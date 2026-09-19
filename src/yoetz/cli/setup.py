@@ -58,6 +58,7 @@ from yoetz.ports.harness_mcp import (
     HarnessBinary,
     McpRegistrationAction,
     McpRegistrationError,
+    McpRegistrationReason,
     McpRegistrationState,
 )
 from yoetz.ports.integrations import (
@@ -982,9 +983,12 @@ def configured_mcp_route_profile() -> Literal["policy", "strict"]:
 
 def _mcp_adapter(
     route_profile: Literal["policy", "strict"] | None = None,
+    *,
+    codex_home: Path | None = None,
 ) -> CodexMcpAdapter:
     return CodexMcpAdapter(
-        route_profile=_configured_mcp_route_profile() if route_profile is None else route_profile
+        route_profile=_configured_mcp_route_profile() if route_profile is None else route_profile,
+        codex_home=codex_home,
     )
 
 
@@ -1163,9 +1167,6 @@ async def _codex_integration_step(
     silently rewrite a previously chosen route (#389 / ADR-018).
     """
 
-    mcp_service = HarnessMcpService(
-        _mcp_adapter("strict" if route_profile is None else route_profile)
-    )
     plugin_service = CodexPluginService()
     project = _integration_target(workspace)
     selected_codex_home: Path | None = None
@@ -1186,7 +1187,7 @@ async def _codex_integration_step(
             # A caller echoing an activation digest explicitly requested that exact mutation.
             # Without a usable explicit home, fail closed instead of silently applying only the
             # other integration surfaces.
-            if approved_activation_digest is not None:
+            if selected_codex_home is None or approved_activation_digest is not None:
                 return {
                     "outcome": "failed",
                     "reason": "activation_preview_failed",
@@ -1237,6 +1238,12 @@ async def _codex_integration_step(
             "skill": {"outcome": "skipped", "presence": None},
             "observation_consent": {"outcome": "absent", "workspace_commitment": None},
         }
+    mcp_service = HarnessMcpService(
+        _mcp_adapter(
+            "strict" if route_profile is None else route_profile,
+            codex_home=bound_home,
+        )
+    )
     try:
         mcp_preview = await mcp_service.preview(binary)
     except McpRegistrationError as error:
@@ -1267,7 +1274,7 @@ async def _codex_integration_step(
     ):
         # No explicit route input: preserve the observed profile of the existing
         # yoetz-owned registration instead of rewriting it (#389).
-        mcp_service = HarnessMcpService(_mcp_adapter(route_profile_before))
+        mcp_service = HarnessMcpService(_mcp_adapter(route_profile_before, codex_home=bound_home))
         try:
             mcp_preview = await mcp_service.preview(binary)
         except McpRegistrationError as error:
@@ -1555,15 +1562,44 @@ async def _codex_integration_step(
         mcp_service.reconcile_applied_route(binary, mcp_preview, _state=_state)
     if not already_registered:
         try:
-            result = await mcp_service.register(
-                binary,
-                McpRegistrationConfirmation(
-                    mcp_preview.preview_digest,
-                    True,
-                    "interactive" if interactive else "noninteractive_flag",
-                ),
-                _state=_state,
-            )
+            try:
+                result = await mcp_service.register(
+                    binary,
+                    McpRegistrationConfirmation(
+                        mcp_preview.preview_digest,
+                        True,
+                        "interactive" if interactive else "noninteractive_flag",
+                    ),
+                    _state=_state,
+                )
+            except McpRegistrationError as changed:
+                if (
+                    changed.reason is not McpRegistrationReason.PREVIEW_STALE
+                    or not interactive
+                    or activation_report.get("outcome") != "active"
+                ):
+                    raise
+                # Plugin activation can make its bundled MCP entry visible. Never silently
+                # reinterpret the approved absence as permission to replace that new entry.
+                refreshed = await mcp_service.preview(binary)
+                if refreshed.state_before is McpRegistrationState.FOREIGN_PRESENT:
+                    raise McpRegistrationError(McpRegistrationReason.FOREIGN_ENTRY_PRESENT, {})
+                typer.echo("Plugin activation changed the effective MCP entry. Updated preview:")
+                typer.echo(f"  Selected Codex home: {bound_home}")
+                typer.echo(f"  Codex executable: {binary.executable_path}")
+                typer.echo(f"  Action: {refreshed.action.value}")
+                typer.echo(f"  State before: {refreshed.state_before.value}")
+                typer.echo(f"  Command: {' '.join(refreshed.serve_command)}")
+                typer.echo(f"  Isolation root: {refreshed.isolated_root}")
+                typer.echo(f"  Preview digest: {refreshed.preview_digest}")
+                if not typer.confirm("Confirm updated MCP registration?", default=False):
+                    raise McpRegistrationError(McpRegistrationReason.CONFIRMATION_REQUIRED, {})
+                result = await mcp_service.register(
+                    binary,
+                    McpRegistrationConfirmation(refreshed.preview_digest, True, "interactive"),
+                    _state=_state,
+                )
+                mcp_preview = refreshed
         except McpRegistrationError as error:
             return {
                 "outcome": "failed",

@@ -129,7 +129,14 @@ def test_mcp_serve_forwards_cursor_project_selector_to_the_bridge(
     )
 
     assert result.exit_code == 0, result.output
-    assert calls == [{"semantic": "on", "host": "cursor", "project_root": project}]
+    assert calls == [
+        {
+            "semantic": "on",
+            "host": "cursor",
+            "project_root": project,
+            "project_binding": "mcp-roots",
+        }
+    ]
 
 
 def test_status_is_local_read_only_and_forwards_pinned_launcher_and_root(
@@ -152,6 +159,7 @@ def test_status_is_local_read_only_and_forwards_pinned_launcher_and_root(
         "host_trust": "unknown",
         "ok": True,
         "route_profile": None,
+        "project_binding": None,
         "runtime_binding": "unobserved",
         "source": "none",
         "state": "absent",
@@ -236,7 +244,7 @@ def test_preview_and_mutation_require_exact_preview_and_bind_launcher_route_and_
             "--host",
             "cursor",
             "--project-root",
-            "${workspaceFolder}",
+            str(project),
             "--semantic",
             "off",
         ],
@@ -366,3 +374,61 @@ def test_remove_strict_sweeps_admission_and_second_remove_is_noop(
     assert noop.exit_code == 0, noop.output
     assert _json(noop)["action"] == "noop"
     assert not json.loads((cursor / "mcp.json").read_text())["mcpServers"].get("yoetz")
+
+
+def test_cli_binding_is_visible_digest_bound_preserved_and_reversible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, config, isolated = _roots(tmp_path)
+    _patch_runtime(monkeypatch, isolated)
+    desktop = _json(_RUNNER.invoke(app, _args(project, config, "preview")))
+    cli_args = ("--project-binding", "registered-project")
+    preview = _json(_RUNNER.invoke(app, _args(project, config, "preview", *cli_args)))
+    assert preview["project_binding"] == "registered-project"
+    assert preview["project_root"] == str(project)
+    assert preview["preview_digest"] != desktop["preview_digest"]
+    stale = _RUNNER.invoke(
+        app,
+        _args(
+            project,
+            config,
+            "install",
+            *cli_args,
+            "--accept",
+            "--preview-digest",
+            str(desktop["preview_digest"]),
+        ),
+    )
+    assert stale.exit_code == 1
+    installed = _RUNNER.invoke(
+        app,
+        _args(
+            project,
+            config,
+            "install",
+            *cli_args,
+            "--accept",
+            "--preview-digest",
+            str(preview["preview_digest"]),
+        ),
+    )
+    assert installed.exit_code == 0, installed.output
+    entry = json.loads((project / ".cursor/mcp.json").read_text())["mcpServers"]["yoetz"]
+    assert entry["args"][-2:] == ["--project-binding", "registered-project"]
+    preserved = _json(_RUNNER.invoke(app, _args(project, config, "preview")))
+    assert preserved["action"] == "noop"
+    assert preserved["project_binding"] == "registered-project"
+    removal = _json(_RUNNER.invoke(app, _args(project, config, "preview-remove")))
+    removed = _RUNNER.invoke(
+        app,
+        _args(
+            project,
+            config,
+            "remove",
+            "--accept",
+            "--preview-digest",
+            str(removal["preview_digest"]),
+        ),
+    )
+    assert removed.exit_code == 0, removed.output
+    assert "yoetz" not in json.loads((project / ".cursor/mcp.json").read_text())["mcpServers"]

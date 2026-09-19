@@ -10,6 +10,7 @@ entries remain recognizable. A foreign same-name entry is never replaced.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
@@ -62,7 +63,12 @@ class CommandOutput:
 type CommandRunner = Callable[[tuple[str, ...]], CommandOutput]
 
 
-def _default_runner(argv: tuple[str, ...]) -> CommandOutput:
+def _default_runner(argv: tuple[str, ...], *, codex_home: Path | None = None) -> CommandOutput:
+    environment = None
+    if codex_home is not None:
+        environment = dict(os.environ)
+        environment["CODEX_HOME"] = str(codex_home)
+        environment["CODEX_TESTING_HOME"] = str(codex_home)
     try:
         # Stream host output to a private unnamed file so a noisy or compromised executable
         # cannot force an unbounded in-memory capture before the structural size check.
@@ -75,6 +81,7 @@ def _default_runner(argv: tuple[str, ...]) -> CommandOutput:
                 timeout=_COMMAND_TIMEOUT_SECONDS,
                 check=False,
                 shell=False,
+                env=environment,
             )
             stdout_size = stdout_file.tell()
             stdout_file.seek(0)
@@ -182,24 +189,28 @@ def _entry_isolated_root(entry: Mapping[str, object]) -> tuple[bool, str | None]
 class CodexMcpAdapter:
     """Implements ``HarnessMcpPort`` for the Codex CLI via bounded subprocesses."""
 
-    __slots__ = ("_route_profile", "_runner", "_serve_command")
+    __slots__ = ("_codex_home", "_route_profile", "_runner", "_serve_command")
 
     def __init__(
         self,
         runner: CommandRunner | None = None,
         *,
         route_profile: Literal["policy", "strict"] = "policy",
+        codex_home: Path | None = None,
     ) -> None:
         if route_profile not in {"policy", "strict"}:
             raise ValueError("mcp_route_profile_invalid")
-        self._runner = _default_runner if runner is None else runner
+        self._runner = runner
+        self._codex_home = codex_home
         self._route_profile: Literal["policy", "strict"] = route_profile
         self._serve_command: tuple[str, ...] = (
             MCP_STRICT_SERVE_COMMAND if route_profile == "strict" else MCP_SERVE_COMMAND
         )
 
     def _run(self, argv: tuple[str, ...]) -> CommandOutput:
-        return self._runner(argv)
+        if self._runner is not None:
+            return self._runner(argv)
+        return _default_runner(argv, codex_home=self._codex_home)
 
     def _classify_entry(
         self,
@@ -405,6 +416,9 @@ class CodexMcpAdapter:
                 current_command=current_command,
                 current_root=current_root,
             )
+        if self._codex_home is not None:
+            digest_input["codex_home"] = str(self._codex_home)
+            digest_input["schema"] = "yoetz.mcp-registration-preview/4"
         digest = canonical_digest(cast(JsonValue, digest_input))
         return McpRegistrationPreview(
             binary.harness_id,
@@ -533,6 +547,9 @@ class CodexMcpAdapter:
             proof = installed_launcher()
             digest_input["schema"] = "yoetz.mcp-unregistration-preview/3"
             digest_input["launcher_digest"] = None if proof is None else proof[1]
+        if self._codex_home is not None:
+            digest_input["codex_home"] = str(self._codex_home)
+            digest_input["schema"] = "yoetz.mcp-unregistration-preview/4"
         digest = canonical_digest(cast(JsonValue, digest_input))
         return McpRegistrationPreview(
             binary.harness_id,

@@ -10,10 +10,11 @@ from __future__ import annotations
 import asyncio
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol, cast
 
 from yoetz.domain.values import Frontier
+from yoetz.observability.logging import record_bounded_counts_without_raising
 from yoetz.ports.diagnostics import DiagnosticsPort, RuntimeCapability
 from yoetz.ports.importer import ImporterPort, ImportStatusSnapshot
 from yoetz.ports.keys import BundleKeys, KeyStoreError, KeyStoreReason
@@ -180,6 +181,12 @@ class _Entry:
     usages: int = 0
     # Leases claimed by _entry_for but not yet counted in usages (validate_fence window).
     pending: int = 0
+    rebind_waiters: int = 0
+    # Background owners can cooperatively yield work when an explicit start needs to rebind this
+    # bundle. Callbacks are process-local and never cross the public runtime boundary.
+    rebind_callbacks: dict[int, Callable[[], None]] = field(
+        default_factory=dict[int, Callable[[], None]]
+    )
     poisoned: bool = False
     closed: bool = False
 
@@ -304,6 +311,8 @@ def _error(
 
 _STALE = "The ready service generation changed."
 _BUSY = "The task is temporarily busy."
+_START_REBIND_WAIT_SECONDS = 5.0
+_START_MAX_REBIND_WAITERS = 64
 
 
 class LocalBundleRuntime(BundleRuntimePort):
@@ -328,6 +337,7 @@ class LocalBundleRuntime(BundleRuntimePort):
         self._opening: dict[str, asyncio.Task[_Entry]] = {}
         self._usages: dict[int, _Entry] = {}
         self._lock = asyncio.Lock()
+        self._idle = asyncio.Condition(self._lock)
         self._opening_limit = asyncio.Semaphore(cache_policy.max_opening_tasks)
         self._closed = False
         self._require_ready()
@@ -495,6 +505,7 @@ class LocalBundleRuntime(BundleRuntimePort):
     ) -> _Entry:
         task_id = inspection.route.task_id
         required_authority = self._authority_for(access)
+        rebind_deadline = asyncio.get_running_loop().time() + _START_REBIND_WAIT_SECONDS
         while True:
             self._require_ready()
             close_before_open: _Entry | None = None
@@ -505,6 +516,14 @@ class LocalBundleRuntime(BundleRuntimePort):
                     if self._same_route(
                         entry.inspection.route, inspection.route
                     ) and required_authority.issubset(entry.authority):
+                        # Give an admitted foreground start a bounded chance to drain.
+                        if entry.rebind_waiters and provision_mode is None:
+                            raise _error(
+                                PublicErrorCode.BUNDLE_BUSY,
+                                _BUSY,
+                                retryable=True,
+                                safe_details={"reason_code": "runtime_rebind_busy"},
+                            )
                         # Claim a pending lease before release so rebind cannot race the
                         # validate_fence window in _lease where usages is still zero.
                         entry.pending += 1
@@ -525,6 +544,66 @@ class LocalBundleRuntime(BundleRuntimePort):
                         self._entries.move_to_end(task_id)
                         rebind_entry = entry
                     elif entry.usages or entry.pending:
+                        if (
+                            provision_mode is not None
+                            and self._same_bundle_route(entry.inspection.route, inspection.route)
+                            and required_authority.issubset(entry.authority)
+                        ):
+                            if entry.rebind_waiters >= _START_MAX_REBIND_WAITERS:
+                                raise _error(
+                                    PublicErrorCode.BUNDLE_BUSY,
+                                    _BUSY,
+                                    retryable=True,
+                                    safe_details={"reason_code": "runtime_rebind_busy"},
+                                )
+                            entry.rebind_waiters += 1
+                            waiting_entry = entry
+                            for callback in tuple(entry.rebind_callbacks.values()):
+                                try:
+                                    callback()
+                                except Exception:
+                                    # A cooperative background owner cannot make the foreground
+                                    # start fail closed. Its lease remains counted until the owner
+                                    # retires normally, and the bounded wait still applies.
+                                    continue
+                            try:
+                                # Condition.wait releases the cache lock used by release and
+                                # pending-lease cleanup. Cancellation removes only this waiter.
+                                async with asyncio.timeout_at(rebind_deadline):
+                                    await self._idle.wait_for(
+                                        lambda: (
+                                            self._closed
+                                            or waiting_entry.poisoned
+                                            or (
+                                                waiting_entry.usages == 0
+                                                and waiting_entry.pending == 0
+                                            )
+                                        )
+                                    )
+                            except TimeoutError as exc:
+                                for operation, count in (
+                                    ("runtime_rebind_timeout_usages", waiting_entry.usages),
+                                    ("runtime_rebind_timeout_pending", waiting_entry.pending),
+                                    (
+                                        "runtime_rebind_timeout_callbacks",
+                                        len(waiting_entry.rebind_callbacks),
+                                    ),
+                                ):
+                                    record_bounded_counts_without_raising(
+                                        component="service.runtime",
+                                        operation=operation,
+                                        outcome="runtime_rebind_busy",
+                                        counts={"operation_count": count},
+                                    )
+                                raise _error(
+                                    PublicErrorCode.BUNDLE_BUSY,
+                                    _BUSY,
+                                    retryable=True,
+                                    safe_details={"reason_code": "runtime_rebind_busy"},
+                                ) from exc
+                            finally:
+                                entry.rebind_waiters -= 1
+                            continue
                         raise _error(PublicErrorCode.BUNDLE_BUSY, _BUSY, retryable=True)
                     else:
                         entry.poisoned = True
@@ -554,6 +633,7 @@ class LocalBundleRuntime(BundleRuntimePort):
                         if self._entries.get(task_id) is rebind_entry:
                             rebind_entry.poisoned = True
                             self._entries.pop(task_id, None)
+                        self._idle.notify_all()
                     await self._close_entry(rebind_entry)
                     raise
                 return rebind_entry
@@ -758,10 +838,12 @@ class LocalBundleRuntime(BundleRuntimePort):
                 entry.usages += 1
                 entry.pending = max(0, entry.pending - 1)
                 self._usages[id(runtime)] = entry
+                self._idle.notify_all()
             return runtime
         except BaseException:
             async with self._lock:
                 entry.pending = max(0, entry.pending - 1)
+                self._idle.notify_all()
             raise
 
     def _versions(self) -> dict[str, str]:
@@ -829,10 +911,12 @@ class LocalBundleRuntime(BundleRuntimePort):
             if entry is None:
                 return
             entry.usages -= 1
+            entry.rebind_callbacks.pop(id(runtime), None)
+            self._idle.notify_all()
             idle = [
                 candidate
                 for candidate in self._entries.values()
-                if candidate.usages == 0 and candidate.pending == 0
+                if candidate.usages == 0 and candidate.pending == 0 and not candidate.rebind_waiters
             ]
             while len(idle) > self._policy.max_idle_tasks:
                 candidate = idle.pop(0)
@@ -842,10 +926,50 @@ class LocalBundleRuntime(BundleRuntimePort):
         for entry in evictions:
             await self._close_entry(entry)
 
+    def register_rebind_callback(self, runtime: TaskRuntime, callback: Callable[[], None]) -> bool:
+        """Register a process-local callback for foreground rebind admission.
+
+        Background owners use this to yield an in-flight, cancellable operation when an explicit
+        start is waiting for the same bundle. The callback is advisory: the runtime keeps the
+        usage counted until the owner releases it, and no callback data is persisted or exposed.
+        """
+
+        if type(runtime) is not TaskRuntime or not callable(callback):
+            return False
+        # Registration is a synchronous service-loop lifecycle operation. The runtime cache
+        # lock is never awaited here, so _entry_for cannot interleave with this lookup or map
+        # update on the owning loop.
+        entry = self._usages.get(id(runtime))
+        if entry is None or entry.poisoned or entry.closed:
+            return False
+        token = id(runtime)
+        entry.rebind_callbacks[token] = callback
+        if entry.rebind_waiters:
+            try:
+                callback()
+            except Exception:
+                entry.rebind_callbacks.pop(token, None)
+                return False
+        return True
+
+    def unregister_rebind_callback(
+        self, runtime: TaskRuntime, callback: Callable[[], None]
+    ) -> None:
+        """Remove one process-local foreground-rebind callback."""
+
+        if type(runtime) is not TaskRuntime:
+            return
+        entry = self._usages.get(id(runtime))
+        if entry is None:
+            return
+        if entry.rebind_callbacks.get(id(runtime)) is callback:
+            entry.rebind_callbacks.pop(id(runtime), None)
+
     async def _close_entry(self, entry: _Entry) -> None:
         if entry.closed:
             return
         entry.closed = True
+        entry.rebind_callbacks.clear()
         try:
             await asyncio.shield(
                 self._factories.close_entry(
@@ -865,6 +989,7 @@ class LocalBundleRuntime(BundleRuntimePort):
             if self._closed:
                 return
             self._closed = True
+            self._idle.notify_all()
             entries = list(self._entries.values())
             openings = list(self._opening.values())
             self._entries.clear()

@@ -845,3 +845,69 @@ def test_preview_names_an_unproven_launcher_instead_of_falling_back_to_path(
     assert caught.value.reason is McpRegistrationReason.HARNESS_UNAVAILABLE
     assert caught.value.safe_details == {"detail": "launcher_unproven"}
     assert all(call[1:3] != ("mcp", "add") for call in runner.calls)
+
+
+def test_selected_home_is_used_for_every_registration_subprocess(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An explicit test home must not register into the ambient user's Codex config."""
+    import sys
+
+    ambient = tmp_path / "ambient"
+    selected = tmp_path / "selected"
+    ambient.mkdir()
+    selected.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(ambient))
+    monkeypatch.setenv("CODEX_TESTING_HOME", str(ambient))
+    host = tmp_path / "codex"
+    host.write_text(
+        f"#!{sys.executable}\n"
+        "import json,os,pathlib,sys\n"
+        "home=pathlib.Path(os.environ['CODEX_HOME'])\n"
+        "assert str(home)==os.environ['CODEX_TESTING_HOME']\n"
+        "entry=home/'mcp-entry.json'\n"
+        "args=sys.argv[1:]\n"
+        "if args[1]=='get':\n"
+        " if not entry.exists():sys.exit(1)\n"
+        " print(entry.read_text())\n"
+        "elif args[1]=='list':print('[]')\n"
+        "elif args[1]=='add':\n"
+        " command=args[args.index('--')+1:]\n"
+        " entry.write_text(json.dumps({'command':command[0],'args':command[1:]}))\n"
+        "elif args[1]=='remove':entry.unlink()\n"
+    )
+    host.chmod(0o700)
+    binary = HarnessBinary(HarnessId.CODEX, str(host), "0.153.4", "untested")
+    adapter = CodexMcpAdapter(codex_home=selected)
+    preview = anyio.run(lambda: adapter.preview_registration(binary))
+    command = McpRegistrationCommand(
+        preview_digest=preview.preview_digest, explicitly_accepted=True
+    )
+    anyio.run(lambda: adapter.apply_registration(binary, command))
+    assert (selected / "mcp-entry.json").exists()
+    assert not tuple(ambient.iterdir())
+    removal = anyio.run(lambda: adapter.preview_unregistration(binary))
+    anyio.run(
+        lambda: adapter.apply_unregistration(
+            binary,
+            McpRegistrationCommand(preview_digest=removal.preview_digest, explicitly_accepted=True),
+        )
+    )
+    assert not (selected / "mcp-entry.json").exists()
+    assert not tuple(ambient.iterdir())
+
+
+def test_registration_preview_cannot_be_replayed_for_a_different_home(tmp_path: Path) -> None:
+    first = CodexMcpAdapter(_Runner(_absent_outputs()), codex_home=tmp_path / "one")
+    second = CodexMcpAdapter(_Runner(_absent_outputs()), codex_home=tmp_path / "two")
+    preview = anyio.run(lambda: first.preview_registration(_BINARY))
+    with pytest.raises(McpRegistrationError) as caught:
+        anyio.run(
+            lambda: second.apply_registration(
+                _BINARY,
+                McpRegistrationCommand(
+                    preview_digest=preview.preview_digest, explicitly_accepted=True
+                ),
+            )
+        )
+    assert caught.value.reason is McpRegistrationReason.PREVIEW_STALE

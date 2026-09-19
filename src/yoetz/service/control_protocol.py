@@ -14,6 +14,7 @@ from typing import Final, Literal, Never, Protocol, cast
 
 from pydantic import BaseModel
 
+from yoetz.adapters.control.unix_socket import LocalControlTransportError
 from yoetz.domain.values import JsonObject, freeze_json
 from yoetz.ports.control import (
     ControlCallRequest,
@@ -83,6 +84,8 @@ MAX_ORDINARY_CONTROL_FRAME_BYTES: Final = 1_048_576
 MAX_ACTIVE_REQUESTS_PER_SESSION: Final = 32
 
 _CONTROL_SCHEMA_VERSION: Final = "2.6.0"
+_CONTROL_RESULT_SCHEMA_VERSION: Final = "2.6.1"
+_CONTROL_REQUEST_SCHEMA_VERSION: Final = "2.6.1"
 _SCHEMA_VERSION: Final = "1.0.0"
 _MAX_IMPORT_SOURCE_BYTES: Final = 4 * 1024 * 1024
 _ERROR_REASONS: Final = frozenset(
@@ -99,6 +102,7 @@ _ERROR_REASONS: Final = frozenset(
         "request_limit_exceeded",
         "service_generation_changed",
         "session_closed",
+        "transport_failed",
     }
 )
 _WORKFLOW_METHODS: Final = tuple(
@@ -384,7 +388,11 @@ def _validated_wire(value: object, schema_name: str) -> JsonObject:
         if not isinstance(wire, Mapping):
             _fail("frame_invalid")
         schema_version = (
-            _CONTROL_SCHEMA_VERSION
+            _CONTROL_RESULT_SCHEMA_VERSION
+            if schema_name == "control-result"
+            else _CONTROL_REQUEST_SCHEMA_VERSION
+            if schema_name == "control-request"
+            else _CONTROL_SCHEMA_VERSION
             if schema_name
             in {"control-hello", "control-hello-result", "control-request", "control-result"}
             else _SCHEMA_VERSION
@@ -530,15 +538,26 @@ async def read_control_frame(
 
 
 async def write_control_frame(stream: ControlStream, value: object) -> None:
-    """Write one validated frame using the stream's backpressure-aware send."""
+    """Write one validated frame using the stream's backpressure-aware send.
+
+    Encoding happens before the write, so a frame this caller built wrong never reaches the
+    wire and keeps ``frame_invalid``. A failure raised by the stream itself is a transport
+    fact about this connection, not a statement about the frame: the bounded
+    ``LocalControlTransportError`` travels unchanged so the caller keeps the safe transport
+    classification (``service_unavailable`` and friends, retryable), and any other send failure
+    becomes the bounded retryable ``transport_failed`` rather than leaking a raw exception.
+    Relabelling every send failure ``frame_invalid`` told a caller its valid request was
+    malformed, made the client's transport mapping dead code, and published a terminal
+    ``INVALID_REQUEST`` for a retryable condition (issue #678).
+    """
 
     encoded = encode_control_frame(value)
     try:
         await stream.send_all(encoded)
-    except BaseException as exc:
-        if isinstance(exc, asyncio.CancelledError):
-            raise
-        raise ControlProtocolError("frame_invalid") from None
+    except asyncio.CancelledError, LocalControlTransportError:
+        raise
+    except BaseException:
+        raise ControlProtocolError("transport_failed") from None
 
 
 def schema_for_method(method: ControlMethod, direction: SchemaDirection) -> Mapping[str, JsonValue]:
@@ -743,6 +762,11 @@ async def _close_after_failure(stream: ControlStream, error: BaseException) -> N
         pass
     if isinstance(error, ControlProtocolError):
         raise error
+    if isinstance(error, LocalControlTransportError):
+        # A handshake that failed on the transport is not a malformed handshake. Both peers
+        # already classify this bounded reason; folding it into `frame_invalid` here would
+        # restore the mislabelling the write path just stopped doing (issue #678).
+        raise error
     raise ControlProtocolError("frame_invalid") from None
 
 
@@ -911,6 +935,7 @@ def public_error_code_for_control_reason(reason: str) -> PublicErrorCode:
         "endpoint_unsafe",
         "peer_untrusted",
         "service_draining",
+        "transport_failed",
     }:
         return PublicErrorCode.SERVICE_UNAVAILABLE
     if reason == "privacy_projection_blocked":

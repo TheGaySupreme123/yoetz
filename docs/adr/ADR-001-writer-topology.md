@@ -85,6 +85,28 @@ mandatory because stale or duplicate service processes must fail safely.
 - Maintenance runs inside the same service and uses the same writer queues and fences. There is no
   separate maintenance process with a hidden direct-storage path.
 
+For a same-bundle session rebind, the service may wait for existing runtime users to drain under
+a bounded condition wait; it must release the lock needed by those users, preserve admission
+limits, and recheck generation and fence authority before use. A definitively returned start
+contention failure may yield only its exact pending catalog lease under the existing generation
+and lease compare-and-swap. Yield never removes the reservation, changes the request identity,
+rewinds a durable milestone, or implies that no write occurred. Cancellation, crash, stale-owner
+and response-loss recovery retain their existing fenced replay rules. Issue #744 specifies the
+five-second wait and exact replay recovery in `docs/INTERFACES.md`; it adds no client writer or
+ownership bypass. Optional observation feedback must not retain a runtime lease: ingestion
+releases its lease even when final capture-backlog publication fails or is cancelled.
+
+The bounded rebind is foreground priority over optional observation advice. A service-owned advice
+drain may register a process-local yield callback; when a start begins waiting, the current
+advisory provider attempt or its post-attempt advice rebuild is cancelled through the normal worker
+path, its durable row retains a truthful terminal outcome, and the advice runtime lease is
+released. The local `cancelled` row does not assert that a physical provider call did not start:
+if the privacy audit consumed authorization, its receipt-pending state remains an independently
+recoverable terminal-unknown attempt and is never redispatched by this advisory lane. Pending
+advisory rows remain pending and are not treated as successful or blindly redispatched. This
+priority applies to additive observation advice only; required semantic checks retain their own
+operation lease and recovery contract.
+
 ## Lifecycle contract
 
 v0.1 ships a foreground `yoetz service run` entrypoint suitable for an explicit terminal or

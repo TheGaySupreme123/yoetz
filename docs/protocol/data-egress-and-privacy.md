@@ -292,3 +292,12 @@ not part of this protocol change.
 - [`privacy-setup-wizard.md`](privacy-setup-wizard.md) — the setup/policy-change contract.
 - [`local-service-security.md`](local-service-security.md) — the trust boundary that hosts this
   protocol.
+
+### Cancelled background review
+
+A foreground session attachment may cancel optional background review. Once disclosure authority
+is consumed, cancellation cannot prove that nothing was sent. The gateway records the owed
+`transport_failed` / `outcome_unknown` receipt through a shielded write. It also parks the bounded
+receipt before dispatch so a later service startup can reconcile an interrupted attempt, before
+admitting new attempts. Reconciliation never sends again or restores spent authority. The
+background result remains cancelled and retains available attempt and provider provenance.

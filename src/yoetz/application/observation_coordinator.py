@@ -39,6 +39,7 @@ from yoetz.application.observation_advice import (
     scoped_session_envelopes,
 )
 from yoetz.application.observation_advice_semantic import (
+    AdviceSemanticCancellationReconciler,
     AdviceSemanticDispatch,
     AdviceSemanticDrainHandle,
     ObservationAdviceSemanticRepository,
@@ -628,6 +629,7 @@ class ObservationCoordinator:
     # drains it through ``advice_semantic_dispatch`` and re-runs advice when it finishes.
     advice_semantic_supervisor: ObservationAdviceSemanticSupervisor | None = None
     advice_semantic_dispatch: AdviceSemanticDispatch | None = None
+    advice_semantic_cancellation_reconciler: AdviceSemanticCancellationReconciler | None = None
     observation_enabled: bool = True
     capture_budget_bootstrap: CaptureBudgetBootstrapHook | None = None
     _advice_event_ref_cache: dict[tuple[str, str], tuple[str, ...]] = field(
@@ -637,6 +639,9 @@ class ObservationCoordinator:
         default_factory=_empty_storage_corrupt_sessions, init=False, repr=False
     )
     _local_executor: ThreadPoolExecutor | None = field(default=None, init=False, repr=False)
+    _pending_releases: set[asyncio.Future[None]] = field(
+        default_factory=lambda: set[asyncio.Future[None]](), init=False, repr=False
+    )
     _capture_budget_exhausted: bool = field(default=False, init=False, repr=False)
     # A persisted root proof belongs to an older service generation until the
     # current coordinator has revalidated its route scope under the capture
@@ -1069,6 +1074,18 @@ class ObservationCoordinator:
             # Preserve ``needs_reconcile`` or unknown scope on any read error;
             # this path never weakens capture admission.
             return
+
+    def _release_finished(self, pending: asyncio.Future[None]) -> None:
+        self._pending_releases.discard(pending)
+        if pending.cancelled():
+            return
+        error = pending.exception()
+        if isinstance(error, Exception):
+            record_unexpected_exception_without_raising(
+                error,
+                component="application.observation_coordinator",
+                operation="observation_runtime_release_failed",
+            )
 
     def close(self) -> None:
         """Stop accepting local-store work; bounded lock waits let running workers retire."""
@@ -2438,11 +2455,20 @@ class ObservationCoordinator:
                 return _reject(ObservationGapCode.SERVICE_UNAVAILABLE.value)
             finally:
                 if runtime is not None:
-                    if store is not None:
-                        await self._publish_capture_backlog(workspace, runtime, store)
-                    with_context = getattr(self.runtime, "release", None)
-                    if with_context is not None:
-                        await with_context(runtime)
+                    try:
+                        if store is not None:
+                            await self._publish_capture_backlog(workspace, runtime, store)
+                    finally:
+                        # Feedback may be cancelled or fail. It never owns the runtime lease,
+                        # so that failure must not strand the bundle and block the next attach.
+                        with_context = getattr(self.runtime, "release", None)
+                        if with_context is not None:
+                            # A second disconnect cancellation must not interrupt release
+                            # while it waits for the runtime registry lock.
+                            pending = asyncio.ensure_future(with_context(runtime))
+                            self._pending_releases.add(pending)
+                            pending.add_done_callback(self._release_finished)
+                            await asyncio.shield(pending)
 
     async def ingest(self, envelope: ObservationEnvelope) -> ObservationIngestResult:
         """ObservationPort-shaped ingest without Codex session id → reject closed."""
@@ -4593,6 +4619,13 @@ class ObservationCoordinator:
         owned = deferred_runtime
         if owned is None:
             owned = await self._route_observation_runtime(runtime.task_id, runtime.session_id)
+        callback_registered = False
+
+        def no_rebind() -> None:
+            return
+
+        rebind_callback: Callable[[], None] = no_rebind
+        unregister_rebind: Callable[[TaskRuntime, Callable[[], None]], None] | None = None
         try:
             owned_store = self._observation_store(owned)
             repository = self._advice_semantic_repository(owned_store)
@@ -4614,8 +4647,31 @@ class ObservationCoordinator:
                 lease_owner=owned.fence.service_instance_id,
                 now=now_wire,
                 lease_expires_at=lease_expiry,
+                reconcile_cancelled=self.advice_semantic_cancellation_reconciler,
             )
             bound_runtime = owned
+
+            def rebind_callback() -> None:
+                supervisor.request_rebind(workspace)
+
+            register_rebind_obj = getattr(self.runtime, "register_rebind_callback", None)
+            unregister_rebind_obj = getattr(self.runtime, "unregister_rebind_callback", None)
+            register_rebind = (
+                cast(
+                    Callable[[TaskRuntime, Callable[[], None]], bool],
+                    register_rebind_obj,
+                )
+                if callable(register_rebind_obj)
+                else None
+            )
+            unregister_rebind = (
+                cast(
+                    Callable[[TaskRuntime, Callable[[], None]], None],
+                    unregister_rebind_obj,
+                )
+                if callable(unregister_rebind_obj)
+                else None
+            )
 
             async def _after() -> None:
                 await self._run_advice(
@@ -4627,6 +4683,8 @@ class ObservationCoordinator:
                 )
 
             async def _release() -> None:
+                if callback_registered and unregister_rebind is not None:
+                    unregister_rebind(bound_runtime, rebind_callback)
                 await self.runtime.release(bound_runtime)
 
             registered = supervisor.register(
@@ -4638,11 +4696,22 @@ class ObservationCoordinator:
                 )
             )
             if not registered:
+                if callback_registered and unregister_rebind is not None:
+                    unregister_rebind(bound_runtime, rebind_callback)
                 if deferred_runtime is None:
                     await self.runtime.release(owned)
                 supervisor.notify(workspace)
                 return False
+            # A waiting foreground start can fire the callback synchronously at registration.
+            # Publish the handle first so that eager yield can retire this exact worker.
+            if register_rebind is not None:
+                try:
+                    callback_registered = bool(register_rebind(bound_runtime, rebind_callback))
+                except Exception:
+                    callback_registered = False
         except BaseException:
+            if callback_registered and unregister_rebind is not None:
+                unregister_rebind(owned, rebind_callback)
             if deferred_runtime is None:
                 await self.runtime.release(owned)
             raise

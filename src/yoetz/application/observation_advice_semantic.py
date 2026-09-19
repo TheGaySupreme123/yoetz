@@ -22,6 +22,7 @@ from yoetz.application.observation_advice import (
     minimized_semantic_evidence_packet,
 )
 from yoetz.domain.findings import FindingId
+from yoetz.observability.logging import record_unexpected_exception_without_raising
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 
 __all__ = [
@@ -29,6 +30,7 @@ __all__ = [
     "ADVICE_SEMANTIC_PENDING_REASON",
     "DEFAULT_ADVICE_SEMANTIC_MAX_PENDING",
     "MAX_ADVICE_SEMANTIC_ATTEMPTS",
+    "AdviceSemanticCancellationReconciler",
     "AdviceSemanticDispatch",
     "AdviceSemanticDrainHandle",
     "ObservationAdviceSemanticAttempt",
@@ -158,6 +160,11 @@ class ObservationAdviceSemanticRepository(Protocol):
 type AdviceSemanticDispatch = Callable[
     [ObservationAdviceSemanticAttempt], Awaitable[ObservationAdviceSemanticOutcome]
 ]
+# Shielded, bounded post-cancellation reconciliation for one claimed row. ``None`` means the
+# attempt never consumed a disclosure authorization, so the ordinary ``cancelled`` outcome stands.
+type AdviceSemanticCancellationReconciler = Callable[
+    [ObservationAdviceSemanticAttempt], Awaitable[ObservationAdviceSemanticOutcome | None]
+]
 type NowProvider = Callable[[], str]
 
 
@@ -284,8 +291,40 @@ class ObservationAdviceSemanticWorker:
     lease_owner: str
     now: NowProvider
     lease_expires_at: NowProvider
+    reconcile_cancelled: AdviceSemanticCancellationReconciler | None = None
+    reconcile_timeout_seconds: float = 5.0
+
+    def __post_init__(self) -> None:
+        self._active_task: asyncio.Task[object] | None = None
+        self._rebind_requested = False
+
+    def begin_rebind_scope(self) -> None:
+        """Bind foreground-yield cancellation to the whole supervisor drain turn."""
+
+        self._active_task = asyncio.current_task()
+
+    def end_rebind_scope(self) -> None:
+        if self._active_task is asyncio.current_task():
+            self._active_task = None
+
+    def request_rebind(self) -> None:
+        """Ask the current provider attempt to yield for an explicit foreground start.
+
+        The provider outcome is not converted into success. ``run_once`` records the normal
+        ``cancelled`` terminal outcome before propagating cancellation so the supervisor can
+        release its task runtime and let the foreground session rebind.
+        """
+
+        if self._rebind_requested:
+            return
+        self._rebind_requested = True
+        active = self._active_task
+        if active is not None and active is not asyncio.current_task():
+            active.cancel()
 
     async def run_once(self) -> ObservationAdviceSemanticAttempt | None:
+        if self._rebind_requested:
+            return None
         attempt = self.repository.claim_next(
             service_generation=self.service_generation,
             lease_owner=self.lease_owner,
@@ -294,13 +333,16 @@ class ObservationAdviceSemanticWorker:
         )
         if attempt is None:
             return None
-        try:
-            outcome = await self.dispatch(attempt)
-        except asyncio.CancelledError:
+        if self._rebind_requested:
             self._complete(
                 attempt,
                 ObservationAdviceSemanticOutcome(status="cancelled", failure_reason="cancelled"),
             )
+            return attempt
+        try:
+            outcome = await self.dispatch(attempt)
+        except asyncio.CancelledError:
+            self._complete(attempt, await self._cancelled_outcome(attempt))
             raise
         except Exception:
             outcome = ObservationAdviceSemanticOutcome(
@@ -308,6 +350,38 @@ class ObservationAdviceSemanticWorker:
             )
         self._complete(attempt, outcome)
         return attempt
+
+    async def _cancelled_outcome(
+        self, attempt: ObservationAdviceSemanticAttempt
+    ) -> ObservationAdviceSemanticOutcome:
+        """Record cancellation, plus the reconciled egress provenance when authority was spent.
+
+        A cancelled row is never a semantic success. It is also not proof that no physical
+        provider call started: if the privacy audit consumed the disclosure authorization before
+        the yield landed, the reconciliation reports the terminal ``outcome_unknown`` receipt for
+        that consumed attempt and this row carries it as provenance. The reconciliation is
+        shielded and bounded so it cannot be cancelled away and cannot hold the foreground rebind
+        open; it never redispatches.
+        """
+
+        cancelled = ObservationAdviceSemanticOutcome(status="cancelled", failure_reason="cancelled")
+        reconcile = self.reconcile_cancelled
+        if reconcile is None:
+            return cancelled
+        try:
+            reconciled = await asyncio.wait_for(
+                asyncio.shield(reconcile(attempt)), self.reconcile_timeout_seconds
+            )
+        except asyncio.CancelledError:
+            return cancelled
+        except Exception as exc:  # noqa: BLE001 - a bounded reconciliation never blocks the rebind
+            record_unexpected_exception_without_raising(
+                exc,
+                component="application.observation_advice_semantic",
+                operation="cancelled_egress_reconciliation_failed",
+            )
+            return cancelled
+        return cancelled if reconciled is None else reconciled
 
     def _complete(
         self,
@@ -352,6 +426,8 @@ class ObservationAdviceSemanticSupervisor:
         self._closed = False
         self._loop_task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
+        self._active_handle: AdviceSemanticDrainHandle | None = None
+        self._retirements: dict[int, asyncio.Task[None]] = {}
 
     def register(self, handle: AdviceSemanticDrainHandle) -> bool:
         if self._closed:
@@ -377,6 +453,24 @@ class ObservationAdviceSemanticSupervisor:
         del workspace_commitment
         if not self._closed:
             self._wake.set()
+
+    def request_rebind(self, workspace_commitment: str) -> None:
+        """Yield one advisory handle for an explicit foreground runtime rebind.
+
+        The supervisor keeps provider work serialized. A handle that is waiting behind another
+        provider attempt can be retired immediately; the active handle is cancelled through its
+        whole drain turn and lets the normal loop perform the release. This callback is called
+        synchronously by the runtime admission lock, so queued retirement is scheduled and never
+        awaits while the runtime lock is held.
+        """
+
+        handle = self._handles.get(workspace_commitment)
+        if handle is None:
+            return
+        handle.worker.request_rebind()
+        if self._active_handle is handle:
+            return
+        self._schedule_retirement(handle)
 
     async def start(self) -> None:
         if self._loop_task is not None:
@@ -408,11 +502,10 @@ class ObservationAdviceSemanticSupervisor:
         if task is not None:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
-        handles = tuple(self._handles.values())
-        self._handles.clear()
-        for handle in handles:
-            if handle.on_idle is not None:
-                await handle.on_idle()
+        pending = [self._schedule_retirement(handle) for handle in tuple(self._handles.values())]
+        pending.extend(self._retirements.values())
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def drain_once(self) -> None:
         """Run every registered worker to idle once; tests drive this without the loop."""
@@ -439,12 +532,63 @@ class ObservationAdviceSemanticSupervisor:
             if handle.worker.service_generation != self.service_generation:
                 continue
             while not self._closed:
-                attempt = await handle.worker.run_once()
-                if attempt is None:
-                    if self._handles.get(handle.workspace_commitment) is handle:
-                        self.unregister(handle.workspace_commitment)
-                        if handle.on_idle is not None:
-                            await handle.on_idle()
+                self._active_handle = handle
+                handle.worker.begin_rebind_scope()
+                try:
+                    attempt = await handle.worker.run_once()
+                    if attempt is None:
+                        await self._retire_handle(handle)
+                        break
+                    if handle.after_complete is not None:
+                        await handle.after_complete()
+                except asyncio.CancelledError:
+                    # A foreground start may cooperatively cancel one in-flight provider attempt
+                    # or its post-attempt advice rebuild so its runtime lease can yield. The
+                    # worker already recorded ``cancelled`` when dispatch was active; retire this
+                    # handle and release the runtime without rerunning the packet.
+                    await self._retire_handle(handle)
                     break
-                if handle.after_complete is not None:
-                    await handle.after_complete()
+                except Exception as exc:
+                    record_unexpected_exception_without_raising(
+                        exc,
+                        component="application.observation_advice_semantic",
+                        operation="drain_failed",
+                    )
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await self._retire_handle(handle)
+                    break
+                finally:
+                    handle.worker.end_rebind_scope()
+                    if self._active_handle is handle:
+                        self._active_handle = None
+
+    def _schedule_retirement(self, handle: AdviceSemanticDrainHandle) -> asyncio.Task[None]:
+        token = id(handle)
+        existing = self._retirements.get(token)
+        if existing is not None:
+            return existing
+        task = asyncio.create_task(self._release_handle(handle), name="observation-advice-retire")
+        self._retirements[token] = task
+
+        def completed(finished: asyncio.Task[None]) -> None:
+            self._retirements.pop(token, None)
+            if not finished.cancelled() and (failure := finished.exception()) is not None:
+                record_unexpected_exception_without_raising(
+                    failure,
+                    component="application.observation_advice_semantic",
+                    operation="retire_failed",
+                )
+
+        task.add_done_callback(completed)
+        return task
+
+    async def _retire_handle(self, handle: AdviceSemanticDrainHandle) -> None:
+        # The runtime release must finish even if another host cancels the drain waiter.
+        await asyncio.shield(self._schedule_retirement(handle))
+
+    async def _release_handle(self, handle: AdviceSemanticDrainHandle) -> None:
+        if self._handles.get(handle.workspace_commitment) is not handle:
+            return
+        self.unregister(handle.workspace_commitment)
+        if handle.on_idle is not None:
+            await handle.on_idle()

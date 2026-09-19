@@ -229,7 +229,7 @@ Then invoke the exact intended Yoetz launcher to preview and install the project
 Install the native plugin with `--mcp-ownership external-registration` through the authenticated
 plugin lifecycle. Its launcher and isolated root must match the project entry. The project entry is
 `.cursor/mcp.json`, has the pinned launcher plus `mcp serve --host cursor --project-root
-${workspaceFolder}`, and carries only the validated `YOETZ_ISOLATED_ROOT` environment binding when
+<exact-project-root>`, and carries only the validated `YOETZ_ISOLATED_ROOT` environment binding when
 isolated. Strict mode appends `--semantic off`; omitting `--route-profile` preserves an existing
 owned route. The project registration command never launches a service and never grants AI-powered
 review egress or host trust. The startup selector is validated against the exact owned project
@@ -1045,3 +1045,39 @@ One host-specific fact already applies and is unchanged by ADR-030: the bridge d
 `authorize_command` to Cursor, because Cursor is never an agent-chat attestation client. The
 canonical body carries only the commands admitted for that host, so it omits the authorize step
 rather than naming a command the host cannot use.
+
+### Project selectors in the Agent CLI (0.2.3)
+
+New project registrations store the exact validated absolute project path. Cursor Agent CLI
+2026.09.18-9a7762b passes the IDE placeholder literally, so a placeholder registration fails
+before the bridge can initialize. Existing placeholder entries remain recognizable and valid
+for IDE clients that expand them; an accepted install preview upgrades them in place. Moving
+a project requires a new registration preview. The absolute selector only chooses among the
+native client roots: it never replaces roots/list or relaxes the ownership and session fences.
+
+
+### Explicit Agent CLI registration
+
+Agent CLI clients that do not supply MCP roots/list use an explicit project binding. Preview it
+with the intended installed launcher:
+
+```text
+yoetz integrate cursor project-mcp preview --project-root /absolute/project --cursor-config-root /absolute/cursor-config --project-binding registered-project
+```
+
+Review the named project, launcher, instance and route. Apply with the same arguments, replacing
+`preview` with `install` and adding `--accept --preview-digest <exact-preview-digest>`. Preserve or
+explicitly choose the existing policy/strict route; this mode grants no content or review egress.
+Restart the CLI MCP connection, enable the project source if the host requires it, and verify a
+native `start`, not just `mcp list`. Model-provided paths and hook CWD do not select the repository.
+
+Use `--project-binding mcp-roots` in a new accepted preview/install to return the entry to desktop
+root binding. Omitting the option preserves the mode of an owned entry. `status`, `preview-remove`
+and accepted `remove` remain supported. Moving/replacing the project or editing/replacing its
+MCP registration retires the serving process and requires a new connection.
+
+For a returned start error with `start_busy_same_identity`, the reservation remains durable and
+only its fenced lease was yielded. Replay the exact start body and request ID once, without
+inventing session or writer IDs. `start_pending_same_identity` instead means a live lease remains:
+wait up to 60 seconds before the one exact replay. If still busy or pending, retain the original
+request and report the unresolved start. These continuations do not authorize a new task.

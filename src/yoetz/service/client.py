@@ -420,6 +420,9 @@ def _protocol_error(error: ControlProtocolError) -> ControlError:
         return ControlError("method_forbidden")
     if error.reason in {"frame_invalid", "correlation_mismatch", "duplicate_rpc_id"}:
         return ControlError("frame_invalid")
+    # Everything left, `transport_failed` from a failed local write included, is a bounded
+    # connection fact: the frame validated and encoded, so the caller never sees INVALID_REQUEST
+    # for it and the retry stays open (issue #678).
     return ControlError("service_unavailable", retryable=True)
 
 
@@ -818,7 +821,15 @@ class ServiceClient(ControlClientPort):
                 await self._fail_connection(ControlError("service_unavailable", retryable=True))
             raise
         finally:
-            self._pending.pop(request.rpc_id, None)
+            settled = self._pending.pop(request.rpc_id, None)
+            if settled is not None and settled.done() and not settled.cancelled():
+                # A failed send fails the connection, and `_fail_connection` completes every
+                # pending future — including this call's own, whose caller is still inside
+                # `_send` and never reaches `await future`. Retrieve the outcome here so the
+                # dropped future cannot surface as `Future exception was never retrieved`
+                # (issue #678). On the ordinary paths the caller already consumed it and this
+                # retrieval is a no-op.
+                settled.exception()
 
         if result.outcome == "error" and isinstance(result.body, ControlError):
             # Only generation skew forces connection teardown. Projection errors

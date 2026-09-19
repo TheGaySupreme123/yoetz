@@ -1965,6 +1965,20 @@ never a socket path. Unsafe and untrusted endpoint copy forbids retry before loc
 preserves same-`request_id` replay. The CLI control-failure helper is unchanged: it still projects
 the public code and does not add a separate unsafe-endpoint guidance line.
 
+**Write-side classification (issue #678).** `frame_invalid` names a frame that failed validation,
+encoding, parsing, or correlation. A control frame is encoded before it is written, so a failure
+raised by the stream during the write states something about the connection, not about the frame:
+the bounded transport reason travels unchanged and the ordinary client classifies it exactly as it
+classifies a failed connect (`endpoint_unsafe` and `peer_untrusted` preserved, everything else
+retryable `service_unavailable`). A send failure the transport itself did not classify becomes the
+bounded protocol reason `transport_failed`, whose public code is `SERVICE_UNAVAILABLE` and which
+never carries raw exception text, a path, or peer data. Both peers share the one write helper, so a
+failed response write is classified the same way; the daemon records it as a bounded
+`control_response_write` diagnostic and ends that call rather than reporting a malformed frame. A
+caller whose valid request could not be written is therefore never told `INVALID_REQUEST`, and every
+pending future failed by the resulting connection teardown — including the future of the call whose
+own write failed — is consumed, so a failed send emits no unhandled-future report.
+
 The MCP bridge maps every typed `ControlError` reason onto a public error through the public-error
 recorder (`{tool}_public_error`) with sink `reason` equal to the control-reason token (or
 `accepted_but_unresponsive` for an accepted-but-silent listener). `exception_control_error` and
@@ -2607,6 +2621,15 @@ different query is the same non-retryable rejection. Both audit adapters project
 egress receipts as well as local disclosure receipts, so a completed subscription review is
 retrievable by its recorded receipt ID and listable by `channel`, `provider_id`, or
 `endpoint_profile_id`.
+Local disclosure purposes use the domain grammar `^[a-z][a-z0-9_-]{0,127}$`, including the
+stored `client_result_projection` value. Network egress and policy purposes retain their
+hyphen-only vocabulary. The 0.2.3 repair adds control-result `2.6.1` to admit the existing local
+receipt values without rewriting stored receipts or the released `2.6.0` envelope. Hello and
+request envelopes remain `2.6.0`; no new control method or 0.3 project contract is introduced.
+CLI JSON, terminal output and the prompt-loop menu render decoded UTC receipt timestamps in
+canonical millisecond RFC3339 form (issues #731 and #732). The added schema inventory is reported
+by version-manifest `2.2.1`; released `2.2.0` and earlier manifests retain their original bytes.
+
 `PrivacyAuditPort.list_pending_disclosures(audience) -> PendingDisclosurePage` projects only
 `PendingDisclosureEntry(pending_id, task_id, expires_at)` for proposals in `awaiting_human` or
 `reserved` whose `expires_at` has not passed, over the ordinary CLI/UI control method
@@ -2642,7 +2665,21 @@ exact-binding liveness query over that registry; it never probes or mints a cred
 awaiting transport closure, after which reconciliation/dispatch/revocation admit no new work, mint
 no credential, render no content-bearing request, and perform no new adapter I/O. Unconsumed work is
 fenced before I/O; a consumed attempt is only best-effort closed/nonselectable and still receives
-its actual or `outcome_unknown` durable receipt. `PrivacyCoordinator.close()` installs its own
+its actual or `outcome_unknown` durable receipt.
+A consumed authorization ends in exactly one terminal receipt, cancellation included. The gateway
+owns that receipt because only it holds the exact final request body, its keyed
+`request_commitment`, and the authorization/registry binding a dispatch receipt must carry.
+Immediately after the consume CAS it builds the `transport_failed/outcome_unknown` receipt the
+attempt would owe and parks it through
+`PrivacyAuditPort.park_attempt_reconciliation(dispatch_id, receipt)`; parking asserts no outcome and
+leaves the row `receipt_pending`. `asyncio.CancelledError` inside that admitted window (a foreground
+runtime rebind yielding an advisory attempt) records the parked receipt through a shielded
+`complete_egress` and then re-raises, so cancellation still propagates promptly and no provider is
+re-entered. `PrivacyAuditPort.reconcile_started_attempts(consumed_before, limit) -> int` is the
+bounded, idempotent startup sweep for rows whose dispatcher died before that write: it runs once
+before any supervisor may admit a new physical attempt and considers only attempts consumed
+strictly before the current service start, so a live dispatch is never closed. Local-sink
+`local_disclosure_pending` cancellation is outside this contract. `PrivacyCoordinator.close()` installs its own
 terminal admission fence first and closes the gateway exactly once; it neither returns credential or
 content nor erases durable policy/audit state, so pending durable work may resume only in a fresh
 ready coordinator.
@@ -3444,6 +3481,25 @@ Independent verification support (local control, not MCP):
   that return `additionalContext` or a Stop `decision: block` stay synchronous with the same bound,
   and `SessionEnd` keeps the host-clamped 3 seconds for local ingest only; its outbox intent is
   retried by a later hook or the service sweeper, and it is not an advice channel.
+
+  An explicit foreground `start` session rebind has priority over this optional advisory lane. When
+  the runtime admits the bounded rebind wait, it signals the registered advice worker to yield. A
+  pending row is left pending; an in-flight provider dispatch is cancelled through the worker's
+  ordinary cancellation path and recorded as `cancelled` before the drain releases its task
+  runtime. That local row is not proof that a physical provider call did not start: if the privacy
+  audit consumed authorization, the attempt is terminally `SemanticEgressAttemptUnknown` and is
+  never redispatched by this advisory lane. The worker reconciles that case from a shielded,
+  bounded finalizer before the cancellation propagates, so the rebind is not held open:
+  `PrivacyCoordinator.recover_started_request(request_id)` reports the started attempt for the
+  exact request identity the cancelled dispatch minted (a cancelled dispatch never observes the
+  prepared case digest), and the cancelled advice row records that provenance as
+  `attempt_receipt` (the reconciled egress receipt, else its privacy proposal) plus
+  `provider_identity`. A cancelled row carrying neither cannot establish whether disclosure authorization was
+  consumed: bounded reconciliation may fail or time out. The privacy audit owns that fact. The cancelled packet is never treated as successful, and the resulting
+  `advice_semantic_unavailable` coverage remains visible. This cooperative yield applies only to additive observation advice; an explicit
+  required semantic check keeps its own operation and recovery contract. The foreground start
+  retains its request identity and continues through the existing bounded same-request recovery
+  when the runtime becomes available.
 
 Native ordinary-work capture adds a separate, closed profile selection to that workspace consent.
 `LocalObservationConsent.content_capture_profiles` is a sorted set containing at most
@@ -4689,11 +4745,11 @@ The selected locator retains its exact filesystem-encoded spelling through looku
 Unicode normalization never aliases distinct directories. A grant created under a differently
 normalized spelling does not authorize its sibling and requires an explicit regrant.
 
-The native Cursor MCP bridge has an additional session binding: on the first workflow call it asks
+The default desktop Cursor MCP bridge has an additional session binding: on the first workflow call it asks
 the MCP client for the standard `roots/list` result. The Cursor-specific adapter accepts local file
 URIs and the strict absolute local path shape emitted by the reviewed host, then safely canonicalizes
 every root. Without a validated project selector, the roots must canonicalize to one repository.
-An owned project registration renders `--project-root ${workspaceFolder}` and binds that startup
+An owned project registration renders the exact absolute `--project-root` and binds that startup
 selector to the exact project entry, launcher, route, and directory/configuration identity. The
 selected repository must occur in the active client's validated root inventory. Registration
 identity is revalidated before each workflow call; a changed registration retires the bridge.
@@ -5301,3 +5357,66 @@ and transport outcomes retain exact replay identity within the bounded attempt p
 stage is unknown unless independently evidenced; local encode/decode stages are named explicitly.
 The CLI's bounded diagnostic projection uses opaque session/source commitments and cursor
 positions, with null absent correlation and explicit incomplete-history coverage.
+
+### Explicit Codex home in setup (issue #786)
+
+The local MCP registration and unregistration preview commitments use revision 4 when an
+explicit Codex home is selected. The commitment includes that home, and all corresponding
+host subprocesses receive matching `CODEX_HOME` and `CODEX_TESTING_HOME`. Plugin activation
+and MCP registration therefore address the same host configuration. This adds no control-wire
+method or protocol schema; unbound legacy adapter calls retain their existing commitments.
+
+The interactive setup wizard may refresh an MCP preview once after its own plugin activation
+changes the effective entry. It displays the new target, command and digest and requires a new
+confirmation. Foreign entries and subsequent drift still refuse. Noninteractive exact-preview
+callers retain the stale-preview failure. The terminal UI prepares its MCP preview with the same
+resolved Codex home as its activation preview.
+
+### Cursor project registration selector compatibility (issue #786)
+
+Project MCP registration emits the validated absolute project path for `--project-root` so both
+IDE and Agent CLI clients can start the same bridge. Existing `${workspaceFolder}` entries remain
+recognized for upgrade and IDE runtime verification. A registration naming another absolute
+project is foreign. In default desktop mode the selector must match the native client roots/list inventory and
+the exact owned project registration; no CWD or caller-authority fallback is added.
+
+### Selected observations across local control (issue #786)
+
+Control request 2.6.1 carries the existing ADR-029 selection route identifiers, authority
+generation, subject-state digest, and protected-read reference. Selection route fields are
+all present or all absent. Routine summaries use the existing closed summary schema; individual
+observations remain closed to unknown fields. Domain and service route/authority validation
+remain mandatory. Released request 2.6.0 bytes and the hello contract remain unchanged.
+
+Routine-read classification persists its proven success bit when the native outcome was nested.
+Summary construction still revalidates that bit. A legacy buffered group that cannot prove a
+summary is delivered as its original individual observations, in source order, without inventing
+success or dropping accepted records. One invalid summary no longer blocks later hook ingestion.
+
+### Explicit Cursor Agent CLI project binding (issue #786)
+
+The maintainer approved this separate CLI binding design on 2026-09-19 after the native Agent
+CLI connected but could not supply MCP roots/list. `integrate cursor project-mcp` accepts
+`--project-binding registered-project`. The local preview names the project, launcher, instance,
+route and binding mode; its digest binds all of them. Omission preserves an owned entry's mode,
+or uses `mcp-roots` for a new entry. Explicit `mcp-roots` reverses the CLI selection.
+
+The rendered bridge command carries the same mode. It requires an absolute project and exact
+owned registration with that flag, revalidates the symlink-free project/configuration identities,
+canonical repository root and directory identity before every workflow operation, and retires on
+any drift. It binds only the configured project; CWD, hook payloads, workflow arguments and MCP
+clientInfo cannot select or switch it. There is no automatic fallback when desktop roots fail.
+No content-capture permission, privacy grant, egress ceiling or service-instance boundary changes.
+Removal is the existing accepted project-registration removal lifecycle.
+
+### Bounded first-start recovery on 0.2
+
+A same-bundle session rebind waits at most five seconds for existing runtime users to retire.
+At most 64 foreground rebind waiters are admitted per cached bundle. Waiting releases the cache
+lock, protects the entry from eviction, and blocks new old-session leases. A definitively returned
+retryable busy attempt yields only its fenced pending start-catalog lease; durable identity, phase
+and milestones remain. Cancellation and ambiguous response loss do not yield that lease.
+
+ADR-030 continuation `start_busy_same_identity` names exact once-only replay after a successful
+lease yield; `start_pending_same_identity` names a live lease and the bounded 60-second wait before
+exact replay. Runtime/catalog producer reasons alone never imply a released start reservation.

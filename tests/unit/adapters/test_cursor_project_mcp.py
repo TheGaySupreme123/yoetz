@@ -67,6 +67,7 @@ def _entry(
     *,
     route: str = "policy",
     isolation_root: str | None = None,
+    project_root: Path | None = None,
 ) -> dict[str, Any]:
     args = [
         *launcher[1:],
@@ -75,7 +76,7 @@ def _entry(
         "--host",
         "cursor",
         "--project-root",
-        "${workspaceFolder}",
+        "${workspaceFolder}" if project_root is None else str(project_root),
     ]
     if route == "strict":
         args.extend(("--semantic", "off"))
@@ -187,7 +188,7 @@ def test_install_preserves_unrelated_project_json_and_binds_exact_launcher_and_r
     unrelated_servers = unrelated["mcpServers"]
     assert isinstance(unrelated_servers, dict)
     assert servers["other"] == unrelated_servers["other"]
-    assert servers["yoetz"] == _entry(isolation_root=root)
+    assert servers["yoetz"] == _entry(isolation_root=root, project_root=target.project_root)
     assert applied["config_digest_after"] == (
         "sha256:" + hashlib.sha256(project.read_bytes()).hexdigest()
     )
@@ -249,7 +250,9 @@ def test_strict_route_is_preserved_when_route_is_none_and_can_be_changed_explici
         preview_digest=str(changed["preview_digest"]),
         accept=True,
     )
-    assert _read_json(project)["mcpServers"]["yoetz"] == _entry(isolation_root=root)
+    assert _read_json(project)["mcpServers"]["yoetz"] == _entry(
+        isolation_root=root, project_root=target.project_root
+    )
 
 
 def test_legacy_project_entry_is_owned_for_upgrade_and_emits_the_selector(tmp_path: Path) -> None:
@@ -282,7 +285,9 @@ def test_legacy_project_entry_is_owned_for_upgrade_and_emits_the_selector(tmp_pa
         accept=True,
     )
     assert applied["state_after"] == "yoetz_owned"
-    assert _read_json(project)["mcpServers"]["yoetz"] == _entry(isolation_root=root)
+    assert _read_json(project)["mcpServers"]["yoetz"] == _entry(
+        isolation_root=root, project_root=target.project_root
+    )
 
 
 def test_changed_launcher_or_isolation_root_is_not_treated_as_owned(
@@ -774,5 +779,50 @@ def test_apply_rejects_a_user_source_appearing_after_project_write(
             accept=True,
         )
     assert raised.value.reason == "cursor_project_mcp_write_failed"
-    assert _read_json(project)["mcpServers"]["yoetz"] == _entry(isolation_root=root)
+    assert _read_json(project)["mcpServers"]["yoetz"] == _entry(
+        isolation_root=root, project_root=target.project_root
+    )
     assert _read_json(_user_config(target))["mcpServers"]["yoetz"] == _entry()
+
+
+def test_placeholder_registration_upgrades_to_exact_project_and_remains_runtime_verifiable(
+    tmp_path: Path,
+) -> None:
+    from yoetz.adapters.integrations.cursor_project_mcp import inspect_project_mcp_registration
+
+    target = _target(tmp_path)
+    root = _isolation_root(tmp_path)
+    config = _project_config(target)
+    _write_json(config, {"mcpServers": {"yoetz": _entry(isolation_root=root)}})
+    # Existing IDE registrations remain valid until an explicitly accepted upgrade.
+    inspect_project_mcp_registration(
+        target.project_root, launcher=LAUNCHER, route_profile="policy", isolation_root=root
+    )
+    preview = preview_cursor_project_mcp(
+        target, action="install", launcher=LAUNCHER, route_profile="policy", isolation_root=root
+    )
+    assert preview["action"] == "reregister"
+    apply_cursor_project_mcp(
+        target,
+        action="install",
+        launcher=LAUNCHER,
+        route_profile="policy",
+        isolation_root=root,
+        preview_digest=str(preview["preview_digest"]),
+        accept=True,
+    )
+    actual = _read_json(config)["mcpServers"]["yoetz"]
+    assert "${workspaceFolder}" not in actual["args"]
+    assert str(target.project_root) in actual["args"]
+    inspect_project_mcp_registration(
+        target.project_root, launcher=LAUNCHER, route_profile="policy", isolation_root=root
+    )
+    # An absolute selector for another directory cannot establish this registration's authority.
+    actual["args"] = [
+        str(tmp_path) if arg == str(target.project_root) else arg for arg in actual["args"]
+    ]
+    _write_json(config, {"mcpServers": {"yoetz": actual}})
+    with pytest.raises(CursorProjectMcpError, match="foreign_present"):
+        inspect_project_mcp_registration(
+            target.project_root, launcher=LAUNCHER, route_profile="policy", isolation_root=root
+        )

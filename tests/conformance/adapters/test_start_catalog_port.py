@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -23,6 +23,7 @@ from yoetz.ports.runtime import StartCompletionEvidence, StartMilestone
 from yoetz.ports.start_catalog import (
     EncryptedResultRef,
     SafeReason,
+    StartAllocation,
     StartCommand,
     StartIdentityInput,
     StartMode,
@@ -631,3 +632,84 @@ async def test_generation_and_route_identity_parity() -> None:
     assert route_memory == route_sqlite
     assert route_memory is not None
     assert route_memory.state is TaskRouteState.INITIALIZING
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("phase", list(StartPhase)[:-1])
+async def test_yielded_start_preserves_each_milestone_and_fences_old_lease(
+    phase: StartPhase,
+) -> None:
+    installation = _id(IdKind.INSTALLATION, 744)
+    clock = _Clock(datetime(2026, 7, 19, 10, tzinfo=UTC))
+    memory, _ = _memory_catalog(installation, clock)
+    sqlite = _sqlite_catalog(installation, clock)
+    allocations: list[StartAllocation] = []
+    for catalog in (memory, sqlite):
+        command = await _command(catalog, operation_id=_id(IdKind.REQUEST, 745))
+        allocated = await catalog.reserve_or_resume(command)
+        for milestone in list(StartPhase)[1:-1]:
+            if allocated.phase is phase:
+                break
+            allocated = await catalog.advance_phase(
+                allocated,
+                milestone,
+                _result() if milestone is StartPhase.RESULT_PUBLISHED else None,
+            )
+        with pytest.raises(PublicOperationError) as live:
+            await catalog.reserve_or_resume(command)
+        assert live.value.code is PublicErrorCode.OPERATION_PENDING
+        assert live.value.safe_details == {
+            "reason_code": "start_lease_pending",
+            "continuation": "start_pending_same_identity",
+        }
+        await catalog.yield_lease(allocated)
+        with pytest.raises(PublicOperationError) as changed:
+            await catalog.reserve_or_resume(replace(command, request_digest="sha256:" + "a" * 64))
+        assert changed.value.code is PublicErrorCode.IDEMPOTENCY_CONFLICT
+        resumed = await catalog.reserve_or_resume(command)
+        assert resumed.lease is not None and allocated.lease is not None
+        assert resumed.lease.lease_generation == allocated.lease.lease_generation + 1
+        assert replace(resumed, lease=allocated.lease, outcome=allocated.outcome) == allocated
+        with pytest.raises(PublicOperationError) as stale:
+            await catalog.yield_lease(allocated)
+        assert stale.value.code is PublicErrorCode.OPERATION_PENDING
+        allocations.append(resumed)
+    assert allocations[0] == allocations[1]
+
+
+@pytest.mark.anyio
+async def test_yield_cannot_change_completed_quarantined_or_new_generation_start() -> None:
+    installation = _id(IdKind.INSTALLATION, 746)
+    clock = _Clock(datetime(2026, 7, 19, 10, tzinfo=UTC))
+    memory, state = _memory_catalog(installation, clock)
+    sqlite = _sqlite_catalog(installation, clock)
+    for catalog in (memory, sqlite):
+        command = await _command(catalog, operation_id=_id(IdKind.REQUEST, 747))
+        allocated = await catalog.reserve_or_resume(command)
+        await _finish(catalog, allocated)
+        with pytest.raises(PublicOperationError):
+            await catalog.yield_lease(allocated)
+        assert (await catalog.reserve_or_resume(command)).outcome == "replayed"
+        quarantine_command = await _command(
+            catalog, operation_id=_id(IdKind.REQUEST, 748), workspace_ref="quarantined"
+        )
+        quarantined = await catalog.reserve_or_resume(quarantine_command)
+        await catalog.quarantine(quarantined, SafeReason("start_bundle_invalid"))
+        with pytest.raises(PublicOperationError):
+            await catalog.yield_lease(quarantined)
+        pending_command = await _command(
+            catalog, operation_id=_id(IdKind.REQUEST, 749), workspace_ref="pending"
+        )
+        pending = await catalog.reserve_or_resume(pending_command)
+        if catalog is memory:
+            state.owner_generation = 2
+        else:
+            sqlite._db.execute(  # pyright: ignore[reportPrivateUsage]
+                "UPDATE catalog_meta SET value = '2' WHERE key = 'owner_generation'"
+            )
+        with pytest.raises(PublicOperationError) as stale_owner:
+            await catalog.yield_lease(pending)
+        assert stale_owner.value.code is PublicErrorCode.OPERATION_PENDING
+        recovered = await catalog.reserve_or_resume(pending_command)
+        assert recovered.task_id == pending.task_id
+        assert recovered.lease is not None and recovered.lease.owner_generation == 2

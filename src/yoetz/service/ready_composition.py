@@ -3781,6 +3781,48 @@ async def provide_service_ready_context(
             local_observation=local_observation,
         )
 
+    # attempt_id -> (physical request identity, provider identity) of the single in-flight
+    # advisory dispatch. Cleared on every dispatch and consumed by the cancellation reconciler.
+    advice_semantic_inflight: dict[str, tuple[str, str]] = {}
+    service_started_at = clock.now_utc()
+
+    async def _reconcile_started_egress_attempts() -> int:
+        """Terminalize egress attempts an earlier service generation left nonterminal.
+
+        Bounded and idempotent. Only attempts consumed strictly before this service started are
+        considered, so no live dispatch is closed; each one records the exact
+        ``transport_failed/outcome_unknown`` receipt it already owed. Nothing re-enters the
+        provider or restores disclosure authority.
+        """
+
+        if type(privacy) is not PrivacyCoordinator:
+            return 0
+        return await privacy.reconcile_started_attempts(service_started_at)
+
+    async def _reconcile_cancelled_observation_advice_semantic(
+        attempt: ObservationAdviceSemanticAttempt,
+    ) -> ObservationAdviceSemanticOutcome | None:
+        """Close the egress audit for an advisory attempt cancelled by a foreground rebind.
+
+        ``None`` means the cancelled dispatch never consumed a disclosure authorization, so the
+        plain ``cancelled`` row is the whole truth. Otherwise the consumed attempt is terminally
+        unknown: the row records that provenance and the provider is never re-entered.
+        """
+
+        identity = advice_semantic_inflight.pop(attempt.attempt_id, None)
+        if identity is None or type(privacy) is not PrivacyCoordinator:
+            return None
+        request_id, provider_id = identity
+        recovered = await privacy.recover_started_request(request_id)
+        if recovered is None:
+            return None
+        return ObservationAdviceSemanticOutcome(
+            status="cancelled",
+            failure_reason="cancelled",
+            attempt_receipt=recovered.receipt_id or recovered.privacy_proposal_id,
+            provider_identity=provider_id,
+        )
+
     async def _dispatch_observation_advice_semantic(
         attempt: ObservationAdviceSemanticAttempt,
     ) -> ObservationAdviceSemanticOutcome:
@@ -3836,7 +3878,13 @@ async def provide_service_ready_context(
             ),
         )
         deadline = Deadline(clock.now_utc(), clock.monotonic_seconds() + 60.0)
+        # The supervisor runs one advisory provider attempt at a time. Remember the exact request
+        # identity this dispatch minted so a foreground rebind that cancels it can reconcile the
+        # consumed disclosure authorization instead of stranding it (issue #755).
+        advice_semantic_inflight.clear()
+        advice_semantic_inflight[attempt.attempt_id] = (candidate.request_id, binding.provider_id)
         result = await cast(PrivacyCoordinator, privacy).evaluate_semantic(candidate, deadline)
+        advice_semantic_inflight.pop(attempt.attempt_id, None)
         if type(result) is not SemanticEgressSuccess:
             return ObservationAdviceSemanticOutcome(
                 status="failed",
@@ -3900,6 +3948,7 @@ async def provide_service_ready_context(
         verification_supervisor=verification_supervisor,
         advice_semantic_supervisor=advice_semantic_supervisor,
         advice_semantic_dispatch=_dispatch_observation_advice_semantic,
+        advice_semantic_cancellation_reconciler=_reconcile_cancelled_observation_advice_semantic,
         observation_enabled=config.observation.enabled,
         capture_budget_bootstrap=bootstrap_capture_reservations,
     )
@@ -3979,6 +4028,7 @@ async def provide_service_ready_context(
         rediscover_pending_advice_semantic=(
             observation_coordinator.rediscover_pending_advice_semantic
         ),
+        reconcile_started_egress_attempts=_reconcile_started_egress_attempts,
         connected_provider_ids=connected_provider_ids,
         provider_credential_connected=provider_credential_connected,
         fallback_credential_connected=fallback_credential_connected,

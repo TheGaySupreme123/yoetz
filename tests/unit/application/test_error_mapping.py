@@ -103,6 +103,7 @@ _EXPECTED_EXIT_CODES: dict[PublicErrorCode, int] = {
 _MODULE_CODE_INVENTORY: dict[str, frozenset[PublicErrorCode]] = {
     "start.py": frozenset(
         {
+            PublicErrorCode.BUNDLE_BUSY,
             PublicErrorCode.INVALID_REQUEST,
             PublicErrorCode.STORAGE_CORRUPT,
             PublicErrorCode.STORAGE_UNSAFE,

@@ -560,7 +560,7 @@ def _unknown_event_0_153_4() -> bytes:
             "ordinal": 2,
             "payload": {"tokens": 1, "text": "CANARY_0153_UNKNOWN_WRAPPER"},
             "timestamp": _TS,
-            "type": "token_usage_record",
+            "type": "future_unknown_wrapper",
         },
         item_completed(
             {"id": "item_future", "type": "FutureItem", "text": "CANARY_0153_UNKNOWN_ITEM"},

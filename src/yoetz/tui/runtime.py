@@ -499,17 +499,17 @@ class YoetzRuntime:
         root = self.project_root()
         route = configured_mcp_route_profile() if route_profile is None else route_profile
         try:
-            mcp_preview = await HarnessMcpService(CodexMcpAdapter(route_profile=route)).preview(
-                binary
-            )
+            activation_preview = codex_activation_preview(binary, codex_home, root)
+        except IntegrationError as error:
+            raise RuntimeError_(error.reason.value, "the Codex activation could not be previewed")
+        try:
+            mcp_preview = await HarnessMcpService(
+                CodexMcpAdapter(route_profile=route, codex_home=activation_preview.codex_home)
+            ).preview(binary)
         except McpRegistrationError as error:
             raise RuntimeError_(error.reason.value, "the Codex registration could not be previewed")
         target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(root))
         skill_preview = await project_skill_preview(root)
-        try:
-            activation_preview = codex_activation_preview(binary, codex_home, root)
-        except IntegrationError as error:
-            raise RuntimeError_(error.reason.value, "the Codex activation could not be previewed")
         plugin_preview = CodexPluginService().preview(
             target,
             codex_version=activation_preview.codex_version,

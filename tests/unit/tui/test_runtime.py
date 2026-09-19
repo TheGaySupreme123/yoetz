@@ -275,3 +275,34 @@ def test_host_entries_report_platform_sandbox_and_storage_without_mutating(
     assert verified["platform_cell"].detail == "Linux x86_64 (manylinux_2_28_x86_64)"
     assert verified["check_sandbox"].detail == "seatbelt"
     assert all(entry.remediation == "" for entry in verified.values())
+
+
+async def test_integration_preview_uses_activation_home_for_mcp(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from yoetz.adapters.integrations import codex_mcp
+    from yoetz.cli import setup
+    from yoetz.ports.harness_mcp import McpRegistrationError, McpRegistrationReason
+    from yoetz.tui.runtime import RuntimeError_
+
+    selected = tmp_path / "selected"
+    resolved = tmp_path / "resolved"
+    seen: list[Path | None] = []
+
+    def activation(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(codex_home=resolved)
+
+    class StopAtPreview:
+        def __init__(self, *, route_profile: str, codex_home: Path | None = None) -> None:
+            assert route_profile == "strict"
+            seen.append(codex_home)
+
+        async def preview_registration(self, _binary: object) -> object:
+            raise McpRegistrationError(McpRegistrationReason.TIMEOUT, {})
+
+    monkeypatch.setattr(setup, "codex_activation_preview", activation)
+    monkeypatch.setattr(codex_mcp, "CodexMcpAdapter", StopAtPreview)
+    runtime = YoetzRuntime(cwd=tmp_path)
+    with pytest.raises(RuntimeError_):
+        await runtime.integration_plan(CLI, selected, "strict")
+    assert seen == [resolved]

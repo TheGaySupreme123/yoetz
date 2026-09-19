@@ -49,9 +49,10 @@ AppArmor profile that permits it; a still-blocked host can relax
 prefix plus `--chdir <workspace>`: the whole host filesystem is bound read-write and only the
 network namespace is unshared, mirroring the macOS profile `(allow default) (deny network*)`.
 
-Evidence state: the adapter and probe are covered by unit tests with a fake `bwrap`; a live
-Ubuntu 24.04 or WSL 2 run of a network-denied check under real bubblewrap is **outstanding** and
-must be recorded here before any Linux sandbox cell is claimed.
+Evidence state: issue #786 records an installed 0.2.3 candidate on Ubuntu 24.04 under WSL 2
+(Windows Server 2025), tested 2026-09-19. The real `ApprovedCheckRunner` used bubblewrap, verified
+a different network namespace, and could not connect to a live listener in the parent namespace.
+This bounded check passed; it does not establish every distribution or native host integration.
 
 ## System credential store
 
@@ -101,8 +102,11 @@ all such implementations lack locks. For example,
 Inside WSL, Yoetz state must stay on the distribution's own ext4 disk — the WSL home is the default — never under `/mnt/<letter>`. The refusal's remediation says so, and it applies to
 `YOETZ_ISOLATED_ROOT`, `yoetz instance create --root`, and `storage.data_dir` alike.
 
-Evidence state: the classifier is covered by unit tests over synthetic mount tables; a live WSL 2
-reproduction on `/mnt/c` is **outstanding**.
+Evidence state: in the 2026-09-19 WSL 2 run recorded in #786, the installed candidate initialized
+and restarted/unlocked on the Linux filesystem. `yoetz instance create` with a `/mnt/c` root
+refused with `path_on_network_filesystem` and exit 20. A full `wsl --terminate` followed by
+distribution startup preserved the installed instance: the service started locked and returned
+ready after passphrase unlock. Native agent acceptance remains a separate, incomplete cell.
 
 ## Host integrations on Linux and WSL
 

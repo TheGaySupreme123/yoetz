@@ -299,9 +299,15 @@ def _flush_lane(
 
     def flush_successes() -> None:
         if successes and previous is not None:
-            deliveries.append(
-                (previous.host_session, summary_builder(tuple(successes), previous.fence))
-            )
+            try:
+                summary = summary_builder(tuple(successes), previous.fence)
+            except ProtocolValueError:
+                # A prior version may have buffered a classified success without its
+                # durable outcome facts. Retain every original record in source order;
+                # an unprovable summary must not strand this lane or later host work.
+                deliveries.extend((previous.host_session, item) for item in successes)
+            else:
+                deliveries.append((previous.host_session, summary))
             successes.clear()
 
     for item in inputs:
@@ -350,7 +356,11 @@ def plan_admission(
         same_lane = ()
     pending = tuple(item for item in same_lane if item.kind == "pending")
     is_pre = envelope.event_kind == "PreToolUse"
-    is_success = envelope.event_kind == "PostToolUse" and proven_routine_success
+    is_success = (
+        envelope.event_kind == "PostToolUse"
+        and proven_routine_success
+        and _proven_routine_success(envelope)
+    )
     eligible = focused and bool(fence) and (routine_candidate if is_pre else is_success)
     if envelope.content_object_refs or any(
         gap not in _ROUTINE_SUMMARY_ALLOWED_GAPS for gap in envelope.gap_codes

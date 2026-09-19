@@ -33,7 +33,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
 from types import MappingProxyType
-from typing import Protocol
+from typing import Protocol, cast
 
 from yoetz.adapters.privacy.catalog import _scope_digest  # pyright: ignore[reportPrivateUsage]
 from yoetz.adapters.privacy.local_enforcer import SecretScanRuleset
@@ -264,6 +264,7 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
         "_local_model_registry",
         "_local_model_resolver",
         "_registry",
+        "_receipt_writes",
         "_repository_authority_validator",
     )
 
@@ -298,6 +299,7 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
         self._registry: ProviderRegistry | None = None
         self._closed = False
         self._close_task: asyncio.Task[None] | None = None
+        self._receipt_writes: set[asyncio.Task[None]] = set()
 
     def _current_registry(self) -> ProviderRegistry | None:
         """Read the live snapshot through a call boundary so static narrowing never assumes away
@@ -741,16 +743,12 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
         # From here on the physical attempt is admitted: no failure below can restore authority,
         # only its actual terminal or `outcome_unknown` receipt is produced.
         dispatch_started_at = self._clock.now_utc()
-        try:
-            result = await evaluator.evaluate(case, deadline)
-            result = _with_policy_digest(result, case)
-            result = _with_request_commitment(result, commitment)
-            outcome, receipt_reason = _result_outcome(result)
-        except Exception:  # noqa: BLE001 - an ambiguous transport failure never leaks native text
-            result = _unknown_outcome_result(case, binding)
-            outcome, receipt_reason = PrivacyOutcome.TRANSPORT_FAILED, PrivacyReason.OUTCOME_UNKNOWN
-
-        receipt = self._attempt_receipt(
+        # This gateway is the only holder of the exact final request body, its keyed commitment,
+        # and the authorization/registry binding a dispatch receipt must carry, and the audit
+        # deliberately retains no plaintext. Build the receipt this admitted attempt owes on an
+        # unknown outcome now and park it beside the `receipt_pending` row, so a crash between
+        # consume and the real receipt leaves recoverable material instead of a stranded row.
+        unknown_receipt = self._attempt_receipt(
             case,
             authorization,
             registry,
@@ -758,15 +756,48 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
             dispatch_started_at,
             commitment,
             body,
-            result,
-            outcome,
-            receipt_reason,
+            _unknown_outcome_result(case, binding),
+            PrivacyOutcome.TRANSPORT_FAILED,
+            PrivacyReason.OUTCOME_UNKNOWN,
         )
+        receipt: EgressReceipt | None = None
         try:
-            await self._audit.complete_egress(dispatch_id, receipt)
-        except Exception:  # noqa: BLE001 - best-effort: the caller already has the real result
-            pass
-        return result
+            await self._park_attempt_reconciliation(dispatch_id, unknown_receipt)
+            try:
+                result = await evaluator.evaluate(case, deadline)
+                result = _with_policy_digest(result, case)
+                result = _with_request_commitment(result, commitment)
+                outcome, receipt_reason = _result_outcome(result)
+            except Exception:  # noqa: BLE001 - ambiguous transport never leaks native text
+                result = _unknown_outcome_result(case, binding)
+                outcome = PrivacyOutcome.TRANSPORT_FAILED
+                receipt_reason = PrivacyReason.OUTCOME_UNKNOWN
+            receipt = self._attempt_receipt(
+                case,
+                authorization,
+                registry,
+                dispatch_id,
+                dispatch_started_at,
+                commitment,
+                body,
+                result,
+                outcome,
+                receipt_reason,
+            )
+            try:
+                await self._audit.complete_egress(dispatch_id, receipt)
+            except Exception:  # noqa: BLE001 - best-effort: caller retains the real result
+                pass
+            return result
+        except BaseException:
+            # Cover every suspension after consume: parking, provider I/O, and the final write.
+            # Preserve a real result already obtained; otherwise adjudicate unknown now, not at
+            # the earlier parking time. Cleanup never dispatches or restores authority.
+            cancelled_receipt = receipt or replace(
+                unknown_receipt, finished_at=max(self._clock.now_utc(), unknown_receipt.finished_at)
+            )
+            await self._shielded_receipt(dispatch_id, cancelled_receipt)
+            raise
 
     def _predispatch_reason(
         self,
@@ -889,6 +920,48 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
         except Exception:  # noqa: BLE001 - best-effort: the bounded result still returns
             pass
         return _preconsume_result(case, reason)
+
+    async def _park_attempt_reconciliation(self, dispatch_id: str, receipt: EgressReceipt) -> None:
+        """Best-effort durable recovery material for one admitted physical attempt."""
+
+        park = getattr(self._audit, "park_attempt_reconciliation", None)
+        if not callable(park):
+            return
+        typed_park = cast(
+            Callable[[str, EgressReceipt], Awaitable[None]],
+            park,
+        )
+        try:
+            await typed_park(dispatch_id, receipt)
+        except Exception:  # noqa: BLE001 - parking is recovery material, never the attempt itself
+            pass
+
+    async def _shielded_receipt(self, dispatch_id: str, receipt: EgressReceipt) -> None:
+        """Keep ownership of the local receipt write through repeated cancellation."""
+
+        pending = asyncio.create_task(self._audit.complete_egress(dispatch_id, receipt))
+        self._receipt_writes.add(pending)
+
+        def finished(task: asyncio.Task[None]) -> None:
+            self._receipt_writes.discard(task)
+            if not task.cancelled():
+                task.exception()  # Observe a failed best-effort write; never redispatch.
+
+        pending.add_done_callback(finished)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 2.0
+        while not pending.done():
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return  # Owned write continues; parked receipt remains restart recovery material.
+            try:
+                await asyncio.wait_for(asyncio.shield(pending), remaining)
+            except asyncio.CancelledError:
+                continue
+            except TimeoutError:
+                return
+            except Exception:  # noqa: BLE001 - a failed audit write grants no retry
+                return
 
     def _attempt_receipt(
         self,

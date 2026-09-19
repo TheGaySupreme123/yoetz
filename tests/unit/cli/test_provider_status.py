@@ -917,7 +917,8 @@ async def test_proven_absolute_adapter_feeds_provider_readiness(
         lambda: ("/test/runtime/bin/yoetz", "sha256:" + "a" * 64),
     )
 
-    def entry(_argv: tuple[str, ...]) -> CommandOutput:
+    def entry(_argv: tuple[str, ...], *, codex_home: Path | None = None) -> CommandOutput:
+        assert codex_home is None
         return CommandOutput(
             0,
             json.dumps(
