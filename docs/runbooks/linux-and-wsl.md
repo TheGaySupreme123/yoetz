@@ -49,6 +49,23 @@ AppArmor profile that permits it; a still-blocked host can relax
 prefix plus `--chdir <workspace>`: the whole host filesystem is bound read-write and only the
 network namespace is unshared, mirroring the macOS profile `(allow default) (deny network*)`.
 
+**`yoetz service status` does not report sandbox availability, and is not going to.** Issue #720
+asked for the fact to be named once in setup diagnostics *and* in `yoetz service status`; the
+second half is deliberately declined here, and those three surfaces are the whole supported set.
+`service status` answers a versioned wire contract (`service-status-1.0.0`, closed to unknown
+fields and a member of the schema manifest whose digest the control handshake pins on both sides)
+about one subject — the local service holder's state, identity, and liveness — and it answers
+while the vault is still locked. Sandbox availability is not a property of that holder. It is a
+live capability probe of whichever process asks: one bounded `bwrap` execution whose answer
+depends on that process's `PATH`, its AppArmor profile, and its permission to create an
+unprivileged user namespace. Each of the three surfaces above reports the answer for the
+environment the operator is actually standing in, which is what decides whether to install
+`bubblewrap`. Because the service is a per-user singleton on the same machine, that is normally
+also the answer its own check worker gets; where the service was started from a different
+installation or `PATH`, a field on `service status` would report the service process's environment
+under a name operators read as their own, which is the worse answer, not the missing one. A
+service-side answer, if one is ever needed, belongs in its own versioned diagnostic.
+
 Evidence state: the adapter and probe are covered by unit tests with a fake `bwrap`; a live
 Ubuntu 24.04 or WSL 2 run of a network-denied check under real bubblewrap is **outstanding** and
 must be recorded here before any Linux sandbox cell is claimed.

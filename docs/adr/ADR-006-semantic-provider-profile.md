@@ -343,29 +343,29 @@ configuration; swapping the primary keeps both bindings and both approvals.
 3. **Replay-safe endpoint selection.** Which endpoint an attempt uses is a pure function of the
    durable attempt rows before it and the immutable execution snapshot in the encrypted
    `SEMANTIC_CASE` object (`yoetz.semantic-case/2`), never mutable provider readiness. The snapshot
-   binds exact endpoints, initial primary availability, retry budgets, and UTC cutoff times. Crash,
-   restart, and `awaiting_human` replay resume the endpoint the attempt was claimed for; changed
-   configuration cannot reinterpret earlier ordinals. Every attempt still checks current privacy
-   authority for that frozen binding. Legacy terminal cases retain stored-result recovery; pending
-   cases lacking the snapshot terminate without dispatch rather than acquiring a newly configured
-   pairing (`coordinator_failure` before dispatch or during a disclosure wait, an uncertain started
-   attempt retains `outcome_unknown` durably and reports the provenance-free public gap
-   `receipt_persistence_unknown`). The internal attempt projection exposes the existing durable
-   `started_at` timestamp; usage counters are an additive nullable bundle migration (0013), so
-   legacy rows remain readable. An expired resumed attempt without a disclosure wait preserves
-   `outcome_unknown`; a known undispatched expiry records `provider_timeout`. If provider-result
-   provenance is unavailable on recovery, the public result uses `receipt_persistence_unknown` while
-   retaining the original durable reason. Retained provider-result objects are recovered when their
-   status and reason match that row. **Lease/recovery amendment, 2026-09-07 (#616, #620):** live
-   AI-powered review operation and job leases use the authenticated execution snapshot's total
-   expiry plus five seconds for local cleanup, rather than a renewable heartbeat. The current
-   two-endpoint maximum makes that live bound at most 605 seconds; a crash can consequently delay
-   reclaim until that bound. Claim/reclaim retains an existing `started` or `response_durable`
-   attempt and its physical request identity. A saved response is selected and recovered before any
-   new attempt is considered. After the execution bound, an already reclaimed ordinary operation
-   lease may perform bounded local terminal recovery; it cannot renew AI-powered review execution or
-   dispatch after the immutable provider deadline. Provider deadlines and human approval expiry
-   remain separate from lease ownership.
+   binds exact endpoints, initial primary availability, retry budgets, and UTC cutoff times.
+   Crash, restart, and `awaiting_human` replay resume the endpoint the attempt was claimed for;
+   changed configuration cannot reinterpret earlier ordinals. Every attempt still checks current
+   privacy authority for that frozen binding. Legacy terminal cases retain stored-result recovery;
+   pending cases lacking the snapshot terminate without dispatch rather than acquiring a newly
+   configured pairing (`coordinator_failure` before dispatch or during a disclosure wait,
+   an uncertain started attempt retains `outcome_unknown` durably and reports the provenance-free
+   public gap `receipt_persistence_unknown`). The internal attempt projection
+   exposes the existing durable `started_at` timestamp; usage counters are an additive nullable
+   bundle migration (0013), so legacy rows remain readable. An expired
+   resumed attempt without a disclosure wait preserves `outcome_unknown`; a known undispatched
+   expiry records `provider_timeout`. If provider-result provenance is unavailable on recovery,
+   the public result uses `receipt_persistence_unknown` while retaining the original durable reason.
+   Retained provider-result objects are recovered when their status and reason match that row.
+   **Lease/recovery amendment, 2026-09-07 (#616, #620):** live AI-powered review operation and job leases
+   use the authenticated execution snapshot's total expiry plus five seconds for local cleanup,
+   rather than a renewable heartbeat. The current two-endpoint maximum makes that live bound
+   at most 7205 seconds; a crash can consequently delay reclaim until that bound. Claim/reclaim
+   retains an existing `started` or `response_durable` attempt and its physical request identity.
+   A saved response is selected and recovered before any new attempt is considered. After the
+   execution bound, an already reclaimed ordinary operation lease may perform bounded local
+   terminal recovery; it cannot renew AI-powered review execution or dispatch after the immutable provider
+   deadline. Provider deadlines and human approval expiry remain separate from lease ownership.
 4. **Every fallback attempt is a fresh physical attempt** under ADR-009: its own privacy
    evaluation against the exact fallback binding, authorization, dispatch identity, credential
    handle or `ExternalRuntimeAuthority`, and privacy receipt. Under `confirm_every_request` it
@@ -413,3 +413,17 @@ uncertain execution boundary; null provenance and missing diagnostics are not no
 Provider-return, mapping and persistence faults remain distinct. Diagnostics cannot change retry
 eligibility, durable-response recovery, cancellation or lease fencing. See `docs/INTERFACES.md` for
 the public reason, coverage and owner diagnostic lookup contracts.
+
+
+### Long external Codex reviews (2026-09-16, #496 / #746)
+
+The external Codex evaluator defaults to 900 seconds and accepts explicit values from 1 to 3600
+seconds. Existing explicit shorter values are preserved. Other provider kinds keep their existing
+limits. The primary and optional fallback each retain their own frozen budget, with a combined
+execution bound of 7200 seconds and five seconds of lease cleanup. Recovery never resets that clock
+or mints a new provider request after authority was consumed.
+
+A client wait timeout or disconnect leaves an admitted semantic check running under service
+ownership. At most eight such checks can be retained; same-identity retries report pending, and a
+changed body conflicts. An explicit attached control cancellation or service shutdown cancels and
+joins the work. This does not introduce parallel semantic scheduling or phase-progress telemetry.

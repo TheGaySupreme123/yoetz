@@ -32,6 +32,34 @@ After a resume, compaction, or handoff, read current Yoetz status before publish
 does not by itself create a new ledger. Pass task identity and bounded availability to delegates;
 inherited `terminal_unavailable` means they make no Yoetz calls.
 
+For cooperative delegation, the parent calls `start mode=delegate` with its current session and
+passes the complete single-use `attach_handle` with a bounded assignment to the intended child. The
+child calls `start mode=attach` and uses its own returned session and writer. A child without a handle
+may create a stable child-specific task with `parent_session_id`; it remains `self_registered` and
+`pending` until the parent records `child_accepted` or `child_rejected`. Read `status view=lineage`
+after handoff. A receipt never closes work or refreshes the parent's dependency manifest. The `prj_`
+project membership object groups work; each source workspace grants workspace-level observation
+consent separately, and the exact membership generation binds coordination delivery. Membership does
+not select a task or authorize sibling content. A clean child receipt does not prove integration.
+
+### Cursor native boundary
+
+The reviewed Cursor IDE profile exposes `sessionStart`, `sessionEnd`, `afterMCPExecution`,
+`afterFileEdit`, and `stop`; it is post-only for structural observation and excludes
+`afterAgentThought`. Cursor's Agent CLI, Cloud/Cloud Agents, and SDK fixture metadata do not supply
+an admitted native child-hook cell here. Shipped type names or a newer installed Cursor build are
+artifact evidence only and do not prove runtime child identity. A child event without an explicit
+cooperative task/session binding remains an attribution gap and is never assigned to the parent.
+`generation_id` identifies a host turn or conversation and never becomes a tool-call identity.
+
+Ordinary Cursor tool capture uses the exact `cursor-ordinary-observation-v1` profile and its separate
+workspace content-consent selection. Structural observation consent does not grant content retention
+or semantic disclosure. Hooks are fail-open and never enforce Cursor work. Native registration,
+session binding, hook drainage, or MCP approval does not prove accepted observation content, semantic
+review, or receipt coverage; report those boundaries separately. When a native child or content
+signal is unsupported, use cooperative MCP delegation or explicit task registration when allowed and
+disclose the native gap.
+
 ## Load the shared Yoetz guidance
 
 These five references are the complete installed guidance set. Follow the one that matches the

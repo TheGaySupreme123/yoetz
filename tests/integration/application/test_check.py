@@ -149,6 +149,17 @@ class _Ledger:
         self.last_executions: tuple[CheckPolicyExecution, ...] | None = None
         self.operation: OperationRecord | None = None
 
+    async def load_events(
+        self,
+        session_id: str,
+        *,
+        after: int = 0,
+        through: int | None = None,
+    ) -> Any:
+        del session_id, after, through
+        if False:
+            yield None
+
     async def freeze_case(self, *args: object) -> FrozenCase | CheckCommitResult:
         if self.failure is not None:
             raise self.failure
@@ -353,8 +364,9 @@ class _App:
         frozen: FrozenCase,
         deterministic_findings: tuple[Finding, ...],
         runtime: object | None = None,
+        lineage_evaluation: object | None = None,
     ) -> FinalSemanticEvaluation:
-        _ = (frozen, deterministic_findings, runtime)
+        _ = (frozen, deterministic_findings, runtime, lineage_evaluation)
         self.semantic_calls += 1
         if self.crash_semantic:
             raise RuntimeError("semantic_evaluator_crashed")
@@ -469,6 +481,7 @@ async def test_empty_completion_scope_gap_reaches_check_verdict(
     assert checked.verdict.value == "insufficient_coverage"
     assert expected_gap in checked.coverage.known_gaps
     assert checked.policy_executions == (
+        CheckPolicyExecution("coordination", "0.1.0", "skipped", "not_applicable"),
         CheckPolicyExecution("research-evidence", "0.1.0", "run", "completed"),
         CheckPolicyExecution("work-integrity", "0.1.0", "run", "completed"),
     )
@@ -1198,3 +1211,19 @@ async def test_capacity_failure_preserves_deterministic_result_and_precise_recei
     )
     assert result.verdict.value == "incomplete_check"
     assert result.findings
+
+
+@pytest.mark.anyio
+async def test_native_resolution_omission_survives_successful_semantic_check() -> None:
+    app = _App(semantic=True)
+    app.semantic_result = replace(
+        _succeeded(SemanticJudgment("no_material_discrepancy", ())),
+        case_content_gaps=(
+            "captured_object_unavailable",
+            "content_capture_unavailable",
+            "content_unselected",
+        ),
+    )
+    result = await execute_check_commit(app, _request("semantic_if_configured"))
+    assert {"captured_object_unavailable", "content_unselected"} <= set(result.coverage.known_gaps)
+    assert result.verdict.value != "no_issue_detected"

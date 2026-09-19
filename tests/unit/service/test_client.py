@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import os
 import stat
 import time
-from collections.abc import Buffer
+from collections.abc import Buffer, Generator
+from contextlib import contextmanager
 from inspect import signature
 from pathlib import Path
 from typing import BinaryIO, cast
 
 import pytest
 
-from yoetz.adapters.control.unix_socket import AuthenticatedUnixStream
+from yoetz.adapters.control.unix_socket import (
+    AuthenticatedUnixStream,
+    LocalControlTransportError,
+)
 from yoetz.domain.values import JsonObject
 from yoetz.ports.control import (
     ControlClientKind,
@@ -26,21 +31,25 @@ from yoetz.ports.control import (
     WorkspaceLocator,
 )
 from yoetz.ports.privacy import LocalDisclosureReceiptView, PrivacyReceiptPage
+from yoetz.protocol.errors import PublicErrorCode
 from yoetz.protocol.ids import IdKind, new_id
-from yoetz.protocol.models import ReceiptRequest
+from yoetz.protocol.models import CheckRequest, ReceiptRequest
 from yoetz.service.client import (
     GetPrivacyReceiptRequest,
     ListPrivacyReceiptsRequest,
+    PreparedProjectRequest,
     PrivacyReceiptFound,
     PrivacyReceiptNotFound,
     ServiceClient,
     connect_service_on_demand,
+    prepare_project_request,
 )
 from yoetz.service.control_protocol import (
     ControlSession,
     decode_control_frame,
     encode_control_frame,
     parse_control_result,
+    public_error_code_for_control_reason,
 )
 
 _SERVICE_ID = "svc_00000000-0000-4000-8000-000000000001"
@@ -58,6 +67,9 @@ class _FakeStream:
         self._incoming = bytearray()
         self._ready = asyncio.Condition()
         self.closed = False
+        # Armed by the transport regressions: the exact failure this stream raises instead of
+        # accepting the next write.
+        self.send_failure: BaseException | None = None
 
     async def receive(self, max_bytes: int) -> bytes:
         async with self._ready:
@@ -70,6 +82,8 @@ class _FakeStream:
             return result
 
     async def send_all(self, data: Buffer) -> None:
+        if self.send_failure is not None:
+            raise self.send_failure
         self.sent.append(bytes(data))
 
     async def aclose(self) -> None:
@@ -138,12 +152,146 @@ def _client(stream: _FakeStream, kind: ControlClientKind = ControlClientKind.CLI
     )
 
 
+@contextmanager
+def _captured_loop_exceptions() -> Generator[list[dict[str, object]]]:
+    """Collect every context the running loop would otherwise report as an unhandled failure."""
+
+    loop = asyncio.get_running_loop()
+    contexts: list[dict[str, object]] = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: contexts.append(context))
+    try:
+        yield contexts
+    finally:
+        loop.set_exception_handler(previous)
+
+
+async def _settle_loop_callbacks() -> None:
+    """Run every callback already queued on the loop, waiting on that fact and not on a clock."""
+
+    flushed = asyncio.Event()
+    asyncio.get_running_loop().call_soon(flushed.set)
+    await flushed.wait()
+
+
 async def _wait_for_sent(stream: _FakeStream, count: int) -> None:
     for _ in range(100):
         if len(stream.sent) >= count:
             return
         await asyncio.sleep(0)
     raise AssertionError("client did not write expected frame")
+
+
+@pytest.mark.anyio
+async def test_project_preserves_supplied_request_id_on_the_control_wire() -> None:
+    stream = _FakeStream()
+    client = _client(stream)
+    supplied = "req_00000000-0000-4000-8000-000000000101"
+    task = asyncio.create_task(
+        client.project(
+            JsonObject(
+                {
+                    "schema_version": "1.0.0",
+                    "operation": "create",
+                    "owner_task_id": "tsk_00000000-0000-4000-8000-000000000102",
+                    "title": "project",
+                    "request_id": supplied,
+                }
+            )
+        )
+    )
+    await _wait_for_sent(stream, 1)
+    request = decode_control_frame(stream.sent[0])
+    body = cast(dict[str, object], request["body"])
+    assert body["request_id"] == supplied
+    assert client.last_project_request == PreparedProjectRequest(JsonObject(body), supplied)
+    await stream.feed(
+        encode_control_frame(
+            ControlResult(
+                protocol_version="1.0",
+                rpc_id=cast(str, request["rpc_id"]),
+                service_instance_id=_SERVICE_ID,
+                service_generation="1",
+                method=ControlMethod.PROJECT,
+                outcome="error",
+                body=ControlError("project_not_found"),
+            )
+        )
+    )
+    with pytest.raises(ControlError, match="project_not_found"):
+        await task
+    await client.close()
+
+
+@pytest.mark.anyio
+async def test_project_generated_request_id_is_exposed_and_reusable_for_recovery() -> None:
+    stream = _FakeStream()
+    client = _client(stream)
+    original = JsonObject(
+        {
+            "schema_version": "1.0.0",
+            "operation": "create",
+            "owner_task_id": "tsk_00000000-0000-4000-8000-000000000103",
+            "title": "project",
+        }
+    )
+    first_task = asyncio.create_task(client.project(original))
+    await _wait_for_sent(stream, 1)
+    first = decode_control_frame(stream.sent[0])
+    first_body = cast(dict[str, object], first["body"])
+    prepared = client.last_project_request
+    assert prepared is not None
+    assert prepared.body is not original
+    assert prepared.body["request_id"] == prepared.request_id
+    assert first_body["request_id"] == prepared.request_id
+    assert "request_id" not in original
+    await stream.feed(
+        encode_control_frame(
+            ControlResult(
+                protocol_version="1.0",
+                rpc_id=cast(str, first["rpc_id"]),
+                service_instance_id=_SERVICE_ID,
+                service_generation="1",
+                method=ControlMethod.PROJECT,
+                outcome="error",
+                body=ControlError("project_not_found"),
+            )
+        )
+    )
+    with pytest.raises(ControlError, match="project_not_found"):
+        await first_task
+
+    retry_task = asyncio.create_task(client.project(prepared.body))
+    await _wait_for_sent(stream, 2)
+    retry = decode_control_frame(stream.sent[1])
+    assert retry["body"] == first["body"]
+    await stream.feed(
+        encode_control_frame(
+            ControlResult(
+                protocol_version="1.0",
+                rpc_id=cast(str, retry["rpc_id"]),
+                service_instance_id=_SERVICE_ID,
+                service_generation="1",
+                method=ControlMethod.PROJECT,
+                outcome="error",
+                body=ControlError("project_not_found"),
+            )
+        )
+    )
+    with pytest.raises(ControlError, match="project_not_found"):
+        await retry_task
+    await client.close()
+
+
+def test_prepare_project_request_uses_matching_explicit_identity() -> None:
+    supplied = "req_00000000-0000-4000-8000-000000000104"
+    prepared = prepare_project_request(
+        JsonObject({"schema_version": "1.0.0", "operation": "opt_in"}),
+        request_id=supplied,
+    )
+    assert prepared.request_id == supplied
+    assert prepared.body["request_id"] == supplied
+    assert prepared.request == prepared.body
 
 
 @pytest.mark.anyio
@@ -828,7 +976,9 @@ async def test_late_timed_out_result_is_retired_without_poisoning_concurrent_cal
         if frame["kind"] == "call"
     )
 
-    healthy = asyncio.create_task(client.receipt(_receipt_request(23), deadline_ms=500))
+    # The second call tests correlation, not another timeout. Its completion is driven by
+    # the explicit reply below, so unrelated CI load cannot spend a second wall-clock budget.
+    healthy = asyncio.create_task(client.receipt(_receipt_request(23)))
     await _wait_for_sent(stream, 3)
     second = decode_control_frame(stream.sent[2])
     assert second["kind"] == "call"
@@ -1158,3 +1308,131 @@ async def test_supersede_signals_only_a_live_foreign_identity_holder(
         if holder.poll() is None:
             holder.kill()
             holder.wait(timeout=5)
+
+
+@pytest.mark.anyio
+async def test_cancelled_check_wait_consumes_late_result_without_cancelling_review() -> None:
+    stream = _FakeStream()
+    client = _client(stream, ControlClientKind.MCP_BRIDGE)
+    source = _receipt_request(31).model_dump(mode="json", exclude_none=True)
+    for key in ("task_id", "format", "include", "redaction_profile"):
+        source.pop(key)
+    source["mode"] = "semantic_required"
+    check = CheckRequest.model_validate(source)
+    waiting = asyncio.create_task(client.check(check))
+    await _wait_for_sent(stream, 1)
+    first = decode_control_frame(stream.sent[0])
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    # Local wait cancellation is not an explicit control cancel of the admitted review.
+    assert len(stream.sent) == 1
+    assert first["rpc_id"] in client._retired_rpc_ids  # pyright: ignore[reportPrivateUsage]
+    healthy = asyncio.create_task(client.receipt(_receipt_request(32), deadline_ms=500))
+    await _wait_for_sent(stream, 2)
+    second = decode_control_frame(stream.sent[1])
+    for frame, method in ((first, ControlMethod.CHECK), (second, ControlMethod.RECEIPT)):
+        await stream.feed(
+            encode_control_frame(
+                ControlResult(
+                    protocol_version="1.0",
+                    rpc_id=cast(str, frame["rpc_id"]),
+                    service_instance_id=_SERVICE_ID,
+                    service_generation="1",
+                    method=method,
+                    outcome="error",
+                    body=ControlError("privacy_projection_unavailable", retryable=True),
+                )
+            )
+        )
+    with pytest.raises(ControlError, match="privacy_projection_unavailable"):
+        await healthy
+    assert not stream.closed
+    assert not client._retired_rpc_ids  # pyright: ignore[reportPrivateUsage]
+    await client.close()
+
+
+@pytest.mark.anyio
+async def test_failed_send_reports_the_retryable_transport_mapping() -> None:
+    """Issue #678: a request that validated and encoded is not the caller's malformed frame."""
+
+    stream = _FakeStream()
+    stream.send_failure = LocalControlTransportError("connection_failed")
+    client = _client(stream)
+
+    with pytest.raises(ControlError) as caught:
+        await client.service_status()
+
+    assert caught.value.reason == "service_unavailable"
+    assert caught.value.retryable is True
+    assert (
+        public_error_code_for_control_reason(caught.value.reason)
+        is PublicErrorCode.SERVICE_UNAVAILABLE
+    )
+    assert stream.sent == []
+    await client.close()
+
+
+@pytest.mark.anyio
+async def test_failed_send_leaves_no_unretrieved_future_for_the_event_loop() -> None:
+    """Issue #678: the call's own future is failed by teardown and must still be consumed."""
+
+    stream = _FakeStream()
+    stream.send_failure = LocalControlTransportError("connection_failed")
+    client = _client(stream)
+
+    with _captured_loop_exceptions() as contexts:
+        with pytest.raises(ControlError, match="service_unavailable"):
+            await client.service_status()
+        await client.close()
+        gc.collect()
+        await _settle_loop_callbacks()
+
+        assert [context.get("message") for context in contexts] == []
+
+
+@pytest.mark.anyio
+async def test_send_cancellation_stays_cancellation() -> None:
+    """A cancelled write is never reclassified, and it strands no future either."""
+
+    stream = _FakeStream()
+    stream.send_failure = asyncio.CancelledError()
+    client = _client(stream)
+
+    with _captured_loop_exceptions() as contexts:
+        with pytest.raises(asyncio.CancelledError):
+            await client.service_status()
+        await client.close()
+        gc.collect()
+        await _settle_loop_callbacks()
+
+        assert [context.get("message") for context in contexts] == []
+
+
+@pytest.mark.anyio
+async def test_failed_send_bounds_every_concurrent_pending_caller() -> None:
+    """One failed write retires the connection; every pending caller ends consumed and bounded."""
+
+    stream = _FakeStream()
+    client = _client(stream)
+
+    with _captured_loop_exceptions() as contexts:
+        awaiting_answer = asyncio.create_task(client.service_status())
+        await _wait_for_sent(stream, 1)
+        stream.send_failure = LocalControlTransportError("connection_failed")
+
+        with pytest.raises(ControlError) as failed_write:
+            await client.service_status()
+        assert failed_write.value.reason == "service_unavailable"
+        assert failed_write.value.retryable is True
+
+        with pytest.raises(ControlError) as stranded:
+            await awaiting_answer
+        assert stranded.value.reason == "service_unavailable"
+        assert stranded.value.retryable is True
+
+        await client.close()
+        gc.collect()
+        await _settle_loop_callbacks()
+
+        assert [context.get("message") for context in contexts] == []

@@ -55,16 +55,26 @@ from yoetz.domain.privacy import (
 from yoetz.ports.control import ControlClientKind, ControlMethod
 from yoetz.ports.ledger import CheckCommitResult
 from yoetz.protocol.canonical import JsonValue, canonical_encode
+from yoetz.protocol.coverage import PublicationChannel, coverage_for_channel, coverage_to_json
 from yoetz.protocol.models import (
     CheckContinuationModel,
+    CheckRequest,
+    CheckSuccessModel,
+    ChildDependencySnapshotModel,
+    ChildFindingSnapshotModel,
     DataCategory,
+    ProjectTextRefModel,
     PublicErrorModel,
     PublishWorkAcceptedEventModel,
     PublishWorkRequest,
     RespondEvidenceSummaryModel,
     RespondResponseModel,
+    StartSuccessModel,
+    StatusAdviceItemModel,
     StatusCompactObligationModel,
     StatusObligationItemModel,
+    StatusProjectDetectionModel,
+    StatusProjectPageModel,
     StatusRequest,
     StatusStructuralSubjectStateModel,
     StatusVersionSliceModel,
@@ -101,12 +111,44 @@ def _version_slice_payload() -> dict[str, object]:
 # A new result model that joins the set without a row in this table fails the inventory test.
 _RESULT_OPTIONAL_NON_NULL: tuple[tuple[type[BaseModel], frozenset[str]], ...] = (
     (CheckContinuationModel, frozenset({"pending_id", "expires_at"})),
+    (CheckSuccessModel, frozenset({"children", "advisory_notes"})),
+    (
+        ChildDependencySnapshotModel,
+        frozenset(
+            {
+                "child_frontier",
+                "child_check_id",
+                "child_receipt_id",
+                "membership_generation",
+            }
+        ),
+    ),
+    (ChildFindingSnapshotModel, frozenset({"resolution_event_id"})),
+    (ProjectTextRefModel, frozenset({"envelope_digest"})),
     (PublishWorkAcceptedEventModel, frozenset({"summary"})),
     (PublicErrorModel, frozenset({"safe_details"})),
     (RespondEvidenceSummaryModel, frozenset({"description"})),
     (RespondResponseModel, frozenset({"reason", "waiver_scope", "waiver_expiry"})),
+    (
+        StartSuccessModel,
+        frozenset({"attach_handle", "parent_task_id", "depth", "origin", "acceptance"}),
+    ),
     (StatusCompactObligationModel, frozenset({"acceptance_criteria"})),
     (StatusObligationItemModel, frozenset({"acceptance_criteria"})),
+    (
+        StatusAdviceItemModel,
+        frozenset(
+            {
+                "coordination_project_id",
+                "coordination_detection_id",
+                "coordination_membership_generation",
+                "coordination_counterpart_task_id",
+                "coordination_resource_paths",
+            }
+        ),
+    ),
+    (StatusProjectDetectionModel, frozenset({"resource_paths"})),
+    (StatusProjectPageModel, frozenset({"title", "description", "title_ref", "description_ref"})),
     (StatusStructuralSubjectStateModel, frozenset({"tree_digest", "diff_digest"})),
     (StatusVersionSliceModel, frozenset({"route_profile"})),
 )
@@ -663,6 +705,33 @@ async def test_public_error_omits_unset_safe_details() -> None:
             },
         ),
         (
+            StatusAdviceItemModel,
+            {
+                "finding_id": protocol_id("fnd_", 2808),
+                "rule_code": "coordination_overlap",
+                "priority": 50,
+                "evidence_commitments": (_DIGEST,),
+                "coverage": dict(
+                    coverage_to_json(coverage_for_channel(PublicationChannel.COOPERATIVE_MCP))
+                ),
+                "freshness_frontier": "membership_generation:1",
+                "verification_state": "not_required",
+                "semantic_state": "disabled",
+                "recommended_next_action": "review_coordination_advice",
+                "coordination_project_id": None,
+            },
+        ),
+        (
+            StatusProjectDetectionModel,
+            {
+                "detection_id": protocol_id("evt_", 2809),
+                "task_ids": (protocol_id("tsk_", 2810), protocol_id("tsk_", 2811)),
+                "resource_count": "0",
+                "open": True,
+                "resource_paths": None,
+            },
+        ),
+        (
             PublishWorkAcceptedEventModel,
             {
                 "event_id": protocol_id("evt_", 2803),
@@ -727,6 +796,152 @@ def test_closed_model_still_rejects_explicit_null(
 def test_status_version_slice_omits_unset_route_profile() -> None:
     parsed = StatusVersionSliceModel.model_validate(_version_slice_payload())
     assert "route_profile" not in parsed.model_dump(mode="json", exclude_unset=True)
+
+
+async def test_root_start_and_check_omit_unset_multi_agent_fields() -> None:
+    app, _policy = await build_projection_application(seed=2900)
+    try:
+        request = start_request(2901, title="Root without children")
+        started = await app.start(request)
+        projected = await project_case(
+            app,
+            ProjectionCase("start", ControlMethod.START, public_model_to_wire(request), started),
+            2902,
+        )
+        assert (
+            not {"attach_handle", "parent_task_id", "depth", "origin", "acceptance"}
+            & projected.keys()
+        )
+        body = {
+            **request_base(protocol_id("req_", 2903)),
+            "session_id": started.session_id,
+            "writer_id": started.writer_id,
+            "expected_frontier": frontier_json(started.frontier),
+            "mode": "deterministic_only",
+        }
+        checked = await app.check(CheckRequest.model_validate(body))
+        assert isinstance(checked, CheckCommitResult)
+        projected_check = await project_case(
+            app,
+            ProjectionCase("check", ControlMethod.CHECK, body, checked),
+            2904,
+        )
+        assert "children" not in projected_check
+        assert "advisory_notes" not in projected_check
+    finally:
+        await app.close()
+
+
+@pytest.mark.parametrize(
+    ("model_type", "payload", "absent"),
+    (
+        (
+            ChildFindingSnapshotModel,
+            {
+                "finding_id": protocol_id("fnd_", 2910),
+                "kind": "result_without_action",
+                "origin": "deterministic",
+                "priority": 2,
+                "actionable": True,
+                "resolved": False,
+            },
+            ("resolution_event_id",),
+        ),
+        (
+            ChildDependencySnapshotModel,
+            {
+                "child_task_id": protocol_id("tsk_", 2911),
+                "origin": "self_registered",
+                "acceptance": "pending",
+                "work_state": "open",
+                "session_health": "contact_lost",
+                "lineage_authority_revision": "1",
+                "coverage": dict(
+                    coverage_to_json(coverage_for_channel(PublicationChannel.COOPERATIVE_MCP))
+                ),
+                "findings": [],
+                "read_gap_reasons": ["missing"],
+            },
+            ("child_frontier", "child_check_id", "child_receipt_id", "membership_generation"),
+        ),
+        (
+            ProjectTextRefModel,
+            {
+                "object_id": protocol_id("obj_", 2912),
+                "content_digest": _DIGEST,
+                "plaintext_size": 1,
+                "owner_task_id": protocol_id("tsk_", 2911),
+                "route_generation": "1",
+            },
+            ("envelope_digest",),
+        ),
+        (
+            StatusProjectPageModel,
+            {
+                "project_id": protocol_id("prj_", 2913),
+                "kind": "repository",
+                "membership_generation": "1",
+                "grant_state": None,
+                "members": [],
+                "lineage": {
+                    "parent_task_id": None,
+                    "children": [],
+                    "annotations": [],
+                    "next_cursor": None,
+                },
+                "detections": [],
+                "receipts": [],
+                "next_cursor": None,
+            },
+            ("title", "description", "title_ref", "description_ref"),
+        ),
+        (
+            StatusAdviceItemModel,
+            {
+                "finding_id": protocol_id("fnd_", 2914),
+                "rule_code": "coordination_overlap",
+                "priority": 50,
+                "evidence_commitments": (_DIGEST,),
+                "coverage": dict(
+                    coverage_to_json(coverage_for_channel(PublicationChannel.COOPERATIVE_MCP))
+                ),
+                "freshness_frontier": "membership_generation:1",
+                "verification_state": "not_required",
+                "semantic_state": "disabled",
+                "recommended_next_action": "review_coordination_advice",
+            },
+            (
+                "coordination_project_id",
+                "coordination_detection_id",
+                "coordination_membership_generation",
+                "coordination_counterpart_task_id",
+                "coordination_resource_paths",
+            ),
+        ),
+        (
+            StatusProjectDetectionModel,
+            {
+                "detection_id": protocol_id("evt_", 2915),
+                "task_ids": (protocol_id("tsk_", 2916), protocol_id("tsk_", 2917)),
+                "resource_count": "0",
+                "open": True,
+            },
+            ("resource_paths",),
+        ),
+    ),
+)
+def test_nested_multi_agent_results_omit_unset_fields(
+    model_type: type[BaseModel],
+    payload: Mapping[str, object],
+    absent: tuple[str, ...],
+) -> None:
+    model = model_type.model_validate(payload)
+    wire = model.model_dump(mode="json", exclude_unset=True)
+    assert not set(absent) & wire.keys()
+    assert model_type.model_validate(wire) == model
+    for field in absent:
+        with pytest.raises(ValidationError, match="optional_field_must_not_be_null"):
+            model_type.model_validate({**payload, field: None})
 
 
 def test_result_optional_non_null_inventory_is_complete() -> None:
@@ -803,6 +1018,34 @@ def test_every_result_optional_non_null_field_has_an_unset_projection_case() -> 
             "test_status_version_slice_omits_unset_route_profile"
         ),
     }
+    for model, fields in (
+        ("StartSuccessModel", ("attach_handle", "parent_task_id", "depth", "origin", "acceptance")),
+        ("CheckSuccessModel", ("children", "advisory_notes")),
+    ):
+        for field in fields:
+            covered[model, field] = "test_root_start_and_check_omit_unset_multi_agent_fields"
+    for model, fields in (
+        ("ChildFindingSnapshotModel", ("resolution_event_id",)),
+        (
+            "ChildDependencySnapshotModel",
+            ("child_frontier", "child_check_id", "child_receipt_id", "membership_generation"),
+        ),
+        ("ProjectTextRefModel", ("envelope_digest",)),
+        ("StatusProjectPageModel", ("title", "description", "title_ref", "description_ref")),
+        (
+            "StatusAdviceItemModel",
+            (
+                "coordination_project_id",
+                "coordination_detection_id",
+                "coordination_membership_generation",
+                "coordination_counterpart_task_id",
+                "coordination_resource_paths",
+            ),
+        ),
+        ("StatusProjectDetectionModel", ("resource_paths",)),
+    ):
+        for field in fields:
+            covered[model, field] = "test_nested_multi_agent_results_omit_unset_fields"
     expected = {
         (model_type.__name__, field)
         for model_type, fields in _RESULT_OPTIONAL_NON_NULL

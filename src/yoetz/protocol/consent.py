@@ -4,10 +4,23 @@ from __future__ import annotations
 
 from typing import Annotated, Final, Literal, Self, cast
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
+from pydantic_core.core_schema import SerializerFunctionWrapHandler
 
 from yoetz.domain.privacy import PrivacyPolicyChange, PrivacyPolicyChangeValue, ProviderBinding
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
+from yoetz.protocol.models import (
+    CanonicalPositiveUInt64Wire,
+    EventIdWire,
+    ProjectIdWire,
+)
 
 __all__ = [
     "CONSENT_PENDING_TTL_SECONDS",
@@ -15,13 +28,16 @@ __all__ = [
     "ConsentCatalogModel",
     "ConsentCatalogOperationModel",
     "ConsentPrepareResultModel",
+    "ConsentProjectCoordinationGrantResultModel",
     "ConsentReviewResultModel",
     "ConsentStatusModel",
+    "CoordinationBindingModel",
     "ImportPublicationPreviewModel",
     "PrivacyPolicyChangeModel",
     "RepositoryPrivacyGrantPreviewModel",
     "RepositoryPrivacyProviderBindingModel",
     "RepositoryPrivacyRecipe",
+    "ProjectCoordinationGrantBindingModel",
 ]
 
 # The one prepared-pending lifetime (docs/INTERFACES.md): every prepared consent action expires
@@ -36,6 +52,7 @@ type ConsentOperation = Literal[
     "provider_credential_set",
     "provider_credential_rotate",
     "repository_privacy_grant",
+    "project_coordination_grant",
     "import_publication",
     "idle_relock_disable",
     "privacy_policy_widen",
@@ -242,6 +259,28 @@ class RepositoryPrivacyGrantPreviewModel(_ClosedModel):
         return self
 
 
+class CoordinationBindingModel(_ClosedModel):
+    """Exact, generation-bound binding for local project coordination consent."""
+
+    schema_: Literal["yoetz.project-coordination-grant-binding/1"] = Field(alias="schema")
+    project_id: ProjectIdWire
+    membership_generation: CanonicalPositiveUInt64Wire
+    action: Literal["grant"]
+    audit_record_id: EventIdWire
+
+    @model_validator(mode="after")
+    def _validate_generation_bound(self) -> Self:
+        # The coordination authority stores this value as a JSON number only after parsing the
+        # canonical string, so keep the public binding inside its exact IEEE-754 safe range.
+        if int(self.membership_generation) > 2**53 - 1:
+            raise ValueError("coordination_binding_generation_invalid")
+        return self
+
+
+# Keep the operation-shaped spelling available to adapters that use the full contract name.
+ProjectCoordinationGrantBindingModel = CoordinationBindingModel
+
+
 class AgentSafePendingModel(_ClosedModel):
     model_config = ConfigDict(
         extra="forbid",
@@ -279,11 +318,21 @@ class AgentSafePendingModel(_ClosedModel):
                     },
                     "else": {"properties": {"import_publication_preview": {"type": "null"}}},
                 },
+                {
+                    "if": {
+                        "properties": {"operation": {"const": "project_coordination_grant"}},
+                        "required": ["operation"],
+                    },
+                    "then": {"properties": {"coordination_binding": {"not": {"type": "null"}}}},
+                    "else": {"properties": {"coordination_binding": {"type": "null"}}},
+                },
             ]
         },
     )
 
-    schema_: Literal["yoetz.consent.pending-agent/6"] = Field(alias="schema")
+    schema_: Literal["yoetz.consent.pending-agent/6", "yoetz.consent.pending-agent/7"] = Field(
+        alias="schema"
+    )
     operation: ConsentOperation
     risk_class: RiskClass
     pending_id: PendingId
@@ -294,6 +343,7 @@ class AgentSafePendingModel(_ClosedModel):
     repository_privacy_recipe: RepositoryPrivacyRecipe | None
     repository_privacy_preview: RepositoryPrivacyGrantPreviewModel | None
     import_publication_preview: ImportPublicationPreviewModel | None
+    coordination_binding: CoordinationBindingModel | None = None
     review_command: tuple[Literal["yoetz"], Literal["consent"], Literal["review"]]
     authorize_command: tuple[Literal["yoetz"], Literal["consent"], Literal["authorize"]] | None
 
@@ -321,7 +371,20 @@ class AgentSafePendingModel(_ClosedModel):
             self.import_publication_preview is not None
         ):
             raise ValueError("import_publication_preview_invalid")
+        if (self.operation == "project_coordination_grant") != (
+            self.coordination_binding is not None
+        ):
+            raise ValueError("coordination_binding_invalid")
         return self
+
+    @model_serializer(mode="wrap")
+    def _serialize_versioned(self, serializer: SerializerFunctionWrapHandler) -> dict[str, object]:
+        """Keep v6 projections byte-compatible while v7 carries the new nullable field."""
+
+        result = cast(dict[str, object], serializer(self))
+        if self.schema_ == "yoetz.consent.pending-agent/6":
+            result.pop("coordination_binding", None)
+        return result
 
 
 class ConsentCatalogOperationModel(_ClosedModel):
@@ -366,7 +429,7 @@ class ConsentRulesModel(_ClosedModel):
 
 
 class ConsentCatalogModel(_ClosedModel):
-    schema_: Literal["yoetz.consent.catalog/6"] = Field(alias="schema")
+    schema_: Literal["yoetz.consent.catalog/6", "yoetz.consent.catalog/7"] = Field(alias="schema")
     default_safe: tuple[
         Literal["mcp.start"],
         Literal["mcp.publish_work"],
@@ -386,13 +449,18 @@ class ConsentCatalogModel(_ClosedModel):
 
 
 class ConsentStatusModel(_ClosedModel):
-    schema_: Literal["yoetz.elevated-bootstrap.status/6"] = Field(alias="schema")
+    schema_: Literal["yoetz.elevated-bootstrap.status/6", "yoetz.elevated-bootstrap.status/7"] = (
+        Field(alias="schema")
+    )
     pending: AgentSafePendingModel | None
     consent_catalog: ConsentCatalogModel
 
 
 class ConsentPrepareResultModel(_ClosedModel):
-    schema_: Literal["yoetz.elevated-bootstrap.prepare-result/6"] = Field(alias="schema")
+    schema_: Literal[
+        "yoetz.elevated-bootstrap.prepare-result/6",
+        "yoetz.elevated-bootstrap.prepare-result/7",
+    ] = Field(alias="schema")
     pending: AgentSafePendingModel
 
 
@@ -421,6 +489,21 @@ class ConsentImportPublicationResultModel(_ClosedModel):
     outcome: Literal["authorized"]
 
 
+class ConsentProjectCoordinationGrantResultModel(_ClosedModel):
+    """Approved result for one exact project membership generation."""
+
+    project_id: ProjectIdWire
+    membership_generation: CanonicalPositiveUInt64Wire
+    audit_record_id: EventIdWire
+    outcome: Literal["granted"]
+
+    @model_validator(mode="after")
+    def _validate_generation_bound(self) -> Self:
+        if int(self.membership_generation) > 2**53 - 1:
+            raise ValueError("coordination_result_generation_invalid")
+        return self
+
+
 class ConsentReviewResultModel(_ClosedModel):
     model_config = ConfigDict(
         extra="forbid",
@@ -438,6 +521,7 @@ class ConsentReviewResultModel(_ClosedModel):
                                 "provider_credential_set",
                                 "provider_credential_rotate",
                                 "repository_privacy_grant",
+                                "project_coordination_grant",
                                 "import_publication",
                             ]
                         },
@@ -545,6 +629,38 @@ class ConsentReviewResultModel(_ClosedModel):
                 },
                 {
                     "properties": {
+                        "operation": {"const": "project_coordination_grant"},
+                        "risk_class": {"const": "privacy_widen"},
+                        "outcome": {"const": "completed"},
+                        "result": {
+                            "type": "object",
+                            "properties": {
+                                "project_id": {
+                                    "pattern": r"^prj_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                                    "type": "string",
+                                },
+                                "membership_generation": {
+                                    "pattern": r"^[1-9][0-9]*$",
+                                    "type": "string",
+                                },
+                                "audit_record_id": {
+                                    "pattern": r"^evt_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                                    "type": "string",
+                                },
+                                "outcome": {"const": "granted"},
+                            },
+                            "required": [
+                                "audit_record_id",
+                                "membership_generation",
+                                "outcome",
+                                "project_id",
+                            ],
+                            "additionalProperties": False,
+                        },
+                    }
+                },
+                {
+                    "properties": {
                         "operation": {"const": "import_publication"},
                         "risk_class": {"const": "review_only"},
                         "outcome": {"const": "completed"},
@@ -625,6 +741,15 @@ class ConsentReviewResultModel(_ClosedModel):
                     },
                 },
                 {
+                    "if": {"properties": {"operation": {"const": "project_coordination_grant"}}},
+                    "then": {
+                        "properties": {
+                            "risk_class": {"const": "privacy_widen"},
+                            "authority_channel": {"const": "agent_attested_chat_instruction"},
+                        }
+                    },
+                },
+                {
                     "if": {"properties": {"operation": {"const": "import_publication"}}},
                     "then": {
                         "properties": {
@@ -642,7 +767,9 @@ class ConsentReviewResultModel(_ClosedModel):
         },
     )
 
-    schema_: Literal["yoetz.elevated-bootstrap.result/6"] = Field(alias="schema")
+    schema_: Literal["yoetz.elevated-bootstrap.result/6", "yoetz.elevated-bootstrap.result/7"] = (
+        Field(alias="schema")
+    )
     pending_id: PendingId
     operation: ConsentOperation
     risk_class: RiskClass
@@ -654,6 +781,7 @@ class ConsentReviewResultModel(_ClosedModel):
         | ConsentVaultInitializedResultModel
         | ConsentProviderCredentialResultModel
         | ConsentRepositoryPrivacyGrantResultModel
+        | ConsentProjectCoordinationGrantResultModel
         | ConsentImportPublicationResultModel
     )
 
@@ -665,11 +793,13 @@ class ConsentReviewResultModel(_ClosedModel):
             "provider_credential_set",
             "provider_credential_rotate",
             "repository_privacy_grant",
+            "project_coordination_grant",
             "import_publication",
         }:
             raise ValueError("review_operation_not_implemented")
         expected_risk = {
             "repository_privacy_grant": "privacy_widen",
+            "project_coordination_grant": "privacy_widen",
             "import_publication": "review_only",
             "vault_passphrase_rotate": "secret_reauth",
         }.get(self.operation, "secret_ingress")
@@ -681,11 +811,17 @@ class ConsentReviewResultModel(_ClosedModel):
             "provider_credential_set",
             "provider_credential_rotate",
             "repository_privacy_grant",
+            "project_coordination_grant",
             "import_publication",
         }:
             raise ValueError("review_authority_channel_mismatch")
         if (
             self.operation == "repository_privacy_grant"
+            and self.authority_channel != "agent_attested_chat_instruction"
+        ):
+            raise ValueError("review_authority_channel_mismatch")
+        if (
+            self.operation == "project_coordination_grant"
             and self.authority_channel != "agent_attested_chat_instruction"
         ):
             raise ValueError("review_authority_channel_mismatch")
@@ -702,6 +838,10 @@ class ConsentReviewResultModel(_ClosedModel):
                 raise ValueError("review_result_operation_mismatch")
             if self.result.outcome == "denied":
                 raise ValueError("review_result_outcome_mismatch")
+            return self
+        if self.operation == "project_coordination_grant":
+            if type(self.result) is not ConsentProjectCoordinationGrantResultModel:
+                raise ValueError("review_result_operation_mismatch")
             return self
         if self.operation == "import_publication":
             if type(self.result) is not ConsentImportPublicationResultModel:

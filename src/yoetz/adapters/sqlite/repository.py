@@ -26,6 +26,7 @@ from yoetz.domain.events import (
     AcceptedEvent,
     CheckRecordedPayload,
     EventSchema,
+    EvidenceDigestProvenance,
     FindingRecordedPayload,
     LedgerChain,
     LedgerRecord,
@@ -1653,12 +1654,14 @@ class SqliteLedger:
         locator = operation.result_locator
         assert operation.result_canonical is not None and operation.result_digest is not None
         assert operation.terminal_at is not None and locator is not None
+        if locator.result_object_ref is not None:
+            self._inventory_object(locator.result_object_ref)
         self._db.execute(
             "INSERT INTO operations(writer_id,operation_id,operation_kind,request_digest,"
             "resume_object_id,state,phase,owner_generation,lease_owner_id,lease_generation,"
             "lease_expires_at,first_ingestion_seq,last_ingestion_seq,result_canonical,"
             "result_digest,result_object_id,quarantine_code,terminal_at,created_at,updated_at) "
-            "VALUES(?,?,?,?,NULL,'complete','terminal',NULL,NULL,NULL,NULL,?,?,?,?,NULL,NULL,?,?,?)",
+            "VALUES(?,?,?,?,NULL,'complete','terminal',NULL,NULL,NULL,NULL,?,?,?,?,?,NULL,?,?,?)",
             (
                 command.writer_id,
                 command.operation_id,
@@ -1668,6 +1671,7 @@ class SqliteLedger:
                 locator.last_ingestion_sequence,
                 operation.result_canonical,
                 operation.result_digest,
+                None if locator.result_object_ref is None else locator.result_object_ref.object_id,
                 format_rfc3339_millis(operation.terminal_at),
                 now,
                 now,
@@ -2070,7 +2074,45 @@ class SqliteLedger:
         self, session_id: str, frontier: Frontier, projection: ProjectionState
     ) -> CaseAvailabilityFacts:
         await self._ensure_recovered()
+        self._refresh_native_capture_refs(projection)
         return await self._oracle().load_case_availability(session_id, frontier, projection)
+
+    def _refresh_native_capture_refs(self, projection: ProjectionState) -> None:
+        """Rehydrate only live referenced native captures inventoried by observation.
+
+        Observation persists its encrypted objects independently of ledger payload objects.
+        Their descriptors must enter the oracle's availability snapshot after recovery too.
+        This restores descriptors only: the oracle still authenticates physical bytes before
+        declaring availability, and redacted/missing objects never earn readable coverage.
+        """
+        for record in projection.evidence.values():
+            payload = record.payload
+            if (
+                payload is None
+                or payload.captured_object_id is None
+                or payload.digest_binding is None
+                or payload.digest_binding.provenance
+                is not EvidenceDigestProvenance.OBSERVATION_CAPTURED
+                or not record.object_available
+            ):
+                continue
+            captured_id = payload.captured_object_id
+            self._state.object_refs.pop(captured_id, None)
+            row = self._db.execute(
+                "SELECT 1 FROM observation_content_manifests AS manifests "
+                "JOIN objects ON objects.object_id=manifests.object_id "
+                "WHERE manifests.object_id=? AND manifests.content_digest=? "
+                "AND manifests.content_bytes=? AND objects.state='present' "
+                "AND objects.kind='captured_content'",
+                (captured_id, payload.content_digest, payload.digest_binding.byte_count),
+            ).fetchone()
+            if row is None:
+                continue
+            self._state.object_refs[captured_id] = self._object_ref_from_inventory(
+                captured_id,
+                self._task_id,
+                "application/vnd.yoetz.observation-content+json",
+            )
 
     async def query_projection(self, query: ProjectionQuery) -> ProjectionPage:
         await self._ensure_recovered()
@@ -2126,6 +2168,7 @@ class SqliteLedger:
             existing_operation = self._state.operations.get(operation_key)
             new_freeze = existing_operation is None
             prior = self._state
+            self._refresh_native_capture_refs(prior.projection)
             baseline = self._freeze_state_snapshot(prior)
             clone = self._clone_state()
             reservation: _FreezeReservation | None = None

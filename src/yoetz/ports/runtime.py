@@ -9,6 +9,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Protocol, cast
 
+from yoetz.domain.coordination import LineageAcceptance, LineageOrigin, WorkState
 from yoetz.domain.values import (
     Frontier,
     JsonObject,
@@ -19,6 +20,7 @@ from yoetz.domain.values import (
     object_id,
     session_id,
     task_id,
+    validate_commitment,
     validate_sha256_digest,
     writer_id,
 )
@@ -126,6 +128,60 @@ def _validated_optional_digest(value: object) -> str | None:
         return validate_sha256_digest(cast(str, value))
     except (TypeError, ValueError) as exc:
         raise _invalid() from exc
+
+
+def _validated_optional_commitment(value: object) -> str | None:
+    if value is None:
+        return None
+    try:
+        return validate_commitment(cast(str, value))
+    except (TypeError, ValueError) as exc:
+        raise _invalid() from exc
+
+
+def _validated_optional_task_id(value: object) -> str | None:
+    if value is None:
+        return None
+    return _validated_id(task_id, value)
+
+
+def _validate_route_metadata(
+    *,
+    task: str,
+    repository_privacy_commitment: object,
+    parent_task_id: object,
+    depth: object,
+    lineage_digest: object,
+    origin: object,
+    acceptance: object,
+    work_state: object,
+) -> tuple[
+    str | None,
+    str | None,
+    int,
+    str | None,
+    LineageOrigin | None,
+    LineageAcceptance | None,
+    WorkState,
+]:
+    repository = _validated_optional_commitment(repository_privacy_commitment)
+    parent = _validated_optional_task_id(parent_task_id)
+    if parent is None:
+        if depth != 0 or origin is not None or acceptance is not None:
+            raise _invalid()
+    else:
+        if parent == task:
+            raise _invalid()
+        if type(depth) is not int or not 1 <= depth <= _MAX_SQLITE_SIGNED_INTEGER:
+            raise _invalid()
+        if type(origin) is not LineageOrigin or type(acceptance) is not LineageAcceptance:
+            raise _invalid()
+    if type(depth) is not int or not 0 <= depth <= _MAX_SQLITE_SIGNED_INTEGER:
+        raise _invalid()
+    lineage = _validated_optional_digest(lineage_digest)
+    if type(work_state) is not WorkState:
+        raise _invalid()
+    return repository, parent, depth, lineage, origin, acceptance, work_state
 
 
 def _validate_milestone_presence(
@@ -282,6 +338,15 @@ class BundleProvisionCommand:
     engine_version: str
     projection_version: str
     bundle_schema_version: str
+    # Route metadata is supplied by the authoritative catalog snapshot.  Bundle inspection can
+    # prove the generated bundle identity, but cannot recreate mutable lineage/work facts.
+    repository_privacy_commitment: str | None = None
+    parent_task_id: str | None = None
+    depth: int = 0
+    lineage_digest: str | None = None
+    origin: LineageOrigin | None = None
+    acceptance: LineageAcceptance | None = None
+    work_state: WorkState = WorkState.OPEN
 
     def __post_init__(self) -> None:
         if type(self.mode) is not BundleProvisionMode:
@@ -298,6 +363,31 @@ class BundleProvisionCommand:
         object.__setattr__(self, "writer_id", writer)
         object.__setattr__(self, "route_generation", generation)
         object.__setattr__(self, "route_identity_digest", route_digest)
+        (
+            repository,
+            parent,
+            depth,
+            lineage,
+            origin,
+            acceptance,
+            work_state,
+        ) = _validate_route_metadata(
+            task=task,
+            repository_privacy_commitment=self.repository_privacy_commitment,
+            parent_task_id=self.parent_task_id,
+            depth=self.depth,
+            lineage_digest=self.lineage_digest,
+            origin=self.origin,
+            acceptance=self.acceptance,
+            work_state=self.work_state,
+        )
+        object.__setattr__(self, "repository_privacy_commitment", repository)
+        object.__setattr__(self, "parent_task_id", parent)
+        object.__setattr__(self, "depth", depth)
+        object.__setattr__(self, "lineage_digest", lineage)
+        object.__setattr__(self, "origin", origin)
+        object.__setattr__(self, "acceptance", acceptance)
+        object.__setattr__(self, "work_state", work_state)
         object.__setattr__(
             self, "lifecycle_event_id", _validated_id(event_id, self.lifecycle_event_id)
         )

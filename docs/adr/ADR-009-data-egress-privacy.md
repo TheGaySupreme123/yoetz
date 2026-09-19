@@ -339,7 +339,7 @@ case → single-use authorization → bounded gateway → bound sink/provider �
     never-send. An unsupported, partial, unsafe, changing, or over-limit capture returns no
     comparable state.
 16. **Live harness observation retention (first-party Codex, ADR-010 amendment 2026-07-22):**
-    Observation consent is independent of egress consent. One project-level confirmation records a
+    Observation consent is independent of egress consent. One workspace-level confirmation records a
     private workspace commitment (never a raw path). The normalized workspace locator is an
     authenticated encrypted task object; plaintext state retains only its commitment and object
     identity. Locator normalization selects a safe Git root and performs lexical path cleanup; it
@@ -405,6 +405,17 @@ case → single-use authorization → bounded gateway → bound sink/provider �
     Repeated startup and replay are idempotent. Missing locators, older control shapes, stale authority
     digests, expiry, denial, crash rollback, or exhausted entitlements leave the prior rows unchanged
     and external LLM admission blocked.
+
+18. **Project coordination stays local disclosure (2026-09-05, issue #494 / ADR-027):**
+    A first-class `prj_` project is a grouping object, not a fifth egress scope. The
+    `AuthorizationScopeKind` enum and `AuthorizationScope.contains()` relation remain the
+    four-kind chain `machine → workspace → task → request`; project membership cannot widen
+    egress authority. A fact enters local coordination only when its source workspace's own
+    observation consent is active. General or cross-repository coordination additionally needs
+    an explicit generation-bound coordination grant, checked at admission and delivery, while
+    cross-repository semantic dispatch remains outside this series. This explains why project
+    membership is not inserted into `privacy_policy_versions` or `privacy_audit_records` and why
+    the existing never-send, category, provenance, and task-scope restrictions remain unchanged.
 
 ### Human involvement under the recommended recipe
 
@@ -577,3 +588,39 @@ independently revocable.
 The fallback binding is carried by privacy-policy schema 1.1.0. The released 1.0.0 schema remains
 byte-identical; current policy readers accept existing 1.0.0 documents and current writers emit
 1.1.0. This wire version change does not alter the canonical domain policy digest.
+
+## Admitted-attempt reconciliation amendment (2026-09-17, issue #755)
+
+Point 9's "post-consumption receipt failure stays `receipt_pending` until recovery records the real
+attempt outcome" needed an actual recovery for the cancellation case. A foreground runtime rebind
+may cancel an in-flight background advisory attempt. `asyncio.CancelledError` is a `BaseException`,
+so it propagated past the gateway's admitted-attempt window, skipped the receipt entirely, and left
+a consumed authorization `receipt_pending` with no caller anywhere invoking recovery. A physical
+provider attempt could therefore complete with no terminal receipt in the audit catalog.
+
+The reconciliation belongs in the gateway's admitted-attempt window, not in the advisory worker. A
+dispatch receipt must carry the exact final application request body byte count and its keyed
+`request_commitment`, and the audit deliberately retains no plaintext and no commitment before the
+receipt exists, so the gateway is the only component that can construct the receipt the admitted
+attempt owes. Accordingly:
+
+1. Immediately after the consume CAS and before the provider call, the gateway builds the
+   `transport_failed/outcome_unknown` receipt that attempt would owe and parks it beside the
+   `receipt_pending` row through `PrivacyAuditPort.park_attempt_reconciliation`. Parking asserts no
+   outcome: the row stays nonterminal, and a real result overwrites the parked material.
+2. Cancellation inside that window records the parked receipt through a shielded `complete_egress`
+   and then re-raises, so cancellation still propagates promptly and the rebind is never blocked
+   beyond one bounded local write. Nothing re-enters the provider.
+3. `PrivacyAuditPort.reconcile_started_attempts(consumed_before, limit)` is the bounded, idempotent
+   startup sweep for rows whose dispatcher died before that write. It runs once, before any
+   supervisor can admit a new physical attempt, and only over attempts consumed strictly before the
+   current service start, so a live in-flight dispatch is never closed.
+4. The advisory lane records provenance rather than authoring receipts.
+   `PrivacyCoordinator.recover_started_request(request_id)` reports the terminal
+   `SemanticEgressAttemptUnknown` for the exact request identity a cancelled dispatch minted — the
+   cancelled dispatch never observes the prepared case digest — and the cancelled advice row stores
+   that reservation plus the provider identity. A cancelled row with no such provenance is proof
+   that no authorization was consumed.
+
+The invariant is unchanged and now holds: a consumed authorization ends in exactly one terminal
+receipt. Local-sink (`local_disclosure_pending`) cancellation is not covered by this amendment.

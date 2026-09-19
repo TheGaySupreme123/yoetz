@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -10,6 +11,7 @@ import pytest
 from yoetz.domain.events import (
     CheckMode,
     CheckRecordedPayload,
+    LedgerRecord,
     NoObligationsReason,
     ObligationPublishedPayload,
     ObligationStatus,
@@ -51,6 +53,7 @@ from yoetz.domain.receipts import (
     unresolved_findings_for_render,
 )
 from yoetz.domain.values import (
+    ActorType,
     FindingId,
     Frontier,
     event_id,
@@ -530,6 +533,53 @@ def test_check_current_as_of_earlier_frontier_names_observation_suffix() -> None
     assert "Its verdict is current as of subject frontier 1, not frontier 2." in limitations
     assert "routine observation can advance the ledger again" in limitations
     assert "Ingestion order does not establish when observed work occurred." in limitations
+
+
+def test_manifest_only_suffix_is_named_as_engine_derived_lineage() -> None:
+    """A recorded child manifest is service lineage, not a host observation.
+
+    The receipt must describe only the frozen parent records it received.  A lineage manifest
+    after an attributable check therefore gets its own bounded wording and cannot be presented as
+    a host-authored observation.
+    """
+
+    code = CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP
+    coverage = _coverage(gaps=(code,))
+    check = replace(
+        _check(CheckVerdict.NO_ISSUE_DETECTED, coverage),
+        subject_frontier=Frontier(1, _DIGEST),
+    )
+    check_record = SimpleNamespace(
+        event_id=_CHECK_EVENT_ID,
+        schema=SimpleNamespace(name="check_recorded"),
+        ledger=SimpleNamespace(ingestion_sequence=2),
+    )
+    manifest_record = SimpleNamespace(
+        event_id=event_id("evt_00000000-0000-4000-8000-000000000004"),
+        schema=SimpleNamespace(name="child_dependencies_recorded"),
+        author=SimpleNamespace(
+            actor_id="yoetz:observation-coordinator",
+            actor_type=ActorType.HARNESS,
+            assurance=AuthorshipAssurance.HARNESS_OBSERVED,
+        ),
+        publication_channel=PublicationChannel.ENGINE_DERIVED,
+        ledger=SimpleNamespace(ingestion_sequence=3),
+    )
+    context = replace(
+        _context(coverage=coverage, gaps=(CaseGap(code, code, ()),), check=check),
+        check_suffix=CheckSuffixClass.OBSERVATIONS_ONLY,
+        records=cast(tuple[LedgerRecord, ...], (check_record, manifest_record)),
+    )
+
+    receipt = _build(context)
+    limitations = next(
+        section.body
+        for section in receipt.sections
+        if section.key is ReceiptSectionKey.LIMITATIONS_AND_COVERAGE
+    )
+    assert "service-generated child-dependency manifests" in limitations
+    assert "finding-free host observations" not in limitations
+    assert "not evaluated by that check" in limitations
 
 
 def test_check_current_as_of_earlier_frontier_names_mixed_suffix() -> None:
@@ -1215,3 +1265,40 @@ def test_selection_summary_and_input_loss_remain_distinct_in_all_receipt_formats
         assert "bounded source summaries" in rendered
         assert "historical loss remains a limitation after queue recovery" in rendered
         assert "new time and state only" in rendered
+
+
+def test_child_receipt_retains_provider_usage_under_the_combined_contract() -> None:
+    from yoetz.domain.receipts import ReceiptChildOutcome, ReceiptChildren
+    from yoetz.protocol.canonical import JsonValue
+    from yoetz.protocol.schemas import validate_schema_instance
+
+    provenance = _subscription_provenance()
+    receipt = _build(
+        _context(
+            check=_check(
+                CheckVerdict.NO_ISSUE_DETECTED, _coverage(), semantic_provenance=provenance
+            )
+        )
+    )
+    child = ReceiptChildOutcome(
+        child_task_id=task_id("tsk_00000000-0000-4000-8000-000000000099"),
+        outcome="unavailable",
+        later_manifest_ref=None,
+        tested_manifest_ref=None,
+        freshness="unknown",
+        findings=(),
+    )
+    receipt = replace(
+        receipt,
+        versions=replace(
+            receipt.versions,
+            schema_versions=(SchemaVersionEntry("receipts/receipt-document", "1.3.0"),),
+        ),
+        children=ReceiptChildren((child,)),
+    )
+    wire = receipt_document_to_json(receipt)
+    validate_schema_instance("receipt-document", "1.3.0", cast(JsonValue, wire))
+    restored = receipt_document_from_json(wire)
+    assert restored.children.children == (child,)
+    assert restored.semantic_provenance == provenance
+    assert restored == receipt

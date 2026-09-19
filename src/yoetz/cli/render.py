@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from enum import Enum
+from typing import cast
 
 from yoetz.protocol.errors import normalize_safe_details
 from yoetz.protocol.models import (
@@ -13,9 +14,12 @@ from yoetz.protocol.models import (
     OmittedContentModel,
     PublicErrorModel,
     ReceiptSuccessModel,
+    StatusAdvicePageModel,
     StatusFindingsPageModel,
+    StatusLineagePageModel,
     StatusObligationsPageModel,
     StatusOperationPageModel,
+    StatusProjectPageModel,
     StatusSuccessModel,
 )
 from yoetz.protocol.recovery import (
@@ -26,6 +30,9 @@ from yoetz.protocol.recovery import (
 )
 
 __all__ = [
+    "bounded_failure_line",
+    "ceremony_refusal_line",
+    "render_error_recovery_lines",
     "render_human_awaiting_human",
     "render_human_check",
     "render_human_error",
@@ -100,6 +107,32 @@ def render_human_check(result: CheckSuccessModel) -> str:
     suppressed = int(result.suppressed_count)
     if suppressed:
         lines.append(f"Suppressed findings: {suppressed}")
+    if result.children is not None:
+        children = result.children
+        lines.append(f"Child dependencies ({children.label}):")
+        if children.tested_manifest_frontier is not None:
+            lines.append(
+                "Tested manifest frontier: "
+                f"{children.tested_manifest_frontier.sequence} "
+                f"({children.tested_manifest_frontier.head_digest})"
+            )
+        if children.label == "preview":
+            lines.append("Preview facts do not change the recorded check.")
+        for child in children.items:
+            lines.append(
+                f"- {child.child_task_id}: {_token(child.origin)}, {_token(child.acceptance)}; "
+                f"work {_token(child.work_state)}, session {_token(child.session_health)}; "
+                f"rollup {_token(child.rollup_state)}"
+            )
+            if child.blocking_conditions:
+                lines.append("  Completion gaps: " + ", ".join(child.blocking_conditions))
+    if result.advisory_notes:
+        lines.append("Project advice (does not affect the verdict):")
+        for note in result.advisory_notes:
+            lines.append(
+                f"- {note.kind}: {note.count}; project {note.project_id}; "
+                "tasks " + ", ".join(note.task_ids)
+            )
     if result.coverage.known_gaps:
         lines.append("Coverage gaps: " + ", ".join(result.coverage.known_gaps))
         # The strict ceiling blocked this process while the last install applied the policy
@@ -140,6 +173,69 @@ def render_human_status(result: StatusSuccessModel) -> str:
                     f"Replay request ID: {result.page.continuation.replay_request_id}",
                 )
             )
+    elif isinstance(result.page, StatusLineagePageModel):
+        lines.extend(_render_lineage(result.page))
+    elif isinstance(result.page, StatusAdvicePageModel):
+        lines.append("Advice:")
+        for item in result.page.items:
+            if item.coordination_detection_id is not None:
+                lines.append(
+                    f"- Coordination overlap {item.coordination_detection_id}: "
+                    f"counterpart {item.coordination_counterpart_task_id}; "
+                    f"project {item.coordination_project_id}"
+                )
+                paths = item.coordination_resource_paths
+                if paths is not None:
+                    if isinstance(paths, OmittedContentModel):
+                        lines.append("  Resources: " + _projected_text(paths))
+                    else:
+                        lines.append("  Resources: " + ", ".join(paths))
+            else:
+                lines.append(
+                    f"- {item.rule_code}: priority {item.priority}; "
+                    f"next {item.recommended_next_action}"
+                )
+        if result.page.next_cursor is not None:
+            lines.append(f"Next page: {result.page.next_cursor}")
+    elif isinstance(result.page, StatusProjectPageModel):
+        page = result.page
+        lines.extend(
+            (
+                f"Project: {page.project_id} ({_token(page.kind)})",
+                f"Membership generation: {page.membership_generation}",
+                f"Coordination grant: {_token(page.grant_state)}",
+                "Members:",
+            )
+        )
+        if page.title is not None:
+            lines.insert(len(lines) - 1, "Title: " + _projected_text(page.title))
+        if page.description is not None:
+            lines.insert(len(lines) - 1, "Description: " + _projected_text(page.description))
+        for member in page.members:
+            lines.append(
+                f"- {member.task_id}: {_token(member.work_state)}, "
+                f"session {_token(member.session_health)} ({member.actor_id or 'unknown actor'})"
+            )
+        lines.extend(_render_lineage(page.lineage))
+        lines.append("Coordination detections:")
+        for detection in page.detections:
+            lines.append(
+                f"- {detection.detection_id}: {detection.resource_count} resources; "
+                f"{'open' if detection.open else 'addressed'}"
+            )
+            if detection.resource_paths is not None:
+                if isinstance(detection.resource_paths, OmittedContentModel):
+                    lines.append("  Resources: " + _projected_text(detection.resource_paths))
+                else:
+                    lines.append("  Resources: " + ", ".join(detection.resource_paths))
+        lines.append("Coordination coverage:")
+        for coverage in page.coverage:
+            lines.append(f"- {coverage.task_id}: {coverage.coverage} ({coverage.gap_code})")
+        lines.append("Member receipts:")
+        for receipt in page.receipts:
+            lines.append(f"- {receipt.task_id}: {receipt.conclusion} ({receipt.receipt_id})")
+        if page.next_cursor is not None:
+            lines.append(f"Next page: {page.next_cursor}")
     if isinstance(result.page, StatusFindingsPageModel):
         for finding in result.page.items:
             lines.append(
@@ -160,6 +256,25 @@ def render_human_status(result: StatusSuccessModel) -> str:
     gaps = tuple(result.gaps) + tuple(result.coverage.known_gaps)
     lines.append("Gaps: " + (", ".join(dict.fromkeys(gaps)) if gaps else "none"))
     return "\n".join(lines)
+
+
+def _render_lineage(page: StatusLineagePageModel) -> list[str]:
+    lines = [f"Parent task: {page.parent_task_id or 'none'}", "Child tasks:"]
+    if not page.children:
+        lines.append("- none in this page")
+    for child in page.children:
+        lines.append(
+            f"- {child.task_id}: {_token(child.origin)}, {_token(child.acceptance)}; "
+            f"work {_token(child.work_state)}, session {_token(child.session_health)}; "
+            f"rollup {_token(child.rollup_state)}"
+        )
+        if child.blocking_conditions:
+            lines.append("  Completion gaps: " + ", ".join(child.blocking_conditions))
+    for annotation in page.annotations:
+        lines.append(f"- Observed subagent {annotation.correlation_id}: pending child binding")
+    if page.next_cursor is not None:
+        lines.append(f"Next page: {page.next_cursor}")
+    return lines
 
 
 def render_human_receipt(result: ReceiptSuccessModel) -> str:
@@ -211,7 +326,40 @@ def render_local_recovery_lines(reason: object) -> list[str]:
     return render_recovery_directive_lines(directive)
 
 
-def _error_recovery_lines(error: PublicErrorModel) -> list[str]:
+def bounded_failure_line(reason: str, *, prefix: str | None = None) -> str:
+    """Render one bounded local reason with its remediation and its recovery directive.
+
+    The single shape every human-rendered CLI refusal uses (issue #741): the bounded token stays
+    first so machine-readable expectations hold, the per-reason remediation follows it on the same
+    line, and the registry directive follows on its own lines. A reason with neither is returned
+    unchanged, so a caller can tell "nothing is known about this token" from the result.
+    """
+
+    from yoetz.cli.exits import remediation_message
+
+    head = reason if prefix is None else f"{prefix}: {reason}"
+    remediation = remediation_message(reason)
+    line = head if remediation is None else f"{head}: {remediation}"
+    return "\n".join([line, *render_local_recovery_lines(reason)])
+
+
+def ceremony_refusal_line(reason: str) -> str | None:
+    """Render a structural ceremony refusal with its directive, or None when unmapped.
+
+    A declined confidential ceremony already carries its own operator-facing sentence, token
+    first. Only the directive lines are added, so the refusal reads the same way it did while
+    gaining the continuation an agent needs to stop rather than restart a healthy service.
+    """
+
+    from yoetz.cli.exits import ceremony_refusal_message
+
+    message = ceremony_refusal_message(reason)
+    if message is None:
+        return None
+    return "\n".join([message, *render_local_recovery_lines(reason)])
+
+
+def render_error_recovery_lines(safe_details: object) -> list[str]:
     """Return the frozen recovery directive lines for a typed continuation, or an empty list.
 
     The directive is reconstructed locally from the continuation token (issue #739); nothing is
@@ -220,12 +368,9 @@ def _error_recovery_lines(error: PublicErrorModel) -> list[str]:
     whole directive, its guidance pointer, and its nudge on separate lines.
     """
 
-    details = error.safe_details
-    if details is None:
+    if not isinstance(safe_details, Mapping):
         return []
-    source = details if isinstance(details, Mapping) else None
-    if source is None:
-        return []
+    source = cast(Mapping[str, object], safe_details)
     lines: list[str] = []
     # A claim-revision rejection carries its correction on the invariant rather than a
     # continuation token. The CLI rendered nothing for it before ADR-030 moved the corrective
@@ -262,7 +407,7 @@ def render_human_error(error: PublicErrorModel) -> str:
         raise TypeError("public_error_invalid")
     suffix = " (retryable)" if error.retryable else ""
     head = f"{_token(error.code)}: {error.message}{suffix}"
-    return "\n".join([head, *_error_recovery_lines(error)])
+    return "\n".join([head, *render_error_recovery_lines(error.safe_details)])
 
 
 def render_human_awaiting_human(result: CheckAwaitingHumanModel) -> str:

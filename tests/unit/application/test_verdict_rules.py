@@ -568,10 +568,12 @@ def test_judgment_rejection_preserves_the_truncation_disclosure() -> None:
         ),
         withheld_review_categories=("obligation_text",),
         case_content_over_item_limit=True,
+        case_content_gaps=("captured_object_unavailable",),
     )
 
     rejected = _judgment_rejected_evaluation(succeeded)
 
     assert rejected.status is SemanticStatus.INVALID
     assert rejected.case_content_over_item_limit is True
+    assert rejected.case_content_gaps == ("captured_object_unavailable",)
     assert rejected.withheld_review_categories == ("obligation_text",)

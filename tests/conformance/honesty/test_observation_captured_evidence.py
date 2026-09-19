@@ -193,3 +193,46 @@ def test_inspection_objects_materialize_as_separate_bounded_evidence() -> None:
         assert payload.subject_state.described_state == (
             "observation-inspection:" + snapshot.subject_state_digest
         )
+
+
+def test_multipart_result_refs_are_canonical_when_object_order_differs(
+    monkeypatch: Any,
+) -> None:
+    import yoetz.application.observation_materialize as materialize_module
+
+    task_id, envelope, manifests = _inputs()
+    first = replace(manifests[0], part_index=0, part_count=2)
+    second = replace(
+        first,
+        object_id="obj_ffffffff-ffff-4fff-8fff-ffffffffffff",
+        part_index=1,
+    )
+    envelope = replace(
+        envelope, content_object_refs=tuple(sorted((first.object_id, second.object_id)))
+    )
+    original = materialize_module._captured_evidence_drafts  # pyright: ignore[reportPrivateUsage]
+    input_refs: list[str] = []
+
+    def descending_inputs(*args: Any, **kwargs: Any) -> object:
+        rows = kwargs["manifests"]
+        ordered = sorted(
+            rows,
+            key=lambda row: original(*args, **{**kwargs, "manifests": (row,)})[1][0],
+            reverse=True,
+        )
+        input_refs.extend(
+            original(*args, **{**kwargs, "manifests": (row,)})[1][0] for row in ordered
+        )
+        return original(*args, **{**kwargs, "manifests": tuple(ordered)})
+
+    monkeypatch.setattr(materialize_module, "_captured_evidence_drafts", descending_inputs)
+    batch = materialize_observation_envelope(
+        envelope, task_id=task_id, captured_content=(first, second)
+    )
+    assert len(input_refs) == 2 and input_refs != sorted(input_refs)
+    result = next(
+        item.draft.payload
+        for item in batch.drafts
+        if isinstance(item.draft.payload, ResultRecordedPayload)
+    )
+    assert result.evidence_refs == tuple(sorted(input_refs))

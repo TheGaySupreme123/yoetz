@@ -121,6 +121,7 @@ from yoetz.protocol.canonical import (
 from yoetz.protocol.errors import ProtocolValueError, PublicOperationError, SafeDetailValue
 from yoetz.protocol.ids import IdKind, new_id, validate_id
 from yoetz.protocol.models import (
+    CheckRequest,
     CheckResult,
     PublishWorkAcceptedProjectionUnavailableModel,
     PublishWorkDryRunModel,
@@ -132,6 +133,7 @@ from yoetz.protocol.models import (
     StartResult,
     StatusResult,
 )
+from yoetz.service.check_waits import EXPLICIT_CONTROL_CANCEL, CheckWaits
 from yoetz.service.confidential_protocol import (
     HUMAN_PROTOCOL_MAGIC,
     HUMAN_PROTOCOL_VERSION,
@@ -222,6 +224,10 @@ _OBSERVATION_SWEEP_INTERVAL_SECONDS: Final = 60.0
 # re-sweep below; this deadline only catches a single ingest that never returns,
 # and a pass it cancels reads as no progress (#564).
 _OBSERVATION_SWEEP_DEADLINE_SECONDS: Final = 30.0
+# Recovery includes a bounded catalog/ledger reconciliation for each active route.  It runs
+# before the first ordinary maintenance pass and then at the normal maintenance cadence; a
+# damaged or unexpectedly slow route must never pin the READY daemon forever.
+_LINEAGE_RECOVERY_DEADLINE_SECONDS: Final = 30.0
 # Yield between two immediately consecutive drain passes. One scheduler turn is not a fair share
 # when the next pass may take a cross-process store lock a hook process also wants.
 _OBSERVATION_SWEEP_PROGRESS_DELAY_SECONDS: Final = 0.05
@@ -278,6 +284,13 @@ _PROJECTION_EXEMPT_METHODS = _STRUCTURAL_METHODS | {
     # cursor. Running it through result disclosure projection both adds no privacy protection and
     # breaks the exact direct response schema used by hook/outbox clients.
     ControlMethod.OBSERVATION_INGEST,
+    # Observation control results are schema-defined wrappers containing only a bounded status
+    # object and the request correlation id. They do not carry workflow result branches and must
+    # bypass client disclosure projection just like ingest.
+    ControlMethod.OBSERVATION_STATUS,
+    ControlMethod.OBSERVATION_PAUSE,
+    ControlMethod.OBSERVATION_RESUME,
+    ControlMethod.OBSERVATION_REVOKE,
     ControlMethod.PRIVACY_PENDING_LIST,
     ControlMethod.PRIVACY_RECEIPTS_LIST,
     ControlMethod.PRIVACY_RECEIPTS_GET,
@@ -287,6 +300,7 @@ _PROJECTION_EXEMPT_METHODS = _STRUCTURAL_METHODS | {
 _READ_ONLY_METHODS: Final[frozenset[ControlMethod]] = frozenset(
     {
         ControlMethod.STATUS,
+        ControlMethod.OBSERVATION_STATUS,
         ControlMethod.PRIVACY_GET_SETUP,
         ControlMethod.PRIVACY_GET_EFFECTIVE,
         ControlMethod.PRIVACY_PENDING_LIST,
@@ -294,6 +308,18 @@ _READ_ONLY_METHODS: Final[frozenset[ControlMethod]] = frozenset(
         ControlMethod.PRIVACY_RECEIPTS_GET,
     }
 )
+
+
+def _request_is_read_only(request: ControlCallRequest) -> bool:
+    """Classify support status as a read while keeping project writes write-shaped."""
+
+    if request.method in _READ_ONLY_METHODS:
+        return True
+    if request.method is ControlMethod.PROJECT and isinstance(request.body, Mapping):
+        return request.body.get("operation") == "status"
+    return False
+
+
 _WORKFLOW_RESULT_MODELS: Final[Mapping[ControlMethod, type[BaseModel]]] = {
     ControlMethod.START: StartResult,
     ControlMethod.PUBLISH_WORK: PublishWorkResult,
@@ -519,6 +545,7 @@ class _Diagnostics(Protocol):
 
 type _HumanConnectionHandler = Callable[[ControlStream], Awaitable[None]]
 type _ReadyApplicationFactory = Callable[[int, int], Awaitable[_ReadyApplication]]
+type _StartupBundleUpgrade = Callable[..., Awaitable[object]]
 
 
 class _ReadyActivationRelay:
@@ -650,6 +677,7 @@ class ServiceDaemon:
         self._activation_lock = asyncio.Lock()
         self._close_lock = asyncio.Lock()
         self._connection_tasks: set[asyncio.Task[None]] = set()
+        self._check_waits = CheckWaits()
         self._ready_maintenance_task: asyncio.Task[None] | None = None
 
     @property
@@ -930,7 +958,7 @@ class ServiceDaemon:
             # internal_error for a pure status/privacy read is what stranded run-4's
             # status view=operation recovery (AttributeError → retryable: false).
             request_id = _safe_body_request_id(request)
-            if request.method in _READ_ONLY_METHODS:
+            if _request_is_read_only(request):
                 reason = "read_projection_failed"
                 correlation_id = record_unexpected_exception_without_raising(
                     exc,
@@ -979,6 +1007,7 @@ class ServiceDaemon:
                 self._stop_event.set()
                 return
             self._stopping = True
+            await self._check_waits.close()
             self._state_reason = reason if reason == "internal_error" else "shutdown_requested"
             lifecycle = self._composition.lifecycle
             if self._started:
@@ -1040,6 +1069,32 @@ class ServiceDaemon:
         request: ControlCallRequest,
         repository_privacy_context: RepositoryPrivacyContext | None,
     ) -> object:
+        body = request.body
+        if (
+            request.method is ControlMethod.CHECK
+            and type(body) is CheckRequest
+            and body.mode != "deterministic_only"
+        ):
+            return await self._check_waits.run(
+                (body.writer_id, body.request_id),
+                hashlib.sha256(canonical_encode(body.model_dump(mode="json"))).hexdigest(),
+                lambda: self._dispatch_ready_once(
+                    projection_context, request, repository_privacy_context, detached_check=True
+                ),
+                request.deadline_ms,
+            )
+        return await self._dispatch_ready_once(
+            projection_context, request, repository_privacy_context
+        )
+
+    async def _dispatch_ready_once(
+        self,
+        projection_context: ClientProjectionContext,
+        request: ControlCallRequest,
+        repository_privacy_context: RepositoryPrivacyContext | None,
+        *,
+        detached_check: bool = False,
+    ) -> object:
         # A recovery ceremony holds this same lock across an unbounded human wait, so an
         # unbounded acquire would hang every ordinary call for as long as someone stares at a
         # confirmation prompt. The caller's own deadline decides how long it is willing to wait.
@@ -1066,6 +1121,7 @@ class ServiceDaemon:
                 projection_context,
                 request,
                 repository_privacy_context,
+                detached_check=detached_check,
             )
         finally:
             if maintenance_acquired:
@@ -1078,6 +1134,8 @@ class ServiceDaemon:
         projection_context: ClientProjectionContext,
         request: ControlCallRequest,
         repository_privacy_context: RepositoryPrivacyContext | None,
+        *,
+        detached_check: bool = False,
     ) -> object:
         application = self._application
         if application is None:
@@ -1098,7 +1156,7 @@ class ServiceDaemon:
             handler = getattr(application, request.method.value, None)
             if not callable(handler):
                 raise ControlError("method_forbidden")
-            if request.deadline_ms is None:
+            if request.deadline_ms is None or detached_check:
                 internal = await self._invoke_ready_handler(
                     handler, request, repository_privacy_context
                 )
@@ -1148,6 +1206,7 @@ class ServiceDaemon:
             ControlMethod.PRIVACY_GET_SETUP,
             ControlMethod.PRIVACY_GET_EFFECTIVE,
             ControlMethod.PRIVACY_PROPOSE_POLICY,
+            ControlMethod.PROJECT,
         }:
             kwargs["repository_privacy_context"] = repository_privacy_context
         return await operation(request.body, **kwargs)
@@ -1178,6 +1237,13 @@ class ServiceDaemon:
         """
 
         try:
+            # Project lifecycle writes remain the structural CLI contract. Project status is the
+            # one project operation that delegates to the canonical status projection below.
+            if request.method is ControlMethod.PROJECT:
+                source = internal_control_json(cast(UnprojectedControlBody, internal))
+                if source.get("view") != "project":
+                    self._validate_success_body(request, internal)
+                    return internal
             if request.method in _PROJECTION_EXEMPT_METHODS:
                 self._validate_success_body(request, internal)
                 return internal
@@ -1254,7 +1320,7 @@ class ServiceDaemon:
             request_id = _safe_body_request_id(request)
             reason = (
                 "read_projection_failed"
-                if request.method in _READ_ONLY_METHODS
+                if _request_is_read_only(request)
                 else "response_projection_failed"
             )
             # One correlation id for the unexpected failure path: shared by the reduced publish
@@ -1374,7 +1440,7 @@ class ServiceDaemon:
                 if not isinstance(request, ControlCallRequest):
                     target = calls.get(request.target_rpc_id)
                     if target is not None:
-                        target.cancel()
+                        target.cancel(EXPLICIT_CONTROL_CANCEL)
                     continue
                 task = asyncio.create_task(self._serve_call(stream, session, request, write_lock))
                 calls[request.rpc_id] = task
@@ -1464,9 +1530,25 @@ class ServiceDaemon:
                 _defer_stop=True,
             )
         session.correlate(result)
-        async with write_lock:
-            async with asyncio.timeout(_CONTROL_RESPONSE_WRITE_DEADLINE_SECONDS):
-                await write_control_frame(stream, result)
+        try:
+            async with write_lock:
+                async with asyncio.timeout(_CONTROL_RESPONSE_WRITE_DEADLINE_SECONDS):
+                    await write_control_frame(stream, result)
+        except (LocalControlTransportError, ControlProtocolError) as exc:
+            if isinstance(exc, ControlProtocolError) and exc.reason != "transport_failed":
+                # A response this service could not encode is its own defect; keep it loud.
+                raise
+            # The peer went away between dispatch and delivery. That is a transport fact about
+            # this connection, not a malformed response, and this task is the only holder of the
+            # failure: record the bounded reason and end the call so the daemon reports neither
+            # `frame_invalid` nor an unretrieved task exception (issue #678). The read side sees
+            # the same dead stream and finalizes the connection.
+            record_bounded_event_without_raising(
+                component="service.daemon",
+                operation="control_response_write",
+                reason=exc.reason,
+            )
+            return
         if request.method is ControlMethod.SERVICE_STOP and result.outcome == "ok":
             # The connection owns only response delivery. If it awaits teardown here, peer EOF
             # makes the connection finalizer cancel this call while singleton release is in flight.
@@ -1622,7 +1704,20 @@ class ServiceDaemon:
             Callable[[], Awaitable[ObservationDrainSummary]] | None,
             getattr(application, "observation_sweep", None),
         )
-        if not callable(recommendation_refresh) and not callable(observation_sweep):
+        coordination_sweep = cast(
+            Callable[[], Awaitable[object]] | None,
+            getattr(application, "coordination_sweep", None),
+        )
+        lineage_recovery = cast(
+            Callable[[], Awaitable[object]] | None,
+            getattr(application, "recover_lineage", None),
+        )
+        if (
+            not callable(recommendation_refresh)
+            and not callable(observation_sweep)
+            and not callable(coordination_sweep)
+            and not callable(lineage_recovery)
+        ):
             return
         self._ready_maintenance_task = asyncio.create_task(
             self._run_ready_maintenance(
@@ -1631,6 +1726,8 @@ class ServiceDaemon:
                 vault_generation,
                 recommendation_refresh if callable(recommendation_refresh) else None,
                 observation_sweep if callable(observation_sweep) else None,
+                coordination_sweep if callable(coordination_sweep) else None,
+                lineage_recovery if callable(lineage_recovery) else None,
             )
         )
 
@@ -1641,6 +1738,8 @@ class ServiceDaemon:
         vault_generation: int,
         recommendation_refresh: Callable[[], Awaitable[object]] | None,
         observation_sweep: Callable[[], Awaitable[ObservationDrainSummary]] | None,
+        coordination_sweep: Callable[[], Awaitable[object]] | None,
+        lineage_recovery: Callable[[], Awaitable[object]] | None,
     ) -> None:
         """Run bounded maintenance only while the exact generation remains published."""
 
@@ -1652,10 +1751,16 @@ class ServiceDaemon:
                 # cold-start window (#235/#238).
                 await self._accept_armed.wait()
             summary: ObservationDrainSummary | None = None
+            if lineage_recovery is not None:
+                # Recovery owns the first maintenance turn.  In particular, an append that
+                # reached the ledger immediately before a daemon crash is mirrored into the
+                # catalog before a lease sweep can classify its session as lost.
+                await self._bounded_lineage_recovery(lineage_recovery)
             if observation_sweep is not None:
                 summary = await self._bounded_observation_sweep(observation_sweep)
                 await self._note_sweep_liveness(summary)
             next_recommendation_refresh = 0.0
+            next_recovery = asyncio.get_running_loop().time() + _OBSERVATION_SWEEP_INTERVAL_SECONDS
             while self._ready_generation_is_current(
                 application, service_generation, vault_generation
             ):
@@ -1669,21 +1774,29 @@ class ServiceDaemon:
                     )
                 if observation_sweep is None:
                     await asyncio.sleep(_OBSERVATION_SWEEP_INTERVAL_SECONDS)
-                    continue
-                # Drain until dry: re-sweep immediately only while a pass actually resolved rows.
-                # Progress is the sole licence to skip the interval — a full-limit pass that
-                # resolved nothing (every row retryable, or every compare-and-swap lost to another
-                # drain actor) would otherwise spin this loop with no delay at all.
-                resolved = 0 if summary is None else summary.acknowledged + summary.quarantined
-                if resolved == 0:
-                    await asyncio.sleep(_OBSERVATION_SWEEP_INTERVAL_SECONDS)
                 else:
-                    # A sweep implementation may complete without suspending.  Even while making
-                    # progress, give control connections and other READY work a real share of the
-                    # loop before the next immediate bulk-drain pass.
-                    await asyncio.sleep(_OBSERVATION_SWEEP_PROGRESS_DELAY_SECONDS)
-                summary = await self._bounded_observation_sweep(observation_sweep)
-                await self._note_sweep_liveness(summary)
+                    # Drain until dry: re-sweep immediately only while a pass actually resolved
+                    # rows. Progress is the sole licence to skip the interval — a full-limit pass
+                    # that resolved nothing would otherwise spin this loop with no delay at all.
+                    resolved = 0 if summary is None else summary.acknowledged + summary.quarantined
+                    await asyncio.sleep(
+                        _OBSERVATION_SWEEP_INTERVAL_SECONDS
+                        if resolved == 0
+                        else _OBSERVATION_SWEEP_PROGRESS_DELAY_SECONDS
+                    )
+                if (
+                    lineage_recovery is not None
+                    and asyncio.get_running_loop().time() >= next_recovery
+                ):
+                    await self._bounded_lineage_recovery(lineage_recovery)
+                    next_recovery = (
+                        asyncio.get_running_loop().time() + _OBSERVATION_SWEEP_INTERVAL_SECONDS
+                    )
+                if observation_sweep is not None:
+                    summary = await self._bounded_observation_sweep(observation_sweep)
+                    await self._note_sweep_liveness(summary)
+                if coordination_sweep is not None:
+                    await self._bounded_coordination_sweep(coordination_sweep)
         except asyncio.CancelledError:
             raise
 
@@ -1742,6 +1855,52 @@ class ServiceDaemon:
                     return await self._bounded_observation_sweep_under_gate(observation_sweep)
         async with self._composition.maintenance_gate:
             return await self._bounded_observation_sweep_under_gate(observation_sweep)
+
+    async def _bounded_coordination_sweep(
+        self, coordination_sweep: Callable[[], Awaitable[object]]
+    ) -> None:
+        """Retry project detection and advice delivery without blocking READY."""
+
+        async with self._composition.maintenance_gate:
+            try:
+                await asyncio.wait_for(
+                    coordination_sweep(), timeout=_OBSERVATION_SWEEP_DEADLINE_SECONDS
+                )
+            except TimeoutError:
+                record_bounded_event_without_raising(
+                    component="service.daemon",
+                    operation="coordination_sweep_failed",
+                    reason="sweep_deadline_exceeded",
+                )
+            except Exception as exc:
+                record_unexpected_exception_without_raising(
+                    exc,
+                    component="service.daemon",
+                    operation="coordination_sweep_failed",
+                )
+
+    async def _bounded_lineage_recovery(
+        self, lineage_recovery: Callable[[], Awaitable[object]]
+    ) -> None:
+        """Run one generation-bound lineage recovery turn without blocking READY."""
+
+        async with self._composition.maintenance_gate:
+            try:
+                await asyncio.wait_for(
+                    lineage_recovery(), timeout=_LINEAGE_RECOVERY_DEADLINE_SECONDS
+                )
+            except TimeoutError:
+                record_bounded_event_without_raising(
+                    component="service.daemon",
+                    operation="lineage_recovery_failed",
+                    reason="recovery_deadline_exceeded",
+                )
+            except Exception as exc:
+                record_unexpected_exception_without_raising(
+                    exc,
+                    component="service.daemon",
+                    operation="lineage_recovery_failed",
+                )
 
     async def _bounded_observation_sweep_under_gate(
         self, observation_sweep: Callable[[], Awaitable[ObservationDrainSummary]]
@@ -3758,6 +3917,7 @@ async def _production_composition(
     _paths: _ProductionPaths | None = None,
     _binders: _ListenerBinders | None = None,
     _ready_application_factory: _ReadyApplicationFactory | None = None,
+    _startup_bundle_upgrade: _StartupBundleUpgrade | None = None,
 ) -> ServiceComposition:
     """Build the real locked-first service graph without opening ready-only state."""
 
@@ -3937,6 +4097,7 @@ async def _production_composition(
                     secret_memory=secret_memory,
                     diagnostics=diagnostics,
                     observation_gate=observation_gate,
+                    startup_bundle_upgrade=_startup_bundle_upgrade,
                 ),
             )
         )

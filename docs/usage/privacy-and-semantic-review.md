@@ -251,9 +251,18 @@ For an `external_runtime_oauth` profile, the equivalent attempt identity is the 
 runtime authority plus exact runtime evidence, not a vault credential handle. Post-acknowledgement
 ambiguity is terminal `outcome_unknown`; it does not mint a replacement attempt.
 
-When you are auditing a run rather than the installation, the [AI-powered review dogfood
-runbook](../runbooks/semantic-dogfood.md) gives the preflight and the provenance gate: which route
-the agent actually got, and how to read `semantic_provenance`.
+Starting a session takes priority over the optional background review, so a review already in
+flight can be cut short. Once a request has been authorized and sent, that cannot un-send it: the
+receipt for that attempt is recorded as `transport_failed` with reason `outcome_unknown`, which
+says the request left your machine and its answer never came back. Nothing is sent again. If the
+service stops before the receipt lands, it is written once when the service next starts, before any
+new request can go out. The background note for that session is marked cancelled and names the
+attempt and provider it reconciled, so `yoetz privacy receipts` accounts for every authorization
+that was spent. A cancelled note that names neither means nothing was sent.
+
+When you are auditing a run rather than the installation, the
+[AI-powered review dogfood runbook](../runbooks/semantic-dogfood.md) gives the preflight and the provenance
+gate: which route the agent actually got, and how to read `semantic_provenance`.
 
 Read `semantic_provenance` together with `semantic_status` and `semantic_reason`, never on its own.
 The outcome is three-way, not two-way: on the statuses where the protocol forbids provenance, null
@@ -263,3 +272,12 @@ not the same as it being useful); and `failed`/`coordinator_failure` is unconstr
 
 If you believe Yoetz disclosed, retained, or logged something these commitments forbid, treat it as
 a security report: [`SECURITY.md`](../../SECURITY.md), not a public issue.
+
+### Reviews that take longer
+
+Codex subscription reviews default to a 15-minute total budget. An explicitly configured shorter
+budget stays in effect; `external_runtime.timeout_seconds` accepts up to one hour. A host tool can
+stop waiting before the review finishes. Recover with the same check request and request ID:
+`OPERATION_PENDING` means the existing check is still running. Repeated waits do not start another
+review or reset its budget. A completed result still needs to qualify before it can resolve a
+finding or support a completion claim.

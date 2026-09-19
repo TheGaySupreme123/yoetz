@@ -101,7 +101,7 @@ def _assert_agent_safe(value: object) -> None:
 
 def test_catalog_is_review_only_and_agent_safe() -> None:
     catalog = cast(dict[str, Any], catalog_payload())
-    assert catalog["schema"] == "yoetz.consent.catalog/6"
+    assert catalog["schema"] == "yoetz.consent.catalog/7"
     assert "mcp.start" in catalog["default_safe"]
     assert catalog["rules"]["no_standing_yolo"] is True
     assert catalog["rules"]["independent_user_presence_required_for_agent_chat"] is False
@@ -627,10 +627,11 @@ def test_target_digest_and_unimplemented_operations_are_rejected(tmp_path: Path)
 
 def test_status_contains_nullable_pending_and_catalog(tmp_path: Path) -> None:
     empty = cast(dict[str, Any], status_payload(_state=tmp_path))
-    assert empty["schema"] == "yoetz.elevated-bootstrap.status/6"
+    assert empty["schema"] == "yoetz.elevated-bootstrap.status/7"
     assert empty["pending"] is None
-    assert empty["consent_catalog"]["schema"] == "yoetz.consent.catalog/6"
+    assert empty["consent_catalog"]["schema"] == "yoetz.consent.catalog/7"
     _assert_agent_safe(empty)
+    validate_schema_instance("status", "7.0.0", empty)
 
     prepare_pending(
         "provider_credential_set", target_digest=_TARGET, provider_binding=_BINDING, _state=tmp_path
@@ -638,7 +639,9 @@ def test_status_contains_nullable_pending_and_catalog(tmp_path: Path) -> None:
     prepared = cast(dict[str, Any], status_payload(_state=tmp_path))
     assert prepared["pending"]["operation"] == "provider_credential_set"
     assert prepared["pending"]["authorize_command"] == ["yoetz", "consent", "authorize"]
+    assert prepared["pending"]["schema"] == "yoetz.consent.pending-agent/7"
+    assert prepared["pending"]["coordination_binding"] is None
     _assert_agent_safe(prepared)
-    validate_schema_instance("catalog", "6.0.0", prepared["consent_catalog"])
-    validate_schema_instance("pending-agent", "6.0.0", prepared["pending"])
-    validate_schema_instance("status", "6.0.0", prepared)
+    validate_schema_instance("catalog", "7.0.0", prepared["consent_catalog"])
+    validate_schema_instance("pending-agent", "7.0.0", prepared["pending"])
+    validate_schema_instance("status", "7.0.0", prepared)

@@ -39,6 +39,7 @@ from yoetz.protocol.errors import (
 __all__ = [
     "CLAIM_REVISION_CORRECTIONS",
     "CONTINUATION_TOKENS",
+    "LOCAL_REASON_CONTINUATION_PREFIXES",
     "REASON_CODE_DIRECTIVE_EXEMPTIONS",
     "RECOVERY_DIRECTIVES",
     "RecoveryDirective",
@@ -49,6 +50,7 @@ __all__ = [
     "correction_for_invariant",
     "covered_reason_codes",
     "directive_for",
+    "local_reason_has_disposition",
     "timeout_operation_kind",
 ]
 
@@ -114,6 +116,26 @@ _DIRECTIVES: Final = (
         ),
         guidance_uri=_WORKFLOW_RECOVERY,
         nudge="Do not mint a fresh request_id, task, or sibling to escape an ambiguous write.",
+    ),
+    RecoveryDirective(
+        token="start_busy_retry_ready",
+        directive=(
+            "The start reservation is retained and its lease was released. Replay the exact "
+            "start body and request_id once; no session or writer IDs are needed. If contention "
+            "persists, retain that request and report the unresolved start."
+        ),
+        guidance_uri=_WORKFLOW_RECOVERY,
+        nudge="Do not create a replacement task to escape contention.",
+    ),
+    RecoveryDirective(
+        token="start_lease_wait",
+        directive=(
+            "Start still has a live lease. Wait up to 60 seconds, then replay the exact start "
+            "body and request_id once. Do not invent session or writer IDs. If still pending, "
+            "retain the request and report the unresolved start."
+        ),
+        guidance_uri=_WORKFLOW_RECOVERY,
+        nudge="A pending start does not prove failure.",
     ),
     RecoveryDirective(
         token="start_timeout_same_identity",
@@ -255,6 +277,187 @@ _DIRECTIVES: Final = (
         ),
         guidance_uri=_WORKFLOW_ERRORS,
     ),
+    # The 0.3 lineage/project reasons are explicit dispositions, never ratchet exemptions.
+    RecoveryDirective(
+        token="lineage_attach_review",
+        directive="The child attach capability is unusable. Ask the authorized parent to inspect the delegation and its existing child before issuing a replacement handle. Do not create a second child to bypass a used or revoked handle.",
+        guidance_uri=_WORKFLOW_ERRORS,
+    ),
+    RecoveryDirective(
+        token="coordination_authority_review",
+        directive="This route lacks authority for this action. Inspect the exact task or project grant and its source-workspace scope. Use the supported consent review only with explicit owner approval; do not widen authority or retry blindly.",
+        guidance_uri=_WORKFLOW_ERRORS,
+    ),
+    RecoveryDirective(
+        token="lineage_operation_recovery",
+        directive="Keep the original request_id and body. Recover the operation using the route ids you already hold; if a start returned no ids, use its exact same-request recovery. Do not create a new task or identity to escape a pending write.",
+        guidance_uri=_WORKFLOW_ERRORS,
+    ),
+    RecoveryDirective(
+        token="lineage_terminal_review",
+        directive="The task, project, or operation is terminal or quarantined. Stop this mutation and present the recorded state for maintainer review. Do not reopen, replace, or clear durable state to bypass the refusal.",
+        guidance_uri=_WORKFLOW_ERRORS,
+    ),
+    RecoveryDirective(
+        token="lineage_service_review",
+        directive="The lineage or coordination service cannot serve this route. Retain the exact request identity, inspect bounded service diagnostics, and report the unavailable boundary. Run only a repair explicitly named for this instance.",
+        guidance_uri=_WORKFLOW_ERRORS,
+    ),
+    RecoveryDirective(
+        token="lineage_state_refresh",
+        directive="Inspect current task lineage and project membership through an authorized route. Reconcile the named state conflict before another mutation, and recover any earlier write under its original request identity.",
+        guidance_uri=_WORKFLOW_ERRORS,
+    ),
+    RecoveryDirective(
+        token="cursor_project_preview_review",
+        directive="Inspect the Cursor project MCP configuration with the supported preview command. Correct the reported route or command mismatch before applying the reviewed configuration; do not replace foreign configuration blindly.",
+        guidance_uri=_WORKFLOW_ERRORS,
+    ),
+    RecoveryDirective(
+        token="lineage_integrity_review",
+        directive="A lineage value or stored result failed its contract. Inspect the current schema and bounded diagnostic for this operation. Correct caller-authored fields only; stop and report invalid stored state instead of rewriting it.",
+        guidance_uri=_WORKFLOW_ERRORS,
+    ),
+    RecoveryDirective(
+        token="coordination_policy_review",
+        directive="The source-workspace policy denies coordination. This is not a missing consent grant. Keep the denial in place and ask the policy owner to review the configured restriction; another grant or repeated request does not override it.",
+        guidance_uri=_WORKFLOW_ERRORS,
+    ),
+    # --- local CLI reasons (issue #741) -----------------------------------------------------
+    # These tokens are reached only through ``continuation_for_local_reason``: the reasons that
+    # map to them are raised by CLI adapters and never become a public error envelope. They are
+    # registered here, beside the protocol continuations, so one edit moves every surface and the
+    # ratchet in ``yoetz.cli.exits`` can require a disposition for every local reason too.
+    RecoveryDirective(
+        token="ceremony_refusal_terminal",
+        directive=(
+            "The service answered this confidential ceremony and declined it, so it is healthy "
+            "and a restart changes nothing. Report the refusal with its exact token and ask the "
+            "vault owner to review the policy that produced it."
+        ),
+        guidance_uri=_TEMPLATES_SETUP,
+        nudge="A refusal is an answer; re-running the ceremony does not obtain a different one.",
+    ),
+    RecoveryDirective(
+        token="vault_unlock_required",
+        directive=(
+            "The vault must be unlocked before this ceremony can run, and nothing was changed. "
+            "Unlock it on a trusted local terminal, then replay this request once; when ordinary "
+            "unlock authority may be lost, read recovery status first."
+        ),
+        guidance_uri=_TEMPLATES_SETUP,
+        nudge="Yoetz stores the secret locally; never request or transmit recovery material.",
+    ),
+    RecoveryDirective(
+        token="pending_decision_refresh",
+        directive=(
+            "That pending decision no longer exists, has expired, or cannot be decided as "
+            "prepared, so nothing was decided. Prepare a fresh decision from the same working "
+            "directory, pass its exact digests, and decide that one."
+        ),
+        guidance_uri=_TEMPLATES_SETUP,
+        nudge="A stale pending id is never revived; absence and expiry are reported alike.",
+    ),
+    RecoveryDirective(
+        token="pending_decision_in_flight",
+        directive=(
+            "Another pending decision is already active for this installation, so a second one "
+            "was not prepared. Authorize or deny the existing decision, or wait for it to expire, "
+            "before preparing another."
+        ),
+        guidance_uri=_TEMPLATES_SETUP,
+        nudge="Do not prepare a second decision to obtain a different answer.",
+    ),
+    RecoveryDirective(
+        token="consent_relay_correction",
+        directive=(
+            "This relayed approval was refused before anything was stored. Correct the named "
+            "relay condition, such as an allowlisted client kind or acknowledged danger text, and "
+            "authorize once; otherwise run the ceremony on a local terminal."
+        ),
+        guidance_uri=_TEMPLATES_SETUP,
+        nudge="Show the danger text to the person instructing you before acknowledging it.",
+    ),
+    RecoveryDirective(
+        token="provider_setup_required",
+        directive=(
+            "No usable provider credential is configured for this installation, so nothing was "
+            "stored. Supply exactly one complete, current credential for the configured provider "
+            "through the documented setup command, then run this again."
+        ),
+        guidance_uri=_TEMPLATES_SETUP,
+        nudge="Yoetz stores the credential locally; never echo, log, or transmit it.",
+    ),
+    RecoveryDirective(
+        token="consent_outcome_unconfirmed",
+        directive=(
+            "The decision was submitted but its outcome could not be confirmed, so it may already "
+            "be effective. Read the recorded grant state through the documented status command "
+            "before preparing another consent."
+        ),
+        guidance_uri=_WORKFLOW_RECOVERY,
+        nudge="An unreadable response is not proof a decision was not recorded.",
+    ),
+    RecoveryDirective(
+        token="ceremony_result_invalid",
+        directive=(
+            "The ceremony finished without reaching its exact successful state, so the approval "
+            "was recorded as failed and nothing was approved. Resolve the named service "
+            "condition, then prepare and authorize again."
+        ),
+        guidance_uri=_TEMPLATES_SETUP,
+        nudge="A failed approval is not a partial one; nothing durable was stored.",
+    ),
+    RecoveryDirective(
+        token="config_correction_required",
+        directive=(
+            "Yoetz refused the selected configuration before doing any work, so nothing changed. "
+            "Correct the named file, key, profile, or environment variable so it matches the "
+            "reviewed configuration model, then run this command again."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge="config.toml is nonsecret; provision credentials through the credential command.",
+    ),
+    RecoveryDirective(
+        token="instance_identity_repair",
+        directive=(
+            "This runtime, its pin, and the root's instance marker do not name one trusted "
+            "installation. Inspect the named root and pin, then dispose and recreate the "
+            "instance, or run the runtime that belongs to that root."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge="Never point a runtime at a second root, or hand-edit a pin, to get past this.",
+    ),
+    RecoveryDirective(
+        token="instance_request_correction",
+        directive=(
+            "The instance root or expiry named on this command cannot be used as asked, and "
+            "nothing was created or removed. Name a root and expiry the documented instance rules "
+            "admit, then run the command again."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge="The everyday permanent install is never disposed by an instance command.",
+    ),
+    RecoveryDirective(
+        token="local_state_repair",
+        directive=(
+            "Yoetz could not safely open local state, so nothing was read or written. Repair the "
+            "named owner-only path, permission, or size condition and keep state on a local disk, "
+            "then run this command again."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge="Do not move state onto a network or shared filesystem to clear this.",
+    ),
+    RecoveryDirective(
+        token="local_service_unavailable",
+        directive=(
+            "The local service could not serve this request, so no work was recorded. Inspect its "
+            "status, let a draining or restarting service settle, then run this command again "
+            "under its original request identity."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge="Never match a Yoetz process by name or path to stop it.",
+    ),
 )
 
 RECOVERY_DIRECTIVES: Final[Mapping[str, RecoveryDirective]] = MappingProxyType(
@@ -282,21 +485,99 @@ _OPERATION_DEPENDENT_REASONS: Final[frozenset[str]] = frozenset({"request_timeou
 # protocol reasons while this registry was being written.
 _LOCAL_REASON_CONTINUATIONS: Final[Mapping[str, str]] = MappingProxyType(
     {
+        # Configuration the loader refused before any work (issues #520, #741).
+        "config_file_too_large": "config_correction_required",
+        "config_file_unreadable": "config_correction_required",
+        "config_preimage_mismatch": "config_correction_required",
+        "config_schema_unsupported": "config_correction_required",
+        "config_toml_invalid": "config_correction_required",
+        "config_value_invalid": "config_correction_required",
+        "durability_unsupported": "config_correction_required",
+        "external_profile_forbids_local_model": "config_correction_required",
+        "external_runtime_forbids_local_model": "config_correction_required",
+        "external_runtime_forbids_provider": "config_correction_required",
+        "external_runtime_required_for_semantic": "config_correction_required",
+        "https_origin_invalid": "config_correction_required",
+        "local_model_locator_forbidden": "config_correction_required",
+        "max_findings_out_of_range": "config_correction_required",
+        "owner_declared_endpoint_forbidden": "config_correction_required",
+        "owner_declared_endpoint_required": "config_correction_required",
+        "payload_logging_forbidden": "config_correction_required",
+        "privacy_bootstrap_unsafe": "config_correction_required",
+        "provider_required_for_semantic": "config_correction_required",
+        "release_probe_not_a_user_profile": "config_correction_required",
+        "secret_env_forbidden": "config_correction_required",
+        "secret_in_config": "config_correction_required",
+        "strict_local_forbids_provider": "config_correction_required",
+        "test_fake_forbids_local_model": "config_correction_required",
+        "test_fake_forbids_provider": "config_correction_required",
+        "unknown_config_env_var": "config_correction_required",
+        "unknown_config_key": "config_correction_required",
+        # Human ceremony and consent (issues #147, #489, #519).
+        "ceremony_unsupported": "ceremony_refusal_terminal",
+        "chat_user_attestation_invalid": "consent_relay_correction",
+        "chat_user_reauthentication_unavailable": "consent_relay_correction",
+        "chat_user_target_mismatch": "pending_decision_refresh",
+        "chat_user_warning_required": "consent_relay_correction",
         "human_authority_unavailable": "consent_ceremony_required",
         "human_authorization_required": "consent_ceremony_required",
         "human_authorization_stale": "consent_ceremony_required",
-        "manifest_digest_mismatch": "resource_integrity_repair",
+        "kind_forbidden": "ceremony_refusal_terminal",
+        "pending_already_active": "pending_decision_in_flight",
         "pending_expired": "consent_ceremony_required",
+        "pending_not_actionable": "pending_decision_refresh",
+        "pending_unavailable": "pending_decision_refresh",
+        "repository_privacy_grant_unconfirmed": "consent_outcome_unconfirmed",
         "repository_privacy_scope_unavailable": "consent_ceremony_required",
+        "result_invalid": "ceremony_result_invalid",
+        "state_forbidden": "vault_unlock_required",
+        "trusted_console_required": "consent_ceremony_required",
+        "vault_locked": "vault_unlock_required",
+        # Provider credentials (issue #520).
+        "provider_credential_invalid": "provider_setup_required",
+        "provider_credential_required": "provider_setup_required",
+        "provider_not_configured": "provider_setup_required",
+        "secret_rejected": "provider_setup_required",
+        # Installed resource integrity.
+        "manifest_digest_mismatch": "resource_integrity_repair",
         "resource_counts_invalid": "resource_integrity_repair",
         "resource_digest_mismatch": "resource_integrity_repair",
         "resource_missing": "resource_integrity_repair",
-        "service_already_running": "service_holder_busy",
         "support_digest_mismatch": "resource_integrity_repair",
         "support_resource_set_mismatch": "resource_integrity_repair",
-        "trusted_console_required": "consent_ceremony_required",
+        # Instance identity, isolation roots, and runtime pins (issue #604).
+        "installation_identity_mismatch": "instance_identity_repair",
+        "instance_absent": "instance_request_correction",
+        "instance_exists": "instance_request_correction",
+        "instance_expired": "instance_identity_repair",
+        "instance_expiry_invalid": "instance_request_correction",
+        "instance_identity_invalid": "instance_identity_repair",
+        "instance_lifecycle_requires_isolated_root": "instance_identity_repair",
+        "instance_not_disposable": "instance_request_correction",
+        "instance_root_invalid": "instance_request_correction",
+        "instance_root_too_long": "instance_request_correction",
+        "instance_service_running": "service_holder_busy",
+        "isolation_root_conflict": "instance_identity_repair",
+        "runtime_pin_conflict": "instance_identity_repair",
+        "runtime_pin_invalid": "instance_identity_repair",
+        # Local storage, workspace, and service lifecycle (issues #237, #428).
+        "git_config_limit_exceeded": "local_state_repair",
+        "path_on_network_filesystem": "local_state_repair",
+        "service_already_running": "service_holder_busy",
+        "session_monitor_unavailable": "local_service_unavailable",
+        "storage_unavailable": "local_state_repair",
+        "storage_unsafe": "local_state_repair",
         "unsafe_root": "storage_root_unsafe",
+        "workspace_unresolvable": "storage_root_unsafe",
     }
+)
+
+# The one bounded local family whose members are generated rather than enumerated. Every
+# ``vault_result_<condition>`` projection reports the same fact -- the ceremony finished outside
+# its exact successful state and the approval was consumed as failed -- so one directive answers
+# the family, exactly as ``yoetz.cli.exits`` gives it one remediation.
+LOCAL_REASON_CONTINUATION_PREFIXES: Final[tuple[tuple[str, str], ...]] = (
+    ("vault_result_", "ceremony_result_invalid"),
 )
 
 # The ratchet's escape hatch (issue #739). A reason code here has been examined and found to need
@@ -307,6 +588,11 @@ _LOCAL_REASON_CONTINUATIONS: Final[Mapping[str, str]] = MappingProxyType(
 # reason code cannot land with nothing to say.
 REASON_CODE_DIRECTIVE_EXEMPTIONS: Final[frozenset[str]] = frozenset(
     {
+        # Internal contention labels do not prove that a first-start lease was released.
+        # The start application emits the stronger start_* tokens only after that proof.
+        "catalog_busy",
+        "catalog_maintenance_busy",
+        "runtime_rebind_busy",
         # Validation reasons: the field pointer plus the schema-derived authoring hint already
         # name the exact repair, and a generic directive would bury it.
         "accepted_record_shape_invalid",
@@ -427,6 +713,11 @@ REASON_CODE_DIRECTIVE_EXEMPTIONS: Final[frozenset[str]] = frozenset(
         "ledger_assigned_field_in_request_identity",
         "method_forbidden",
         "not_an_accepted_envelope",
+        # A host handed one hook ingress more bytes than the fixed stdin cap admits. The
+        # agent cannot shrink what the host already wrote, and the ingress deliberately
+        # reads only cap-plus-one bytes, so there is no repair to name beyond the coverage
+        # gap the hook records for the affected event (issue #667).
+        "payload_too_large",
         "peer_untrusted",
         "provider_attempt_provenance_is_not_final",
         "public_error_invalid_correlation_id",
@@ -581,7 +872,35 @@ def continuation_for_local_reason(reason: object) -> str | None:
 
     if type(reason) is not str:
         return None
-    return _LOCAL_REASON_CONTINUATIONS.get(reason)
+    token = _LOCAL_REASON_CONTINUATIONS.get(reason)
+    if token is not None:
+        return token
+    for prefix, prefixed_token in LOCAL_REASON_CONTINUATION_PREFIXES:
+        if reason.startswith(prefix) and len(reason) > len(prefix):
+            return prefixed_token
+    return None
+
+
+def local_reason_has_disposition(reason: object) -> bool:
+    """Return whether a CLI reason resolves to a directive in either vocabulary.
+
+    The ratchet in ``yoetz.cli.exits`` uses this: a local reason is answered when it maps to a
+    local directive, or when it is also a protocol reason code whose disposition -- a directive or
+    a recorded exemption -- was already decided on the protocol side. Nothing else counts, so a
+    new CLI reason cannot land with nothing for an agent to do.
+    """
+
+    if type(reason) is not str:
+        return False
+    if continuation_for_local_reason(reason) is not None:
+        return True
+    if reason not in PROTOCOL_REASON_CODES:
+        return False
+    return (
+        continuation_for_reason(reason) is not None
+        or reason in _OPERATION_DEPENDENT_REASONS
+        or reason in REASON_CODE_DIRECTIVE_EXEMPTIONS
+    )
 
 
 def covered_reason_codes() -> frozenset[str]:
@@ -622,7 +941,11 @@ def _check_registry() -> None:
             _GUIDANCE_URI_PATTERN.fullmatch(entry.guidance_uri) is None
         ):
             raise RuntimeError("recovery_directive_guidance_uri_invalid")
-    mapped_tokens = set(_REASON_CONTINUATIONS.values()) | set(_LOCAL_REASON_CONTINUATIONS.values())
+    mapped_tokens = (
+        set(_REASON_CONTINUATIONS.values())
+        | set(_LOCAL_REASON_CONTINUATIONS.values())
+        | {token for _, token in LOCAL_REASON_CONTINUATION_PREFIXES}
+    )
     if mapped_tokens - CONTINUATION_TOKENS:
         raise RuntimeError("recovery_reason_maps_to_unregistered_token")
     if set(_REASON_CONTINUATIONS) & REASON_CODE_DIRECTIVE_EXEMPTIONS:
@@ -636,6 +959,11 @@ def _check_registry() -> None:
     # were nearly registered as protocol reasons while this module was written.
     if set(_LOCAL_REASON_CONTINUATIONS) & PROTOCOL_REASON_CODES:
         raise RuntimeError("recovery_local_reason_collides_with_protocol_reason")
+    for prefix, _ in LOCAL_REASON_CONTINUATION_PREFIXES:
+        if _TOKEN_PATTERN.fullmatch(prefix.rstrip("_")) is None:
+            raise RuntimeError("recovery_local_reason_prefix_invalid")
+        if any(reason.startswith(prefix) for reason in PROTOCOL_REASON_CODES):
+            raise RuntimeError("recovery_local_reason_collides_with_protocol_reason")
     # ``yoetz.protocol.errors`` is a dependency root and cannot import this module, so it holds
     # the admitted token set literally. Locking the two here means a token can never be admitted
     # onto the wire without a directive behind it, nor a directive exist for a token the

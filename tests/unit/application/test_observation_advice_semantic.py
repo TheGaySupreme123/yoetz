@@ -391,6 +391,85 @@ def test_dispatch_exception_and_cancellation_are_recorded_not_succeeded() -> Non
         assert row.finding_ids == ()
 
 
+def test_cancellation_reconciliation_is_bounded_and_never_fabricates_provenance() -> None:
+    """A cancelled row records reconciled egress provenance, or plain ``cancelled`` (#755).
+
+    The reconciliation is shielded so cancellation cannot drop it, and bounded so a stuck or
+    failing reconciler can never hold the foreground rebind open. Neither path may invent a
+    success, a finding, or a second dispatch.
+    """
+
+    _db, repository = _repository()
+    stuck = asyncio.Event()
+    cases: tuple[tuple[str, str | None, str], ...] = (
+        ("d", "egr_30000000-0000-4000-8000-0000000000d1", "reconciled"),
+        ("e", None, "unconsumed"),
+        ("f", None, "raises"),
+        ("0", None, "stuck"),
+    )
+    for marker, receipt, mode in cases:
+        basis = "sha256:" + marker * 64
+        session = _SESSION[:-1] + marker
+        repository.schedule(
+            workspace=_COMMITMENT,
+            yoetz_session_id=session,
+            basis_digest=basis,
+            subject_digest=basis,
+            coverage_gaps=(),
+            packet_json=b"{}",
+            enqueued_at=_clock(),
+            max_pending=16,
+        )
+        dispatches = 0
+
+        async def dispatch(
+            _attempt: ObservationAdviceSemanticAttempt,
+        ) -> ObservationAdviceSemanticOutcome:
+            nonlocal dispatches
+            dispatches += 1
+            raise asyncio.CancelledError
+
+        async def reconcile(
+            _attempt: ObservationAdviceSemanticAttempt,
+            *,
+            _receipt: str | None = receipt,
+            _mode: str = mode,
+        ) -> ObservationAdviceSemanticOutcome | None:
+            if _mode == "raises":
+                raise RuntimeError("audit unreadable")
+            if _mode == "stuck":
+                await stuck.wait()
+            if _receipt is None:
+                return None
+            return ObservationAdviceSemanticOutcome(
+                status="cancelled",
+                failure_reason="cancelled",
+                attempt_receipt=_receipt,
+                provider_identity="provider-under-test",
+            )
+
+        worker = ObservationAdviceSemanticWorker(
+            repository=repository,
+            dispatch=dispatch,
+            service_generation=1,
+            lease_owner="svc-1",
+            now=_clock,
+            lease_expires_at=_later,
+            reconcile_cancelled=reconcile,
+            reconcile_timeout_seconds=0.05,
+        )
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(worker.run_once())
+
+        row = repository.lookup(yoetz_session_id=session, basis_digest=basis)
+        assert row is not None
+        assert (row.status, row.failure_reason) == ("cancelled", "cancelled")
+        assert row.finding_ids == ()
+        assert row.attempt_receipt == receipt
+        assert row.provider_identity == (None if receipt is None else "provider-under-test")
+        assert dispatches == 1
+
+
 def test_restart_reclaims_a_foreign_generation_lease_without_reporting_success() -> None:
     """A row left running by a previous service generation is re-attempted, never succeeded."""
 
@@ -534,6 +613,215 @@ def test_supervisor_drains_registered_workers_and_reruns_advice_after_each_attem
     assert ADVICE_SEMANTIC_UNAVAILABLE_GAP not in rebuilt.confidence_coverage.known_gaps
     # A succeeded attempt without challenges is an honest receipt, not an additive finding.
     assert CheckType.SEMANTIC_MODEL_DERIVED not in rebuilt.confidence_coverage.check_types
+
+
+def test_foreground_rebind_cancels_slow_provider_and_records_terminal_gap() -> None:
+    """A foreground attach can yield the semantic runtime without redispatching its packet."""
+
+    _db, repository = _repository()
+    basis = "sha256:" + "e" * 64
+    repository.schedule(
+        workspace=_COMMITMENT,
+        yoetz_session_id=_SESSION,
+        basis_digest=basis,
+        subject_digest=basis,
+        coverage_gaps=_GAPS,
+        packet_json=b"{}",
+        enqueued_at=_clock(),
+        max_pending=16,
+    )
+    started = asyncio.Event()
+    idle: list[str] = []
+
+    async def slow_dispatch(
+        _attempt: ObservationAdviceSemanticAttempt,
+    ) -> ObservationAdviceSemanticOutcome:
+        started.set()
+        # This represents a provider that could run past the five-second foreground rebind wait.
+        # The worker's cooperative cancellation must settle the row without waiting for it.
+        await asyncio.Event().wait()
+        raise AssertionError("provider cancellation was not delivered")
+
+    async def on_idle() -> None:
+        idle.append("released")
+
+    async def scenario() -> None:
+        supervisor = ObservationAdviceSemanticSupervisor(service_generation=1)
+        worker = ObservationAdviceSemanticWorker(
+            repository=repository,
+            dispatch=slow_dispatch,
+            service_generation=1,
+            lease_owner="svc-1",
+            now=_clock,
+            lease_expires_at=_later,
+        )
+        assert supervisor.register(AdviceSemanticDrainHandle(_COMMITMENT, worker, on_idle=on_idle))
+        draining = asyncio.create_task(supervisor.drain_once())
+        await asyncio.wait_for(started.wait(), 5)
+        worker.request_rebind()
+        await asyncio.wait_for(draining, 5)
+        assert not supervisor.has_handle(_COMMITMENT)
+
+    asyncio.run(scenario())
+    row = repository.lookup(yoetz_session_id=_SESSION, basis_digest=basis)
+    assert row is not None
+    assert (row.status, row.failure_reason) == ("cancelled", "cancelled")
+    assert repository.list_pending_workspaces() == ()
+    assert idle == ["released"]
+
+
+def test_foreground_rebind_also_releases_during_post_attempt_advice_rebuild() -> None:
+    """A slow post-attempt rebuild cannot retain the semantic runtime past foreground priority."""
+
+    _db, repository = _repository()
+    basis = "sha256:" + "f" * 64
+    repository.schedule(
+        workspace=_COMMITMENT,
+        yoetz_session_id=_SESSION,
+        basis_digest=basis,
+        subject_digest=basis,
+        coverage_gaps=_GAPS,
+        packet_json=b"{}",
+        enqueued_at=_clock(),
+        max_pending=16,
+    )
+    after_started = asyncio.Event()
+    idle: list[str] = []
+
+    async def dispatch(
+        attempt: ObservationAdviceSemanticAttempt,
+    ) -> ObservationAdviceSemanticOutcome:
+        return ObservationAdviceSemanticOutcome(
+            status="succeeded",
+            attempt_receipt="egr_after",
+            evidence_digest=attempt.subject_digest,
+        )
+
+    async def after_complete() -> None:
+        after_started.set()
+        await asyncio.Event().wait()
+
+    async def on_idle() -> None:
+        idle.append("released")
+
+    async def scenario() -> None:
+        supervisor = ObservationAdviceSemanticSupervisor(service_generation=1)
+        worker = ObservationAdviceSemanticWorker(
+            repository=repository,
+            dispatch=dispatch,
+            service_generation=1,
+            lease_owner="svc-1",
+            now=_clock,
+            lease_expires_at=_later,
+        )
+        assert supervisor.register(
+            AdviceSemanticDrainHandle(
+                _COMMITMENT,
+                worker,
+                after_complete=after_complete,
+                on_idle=on_idle,
+            )
+        )
+        draining = asyncio.create_task(supervisor.drain_once())
+        await asyncio.wait_for(after_started.wait(), 5)
+        worker.request_rebind()
+        await asyncio.wait_for(draining, 5)
+        assert not supervisor.has_handle(_COMMITMENT)
+
+    asyncio.run(scenario())
+    row = repository.lookup(yoetz_session_id=_SESSION, basis_digest=basis)
+    assert row is not None
+    assert (row.status, row.attempt_receipt) == ("succeeded", "egr_after")
+    assert idle == ["released"]
+
+
+def test_rebind_retires_queued_workspace_while_another_provider_attempt_is_active() -> None:
+    """A queued advisory lease yields immediately without parallelizing provider work."""
+
+    _db_first, first_repository = _repository()
+    _db_second, second_repository = _repository()
+    second_session = _SESSION[:-1] + "2"
+    first_repository.schedule(
+        workspace=_COMMITMENT,
+        yoetz_session_id=_SESSION,
+        basis_digest="sha256:" + "1" * 64,
+        subject_digest="sha256:" + "1" * 64,
+        coverage_gaps=_GAPS,
+        packet_json=b"{}",
+        enqueued_at=_clock(),
+        max_pending=16,
+    )
+    second_repository.schedule(
+        workspace=_COMMITMENT,
+        yoetz_session_id=second_session,
+        basis_digest="sha256:" + "2" * 64,
+        subject_digest="sha256:" + "2" * 64,
+        coverage_gaps=_GAPS,
+        packet_json=b"{}",
+        enqueued_at=_clock(),
+        max_pending=16,
+    )
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    second_idle = asyncio.Event()
+    dispatched: list[str] = []
+
+    async def dispatch(
+        attempt: ObservationAdviceSemanticAttempt,
+    ) -> ObservationAdviceSemanticOutcome:
+        dispatched.append(attempt.yoetz_session_id)
+        if attempt.yoetz_session_id == _SESSION:
+            first_started.set()
+            await release_first.wait()
+        return ObservationAdviceSemanticOutcome(
+            status="succeeded", attempt_receipt="egr_serialized"
+        )
+
+    async def on_second_idle() -> None:
+        second_idle.set()
+
+    async def scenario() -> None:
+        supervisor = ObservationAdviceSemanticSupervisor(service_generation=1)
+        first_worker = ObservationAdviceSemanticWorker(
+            repository=first_repository,
+            dispatch=dispatch,
+            service_generation=1,
+            lease_owner="svc-1",
+            now=_clock,
+            lease_expires_at=_later,
+        )
+        second_worker = ObservationAdviceSemanticWorker(
+            repository=second_repository,
+            dispatch=dispatch,
+            service_generation=1,
+            lease_owner="svc-1",
+            now=_clock,
+            lease_expires_at=_later,
+        )
+        assert supervisor.register(AdviceSemanticDrainHandle(_SESSION, first_worker))
+        assert supervisor.register(
+            AdviceSemanticDrainHandle(
+                _COMMITMENT + "-second", second_worker, on_idle=on_second_idle
+            )
+        )
+        draining = asyncio.create_task(supervisor.drain_once())
+        await asyncio.wait_for(first_started.wait(), 5)
+        supervisor.request_rebind(_COMMITMENT + "-second")
+        await asyncio.wait_for(second_idle.wait(), 5)
+        assert supervisor.has_handle(_SESSION)
+        assert not supervisor.has_handle(_COMMITMENT + "-second")
+        assert dispatched == [_SESSION]
+        release_first.set()
+        await asyncio.wait_for(draining, 5)
+        await supervisor.stop()
+
+    asyncio.run(scenario())
+    first = first_repository.lookup(yoetz_session_id=_SESSION, basis_digest="sha256:" + "1" * 64)
+    second = second_repository.lookup(
+        yoetz_session_id=second_session, basis_digest="sha256:" + "2" * 64
+    )
+    assert first is not None and first.status == "succeeded"
+    assert second is not None and second.status == "pending"
 
 
 def test_outcome_shape_is_closed() -> None:

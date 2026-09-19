@@ -10,6 +10,7 @@ from typing import cast
 
 import pytest
 
+from yoetz.adapters.control.unix_socket import LocalControlTransportError
 from yoetz.domain.values import JsonObject
 from yoetz.ports.control import (
     ControlCallRequest,
@@ -677,7 +678,9 @@ def test_server_answers_hello_result_then_refuses_a_foreign_manifest() -> None:
             await server_handshake(server, client_peer, _status())
         _assert_reason(refused, "manifest_mismatch")
         result = await read_control_frame(client)
-        validate_schema_instance("control-hello-result", "2.1.0", result)
+        # The refusal is emitted by the active 2.7 service.  The released 2.5/2.6
+        # hello-result schemas remain byte-frozen and cannot describe the new project method.
+        validate_schema_instance("control-hello-result", "2.7.0", result)
         assert result["schema_manifest_digest"] == load_schema_catalog().manifest_digest
         assert result["service_instance_id"] == _SERVICE_ID
 
@@ -715,3 +718,72 @@ def test_service_incompatible_maps_to_service_unavailable() -> None:
         public_error_code_for_control_reason("service_incompatible")
         is PublicErrorCode.SERVICE_UNAVAILABLE
     )
+
+
+class _SendFailureStream:
+    """A stream that encodes nothing and fails exactly one way on the write."""
+
+    def __init__(self, failure: BaseException) -> None:
+        self.peer_identity = object()
+        self.failure = failure
+        self.sent: list[bytes] = []
+        self.closed = False
+
+    async def receive(self, max_bytes: int) -> bytes:
+        del max_bytes
+        return b""
+
+    async def send_all(self, data: Buffer) -> None:
+        del data
+        raise self.failure
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+def test_a_failed_send_is_a_transport_fact_not_a_malformed_frame() -> None:
+    """Issue #678: the frame validated and encoded, so the write failure is not frame_invalid."""
+
+    async def exercise() -> None:
+        transport = _SendFailureStream(LocalControlTransportError("connection_failed"))
+        with pytest.raises(LocalControlTransportError) as failed:
+            await write_control_frame(transport, _hello())
+        # The bounded transport reason survives the protocol layer, which is what keeps the
+        # client's safe transport classification (retryable) reachable for a failed local write.
+        assert failed.value.reason == "connection_failed"
+
+        opaque = _SendFailureStream(OSError(32, "broken pipe", "/private/var/socket"))
+        with pytest.raises(ControlProtocolError) as unclassified:
+            await write_control_frame(opaque, _hello())
+        _assert_reason(unclassified, "transport_failed")
+        assert "socket" not in str(unclassified.value)
+        assert "broken pipe" not in str(unclassified.value)
+
+    asyncio.run(exercise())
+
+
+def test_write_cancellation_stays_cancellation_and_encode_failures_stay_frame_invalid() -> None:
+    async def exercise() -> None:
+        cancelled = _SendFailureStream(asyncio.CancelledError())
+        with pytest.raises(asyncio.CancelledError):
+            await write_control_frame(cancelled, _hello())
+
+        malformed = _SendFailureStream(LocalControlTransportError("connection_failed"))
+        hello = _hello()
+        hello["client_kind"] = "unknown_host"
+        with pytest.raises(ControlProtocolError) as rejected:
+            await write_control_frame(malformed, hello)
+        # Encoding happens before the write: a frame this caller built wrong never reaches the
+        # stream, so the transport failure armed above is not what the caller is told about.
+        _assert_reason(rejected, "frame_invalid")
+        assert malformed.sent == []
+
+    asyncio.run(exercise())
+
+
+def test_transport_failed_is_a_retryable_public_service_code() -> None:
+    assert (
+        public_error_code_for_control_reason("transport_failed")
+        is PublicErrorCode.SERVICE_UNAVAILABLE
+    )
+    assert public_error_code_for_control_reason("frame_invalid") is PublicErrorCode.INVALID_REQUEST

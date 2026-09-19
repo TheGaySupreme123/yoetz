@@ -14,6 +14,8 @@ from typing import Final, Literal, Never, Protocol, cast
 
 from pydantic import BaseModel
 
+from yoetz.adapters.control.unix_socket import LocalControlTransportError
+from yoetz.domain.coordination import CoordinationErrorCode
 from yoetz.domain.values import JsonObject, freeze_json
 from yoetz.ports.control import (
     ControlCallRequest,
@@ -82,7 +84,7 @@ MAX_CONTROL_FRAME_BYTES: Final = 6_291_456
 MAX_ORDINARY_CONTROL_FRAME_BYTES: Final = 1_048_576
 MAX_ACTIVE_REQUESTS_PER_SESSION: Final = 32
 
-_CONTROL_SCHEMA_VERSION: Final = "2.6.0"
+_CONTROL_SCHEMA_VERSION: Final = "2.8.0"
 _SCHEMA_VERSION: Final = "1.0.0"
 _MAX_IMPORT_SOURCE_BYTES: Final = 4 * 1024 * 1024
 _ERROR_REASONS: Final = frozenset(
@@ -99,7 +101,11 @@ _ERROR_REASONS: Final = frozenset(
         "request_limit_exceeded",
         "service_generation_changed",
         "session_closed",
+        "transport_failed",
     }
+)
+_COORDINATION_CONTROL_ERROR_REASONS: Final[frozenset[str]] = frozenset(
+    code.value for code in CoordinationErrorCode
 )
 _WORKFLOW_METHODS: Final = tuple(
     sorted(
@@ -530,15 +536,26 @@ async def read_control_frame(
 
 
 async def write_control_frame(stream: ControlStream, value: object) -> None:
-    """Write one validated frame using the stream's backpressure-aware send."""
+    """Write one validated frame using the stream's backpressure-aware send.
+
+    Encoding happens before the write, so a frame this caller built wrong never reaches the
+    wire and keeps ``frame_invalid``. A failure raised by the stream itself is a transport
+    fact about this connection, not a statement about the frame: the bounded
+    ``LocalControlTransportError`` travels unchanged so the caller keeps the safe transport
+    classification (``service_unavailable`` and friends, retryable), and any other send failure
+    becomes the bounded retryable ``transport_failed`` rather than leaking a raw exception.
+    Relabelling every send failure ``frame_invalid`` told a caller its valid request was
+    malformed, made the client's transport mapping dead code, and published a terminal
+    ``INVALID_REQUEST`` for a retryable condition (issue #678).
+    """
 
     encoded = encode_control_frame(value)
     try:
         await stream.send_all(encoded)
-    except BaseException as exc:
-        if isinstance(exc, asyncio.CancelledError):
-            raise
-        raise ControlProtocolError("frame_invalid") from None
+    except asyncio.CancelledError, LocalControlTransportError:
+        raise
+    except BaseException:
+        raise ControlProtocolError("transport_failed") from None
 
 
 def schema_for_method(method: ControlMethod, direction: SchemaDirection) -> Mapping[str, JsonValue]:
@@ -549,7 +566,7 @@ def schema_for_method(method: ControlMethod, direction: SchemaDirection) -> Mapp
     if direction not in {"request", "result"}:
         raise ValueError("control_schema_direction_invalid")
     schema_name = "control-request" if direction == "request" else "control-result"
-    document = schema_document_for(schema_name, _SCHEMA_VERSION)
+    document = schema_document_for(schema_name, _CONTROL_SCHEMA_VERSION)
     branches = document.json_schema.get("oneOf")
     if not isinstance(branches, list | tuple):
         _fail("frame_invalid")
@@ -743,6 +760,11 @@ async def _close_after_failure(stream: ControlStream, error: BaseException) -> N
         pass
     if isinstance(error, ControlProtocolError):
         raise error
+    if isinstance(error, LocalControlTransportError):
+        # A handshake that failed on the transport is not a malformed handshake. Both peers
+        # already classify this bounded reason; folding it into `frame_invalid` here would
+        # restore the mislabelling the write path just stopped doing (issue #678).
+        raise error
     raise ControlProtocolError("frame_invalid") from None
 
 
@@ -902,6 +924,11 @@ async def server_handshake(
 def public_error_code_for_control_reason(reason: str) -> PublicErrorCode:
     """Map a bounded control reason without exposing wire-only tokens."""
 
+    if reason in _COORDINATION_CONTROL_ERROR_REASONS:
+        # Project lifecycle refusals are caller-actionable command outcomes. They share the
+        # INVALID_REQUEST shell exit while the original finite token remains available to the CLI
+        # renderer and MCP-safe reason projection.
+        return PublicErrorCode.INVALID_REQUEST
     if reason in {
         "service_generation_changed",
         "privacy_projection_unavailable",
@@ -911,6 +938,7 @@ def public_error_code_for_control_reason(reason: str) -> PublicErrorCode:
         "endpoint_unsafe",
         "peer_untrusted",
         "service_draining",
+        "transport_failed",
     }:
         return PublicErrorCode.SERVICE_UNAVAILABLE
     if reason == "privacy_projection_blocked":

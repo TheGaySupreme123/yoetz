@@ -1,14 +1,18 @@
 # Yoetz — decision ledger and release-gate dispositions
 
-**ADRs:** ADR-001 through ADR-026 | **Related:** [`docs/INTERFACES.md`](INTERFACES.md),
+**ADRs:** ADR-001 through ADR-029 | **Related:** [`docs/INTERFACES.md`](INTERFACES.md),
 [`docs/adr/`](adr/), release-evidence generation
 
 ## Purpose
 
-The current product release line is **0.2**, with Linux/WSL compatibility fixes released as
-**0.2.1** and install-path fixes as **0.2.2**. The dated v0.1 decisions below remain history; the 0.2 re-dispositions govern the
-current line. Real WSL 2 and native Linux Claude/Cursor acceptance remain untested, and
-privacy-receipt CLI bugs #731 and #732 remain open (release tracking: #733). This version
+The next product release candidate is **0.3.0** (release tracking: #785); **0.2.2** remains
+published until the candidate's gates pass. The candidate carries Linux/WSL compatibility fixes
+(**0.2.1**) and install-path fixes (**0.2.2**). The dated v0.1 decisions below remain history;
+the 0.2 re-dispositions govern the current line. Real WSL 2 and native Linux Claude/Cursor
+acceptance remain untested, native Codex
+multi-agent acceptance (#499, #507) remains open, and first run still connects Codex only (#767).
+Issue #767 remains a release gate until implemented or explicitly deferred by the maintainer.
+The privacy-receipt CLI bugs #731 and #732 are fixed in this candidate (#783). This version
 update does not close a gate or add a supported capability cell.
 
 This file is the one canonical ledger of the decisions taken for v0.1 and the dated dispositions
@@ -115,7 +119,7 @@ that evidence.
 | E-010 | Local service endpoint, peer-credential, permission, lifecycle, keyring, memory-protection, and relock matrix | No platform support claim until a clean-profile service proves authenticated local attachment, locked/ready transitions, crash recovery, suspend/session-lock relock, and secret-canary absence. | Service/control capability evidence and platform matrix. |
 | E-011 | Privacy classifier, never-send scanner, minimizer/redactor, consent, endpoint binding, and receipt matrix | No “policy enforced” claim from configuration alone; every profile, channel, scope intersection, denial, and dispatch path must produce exact evidence. Imported Codex command/model text is intentionally verbatim only in encrypted local objects and receives no import-time content scan; every later disclosure crosses the one authoritative classifier/secret scan, tested across shell assignments, inline auth/header flags, bearer/API-key forms, credential URLs, and JSON/UTF-8/chunk splits. | ADR-009 privacy conformance, property, integration, and live-profile evidence. |
 | E-012 | Public security, conduct, and support routes | Before public release, prove that private vulnerability reporting is enabled, the single maintained private mailbox `support@yoetz.dev` (serving security fallback, conduct, and support per the 2026-08-20 F-006 amendment) is monitored by maintainers, and the repository issue route is available for ordinary support. | Repository policy-link check plus dated maintainer delivery/response drill. |
-| E-013 | Exact harness lifecycle trigger points and observation events a hook profile may bind to; context compaction among triggers | Codex `0.144.5` currently exposes `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `SessionStart`, `UserPromptSubmit`, `SubagentStart`, `SubagentStop`, and `Stop`, but names alone are not support evidence. A v0.1 exact capability cell may declare a trigger arm and/or a nonempty `observation_events` set only after an installed-artifact run freezes event, payload/privacy boundary, permitted action, coalescing/loop guard, gap codes, and failure behavior for each arm. Observation evidence must prove dual-source ingest (hooks primary; selective session-stream reconciliation), consent/revoke behavior, and that `hook_observed` is earned only from real observation evidence. Unproven cells remain `None` / empty observation arms; unprofiled harnesses stay cooperative-only. | ADR-010 installed-artifact capability evidence and exact harness support-matrix cell. |
+| E-013 | Exact harness lifecycle trigger points and observation events a hook profile may bind to; context compaction among triggers | Codex `0.144.5` currently exposes `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `SessionStart`, `UserPromptSubmit`, `SubagentStart`, `SubagentStop`, and `Stop`, but names alone are not support evidence. A v0.1 exact capability cell may declare a trigger arm and/or a nonempty `observation_events` set only after an installed-artifact run freezes event, payload/privacy boundary, permitted action, coalescing/loop guard, gap codes, and failure behavior for each arm. Observation evidence must prove dual-source ingest (hooks primary; selective session-stream reconciliation), consent/revoke behavior, and that `hook_observed` is earned only from real observation evidence. Unproven cells remain `None` / empty observation arms; unprofiled harnesses stay cooperative-only. **Status (2026-09-05, issue #494 / ADR-027, no capability flip):** the lineage and project grouping model is ratified. Mapping `SubagentStart` / `SubagentStop` or any other host delegate signal onto a child task remains evidence-gated in #506–#508. This status populates no capability cell and does not earn `hook_observed`. | ADR-010 installed-artifact capability evidence and exact harness support-matrix cell. |
 | E-014 | Publication-ceremony budget and work-package grouping examples | Dogfood must measure publications per work package, model-authored event bytes, token/latency overhead, abandoned or stale-ledger rate, skipped checks, and user-visible chatter. Large inventories must compare grouped work packages with per-file publication amplification; no threshold is inferred from file count alone. | Harness-neutral capability/conformance fixtures plus bounded dogfood evidence used to freeze guidance examples and budgets. |
 | E-015 | Exact structural subject-state capture matrix | No support claim until installed-artifact tests freeze Git/object-format and OS cells, symlink/submodule/racy-worktree behavior, file/byte caps, exclusions, sanitized environment, path/content-free output, and no network or trusted-service reachability. | ADR-011 CLI/subprocess, packaging-boundary, privacy, and capability evidence. |
 | E-016 | TOML as alternate nonsecret settings surface, including official OpenAI vs owner-declared OpenAI-compatible HTTPS origin+model | **Working (ADR-014).** Config validates constrained `https_origin`, rejects secrets/free `base_url`, mutual-excludes official vs owner-declared, and writes the same fields from wizard/menu/`yoetz provider endpoint`. Owner-declared data-use defaults to `unknown` (never `assisted`). Privacy desired-state export/apply classifies widen vs tighten and never silently widens. Remaining: optional live owner-declared host probe before advertising verified interoperability beyond the protocol cell. | ADR-014, ADR-006/009 amendments, config/privacy/openai_responses specs, unit fixtures; live probe optional. |
@@ -158,6 +162,20 @@ affected claim, and for the first non-alpha release regardless.
 | E-017 | Open, narrowed (row added 2026-09-05; the gate post-dates the 2026-08-20 alpha and was never a v0.1.0 tag gate). The Claude Code `claude-code-cli-local-project-2.1.241` cell ships as an implementation/fixture pin declaring a `SessionStart` trigger arm with `observation_events=()`: its fixture proves strict validation, source/render/cache identity, disabled default, discovery, fresh-session plugin/skill/tool registration, and connected plugin-owned MCP, while a correlated model call, accepted observation, AI-powered review dispatch, privacy receipt, and workflow receipt remain unobserved for that version. The 2026-09-04 live capture on Claude Code `2.1.251` proves only the bare-JSON-string `PostToolUse` `tool_response` shape and adds no capability-profile entry (`docs/runbooks/claude-code-integration.md`). Cursor `cursor-ide-3.17.8` and `cursor-cli-2026.07.09-a3815c0` are implementation/fixture pins; the SDK rows are metadata-only. No host cell is `supported`, and `support/runtime-support.json` ships every cell array empty under `development_unverified`. |
 
 ### 0.2 re-dispositions — 2026-09-05
+
+The 2026-09-16 source-only #499/#507 repair adds durable lifecycle events and a validated Codex
+child-start correlation bridge. It does not change E-013 or any capability cell. Isolated source
+fixtures are separate from the still-required fresh installed native run and independent semantic
+review; see [Codex integration](runbooks/codex-integration.md#subagent-correlation-507).
+
+The #754 follow-up teaches that bridge Codex 0.153.4 multi-agent v2: the delegated child's own
+rollout header is an identity source, and `token_usage_record` plus 0.153.4's new fractional JSON
+leaves stop counting as coverage gaps. It flips no capability cell and earns no exact rollout
+profile — 0.153.4 stays on the structural compatibility profile — and the v2 evidence read from a
+stopped isolated instance is observation, not certification. Whether 0.153.4 emits
+`SubAgentActivity` with `multi_agent_v2=false`, whether its `SubagentStart` hook payload carries
+`subagent_id`, and whether a delegated child thread ever runs the hook bridge all remain open; see
+[Codex integration](runbooks/codex-integration.md#multi-agent-v2-01534-754).
 
 - **E-013 — Narrowed (was "not applicable" for v0.1.0; that row stays above as history).** What
   ships in 0.2: hook observation ingress exists for all three first-party hosts. The Codex plugin
@@ -356,9 +374,11 @@ affected claim, and for the first non-alpha release regardless.
 - **F-021 (2026-07-22):** First-party Codex observation is in protocol `0.1` (not deferred to
   v0.2). Dual sources are hooks (primary, low-latency) and selective session-stream reconciliation.
   Shared types are `ObservationSource`, `ObservationEnvelope`, `ObservationCursor`,
-  `ObservationStatus`, and `AdviceSnapshot`. Observation consent is one project-level confirmation
-  via a private workspace commitment, separate from egress consent; revocation stops new ingestion
-  and retains already-kept evidence. `AdviceSnapshot` surfaces via nonblocking hooks and ordinary
+  `ObservationStatus`, and `AdviceSnapshot`. Observation consent is one workspace-level
+  confirmation via a private workspace commitment, separate from egress consent; revocation stops
+  new ingestion and retains already-kept evidence. That confirmation is the existing workspace observation
+  consent, not the first-class `prj_` project object ratified in ADR-027. `AdviceSnapshot`
+  surfaces via nonblocking hooks and ordinary
   `status`. Batch `ImporterPort` JSONL import stays a separate support surface. Existing v0.1 data
   remains readable; migrations may add only observation consent/cursor/dedup/advice state.
 - **F-016:** Any MCP host is supported with no integration. Initialize `instructions` carry

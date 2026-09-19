@@ -14,16 +14,15 @@ from __future__ import annotations
 import dataclasses
 import json
 import sys
-from collections.abc import Awaitable, Callable, Mapping
-from enum import Enum
+from collections.abc import Awaitable, Callable
 from typing import Final, Literal, cast
 
 import click
 import typer
-from pydantic import BaseModel
 
 from yoetz import __version__
-from yoetz.cli.exits import ceremony_refusal_message, remediation_message
+from yoetz.cli.bootstrap import plain_json
+from yoetz.cli.render import bounded_failure_line, ceremony_refusal_line
 from yoetz.domain.values import JsonObject
 from yoetz.ports.control import ControlError
 from yoetz.protocol.canonical import JsonValue
@@ -61,24 +60,14 @@ def _control_guidance(error: ControlError) -> str:
 
 
 def _plain(value: object) -> JsonValue:
-    if value is None or type(value) in {bool, int, str}:
-        return cast(JsonValue, value)
-    if isinstance(value, Enum):
-        return cast(JsonValue, value.value)
-    if isinstance(value, BaseModel):
-        return cast(JsonValue, value.model_dump(mode="json", by_alias=True, exclude_none=False))
-    if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return _plain(dataclasses.asdict(value))
-    if isinstance(value, Mapping):
-        source = cast(Mapping[object, object], value)
-        return {str(key): _plain(item) for key, item in source.items()}
-    if isinstance(value, (list, tuple)):
-        sequence = cast(list[object] | tuple[object, ...], value)
-        return [_plain(item) for item in sequence]
-    if isinstance(value, (set, frozenset)):
-        members = cast(set[object] | frozenset[object], value)
-        return [_plain(item) for item in sorted(members, key=str)]
-    raise TypeError("cli_result_not_json")
+    """The menu shares the CLI's one conversion.
+
+    This used to be a byte-identical copy of :func:`yoetz.cli.bootstrap.plain_json`, so the
+    missing ``datetime`` case of issue #731 had to be fixed twice.  Delegating keeps the menu
+    and the command graph on the same supported result vocabulary.
+    """
+
+    return plain_json(value)
 
 
 def _show(value: object) -> None:
@@ -113,11 +102,10 @@ def _run_ceremony(operation: Callable[[], Awaitable[object]]) -> None:
         except (OSError, ValueError) as error:
             # Bounded setup tokens the menu itself raises deserve their next step, not a
             # generic input complaint the operator cannot act on.
-            remediation = remediation_message(str(error))
+            reason = str(error)
+            line = bounded_failure_line(reason)
             typer.echo(
-                f"{error}: {remediation}"
-                if remediation is not None
-                else "invalid_request: the ceremony input is invalid",
+                line if line != reason else "invalid_request: the ceremony input is invalid",
                 err=True,
             )
         except HumanCeremonyCliError as error:
@@ -128,10 +116,10 @@ def _run_ceremony(operation: Callable[[], Awaitable[object]]) -> None:
                     "internal_error: the confidential ceremony could not be completed", err=True
                 )
             else:
-                remediation = remediation_message(error.reason)
+                line = bounded_failure_line(error.reason)
                 typer.echo(
-                    f"{error.reason}: {remediation}"
-                    if remediation is not None
+                    line
+                    if line != error.reason
                     else "invalid_request: the ceremony input is invalid",
                     err=True,
                 )
@@ -139,7 +127,7 @@ def _run_ceremony(operation: Callable[[], Awaitable[object]]) -> None:
             if error.reason == "cancelled":
                 typer.echo("cancelled", err=True)
             else:
-                refusal = ceremony_refusal_message(error.reason)
+                refusal = ceremony_refusal_line(error.reason)
                 typer.echo(
                     refusal
                     or "service_unavailable: the confidential ceremony could not be completed",

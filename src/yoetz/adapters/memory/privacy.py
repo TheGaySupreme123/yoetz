@@ -798,6 +798,35 @@ class MemoryPrivacyAudit:
                 receipt_id=None if row.receipt is None else row.receipt.receipt_id,
             )
 
+    async def load_started_disclosure_attempt(self, request_id: str) -> PrivacyAuditState | None:
+        """Find one disclosure audit row by its physical request identity alone."""
+
+        if type(request_id) is not str:
+            raise TypeError("privacy_disclosure_attempt_lookup_invalid")
+        try:
+            validate_id(IdKind.REQUEST, request_id)
+        except ValueError as exc:
+            raise ValueError("privacy_disclosure_attempt_lookup_invalid") from exc
+        async with self._lock:
+            disclosure_rows = tuple(
+                row
+                for row in self._state.audit.values()
+                if row.reservation.request_id == request_id
+                and type(row.subject) is DisclosureProposal
+            )
+            if len(disclosure_rows) > 1:
+                raise ValueError("privacy_audit_attempt_ambiguous")
+            if not disclosure_rows:
+                return None
+            row = disclosure_rows[0]
+            return PrivacyAuditState(
+                row.reservation,
+                row.status,
+                row.authorization_id,
+                row.dispatch_id,
+                receipt_id=None if row.receipt is None else row.receipt.receipt_id,
+            )
+
     async def load_disclosure_proposal(self, proposal_id: str) -> DisclosureProposal | None:
         async with self._lock:
             row = self._state.audit.get(proposal_id)
@@ -1044,3 +1073,13 @@ class MemoryPrivacyAudit:
     async def complete_egress(self, dispatch_id: str, receipt: EgressReceipt) -> None:
         del dispatch_id, receipt
         raise ValueError("network_privacy_dispatch_unavailable_until_b8")
+
+    async def park_attempt_reconciliation(self, dispatch_id: str, receipt: EgressReceipt) -> None:
+        del dispatch_id, receipt
+        raise ValueError("network_privacy_dispatch_unavailable_until_b8")
+
+    async def reconcile_started_attempts(self, consumed_before: datetime, limit: int) -> int:
+        """No memory-adapter row reaches ``receipt_pending``: network dispatch never admits here."""
+
+        del consumed_before, limit
+        return 0

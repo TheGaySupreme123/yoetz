@@ -4,7 +4,62 @@ All notable user-visible changes to Yoetz are documented in this file. Format is
 project-native heading style that marks the pending version as unreleased above
 reverse-chronological released versions.
 
-## Unreleased
+## 0.3.0 — 2026-09-19
+
+Prepared public-alpha release candidate; publication remains gated by #785. See
+[release notes](docs/releases/v0.3.0.md) for changes and validation limits.
+
+### Added
+
+- Multiple agents can work in independent tasks within one repository. Parents can delegate
+  work, children can register for explicit acceptance, and lineage views and receipts retain
+  each child's findings, unfinished work, and observation gaps. Requesting a receipt does not
+  close a task or erase a child dependency (issues #494–#504, #509).
+- Projects group concurrent tasks and surface declared overlaps under each source workspace's
+  existing consent. The CLI supports project creation, membership changes, grouping opt-out and
+  opt-in, and generation-bound coordination grants. Retrying a project mutation recovers its
+  recorded operation without creating a second project or repeating a membership change
+  (issues #505–#508).
+
+### Changed
+
+- Updating from 0.2 preserves existing tasks, settings, permissions, and host registrations.
+  On ordinary service startup after unlock, supported task ledgers receive a verified backup
+  and automatic schema upgrade before new work is admitted. Interrupted upgrades resume from
+  recorded progress; failed verification keeps the service unavailable for writes and retains
+  recovery evidence (issue #496).
+- The 0.3 functionality uses additive control contracts and migrations while retaining the
+  released 0.2 schemas and migration bytes. Observation selection, runtime isolation, and
+  recovery improvements from 0.2 remain in effect.
+- Small status reads reuse immutable projection pages instead of replaying the ledger for
+  each query (#748). New Codex subscription review bindings default to a 15-minute budget
+  and allow explicit budgets up to one hour; existing explicit budgets remain unchanged (#750).
+- Linux sandbox readiness is documented as a fact of the client host, separately from the
+  semantic runtime evaluator; this adds no WSL or AppArmor acceptance claim (#765).
+- The Grok provider preset names grok-4.6 (#763).
+
+### Fixed
+
+- Busy starts recover their recorded route, and review-case construction resolves authenticated
+  captured evidence instead of substituting its description (#745).
+- Long AI-powered reviews retain execution leases and durable responses through client
+  disconnects and recovery, avoiding duplicate dispatch after a client timeout (#750).
+- Child lifecycle and native host correlation preserve parent dependencies and session-health
+  distinctions. Codex 0.153.4 multi-agent v2 child identity comes from the child's own rollout
+  metadata; token-usage and fractional-number handling no longer break stream reconciliation
+  (#752, #762). Native installed multi-agent acceptance remains open (#499, #507).
+- Consumed egress is reconciled after advice cancellation (#761); an invalid routine summary
+  no longer stops observation admission flushes (#764).
+- Every local CLI error has a recovery directive (#780). Failed transport sends receive the
+  retryable transport classification, and pending request futures are consumed on failure (#781).
+- Paired edits produce one advice finding, and verification baselines use a typed contract
+  (#782). Oversized hook payloads produce an explicit scoped coverage gap (#784).
+- Privacy receipt commands serialize datetimes and admit the local purpose on the control
+  wire, fixing #731 and #732 (#783).
+- The npm release verifier checks both the persistent install and subsequent delegation
+  (#777). The parent/worker capture test observes outbox drain between writes to avoid
+  counting runner-load overflow as a product regression (#775).
+- The release carries every 0.2.2 install fix, including the review follow-ups ported in #774.
 
 ## 0.2.2 — 2026-09-18
 
@@ -204,6 +259,14 @@ for host integration, observation selection and recovery, upgrade guidance, and 
   dogfood runs; ADR-026 records that exemption (issue #534).
 
 ### Added
+
+- ADR-027 ratifies task lineage and first-class project grouping: child tasks are own bundles with
+  catalog-held parent, depth, lineage digest, origin, acceptance, and work state; receipts roll
+  up one level by severity; `prj_` is the accepted project id. Coordination remains local
+  disclosure under each source workspace's consent, with a generation-bound coordination grant
+  for general or cross-repository work; the egress lattice is unchanged. `workspace_task_exists`
+  and only inventory-designated shared-mutable state are named for retirement, with replacement
+  invariants, in #496/#497. No wire, catalog, or admission change ships in this change (issue #494).
 
 - Agents can now set up or change semantic review through normal conversation. When a user
   explicitly wants semantic review, the agent recommends Expanded review first, explains the
@@ -665,7 +728,7 @@ and contained no usable Yoetz implementation.
 - First-party Codex **live observation and advice** as a required v0.1 capability (ADR-010
   amendment): dual-source ingest (hooks primary + selective session-stream reconciliation), local
   `ObservationPort` control (`yoetz observe status|grant|pause|resume|revoke|reconcile|drain|reclaim`), unified
-  `yoetz hooks observe`, project-level observation consent via private workspace commitment,
+  `yoetz hooks observe`, workspace-level observation consent via private workspace commitment,
   automatic session↔task attachment without depending on MCP `start`, descriptor-safe workspace
   inspection, approved-check runner, and deterministic `AdviceSnapshot` guidance (optional semantic
   review remains additive). Still exactly six MCP tools; observation is CLI/service control only.

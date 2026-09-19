@@ -265,6 +265,10 @@ _STRUCTURAL_KEYS: Final = frozenset(
         "bytes_touched",
         "tool_call_id",
         "parent_tool_call_id",
+        "lineage_child_task_id",
+        "lineage_child_session_id",
+        "lineage_child_writer_id",
+        "lineage_parent_task_id",
         "permission_kind",
         "decision_reason_code",
         "mapping_hint",
@@ -386,6 +390,7 @@ class ObservationGapCode(str, Enum):  # noqa: UP042 - exact durable wire enum
     CONSENT_REVOKED = "consent_revoked"
     SOURCE_LAG = "source_lag"
     MAPPING_MISSING = "mapping_missing"
+    MISSING_SUBAGENT_IDENTITY = "missing_subagent_identity"
     SESSION_SUPERSEDED = "session_superseded"
     OUTBOX_OVERFLOW = "outbox_overflow"
     OBSERVATION_INPUT_LOSS = "observation_input_loss"
@@ -399,6 +404,19 @@ class ObservationGapCode(str, Enum):  # noqa: UP042 - exact durable wire enum
     CONTENT_REDACTED = "content_redacted"
     ROUTINE_READ_SUMMARY_DETAIL_OMITTED = "routine_read_detail_omitted"
     ROUTINE_READ_SUMMARY_INVALID = "routine_read_summary_invalid"
+    # Distinct from ``routine_read_summary_invalid`` above, which describes a
+    # delivered summary envelope that materialization refused.  This one
+    # describes a summary that was never built: the admission flush refused one
+    # buffered lane, so its members were admitted individually instead of being
+    # represented by a bounded summary account (issue #753).
+    ROUTINE_SUMMARY_INVALID = "routine_summary_invalid"
+    # One host hook event whose body exceeded the fixed stdin ingress bound and
+    # was therefore never parsed. Distinct from ``truncated_payload``, which is
+    # a payload that was admitted and then clipped after parsing: nothing about
+    # this event is known beyond the hook name the host named on the command
+    # line, so no structural row, session, or path identity exists for it. The
+    # work itself still happened, and the gap is how coverage says so (#667).
+    PAYLOAD_TOO_LARGE = "payload_too_large"
     SELECTION_ROUTE_CHANGED = "selection_route_changed"
     POLICY_UNTRUSTED = "policy_untrusted"
     VERIFICATION_STALE = "verification_stale"

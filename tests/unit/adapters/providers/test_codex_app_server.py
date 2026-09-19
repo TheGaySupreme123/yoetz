@@ -2153,3 +2153,10 @@ def test_every_adapter_stage_token_is_a_registered_closed_stage() -> None:
         for acknowledged in (True, False)
     }
     assert unmapped == {"unclassified"}
+
+
+def test_explicit_long_review_budget_is_preserved_by_runtime_profile() -> None:
+    for seconds in (120, 900, 3600):
+        assert replace(_profile(), timeout_seconds=seconds).timeout_seconds == seconds
+    with pytest.raises(ValueError):
+        replace(_profile(), timeout_seconds=3601)

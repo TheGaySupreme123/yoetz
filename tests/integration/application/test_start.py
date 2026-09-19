@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 from collections.abc import AsyncIterator, Callable
@@ -477,27 +478,22 @@ async def test_historical_session_reattaches_after_same_pair_rotation() -> None:
     assert binding.session_id == resumed.session_id
 
 
-async def test_create_or_attach_drifted_pair_conflicts_until_explicit_create() -> None:
-    """A changed external_ref in an occupied workspace is not a silent new task (#431)."""
+async def test_create_or_attach_drifted_pair_creates_sibling_and_held_session_attaches() -> None:
+    """A drifted pair creates independent work; an explicit held session still attaches."""
 
     app, _, _, _ = start_composition()
     created = await execute_start(app, start_request(770, refs=True))
     drifted = start_request(771, refs=True).model_dump(mode="json", exclude_none=True)
     drifted["external_ref"] = "external-B"
-    with pytest.raises(PublicOperationError) as caught:
-        await execute_start(app, StartRequest.model_validate(drifted))
-    assert caught.value.code is PublicErrorCode.SESSION_CONFLICT
-    assert caught.value.safe_details == {"reason_code": "workspace_task_exists"}
-    assert created.task_id not in caught.value.message
-    assert created.session_id not in caught.value.message
-    assert created.writer_id not in caught.value.message
+    drifted_task = await execute_start(app, StartRequest.model_validate(drifted))
+    assert drifted_task.outcome == "created"
+    assert drifted_task.task_id != created.task_id
 
-    # The hook recovery path uses the selector it already holds locally; the
-    # selector-free public conflict contributes no task identity (#535).
+    # The hook recovery path uses the held session selector and still returns to the original
+    # task, even after an independent drifted pair has been admitted.
     recovery_wire = start_request(
         772, mode="attach", refs=True, session_id=created.session_id
     ).model_dump(mode="json", exclude_none=True)
-    recovery_wire["external_ref"] = "external-B"
     recovered = await execute_start(app, StartRequest.model_validate(recovery_wire))
     assert recovered.outcome == "attached"
     assert recovered.task_id == created.task_id
@@ -506,10 +502,10 @@ async def test_create_or_attach_drifted_pair_conflicts_until_explicit_create() -
     sibling_wire = start_request(773, mode="create", refs=True).model_dump(
         mode="json", exclude_none=True
     )
-    sibling_wire["external_ref"] = "external-B"
+    sibling_wire["external_ref"] = "external-C"
     sibling = await execute_start(app, StartRequest.model_validate(sibling_wire))
     assert sibling.outcome == "created"
-    assert sibling.task_id != created.task_id
+    assert sibling.task_id not in {created.task_id, drifted_task.task_id}
 
 
 async def test_hook_pair_then_guidance_pair_lands_on_the_auto_attached_task() -> None:
@@ -517,11 +513,10 @@ async def test_hook_pair_then_guidance_pair_lands_on_the_auto_attached_task() ->
 
     The observation hook auto-attaches with the canonical project root as ``workspace_ref``
     and ``<host>-session:<id>`` as ``external_ref``. An agent following the guidance uses
-    the same root with its own work-item ``external_ref``: that pair is a typed
-    ``workspace_task_exists`` conflict, and the session selector the SessionStart context
-    now carries attaches to the same task. A ``workspace_ref`` in another vocabulary (the
-    remote URL) is a different workspace commitment and silently creates a sibling, which is
-    why the guidance no longer offers it.
+    the same root with its own work-item ``external_ref`` and gets an independent sibling;
+    the explicit SessionStart session selector still attaches to the hook task. A
+    ``workspace_ref`` in another vocabulary (the remote URL) is a different workspace
+    commitment and creates another sibling.
     """
 
     app, _, _, _ = start_composition()
@@ -537,10 +532,9 @@ async def test_hook_pair_then_guidance_pair_lands_on_the_auto_attached_task() ->
     agent_wire = start_request(781, refs=True).model_dump(mode="json", exclude_none=True)
     agent_wire["workspace_ref"] = root
     agent_wire["external_ref"] = "claude/dogfood-issue-568"
-    with pytest.raises(PublicOperationError) as caught:
-        await execute_start(app, StartRequest.model_validate(agent_wire))
-    assert caught.value.code is PublicErrorCode.SESSION_CONFLICT
-    assert caught.value.safe_details == {"reason_code": "workspace_task_exists"}
+    guidance_task = await execute_start(app, StartRequest.model_validate(agent_wire))
+    assert guidance_task.outcome == "created"
+    assert guidance_task.task_id != hook_task.task_id
 
     attached = await execute_start(
         app, start_request(782, mode="attach", session_id=hook_task.session_id)
@@ -554,7 +548,7 @@ async def test_hook_pair_then_guidance_pair_lands_on_the_auto_attached_task() ->
     url_wire["external_ref"] = "claude/dogfood-issue-568"
     sibling = await execute_start(app, StartRequest.model_validate(url_wire))
     assert sibling.outcome == "created"
-    assert sibling.task_id != hook_task.task_id
+    assert sibling.task_id not in {hook_task.task_id, guidance_task.task_id}
 
 
 async def test_result_published_crash_resumes_pinned_object_and_releases_each_runtime() -> None:
@@ -578,6 +572,74 @@ async def test_result_published_crash_resumes_pinned_object_and_releases_each_ru
     assert runtime.provisions[-1].phase == "result_published"
     republished = runtime.start_result_refs(first_task)
     assert republished == published
+
+
+@pytest.mark.parametrize("milestone", list(StartMilestone))
+async def test_busy_after_each_start_milestone_yields_for_immediate_exact_replay(
+    milestone: StartMilestone, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, runtime, _clock, _catalog = start_composition()
+    request = start_request(7440)
+    verify = runtime.verify_start
+    failed = False
+
+    async def busy_once(
+        task: TaskRuntime, expectation: StartMilestoneExpectation
+    ) -> StartCompletionEvidence:
+        nonlocal failed
+        result = await verify(task, expectation)
+        if expectation.milestone is milestone and not failed:
+            failed = True
+            raise PublicOperationError(PublicErrorCode.BUNDLE_BUSY, "Busy", True)
+        return result
+
+    monkeypatch.setattr(runtime, "verify_start", busy_once)
+    with pytest.raises(PublicOperationError) as busy:
+        await execute_start(app, request)
+    assert busy.value.safe_details == {
+        "reason_code": "start_busy_retry_ready",
+        "continuation": "start_busy_retry_ready",
+    }
+    original = runtime.provisions[0]
+    recovered = await execute_start(app, request)
+    assert recovered.task_id == original.task_id
+    assert recovered.session_id == original.session_id
+    assert recovered.writer_id == original.writer_id
+    assert recovered.frontier.sequence == "1"
+    assert await execute_start(app, request) == recovered
+    assert len(runtime.start_result_refs(recovered.task_id)) == 1
+
+
+async def test_cancelled_provision_keeps_live_lease_until_expiry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, runtime, clock, _catalog = start_composition()
+    request = start_request(7441)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    provision = runtime.provision_start
+
+    async def blocked(command: BundleProvisionCommand) -> TaskRuntime:
+        entered.set()
+        await release.wait()
+        return await provision(command)
+
+    monkeypatch.setattr(runtime, "provision_start", blocked)
+    attempt = asyncio.create_task(execute_start(app, request))
+    await asyncio.wait_for(entered.wait(), 5)
+    attempt.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await attempt
+    with pytest.raises(PublicOperationError) as pending:
+        await execute_start(app, request)
+    assert pending.value.safe_details == {
+        "reason_code": "start_lease_pending",
+        "continuation": "start_lease_wait",
+    }
+    clock.advance(61)
+    release.set()
+    recovered = await execute_start(app, request)
+    assert recovered.frontier.sequence == "1"
 
 
 async def test_sqlite_and_encrypted_files_resume_exact_catalog_pinned_object(

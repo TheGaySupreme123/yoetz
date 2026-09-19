@@ -1,7 +1,9 @@
 # ADR-022 — Harness observation writer identity and observation-tolerant optimistic concurrency
 
 **Status:** Accepted (2026-08-13), recorded for issues #214–#223 and acknowledged in issue #225.
-**Amended:** 2026-09-04 for issue #577 (pending observation rows follow a superseded session
+**Amended:** 2026-09-05 for issue #494 / ADR-027 (observation writer stays per task/session;
+only inventory-designated shared-mutable workspace routing or verification-job scheduling authority
+may become project-scoped once multiple live tasks share a repository); 2026-09-04 for issue #577 (pending observation rows follow a superseded session
 binding after ended-session recovery attach); 2026-09-04 for issue #560 (task-scoped operation identity across workflow
 reattach, decision 18); 2026-09-03 for issues #539 (content-bearing committed replay) and #540
 (terminal ingest rejection and retry ceiling); 2026-08-30 for issue #302 (captured observation ledger
@@ -28,7 +30,7 @@ selection fence.
 `src/yoetz/adapters/integrations/observation_local.py`.
 **Relates to:** ADR-009, ADR-010, ADR-020, and
 issues #214, #216, #217, #223, #224, #225, #226, #227, #244, #302, #320, #322, #326, #331,
-#445, #539, #540, #560, #577, and #607.
+#445, #494, #539, #540, #560, #577, and #607.
 
 **Proposed amendment for issue #231:** `provider_not_ready` remains bounded local advice, but the
 observation coordinator does not materialize it as an agent-facing finding. Provider readiness is a
@@ -122,6 +124,13 @@ unsupported claims and unbounded duplicate findings.
    event. Once a readable finding for that condition exists, later evidence-window or frontier
    changes do not append another `finding_recorded` event. The current observation snapshot and
    coverage/gap state retain the changing evidence context without growing the durable finding set.
+   A rule whose cause is one host tool call keys its detail token on the logical call, never on the
+   observed phase or event position: the `PreToolUse` and `PostToolUse` phases of one edit are one
+   condition. The key is fenced by source, session commitment, source generation, and the admitted
+   `correlation_id`/`tool_call_id`, falling back to the envelope's source identity so a post-only
+   profile still reports its one observed phase without a fabricated pre-event. Two tool calls
+   remain two conditions, a call id reused across a source, session, or generation boundary never
+   coalesces, and both phases stay in the evidence refs (issue #680).
 
 8. `provenance_disputed` is the fourth `ResponseDisposition`. It records that the responder
    contests the finding's authorship or provenance premise, requires a non-empty reason, and may
@@ -144,6 +153,19 @@ unsupported claims and unbounded duplicate findings.
     individual. The materializer accepts an explicit summary account and does not silently
     coalesce an individual delivery again. Detailed mode retains individual routine records
     within the same content and disclosure authority.
+    Routine reads are never promoted to checks, and deterministic observation advice moves its
+    verification baseline only on typed check evidence: a current `passed` approved-check fact, or
+    an explicit success reported by a dedicated verification tool whose tool identity names the
+    check (`test`, `pytest`, `cargo_test`, `npm_test`, `uv_run_pytest`). A successful generic host
+    shell (`shell`, `Bash`, `bash`) proves that the tool returned, not that anything was verified,
+    so it neither establishes a baseline, nor carries one past a later edit, nor supports a
+    completion claim or a live-wire claim. Check identity is never inferred from command text or
+    from a host-supplied `action` label, and a non-current, failed, stale or unknown check fact
+    establishes no baseline. Consequently `edit_after_successful_check` reports staleness only
+    against a real check: a session that never ran one is covered by
+    `completion_without_verification` and by the check coverage vector instead (issue #681). The
+    failed and unresolved-command rules still read every command-bearing tool, including generic
+    shells: narrowing what proves a check does not narrow what reports an outcome.
 
 11. Every newly accepted observation-authored append records one bounded pending frontier-motion
     notice for the originating Codex session. A retry of a completed append whose local notice
@@ -345,13 +367,77 @@ unsupported claims and unbounded duplicate findings.
 same-host predecessor mapping for that task in the same pass it stores the successor mapping. The
 shared hook recovery path takes a nonblocking workspace reservation and ordered locks for every
 eligible ended same-host session through full candidate revalidation, the service RPC, authorized
-rewrites, and pruning; contention or changed state falls back to the ordinary request. A
+rewrites, and pruning; contention or changed state returns the closed `auto_attach_recovery_busy`
+boundary rather than issuing ordinary new admission while the selector is unstable. A
     row refused only because its route was retired is never `ledger_rejected`; a superseded payload
     that cannot be followed (missing or mismatched task/session/writer ids, a hop cycle, or a
     rotation after the route already opened) quarantines that row as `session_superseded`. That
     reason is not `mapping_missing`, so ended-unmapped drain terminalization and the status rule
     that hides `mapping_missing` while a mapping file exists cannot mislabel a mapped retirement.
     `ledger_rejected` remains the terminal class for content and identity refusals.
+
+20. Selected native Codex captured evidence is resolved before semantic case construction
+    (issue #509). The application reads through the mapped task's observation and authenticated
+    object ports; the pure packet builder receives only immutable, frontier-bound resolution
+    values. A captured-object description is structural provenance, never a substitute for the
+    captured bytes. Without successful resolution the packet contains an explicit omission.
+
+    Resolution requires active local workspace observation consent, a capture timestamp within
+    that grant, a native `codex_hook` envelope, the exact task-derived evidence identity, matching
+    source commitment and correlation, complete multipart manifests, and authenticated content
+    whose task, kind, media type, digest, byte count and part metadata match. Every member of a
+    selected multipart group must authenticate. Current evidence redaction/unavailability wins
+    over retained object bytes. SQLite reconstructs descriptors for current referenced native
+    captures from the matching task-owned manifest and present object inventory before freezing
+    availability. That reconstruction does not assert physical availability: the ledger still
+    authenticates the object, and absent or deleted bytes remain unavailable. It repairs the
+    composed failure where recovery restored event payload descriptors but omitted independently
+    inventoried native captures.
+
+    Revocation, pause or a changed consent record while resolving
+    withholds the result. No new consent, profile or source authority is inferred from selection.
+
+    Input, locator, session-stream and message content are excluded before object reads. This
+    compatible 0.3 repair supports native Codex source/diff/tool-output objects; Claude and Cursor
+    captured objects remain explicitly unselected. It introduces no capture ticket or two-phase
+    transport protocol. Capture and outbound disclosure remain independent: the existing selected
+    review profile and privacy coordinator still authorize the exact provider case after local
+    resolution, and source consent is rechecked around resolution.
+
+    Reads are bounded to 64 candidate/object identities and 256 recent task-owned envelopes.
+    Each decoded part must fit both the review selection's byte limit and the resolver's 4096-byte native excerpt limit (below the shared semantic item ceiling); authenticated wrappers have a 10240-byte ceiling. The packet also enforces the
+    configured excerpt count and aggregate byte limits. Old, oversized, unavailable or excluded
+    items retain their own omissions and coverage gaps without vetoing valid neighbors. A missing
+    member cannot be reconstructed from another source or a later successful drain.
+
+    The state bound is the frozen captured snapshot identity and its present availability. It does
+    not establish that a source read still matches the current working file; native excerpts keep
+    `subject_state_relation=unknown` unless an independently recorded stronger relation exists.
+    Packet omissions propagate into the final check and receipt. Local fixture execution, native
+    hook execution, retained content, selected provider input, semantic result and follow-through
+    remain separate acceptance facts.
+
+## Amendment — multi-task workspace observation home (2026-09-05, issue #494 / ADR-027)
+
+Decision 1 is unchanged: the observation writer remains a pure function of task and session.
+Decision 14 is unchanged: a mapped session's advice snapshot is constructed from that session's
+own retained envelopes and is never silently fed a workspace-wide aggregate.
+
+ADR-027's bounded reversal of the #250/#352 no-cross-task-state posture does not create a shared
+writable ledger and does not let workspace-wide observation become a silent input to another
+task's advice snapshot. The #498 ownership inventory must classify each table before #496 moves
+anything. Only inventory-designated shared-mutable workspace routing may move to a catalog or
+project home; task-owned provenance remains in its task bundle. In the expected `0004` inventory,
+`observation_workspace_session_routes` is one expected shared-mutable candidate. The
+`observation_verification_jobs` per-workspace running-job uniqueness in `0003` is a separate
+expected scheduling-authority candidate. Job results, `observation_inspection_snapshots`, and
+`observation_session_advice` remain task-owned unless the inventory proves otherwise. In the dated
+Increment-A design, `workspace_task_exists` kept the store single-task-safe until the #497 decision
+table was ready. The current 0.3 candidate implements that replacement on automatic
+`create_or_attach`: validated ended-session bindings may recover a task, while explicit
+`mode=create` still reports the conflict for an identical identity pair. Recovery and migration
+compatibility follow ADR-003 and the storage/recovery runbooks; native host capability evidence and
+limits remain in the host integration runbooks.
 
 20. Workspace recovery and host lifecycle mutation share a nonblocking workspace reservation and
     ordered per-session locks. The recovery snapshot is revalidated against every eligible

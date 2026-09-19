@@ -24,15 +24,14 @@ from yoetz.application.observation_drain import ObservationOutboxSweeper
 from yoetz.cli import observe_hooks as observe_hooks_module
 from yoetz.cli.observe_hooks import ServiceConnector, handle_observe
 from yoetz.domain.observation import (
+    ObservationGapCode,
     ObservationIngestDisposition,
     ObservationIngestRequest,
     ObservationIngestResult,
     ObservationSource,
     observation_ingest_result_to_json,
 )
-from yoetz.protocol.errors import PublicErrorCode
-from yoetz.protocol.ids import IdKind, new_id
-from yoetz.protocol.models import OperationFailureModel, StartRequest
+from yoetz.protocol.models import StartRequest
 
 _START_IDS = {
     "task_id": "tsk_1b4e28ba-2fa1-4d3b-8f0a-0c1d2e3f4a5b",
@@ -71,25 +70,10 @@ class _RecoveryBarrierClient:
         assert isinstance(request, StartRequest)
         self.requests.append(request)
         self._start_count += 1
-        if self._start_count == 1:
-            assert request.mode == "create_or_attach"
-            self.rpc_started.set()
-            await asyncio.to_thread(self.release.wait, 5)
-            return OperationFailureModel.model_validate(
-                {
-                    "protocol_version": "0.1",
-                    "schema_version": "1.0.0",
-                    "ok": False,
-                    "error": {
-                        "code": PublicErrorCode.SESSION_CONFLICT.value,
-                        "message": "workspace occupied",
-                        "retryable": False,
-                        "correlation_id": new_id(IdKind.CORRELATION),
-                        "safe_details": {"reason_code": "workspace_task_exists"},
-                    },
-                }
-            )
+        assert self._start_count == 1
         assert request.mode == "attach"
+        self.rpc_started.set()
+        await asyncio.to_thread(self.release.wait, 5)
         return SimpleNamespace(
             ok=True,
             frontier=SimpleNamespace(sequence="4", head_digest="sha256:" + "b" * 64),
@@ -235,6 +219,47 @@ def _pending_intent(
         ),
     )
     return intents[0]
+
+
+@pytest.mark.parametrize("event_name", ("SessionStart", "SessionEnd"))
+def test_full_deferred_lifecycle_queue_retains_a_session_scoped_gap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, event_name: str
+) -> None:
+    state, workspace_dir, store, workspace = _workspace_and_store(tmp_path)
+    session_id = "codex-lifecycle-overflow"
+    commitment = store.bind_codex_session(workspace, session_id)
+    sibling = store.bind_codex_session(workspace, "codex-other-lane")
+
+    def full_queue(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr(LocalObservationStore, "record_pending_session_lifecycle", full_queue)
+
+    with acquire_session_lock(session_id, _state=state) as owned:
+        assert owned
+        assert (
+            handle_observe(
+                event_name=event_name,
+                stdin_bytes=_payload(session_id, event_name),
+                stdout=io.BytesIO(),
+                workspace=str(workspace_dir),
+                skip_service=True,
+                _state=state,
+            )
+            == 0
+        )
+    restored = LocalObservationStore(_state=state)
+    assert ObservationGapCode.OUTBOX_OVERFLOW.value in restored.session_gap_codes(
+        workspace, commitment
+    )
+    assert ObservationGapCode.OUTBOX_OVERFLOW.value not in restored.session_gap_codes(
+        workspace, sibling
+    )
+    own_envelopes = [
+        item for item in restored.list_envelopes(workspace) if item.session_commitment == commitment
+    ]
+    assert own_envelopes
+    assert ObservationGapCode.OUTBOX_OVERFLOW.value in own_envelopes[-1].gap_codes
 
 
 @pytest.mark.parametrize(

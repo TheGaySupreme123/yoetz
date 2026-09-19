@@ -25,8 +25,11 @@ use that manager's upgrade procedure and then return to the guide. A failed or t
 command is reported without claiming success; inspect the installed version before retrying.
 
 Start the fresh launcher and run `yoetz upgrade` again, with the same host target options. Do not
-repeat `--accept` just to continue. Package replacement does not itself refresh host files or
-migrate existing data:
+repeat `--accept` just to continue. Package replacement does not itself refresh host files. When
+the package and the existing data are a supported pair, the first controlled service startup
+performs the backup-first data upgrade before the service becomes ready. It preserves existing
+tasks, settings, permissions, host integrations, observation consent, and recorded history; there
+is no per-task migration ceremony:
 
 - **Codex:** refresh the existing skill and inspect the exact plugin activation and MCP target.
   Apply only the fresh preview supplied by those surfaces, preserving its route and home.
@@ -34,13 +37,17 @@ migrate existing data:
   with the same request and digest, then reload or start a fresh session.
 - **Cursor:** use the native replacement preview and install procedure, then fully relaunch when
   runtime status requires it. Portable/development carriers use their original install procedure.
-- **Existing data:** when migration is required, use its backup-first preview and approve the exact
-  plan. Restarting the service alone does not migrate a task bundle.
+- **Existing data:** the service handles a compatible 0.2-to-0.3 bundle upgrade during startup and
+  verifies the result before accepting new work. A recoverable interruption resumes the recorded
+  operation at the next unlocked startup. A newer schema, an unrecognized older layout, or a
+  failed integrity check stays unavailable and points to the supported recovery procedure.
+  Do not edit the database or retry with a new migration identity.
 
 The agent should verify the package version, service identity, selected host artifact/runtime
-status, and any migration receipt before saying the upgrade is complete. Host trust prompts and
-migration approval remain explicit. The guide automates the package step; the remaining stages are
-supported continuations for the agent or operator, not automatically executed actions.
+status, and the completed data-upgrade result before saying the upgrade is complete. Host trust
+prompts and any explicit backup, restore, or manual migration remain separate reviewed actions. The
+guide automates the package step and compatible startup migration; host refresh and activation are
+still separate actions with their own exact target and evidence.
 
 ## Release notices and new settings
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 from collections.abc import Buffer, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -12,6 +13,7 @@ import pytest
 
 import yoetz.service.daemon as daemon_module
 from builders.privacy_policies import INSTALLATION_ID, local_only_policy
+from yoetz.adapters.control.unix_socket import LocalControlTransportError
 from yoetz.adapters.privacy.catalog import encode_privacy_policy_json
 from yoetz.application.observation_drain import ObservationDrainSummary
 from yoetz.application.publish_work import PublishWorkInternalResult
@@ -225,6 +227,7 @@ class _Application:
         self.publish_response_store_error: PublicOperationError | None = None
         self.privacy_setup_contexts: list[RepositoryPrivacyContext | None] = []
         self.observation_requests: list[JsonObject] = []
+        self.check_requests: list[CheckRequest] = []
 
     async def start(
         self,
@@ -260,6 +263,7 @@ class _Application:
     ) -> JsonObject:
         del route_profile, repository_privacy_context
         assert isinstance(request, CheckRequest)
+        self.check_requests.append(request)
         await asyncio.sleep(0)
         # Unprojected stand-in only. Projection is forced to fail in the dedicated correlation
         # tests before any public CheckResult is required.
@@ -1480,6 +1484,38 @@ async def test_connected_control_session_carries_trusted_presentation_to_daemon_
 
 
 @pytest.mark.anyio
+async def test_connected_service_client_accepts_coordination_check_pack() -> None:
+    """A current coordination check survives the real client and control-wire path."""
+
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+    client_stream, server_stream = _connected_control_pair()
+    server_task = asyncio.create_task(daemon._serve_control_connection(server_stream))  # pyright: ignore[reportPrivateUsage]
+    service_client = None
+    try:
+        session = await client_handshake(client_stream, ControlClientKind.CLI, "0.3.0")
+        service_client = _connected_client(  # pyright: ignore[reportPrivateUsage]
+            client_stream,  # pyright: ignore[reportArgumentType]
+            session,
+            ControlClientKind.CLI,
+        )
+        application.projection_error = RuntimeError("test_projection_failure")
+        request = _check_body().model_copy(update={"policy_packs": ("coordination/0.1.0",)})
+
+        with pytest.raises(ControlError) as caught:
+            await service_client.check(request, deadline_ms=3_000)
+
+        assert caught.value.reason == "response_projection_failed"
+        assert application.check_requests == [request]
+    finally:
+        if service_client is not None:
+            await service_client.close()
+        server_task.cancel()
+        await asyncio.gather(server_task, return_exceptions=True)
+        await daemon.close()
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("source", "session_id", "mapping_version", "structural_payload"),
     [
@@ -2339,6 +2375,75 @@ async def test_ready_maintenance_sweeps_immediately_repeats_and_cancels_before_c
     await asyncio.sleep(0.03)
     assert events.count("sweep") == count_after_lock
     assert events.index("application_close") < events.index("vault_lock")
+    await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_ready_maintenance_recovers_lineage_before_and_during_observation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[str] = []
+    recovered_twice = asyncio.Event()
+
+    class Application(_Application):
+        observation_sweep: object
+        recovery_calls = 0
+
+        async def recover_lineage(self) -> object:
+            events.append("recovery")
+            self.recovery_calls += 1
+            if self.recovery_calls >= 2:
+                recovered_twice.set()
+            return (), ()
+
+    application = Application()
+
+    async def sweep() -> ObservationDrainSummary:
+        events.append("sweep")
+        return ObservationDrainSummary(
+            attempted=0,
+            acknowledged=0,
+            retry_pending=0,
+            quarantined=0,
+            reasons=(),
+        )
+
+    application.observation_sweep = sweep
+    vault = _Vault()
+    vault.ready = False
+    lifecycle = ServiceLifecycle(
+        _Clock(),
+        generation_store=_GenerationStore(),
+        process_start_identity_commitment="sha256:" + "2" * 64,
+        instance_id=_INSTANCE_ID,
+        singleton_lock_path=tmp_path / "service.lock",
+    )
+
+    async def factory(_service_generation: int, _vault_generation: int) -> _Application:
+        return application
+
+    daemon = ServiceDaemon(
+        _composition=ServiceComposition(
+            lifecycle=lifecycle,
+            control_listener=_Listener(),  # pyright: ignore[reportArgumentType]
+            secret_ingress_listener=None,
+            human_control_listener=None,
+            human_control_service=None,
+            session_monitor=None,
+            vault=vault,
+            ready_application_factory=factory,
+        )
+    )
+    monkeypatch.setattr(daemon_module, "_OBSERVATION_SWEEP_INTERVAL_SECONDS", 0.01)
+    await daemon.start()
+    await daemon.composition.lifecycle.transition(ServiceState.UNLOCKING)
+    vault.ready = True
+    await daemon.activate_ready_application(7, 3)
+
+    await asyncio.wait_for(recovered_twice.wait(), timeout=1)
+    assert events[0] == "recovery"
+    assert events.index("sweep") > events.index("recovery")
+    await daemon.lock()
     await daemon.close()
 
 
@@ -3215,3 +3320,138 @@ async def test_recommendation_deadline_includes_maintenance_gate_wait(
     finally:
         composition.maintenance_gate.release()
         await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_connected_check_wait_timeout_and_disconnect_preserve_admitted_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real client timeout must not send control cancellation for a long semantic check."""
+
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+    entered, release, finished, cancelled = (
+        asyncio.Event(),
+        asyncio.Event(),
+        asyncio.Event(),
+        asyncio.Event(),
+    )
+    original = application.check
+
+    async def held_check(*args: object, **kwargs: object) -> object:
+        entered.set()
+        try:
+            await release.wait()
+            return await original(*args, **kwargs)  # pyright: ignore[reportArgumentType]
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        finally:
+            finished.set()
+
+    async def project_completed(*_args: object, **_kwargs: object) -> object:
+        # This harness intentionally supplies no public CheckResult; exercise transport lifetime
+        # without treating its unprojected stand-in as a projection regression.
+        return JsonObject({"ok": True})
+
+    monkeypatch.setattr(application, "check", held_check)
+    monkeypatch.setattr(daemon, "_project_completed_response", project_completed)
+    client_stream, server_stream = _connected_control_pair()
+    server_task = asyncio.create_task(daemon._serve_control_connection(server_stream))  # pyright: ignore[reportPrivateUsage]
+    service_client = None
+    try:
+        session = await client_handshake(client_stream, ControlClientKind.CLI, "0.3.0")
+        service_client = _connected_client(client_stream, session, ControlClientKind.CLI)  # pyright: ignore[reportArgumentType]
+        request = _check_body().model_copy(update={"mode": "semantic_required"})
+        with pytest.raises(ControlError) as timeout:
+            await service_client.check(request, deadline_ms=50)
+        assert timeout.value.reason == "request_timeout"
+        assert entered.is_set() and not cancelled.is_set()
+        await service_client.close()
+        server_task.cancel()
+        await asyncio.gather(server_task, return_exceptions=True)
+        assert not cancelled.is_set()
+        release.set()
+        await finished.wait()
+        assert application.check_requests == [request]
+        assert not cancelled.is_set()
+    finally:
+        release.set()
+        if service_client is not None:
+            await service_client.close()
+        server_task.cancel()
+        await asyncio.gather(server_task, return_exceptions=True)
+        await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_failed_response_write_is_a_recorded_transport_fact_not_frame_invalid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #678: the same write wrapper serves the daemon, so the same mislabelling was here.
+
+    A peer that stops reading between dispatch and delivery is a transport fact about one
+    connection. The daemon records the bounded reason, ends that call, and leaves no exception
+    for the loop to report; the operation itself already ran.
+    """
+
+    import yoetz.observability.diagnostics as diagnostics
+
+    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
+    recorded: list[tuple[str, str, str, str]] = []
+    written = asyncio.Event()
+    record_bounded = daemon_module.record_bounded_event_without_raising
+
+    def capture(
+        *, component: str, operation: str, reason: str, request_id: str | None = None
+    ) -> str:
+        correlation_id = record_bounded(
+            component=component, operation=operation, reason=reason, request_id=request_id
+        )
+        recorded.append((component, operation, reason, correlation_id))
+        written.set()
+        return correlation_id
+
+    monkeypatch.setattr(daemon_module, "record_bounded_event_without_raising", capture)
+
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+    client, server = _connected_control_pair()
+    loop = asyncio.get_running_loop()
+    contexts: list[dict[str, object]] = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: contexts.append(context))
+    server_task = asyncio.create_task(daemon._serve_control_connection(server))  # pyright: ignore[reportPrivateUsage]
+    try:
+        session = await client_handshake(client, ControlClientKind.CLI, "0.3.0")
+
+        async def refuse(data: Buffer) -> None:
+            del data
+            raise LocalControlTransportError("connection_failed")
+
+        # The peer is gone only after its handshake was answered, so the failing write is the
+        # response to a request the daemon already dispatched.
+        monkeypatch.setattr(server, "send_all", refuse)
+        request = _request(daemon, ControlMethod.START, _start_body())
+        session.admit(request)
+        await write_control_frame(client, request)
+        async with asyncio.timeout(5):
+            await written.wait()
+    finally:
+        server_task.cancel()
+        await asyncio.gather(server_task, return_exceptions=True)
+        await daemon.close()
+        gc.collect()
+        loop.set_exception_handler(previous)
+
+    assert application.start_calls == 1
+    assert len(recorded) == 1
+    component, operation, reason, correlation_id = recorded[0]
+    assert (component, operation, reason) == (
+        "service.daemon",
+        "control_response_write",
+        "connection_failed",
+    )
+    found = lookup_diagnostic_records(correlation_id, root=tmp_path)
+    assert [entry["reason"] for entry in found] == ["connection_failed"]
+    assert [context.get("message") for context in contexts] == []

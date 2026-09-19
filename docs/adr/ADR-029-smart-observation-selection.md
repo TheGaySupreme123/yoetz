@@ -4,7 +4,7 @@
 draft PR on 2026-09-10. Product direction is acknowledged; measured performance acceptance and
 the larger-profile rollout remain review decisions on that issue.
 
-**Relates to:** ADR-009, ADR-010, ADR-014, ADR-016, ADR-022, and issue #687.
+**Relates to:** ADR-009, ADR-010, ADR-014, ADR-016, ADR-022, and issues #687 and #753.
 
 ## Context
 
@@ -48,6 +48,17 @@ Its durable identity binds every represented input identity and source position.
 the actual represented inputs and completed calls; they are not estimates of discarded traffic.
 Summaries cannot cross workspace, routed task/session/writer, host session, delegate, source,
 source generation, consent generation, restart, or material subject-state boundaries.
+
+One definition decides whether a routine read succeeded. The classifier resolves it from the host
+payload and records that decision on the envelope; a later caller re-derives the same state from
+the fields the envelope retains rather than applying a second, stricter rule to a lossy copy of
+them. Where the two disagreed, the buffer admitted an input the summary then refused (issue #753).
+
+Refusing to summarize a buffered lane is an accounting loss for that lane alone. Its members are
+still accepted observations: they are admitted individually with the durable
+`routine_summary_invalid` coverage gap, the remaining lanes commit, and the buffer drains. The
+workspace retains one bounded, deduplicated account of the refused lane so the cause is named
+once. An invariant failure while summarizing must never stop ingestion for the session.
 
 The pending representation and source cursor commit together. A replayable input cannot advance
 past an input for which neither an individual record nor its summary account is durable.

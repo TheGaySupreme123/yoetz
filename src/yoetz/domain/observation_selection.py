@@ -586,6 +586,33 @@ def is_routine_read_candidate(payload: Mapping[str, CanonicalJsonValue]) -> bool
     return _routine_facts(payload).candidate
 
 
+def envelope_outcome_state(
+    structural_payload: Mapping[str, CanonicalJsonValue], event_kind: str
+) -> str | None:
+    """Resolve an already-built envelope's outcome with the classifier's rules.
+
+    ``classify_observation`` reduces the host payload — its nested result
+    carriers and the native post-hook fallback included — to one outcome state,
+    and the ingress records that decision on the envelope.  An envelope keeps
+    only the allowlisted structural copy of that payload, so a second,
+    independent re-derivation over those fields disagreed with the classifier
+    for every Codex-shaped post and wedged the admission flush (issue #753).
+
+    This is the one definition for a caller that holds an envelope rather than a
+    host payload: the same reducer, applied to the fields the envelope actually
+    carries, with the recorded ``hook_name`` standing in for the host's own
+    ``hook_event_name`` echo so the native post fallback resolves identically.
+    A stream envelope records no ``hook_name`` and therefore keeps needing an
+    explicit outcome fact, exactly as its own classification did.
+    """
+
+    payload = dict(structural_payload)
+    hook_name = payload.get("hook_name")
+    if type(hook_name) is str and "hook_event_name" not in payload:
+        payload["hook_event_name"] = hook_name
+    return _classification_outcome(payload, event_kind).state
+
+
 __all__ = [
     "OBSERVATION_CLASSIFICATION_VERSION",
     "OBSERVATION_SELECTION_VERSION",
@@ -597,5 +624,6 @@ __all__ = [
     "ROUTINE_READ_TOOLS",
     "SHELL_TOOLS",
     "classify_observation",
+    "envelope_outcome_state",
     "is_routine_read_candidate",
 ]

@@ -609,3 +609,38 @@ async def test_expired_resumed_attempt_preserves_dispatch_uncertainty(
     recovered = await evaluator(FrozenCase(frozen.case, result.operation_lease), (), runtime)
     assert recovered.reason is SemanticReason.RECEIPT_PERSISTENCE_UNKNOWN
     assert getattr(privacy, "calls") == calls
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "adapter_factory", (memory_adapter, sqlite_adapter), ids=("memory", "sqlite")
+)
+@pytest.mark.parametrize("budget", (900, 3600))
+async def test_long_execution_budget_reaches_dispatch_without_five_minute_clamp(
+    adapter_factory: Callable[[object], MemoryLedgerAdapter | SqliteLedger], budget: int
+) -> None:
+    clock = _MovingClock()
+    adapter = adapter_factory(append_command())
+    adapter._clock = clock  # pyright: ignore[reportPrivateUsage]
+    frozen, runtime = await _durable_semantic_case(adapter)
+
+    class LongPrivacy(_PairedPrivacy):
+        async def evaluate_semantic(self, candidate: object, deadline: object) -> object:
+            assert type(deadline) is Deadline
+            assert deadline.remaining_seconds(clock.monotonic_seconds()) == float(budget)
+            clock.elapsed += budget * 0.75
+            return await super().evaluate_semantic(candidate, deadline)
+
+    privacy = LongPrivacy(task_id=runtime.task_id)
+    result = await _paired_evaluator(
+        privacy,
+        runtime,
+        clock=clock,
+        primary_binding=_FALLBACK,
+        fallback_binding=None,
+        primary_timeout=budget,
+        primary_retries=0,
+    )(frozen, (), runtime)
+    assert result.status is SemanticStatus.SUCCEEDED
+    assert cast(int, getattr(privacy, "calls")) == 1
+    assert _accounting(result).attempted_count == 1

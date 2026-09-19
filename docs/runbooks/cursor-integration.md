@@ -58,6 +58,13 @@ configuration root and project.
 
 ## Proof facets are independent
 
+Explicit attach uses the same service contention repair as other hosts (#744): retry-ready
+start reasons retain the operation and release its lease for an identical-request replay.
+`start_lease_pending` retains a live owner and calls for waiting up to 60 seconds before replay.
+Cursor's canonical JSON text preserves the same code, reason, and service message as structured
+output. A first start needs no invented session/writer IDs to retry. Hook deadlines and existing
+structural-only observation scope are unchanged; shared service tests are not native Cursor proof.
+
 Record these separately: Yoetz source and wheel identity; rendered artifact; installed bytes;
 Cursor product/SDK/bridge identity; plugin source; discovery; activation; skill delivery; MCP owner;
 MCP binding; raw MCP runtime; model-visible tools; correlated model-controlled use; hook capability;
@@ -420,6 +427,14 @@ as active.
 
 ## Multitask delegation after an outage
 
+The #499 lifecycle repair applies to cooperative Cursor children: activity renews session health,
+abandonment is durably service-stamped, and an unused expired handle leaves an abandoned
+reservation. The #507 native start-callback correlation bridge is Codex-only and does not change
+Cursor's unsupported native-subagent decision or earn a capability cell. The #754 multi-agent v2
+child identity source is Codex-only on the same boundary: it reads a Codex rollout `session_meta`
+header, and Cursor has no session-stream family of its own, so its native-subagent decision and
+capability cell are unchanged.
+
 Cursor subagents inherit the parent's MCP tools, so delegated workers reach the same `yoetz`
 bridge process. The bridge latches the first availability failure of that binding
 (`service_unavailable`, `service_incompatible`, `protocol_mismatch`, `endpoint_unsafe`,
@@ -477,6 +492,16 @@ intent close before the bounded service drain; advice-bearing events remain sync
 `additional_context` stays on the current hook response. Legacy edit/MCP hooks keep their existing
 output behavior, and automatic Stop follow-up messages remain disabled. Hook success never
 substitutes for an explicit command/test exit fact.
+Stale-verification advice is scoped to the logical tool call rather than the observed phase, so a
+`preToolUse`/`postToolUse` pair carrying one call identity reports one
+`edit_after_successful_check` finding with both phases as evidence. The reviewed post-only
+structural profile is unchanged and still reports one finding for its one observed phase; Yoetz
+does not fabricate a pre-event to complete a pair (issue #680).
+Built-in shell success is a host outcome, never a check: deterministic advice moves its
+verification baseline only on a current `passed` approved-check fact or an explicit success from a
+dedicated verification tool, and never on a routine read (issue #681). This host adds no reviewed
+check signal of its own, so a Cursor session with no approved check keeps
+`completion_without_verification` instead of inheriting a baseline from a successful command.
 For ordinary MCP tool events, `tool_output` contains tool-domain data. Only the outer MCP
 `isError`/`is_error` signal contributes execution status; nested `status`, `outcome`, `success`,
 and exit-like fields do not describe the host execution. Built-in shell outcomes retain their
@@ -531,6 +556,27 @@ delivery, accepted content, AI-powered review selection, and influence.
 Native AI-powered review selection uses the accepted tool event's durable session route and does not
 require an approved-check policy. Local capture consent and repository disclosure permission
 remain separate requirements.
+
+### Oversized hook payloads (issue #667)
+
+A Cursor hook body over the 256 KiB ingress cap (`MAX_HOOK_STDIN_BYTES`) is refused at stdin,
+before the NUL scan, the UTF-8 decode, and the vendor-decimal parse. An ordinary write to a
+large file reaches this bound: Cursor's native tool input carries the whole file content, and
+the dogfood writes that opened this issue were roughly 389,000 bytes each. The hook stays
+fail-open and Cursor continues. Yoetz records the bounded `cursor_payload_too_large` reason
+against that event in `yoetz observe status` hook diagnostics, and notes the
+`payload_too_large` coverage gap on the consented workspace so receipts and coverage wording
+carry the loss. Before this the same event recorded the generic `cursor_payload_invalid`, which
+reported a real coverage loss as a malformed vendor envelope.
+The cap is fixed and shared by every host; raising it is not an operator control. Each reader
+consumes at most cap-plus-one bytes, so the true size of a refused body is never measured and
+never recorded — the bound itself is the whole fact. Nothing about the event is parsed, so the
+hook name the host supplied on the command line is the only identity the record can carry: no
+tool name, session, or path. The refusal costs exactly that one event; the next ordinary event
+still ingests.
+Retaining a bounded structural envelope for the refused edit, with content explicitly omitted,
+is a separate design-gated change and is not implemented; today an oversized edit is an honest
+gap, not a partial observation.
 
 ### Smart observation selection (issue #687)
 
@@ -600,6 +646,30 @@ the portable CLI artifact therefore advertises no hooks. SDK fixture metadata ad
 capability; the SDKs' file-based hook contract is not execution evidence. Hooks call
 `yoetz hooks cursor-observe`, are fail-open, and never enforce Cursor work.
 
+### Delegate identity and file overlap (#508, #509)
+
+The current exact local capability cell is IDE `3.17.8` and Agent CLI
+`2026.07.09-a3815c0`. A read-only inspection of the installed app found Cursor `3.19.7`; its
+resolver contains `SubagentStartRequestQuery` / `SubagentStopRequestQuery` fields such as
+`subagent_id`, `parent_conversation_id`, and `tool_call_id`. Those shipped type definitions are
+artifact evidence only and do not prove that the pinned 3.17.8 IDE or CLI emits, forwards, or
+binds them at runtime.
+
+The decision is **not supported here** for native subagent observation on both surfaces. The IDE
+profile advertises only the five hooks above, and the CLI profile has no admitted hook or SDK child
+signal. An inherited MCP session may carry an attach handle only through cooperative prompt
+delivery; no separate child session identity is currently proven. A child `afterFileEdit` has only
+the one-way changed-path digest, so #503 file-overlap attribution is `not observable for a
+delegate` unless the child explicitly registers and supplies its own task/session. Such activity
+is recorded as an attribution gap and never silently assigned to the parent.
+
+If a future exact cell proves a child signal, the service may stamp one `host_observed` pending
+annotation from `subagent_id` plus parent conversation/tool correlation. An accepted parent-minted
+delegate or cooperative self-registration then binds that annotation; host metadata alone never
+creates a child task. The #509 row stays evidence-gated until an isolated cell reports child start,
+publication, observation, advice isolation, and receipt separately. Cursor Cloud/Cloud Agents and
+the portable CLI artifact remain separate unsupported surfaces.
+
 Cursor's installed hook profile is post-only. `generation_id` identifies the
 host turn/conversation and remains metadata; it is never used as a tool-call
 identity or to synthesize a missing `PreToolUse`. A future paired Cursor
@@ -643,17 +713,27 @@ symlinked ancestors, root/home locators, unsafe markers, or unbounded/control-be
 `workspace_unresolvable` and `workspace_unconsented` remain distinct payload-free diagnostics
 (with `paused` for a paused grant), recorded by the shared ingress for every host. A consented
 `sessionStart` auto-attaches through the shared `start mode=create_or_attach` request, pairing the
-resolved workspace root as `workspace_ref` with `cursor-session:<session_id>` as `external_ref`;
-an exact `workspace_task_exists` conflict gets one `mode=attach` recovery only when the private
-local store already holds a valid mapping from an earlier Cursor session whose `sessionEnd` was
-received, every other bound session is ended, and the candidate is bound only to this consented
-workspace. The catalog also requires one mapped task, the selector still active, no sibling task,
-the matching repository-privacy binding, and no start already pending for that route. The conflict
-reveals no selector, and a hard crash without `sessionEnd` remains fail-closed rather than being
-guessed from age. A successful recovery also rewrites every ended same-host predecessor mapping for that task to
-the rotated session and writer so pending predecessor rows drain on the successor route
-(`session_superseded` is followed, not quarantined as `ledger_rejected`). Recovery first takes a nonblocking workspace reservation, then holds ordered locks for every eligible ended same-host session through full candidate revalidation, the service RPC, authorized rewrites, and pruning. The revalidation covers unmapped sessions, cross-workspace ownership, mapping identity, and mapping recency; a busy workspace reservation defers with `auto_attach_recovery_busy`, while candidate-lock contention or changed state falls back to the ordinary request. A failed attempt records its typed cause (`auto_attach_workspace_unbound`,
-`auto_attach_request_invalid`, `auto_attach_conflict`, `auto_attach_refused`,
+resolved workspace root as `workspace_ref` with `cursor-session:<session_id>` as `external_ref`.
+Before automatic new-pair admission, it checks private persisted mappings from eligible ended Cursor
+sessions. Eligibility requires a received `sessionEnd`, every other bound session ended, and a
+candidate bound only to this consented workspace. A unique eligible mapping is selected first: the
+hook holds the workspace and lifecycle locks, revalidates ownership and state, and sends one
+`mode=attach` request carrying that selector plus the new pair. The catalog requires one mapped
+task, the selector still active, no sibling task,
+the matching repository-privacy binding, and no start already pending for that route. Recovery
+revalidates unmapped sessions, cross-workspace ownership, mapping identity, and mapping recency; a
+busy workspace reservation defers with `auto_attach_recovery_busy`, while candidate-lock contention
+or changed state returns the closed `auto_attach_recovery_busy` boundary rather than creating work
+from an unstable selector. A successful recovery rewrites every ended same-host predecessor mapping
+for that task to
+the rotated session and writer and drains pending rows on the successor route
+(`session_superseded` is followed, not quarantined as `ledger_rejected`). With no usable persisted
+selector, automatic `create_or_attach` admits the new pair as independent work, including beside a
+dormant task. `workspace_task_exists` identifies only explicit `mode=create` colliding with an
+identical pair; workspace membership never selects a task. Age alone never proves a host session
+ended. A failed attempt records its typed cause (`auto_attach_workspace_unbound`,
+`auto_attach_request_invalid`, `auto_attach_binding_ambiguous`, `auto_attach_conflict`,
+`auto_attach_refused`,
 `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`,
 `service_unavailable`, `vault_locked`, `timeout`, `storage_unsafe`, or `storage_corrupt`) in the
 same diagnostics file, and the session keeps an observation-only binding until a retry or an
@@ -743,17 +823,24 @@ Shared drain terminalization is host-neutral: `ledger_rejected` means the ready 
 one envelope non-retryably, so that row is retained in quarantine and later rows proceed. A task
 bundle at schema 9 (bundle migration `0009`) stores `cursor_hook` rows; schema 8's source CHECK
 refused them. The SQLite store now classifies deterministic constraint failures as `ledger_rejected`
-(issue #576). Existing task bundles require the explicit [migration procedure](migration-rollback.md);
-upgrading or restarting the service alone does not migrate them, and the new writer refuses an
-unmigrated bundle before observation ingestion. Migration allows valid pending envelopes to store
-unchanged, but delivery still requires a usable session mapping; it does not itself repair a retired
-session route or replay quarantined rows. An
+(issue #576). During a compatible 0.2-to-0.3 package update, after old writers are stopped, the
+fresh service runs its backup-first bundle migration before READY; no per-task migration ceremony
+is required. The ordinary writer still refuses an unmigrated bundle before observation ingestion,
+and an unsupported or ambiguous startup result remains fail-closed with the [migration and rollback
+procedure](migration-rollback.md). Migration allows valid pending envelopes to store unchanged, but
+delivery still requires a usable session mapping; it does not itself repair a retired session route
+or replay quarantined rows. An
 idempotent repeat of a committed envelope (lost acknowledgement, service restart, or a workflow
 reattach that rotates the mapped Yoetz session) is resolved task-wide and acknowledged, never
 quarantined. A pending row from an ended host session whose task was recovered by a successor
 session is delivered on the successor route (`session_superseded` is followed). A successor
 binding that cannot be followed quarantines that row as `session_superseded`, not
 `ledger_rejected` or `mapping_missing`.
+A non-retryable `SESSION_CONFLICT` while acquiring the task runtime reports `mapping_missing`,
+keeping the envelope pending for a later drain after its lifecycle mapping is repaired. The route must still
+pass its ownership checks. Non-retryable conflicts after runtime acquisition remain
+`ledger_rejected` and enter quarantine. Retryable route conflicts report `service_unavailable`
+and stay pending.
 A row
 also enters quarantine after 128 consecutive rejections with the same retryable reason, except for
 designed back-pressure and workspace-global pause/vault/disabled gates. Both cases remain visible
@@ -769,8 +856,9 @@ not enqueued for delivery, while `start`, `publish_work`, `check`, and `respond`
 each. Cursor's hook payload states no outcome fact for MCP executions, so a failed Yoetz call is
 indistinguishable from a successful one at this ingress; the service's own record of the call is
 the authority on its outcome. The shared advice guard recognizes both Cursor server spellings, so
-a self-owned hook does not lease pending frontier or recommendation context for the call being
-observed; this does not change local retention or explicit failure delivery. Cursor reports
+a self-owned hook without an explicit failure does not lease pending frontier or recommendation
+context for the call being observed; explicit failures remain eligible for pending advice.
+This does not change local retention or explicit failure delivery. Cursor reports
 `duration` as a finite decimal number of milliseconds
 for MCP executions, while the canonical structural field is the bounded integer `duration_ms`.
 Cursor ingress truncates that vendor value to whole milliseconds before structural filtering; the canonical parser
@@ -780,6 +868,19 @@ edit payloads use `model`, while lifecycle payloads may also provide `model_id`;
 `model_id` takes precedence when both spellings are present, and `model` is its bounded fallback.
 Malformed or unsafe Cursor envelopes remain fail-open but record `cursor_payload_invalid` as a
 payload-free hook diagnostic. `afterFileEdit` and lifecycle events are otherwise unchanged.
+
+Cursor's currently reviewed native profile is post-only: `afterMCPExecution` and `afterFileEdit`
+do not imply a missing `PreToolUse`, so accepted observations carry no synthetic `unpaired_event`
+gap. Their `generation_id` is retained as bounded host metadata and is never used as a tool-call
+identity; the materializer records metadata-only evidence instead of fabricating an action/result
+pair. Codex's paired hook profile keeps its source/session/generation-scoped orphan diagnostics.
+The historical 0.3 cell used control 2.5, which admits `pairing_mode`, `correlation_kind`, and
+`generation_id` on structural observation payloads. Current control 2.7 retains those fields and
+main's control 2.6 observation-selection projection alongside the 0.3 coordination surface; both
+peers must use the same current manifest. An older development artifact omitted these fields from its
+closed schema, so the client refused a valid Cursor-shaped frame before sending it and the hook
+layer reported `ledger_rejected`. The frozen control 2.4 schema remains available for historical
+validation; metadata is not stripped to disguise an incompatible contract.
 
 Measured on 2026-08-28 with Cursor Agent CLI `2026.08.25-3e8eec8` (payload `cursor_version`;
 `cursor-agent --version` printed `2026.08.11-e8db854`) loading the native plugin through
@@ -1030,7 +1131,8 @@ Task/receipt advice can occupy the same context slot and defer the recommendatio
 Use the exact advertised accept/decline command, including `--release-version`. A new decline skips
 that release; older permanent declines remain respected. Acceptance only supplies the upgrade
 instructions, and execution requires the user's explicit upgrade request. Package replacement does
-not itself prove host activation or data migration. Preserve the existing host roots, ownership and
+not itself prove host activation; a compatible data migration is performed by the fresh service
+before READY and must be verified separately. Preserve the existing host roots, ownership and
 privacy choices; new settings such as Expanded review require a separate exact approval.
 
 ## Recovery directives in errors (ADR-030)

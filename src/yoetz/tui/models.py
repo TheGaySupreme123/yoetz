@@ -34,6 +34,7 @@ __all__ = [
     "ProviderPosture",
     "ReadinessLayer",
     "ReceiptSummary",
+    "TaskStatusPage",
     "StatusSnapshot",
     "StorageChoice",
     "VaultPosture",
@@ -453,6 +454,14 @@ class WorkDetail:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskStatusPage:
+    """A bounded service-rendered task view and its opaque continuation."""
+
+    lines: tuple[str, ...]
+    next_cursor: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class ReceiptSummary:
     """The human-readable foreground of one receipt."""
 
@@ -465,6 +474,7 @@ class ReceiptSummary:
     freshness: str = "unknown"
     verified: tuple[str, ...] = ()
     not_verified: tuple[str, ...] = ()
+    rendered_lines: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

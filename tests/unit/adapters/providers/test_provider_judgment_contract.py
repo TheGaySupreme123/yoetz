@@ -32,7 +32,12 @@ from yoetz.adapters.providers.openai_responses import (
 from yoetz.adapters.providers.openai_responses import (
     normalize_response as normalize_responses_response,
 )
-from yoetz.domain.findings import RUNTIME_FAILURE_STAGES, FindingKind, SemanticFailureClass
+from yoetz.domain.findings import (
+    EXTERNAL_SEMANTIC_FINDING_KINDS,
+    RUNTIME_FAILURE_STAGES,
+    FindingKind,
+    SemanticFailureClass,
+)
 from yoetz.ports.semantic import (
     SemanticResultInvalid,
     SemanticResultRefused,
@@ -196,7 +201,8 @@ def test_generated_schema_matches_owning_model_and_frozen_artifact() -> None:
             dict[str, Any], cast(dict[str, Any], JUDGMENT_JSON_SCHEMA["$defs"])["FindingKindWire"]
         )["enum"],
     )
-    assert set(kinds) == {kind.value for kind in FindingKind}
+    assert set(kinds) == {kind.value for kind in EXTERNAL_SEMANTIC_FINDING_KINDS}
+    assert FindingKind.COORDINATION_OVERLAP.value not in kinds
 
 
 def test_request_schema_root_is_an_object_never_a_union() -> None:
@@ -275,14 +281,15 @@ def test_request_schema_carries_no_docstring_commentary() -> None:
     assert not docstrings & set(descriptions)
 
 
-def test_every_finding_kind_and_challenge_field_has_a_reviewer_gloss() -> None:
-    """A kind or field the model can emit but has no definition for is an unfair question.
+def test_every_provider_finding_kind_and_challenge_field_has_a_reviewer_gloss() -> None:
+    """A provider kind or field the model can emit but has no definition is an unfair question.
 
-    Adding a ``FindingKind`` or a challenge field without writing its gloss fails here rather than
-    reaching a provider as one more bare token among the rest.
+    Adding a provider-wire kind or a challenge field without writing its gloss fails here rather
+    than reaching a provider as one more bare token among the rest. Local coordination kinds are
+    intentionally excluded by the D7 external semantic boundary.
     """
 
-    assert set(FINDING_KIND_GLOSSARY) == {kind.value for kind in FindingKind}
+    assert set(FINDING_KIND_GLOSSARY) == {kind.value for kind in EXTERNAL_SEMANTIC_FINDING_KINDS}
     challenge = cast(
         dict[str, Any], cast(dict[str, Any], JUDGMENT_JSON_SCHEMA["$defs"])["ProviderChallenge"]
     )
@@ -291,7 +298,7 @@ def test_every_finding_kind_and_challenge_field_has_a_reviewer_gloss() -> None:
     kind_gloss = cast(
         dict[str, Any], cast(dict[str, Any], JUDGMENT_JSON_SCHEMA["$defs"])["FindingKindWire"]
     )["description"]
-    for kind in FindingKind:
+    for kind in EXTERNAL_SEMANTIC_FINDING_KINDS:
         assert f"{kind.value}: " in kind_gloss
 
 
@@ -304,12 +311,20 @@ def test_envelope_and_bare_judgment_both_normalize() -> None:
     assert _provider_schema_accepts(bare)
 
 
-def test_every_finding_kind_is_admitted_and_near_misses_are_rejected() -> None:
-    for kind in FindingKind:
+def test_every_provider_finding_kind_is_admitted_and_local_kinds_are_rejected() -> None:
+    for kind in EXTERNAL_SEMANTIC_FINDING_KINDS:
         judgment = normalize_judgment(
             _judgment("challenges_returned", [_challenge(kind=kind.value)])
         )
         assert judgment.challenges[0].finding_kind is kind
+
+    with pytest.raises(ValueError, match="openai_judgment_shape_invalid"):
+        normalize_judgment(
+            _judgment(
+                "challenges_returned",
+                [_challenge(kind=FindingKind.COORDINATION_OVERLAP.value)],
+            )
+        )
 
     with pytest.raises(ValueError, match="openai_judgment_shape_invalid"):
         normalize_judgment(

@@ -297,8 +297,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(TOOL_DESCRIPTORS) == ("policy", "strict")
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == ("policy", "strict")
     assert TOOL_DESCRIPTOR_SET_DIGEST == {
-        "policy": "sha256:cae0331be83ba8a17e646facfb8733311a40f17bd6c33054acce1bb9bbb78aeb",
-        "strict": "sha256:dedc76ee897207d9e84925b44f0dfdaa6a2ae1aa1490fd17c7a76f6092d0e900",
+        "policy": "sha256:0c95c9a3d50da032f4f5529291b00df19df8e426a34570e2c280c7c2e4493995",
+        "strict": "sha256:ddda86591ee92edc172ea8da341a13c7b54f9e1e878e5ec8be4b3f7a82494b24",
     }
     for profile, descriptors in TOOL_DESCRIPTORS.items():
         assert tuple(item.name for item in descriptors) == _EXPECTED_TOOL_NAMES
@@ -341,15 +341,15 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert isinstance(description, str)
     assert "unsorted_set_field" in description
     publish_descriptor = descriptor_for("publish_work")
-    assert publish_descriptor.input_schema_ref.endswith("publish-work-request-1.1.0.schema.json")
+    assert publish_descriptor.input_schema_ref.endswith("publish-work-request-1.2.0.schema.json")
     assert publish_descriptor.output_schema_ref.endswith("publish-work-result-1.0.0.schema.json")
     check_descriptor = descriptor_for("check")
-    assert check_descriptor.output_schema_ref.endswith("check-result-1.2.0.schema.json")
+    assert check_descriptor.output_schema_ref.endswith("check-result-1.3.0.schema.json")
     status_descriptor = descriptor_for("status")
-    assert status_descriptor.input_schema_ref.endswith("status-request-1.1.0.schema.json")
-    assert status_descriptor.output_schema_ref.endswith("status-result-1.3.0.schema.json")
+    assert status_descriptor.input_schema_ref.endswith("status-request-1.2.0.schema.json")
+    assert status_descriptor.output_schema_ref.endswith("status-result-1.4.0.schema.json")
     receipt_descriptor = descriptor_for("receipt")
-    assert receipt_descriptor.output_schema_ref.endswith("receipt-result-1.2.0.schema.json")
+    assert receipt_descriptor.output_schema_ref.endswith("receipt-result-1.3.0.schema.json")
     for descriptors in TOOL_DESCRIPTORS.values():
         assert {item.name for item in descriptors if item.annotations.read_only} == {
             "status",
@@ -668,8 +668,8 @@ def _subscription_receipt_result() -> dict[str, Any]:
                 {"policy_id": "work-integrity", "policy_version": "0.1.0"},
             ],
             "schema_versions": [
-                {"schema_id": "findings/finding", "schema_version": "1.2.0"},
-                {"schema_id": "receipts/receipt-document", "schema_version": "1.2.0"},
+                {"schema_id": "findings/finding", "schema_version": "1.3.0"},
+                {"schema_id": "receipts/receipt-document", "schema_version": "1.3.0"},
             ],
             "resource_manifest_digest": _SUBSCRIPTION_DIGEST,
         },
@@ -681,6 +681,7 @@ def _subscription_receipt_result() -> dict[str, Any]:
         "evidence_refs": [],
         "gaps": [],
         "redactions": [],
+        "children": {"children": []},
         "sections": [
             {"key": "summary", "title": "Summary", "body": "Synthetic receipt.", "items": []},
             {
@@ -904,7 +905,7 @@ def test_presentation_examples_admit_under_catalog_models() -> None:
     start_examples = descriptor_for("start").input_schema["examples"]
     status_examples = descriptor_for("status").input_schema["examples"]
     publish_examples = descriptor_for("publish_work").input_schema["examples"]
-    assert isinstance(start_examples, list) and len(start_examples) == 1
+    assert isinstance(start_examples, list) and len(start_examples) == 4
     assert isinstance(status_examples, list) and len(status_examples) == 1
     assert isinstance(publish_examples, list) and publish_examples
     start_example = start_examples[0]
@@ -913,7 +914,8 @@ def test_presentation_examples_admit_under_catalog_models() -> None:
     assert isinstance(start_example, dict)
     assert isinstance(status_example, dict)
     assert isinstance(publish_example, dict)
-    StartRequest.model_validate(start_example)
+    for example in start_examples:
+        StartRequest.model_validate(example)
     StatusRequest.model_validate(status_example)
     event_drafts = publish_example["event_drafts"]
     assert isinstance(event_drafts, list) and event_drafts

@@ -7,7 +7,7 @@ import errno
 import functools
 import os
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, Literal, ParamSpec, Protocol, cast
@@ -47,6 +47,7 @@ from yoetz.application.observation_drain import (
 from yoetz.application.observation_verification import run_bound_approved_check
 from yoetz.cli.exits import exit_code_for, remediation_message
 from yoetz.cli.hook_diagnostics import hook_diagnostic_summary
+from yoetz.cli.render import render_error_recovery_lines, render_local_recovery_lines
 from yoetz.config.paths import PathSafetyError
 from yoetz.domain.observation import (
     ObservationControlCommand,
@@ -140,6 +141,46 @@ _UNSAFE_OBSERVATION_STORAGE_ERRNOS: Final = frozenset(
 _P = ParamSpec("_P")
 
 
+def _session_filename_stem(path: Path) -> str:
+    """Remove only admitted stream suffixes while preserving the filename token."""
+
+    name = path.name
+    lower_name = name.lower()
+    for suffix in (".jsonl.zst", ".jsonl"):
+        if lower_name.endswith(suffix):
+            return name[: -len(suffix)]
+    return path.stem
+
+
+def _mapped_session_id_from_path(
+    path: Path,
+    *,
+    store: LocalObservationStore,
+    workspace_commitment: str,
+    state_root: Path | None,
+) -> str | None:
+    """Recover one full host session id from an owner-authorized lifecycle mapping.
+
+    Native rollout filenames contain a timestamp prefix and a UUID whose hyphens make
+    suffix splitting lossy. A filename is only allowed to select one valid durable
+    mapping already bound unambiguously to the selected workspace; an unmapped explicit
+    path keeps the legacy recovery fallback below when it is not a native rollout name.
+    """
+
+    stem = _session_filename_stem(path)
+    if not stem:
+        return None
+    candidates: list[str] = []
+    for session_id in store.unambiguous_codex_sessions_for_workspace(workspace_commitment):
+        mapping = load_mapping(session_id, _state=state_root)
+        if mapping is None:
+            continue
+        token = mapping.codex_session_id
+        if stem == token or stem.endswith(f"-{token}") or f"-{token}_" in stem:
+            candidates.append(token)
+    return candidates[0] if len(candidates) == 1 else None
+
+
 def _resolve_workspace(path: str | None) -> Path:
     root = canonical_workspace_locator("." if path is None else path)
     if root is None:
@@ -155,11 +196,15 @@ def _typed_failure(
     message: str,
     retryable: bool,
     json_output: bool,
+    recovery_lines: Sequence[str] = (),
 ) -> int:
     """Report one bounded failure that names its layer, never `internal_error` (#428).
 
     The token comes first so existing machine-readable expectations hold; the
-    remediation follows it. JSON callers get the same facts as one object.
+    remediation follows it, and the typed recovery directive follows that on its
+    own lines (ADR-030, issue #741). JSON callers get the same facts as one
+    object: the directive is text a renderer reconstructs from a token, so it is
+    not copied into the structured body.
     """
 
     if json_output:
@@ -176,7 +221,8 @@ def _typed_failure(
             json_output=True,
         )
     else:
-        typer.echo(f"observation_{operation}_failed:{reason}: {message}", err=True)
+        lines = [f"observation_{operation}_failed:{reason}: {message}", *recovery_lines]
+        typer.echo("\n".join(lines), err=True)
     return exit_code_for(code)
 
 
@@ -205,6 +251,7 @@ def _bounded_operation(operation: str) -> Callable[[Callable[_P, int]], Callable
                     message=remediation_message("workspace_unresolvable") or "",
                     retryable=False,
                     json_output=json_output,
+                    recovery_lines=render_local_recovery_lines("workspace_unresolvable"),
                 )
             except PathSafetyError:
                 return _typed_failure(
@@ -214,6 +261,7 @@ def _bounded_operation(operation: str) -> Callable[[Callable[_P, int]], Callable
                     message=remediation_message("storage_unsafe") or "",
                     retryable=False,
                     json_output=json_output,
+                    recovery_lines=render_local_recovery_lines("storage_unsafe"),
                 )
             except PublicOperationError as error:
                 return _typed_failure(
@@ -223,6 +271,7 @@ def _bounded_operation(operation: str) -> Callable[[Callable[_P, int]], Callable
                     message=error.message,
                     retryable=error.retryable,
                     json_output=json_output,
+                    recovery_lines=render_error_recovery_lines(error.safe_details),
                 )
             except BrokenPipeError:
                 # A closed output consumer is not an observation-store failure.
@@ -236,6 +285,7 @@ def _bounded_operation(operation: str) -> Callable[[Callable[_P, int]], Callable
                         message=remediation_message("storage_unsafe") or "",
                         retryable=False,
                         json_output=json_output,
+                        recovery_lines=render_local_recovery_lines("storage_unsafe"),
                     )
                 return _typed_failure(
                     operation,
@@ -244,6 +294,7 @@ def _bounded_operation(operation: str) -> Callable[[Callable[_P, int]], Callable
                     message=remediation_message("storage_unavailable") or "",
                     retryable=True,
                     json_output=json_output,
+                    recovery_lines=render_local_recovery_lines("storage_unavailable"),
                 )
 
         return wrapped
@@ -738,6 +789,10 @@ def observe_status(
         codex_home=codex_home,
     )
     diagnostics = hook_diagnostic_summary(_state=_state)
+    # A refused routine-read summary costs only its lane's bounded account, but
+    # an operator must be able to name that cause instead of reading a bare
+    # "incomplete or stale" coverage note (issue #753).
+    summary_refusals = store.summary_refusals(commitment)
     reclaim_guidance = (
         "reclaim with 'yoetz observe reclaim --workspace .'"
         if root == Path.cwd().resolve()
@@ -795,6 +850,7 @@ def observe_status(
                 "quarantine_reclaimed_count": quarantine_reclaimed,
                 "mapping_present": mapping_present,
                 "hook_diagnostics": diagnostics,
+                "summary_refusals": summary_refusals,
                 "plugin_activation": plugin_activation,
             },
             json_output=True,
@@ -833,6 +889,17 @@ def observe_status(
         "hook_diagnostics": canonical_encode(diagnostics).decode("utf-8"),
         "advice_frontier": status.advice_frontier or "none",
         "gaps": ",".join(status.gaps) if status.gaps else "none",
+        "summary_refusals": (
+            "none"
+            if not summary_refusals
+            else "; ".join(
+                f"{entry.get('source')} generation {entry.get('source_generation')} "
+                f"identity {entry.get('source_identity')} position {entry.get('event_position')} "
+                f"inputs {entry.get('input_count')} reason {entry.get('reason')} "
+                f"({entry.get('disposition')})"
+                for entry in summary_refusals[-4:]
+            )
+        ),
         "hook_coverage": str(status.source_coverage.get(ObservationSource.CODEX_HOOK, False)),
         "stream_coverage": str(
             status.source_coverage.get(ObservationSource.CODEX_SESSION_STREAM, False)
@@ -1856,10 +1923,22 @@ def reconcile_session_stream(
     if not path.is_file() or path.is_symlink():
         typer.echo("observation_reconcile_failed:session_file_unreadable", err=True)
         return 20
-    # Session commitment is derived from the file's stem (opaque token), never the full path.
-    session_token = path.stem if path.stem else "session"
-    if "-" in session_token:
-        session_token = session_token.rsplit("-", 1)[-1] or session_token
+    # Prefer the full host id from one durable lifecycle mapping. Native rollout filenames
+    # include hyphenated UUIDs; suffix splitting would orphan the mapped session. Unmapped
+    # explicit paths retain the established opaque-token recovery behavior.
+    session_token = _mapped_session_id_from_path(
+        path,
+        store=store,
+        workspace_commitment=workspace_commitment,
+        state_root=_state,
+    )
+    if session_token is None:
+        if path.stem.startswith("rollout-"):
+            typer.echo("observation_reconcile_failed:mapping_missing", err=True)
+            return 20
+        session_token = path.stem if path.stem else "session"
+        if "-" in session_token:
+            session_token = session_token.rsplit("-", 1)[-1] or session_token
     session_commitment = store.session_commitment(session_token[:128])
     store.bind_session(workspace_commitment, session_commitment)
     locator = CodexSessionStreamLocator(resolve_codex_home())

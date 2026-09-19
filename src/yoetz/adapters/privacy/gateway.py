@@ -33,7 +33,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
 from types import MappingProxyType
-from typing import Protocol
+from typing import Protocol, cast
 
 from yoetz.adapters.privacy.catalog import _scope_digest  # pyright: ignore[reportPrivateUsage]
 from yoetz.adapters.privacy.local_enforcer import SecretScanRuleset
@@ -741,6 +741,24 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
         # From here on the physical attempt is admitted: no failure below can restore authority,
         # only its actual terminal or `outcome_unknown` receipt is produced.
         dispatch_started_at = self._clock.now_utc()
+        # This gateway is the only holder of the exact final request body, its keyed commitment,
+        # and the authorization/registry binding a dispatch receipt must carry, and the audit
+        # deliberately retains no plaintext. Build the receipt this admitted attempt owes on an
+        # unknown outcome now and park it beside the `receipt_pending` row, so a crash between
+        # consume and the real receipt leaves recoverable material instead of a stranded row.
+        unknown_receipt = self._attempt_receipt(
+            case,
+            authorization,
+            registry,
+            dispatch_id,
+            dispatch_started_at,
+            commitment,
+            body,
+            _unknown_outcome_result(case, binding),
+            PrivacyOutcome.TRANSPORT_FAILED,
+            PrivacyReason.OUTCOME_UNKNOWN,
+        )
+        await self._park_attempt_reconciliation(dispatch_id, unknown_receipt)
         try:
             result = await evaluator.evaluate(case, deadline)
             result = _with_policy_digest(result, case)
@@ -749,6 +767,14 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
         except Exception:  # noqa: BLE001 - an ambiguous transport failure never leaks native text
             result = _unknown_outcome_result(case, binding)
             outcome, receipt_reason = PrivacyOutcome.TRANSPORT_FAILED, PrivacyReason.OUTCOME_UNKNOWN
+        except BaseException:
+            # Cancellation (a foreground runtime rebind yielding this advisory attempt) is a
+            # `BaseException` and would otherwise skip the receipt entirely, leaving the consumed
+            # authorization `receipt_pending` forever. Record the terminal `outcome_unknown`
+            # receipt under a shield so the bounded write survives the cancellation, then let
+            # cancellation propagate: nothing here re-enters the provider.
+            await self._shielded_unknown_receipt(dispatch_id, unknown_receipt)
+            raise
 
         receipt = self._attempt_receipt(
             case,
@@ -889,6 +915,32 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
         except Exception:  # noqa: BLE001 - best-effort: the bounded result still returns
             pass
         return _preconsume_result(case, reason)
+
+    async def _park_attempt_reconciliation(self, dispatch_id: str, receipt: EgressReceipt) -> None:
+        """Best-effort durable recovery material for one admitted physical attempt."""
+
+        park = getattr(self._audit, "park_attempt_reconciliation", None)
+        if not callable(park):
+            return
+        typed_park = cast(
+            Callable[[str, EgressReceipt], Awaitable[None]],
+            park,
+        )
+        try:
+            await typed_park(dispatch_id, receipt)
+        except Exception:  # noqa: BLE001 - parking is recovery material, never the attempt itself
+            pass
+
+    async def _shielded_unknown_receipt(self, dispatch_id: str, receipt: EgressReceipt) -> None:
+        """Record the owed ``outcome_unknown`` receipt without being cancelled a second time."""
+
+        try:
+            await asyncio.shield(self._audit.complete_egress(dispatch_id, receipt))
+        except asyncio.CancelledError:
+            # The shielded write keeps running; the caller re-raises the original cancellation.
+            pass
+        except Exception:  # noqa: BLE001 - a conflicting receipt means the row is already terminal
+            pass
 
     def _attempt_receipt(
         self,

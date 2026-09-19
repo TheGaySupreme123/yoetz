@@ -627,18 +627,23 @@ async def test_unmapped_parent_worker_candidates_do_not_starve_a_usable_mapping(
 
 
 @pytest.mark.anyio
-async def test_ambiguous_host_session_cannot_publish_an_inventory(tmp_path: Path) -> None:
+async def test_duplicate_host_session_binding_is_refused_before_inventory_change(
+    tmp_path: Path,
+) -> None:
     world = await _world(tmp_path)
     unrelated = tmp_path / "unrelated-project"
     unrelated.mkdir()
     other_workspace = world.local.workspace_commitment(str(unrelated))
     world.local.grant_consent(other_workspace)
-    world.local.bind_codex_session(other_workspace, world.host_session)
     try:
-        result = await world.coordinator.recover_capture_inventory(world.workspace)
-        assert result is ObservationCaptureRecoveryOutcome.MAPPING_MISSING
+        from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
+
+        with pytest.raises(PublicOperationError) as refused:
+            world.local.bind_codex_session(other_workspace, world.host_session)
+        assert refused.value.code is PublicErrorCode.SESSION_CONFLICT
+        assert world.local.find_workspace_for_codex_session(world.host_session) == world.workspace
         assert world.routes.calls == []
-        assert not world.local.capture_reservation_bootstrap_ready(world.workspace)
+        assert not world.local.capture_reservation_bootstrap_ready(other_workspace)
     finally:
         world.coordinator.close()
 
@@ -773,6 +778,20 @@ async def test_blocking_task_metadata_read_leaves_control_loop_responsive(
         world.coordinator.close()
 
 
+async def _observe_outbox_drain(world: _World, sweeper: ObservationOutboxSweeper) -> None:
+    """Drive the sweeper until the local outbox is empty, or fail on a deadline.
+
+    A hook pass drains its own rows within a bounded budget. On a loaded runner
+    that budget can expire with rows still pending, and the next pass then
+    counts a real admission loss against the stalled, ageing rows (issue #775).
+    Observe the drain instead of assuming each pass landed before the next write.
+    """
+
+    async with asyncio.timeout(10):
+        while world.local.pending_outbox_count(world.workspace) > 0:
+            await sweeper.sweep()
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("host", ("claude", "cursor", "codex"))
 async def test_parent_worker_routes_recover_and_keep_encrypted_content_task_scoped(
@@ -842,6 +861,7 @@ async def test_parent_worker_routes_recover_and_keep_encrypted_content_task_scop
                     )
                     == 0
                 )
+                await _observe_outbox_drain(world, sweeper)
         after = world.local.selection_accounting(world.workspace)
         assert after["unrecoverable_input_count"] == 2
         assert after["loss_identity_commitment"] == before["loss_identity_commitment"]

@@ -289,6 +289,20 @@ class ServiceLifecycle:
     def current_vault_generation(self) -> int | None:
         return self._vault_generation
 
+    def assert_singleton_held(self) -> None:
+        """Assert that this generation still owns the process singleton.
+
+        Startup maintenance uses this narrow, non-serializable fence immediately before and
+        after touching a task bundle.  The lock descriptor remains the authority; exposing the
+        assertion through the lifecycle keeps callers from reaching into its private descriptor
+        state or mistaking the advisory lock-file stamp for ownership.
+        """
+
+        authority = self._singleton_authority
+        if authority is None:
+            raise LifecycleError("invalid_transition")
+        authority.assert_held()
+
     @property
     def idle_relock_policy(self) -> IdleRelockPolicy:
         return self._policy

@@ -26,6 +26,7 @@ from yoetz.protocol.errors import ProtocolValueError
 __all__ = [
     "ADDITIONAL_CONTEXT_EVENTS",
     "CLAUDE_ADDITIONAL_CONTEXT_EVENTS",
+    "MAX_HOOK_STDIN_BYTES",
     "STOP_CONTROL_EVENTS",
     "claude_context_output",
     "context_output",
@@ -36,7 +37,11 @@ __all__ = [
     "stdout_json",
 ]
 
-_MAX_STDIN_BYTES: Final = 262_144
+# The one hook ingress bound, shared by every host reader here and by
+# ``yoetz.cli.hooks``. A second copy of this number drifted from this one
+# silently, and both sides must move together for the documented 256 KiB cap to
+# stay a single fact (issue #667).
+MAX_HOOK_STDIN_BYTES: Final = 262_144
 _MAX_CONTEXT_CHARS: Final = 2_000
 _MAX_STDERR_CHARS: Final = 200
 _MAX_SAFE_INTEGER: Final = 2**53 - 1
@@ -179,8 +184,15 @@ def cursor_context_output(
 def read_hook_payload(raw: bytes | None = None) -> Mapping[str, JsonValue]:
     """Read a bounded Codex hook JSON object from stdin (or supplied bytes)."""
 
-    data = sys.stdin.buffer.read(_MAX_STDIN_BYTES + 1) if raw is None else raw
-    if not data or len(data) > _MAX_STDIN_BYTES:
+    data = sys.stdin.buffer.read(MAX_HOOK_STDIN_BYTES + 1) if raw is None else raw
+    # Size is decided before the body is inspected, so an oversized event and an
+    # empty or malformed one shared one reason and the caller could not tell an
+    # ordinary edit that outgrew the cap from a host that sent nothing (#667).
+    # Only cap-plus-one bytes are ever read, so the exact size stays unknown by
+    # construction: the bound itself is the whole fact.
+    if len(data) > MAX_HOOK_STDIN_BYTES:
+        raise ProtocolValueError("payload_too_large")
+    if not data:
         raise ProtocolValueError("invalid_event_value_type")
     parsed = strict_json_parse(data)
     if not isinstance(parsed, Mapping):
@@ -265,12 +277,17 @@ def read_cursor_hook_payload(raw: bytes | None = None) -> Mapping[str, JsonValue
     by the caller.
     """
 
-    data = sys.stdin.buffer.read(_MAX_STDIN_BYTES + 1) if raw is None else raw
+    data = sys.stdin.buffer.read(MAX_HOOK_STDIN_BYTES + 1) if raw is None else raw
     if type(data) is bytearray:
         data = bytes(data)
     elif type(data) is not bytes:
         raise ProtocolValueError("input_not_bytes")
-    if not data or len(data) > _MAX_STDIN_BYTES:
+    # Same split as the Codex reader, and for the same reason: this branch runs
+    # before the NUL scan, the UTF-8 decode, and the JSON parse, so without it
+    # every oversized Cursor write is reported as a malformed envelope (#667).
+    if len(data) > MAX_HOOK_STDIN_BYTES:
+        raise ProtocolValueError("payload_too_large")
+    if not data:
         raise ProtocolValueError("invalid_event_value_type")
     if b"\x00" in data:
         raise ProtocolValueError("nul_byte_forbidden")

@@ -195,7 +195,7 @@ PROVIDER_PRESETS: Final[Mapping[str, ProviderPreset]] = MappingProxyType(
                 "anthropic/claude-opus-5",
                 "anthropic/claude-fable-5",
                 "google/gemini-3.6-flash",
-                "x-ai/grok-4.5",
+                "x-ai/grok-4.6",
             ),
         ),
         "grok": ProviderPreset(
@@ -206,9 +206,10 @@ PROVIDER_PRESETS: Final[Mapping[str, ProviderPreset]] = MappingProxyType(
             _XAI_CAPABILITY,
             "api.x.ai",
             "/v1",
-            "grok-4.5",
+            "grok-4.6",
             "chat_completions",
             (
+                "grok-4.6",
                 "grok-4.5",
                 "grok-4.3",
                 "grok-4.20-0309-reasoning",
@@ -231,7 +232,7 @@ PROVIDER_PRESETS: Final[Mapping[str, ProviderPreset]] = MappingProxyType(
                 "openai/gpt-5.6-sol",
                 "openai/gpt-5.6-terra",
                 "openai/gpt-5.6-luna",
-                "xai/grok-4.5",
+                "spacexai/grok-4.6",
                 "google/gemini-3.6-flash",
             ),
         ),
@@ -422,7 +423,7 @@ def codex_subscription_runtime(
     codex_home: str,
     model: str,
     reasoning_effort: str,
-    timeout_seconds: int = 120,
+    timeout_seconds: int = 900,
     max_retries: int = 2,
 ) -> ExternalRuntimeProfileConfig:
     """Build the exact nonsecret Codex app-server subscription binding."""
@@ -509,6 +510,17 @@ def render_config_toml(config: YoetzConfig) -> str:
         },
     )
     _emit_table(lines, "observation", {"enabled": config.observation.enabled})
+    _emit_table(
+        lines,
+        "lineage",
+        {
+            "start_lease_seconds": config.lineage.start_lease_seconds,
+            "attach_handle_ttl_seconds": config.lineage.attach_handle_ttl_seconds,
+            "contact_lost_recovery_seconds": config.lineage.contact_lost_recovery_seconds,
+            "max_depth": config.lineage.max_depth,
+            "max_fanout": config.lineage.max_fanout,
+        },
+    )
     _emit_table(
         lines,
         "logging",

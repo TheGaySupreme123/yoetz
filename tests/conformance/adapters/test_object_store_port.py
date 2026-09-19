@@ -378,5 +378,6 @@ async def test_generation_fenced_sweep_parity(tmp_path: Path) -> None:
 
 
 def test_commitment_domain_fixture_shape() -> None:
-    assert len(OBJECT_COMMITMENT_DOMAINS) == len(ObjectKind) == 17
+    assert len(OBJECT_COMMITMENT_DOMAINS) == len(ObjectKind) == 18
     assert all(value.endswith(b"\0") for value in OBJECT_COMMITMENT_DOMAINS.values())
+    assert OBJECT_COMMITMENT_DOMAINS[ObjectKind.PROJECT_TEXT] == b"yoetz/object/project_text/v1\0"

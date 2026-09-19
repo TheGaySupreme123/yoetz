@@ -12,6 +12,7 @@ from pathlib import Path
 import apsw
 import pytest
 
+from yoetz.adapters.sqlite.migrations import initialize_catalog
 from yoetz.adapters.sqlite.start_catalog import SqliteStartCatalog
 from yoetz.domain.values import Frontier
 from yoetz.ports.runtime import StartCompletionEvidence, StartMilestone
@@ -255,7 +256,7 @@ async def test_attachment_conflict_and_quarantine_paths() -> None:
 
 @pytest.mark.anyio
 async def test_workspace_ref_groups_sibling_tasks_and_pair_attaches() -> None:
-    """create_or_attach on a drifted pair conflicts; mode=create still makes a sibling."""
+    """A drifted pair creates an authorized sibling and later resumes that exact pair."""
 
     harness = _Harness.create(840)
     first_request = await harness.command(841, mode=StartMode.CREATE_OR_ATTACH, refs="A")
@@ -280,40 +281,52 @@ async def test_workspace_ref_groups_sibling_tasks_and_pair_attaches() -> None:
         commitments_b,
         None,
     )
-    with pytest.raises(PublicOperationError) as drifted:
-        await harness.catalog.reserve_or_resume(drifted_request)
-    assert drifted.value.code is PublicErrorCode.SESSION_CONFLICT
-    assert drifted.value.safe_details == {"reason_code": "workspace_task_exists"}
-    assert first.task_id not in drifted.value.message
-    assert first.session_id not in drifted.value.message
-    assert first.writer_id not in drifted.value.message
+    second = await harness.catalog.reserve_or_resume(drifted_request)
+    assert second.route_action == "created"
+    assert second.task_id != first.task_id
+    await _complete(harness.catalog, second, 844)
 
-    create_request = StartCommand(
-        _id(IdKind.REQUEST, 844),
-        canonical_digest(
-            {
-                "external": commitments_b.external_ref_commitment,
-                "mode": StartMode.CREATE.value,
-                "session_id": None,
-                "title": commitments_b.title_commitment,
-                "workspace": commitments_b.workspace_ref_commitment,
-            }
-        ),
-        StartMode.CREATE,
+    drifted_attach = StartCommand(
+        _id(IdKind.REQUEST, 845),
+        drifted_request.request_digest,
+        StartMode.CREATE_OR_ATTACH,
         identity_b,
         commitments_b,
         None,
     )
-    second = await harness.catalog.reserve_or_resume(create_request)
-    await _complete(harness.catalog, second, 845)
+    drifted_attach_result = await harness.catalog.reserve_or_resume(drifted_attach)
+    assert drifted_attach_result.route_action == "attached"
+    assert drifted_attach_result.task_id == second.task_id
+    await _complete(harness.catalog, drifted_attach_result, 846)
 
-    assert second.task_id != first.task_id
+    identity_c = StartIdentityInput("Task title", "workspace-A", "external-C")
+    commitments_c = await harness.catalog.commit_identity(identity_c)
+    create_request = StartCommand(
+        _id(IdKind.REQUEST, 847),
+        canonical_digest(
+            {
+                "external": commitments_c.external_ref_commitment,
+                "mode": StartMode.CREATE.value,
+                "session_id": None,
+                "title": commitments_c.title_commitment,
+                "workspace": commitments_c.workspace_ref_commitment,
+            }
+        ),
+        StartMode.CREATE,
+        identity_c,
+        commitments_c,
+        None,
+    )
+    third = await harness.catalog.reserve_or_resume(create_request)
+    await _complete(harness.catalog, third, 848)
+
+    assert third.task_id not in {first.task_id, second.task_id}
     workspace = first_request.identity_commitments.workspace_ref_commitment
     assert workspace is not None
     grouped = await harness.catalog.list_workspace_task_ids(workspace)
-    assert grouped == tuple(sorted((first.task_id, second.task_id)))
+    assert grouped == tuple(sorted((first.task_id, second.task_id, third.task_id)))
 
-    attach_request = await harness.command(846, mode=StartMode.CREATE_OR_ATTACH, refs="A")
+    attach_request = await harness.command(849, mode=StartMode.CREATE_OR_ATTACH, refs="A")
     attached = await harness.catalog.reserve_or_resume(attach_request)
     assert attached.route_action == "attached"
     assert attached.task_id == first.task_id
@@ -322,8 +335,51 @@ async def test_workspace_ref_groups_sibling_tasks_and_pair_attaches() -> None:
 
 
 @pytest.mark.anyio
+async def test_prebirth_auto_grouping_preference_is_durable_without_project_birth() -> None:
+    installation_id = _id(IdKind.INSTALLATION, 850)
+    database = apsw.Connection(":memory:")
+    initialize_catalog(database)
+    database.executemany(
+        "INSERT INTO catalog_meta(key, value) VALUES(?, ?)",
+        (("installation_id", installation_id), ("owner_generation", "1")),
+    )
+    clock = _Clock(datetime(2026, 7, 19, 12, 0, tzinfo=UTC))
+    catalog = SqliteStartCatalog(
+        database,
+        installation_id=installation_id,
+        lookup=_Lookup(),
+        clock=clock,
+        ids=_Ids(),
+    )
+    repository = "hmac-sha256:" + "a" * 64
+
+    assert await catalog.repository_auto_grouping_enabled(repository) is True
+    assert await catalog.set_project_auto_grouping(repository, enabled=False) is None
+    assert await catalog.repository_auto_grouping_enabled(repository) is False
+    assert database.execute("SELECT COUNT(*) FROM projects").fetchone() == (0,)
+    assert database.execute(
+        "SELECT auto_grouping FROM repository_grouping_preferences WHERE repository_commitment = ?",
+        (repository,),
+    ).fetchone() == (0,)
+
+    assert await catalog.ensure_repository_project_if_auto_grouping_enabled(repository) is None
+    assert database.execute("SELECT COUNT(*) FROM projects").fetchone() == (0,)
+    project = await catalog.ensure_repository_project(repository)
+    assert project.auto_grouping is False
+    assert database.execute("SELECT COUNT(*) FROM projects").fetchone() == (1,)
+
+    updated = await catalog.set_project_auto_grouping(repository, enabled=True)
+    assert updated is not None and updated.auto_grouping is True
+    assert await catalog.repository_auto_grouping_enabled(repository) is True
+    assert database.execute(
+        "SELECT auto_grouping FROM repository_grouping_preferences WHERE repository_commitment = ?",
+        (repository,),
+    ).fetchone() == (1,)
+
+
+@pytest.mark.anyio
 async def test_pending_operation_recovery_preserves_workspace_before_explicit_sibling() -> None:
-    """Existing operation and workspace identity boundaries stay intact across recovery."""
+    """A pending pair can recover while a different pair creates one workspace sibling."""
 
     harness = _Harness.create(850)
     pending_request = await harness.command(851, mode=StartMode.CREATE_OR_ATTACH, refs="pending")
@@ -352,23 +408,38 @@ async def test_pending_operation_recovery_preserves_workspace_before_explicit_si
         sibling_commitments,
         None,
     )
-    with pytest.raises(PublicOperationError) as conflict:
-        await harness.catalog.reserve_or_resume(implicit_sibling)
-    assert conflict.value.code is PublicErrorCode.SESSION_CONFLICT
-    assert await harness.catalog.list_workspace_task_ids(workspace) == (pending.task_id,)
+    sibling = await harness.catalog.reserve_or_resume(implicit_sibling)
+    assert sibling.outcome == "reserved"
+    assert sibling.route_action == "created"
+    assert sibling.task_id != pending.task_id
+    assert sibling.session_id != pending.session_id
+    assert sibling.writer_id != pending.writer_id
+    assert sibling.lifecycle_event_id != pending.lifecycle_event_id
+    assert await harness.catalog.list_workspace_task_ids(workspace) == tuple(
+        sorted((pending.task_id, sibling.task_id))
+    )
+    pending_route = await harness.catalog.resolve_route(pending.session_id)
+    sibling_route = await harness.catalog.resolve_route(sibling.session_id)
+    assert pending_route is not None and pending_route.task_id == pending.task_id
+    assert sibling_route is not None and sibling_route.task_id == sibling.task_id
+    assert pending_route.session_id == pending.session_id
+    assert sibling_route.session_id == sibling.session_id
 
     # Recover the pending operation with its exact request identity before advancing the original
-    # task. This test covers the existing state-preservation and mode/pair boundaries; it does not
-    # add temporal admission enforcement for an explicit mode=create request.
+    # task. The sibling remains a separate pending operation and route.
     harness.clock.advance(61)
     resumed = await harness.catalog.reserve_or_resume(pending_request)
     assert resumed.outcome == "resumed"
     assert resumed.task_id == pending.task_id
     assert resumed.session_id == pending.session_id
+    assert resumed.writer_id == pending.writer_id
+    assert resumed.lifecycle_event_id == pending.lifecycle_event_id
+    assert resumed.route_generation == pending.route_generation
+    assert resumed.route_identity_digest == pending.route_identity_digest
     await _complete(harness.catalog, resumed, 853)
 
-    # Once the original operation reaches a known terminal state, an explicitly declared sibling
-    # uses the existing mode=create path and receives its own task boundary.
+    # The automatic sibling already owns this exact pair. An explicit create must retain its
+    # collision guard and must not allocate a third task while the sibling operation is pending.
     explicit_sibling = StartCommand(
         _id(IdKind.REQUEST, 854),
         canonical_digest(
@@ -385,9 +456,33 @@ async def test_pending_operation_recovery_preserves_workspace_before_explicit_si
         sibling_commitments,
         None,
     )
-    sibling = await harness.catalog.reserve_or_resume(explicit_sibling)
-    assert sibling.task_id != pending.task_id
-    await _complete(harness.catalog, sibling, 855)
+    with pytest.raises(PublicOperationError) as conflict:
+        await harness.catalog.reserve_or_resume(explicit_sibling)
+    assert conflict.value.code is PublicErrorCode.SESSION_CONFLICT
+    assert conflict.value.safe_details == {"reason_code": "workspace_task_exists"}
+    assert await harness.catalog.list_workspace_task_ids(workspace) == tuple(
+        sorted((pending.task_id, sibling.task_id))
+    )
+
+    # Resume and complete the original automatic sibling by its exact request. The explicit create
+    # collision above must leave this operation untouched and must not create a fourth route.
+    sibling_resumed = await harness.catalog.reserve_or_resume(implicit_sibling)
+    assert sibling_resumed.outcome == "resumed"
+    assert sibling_resumed.task_id == sibling.task_id
+    assert sibling_resumed.session_id == sibling.session_id
+    assert sibling_resumed.writer_id == sibling.writer_id
+    assert sibling_resumed.lifecycle_event_id == sibling.lifecycle_event_id
+    await _complete(harness.catalog, sibling_resumed, 855)
+    assert await harness.catalog.list_workspace_task_ids(workspace) == tuple(
+        sorted((pending.task_id, sibling.task_id))
+    )
+
+    # Repeating the explicit create remains a collision after completion, with the same two routes
+    # and no operation record or task multiplication introduced by the refused request.
+    with pytest.raises(PublicOperationError) as completed_conflict:
+        await harness.catalog.reserve_or_resume(explicit_sibling)
+    assert completed_conflict.value.code is PublicErrorCode.SESSION_CONFLICT
+    assert completed_conflict.value.safe_details == {"reason_code": "workspace_task_exists"}
     assert await harness.catalog.list_workspace_task_ids(workspace) == tuple(
         sorted((pending.task_id, sibling.task_id))
     )

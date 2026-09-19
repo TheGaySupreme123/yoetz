@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -23,6 +23,7 @@ from yoetz.ports.runtime import StartCompletionEvidence, StartMilestone
 from yoetz.ports.start_catalog import (
     EncryptedResultRef,
     SafeReason,
+    StartAllocation,
     StartCommand,
     StartIdentityInput,
     StartMode,
@@ -81,10 +82,12 @@ def _id(kind: IdKind, value: int) -> str:
     return PREFIX_BY_KIND[kind] + str(uuid.UUID(bytes=bytes(raw)))
 
 
-def _sqlite_catalog(installation_id: str, clock: _Clock) -> SqliteStartCatalog:
+def _sqlite_catalog(
+    installation_id: str, clock: _Clock, *, schema_version: int = 3
+) -> SqliteStartCatalog:
     db = apsw.Connection(":memory:")
     root = Path(__file__).resolve().parents[3]
-    for version in ("0001", "0002", "0003"):
+    for version in (f"{number:04d}" for number in range(1, schema_version + 1)):
         db.execute((root / f"migrations/catalog/{version}.sql").read_text(encoding="utf-8"))
     db.executemany(
         "INSERT INTO catalog_meta(key, value) VALUES(?, ?)",
@@ -481,8 +484,8 @@ async def test_workspace_rotation_rejects_wrong_workspace_and_sibling_ambiguity(
 
 
 @pytest.mark.anyio
-async def test_initializing_route_blocks_implicit_drift_but_not_explicit_sibling() -> None:
-    """A reclaimable initializing start stays occupied until quarantine or explicit intent."""
+async def test_initializing_route_preserves_its_pair_without_blocking_a_new_pair() -> None:
+    """An unfinished task is never selected solely because it shares the workspace."""
 
     installation_id = _id(IdKind.INSTALLATION, 735)
     now = datetime(2026, 7, 19, 9, 20, tzinfo=UTC)
@@ -497,27 +500,27 @@ async def test_initializing_route_blocks_implicit_drift_but_not_explicit_sibling
         assert route is not None
         assert route.state is TaskRouteState.INITIALIZING
 
-        with pytest.raises(PublicOperationError) as conflict:
-            await catalog.reserve_or_resume(
-                await _command(
-                    catalog,
-                    operation_id=_id(IdKind.REQUEST, 737),
-                    external_ref="external-B",
-                )
+        automatic = await catalog.reserve_or_resume(
+            await _command(
+                catalog,
+                operation_id=_id(IdKind.REQUEST, 737),
+                external_ref="external-B",
             )
-        assert conflict.value.code is PublicErrorCode.SESSION_CONFLICT
-        assert conflict.value.safe_details == {"reason_code": "workspace_task_exists"}
+        )
+        assert automatic.route_action == "created"
+        assert automatic.task_id != initializing.task_id
+        assert await catalog.resolve_route(initializing.session_id) == route
 
         sibling = await catalog.reserve_or_resume(
             await _command(
                 catalog,
                 operation_id=_id(IdKind.REQUEST, 738),
                 mode=StartMode.CREATE,
-                external_ref="external-B",
+                external_ref="external-C",
             )
         )
         assert sibling.route_action == "created"
-        assert sibling.task_id != initializing.task_id
+        assert len({sibling.task_id, automatic.task_id, initializing.task_id}) == 3
 
 
 @pytest.mark.anyio
@@ -601,6 +604,37 @@ async def test_quarantine_and_reclaim_parity() -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("mode", [StartMode.ATTACH, StartMode.CREATE_OR_ATTACH, StartMode.CREATE])
+async def test_quarantined_pair_refuses_before_new_reservation(mode: StartMode) -> None:
+    installation = _id(IdKind.INSTALLATION, 740)
+    clock = _Clock(datetime(2026, 7, 19, 11, 0, tzinfo=UTC))
+    memory, state = _memory_catalog(installation, clock)
+    sqlite = _sqlite_catalog(installation, clock, schema_version=5)
+    for catalog in (memory, sqlite):
+        original = await _command(catalog, operation_id=_id(IdKind.REQUEST, 741))
+        allocation = await catalog.reserve_or_resume(original)
+        await catalog.quarantine(allocation, SafeReason("start_bundle_invalid"))
+        route = await catalog.task_route(allocation.task_id)
+        sessions = await catalog.task_session_states(allocation.task_id)
+        replacement = await _command(catalog, operation_id=_id(IdKind.REQUEST, 742), mode=mode)
+        with pytest.raises(PublicOperationError) as error:
+            await catalog.reserve_or_resume(replacement)
+        assert error.value.code is PublicErrorCode.STORAGE_CORRUPT
+        assert await catalog.task_route(allocation.task_id) == route
+        assert await catalog.task_session_states(allocation.task_id) == sessions
+        if isinstance(catalog, MemoryStartCatalogAdapter):
+            assert len(state.operations) == 1
+        else:
+            assert catalog._db.execute(  # pyright: ignore[reportPrivateUsage]
+                "SELECT COUNT(*) FROM start_operations"
+            ).fetchone() == (1,)
+        # An exact retry still recovers the original terminal failure.
+        replayed = await catalog.reserve_or_resume(original)
+        assert replayed.outcome == "replayed"
+        assert replayed.replayed_result is not None
+
+
+@pytest.mark.anyio
 async def test_generation_and_route_identity_parity() -> None:
     installation_id = _id(IdKind.INSTALLATION, 720)
     memory_clock = _Clock(datetime(2026, 7, 19, 11, 0, tzinfo=UTC))
@@ -631,3 +665,84 @@ async def test_generation_and_route_identity_parity() -> None:
     assert route_memory == route_sqlite
     assert route_memory is not None
     assert route_memory.state is TaskRouteState.INITIALIZING
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("phase", list(StartPhase)[:-1])
+async def test_yielded_start_preserves_each_milestone_and_fences_old_lease(
+    phase: StartPhase,
+) -> None:
+    installation = _id(IdKind.INSTALLATION, 744)
+    clock = _Clock(datetime(2026, 7, 19, 10, tzinfo=UTC))
+    memory, _ = _memory_catalog(installation, clock)
+    sqlite = _sqlite_catalog(installation, clock)
+    allocations: list[StartAllocation] = []
+    for catalog in (memory, sqlite):
+        command = await _command(catalog, operation_id=_id(IdKind.REQUEST, 745))
+        allocated = await catalog.reserve_or_resume(command)
+        for milestone in list(StartPhase)[1:-1]:
+            if allocated.phase is phase:
+                break
+            allocated = await catalog.advance_phase(
+                allocated,
+                milestone,
+                _result() if milestone is StartPhase.RESULT_PUBLISHED else None,
+            )
+        with pytest.raises(PublicOperationError) as live:
+            await catalog.reserve_or_resume(command)
+        assert live.value.code is PublicErrorCode.OPERATION_PENDING
+        assert live.value.safe_details == {
+            "reason_code": "start_lease_pending",
+            "continuation": "start_lease_wait",
+        }
+        await catalog.yield_lease(allocated)
+        with pytest.raises(PublicOperationError) as changed:
+            await catalog.reserve_or_resume(replace(command, request_digest="sha256:" + "a" * 64))
+        assert changed.value.code is PublicErrorCode.IDEMPOTENCY_CONFLICT
+        resumed = await catalog.reserve_or_resume(command)
+        assert resumed.lease is not None and allocated.lease is not None
+        assert resumed.lease.lease_generation == allocated.lease.lease_generation + 1
+        assert replace(resumed, lease=allocated.lease, outcome=allocated.outcome) == allocated
+        with pytest.raises(PublicOperationError) as stale:
+            await catalog.yield_lease(allocated)
+        assert stale.value.code is PublicErrorCode.OPERATION_PENDING
+        allocations.append(resumed)
+    assert allocations[0] == allocations[1]
+
+
+@pytest.mark.anyio
+async def test_yield_cannot_change_completed_quarantined_or_new_generation_start() -> None:
+    installation = _id(IdKind.INSTALLATION, 746)
+    clock = _Clock(datetime(2026, 7, 19, 10, tzinfo=UTC))
+    memory, state = _memory_catalog(installation, clock)
+    sqlite = _sqlite_catalog(installation, clock)
+    for catalog in (memory, sqlite):
+        command = await _command(catalog, operation_id=_id(IdKind.REQUEST, 747))
+        allocated = await catalog.reserve_or_resume(command)
+        await _finish(catalog, allocated)
+        with pytest.raises(PublicOperationError):
+            await catalog.yield_lease(allocated)
+        assert (await catalog.reserve_or_resume(command)).outcome == "replayed"
+        quarantine_command = await _command(
+            catalog, operation_id=_id(IdKind.REQUEST, 748), workspace_ref="quarantined"
+        )
+        quarantined = await catalog.reserve_or_resume(quarantine_command)
+        await catalog.quarantine(quarantined, SafeReason("start_bundle_invalid"))
+        with pytest.raises(PublicOperationError):
+            await catalog.yield_lease(quarantined)
+        pending_command = await _command(
+            catalog, operation_id=_id(IdKind.REQUEST, 749), workspace_ref="pending"
+        )
+        pending = await catalog.reserve_or_resume(pending_command)
+        if catalog is memory:
+            state.owner_generation = 2
+        else:
+            sqlite._db.execute(  # pyright: ignore[reportPrivateUsage]
+                "UPDATE catalog_meta SET value = '2' WHERE key = 'owner_generation'"
+            )
+        with pytest.raises(PublicOperationError) as stale_owner:
+            await catalog.yield_lease(pending)
+        assert stale_owner.value.code is PublicErrorCode.OPERATION_PENDING
+        recovered = await catalog.reserve_or_resume(pending_command)
+        assert recovered.task_id == pending.task_id
+        assert recovered.lease is not None and recovered.lease.owner_generation == 2

@@ -112,9 +112,31 @@ _MATERIAL_HOOK_EVENTS: Final = frozenset(
         "Stop",
         "SessionEnd",
         "SessionStart",
+        "SubagentStart",
         "SubagentStop",
     }
 )
+_SUBAGENT_ACTIVITY_START_KINDS: Final = frozenset({"start", "started"})
+_SUBAGENT_ACTIVITY_STOP_KINDS: Final = frozenset(
+    {"cancelled", "completed", "failed", "interrupted", "stop", "stopped"}
+)
+# Known activity kinds that are neither a start nor a stop. Codex 0.153.4 multi-agent v2 reports
+# every parent/child exchange after the spawn as ``interacted`` (issue #754, fixture IMP-015):
+# it names no lifecycle transition, so it carries no phase and never opens or closes an
+# annotation — but it is an understood kind, not an ``unsupported_event`` coverage gap.
+_SUBAGENT_ACTIVITY_PROGRESS_KINDS: Final = frozenset({"interacted"})
+_SUBAGENT_ACTIVITY_KINDS: Final = (
+    _SUBAGENT_ACTIVITY_START_KINDS
+    | _SUBAGENT_ACTIVITY_STOP_KINDS
+    | _SUBAGENT_ACTIVITY_PROGRESS_KINDS
+)
+# Codex 0.153.4 multi-agent v2 identifies a delegated child in the child rollout's own
+# ``session_meta`` header rather than in a parent ``SubAgentActivity`` item: ``thread_source`` is
+# ``subagent``, ``id`` is the child thread, and ``parent_thread_id`` names the spawning thread
+# (``session_id`` is the parent thread there, so it is never the child key). The header is the
+# child's own start signal; the parent task it belongs to is resolved from admitted catalog
+# lineage, never from these host tokens.
+_SUBAGENT_THREAD_SOURCE: Final = "subagent"
 
 
 _JSONL_SUFFIXES: Final = (".jsonl", ".jsonl.zst")
@@ -302,6 +324,29 @@ def _token(value: object) -> str | None:
     if any(ch not in allowed for ch in value) or value[0] in "._:/+-":
         return None
     return value
+
+
+def _consistent_alias_token(
+    body: Mapping[str, JsonValue], names: tuple[str, ...]
+) -> tuple[str | None, bool]:
+    """Return one bounded alias value only when every supplied spelling agrees."""
+
+    values: list[str] = []
+    supplied = False
+    for name in names:
+        if name not in body:
+            continue
+        supplied = True
+        raw = body.get(name)
+        if raw is None:
+            continue
+        token = _token(raw)
+        if token is None:
+            return None, supplied
+        values.append(token)
+    if any(value != values[0] for value in values[1:]):
+        return None, supplied
+    return (values[0] if values else None), supplied
 
 
 def resolve_codex_home(
@@ -492,6 +537,56 @@ def _structural_body(record: CodexParsedRecord) -> JsonObject | None:
     if isinstance(item, JsonObject):
         return item
     return None
+
+
+def _spawn_parent_thread(payload: JsonObject) -> tuple[str | None, bool]:
+    """Read the nested spawn record's parent thread, reporting whether one was supplied."""
+
+    source = payload.get("source")
+    if not isinstance(source, JsonObject):
+        return None, False
+    subagent = source.get(_SUBAGENT_THREAD_SOURCE)
+    if not isinstance(subagent, JsonObject):
+        return None, False
+    spawn = subagent.get("thread_spawn")
+    if not isinstance(spawn, JsonObject):
+        return None, False
+    if "parent_thread_id" not in spawn:
+        return None, False
+    return _token(spawn.get("parent_thread_id")), True
+
+
+def _child_session_identity(record: CodexParsedRecord) -> tuple[str | None, bool]:
+    """Return one v2 child rollout header's bounded child identity.
+
+    The second member says the header declared itself a delegated child (``thread_source`` is
+    ``subagent``); the first is that child's thread id, or ``None`` when the declared identity is
+    absent or self-contradictory. Only the second-with-``None`` shape is a genuine identity gap:
+    an ordinary user thread declares no child at all.
+
+    Both spellings of the spawning thread must agree, and a header whose child id equals its
+    parent id is refused: v2 sets ``session_id`` to the parent thread, so an adapter that read the
+    wrong field would publish the parent as its own child.
+    """
+
+    if record.wrapper_type != "session_meta":
+        return None, False
+    payload = _structural_body(record)
+    if payload is None or payload.get("thread_source") != _SUBAGENT_THREAD_SOURCE:
+        return None, False
+    parent, spawn_supplied = _spawn_parent_thread(payload)
+    if spawn_supplied and parent is None:
+        return None, True
+    declared = _token(payload.get("parent_thread_id"))
+    if "parent_thread_id" in payload and declared is None:
+        return None, True
+    if parent is not None and declared is not None and parent != declared:
+        return None, True
+    parent = declared if declared is not None else parent
+    child = _token(payload.get("id"))
+    if child is None or parent is None or child == parent:
+        return None, True
+    return child, True
 
 
 def _decode_stream_call_tool(value: object) -> tuple[str | None, bool]:
@@ -816,9 +911,52 @@ def structural_from_stream_record(
                 fields["exit_status"] = exit_code
             else:
                 gaps.add(ObservationGapCode.UNSUPPORTED_EVENT.value)
-        call_id = _token(body.get("id")) or _token(body.get("call_id"))
-        if call_id is not None:
-            fields["tool_call_id"] = call_id
+        # ``SubAgentActivity.id`` identifies the rollout item itself, not the
+        # parent tool call.  Keep it out of the parent correlation family; only
+        # an explicit call alias may identify that parent.
+        if item_type != "SubAgentActivity":
+            call_id = _token(body.get("id")) or _token(body.get("call_id"))
+            if call_id is not None:
+                fields["tool_call_id"] = call_id
+        # Codex rollout records use the same child identifiers as its native
+        # hook profile.  Preserve only the bounded structural pair; task
+        # creation and acceptance stay service-owned.  Some historical stream
+        # records use ``agent_id`` for the child, so normalize that alias to
+        # the canonical ``subagent_id`` field.
+        subagent_id, _subagent_aliases_supplied = _consistent_alias_token(
+            body, ("subagent_id", "agent_id", "agent_thread_id")
+        )
+        if subagent_id is not None:
+            fields["subagent_id"] = subagent_id
+        if item_type == "SubAgentActivity":
+            parent_tool_call_id, parent_aliases_supplied = _consistent_alias_token(
+                body, ("parent_tool_call_id", "tool_call_id", "tool_use_id")
+            )
+            if parent_tool_call_id is not None:
+                fields["parent_tool_call_id"] = parent_tool_call_id
+            elif parent_aliases_supplied:
+                # Invalid or conflicting supplied aliases cannot become a weaker child-only
+                # identity. Retain the same durable gap as native subagent hook ingress.
+                fields.pop("subagent_id", None)
+                gaps.add(ObservationGapCode.MISSING_SUBAGENT_IDENTITY.value)
+            # The generic ``tool_call_id`` spelling is accepted above only as
+            # an explicit parent alias for this item family.  Never leave a
+            # conflicting/invalid value in the generic field where the domain
+            # normalizer could reinterpret it as a parent call.
+            fields.pop("tool_call_id", None)
+            activity_kind = _token(body.get("kind"))
+            if activity_kind not in _SUBAGENT_ACTIVITY_KINDS:
+                gaps.add(ObservationGapCode.UNSUPPORTED_EVENT.value)
+    child_session_id, child_session_header = _child_session_identity(record)
+    if child_session_header:
+        # The header's ``id`` is a thread, never a tool call: leaving it in the generic field
+        # would let the domain normalizer read the child's own thread as its parent call.
+        fields.pop("tool_call_id", None)
+        if child_session_id is None:
+            fields.pop("subagent_id", None)
+            gaps.add(ObservationGapCode.MISSING_SUBAGENT_IDENTITY.value)
+        else:
+            fields["subagent_id"] = child_session_id
     if record.wrapper_type not in known_wrappers:
         gaps.add(ObservationGapCode.UNSUPPORTED_EVENT.value)
     return JsonObject(fields), tuple(sorted(gaps, key=str.encode))
@@ -839,6 +977,17 @@ def envelope_from_stream_record(
             token = _token(body.get(key))
             if token is not None:
                 host_ids[key] = token
+        subagent_id, _subagent_aliases_supplied = _consistent_alias_token(
+            body, ("subagent_id", "agent_id", "agent_thread_id")
+        )
+        if subagent_id is not None:
+            host_ids["subagent_id"] = subagent_id
+        if record.item_type == "SubAgentActivity":
+            parent_tool_call_id, _parent_aliases_supplied = _consistent_alias_token(
+                body, ("parent_tool_call_id", "tool_call_id", "tool_use_id")
+            )
+            if parent_tool_call_id is not None:
+                host_ids["parent_tool_call_id"] = parent_tool_call_id
     event_id = _token(record.value.get("event_id")) or _token(record.value.get("id"))
     if event_id is not None:
         host_ids.setdefault("event_id", event_id)
@@ -858,6 +1007,20 @@ def envelope_from_stream_record(
         ).removeprefix("sha256:")[:48]
     )
     event_kind = _token(record.wrapper_type) or "unsupported_event"
+    if record.item_type == "SubAgentActivity" and body is not None:
+        activity_kind = _token(body.get("kind"))
+        if activity_kind in _SUBAGENT_ACTIVITY_START_KINDS:
+            event_kind = "SubagentStart"
+        elif activity_kind in _SUBAGENT_ACTIVITY_STOP_KINDS:
+            event_kind = "SubagentStop"
+    child_session_id, child_session_header = _child_session_identity(record)
+    if child_session_header:
+        # A delegated child's own header is that child's start signal. A declared child with no
+        # usable identity keeps the phase and earns ``missing_subagent_identity``; it is never
+        # downgraded to an ordinary header, which would hide the delegation entirely.
+        event_kind = "SubagentStart"
+        if child_session_id is not None:
+            host_ids["subagent_id"] = child_session_id
     return ObservationEnvelope(
         session_commitment=session_commitment,
         event_kind=event_kind,

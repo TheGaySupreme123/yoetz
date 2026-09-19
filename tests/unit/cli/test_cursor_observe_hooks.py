@@ -8,6 +8,11 @@ from typing import cast
 
 import pytest
 
+from yoetz.adapters.integrations.codex_lifecycle import (
+    load_mapping,
+    mapping_from_start_ids,
+    store_mapping,
+)
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.application.recommendations import (
     RecommendationState,
@@ -15,10 +20,16 @@ from yoetz.application.recommendations import (
     store_recommendation_state,
 )
 from yoetz.cli import observe_hooks
-from yoetz.domain.observation import ObservationSource
+from yoetz.cli.hook_io import MAX_HOOK_STDIN_BYTES
+from yoetz.domain.observation import (
+    ObservationGapCode,
+    ObservationSource,
+    ObservationStatusQuery,
+)
 from yoetz.domain.observation_profiles import CURSOR_ORDINARY_OBSERVATION_PROFILE_ID
 from yoetz.kernel.policies.observation_advice import ObservationCompositionFact
 from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
+from yoetz.protocol.ids import IdKind, new_id
 
 
 def _consented_store(tmp_path: Path) -> tuple[LocalObservationStore, str]:
@@ -510,6 +521,43 @@ def test_cursor_real_ingress_uses_bounded_profile_and_privacy_canaries(
         assert canary.encode() not in state_bytes
 
 
+def test_cursor_received_clear_clears_existing_lifecycle_mapping(tmp_path: Path) -> None:
+    """The closed Cursor source=clear flag reaches the shared mapping fence."""
+
+    _store, _commitment = _consented_store(tmp_path)
+    session = "cursor:received-clear"
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id=session,
+            yoetz_task_id=new_id(IdKind.TASK),
+            yoetz_session_id=new_id(IdKind.SESSION),
+            yoetz_writer_id=new_id(IdKind.WRITER),
+            last_frontier=None,
+        ),
+        _state=tmp_path,
+    )
+    assert load_mapping(session, _state=tmp_path) is not None
+
+    assert (
+        observe_hooks.handle_cursor_observe(
+            event_name="sessionStart",
+            stdin_bytes=canonical_encode(
+                {
+                    "hook_event_name": "sessionStart",
+                    "conversation_id": "received-clear",
+                    "source": "clear",
+                }
+            ),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+    assert load_mapping(session, _state=tmp_path) is None
+
+
 def test_cursor_outputless_event_does_not_lease_or_commit_frontier_motion(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -979,3 +1027,72 @@ def test_cursor_version_mapping_distinguishes_ide_cli_unknown_and_omitted() -> N
     assert mapper(None) is None
     assert mapper("") is None
     assert observation_pairing_contract("cursor", None) == ("post_only", "generation_id")
+
+
+def test_cursor_oversized_payload_records_scoped_size_gap_and_keeps_ingesting(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    store, commitment = _consented_store(tmp_path)
+    oversize = (
+        b'{"conversation_id":"cursor-oversize","hook_event_name":"afterFileEdit",'
+        b'"file_path":"/EDIT_CANARY.md","edits":[{"new_string":"'
+        + b"x" * MAX_HOOK_STDIN_BYTES
+        + b'"}]}'
+    )
+    stdout = io.BytesIO()
+
+    assert (
+        observe_hooks.handle_cursor_observe(
+            event_name="afterFileEdit",
+            stdin_bytes=oversize,
+            stdout=stdout,
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+
+    assert stdout.getvalue() == b"{}\n"
+    diagnostic = (tmp_path / "observation/hook-diagnostics.jsonl").read_text(encoding="utf-8")
+    row = json.loads(diagnostic.splitlines()[0])
+    # Scoped to the affected hook event and named for its own cause, so an
+    # oversized ordinary edit is no longer reported as a malformed vendor
+    # envelope (issue #667).
+    assert row == {
+        "event": "PostToolUse",
+        "reason": "cursor_payload_too_large",
+        "ts": row["ts"],
+    }
+    assert "cursor_payload_invalid" not in diagnostic
+    assert "EDIT_CANARY" not in diagnostic
+    assert (
+        ObservationGapCode.PAYLOAD_TOO_LARGE.value
+        in store.status(ObservationStatusQuery(commitment)).gaps
+    )
+    captured = capsys.readouterr().err
+    assert "payload_too_large" in captured
+    assert str(MAX_HOOK_STDIN_BYTES) in captured
+    assert "EDIT_CANARY" not in captured
+
+    # The refused event costs only itself: the next ordinary edit still ingests.
+    assert (
+        observe_hooks.handle_cursor_observe(
+            event_name="afterFileEdit",
+            stdin_bytes=canonical_encode(
+                {
+                    "conversation_id": "cursor-oversize",
+                    "file_path": str(tmp_path / "small.md"),
+                    "hook_event_name": "afterFileEdit",
+                }
+            ),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+
+    assert store.list_envelopes(commitment)

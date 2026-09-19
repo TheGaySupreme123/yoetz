@@ -73,6 +73,22 @@ _REASONS: Final = frozenset(
         "drain_budget_exhausted",
         "drain_lease_contended",
         "drain_preflight_failed",
+        # A structural defect in the buffered admission account refused this
+        # hook's pre-flush. Before this token the failure reached the outer
+        # handler as the bare `observe` reason, so a permanently wedged flush
+        # was indistinguishable from any other hook fault (issue #753).
+        "admission_flush_invalid",
+        # One host event refused at stdin ingress for exceeding
+        # ``MAX_HOOK_STDIN_BYTES``, named per host because the reading process
+        # is the only thing that still knows which host it was: the body was
+        # never parsed, so hook payload identity (tool name, session, paths) is
+        # unavailable. Before these, an oversized Cursor write was recorded as
+        # the generic `cursor_payload_invalid`, a Codex one degraded to the bare
+        # `observe` token, and a Claude Code one recorded nothing at all
+        # (issue #667).
+        "codex_payload_too_large",
+        "claude_payload_too_large",
+        "cursor_payload_too_large",
         "auto_attach_retry_failed",
         # Why a consented SessionStart (or its turn-boundary retry) produced no
         # mapping (#459). Before these, every auto-attach failure collapsed to a
@@ -85,6 +101,7 @@ _REASONS: Final = frozenset(
         "auto_attach_result_invalid",
         "auto_attach_mapping_write_failed",
         "auto_attach_recovery_busy",
+        "auto_attach_binding_ambiguous",
         "privacy_authority_required",
         "runtime_gate_contended",
         "runtime_gate_unsafe",
@@ -127,6 +144,7 @@ _REASONS: Final = frozenset(
         # bind failed silently and observation kept routing to the old task.
         "start_bind_unparsed",
         "start_bind_invalid_ids",
+        "start_bind_child_lane_unbound",
         "start_bind_deferred",
         "start_bind_write_failed",
         # Observability only: the end-to-end hook budget is a contract, not an
@@ -217,18 +235,23 @@ def record_hook_diagnostic(
     reason: str,
     event: str,
     *,
+    candidate_count: int | None = None,
     _state: Path | None = None,
 ) -> None:
     """Append one bounded structural hook failure record, rotating one prior file."""
 
-    _append_row(
-        {
-            "event": _closed(event, _EVENTS, "unknown_event"),
-            "reason": _closed(reason, _REASONS, "unknown_reason"),
-            "ts": _timestamp(),
-        },
-        _state=_state,
-    )
+    row: dict[str, object] = {
+        "event": _closed(event, _EVENTS, "unknown_event"),
+        "reason": _closed(reason, _REASONS, "unknown_reason"),
+        "ts": _timestamp(),
+    }
+    if (
+        reason == "auto_attach_binding_ambiguous"
+        and type(candidate_count) is int
+        and 2 <= candidate_count <= 1_000_000
+    ):
+        row["candidate_count"] = candidate_count
+    _append_row(row, _state=_state)
 
 
 def record_drain_failure(

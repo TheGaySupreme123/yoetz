@@ -6,6 +6,7 @@ import asyncio
 import io
 import json
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import get_args
 
@@ -94,6 +95,62 @@ def test_zero_cooperative_publications_still_yields_advice() -> None:
     assert snapshot.ranked_items[0].summary
     assert snapshot.recommended_next_action == "resolve_failed_command"
     assert "SECRET" not in snapshot.recommended_next_action
+
+
+def _stale_finding_ids(envelopes: tuple[ObservationEnvelope, ...]) -> list[object]:
+    snapshot = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=envelopes,
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            has_real_observation=True,
+        )
+    )
+    assert snapshot is not None
+    return [
+        item.finding_id
+        for item in _materialized_advice_items(snapshot.ranked_items)
+        if item.rule_code == "edit_after_successful_check"
+    ]
+
+
+def test_paired_edit_mints_one_stable_advice_finding_id() -> None:
+    """Issue #680: a paired host edit is one receipt-blocking condition."""
+
+    check = _envelope(
+        "hook:check",
+        {"tool_name": "pytest", "exit_status": 0, "correlation_id": "check-1"},
+        pos=1,
+    )
+    pre = replace(
+        _envelope(
+            "hook:write-pre",
+            {
+                "tool_name": "Write",
+                "tool_call_id": "call-1",
+                "action": "claude_tool_pending",
+                "changed_paths_digest": "sha256:" + "b" * 64,
+            },
+            pos=2,
+        ),
+        event_kind="PreToolUse",
+    )
+    post = _envelope(
+        "hook:write-post",
+        {
+            "tool_name": "Write",
+            "tool_call_id": "call-1",
+            "action": "claude_tool_success",
+            "success": True,
+            "changed_paths_digest": "sha256:" + "b" * 64,
+        },
+        pos=3,
+    )
+    paired = _stale_finding_ids((check, pre, post))
+    assert len(paired) == 1
+    # The later phase and the wider evidence window keep the same identity, so
+    # the coordinator appends one ``finding_recorded`` event for this edit.
+    assert _stale_finding_ids((check, pre)) == paired
 
 
 def test_completion_without_verification_is_clear() -> None:
