@@ -290,6 +290,14 @@ def run_host_connection(
 
 def launch_details(installation: HostInstallation, project: Path) -> dict[str, JsonValue]:
     environment: dict[str, JsonValue] = {}
+    invocation = invoking_launcher()
+    if invocation is not None:
+        # Canonical Codex hooks and agent-issued CLI commands use `yoetz` on PATH.
+        # Keep them on the same installation as the reviewed MCP registration.
+        launcher = resolve_yoetz_launcher(invocation)
+        environment["PATH"] = (
+            str(Path(launcher[0]).parent) + os.pathsep + os.environ.get("PATH", "")
+        )
     command: list[JsonValue] = [str(installation.executable)]
     if installation.host == "codex":
         environment["CODEX_HOME"] = str(installation.config_root)

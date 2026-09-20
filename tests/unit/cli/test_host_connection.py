@@ -119,3 +119,25 @@ def test_status_never_consumes_approval(
     report = json.loads(capsys.readouterr().out)
     assert report["outcome"] == "status"
     assert report["connection_observed"] is False
+
+
+def test_launch_preserves_the_selected_yoetz_runtime_on_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yoetz.adapters.integrations.host_discovery import HostInstallation
+    from yoetz.cli import host_connection
+
+    monkeypatch.setattr(host_connection, "invoking_launcher", lambda: "/opt/instance/bin/yoetz")
+
+    def resolve(_value: object) -> tuple[str, ...]:
+        return ("/opt/instance/bin/yoetz",)
+
+    monkeypatch.setattr(host_connection, "resolve_yoetz_launcher", resolve)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    selected = HostInstallation(
+        "codex", Path("/opt/codex"), "0.153.4", Path("/workspace/profile"), "Codex"
+    )
+    launch = host_connection.launch_details(selected, Path("/workspace/project"))
+    environment = launch["environment"]
+    assert isinstance(environment, dict)
+    assert environment["PATH"] == "/opt/instance/bin:/usr/bin:/bin"
