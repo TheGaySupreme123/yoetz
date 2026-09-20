@@ -2642,7 +2642,9 @@ for _admission_action in ("status", "preview", "grant", "revoke"):
 def setup_run(
     non_interactive: Annotated[
         bool,
-        typer.Option("--non-interactive", help="Never ask setup questions; apply only an accepted preview."),
+        typer.Option(
+            "--non-interactive", help="Never ask setup questions; apply only an accepted preview."
+        ),
     ] = False,
     codex_path: _CODEX_PATH = None,
     codex_home: Annotated[

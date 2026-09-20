@@ -237,31 +237,7 @@ def run_host_connection(
             report.update({"outcome": "completed", "status": apply_selected(plan, prepare)})
             code = 0
         else:
-            continuation_launcher = invoking_launcher()
-            if continuation_launcher is None:
-                raise ConnectionError("connection_launcher_unavailable")
-            command = [
-                *resolve_yoetz_launcher(continuation_launcher),
-                "setup",
-                "run" if action == "connect" else "disconnect",
-                "--host",
-                selected.host,
-                "--host-path",
-                str(selected.executable),
-                "--host-config-root",
-                str(selected.config_root),
-                "--project",
-                str(project),
-                "--route-profile",
-                route,
-                "--request-id",
-                request,
-                "--preview-digest",
-                plan.digest,
-                "--accept",
-                "--non-interactive",
-            ]
-            report.update({"outcome": "preview", "next_step": shlex.join(command)})
+            report.update({"outcome": "preview", "next_step": connection_continuation(plan)})
             code = 3 if accept or interactive else 0
         if report["outcome"] in {"completed", "unchanged"}:
             launch = launch_details(selected, project)
@@ -347,3 +323,33 @@ def launch_details(installation: HostInstallation, project: Path) -> dict[str, J
         "cwd": str(project),
         "shell_command": "cd " + shlex.quote(str(project)) + " && " + shlex.join(arguments),
     }
+
+
+def connection_continuation(plan: ConnectionPlan) -> str:
+    """Retain the selected instance, host, project and exact approval on handover."""
+    launcher = invoking_launcher()
+    if launcher is None:
+        raise ConnectionError("connection_launcher_unavailable")
+    body = plan.body
+    command = [
+        *resolve_yoetz_launcher(launcher),
+        "setup",
+        "run" if body["action"] == "connect" else "disconnect",
+        "--host",
+        str(body["host"]),
+        "--host-path",
+        str(body["executable"]),
+        "--host-config-root",
+        str(body["config_root"]),
+        "--project",
+        str(body["project_root"]),
+        "--route-profile",
+        str(body["route_profile"]),
+        "--request-id",
+        str(body["request_id"]),
+        "--preview-digest",
+        plan.digest,
+        "--accept",
+        "--non-interactive",
+    ]
+    return shlex.join(command)

@@ -10,6 +10,8 @@ def test_executable_discovery_keeps_cursor_surfaces_distinct(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str
 ) -> None:
     monkeypatch.setattr(discovery.sys, "platform", platform)
+    for key in ("CURSOR_CONFIG_DIR", "XDG_CONFIG_HOME", "CLAUDE_CONFIG_DIR"):
+        monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr(discovery, "discover_codex_binaries", lambda: ())
     names = {"claude": "2.1.241", "cursor": "2.6.0", "cursor-agent": "2026.09.19"}
     for name in names:

@@ -20,6 +20,69 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
+@pytest.mark.parametrize(
+    ("host", "installed", "enabled", "configured", "expected"),
+    [
+        ("claude", False, False, True, "absent"),
+        ("claude", True, False, True, "absent"),
+        ("claude", True, True, True, "yoetz_owned"),
+        ("cursor-cli", True, None, True, "yoetz_owned"),
+        ("cursor-ide", False, None, True, "absent"),
+        ("cursor-ide", True, None, False, "absent"),
+    ],
+)
+async def test_host_ownership_requires_complete_configuration_off_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    host: str,
+    installed: bool,
+    enabled: bool | None,
+    configured: bool,
+    expected: str,
+) -> None:
+    import threading
+
+    from yoetz.cli import host_connection
+
+    event_thread = threading.get_ident()
+
+    def select(*_args: object) -> object:
+        assert threading.get_ident() != event_thread
+        return object()
+
+    monkeypatch.setattr(host_connection, "select_installation", select)
+
+    def prepare(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            status=lambda: {"installed": installed, "enabled": enabled, "configured": configured}
+        )
+
+    monkeypatch.setattr(host_connection, "prepare_selected", prepare)
+    option = HarnessOption("/opt/agent", "1.0.0", "Agent", "", host=host)
+    assert await YoetzRuntime(cwd=tmp_path).mcp_state(option) == expected
+
+
+@pytest.mark.parametrize("host", ["claude", "cursor-ide", "cursor-cli"])
+async def test_non_codex_plugin_layers_use_selected_host_state(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, host: str
+) -> None:
+    from yoetz.tui.models import LayerState
+
+    seen: list[str] = []
+
+    async def status(_self: YoetzRuntime, option: HarnessOption) -> dict[str, object]:
+        seen.append(option.host)
+        return {"installed": True, "configured": True, "enabled": True}
+
+    monkeypatch.setattr(YoetzRuntime, "_host_connection_status", status)
+    option = HarnessOption("/opt/agent", "1.0.0", "Selected agent", "", host=host)
+    layers = await YoetzRuntime(cwd=tmp_path)._host_plugin_layers(option)  # pyright: ignore[reportPrivateUsage]
+    assert seen == [host]
+    assert layers[0].state is LayerState.VERIFIED
+    assert layers[0].detail == "Selected agent"
+    assert layers[1].state is LayerState.UNPROVEN
+
+
 async def test_detect_reports_connected_when_the_second_installation_is_owned(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

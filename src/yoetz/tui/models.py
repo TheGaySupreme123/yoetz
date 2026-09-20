@@ -15,7 +15,6 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Final, Literal
 
-from yoetz.ports.harness_mcp import MCP_SERVE_COMMAND
 from yoetz.tui.symbols import Level
 
 __all__ = [
@@ -162,7 +161,7 @@ class IntegrationPlan:
     activation_config_preimage_digest: str
     activation_cache_mutation_planned: bool
     mcp_isolated_root: str | None = None
-    activation_mcp_command: tuple[str, ...] = MCP_SERVE_COMMAND
+    activation_mcp_command: tuple[str, ...] = ()
 
     @property
     def changes(self) -> tuple[str, ...]:

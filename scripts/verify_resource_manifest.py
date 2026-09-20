@@ -1153,6 +1153,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         "application/schema+json",
         True,
     ),
+    (
+        "schemas/version/version-manifest-2.2.2.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
     ("skills/claude-code/yoetz/SKILL.md", "skill", "text/markdown", True),
     ("skills/codex/yoetz/SKILL.md", "skill", "text/markdown", True),
     ("skills/codex/yoetz/manifest.json", "compatibility_manifest", "application/json", True),

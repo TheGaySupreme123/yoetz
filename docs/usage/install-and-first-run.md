@@ -147,13 +147,11 @@ pipes, redirected streams — prints help instead, exactly as before.
 
 Setup is a linear path inside the interface, each finished step collapsing into a short line:
 
-1. **Detection.** Codex installations (the wizard detects Codex only; Claude Code and Cursor are
-   connected afterwards through `yoetz integrate claude ...` and `yoetz integrate cursor ...`, see
-   the note at the top of this page), your project and its canonical Git common
+1. **Detection.** Installed Codex, Claude Code, Cursor IDE and Cursor Agent CLI, your project and its canonical Git common
    root (or resolved non-Git directory), whether system secure storage is available, and whether
    Yoetz is connected yet.
-2. **Which installation**, when several Codex binaries are found on your `PATH`, in the standard
-   macOS Codex Desktop location, or in the Windows Store Codex App package. Friendly names lead;
+2. **Which installation**, when several supported agents are found. Select your preferred agent
+   in the same setup flow. Friendly names lead;
    executable paths appear on selection and under `D`.
 3. **Project trust.** The repository root and what project-local guidance and hooks are permitted
    to do. Starting in a subfolder is called out, with the root the trust applies to.

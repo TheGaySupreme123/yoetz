@@ -20,7 +20,7 @@ def prepared(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> ConnectionPlan:
     launcher.chmod(0o700)
     monkeypatch.setattr(cli, "invoking_launcher", lambda: (str(launcher),))
     installation = HostInstallation(
-        "claude", Path("/opt/claude"), "2.1.241", Path("/home/person/.claude"), "Claude Code"
+        "claude", Path("/opt/claude"), "2.1.241", Path("/workspace/example/.claude"), "Claude Code"
     )
     plan = ConnectionPlan(
         {
@@ -29,8 +29,8 @@ def prepared(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> ConnectionPlan:
             "host": "claude",
             "host_version": "2.1.241",
             "executable": "/opt/claude",
-            "config_root": "/home/person/.claude",
-            "project_root": "/home/person/project",
+            "config_root": "/workspace/example/.claude",
+            "project_root": "/workspace/example/project",
             "action": "connect",
             "route_profile": "strict",
             "preview_digest": DIGEST,
@@ -63,7 +63,7 @@ def test_agent_acceptance_requires_exact_preview_and_request(
         host="claude",
         executable=None,
         config_root=None,
-        project=Path("/home/person/project"),
+        project=Path("/workspace/example/project"),
         accept=True,
         json_output=True,
     )
@@ -86,7 +86,7 @@ def test_pending_approval_is_an_actionable_report_not_a_traceback(
         host="claude",
         executable=None,
         config_root=None,
-        project=Path("/home/person/project"),
+        project=Path("/workspace/example/project"),
         accept=True,
         request_value=REQUEST,
         preview_digest=prepared.digest,
@@ -110,7 +110,7 @@ def test_status_never_consumes_approval(
             host="claude",
             executable=None,
             config_root=None,
-            project=Path("/home/person/project"),
+            project=Path("/workspace/example/project"),
             status_only=True,
             json_output=True,
         )

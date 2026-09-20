@@ -1197,6 +1197,7 @@ class YoetzTui(App[int]):
         from yoetz.cli.host_connection import (
             CONNECTION_ERRORS,
             apply_selected,
+            connection_continuation,
             connection_summary,
             launch_details,
             prepare_selected,
@@ -1241,9 +1242,17 @@ class YoetzTui(App[int]):
                 if approved != "apply":
                     self.say(Level.OPTIONAL, "Connection left unchanged.")
                     return False
-                status = await self.hand_over_terminal(
-                    lambda: run_sync(lambda: apply_selected(plan, prepare))
-                )
+                try:
+                    status = await self.hand_over_terminal(
+                        lambda: run_sync(lambda: apply_selected(plan, prepare))
+                    )
+                except SuspendNotSupported:
+                    self.say(
+                        Level.UNPROVEN,
+                        "This terminal cannot hand over for connection approval",
+                        ("Run this command in your terminal:", connection_continuation(plan)),
+                    )
+                    return False
             else:
                 status = await run_sync(plan.status)
             self.say(

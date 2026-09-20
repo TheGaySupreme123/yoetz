@@ -34,6 +34,60 @@ async def run_command(pilot: object, app: YoetzTui, command: str) -> None:
     await pilot.pause()  # type: ignore[attr-defined]
 
 
+async def test_connection_handover_failure_preserves_exact_continuation(
+    make_app: MakeApp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from textual.app import SuspendNotSupported
+
+    from yoetz.cli import host_connection
+    from yoetz.tui.models import HarnessOption
+
+    app = make_app()
+    plan = SimpleNamespace(unchanged=False)
+    continuation = "/opt/test-instance/bin/yoetz setup disconnect --host claude --project /project"
+
+    def select(*_args: object) -> object:
+        return object()
+
+    def prepare(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        return plan
+
+    def summary(_plan: object) -> tuple[str, ...]:
+        return ("Preview",)
+
+    def continue_command(_plan: object) -> str:
+        return continuation
+
+    applied: list[bool] = []
+
+    def apply(*_args: object) -> None:
+        applied.append(True)
+
+    monkeypatch.setattr(host_connection, "select_installation", select)
+    monkeypatch.setattr(host_connection, "prepare_selected", prepare)
+    monkeypatch.setattr(host_connection, "connection_summary", summary)
+    monkeypatch.setattr(host_connection, "connection_continuation", continue_command)
+    monkeypatch.setattr(host_connection, "apply_selected", apply)
+
+    async def approve(_view: object) -> str:
+        return "apply"
+
+    async def no_handover(_operation: object) -> None:
+        raise SuspendNotSupported()
+
+    monkeypatch.setattr(app, "ask", approve)
+    monkeypatch.setattr(app, "hand_over_terminal", no_handover)
+    option = HarnessOption(str(Path("/opt/claude")), "2.1.0", "Claude", "", host="claude")
+    async with app.run_test(size=WIDE):
+        result = await app._connect_selected_host(option, disconnect=True)  # pyright: ignore[reportPrivateUsage]
+        assert result is False
+        assert applied == []
+        assert continuation in transcript(app)
+
+
 # ---------------------------------------------------------------------------
 # Landing surface
 # ---------------------------------------------------------------------------
