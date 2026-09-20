@@ -4,7 +4,7 @@ All notable user-visible changes to Yoetz are documented in this file. Format is
 project-native heading style that marks the pending version as unreleased above
 reverse-chronological released versions.
 
-## 0.2.4 — unreleased
+## 0.2.4 — 2026-09-20
 
 - One guided installation and connection lifecycle for Codex, Claude Code, Cursor IDE and
   Cursor Agent CLI, including preview, status, disconnect and reconnect (#767).

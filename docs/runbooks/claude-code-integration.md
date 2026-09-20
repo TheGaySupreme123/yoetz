@@ -14,9 +14,12 @@ install` below retains its disabled-by-default behavior.
 On macOS the presence step uses LocalAuthentication; Linux and WSL 2 use the trusted PAM console
 path. A missing mechanism is a reported local continuation, not permission to bypass it. The
 common connection code does not establish native acceptance on any OS. Track current exact-head
-macOS/Linux/WSL installation, fresh-session tool discovery, start, disconnect and reconnect evidence
-in #767. Existing capability records below remain bounded to their recorded cells. Ownership,
+macOS/Linux/WSL installation, status, repeat setup, disconnect and reconnect evidence
+in #767. Provider authentication and model sessions are outside that installation acceptance. Existing capability records below remain bounded to their recorded cells. Ownership,
 configuration, enablement, session activation, observation and review remain separate proof layers.
+Claude may delete its private marketplace source during native removal; Yoetz accepts that
+already-absent source and still verifies the final registration and installation state.
+The command sequence follows the [official marketplace CLI reference](https://code.claude.com/docs/en/plugin-marketplaces#manage-marketplaces-from-the-cli).
 
 ## Conditional agent guidance
 

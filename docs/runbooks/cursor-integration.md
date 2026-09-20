@@ -18,8 +18,10 @@ A repeated exact connection is a no-op; a partial connection is re-previewed fro
 macOS uses LocalAuthentication; Linux and Windows through WSL 2 use the trusted PAM console path.
 Windows-side IDE discovery/configuration is not inferred from a Linux executable or directory.
 An IDE available only outside the selected WSL environment needs an explicit capability disposition.
-Track each OS and each IDE/CLI cell's exact-head native installation, fresh-session discovery/start,
-disconnect and reconnect in #767. CLI proof does not establish IDE proof. Existing evidence below
+Track each OS and each IDE/CLI cell's exact-candidate installation, status, repeat setup,
+disconnect and reconnect in #767. Provider authentication and model sessions are outside that
+installation acceptance. The Windows-side IDE with Remote WSL remains unverified; #722, owned
+by the Yoetz integration maintainer, tracks that separate cell. CLI proof does not establish IDE proof. Existing evidence below
 remains limited to its named cells; configuration success never claims session activation.
 
 ## Conditional agent guidance
