@@ -2515,8 +2515,9 @@ async def run_setup_wizard(
         selected_route = route_profile or (
             "policy" if interactive and _choose_review_mode() == "semantic" else "strict"
         )
-        result = await run_sync(
-            lambda: run_host_connection(
+
+        def connect() -> int:
+            return run_host_connection(
                 host=host,
                 executable=host_path,
                 config_root=host_config_root,
@@ -2528,7 +2529,10 @@ async def run_setup_wizard(
                 preview_digest=preview_digest,
                 json_output=json_output,
             )
-        )
+
+        # PAM owns SIGALRM and the foreground console on the operator's main thread.
+        # Codex's legacy composition owns an AnyIO loop and must stay off this loop.
+        result = await run_sync(connect) if host == "codex" else connect()
         if result == 0 and interactive:
             if selected_route == "policy":
                 result = await run_provider_setup()

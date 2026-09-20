@@ -1242,10 +1242,15 @@ class YoetzTui(App[int]):
                 if approved != "apply":
                     self.say(Level.OPTIONAL, "Connection left unchanged.")
                     return False
+
+                async def apply_on_terminal():
+                    if option.host == "codex":
+                        return await run_sync(lambda: apply_selected(plan, prepare))
+                    # PAM must own the main thread's signal deadline while the UI is suspended.
+                    return apply_selected(plan, prepare)
+
                 try:
-                    status = await self.hand_over_terminal(
-                        lambda: run_sync(lambda: apply_selected(plan, prepare))
-                    )
+                    status = await self.hand_over_terminal(apply_on_terminal)
                 except SuspendNotSupported:
                     self.say(
                         Level.UNPROVEN,

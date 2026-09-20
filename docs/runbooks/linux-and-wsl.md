@@ -5,6 +5,19 @@ WSL 2 (Windows Subsystem for Linux). Product wording for users lives on
 [the install page](../usage/install-and-first-run.md#linux); this page records the decisions and
 their evidence state. Filed from the Linux/WSL parity sweep (issues #716, #720–#725).
 
+## Shared desktop installation
+
+`yoetz setup run` discovers installed Codex, Claude Code, Cursor IDE and Cursor Agent CLI.
+The selected host uses the common preview, status, disconnect and reconnect flow. Installing the
+Yoetz integration does not require signing in to a model provider. Host account sign-in is a
+separate prerequisite for model use.
+
+Claude and Cursor plugin changes retain the exact-plan operating-system identity check. On
+Linux and WSL, setup and the suspended terminal interface keep that PAM ceremony on the
+foreground main thread; a worker thread cannot own its signal deadline. A missing trusted
+console or failed password leaves the integration unchanged and returns a terminal continuation.
+Issue #767 owns installation verification; it does not certify full model/observation behavior.
+
 ## Certified platform cells
 
 ADR-007 advertises exactly two cells: macOS 11.0+ arm64 (`macosx_11_0_arm64`) and glibc 2.28+

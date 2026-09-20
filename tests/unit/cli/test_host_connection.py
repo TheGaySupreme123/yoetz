@@ -141,3 +141,35 @@ def test_launch_preserves_the_selected_yoetz_runtime_on_path(
     environment = launch["environment"]
     assert isinstance(environment, dict)
     assert environment["PATH"] == "/opt/instance/bin:/usr/bin:/bin"
+
+
+@pytest.mark.parametrize("host", ["claude", "cursor-ide", "cursor-cli", "codex"])
+def test_setup_keeps_os_password_ceremony_on_main_thread(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, host: str
+) -> None:
+    import threading
+
+    import anyio
+
+    from yoetz.cli.setup import run_setup_wizard
+
+    main_thread = threading.get_ident()
+
+    def connect(**_kwargs: object) -> int:
+        assert (threading.get_ident() == main_thread) is (host != "codex")
+        return 0
+
+    monkeypatch.setattr(cli, "run_host_connection", connect)
+
+    async def run() -> int:
+        return await run_setup_wizard(
+            non_interactive=True,
+            codex_path=None,
+            codex_home=None,
+            accept=False,
+            json_output=True,
+            host=host,
+            project=tmp_path,
+        )
+
+    assert anyio.run(run) == 0
