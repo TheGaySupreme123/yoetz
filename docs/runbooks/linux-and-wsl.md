@@ -133,4 +133,7 @@ native host cell. Both hosts can use a hand-added `yoetz mcp serve` entry. The p
 are recorded in
 [`claude-code-integration.md`](claude-code-integration.md#linux-and-wsl) and
 [`cursor-integration.md`](cursor-integration.md#linux-and-wsl); the Linux x86-64 evidence cases
-for the CLI cells are **outstanding** (issue #722).
+for session activation/observation remain **outstanding** (issue #722). Separately, issue #767
+records successful installed 0.2.4 setup lifecycles for all three CLIs on both Ubuntu x86-64 and
+actual WSL 2, plus the Cursor IDE installation on Ubuntu. Successful real PAM approval was
+exercised using disposable local accounts; no provider authentication or model task was required.
