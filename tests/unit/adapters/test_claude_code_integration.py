@@ -88,8 +88,11 @@ def _target(tmp_path: Path) -> ClaudeCodePluginTarget:
 
 
 class _ClaudeFixture:
-    def __init__(self, artifact: ClaudeCodePluginArtifact) -> None:
+    def __init__(
+        self, artifact: ClaudeCodePluginArtifact, *, removes_marketplace_source: bool = False
+    ) -> None:
         self.artifact = artifact
+        self.removes_marketplace_source = removes_marketplace_source
         self.installed = False
         self.enabled = False
         self.calls: list[tuple[str, ...]] = []
@@ -181,6 +184,8 @@ class _ClaudeFixture:
             return ClaudeCodeCommandResult(0, b"ok", b"")
         if args[:3] == ("plugin", "marketplace", "remove"):
             self.settings(target, False)
+            if self.removes_marketplace_source:
+                shutil.rmtree(Path(target.marketplace_root))
             return ClaudeCodeCommandResult(0, b"ok", b"")
         return ClaudeCodeCommandResult(1, b"", b"unexpected")
 
@@ -565,15 +570,17 @@ def test_export_writes_the_exact_development_root_and_preview_refuses_it(
     assert refused.value.reason is PluginArtifactReason.SOURCE_INVALID
 
 
+@pytest.mark.parametrize("removes_marketplace_source", [False, True])
 def test_project_marketplace_install_enable_disable_and_remove_are_separate_states(
     tmp_path: Path,
+    removes_marketplace_source: bool,
 ) -> None:
     target = _target(tmp_path)
     artifact = render_claude_code_plugin(
         mcp_ownership=McpOwnership.PLUGIN_MANAGED,
         route_profile="strict",
     )
-    commands = _ClaudeFixture(artifact)
+    commands = _ClaudeFixture(artifact, removes_marketplace_source=removes_marketplace_source)
     review = _Review()
 
     before = status_claude_code_plugin(target, artifact, commands=commands)

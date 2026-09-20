@@ -1996,6 +1996,11 @@ def _remove_source(target: ClaudeCodePluginTarget) -> tuple[str, ...]:
     rollback = root.parent / _ROLLBACK_NAME
     if rollback.exists() or rollback.is_symlink():
         raise _error(PluginArtifactReason.RECOVERY_REQUIRED)
+    # Claude's marketplace removal may already delete its source directory.
+    # Missing source is a successful removal; dangling symlinks still require
+    # the ownership checks below.
+    if not root.exists() and not root.is_symlink():
+        return ()
     try:
         os.replace(root, rollback)
         _fsync_dir(root.parent)
