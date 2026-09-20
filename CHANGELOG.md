@@ -4,6 +4,16 @@ All notable user-visible changes to Yoetz are documented in this file. Format is
 project-native heading style that marks the pending version as unreleased above
 reverse-chronological released versions.
 
+## 0.2.4 — 2026-09-20
+
+- One guided installation and connection lifecycle for Codex, Claude Code, Cursor IDE and
+  Cursor Agent CLI, including preview, status, disconnect and reconnect (#767).
+- Preserve exact host profiles and runtime paths in setup continuations; keep required Linux/WSL
+  password approval on the foreground thread.
+- Inspect the selected host's readiness and retain partial-installation and fresh-session limits.
+
+See [release notes](docs/releases/v0.2.4.md) for installation verification and coverage limits.
+
 ## 0.2.3 — 2026-09-19
 
 Repairs to existing 0.2 behavior; no 0.3 feature merge. The verified scope and known limits are

@@ -350,6 +350,7 @@ class YoetzTui(App[int]):
             "check": self.command_check,
             "receipt": self.command_receipt,
             "connect": self.command_connect,
+            "disconnect": self.command_disconnect,
             "privacy": self.command_privacy,
             "provider": self.command_provider,
             "service": self.command_service,
@@ -392,14 +393,14 @@ class YoetzTui(App[int]):
                 options=[
                     Option(
                         "connect",
-                        "Connect Yoetz to Codex",
+                        "Connect Yoetz to an agent",
                         "Recommended. Adds the local integration for this project.",
                         disabled=not detection.harnesses,
-                        disabled_reason="no Codex installation found",
+                        disabled_reason="no agent installation found",
                     ),
                     Option(
                         "local",
-                        "Set up Yoetz without Codex",
+                        "Set up Yoetz without an agent",
                         "Use local checks and receipts from the terminal.",
                     ),
                     Option("exit", "Exit"),
@@ -434,6 +435,16 @@ class YoetzTui(App[int]):
                 option = await self._choose_harness(detection.harnesses)
                 if option is None:
                     self.say(Level.OPTIONAL, "Setup stopped. Nothing was changed.")
+                    return
+                if option.host != "codex":
+                    review = await self._ask_review_mode()
+                    if review is None:
+                        return
+                    if await self._connect_selected_host(
+                        option, route="policy" if review == "semantic" else "strict"
+                    ):
+                        await self._choose_storage(detection)
+                        await self._run_initial_review(review, connected=True)
                     return
                 codex_home = None
                 step = 1
@@ -605,7 +616,7 @@ class YoetzTui(App[int]):
         chosen = await self.ask(
             SelectionView(
                 name="harness",
-                title="More than one Codex installation is available",
+                title="Choose an agent installation",
                 options=rows,
                 hint="enter to choose · esc to cancel",
             )
@@ -1111,7 +1122,7 @@ class YoetzTui(App[int]):
         if not harnesses:
             self.say(
                 Level.OPTIONAL,
-                "No Codex installation was found",
+                "No agent installation was found",
                 (
                     "Yoetz still works offline: /check runs local checks",
                     "and /receipt produces an honest record.",
@@ -1120,6 +1131,13 @@ class YoetzTui(App[int]):
             return
         option = await self._choose_harness(harnesses)
         if option is None:
+            return
+        if option.host != "codex":
+            review = await self._ask_review_mode()
+            if review is not None:
+                await self._connect_selected_host(
+                    option, route="policy" if review == "semantic" else "strict"
+                )
             return
         if not await self._offer_package_upgrade_if_newer():
             return
@@ -1161,6 +1179,107 @@ class YoetzTui(App[int]):
             return
         await self._connect(option, codex_home)
         await self._refresh_header()
+
+    async def command_disconnect(self) -> None:
+        option = await self._choose_harness(self.runtime.discover_harnesses())
+        if option is not None:
+            await self._connect_selected_host(option, disconnect=True)
+
+    async def _connect_selected_host(
+        self,
+        option: HarnessOption,
+        *,
+        route: Literal["policy", "strict"] = "strict",
+        disconnect: bool = False,
+    ) -> bool:
+        from anyio.to_thread import run_sync
+
+        from yoetz.cli.host_connection import (
+            CONNECTION_ERRORS,
+            apply_selected,
+            connection_continuation,
+            connection_summary,
+            launch_details,
+            prepare_selected,
+            select_installation,
+        )
+        from yoetz.protocol.ids import IdKind, new_id
+
+        request = new_id(IdKind.REQUEST)
+        try:
+            selected = await run_sync(
+                lambda: select_installation(
+                    option.host,
+                    Path(option.executable_path),
+                    None if option.config_root is None else Path(option.config_root),
+                )
+            )
+
+            def prepare():
+                return prepare_selected(
+                    selected,
+                    self.runtime.project_root(),
+                    action="disconnect" if disconnect else "connect",
+                    route=route,
+                    request_value=request,
+                )
+
+            plan = await run_sync(prepare)
+            if not plan.unchanged:
+                approved = await self.ask(
+                    SelectionView(
+                        name="host-connection",
+                        title=f"{'Disconnect' if disconnect else 'Connect'} {option.label}",
+                        options=[
+                            Option(
+                                "apply", "Apply this plan", " · ".join(connection_summary(plan))
+                            ),
+                            Option("cancel", "Cancel"),
+                        ],
+                        hint="enter to choose · esc to cancel",
+                    )
+                )
+                if approved != "apply":
+                    self.say(Level.OPTIONAL, "Connection left unchanged.")
+                    return False
+
+                async def apply_on_terminal():
+                    if option.host == "codex":
+                        return await run_sync(lambda: apply_selected(plan, prepare))
+                    # PAM must own the main thread's signal deadline while the UI is suspended.
+                    return apply_selected(plan, prepare)
+
+                try:
+                    status = await self.hand_over_terminal(apply_on_terminal)
+                except SuspendNotSupported:
+                    self.say(
+                        Level.UNPROVEN,
+                        "This terminal cannot hand over for connection approval",
+                        ("Run this command in your terminal:", connection_continuation(plan)),
+                    )
+                    return False
+            else:
+                status = await run_sync(plan.status)
+            self.say(
+                Level.ACTIVE,
+                "Integration removed" if disconnect else "Integration configured",
+                (
+                    "Start a fresh session: "
+                    + str(launch_details(selected, self.runtime.project_root())["shell_command"])
+                    if not disconnect
+                    else "Restart the host. Your Yoetz data is retained.",
+                ),
+                details=tuple(f"{key}: {value}" for key, value in status.items()),
+            )
+            return True
+        except CONNECTION_ERRORS as error:
+            self.say(
+                Level.BLOCKED,
+                "Connection needs attention",
+                ("Run yoetz setup run --host " + option.host + " in a trusted local terminal.",),
+                details=(type(error).__name__,),
+            )
+            return False
 
     async def _offer_package_upgrade_if_newer(self) -> bool:
         """When a newer package exists, offer upgrade before harness re-apply.

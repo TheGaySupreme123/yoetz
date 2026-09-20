@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
 import pytest
 
@@ -32,6 +32,69 @@ async def run_command(pilot: object, app: YoetzTui, command: str) -> None:
     await pilot.press("enter")  # type: ignore[attr-defined]
     await pilot.pause()  # type: ignore[attr-defined]
     await pilot.pause()  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("suspendable", [False, True])
+async def test_connection_handover_preserves_foreground_authority_and_continuation(
+    make_app: MakeApp, monkeypatch: pytest.MonkeyPatch, suspendable: bool
+) -> None:
+    import threading
+
+    main_thread = threading.get_ident()
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from textual.app import SuspendNotSupported
+
+    from yoetz.cli import host_connection
+    from yoetz.tui.models import HarnessOption
+
+    app = make_app()
+    plan = SimpleNamespace(unchanged=False)
+    continuation = "/opt/test-instance/bin/yoetz setup disconnect --host claude --project /project"
+
+    def select(*_args: object) -> object:
+        return object()
+
+    def prepare(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        return plan
+
+    def summary(_plan: object) -> tuple[str, ...]:
+        return ("Preview",)
+
+    def continue_command(_plan: object) -> str:
+        return continuation
+
+    applied: list[bool] = []
+
+    def apply(*_args: object) -> dict[str, object]:
+        assert threading.get_ident() == main_thread
+        applied.append(True)
+        return {}
+
+    monkeypatch.setattr(host_connection, "select_installation", select)
+    monkeypatch.setattr(host_connection, "prepare_selected", prepare)
+    monkeypatch.setattr(host_connection, "connection_summary", summary)
+    monkeypatch.setattr(host_connection, "connection_continuation", continue_command)
+    monkeypatch.setattr(host_connection, "apply_selected", apply)
+
+    async def approve(_view: object) -> str:
+        return "apply"
+
+    async def handover(operation: Callable[[], Awaitable[object]]) -> object:
+        if not suspendable:
+            raise SuspendNotSupported()
+        return await operation()
+
+    monkeypatch.setattr(app, "ask", approve)
+    monkeypatch.setattr(app, "hand_over_terminal", handover)
+    option = HarnessOption(str(Path("/opt/claude")), "2.1.0", "Claude", "", host="claude")
+    async with app.run_test(size=WIDE):
+        result = await app._connect_selected_host(option, disconnect=True)  # pyright: ignore[reportPrivateUsage]
+        assert result is suspendable
+        assert applied == ([True] if suspendable else [])
+        if not suspendable:
+            assert continuation in transcript(app)
 
 
 # ---------------------------------------------------------------------------
@@ -701,7 +764,7 @@ async def test_connect_without_a_harness_points_at_local_verification(
         await pilot.pause()
         await run_command(pilot, app, "/connect")
         text = transcript(app)
-        assert "No Codex installation was found" in text
+        assert "No agent installation was found" in text
         assert "/check" in text
 
 

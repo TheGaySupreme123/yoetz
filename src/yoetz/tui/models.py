@@ -93,6 +93,8 @@ class HarnessOption:
     label: str
     description: str
     recommended: bool = False
+    host: str = "codex"
+    config_root: str | None = None
 
     @property
     def version_text(self) -> str:
@@ -159,6 +161,7 @@ class IntegrationPlan:
     activation_config_preimage_digest: str
     activation_cache_mutation_planned: bool
     mcp_isolated_root: str | None = None
+    activation_mcp_command: tuple[str, ...] = ()
 
     @property
     def changes(self) -> tuple[str, ...]:

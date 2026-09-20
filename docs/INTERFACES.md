@@ -2628,7 +2628,7 @@ receipt values without rewriting stored receipts or the released `2.6.0` envelop
 request envelopes remain `2.6.0`; no new control method or 0.3 project contract is introduced.
 CLI JSON, terminal output and the prompt-loop menu render decoded UTC receipt timestamps in
 canonical millisecond RFC3339 form (issues #731 and #732). The added schema inventory is reported
-by version-manifest `2.2.1`; released `2.2.0` and earlier manifests retain their original bytes.
+by version-manifest `2.2.2`; released `2.2.1` and earlier manifests retain their original bytes.
 
 `PrivacyAuditPort.list_pending_disclosures(audience) -> PendingDisclosurePage` projects only
 `PendingDisclosureEntry(pending_id, task_id, expires_at)` for proposals in `awaiting_human` or
@@ -4241,6 +4241,18 @@ schema tokens are `yoetz.setup-wizard-marker/1`, `yoetz.setup-wizard-report/1`,
 `config.paths.setup_marker_path`. The CLI surfaces are
 `yoetz setup run|status` and
 `yoetz integrate <harness> mcp status|preview|preview-remove|install|remove` (ADR-012).
+
+The #767 desktop entrypoints are `setup run|status|disconnect --host
+codex|claude|cursor-ide|cursor-cli`, with `--host-path`, `--host-config-root`, and `--project`
+overrides. `setup-status/1` adds the executable-backed `hosts` inventory alongside its legacy
+Codex `discovered` rows. Inventory is not connection proof. `yoetz.host-connection-plan/1` binds
+the request, installation, project, route, adapter previews and changes to `preview_digest`.
+`yoetz.host-connection-report/1` names `preview`, `completed`, `unchanged`, `status` or `incomplete`,
+with the plan, layer-specific status, reason and continuation where applicable.
+`connection_observed: false` means setup did not observe a native session. An agent repeats the
+preview's exact `--request-id` and `--preview-digest` with `--accept`; generic acceptance cannot
+bind unseen changes. Human and agent surfaces share that application path. ADR-012 specifies
+compound-review consumption and the separate observation/provider/disclosure authority.
 
 For issue #654, `mcp_command_profile` validates the shape of a bare or absolute console-script
 command with the exact current or legacy Codex serving suffix; it establishes no ownership.

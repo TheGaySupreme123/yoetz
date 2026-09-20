@@ -24,8 +24,8 @@ _MANIFEST_PATH = "manifest.json"
 _SCHEMA_NAMESPACE = "https://schemas.yoetz.dev/0.1/"
 _EXPECTED_SCHEMA_MANIFEST_SCHEMA = "yoetz.schema-manifest/1.0.0"
 _EXPECTED_SCHEMA_MANIFEST_VERSION = "1.0.0"
-_EXPECTED_MEMBER_COUNT = 148
-_EXPECTED_REQUEST_RESULT_VERSION_COUNT = 42
+_EXPECTED_MEMBER_COUNT = 150
+_EXPECTED_REQUEST_RESULT_VERSION_COUNT = 43
 _EXPECTED_EVENT_VERSION_COUNT = 16
 
 
@@ -212,6 +212,8 @@ def test_schema_registry_is_complete() -> None:
             if path.endswith("-2.4.0.schema.json")
             else "2.3.0"
             if path.endswith("-2.3.0.schema.json")
+            else "2.2.2"
+            if path.endswith("-2.2.2.schema.json")
             else "2.2.1"
             if path.endswith("-2.2.1.schema.json")
             else "2.2.0"
@@ -441,12 +443,21 @@ def test_released_version_manifest_2_2_retains_the_0_2_2_inventory() -> None:
     )
 
 
-def test_live_version_manifest_2_2_1_tracks_the_current_inventory() -> None:
+def test_released_version_manifest_2_2_1_retains_the_0_2_3_inventory() -> None:
+    document = _version_manifest_document("2.2.1")
+    assert document["properties"]["schema_version"]["const"] == "2.2.1"
+    assert int(_version_manifest_consts(document, "resource_counts")["total"]) == 202
+    assert "host-connection" not in _version_manifest_consts(
+        document, "request_result_schema_versions"
+    )
+
+
+def test_live_version_manifest_2_2_2_tracks_the_current_inventory() -> None:
     from yoetz.version import REVIEWED_RESOURCE_COUNT
 
-    document = _version_manifest_document("2.2.1")
+    document = _version_manifest_document("2.2.2")
 
-    assert document["properties"]["schema_version"]["const"] == "2.2.1"
+    assert document["properties"]["schema_version"]["const"] == "2.2.2"
     counts = _version_manifest_consts(document, "resource_counts")
     assert int(counts["total"]) == REVIEWED_RESOURCE_COUNT
     assert sum(int(count) for name, count in counts.items() if name != "total") == int(

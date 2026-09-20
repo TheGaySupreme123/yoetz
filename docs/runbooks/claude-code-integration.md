@@ -1,5 +1,26 @@
 # Claude Code native integration
 
+## Guided desktop connection (issue #767)
+
+Prefer `yoetz setup run --host claude` for ordinary setup. It discovers the executable and
+configuration root, derives the cache and private marketplace paths, and previews installation
+plus enablement in one exact connection plan. Override the executable/configuration or project
+with `--host-path`, `--host-config-root`, and `--project`. Agent-driven setup uses
+`--non-interactive --json`, then repeats the preview's request ID and digest with `--accept`.
+The existing OS-authenticated artifact review still applies. Status and disconnect use
+`yoetz setup status|disconnect --host claude` with the same target options. Standalone `plugin
+install` below retains its disabled-by-default behavior.
+
+On macOS the presence step uses LocalAuthentication; Linux and WSL 2 use the trusted PAM console
+path. A missing mechanism is a reported local continuation, not permission to bypass it. The
+common connection code does not establish native acceptance on any OS. Track current exact-head
+macOS/Linux/WSL installation, status, repeat setup, disconnect and reconnect evidence
+in #767. Provider authentication and model sessions are outside that installation acceptance. Existing capability records below remain bounded to their recorded cells. Ownership,
+configuration, enablement, session activation, observation and review remain separate proof layers.
+Claude may delete its private marketplace source during native removal; Yoetz accepts that
+already-absent source and still verifies the final registration and installation state.
+The command sequence follows the [official marketplace CLI reference](https://code.claude.com/docs/en/plugin-marketplaces#manage-marketplaces-from-the-cli).
+
 ## Conditional agent guidance
 
 The skill keeps its activation boundary, core workflow, and safety floor in the entrypoint.
@@ -58,7 +79,14 @@ remote/web/cloud, synced/managed/user/local scopes, Agent SDK, or headless sessi
 
 ## Linux and WSL
 
-Decision (issue #722): the Linux and WSL 2 native Claude Code cell remains **unproven**.
+Installation evidence (2026-09-20, issue #767): the installed 0.2.4 wheel passed preview,
+connect, status, repeat/no-op, disconnect and reconnect with Claude Code `2.1.261` on Ubuntu
+24.04 x86-64 and Ubuntu 24.04 inside actual WSL 2. Real PAM approval succeeded with disposable
+local accounts. The [acceptance record](https://github.com/TheGaySupreme123/yoetz/issues/767#issuecomment-5750168131)
+binds the source, wheel digest and outcomes. Provider login and model runs were outside that
+installation acceptance.
+
+Decision (issue #722): native-session capability on Linux and WSL 2 remains **unproven**.
 The separate Linux PAM approval work (#719) supplies the plugin mutation ceremony; builds
 without that cell refuse `human_authority_unavailable` on non-macOS hosts. Check the installed
 preview's `authorization.human_presence` before proceeding. A supported presence mechanism is

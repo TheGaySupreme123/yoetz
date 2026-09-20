@@ -24,6 +24,8 @@ from typing import Final, Literal, cast
 
 import anyio
 import typer
+from anyio.to_thread import run_sync
+from click import IntRange
 
 from yoetz.adapters.integrations.codex_discovery import (
     default_codex_home,
@@ -1148,6 +1150,7 @@ async def _codex_integration_step(
     route_profile: Literal["policy", "strict"] | None = None,
     workspace: Path | None = None,
     approved_preview_digest: str | None = None,
+    approved_activation_mcp_command: tuple[str, ...] | None = None,
     approved_skill_preview_digest: str | None = None,
     approved_activation_digest: str | None = None,
     approved_policy_digest: str | None = None,
@@ -1574,6 +1577,36 @@ async def _codex_integration_step(
                 )
             except McpRegistrationError as changed:
                 if (
+                    changed.reason is McpRegistrationReason.PREVIEW_STALE
+                    and approved_activation_mcp_command is not None
+                    and mcp_preview.state_before is McpRegistrationState.ABSENT
+                    and activation_report.get("outcome") == "active"
+                ):
+                    observed = await mcp_service.observe(binary)
+                    if observed.serve_command != approved_activation_mcp_command:
+                        raise
+                    refreshed = await mcp_service.preview(binary)
+                    if (
+                        refreshed.state_before is not McpRegistrationState.YOETZ_OWNED
+                        or refreshed.serve_command != mcp_preview.serve_command
+                        or refreshed.isolated_root != mcp_preview.isolated_root
+                    ):
+                        raise
+                    result = await mcp_service.register(
+                        binary,
+                        McpRegistrationConfirmation(
+                            refreshed.preview_digest, True, "noninteractive_flag"
+                        ),
+                        _state=_state,
+                    )
+                    mcp_preview = refreshed
+                else:
+                    raise
+            # Legacy interactive flows can ask for another preview when they did not
+            # approve the complete activation-generated transition up front.
+        except McpRegistrationError as changed:
+            try:
+                if (
                     changed.reason is not McpRegistrationReason.PREVIEW_STALE
                     or not interactive
                     or activation_report.get("outcome") != "active"
@@ -1600,16 +1633,16 @@ async def _codex_integration_step(
                     _state=_state,
                 )
                 mcp_preview = refreshed
-        except McpRegistrationError as error:
-            return {
-                "outcome": "failed",
-                "reason": error.reason.value,
-                "state": mcp_preview.state_before.value,
-                "plugin": plugin_report,
-                "plugin_activation": activation_report,
-                "skill": skill_report,
-                "observation_consent": {"outcome": "absent", "workspace_commitment": None},
-            }
+            except McpRegistrationError as error:
+                return {
+                    "outcome": "failed",
+                    "reason": error.reason.value,
+                    "state": mcp_preview.state_before.value,
+                    "plugin": plugin_report,
+                    "plugin_activation": activation_report,
+                    "skill": skill_report,
+                    "observation_consent": {"outcome": "absent", "workspace_commitment": None},
+                }
         mcp_state = result.state_after
         mcp_outcome = (
             "reregistered" if result.action is McpRegistrationAction.REREGISTER else "registered"
@@ -1692,6 +1725,7 @@ async def apply_codex_integration(
     route_profile: Literal["policy", "strict"] | None = None,
     workspace: Path | None = None,
     approved_preview_digest: str,
+    approved_activation_mcp_command: tuple[str, ...] | None = None,
     approved_skill_preview_digest: str,
     approved_activation_digest: str,
     approved_policy_digest: str | None = None,
@@ -1720,6 +1754,7 @@ async def apply_codex_integration(
         route_profile=route_profile,
         workspace=workspace,
         approved_preview_digest=approved_preview_digest,
+        approved_activation_mcp_command=approved_activation_mcp_command,
         approved_skill_preview_digest=approved_skill_preview_digest,
         approved_activation_digest=approved_activation_digest,
         approved_policy_digest=approved_policy_digest,
@@ -2434,6 +2469,12 @@ async def run_setup_wizard(
     accept: bool,
     json_output: bool,
     route_profile: Literal["policy", "strict"] | None = None,
+    host: str | None = None,
+    host_path: Path | None = None,
+    host_config_root: Path | None = None,
+    project: Path | None = None,
+    request_value: str | None = None,
+    preview_digest: str | None = None,
 ) -> int:
     """Run the guided first-run setup and report each step honestly.
 
@@ -2445,6 +2486,59 @@ async def run_setup_wizard(
     """
 
     interactive = not non_interactive and _is_interactive_terminal()
+
+    from yoetz.adapters.integrations.host_discovery import discover_hosts
+    from yoetz.cli.host_connection import run_host_connection
+
+    if host is None and codex_path is None:
+        installations = discover_hosts()
+        alternatives = [item for item in installations if item.host != "codex"]
+        if alternatives and interactive:
+            typer.echo("Choose an agent to connect:")
+            for index, item in enumerate(installations, 1):
+                typer.echo(f"  {index}. {item.label} {item.version or ''}")
+            choice = int(typer.prompt("Agent", type=IntRange(1, len(installations)), default=1))
+            selected = installations[choice - 1]
+            host, host_path, host_config_root = (
+                selected.host,
+                selected.executable,
+                selected.config_root,
+            )
+        elif alternatives and len(installations) == 1:
+            selected = alternatives[0]
+            host, host_path, host_config_root = (
+                selected.host,
+                selected.executable,
+                selected.config_root,
+            )
+    if host is not None:
+        selected_route = route_profile or (
+            "policy" if interactive and _choose_review_mode() == "semantic" else "strict"
+        )
+
+        def connect() -> int:
+            return run_host_connection(
+                host=host,
+                executable=host_path,
+                config_root=host_config_root,
+                project=_canonical_setup_workspace(project),
+                route=selected_route,
+                accept=accept,
+                interactive=interactive,
+                request_value=request_value,
+                preview_digest=preview_digest,
+                json_output=json_output,
+            )
+
+        # PAM owns SIGALRM and the foreground console on the operator's main thread.
+        # Codex's legacy composition owns an AnyIO loop and must stay off this loop.
+        result = await run_sync(connect) if host == "codex" else connect()
+        if result == 0 and interactive:
+            if selected_route == "policy":
+                result = await run_provider_setup()
+            if result == 0:
+                _write_setup_marker("complete")
+        return result
 
     binaries = discover_codex_binaries()
     try:
@@ -2920,6 +3014,8 @@ def _emit_human_report(report: dict[str, JsonValue]) -> None:
 async def setup_status(*, json_output: bool) -> int:
     """Read-only setup posture: discovery, registration state, service, marker."""
 
+    from yoetz.cli.host_connection import installation_rows
+
     binaries = discover_codex_binaries()
     service_port = _mcp_adapter()
     rows: list[JsonValue] = []
@@ -2943,6 +3039,7 @@ async def setup_status(*, json_output: bool) -> int:
         rows.append(row)
     report: dict[str, JsonValue] = {
         "discovered": rows,
+        "hosts": installation_rows(),
         "integration": _integration_layers(),
         "marker_present": setup_marker_present(),
         "platform": _platform_diagnostics(),

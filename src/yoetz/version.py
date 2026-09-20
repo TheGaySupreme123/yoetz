@@ -101,7 +101,7 @@ _RESOURCE_LIMIT: Final = 4_194_304
 # One independently reviewed cardinality tripwire guards the generated resource manifest. All
 # per-kind counts are derived from the manifest entries so adding a resource has exactly one
 # hand-authored count to review and the owning resource-ripple command can regenerate the rest.
-REVIEWED_RESOURCE_COUNT: Final = 202
+REVIEWED_RESOURCE_COUNT: Final = 204
 _RESOURCE_KINDS: Final = frozenset(
     {
         "canonical_vector",
@@ -129,6 +129,7 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("egress-receipt", "1.0.0"),
     ("finding", "1.2.0"),
     ("frontier", "1.0.0"),
+    ("host-connection", "1.0.0"),
     ("operation-result", "1.0.0"),
     ("outbound-case", "1.1.0"),
     ("pending-agent", "6.0.0"),
@@ -748,7 +749,7 @@ def build_version_manifest(*, include_optional_probes: bool = False) -> VersionM
     if not platform_cell().certified:
         limitations = tuple(sorted({*limitations, PLATFORM_CELL_UNTESTED}, key=str.encode))
     return VersionManifest(
-        schema_version="2.2.1",
+        schema_version="2.2.2",
         package_name="yoetz",
         package_version=_distribution_version("yoetz") or "0.1.0",
         protocol_version=PROTOCOL_VERSION,

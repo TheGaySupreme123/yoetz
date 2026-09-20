@@ -21,7 +21,7 @@ _SCRIPT_ROOT = Path(__file__).resolve().parent
 _DEFAULT_REPO_ROOT = _SCRIPT_ROOT.parent
 
 _MAX_PASSES: Final = 5
-_VERSION_MANIFEST_SCHEMA: Final = "version/version-manifest-2.2.1.schema.json"
+_VERSION_MANIFEST_SCHEMA: Final = "version/version-manifest-2.2.2.schema.json"
 _OWNED_ROOTS: Final = (
     "schemas",
     "src/yoetz/resources",
@@ -41,7 +41,7 @@ from jsonschema import Draft202012Validator
 from yoetz.version import build_version_manifest, version_manifest_json
 
 schema = json.loads(
-    pathlib.Path("schemas/version/version-manifest-2.2.1.schema.json").read_bytes()
+    pathlib.Path("schemas/version/version-manifest-2.2.2.schema.json").read_bytes()
 )
 document = json.loads(version_manifest_json(build_version_manifest(), include_resources=True))
 Draft202012Validator(schema).validate(document)
@@ -190,6 +190,8 @@ def _write_pass(repo_root: Path) -> bool:
             "operations/status-result-1.1.0.schema.json",
             "--only",
             "operations/status-result-1.2.0.schema.json",
+            "--only",
+            "integrations/host-connection-1.0.0.schema.json",
         ),
         ("sync_repository_authority_schemas.py", "--write"),
         ("sync_semantic_capacity_schemas.py",),
