@@ -1169,6 +1169,7 @@ class _WorkspaceState:
     selection_loss_ranges: tuple[JsonObject, ...] = ()
     selection_last_loss_notice_ms: int | None = None
     selection_loss_notice_pending: bool = False
+    selection_reported_loss_lanes: tuple[str, ...] = ()
     # (codex_session_id, envelope, reason, quarantined_at). The timestamp is
     # store-authored at quarantine time so the age bound measures time *in*
     # quarantine, never the (possibly much older) envelope receipt time.
@@ -4753,6 +4754,55 @@ class LocalObservationStore:
             )
             return (ObservationGapCode.OBSERVATION_INPUT_LOSS.value,) if matched else ()
 
+    def pending_selection_losses(self, workspace: str) -> tuple[JsonObject, ...]:
+        """Return bounded, exactly routed historical losses awaiting durable reporting.
+
+        Unrouted and overflow-only history stays local: a later task binding
+        cannot establish which task owned an input that was already lost.
+        Reporting one permanent gap per lane does not clear or reset its count.
+        """
+
+        with self._lock:
+            return self._pending_selection_losses(self._load(workspace))
+
+    @staticmethod
+    def _pending_selection_losses(state: _WorkspaceState) -> tuple[JsonObject, ...]:
+        result: list[JsonObject] = []
+        for item in state.selection_loss_ranges:
+            if item.get("lane") in state.selection_reported_loss_lanes:
+                continue
+            try:
+                route = observation_selection_route(item.get("route"))
+            except ValueError, TypeError:
+                continue
+            if route is not None:
+                result.append(item)
+        return tuple(result)
+
+    def acknowledge_selection_loss(self, workspace: str, lane: str) -> None:
+        """Acknowledge only after task history and ledger append have committed."""
+
+        with self._lock:
+            state = self._load(workspace)
+            if lane in state.selection_reported_loss_lanes:
+                return
+            if not any(item.get("lane") == lane for item in state.selection_loss_ranges):
+                return
+            state.selection_reported_loss_lanes = tuple(
+                sorted((*state.selection_reported_loss_lanes, lane))
+            )
+            self._save(workspace, state)
+
+    def selection_loss_workspaces(self) -> tuple[str, ...]:
+        """Discover durable maintenance demand without requiring a host event."""
+
+        with self._lock:
+            return tuple(
+                workspace
+                for workspace, state in self._iter_workspaces()
+                if self._pending_selection_losses(state)
+            )
+
     def consume_admission_loss_notice(self, workspace: str) -> bool:
         with self._lock:
             state = self._load(workspace)
@@ -6259,6 +6309,7 @@ class LocalObservationStore:
                     or state.admission_buffer.inputs
                     or pressure_active
                     or self._capture_inventory_recovery_pending(state)
+                    or self._pending_selection_losses(state)
                 ):
                     pending.append(workspace)
             return tuple(sorted(pending, key=str.encode))
@@ -8164,6 +8215,7 @@ class LocalObservationStore:
             "selection_rejected_count": state.selection_rejected_count,
             "selection_loss_commitment": state.selection_loss_commitment,
             "selection_loss_ranges": state.selection_loss_ranges,
+            "selection_reported_loss_lanes": state.selection_reported_loss_lanes,
             "selection_last_loss_notice_ms": state.selection_last_loss_notice_ms,
             "selection_loss_notice_pending": state.selection_loss_notice_pending,
             "read_protections": tuple(
@@ -9086,6 +9138,9 @@ class LocalObservationStore:
             selection_loss_ranges=tuple(
                 JsonObject(cast(Mapping[str, JsonValue], item))
                 for item in cast(tuple[JsonValue, ...], raw.get("selection_loss_ranges", ()))[:64]
+            ),
+            selection_reported_loss_lanes=tuple(
+                cast(tuple[str, ...], raw.get("selection_reported_loss_lanes", ()))[:64]
             ),
             selection_last_loss_notice_ms=cast(
                 int | None, raw.get("selection_last_loss_notice_ms")

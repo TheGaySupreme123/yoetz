@@ -27,6 +27,7 @@ from yoetz.domain.observation import (
     observation_earns_hook_observed,
     workspace_commitment_from_path,
 )
+from yoetz.domain.observation_loss import ObservationSelectionLoss
 from yoetz.domain.values import Timestamp
 from yoetz.kernel.policies.observation_advice import ObservationCheckFact
 from yoetz.ports.objects import ObjectRef
@@ -101,6 +102,10 @@ class TaskObservationPort(Protocol):
     def bind_session(self, workspace_commitment: str, session_commitment: str) -> None: ...
 
     async def ingest(self, envelope: ObservationEnvelope) -> ObservationIngestResult: ...
+
+    async def record_selection_loss(
+        self, workspace: str, loss: ObservationSelectionLoss, observed_at: Timestamp
+    ) -> None: ...
 
     async def status(self, query: ObservationStatusQuery) -> ObservationStatus: ...
 

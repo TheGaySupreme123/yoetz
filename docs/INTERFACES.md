@@ -3639,7 +3639,22 @@ The closed internal recovery outcomes are `capture_inventory_recovered`,
 `capture_inventory_unknown`, `capture_inventory_disabled`, `capture_inventory_busy`, and
 `capture_inventory_timeout`. They contribute only fixed reason counts to
 `ObservationDrainSummary.reasons`, not row delivery/attempt counts, coverage gaps, or raw
-exception text. No new diagnostic/RPC schema or task-loss event is introduced. A successful
+exception text. No new diagnostic/RPC or event schema is introduced. `recovery_routes()` owns a separate
+read-only connection for each file-backed complete scan and joins its worker on cancellation.
+The shared writable catalog connection never crosses to that worker.
+
+`LocalObservationStore.pending_selection_losses(workspace)` returns at most 64 retained,
+fully routed lanes; `acknowledge_selection_loss(workspace, lane)` follows committed reporting.
+`ObservationCoordinator.reconcile_task_selection_losses(runtime)` imports only that task's
+historical losses before a new check freezes its inputs. Existing check operations bypass this
+reconciliation. The service sweep attempts eight lanes per workspace turn with a rotating cursor.
+A service-authenticated `evidence_recorded` marker carries `observation_input_loss` in coverage;
+`TaskObservationPort.record_selection_loss` records an internal `observation_gap` in task history
+without using native admission or advancing its cursor. Its `selection-loss/1.0.0` cursor namespace
+is internal bookkeeping, not a native read position. Full original attribution is retained in
+the evidence payload and selection route fields. One task-wide operation per lane makes
+commit-before-ack recovery idempotent; source/authority generations and original session/writer
+remain part of lane identity. Unrouted and overflow-only history remains local. A successful
 inventory does not clear loss identity/count history or bypass a real hard capacity limit.
 
 Outcome semantics and back-pressure vocabulary (ADR-022 decisions 12–13):

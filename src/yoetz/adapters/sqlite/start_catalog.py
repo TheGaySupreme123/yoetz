@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
+from functools import partial
+from pathlib import Path
 from types import TracebackType
 from typing import Final, Literal, cast
 
@@ -18,6 +21,7 @@ from yoetz.adapters.privacy.catalog import (
     _policy_from_bytes,  # pyright: ignore[reportPrivateUsage]
     _scope_digest,  # pyright: ignore[reportPrivateUsage]
 )
+from yoetz.adapters.sqlite.connection import open_read_only
 from yoetz.domain.privacy import AuthorizationScope, AuthorizationScopeKind, LocalDisclosureSink
 from yoetz.domain.values import (
     format_rfc3339_millis,
@@ -483,6 +487,9 @@ class SqliteStartCatalog:
         if type(connection) is not apsw.Connection:
             raise TypeError("catalog_connection_invalid")
         self._db = connection
+        # A file-backed recovery scan owns a separate inspection connection for
+        # its entire lifetime. Never send the shared writer to an executor.
+        self._recovery_path = Path(connection.filename) if connection.filename else None
         self._installation_id = validate_id(IdKind.INSTALLATION, installation_id)
         self._lookup = lookup
         self._clock = clock
@@ -498,10 +505,37 @@ class SqliteStartCatalog:
     async def recovery_routes(self) -> tuple[TaskRoute, ...]:
         """Decode every durable route for recovery verification without exposing identities."""
 
-        rows = self._rows(
-            f"SELECT {self._route_columns} FROM task_routes ORDER BY task_id ASC",
-            (),
+        if self._recovery_path is None:
+            # In-memory reference fixtures have no separately openable file.
+            return self._decode_recovery_routes(self._db, self._route_columns)
+        worker = asyncio.get_running_loop().run_in_executor(
+            None, partial(self._read_recovery_routes, self._recovery_path, self._route_columns)
         )
+        try:
+            await asyncio.wait((worker,))
+            return worker.result()
+        except asyncio.CancelledError:
+            # Keep connection cleanup owned, even under repeated READY teardown
+            # cancellation. The enclosing capture lock/runtime outlive the read.
+            while not worker.done():
+                try:
+                    await asyncio.wait((worker,))
+                except asyncio.CancelledError:
+                    continue
+            worker.exception()
+            raise
+
+    @staticmethod
+    def _read_recovery_routes(path: Path, columns: str) -> tuple[TaskRoute, ...]:
+        db = open_read_only(path)
+        try:
+            return SqliteStartCatalog._decode_recovery_routes(db, columns)
+        finally:
+            db.close()
+
+    @staticmethod
+    def _decode_recovery_routes(db: apsw.Connection, columns: str) -> tuple[TaskRoute, ...]:
+        rows = db.execute(f"SELECT {columns} FROM task_routes ORDER BY task_id ASC")
         routes: list[TaskRoute] = []
         for row in rows:
             try:
