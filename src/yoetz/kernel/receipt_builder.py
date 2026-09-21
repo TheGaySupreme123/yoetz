@@ -63,6 +63,12 @@ from yoetz.domain.values import (
 )
 from yoetz.kernel.claims import effective_claim_items
 from yoetz.kernel.command_attempts import command_attempts
+from yoetz.kernel.completion_scope import (
+    CLAIM_OUTSIDE_PLAN,
+    PLAN_NOT_CLAIMED,
+    SCOPE_REPAIR,
+    completion_scope_differences,
+)
 from yoetz.kernel.deterministic_checks import CaseAvailabilityFacts, CaseGap
 from yoetz.kernel.finding_resolution import finding_resolution_explanation
 from yoetz.kernel.plan_scope import CurrentPlanScope, current_plan_scope
@@ -528,6 +534,26 @@ def _select_gaps(context: ReceiptBuildContext) -> tuple[ReceiptGap, ...]:
         context.projection.plans,
         context.projection.coverage_gaps,
     )
+    differences = completion_scope_differences(context.projection)
+
+    def scope_detail(code: str) -> str | None:
+        if code not in {CLAIM_OUTSIDE_PLAN, PLAN_NOT_CLAIMED}:
+            return None
+        pairs = [
+            (row.claim_id, refs)
+            for row in differences
+            if (refs := (row.outside_plan if code == CLAIM_OUTSIDE_PLAN else row.not_claimed))
+        ]
+        count = sum(len(refs) for _, refs in pairs)
+        previews = [f"{claim}: {ref}" for claim, refs in pairs for ref in refs][:16]
+        return (
+            f"{len(pairs)} completion claim(s), {count} obligation relation(s). "
+            + "; ".join(previews)
+            + ("; additional relations omitted." if count > 16 else ".")
+            + " "
+            + SCOPE_REPAIR
+        )
+
     values = tuple(
         ReceiptGap(
             code=gap.code,
@@ -536,7 +562,7 @@ def _select_gaps(context: ReceiptBuildContext) -> tuple[ReceiptGap, ...]:
                 plan_scope.no_obligations_reason.value
                 if gap.code == COMPLETION_SCOPE_DECLARED_NONE_GAP
                 and plan_scope.no_obligations_reason is not None
-                else None
+                else scope_detail(gap.code)
             ),
         )
         for gap in sorted(
@@ -1088,6 +1114,18 @@ def _sections(
             )
         else:
             gap_body = f"Coverage is limited by: {', '.join(gap_codes)}."
+        if CLAIM_OUTSIDE_PLAN in gap_codes:
+            gap_body += (
+                " A completion claim covers obligations outside the effective plan. " + SCOPE_REPAIR
+            )
+        if PLAN_NOT_CLAIMED in gap_codes:
+            gap_body += (
+                " Some declared plan obligations are outside a completion claim; whole-plan completion is not established. "
+                + SCOPE_REPAIR
+            )
+            bodies[ReceiptSectionKey.OUTSTANDING_WORK] += (
+                " Declared scope remains outside a completion claim, regardless of obligation resolution. "
+            )
         if "routine_read_detail_omitted" in gap_codes:
             gap_body += (
                 " Successful routine reads are represented by bounded source summaries; "

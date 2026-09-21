@@ -77,3 +77,26 @@ intent but does not independently establish that no material obligations were om
 
 **Add a finding or bump the work-integrity policy.** Rejected: the distinction is a deterministic
 coverage limitation and readiness fact, not a new actionable policy finding.
+
+## Completion claim consistency (issue #679)
+
+Maintainer acknowledgement: [issue #679](https://github.com/TheGaySupreme123/yoetz/issues/679#issuecomment-5761526859).
+Each readable effective completion claim is compared with the readable current plan. The shared
+pure comparison reports `completion_claim_outside_plan` for claim refs outside that plan and
+`completion_plan_not_claimed` for plan refs omitted by that claim. These are bounded coverage
+limitations, not publication rejection or inferred obligations. Material and explicitly superseded
+claims do not participate. Missing/redacted obligations and unreadable plans/claims retain their
+existing unknown-input semantics rather than producing invented differences.
+
+Comparisons are per claim: multiple partial claims do not implicitly combine into whole-plan
+completion. An older unsuperseded claim remains a current assertion and is compared with a later
+plan too; the author can explicitly supersede it. Narrowing a claim does not reopen a resolved
+obligation or remove it from the plan. Its omitted scope stays visible as outside that claim's
+completion coverage. A full-scope claim, explicit plan revision, or claim replacement is the
+supported repair; the checker never edits these declarations itself.
+
+Publication previews and committed responses expose the relation codes in existing coverage/gap
+fields. Status (including closure readiness), local checks, and all receipt formats derive the
+same limitations. Receipts retain bounded per-claim ID examples and total counts under normal
+privacy projection. No new finding kind, storage table, or wire field is introduced. Historical
+bytes remain unchanged; the new reader derives diagnostics from their accepted contents.

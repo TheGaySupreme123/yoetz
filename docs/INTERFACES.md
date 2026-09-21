@@ -5432,3 +5432,16 @@ and milestones remain. Cancellation and ambiguous response loss do not yield tha
 ADR-030 continuation `start_busy_same_identity` names exact once-only replay after a successful
 lease yield; `start_pending_same_identity` names a live lease and the bounded 60-second wait before
 exact replay. Runtime/catalog producer reasons alone never imply a released start reservation.
+
+### Completion claim scope diagnostics (issue #679)
+
+`kernel/completion_scope.py` owns the comparison between each readable effective completion
+claim and `current_plan_scope`. `completion_claim_outside_plan` and
+`completion_plan_not_claimed` are fixed coverage codes carried by publication previews/results,
+status, checks, and receipts. There are at most two case gaps regardless of relation count.
+Status readiness uses its existing `coverage_gaps_declared` condition; declared/open obligation
+counts stay plan-derived. Receipt gap details contain at most 16 ID-pair examples plus full
+relation counts, with an explicit omission marker; default privacy projection still applies.
+Partial claims are accepted. Material/superseded claims are excluded, and unavailable input is
+not an empty scope. Multiple partial claims are compared independently; older effective claims
+are compared to the current plan until explicitly superseded. See ADR-019 for repair semantics.

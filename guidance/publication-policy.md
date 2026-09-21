@@ -384,3 +384,23 @@ Publish the original obligation, the material new fact, and one plan revision ex
 ### Large generated inventory
 
 For 100 files, group them into independently reviewable packages, record partial package status when useful, attach one bounded member manifest per completed package, and publish one final package transition. One obligation or routine event per file is invalid.
+
+### Check completion scope before append
+
+Preview a completion claim with `publish_work dry_run=true`. A
+`completion_claim_outside_plan` gap means its `obligation_refs` extend beyond the effective plan;
+`completion_plan_not_claimed` means declared plan refs remain outside that claim. These diagnostics
+also appear after append and in status/check/receipts; they never auto-include obligations.
+
+To add a newly intended obligation, publish `plan_revised` with `plan_version` equal to the current
+version plus one, `supersedes_plan_version` equal to the current version, and an
+`obligation_changes` entry `{"obligation_id":"<actual new obligation ID>","change":"carried"}`.
+Alternatively publish `plan_published` at exactly the next version with the complete sorted-unique
+`obligation_refs`. Supply the normal bounded reason/summary and envelope fields. Preview the plan
+and claim together before committing. To narrow/correct an existing claim, publish
+`claim_recorded/1.1.0` and name its actual ID in `supersedes_claim_refs`.
+
+A partial completion claim remains permitted, but the omitted plan scope is not covered by that
+claim even if those obligation rows are resolved. Separate partial claims do not automatically
+combine into a whole-plan completion claim. Explicitly replace older completion claims after
+scope changes when their assertions no longer describe the intended current scope.

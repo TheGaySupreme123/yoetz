@@ -78,6 +78,7 @@ from yoetz.domain.values import (
     writer_id,
 )
 from yoetz.kernel.command_attempts import command_attempts
+from yoetz.kernel.completion_scope import completion_scope_codes, with_completion_scope_coverage
 from yoetz.kernel.deterministic_checks import (
     CaseAvailabilityFacts,
     DeterministicCase,
@@ -885,7 +886,7 @@ def compact_status_coverage(
     the same predicate as the receipt so status and receipts cannot disagree either.
     """
 
-    baseline = records[-1].coverage
+    baseline = with_completion_scope_coverage(records[-1].coverage, projection)
     latest = projection.latest_tested_state
     if latest is None:
         return baseline
@@ -1245,7 +1246,12 @@ def _projection_items(
                 unanswered_findings=unanswered_findings[:10],
                 freshness=item_freshness.value,
                 coverage=CoverageModel.model_validate(coverage_to_json(item_coverage)),
-                gaps=_status_gap_codes(projection.coverage_gaps),
+                gaps=tuple(
+                    sorted(
+                        set(_status_gap_codes(projection.coverage_gaps))
+                        | set(completion_scope_codes(projection))
+                    )
+                ),
             ),
         )
     if view is ProjectionView.VERSIONS:
@@ -2006,8 +2012,15 @@ class MemoryLedgerAdapter:
                 next_position = IdProjectionPosition(last.evidence_id)
             elif type(last) is StatusResultItemModel:
                 next_position = IdProjectionPosition(last.result_id)
-        status_gaps = _status_gap_codes(effective_projection.coverage_gaps)
-        coverage = replace(prefix[-1].coverage, known_gaps=status_gaps)
+        status_gaps = tuple(
+            sorted(
+                set(_status_gap_codes(effective_projection.coverage_gaps))
+                | set(completion_scope_codes(effective_projection))
+            )
+        )
+        coverage = with_completion_scope_coverage(
+            replace(prefix[-1].coverage, known_gaps=status_gaps), effective_projection
+        )
         page = ProjectionPage(
             query.view,
             selected,
