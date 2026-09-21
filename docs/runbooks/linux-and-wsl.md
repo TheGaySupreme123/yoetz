@@ -5,6 +5,19 @@ WSL 2 (Windows Subsystem for Linux). Product wording for users lives on
 [the install page](../usage/install-and-first-run.md#linux); this page records the decisions and
 their evidence state. Filed from the Linux/WSL parity sweep (issues #716, #720–#725).
 
+## Shared desktop installation
+
+`yoetz setup run` discovers installed Codex, Claude Code, Cursor IDE and Cursor Agent CLI.
+The selected host uses the common preview, status, disconnect and reconnect flow. Installing the
+Yoetz integration does not require signing in to a model provider. Host account sign-in is a
+separate prerequisite for model use.
+
+Claude and Cursor plugin changes retain the exact-plan operating-system identity check. On
+Linux and WSL, setup and the suspended terminal interface keep that PAM ceremony on the
+foreground main thread; a worker thread cannot own its signal deadline. A missing trusted
+console or failed password leaves the integration unchanged and returns a terminal continuation.
+Issue #767 owns installation verification; it does not certify full model/observation behavior.
+
 ## Certified platform cells
 
 ADR-007 advertises exactly two cells: macOS 11.0+ arm64 (`macosx_11_0_arm64`) and glibc 2.28+
@@ -66,9 +79,11 @@ installation or `PATH`, a field on `service status` would report the service pro
 under a name operators read as their own, which is the worse answer, not the missing one. A
 service-side answer, if one is ever needed, belongs in its own versioned diagnostic.
 
-Evidence state: the adapter and probe are covered by unit tests with a fake `bwrap`; a live
-Ubuntu 24.04 or WSL 2 run of a network-denied check under real bubblewrap is **outstanding** and
-must be recorded here before any Linux sandbox cell is claimed.
+Evidence state: issue #786 records an installed 0.2.3 candidate on Ubuntu 24.04 under WSL 2
+(Windows Server 2025), tested 2026-09-19. The real `ApprovedCheckRunner` used bubblewrap, verified
+a different network namespace, and could not connect to a live listener in the parent namespace.
+This bounded check passed; it does not establish every distribution or native host integration,
+and no Linux sandbox capability cell is claimed from it.
 
 ## System credential store
 
@@ -118,8 +133,11 @@ all such implementations lack locks. For example,
 Inside WSL, Yoetz state must stay on the distribution's own ext4 disk — the WSL home is the default — never under `/mnt/<letter>`. The refusal's remediation says so, and it applies to
 `YOETZ_ISOLATED_ROOT`, `yoetz instance create --root`, and `storage.data_dir` alike.
 
-Evidence state: the classifier is covered by unit tests over synthetic mount tables; a live WSL 2
-reproduction on `/mnt/c` is **outstanding**.
+Evidence state: in the 2026-09-19 WSL 2 run recorded in #786, the installed candidate initialized
+and restarted/unlocked on the Linux filesystem. `yoetz instance create` with a `/mnt/c` root
+refused with `path_on_network_filesystem` and exit 20. A full `wsl --terminate` followed by
+distribution startup preserved the installed instance: the service started locked and returned
+ready after passphrase unlock. Native agent acceptance remains a separate, incomplete cell.
 
 ## Host integrations on Linux and WSL
 
@@ -133,4 +151,7 @@ native host cell. Both hosts can use a hand-added `yoetz mcp serve` entry. The p
 are recorded in
 [`claude-code-integration.md`](claude-code-integration.md#linux-and-wsl) and
 [`cursor-integration.md`](cursor-integration.md#linux-and-wsl); the Linux x86-64 evidence cases
-for the CLI cells are **outstanding** (issue #722).
+for session activation/observation remain **outstanding** (issue #722). Separately, issue #767
+records successful installed 0.2.4 setup lifecycles for all three CLIs on both Ubuntu x86-64 and
+actual WSL 2, plus the Cursor IDE installation on Ubuntu. Successful real PAM approval was
+exercised using disposable local accounts; no provider authentication or model task was required.

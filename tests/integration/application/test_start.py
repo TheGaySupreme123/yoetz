@@ -598,7 +598,7 @@ async def test_busy_after_each_start_milestone_yields_for_immediate_exact_replay
         await execute_start(app, request)
     assert busy.value.safe_details == {
         "reason_code": "start_busy_retry_ready",
-        "continuation": "start_busy_retry_ready",
+        "continuation": "start_busy_same_identity",
     }
     original = runtime.provisions[0]
     recovered = await execute_start(app, request)
@@ -634,7 +634,7 @@ async def test_cancelled_provision_keeps_live_lease_until_expiry(
         await execute_start(app, request)
     assert pending.value.safe_details == {
         "reason_code": "start_lease_pending",
-        "continuation": "start_lease_wait",
+        "continuation": "start_pending_same_identity",
     }
     clock.advance(61)
     release.set()

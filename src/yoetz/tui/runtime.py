@@ -336,12 +336,28 @@ class YoetzRuntime:
         return default_codex_home()
 
     def discover_harnesses(self) -> tuple[HarnessOption, ...]:
-        from yoetz.adapters.integrations.codex_discovery import discover_codex_binaries
+        from yoetz.adapters.integrations.host_discovery import discover_hosts
+        from yoetz.ports.harness_mcp import HarnessBinary
+        from yoetz.ports.integrations import HarnessId
 
-        binaries = discover_codex_binaries()
+        installations = discover_hosts()
         return tuple(
-            _harness_option(binary, index=index, total=len(binaries))
-            for index, binary in enumerate(binaries)
+            _harness_option(
+                HarnessBinary(HarnessId.CODEX, str(item.executable), item.version, "untested"),
+                index=index,
+                total=len(installations),
+            )
+            if item.host == "codex"
+            else HarnessOption(
+                str(item.executable),
+                item.version,
+                item.label,
+                "Installed agent",
+                index == 0,
+                item.host,
+                str(item.config_root),
+            )
+            for index, item in enumerate(installations)
         )
 
     async def detect(self) -> Detection:
@@ -377,6 +393,17 @@ class YoetzRuntime:
         )
 
     async def mcp_state(self, option: HarnessOption) -> str:
+        if option.host != "codex":
+            from yoetz.cli.host_connection import CONNECTION_ERRORS
+
+            try:
+                status = await self._host_connection_status(option)
+                ready = status.get("installed") is True and status.get("configured") is True
+                if option.host == "claude":
+                    ready = ready and status.get("enabled") is True
+                return "yoetz_owned" if ready else "absent"
+            except CONNECTION_ERRORS:
+                return "unknown"
         from yoetz.adapters.integrations.codex_mcp import CodexMcpAdapter
         from yoetz.application.harness_mcp import HarnessMcpService
         from yoetz.ports.harness_mcp import McpRegistrationError
@@ -387,6 +414,56 @@ class YoetzRuntime:
         except McpRegistrationError as error:
             raise RuntimeError_(error.reason.value, "the Codex registration could not be read")
         return str(state.value)
+
+    async def _host_connection_status(self, option: HarnessOption) -> dict[str, object]:
+        from anyio.to_thread import run_sync
+
+        from yoetz.cli.host_connection import prepare_selected, select_installation
+        from yoetz.cli.setup import configured_mcp_route_profile
+        from yoetz.protocol.ids import IdKind, new_id
+
+        selected = await run_sync(
+            lambda: select_installation(
+                option.host,
+                Path(option.executable_path),
+                None if option.config_root is None else Path(option.config_root),
+            )
+        )
+        plan = await run_sync(
+            lambda: prepare_selected(
+                selected,
+                self.project_root(),
+                action="connect",
+                route=configured_mcp_route_profile(),
+                request_value=new_id(IdKind.REQUEST),
+            )
+        )
+        return dict(await run_sync(plan.status))
+
+    async def _host_plugin_layers(self, option: HarnessOption) -> tuple[ReadinessLayer, ...]:
+        from yoetz.cli.host_connection import CONNECTION_ERRORS
+
+        try:
+            status = await self._host_connection_status(option)
+        except CONNECTION_ERRORS:
+            state = LayerState.UNKNOWN
+        else:
+            state = (
+                LayerState.VERIFIED
+                if status.get("installed") is True
+                else LayerState.NOT_CONFIGURED
+            )
+        return (
+            ReadinessLayer("plugin_installed", "Guidance installed", state, option.label),
+            ReadinessLayer(
+                "hooks_installed",
+                "Structural hooks installed",
+                LayerState.UNPROVEN if state is LayerState.VERIFIED else state,
+                "Fresh host session required to verify hook activation"
+                if state is LayerState.VERIFIED
+                else option.label,
+            ),
+        )
 
     async def run_privacy_setup(
         self, recipe_hint: str | None, *, offer_recommended: bool = False
@@ -494,24 +571,28 @@ class YoetzRuntime:
             configured_mcp_route_profile,
             project_skill_preview,
         )
-        from yoetz.ports.harness_mcp import McpRegistrationError, McpRegistrationState
+        from yoetz.ports.harness_mcp import (
+            MCP_SERVE_COMMAND,
+            McpRegistrationError,
+            McpRegistrationState,
+        )
         from yoetz.ports.integrations import IntegrationError, IntegrationScope, IntegrationTarget
 
         binary = self._binary_for(option)
         root = self.project_root()
         route = configured_mcp_route_profile() if route_profile is None else route_profile
         try:
-            mcp_preview = await HarnessMcpService(CodexMcpAdapter(route_profile=route)).preview(
-                binary
-            )
+            activation_preview = codex_activation_preview(binary, codex_home, root)
+        except IntegrationError as error:
+            raise RuntimeError_(error.reason.value, "the Codex activation could not be previewed")
+        try:
+            mcp_preview = await HarnessMcpService(
+                CodexMcpAdapter(route_profile=route, codex_home=activation_preview.codex_home)
+            ).preview(binary)
         except McpRegistrationError as error:
             raise RuntimeError_(error.reason.value, "the Codex registration could not be previewed")
         target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(root))
         skill_preview = await project_skill_preview(root)
-        try:
-            activation_preview = codex_activation_preview(binary, codex_home, root)
-        except IntegrationError as error:
-            raise RuntimeError_(error.reason.value, "the Codex activation could not be previewed")
         plugin_preview = CodexPluginService().preview(
             target,
             codex_version=activation_preview.codex_version,
@@ -564,6 +645,7 @@ class YoetzRuntime:
             activation_marketplace_preimage_digest=(activation_preview.marketplace_preimage_digest),
             activation_config_preimage_digest=activation_preview.config_preimage_digest,
             activation_cache_mutation_planned=activation_preview.cache_mutation_planned,
+            activation_mcp_command=MCP_SERVE_COMMAND,
             mcp_isolated_root=mcp_preview.isolated_root,
         )
 
@@ -588,6 +670,7 @@ class YoetzRuntime:
             route_profile=plan.route_profile,
             workspace=self.project_root(),
             approved_preview_digest=plan.preview_digest,
+            approved_activation_mcp_command=plan.activation_mcp_command,
             approved_skill_preview_digest=plan.skill_preview_digest,
             approved_activation_digest=plan.activation_preview_digest,
             approved_policy_digest=plan.policy_digest,
@@ -1164,7 +1247,7 @@ class YoetzRuntime:
                 "harness_detected",
                 "Harness detected",
                 LayerState.VERIFIED if detected else LayerState.NOT_CONFIGURED,
-                detail=harnesses[0].label if detected else "no Codex installation found",
+                detail=harnesses[0].label if detected else "no supported agent installation found",
             )
         )
 
@@ -1213,43 +1296,50 @@ class YoetzRuntime:
         else:
             layers.append(ReadinessLayer("mcp_verified", "MCP verified", LayerState.UNKNOWN))
 
-        try:
-            inspection = inspect_plugin(
-                IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(root)),
-                codex_version=harnesses[0].reported_version if detected else None,
-            )
-            presence = str(inspection.presence.value)
-            trust_observable = bool(inspection.trust_observable)
-        except IntegrationError as error:
-            presence = "unknown"
-            trust_observable = False
-            layers.append(
-                ReadinessLayer(
-                    "plugin_installed",
-                    "Guidance installed",
-                    LayerState.UNKNOWN,
-                    error.reason.value,
-                )
-            )
+        if detected and harnesses[0].host != "codex":
+            layers.extend(await self._host_plugin_layers(harnesses[0]))
         else:
+            try:
+                inspection = inspect_plugin(
+                    IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(root)),
+                    codex_version=harnesses[0].reported_version if detected else None,
+                )
+                presence = str(inspection.presence.value)
+                trust_observable = bool(inspection.trust_observable)
+            except IntegrationError as error:
+                presence = "unknown"
+                trust_observable = False
+                layers.append(
+                    ReadinessLayer(
+                        "plugin_installed",
+                        "Guidance installed",
+                        LayerState.UNKNOWN,
+                        error.reason.value,
+                    )
+                )
+            else:
+                layers.append(
+                    ReadinessLayer(
+                        "plugin_installed",
+                        "Guidance installed",
+                        LayerState.VERIFIED
+                        if presence == "installed"
+                        else LayerState.NOT_CONFIGURED,
+                    )
+                )
             layers.append(
                 ReadinessLayer(
-                    "plugin_installed",
-                    "Guidance installed",
-                    LayerState.VERIFIED if presence == "installed" else LayerState.NOT_CONFIGURED,
+                    "hooks_installed",
+                    "Structural hooks installed",
+                    LayerState.VERIFIED
+                    if presence == "installed" and trust_observable
+                    else (
+                        LayerState.UNPROVEN
+                        if presence == "installed"
+                        else LayerState.NOT_CONFIGURED
+                    ),
                 )
             )
-        layers.append(
-            ReadinessLayer(
-                "hooks_installed",
-                "Structural hooks installed",
-                LayerState.VERIFIED
-                if presence == "installed" and trust_observable
-                else (
-                    LayerState.UNPROVEN if presence == "installed" else LayerState.NOT_CONFIGURED
-                ),
-            )
-        )
 
         consent_active = self._consent_active(root)
         layers.append(

@@ -4,13 +4,16 @@ All notable user-visible changes to Yoetz are documented in this file. Format is
 project-native heading style that marks the pending version as unreleased above
 reverse-chronological released versions.
 
-## 0.3.0 — 2026-09-19
+## 0.3.0 — 2026-09-21
 
 Prepared public-alpha release candidate; publication remains gated by #785. See
 [release notes](docs/releases/v0.3.0.md) for changes and validation limits.
 
 ### Added
 
+- One guided installation and connection lifecycle for Codex, Claude Code, Cursor IDE and
+  Cursor Agent CLI, including preview, status, disconnect and reconnect, carried from 0.2.4
+  (#767).
 - Multiple agents can work in independent tasks within one repository. Parents can delegate
   work, children can register for explicit acceptance, and lineage views and receipts retain
   each child's findings, unfinished work, and observation gaps. Requesting a receipt does not
@@ -59,7 +62,44 @@ Prepared public-alpha release candidate; publication remains gated by #785. See
 - The npm release verifier checks both the persistent install and subsequent delegation
   (#777). The parent/worker capture test observes outbox drain between writes to avoid
   counting runner-load overflow as a product regression (#775).
-- The release carries every 0.2.2 install fix, including the review follow-ups ported in #774.
+- The release carries every 0.2.2 install fix, including the review follow-ups ported in #774,
+  and every 0.2.3 and 0.2.4 repair: Codex home-aware setup, Cursor exact-path and Agent CLI
+  project binding, fractional Codex metadata, selected observations and routine summaries across
+  local control, contended session attachment with shielded lease release, and the foreground
+  desktop approval and runtime-retaining host handoffs (#786, #787, #788).
+## 0.2.4 — 2026-09-20
+
+- One guided installation and connection lifecycle for Codex, Claude Code, Cursor IDE and
+  Cursor Agent CLI, including preview, status, disconnect and reconnect (#767).
+- Preserve exact host profiles and runtime paths in setup continuations; keep required Linux/WSL
+  password approval on the foreground thread.
+- Inspect the selected host's readiness and retain partial-installation and fresh-session limits.
+
+See [release notes](docs/releases/v0.2.4.md) for installation verification and coverage limits.
+
+## 0.2.3 — 2026-09-19
+
+Repairs to existing 0.2 behavior; no 0.3 feature merge. The verified scope and known limits are
+recorded in [release notes](docs/releases/v0.2.3.md) and issue #786.
+
+- Privacy receipt list/get render stored timestamps and local disclosure purposes correctly
+  (#731, #732).
+- Codex setup registers MCP in the selected home and reconfirms a refreshed preview when plugin
+  activation changes the effective entry (#759, #786).
+- Newer Codex fractional metadata no longer discards the surrounding transcript record (#754).
+- Cursor project registration uses the exact project path so Agent CLI can initialize the same
+  bridge as the IDE; existing placeholder registrations remain upgradeable (#786).
+- Explicit Cursor CLI project binding uses the project selected in the accepted registration,
+  revalidating its identities on each call; desktop still requires native roots (#786).
+- Local transport preserves retryable send failures and consumes pending request errors (#678).
+- Local control accepts the existing selected-observation envelopes and bounded routine summaries,
+  preserving route validation and rejecting unknown structural fields (#786).
+- Routine-read outcomes survive structural mapping; legacy unqualifiable summary buffers drain
+  as original records instead of blocking later hook observations (#786).
+
+- Contended session attachment drains existing runtime users and preserves same-request recovery.
+  Optional review cancellation retains accounting, and observation feedback failures cannot skip
+  ingestion lease cleanup (#744, #755, #786).
 
 ## 0.2.2 — 2026-09-18
 

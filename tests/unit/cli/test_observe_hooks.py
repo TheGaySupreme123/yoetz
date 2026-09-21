@@ -6869,3 +6869,31 @@ def test_codex_post_tool_use_entry_point_routes_an_oversized_body_to_the_gap(
         ObservationGapCode.PAYLOAD_TOO_LARGE.value
         in store.status(ObservationStatusQuery(workspace)).gaps
     )
+
+
+@pytest.mark.parametrize(
+    "response,expected",
+    [
+        ({"exit_code": 0}, True),
+        ({"exit_code": 1}, False),
+        ({"exit_code": 0, "is_error": True}, False),
+        ({}, False),
+    ],
+)
+def test_nested_routine_outcome_survives_structural_mapping(
+    response: dict[str, JsonValue], expected: bool
+) -> None:
+    envelope = map_hook_payload_to_envelope(
+        "PostToolUse",
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": "head invoice.py"},
+            "tool_response": response,
+        },
+        session_commitment="hmac-sha256:" + "a" * 64,
+        event_ordinal=1,
+        key_material=_KEY,
+    )
+    assert (envelope.structural_payload.get("success") is True) is expected
+    assert "tool_response" not in envelope.structural_payload
+    assert "command" not in envelope.structural_payload

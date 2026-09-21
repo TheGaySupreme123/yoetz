@@ -93,7 +93,8 @@ and lease compare-and-swap. Yield never removes the reservation, changes the req
 rewinds a durable milestone, or implies that no write occurred. Cancellation, crash, stale-owner
 and response-loss recovery retain their existing fenced replay rules. Issue #744 specifies the
 five-second wait and exact replay recovery in `docs/INTERFACES.md`; it adds no client writer or
-ownership bypass.
+ownership bypass. Optional observation feedback must not retain a runtime lease: ingestion
+releases its lease even when final capture-backlog publication fails or is cancelled.
 
 The bounded rebind is foreground priority over optional observation advice. A service-owned advice
 drain may register a process-local yield callback; when a start begins waiting, the current

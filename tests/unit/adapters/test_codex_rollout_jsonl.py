@@ -694,3 +694,41 @@ def test_unknown_shapes_under_0_150_1_stay_bounded_unknown() -> None:
     )
     assert parsed.reason_codes[1:3] == ("unknown_wrapper_type", "unknown_item_type")
     assert [record.item_type for record in parsed.records] == [None, "function_call"]
+
+
+def test_compatible_fractional_metadata_preserves_the_mapped_message() -> None:
+    row = response_item(
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "ok"}],
+            "internal_chat_message_metadata_passthrough": {"create_time": 123.5},
+        },
+        ordinal=2,
+    )
+    parsed = parse_codex_rollout_jsonl(
+        encode_lines(session_meta(cli_version="0.153.4", history_mode="paginated", ordinal=1), row),
+        None,
+        require_admission=True,
+    )
+    assert parsed.statuses == (ImportLineStatus.MAPPED, ImportLineStatus.MAPPED)
+    payload = cast(dict[str, object], parsed.records[-1].value["payload"])
+    metadata = cast(dict[str, object], payload["internal_chat_message_metadata_passthrough"])
+    assert metadata["create_time"] is None
+    assert payload["role"] == "assistant"
+
+
+def test_compatible_token_usage_telemetry_is_known_without_promoting_an_exact_cell() -> None:
+    parsed = parse_codex_rollout_jsonl(
+        encode_lines(
+            session_meta(cli_version="0.153.4", history_mode="paginated", ordinal=1),
+            {"type": "token_usage_record", "timestamp": "t", "payload": {"tokens": 1}},
+        ),
+        None,
+        require_admission=True,
+    )
+    assert parsed.profile is COMPATIBLE_ROLLOUT_PROFILE
+    assert all(reason is None for reason in parsed.reason_codes)
+    assert all(
+        "token_usage_record" not in p.wrapper_types for p in SUPPORTED_ROLLOUT_PROFILES.values()
+    )

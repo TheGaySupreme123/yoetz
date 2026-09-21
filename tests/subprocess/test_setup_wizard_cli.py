@@ -94,6 +94,9 @@ def _absent_mcp() -> list[CommandOutput]:
 @pytest.fixture
 def wizard_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, object]:
     """Fake discovery, adapter subprocesses, service client, and marker path."""
+    # The legacy Codex wizard fixtures must not probe real Claude/Cursor installations.
+    # Shared multi-host discovery and explicit setup are exercised in their own tests.
+    monkeypatch.setattr("yoetz.adapters.integrations.host_discovery.discover_hosts", lambda: ())
 
     # These scripted entries model the legacy embedded/bare-launcher cell, not whichever
     # wheel happens to host pytest. Absolute installation proof is supplied explicitly in
@@ -105,6 +108,7 @@ def wizard_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, obj
         "outputs": _absent_mcp(),
         "calls": [],
         "activation_apply_calls": 0,
+        "mcp_homes": [],
     }
     marker = tmp_path / "setup-wizard.json"
     codex_home = tmp_path / "codex-home"
@@ -116,10 +120,12 @@ def wizard_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, obj
     def fake_adapter(
         *,
         route_profile: Literal["policy", "strict"] = "policy",
+        codex_home: Path | None = None,
     ) -> CodexMcpAdapter:
+        cast(list[Path | None], state["mcp_homes"]).append(codex_home)
         runner = _ScriptedRunner(cast(list[CommandOutput], state["outputs"]))
         cast(list[list[tuple[str, ...]]], state["calls"]).append(runner.calls)
-        return CodexMcpAdapter(runner, route_profile=route_profile)
+        return CodexMcpAdapter(runner, route_profile=route_profile, codex_home=codex_home)
 
     async def unreachable_client() -> object:
         raise ControlError("service_unavailable")
@@ -660,7 +666,9 @@ async def test_tui_apply_refuses_a_skill_preview_digest_not_shown_to_the_user(
 
     preview_runner = _ScriptedRunner([_yoetz_entry()])
     mcp_preview = await HarnessMcpService(
-        CodexMcpAdapter(preview_runner, route_profile="strict")
+        CodexMcpAdapter(
+            preview_runner, route_profile="strict", codex_home=cast(Path, wizard_env["codex_home"])
+        )
     ).preview(_binary())
     workspace = cast(Path, wizard_env["marker"]).parent
     wizard_env["outputs"] = [_yoetz_entry()]
@@ -704,7 +712,9 @@ async def test_a_preview_and_apply_that_disagree_on_the_route_refuse_as_stale(
 
     # Exactly what the TUI does today: no route_profile, so the class default (policy) applies.
     preview_runner = _ScriptedRunner(_absent_mcp())
-    mcp_preview = await HarnessMcpService(CodexMcpAdapter(preview_runner)).preview(_binary())
+    mcp_preview = await HarnessMcpService(
+        CodexMcpAdapter(preview_runner, codex_home=cast(Path, wizard_env["codex_home"]))
+    ).preview(_binary())
 
     # And exactly what apply does today: the configured route, strict with no provider bound.
     wizard_env["outputs"] = _absent_mcp()
@@ -741,7 +751,11 @@ async def test_a_preview_and_apply_on_the_same_route_register(
 
     preview_runner = _ScriptedRunner(_absent_mcp())
     mcp_preview = await HarnessMcpService(
-        CodexMcpAdapter(preview_runner, route_profile="strict")
+        CodexMcpAdapter(
+            preview_runner,
+            route_profile="strict",
+            codex_home=cast(Path, wizard_env["codex_home"]),
+        )
     ).preview(_binary())
 
     wizard_env["outputs"] = [
@@ -761,6 +775,7 @@ async def test_a_preview_and_apply_on_the_same_route_register(
         _state=cast(Path, wizard_env["isolated_state"]),
     )
 
+    assert wizard_env["mcp_homes"] == [wizard_env["codex_home"]]
     assert report["reason"] is None
     assert report["outcome"] == "registered"
     # The successful apply durably records the strict route it verified post-write.
@@ -2731,3 +2746,84 @@ def test_set_reports_the_underlying_privacy_reason_rather_than_a_generic_block(
 
     assert result.exit_code == 20
     assert "Reason: privacy_setup_grant_missing" in _plain(result.output)
+
+
+@pytest.mark.parametrize("approved", [True, False])
+def test_interactive_setup_reconfirms_mcp_entry_exposed_by_plugin_activation(
+    wizard_env: dict[str, object], monkeypatch: pytest.MonkeyPatch, approved: bool
+) -> None:
+    import yoetz.cli.setup as setup_module
+
+    wizard_env["outputs"] = [
+        *_absent_mcp(),
+        _yoetz_entry("policy"),  # Activation exposes the bundled entry after the first preview.
+        _yoetz_entry("policy"),  # The replacement preview must describe that actual entry.
+        *(
+            [_yoetz_entry("policy"), CommandOutput(0, b""), _yoetz_entry("strict")]
+            if approved
+            else []
+        ),
+    ]
+    monkeypatch.setattr(setup_module, "_is_interactive_terminal", lambda: True)
+    answer = "Y" if approved else "N"
+    result = _RUNNER.invoke(
+        cli.app,
+        ["setup", "run"],
+        input=f"1\n{wizard_env['codex_home']}\n2\nY\nY\n{answer}\n",
+    )
+    assert result.exit_code == 0, (result.output, result.exception)
+    assert "Plugin activation changed the effective MCP entry" in result.stdout
+    assert "Confirm updated MCP registration?" in result.stdout
+    calls = [
+        call for group in cast(list[list[tuple[str, ...]]], wizard_env["calls"]) for call in group
+    ]
+    assert any(call[1:3] == ("mcp", "add") for call in calls) is approved
+    assert (
+        "MCP registration: reregistered" if approved else "confirmation_required"
+    ) in result.stdout
+
+
+@pytest.mark.parametrize("expected_transition", [True, False])
+def test_complete_codex_plan_accepts_only_its_generated_activation_transition(
+    wizard_env: dict[str, object], expected_transition: bool
+) -> None:
+    import yoetz.cli.setup as setup_module
+
+    binary = _binary()
+    home = cast(Path, wizard_env["codex_home"])
+
+    async def prepare():
+        adapter = setup_module._mcp_adapter("strict", codex_home=home)  # pyright: ignore[reportPrivateUsage]
+        preview = await HarnessMcpService(adapter).preview(binary)
+        skill = await setup_module.project_skill_preview(Path.cwd())
+        return preview, skill
+
+    preview, skill = asyncio.run(prepare())
+    generated = _yoetz_entry("policy")
+    wizard_env["outputs"] = [
+        *_absent_mcp(),
+        generated,
+        generated if expected_transition else _yoetz_entry("strict"),
+        *(
+            [generated, generated, CommandOutput(0, b""), _yoetz_entry("strict")]
+            if expected_transition
+            else []
+        ),
+    ]
+    result = asyncio.run(
+        setup_module.apply_codex_integration(
+            binary,
+            route_profile="strict",
+            workspace=Path.cwd(),
+            codex_home=home,
+            approved_preview_digest=preview.preview_digest,
+            approved_skill_preview_digest=skill.preview_digest,
+            approved_activation_digest=cast(str, wizard_env["activation_digest"]),
+            approved_activation_mcp_command=MCP_SERVE_COMMAND,
+        )
+    )
+    calls = [
+        call for group in cast(list[list[tuple[str, ...]]], wizard_env["calls"]) for call in group
+    ]
+    assert any(call[1:3] == ("mcp", "add") for call in calls) is expected_transition
+    assert result["outcome"] == ("reregistered" if expected_transition else "failed")

@@ -187,6 +187,7 @@ _VERSION_RE: Final = re.compile(r"^(\d+)\.(\d+)\.(\d+)$", re.ASCII)
 
 
 class ClaudeCodePluginAction(str, Enum):  # noqa: UP042 - exact public token
+    CONNECT = "connect"
     INSTALL = "install"
     UPDATE = "update"
     ENABLE = "enable"
@@ -1703,7 +1704,18 @@ def preview_claude_code_plugin(
         # Interrupted stage/rollback material must be resolved before any new
         # mutation may even be previewed, let alone consume authority.
         raise _error(PluginArtifactReason.RECOVERY_REQUIRED)
-    if action is ClaudeCodePluginAction.INSTALL and status.state is not PluginArtifactState.ABSENT:
+    if action is ClaudeCodePluginAction.CONNECT:
+        if status.state is not PluginArtifactState.ABSENT:
+            if not status.marker_valid or status.state not in {
+                PluginArtifactState.NATIVE_MANAGED,
+                PluginArtifactState.PARTIAL,
+            }:
+                raise _error(PluginArtifactReason.DESTINATION_CONFLICT)
+            if status.installed_digest == artifact.artifact_digest and status.enabled is True:
+                action = ClaudeCodePluginAction.NOOP
+    elif (
+        action is ClaudeCodePluginAction.INSTALL and status.state is not PluginArtifactState.ABSENT
+    ):
         if (
             status.state is PluginArtifactState.NATIVE_MANAGED
             and status.installed_digest == artifact.artifact_digest
@@ -1992,6 +2004,11 @@ def _remove_source(target: ClaudeCodePluginTarget) -> tuple[str, ...]:
     rollback = root.parent / _ROLLBACK_NAME
     if rollback.exists() or rollback.is_symlink():
         raise _error(PluginArtifactReason.RECOVERY_REQUIRED)
+    # Claude's marketplace removal may already delete its source directory.
+    # Missing source is a successful removal; dangling symlinks still require
+    # the ownership checks below.
+    if not root.exists() and not root.is_symlink():
+        return ()
     try:
         os.replace(root, rollback)
         _fsync_dir(root.parent)
@@ -2056,7 +2073,35 @@ def apply_claude_code_plugin(
     _consume_authority(review, authority, accepted_preview_digest)
     changed: tuple[str, ...] = ()
     command_ok = True
-    if action is ClaudeCodePluginAction.INSTALL:
+    if action is ClaudeCodePluginAction.CONNECT:
+        # One reviewed operation covers source, marketplace, installation and enablement.
+        # Read-back determines the remaining stages after an interrupted connection.
+        before = status_claude_code_plugin(target, artifact, commands=command_port)
+        if before.source_digest != artifact.artifact_digest:
+            changed = _write_source(target, artifact, preview.request_id)
+        if before.marketplace_registered is not True:
+            command_ok = _run_mutation(
+                target,
+                command_port,
+                ("plugin", "marketplace", "add", "--scope", "project", target.marketplace_root),
+            )
+        if command_ok and before.installed_digest != artifact.artifact_digest:
+            command_ok = _run_mutation(
+                target,
+                command_port,
+                (
+                    "plugin",
+                    "update" if before.discovered else "install",
+                    _PLUGIN_ID,
+                    "--scope",
+                    "project",
+                ),
+            )
+        if command_ok and before.enabled is not True:
+            command_ok = _run_mutation(
+                target, command_port, ("plugin", "enable", _PLUGIN_ID, "--scope", "project")
+            )
+    elif action is ClaudeCodePluginAction.INSTALL:
         changed = _write_source(target, artifact, preview.request_id)
         command_ok = _run_mutation(
             target,
@@ -2105,6 +2150,10 @@ def apply_claude_code_plugin(
     after = status_claude_code_plugin(target, artifact, commands=command_port)
     reached = (
         after.state is PluginArtifactState.NATIVE_MANAGED
+        and after.installed_digest == artifact.artifact_digest
+        and after.enabled is True
+        if action is ClaudeCodePluginAction.CONNECT
+        else after.state is PluginArtifactState.NATIVE_MANAGED
         and after.installed_digest == artifact.artifact_digest
         and after.enabled is False
         if action is ClaudeCodePluginAction.INSTALL

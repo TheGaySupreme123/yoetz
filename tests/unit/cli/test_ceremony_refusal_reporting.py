@@ -404,3 +404,11 @@ class TestEveryHumanCliErrorCarriesADirective:
         assert captured.startswith("version: FAIL (resource_missing)")
         assert "version: remediation: a reviewed installed resource is absent" in captured
         assert "version: Continuation: resource_integrity_repair" in captured
+
+
+def test_reauthentication_recovery_includes_repository_privacy_and_rotation() -> None:
+    message = remediation_message("chat_user_reauthentication_unavailable")
+    assert message is not None
+    assert "yoetz --privacy" in message
+    assert "yoetz service rotate-passphrase" in message
+    assert "yoetz provider credential set" in message

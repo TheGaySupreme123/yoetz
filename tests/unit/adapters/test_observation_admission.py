@@ -6,8 +6,10 @@ from dataclasses import replace
 
 from yoetz.adapters.integrations.observation_admission import (
     AdmissionBuffer,
+    BufferedInput,
     admission_buffer_from_json,
     admission_buffer_to_json,
+    build_routine_read_summary,
     flush_admission,
     plan_admission,
 )
@@ -26,7 +28,13 @@ def envelope(position: int, kind: str = "PostToolUse", call: str = "call1") -> O
         ObservationSource.CODEX_HOOK,
         ObservationCursor(1, 0, position, "hmac-sha256:" + "2" * 64, "codex-obs-hook/1.0.0"),
         Timestamp("2026-09-10T00:00:00.000Z"),
-        JsonObject({"tool_name": "Read", "tool_call_id": call}),
+        JsonObject(
+            {
+                "tool_name": "Read",
+                "tool_call_id": call,
+                **({"success": True} if kind == "PostToolUse" else {}),
+            }
+        ),
         (),
         (),
     )
@@ -170,3 +178,43 @@ def test_count_bound_flushes_without_rewriting_an_accepted_individual() -> None:
     result = admit(buffer, envelope(16, call="call16"))
     assert len(result.deliveries) == 1
     assert not result.buffer.inputs
+
+
+def test_classification_without_durable_success_is_delivered_individually() -> None:
+    event = replace(
+        envelope(1), structural_payload=JsonObject({"action": "routine_read", "tool_name": "Read"})
+    )
+    result = admit(AdmissionBuffer(), event, success=True)
+    assert result.deliveries == (("host1", event),)
+    assert not result.buffer.inputs
+
+
+def test_legacy_buffer_without_success_does_not_block_later_work() -> None:
+    event = replace(
+        envelope(1), structural_payload=JsonObject({"action": "routine_read", "tool_name": "Read"})
+    )
+    buffer = AdmissionBuffer((BufferedInput("host1", FENCE, event, "success", 100),))
+    restored = admission_buffer_from_json(admission_buffer_to_json(buffer))
+    flushed = flush_admission(restored, now_ms=2100, summary_builder=build_routine_read_summary)
+    # The original record is delivered in source order. On the 0.3 line the unprovable
+    # summary is also accounted for: the input carries the ``routine_summary_invalid``
+    # coverage gap and the lane records one bounded refusal (#764, #786).
+    demoted = replace(event, gap_codes=("routine_summary_invalid",))
+    assert flushed.deliveries == (("host1", demoted),)
+    assert [(refusal.reason, refusal.input_count) for refusal in flushed.refusals] == [
+        ("invalid_event_value_type", 1)
+    ]
+    assert not flushed.buffer.inputs
+    later = plan_admission(
+        restored,
+        envelope(2, "Mutation"),
+        host_session="host1",
+        fence=FENCE,
+        focused=True,
+        routine_candidate=False,
+        proven_routine_success=False,
+        now_ms=2100,
+        summary_builder=build_routine_read_summary,
+    )
+    assert later.deliveries == (("host1", demoted), ("host1", envelope(2, "Mutation")))
+    assert not later.buffer.inputs

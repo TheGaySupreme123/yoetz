@@ -315,6 +315,8 @@ class ObservationAdviceSemanticWorker:
         release its task runtime and let the foreground session rebind.
         """
 
+        if self._rebind_requested:
+            return
         self._rebind_requested = True
         active = self._active_task
         if active is not None and active is not asyncio.current_task():
@@ -425,6 +427,7 @@ class ObservationAdviceSemanticSupervisor:
         self._loop_task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
         self._active_handle: AdviceSemanticDrainHandle | None = None
+        self._retirements: dict[int, asyncio.Task[None]] = {}
 
     def register(self, handle: AdviceSemanticDrainHandle) -> bool:
         if self._closed:
@@ -467,10 +470,7 @@ class ObservationAdviceSemanticSupervisor:
         handle.worker.request_rebind()
         if self._active_handle is handle:
             return
-        asyncio.create_task(
-            self._retire_handle(handle),
-            name=f"observation-advice-rebind-{workspace_commitment[:16]}",
-        )
+        self._schedule_retirement(handle)
 
     async def start(self) -> None:
         if self._loop_task is not None:
@@ -502,11 +502,10 @@ class ObservationAdviceSemanticSupervisor:
         if task is not None:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
-        handles = tuple(self._handles.values())
-        self._handles.clear()
-        for handle in handles:
-            if handle.on_idle is not None:
-                await handle.on_idle()
+        pending = [self._schedule_retirement(handle) for handle in tuple(self._handles.values())]
+        pending.extend(self._retirements.values())
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def drain_once(self) -> None:
         """Run every registered worker to idle once; tests drive this without the loop."""
@@ -555,14 +554,39 @@ class ObservationAdviceSemanticSupervisor:
                         component="application.observation_advice_semantic",
                         operation="drain_failed",
                     )
-                    await self._retire_handle(handle)
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await self._retire_handle(handle)
                     break
                 finally:
                     handle.worker.end_rebind_scope()
                     if self._active_handle is handle:
                         self._active_handle = None
 
+    def _schedule_retirement(self, handle: AdviceSemanticDrainHandle) -> asyncio.Task[None]:
+        token = id(handle)
+        existing = self._retirements.get(token)
+        if existing is not None:
+            return existing
+        task = asyncio.create_task(self._release_handle(handle), name="observation-advice-retire")
+        self._retirements[token] = task
+
+        def completed(finished: asyncio.Task[None]) -> None:
+            self._retirements.pop(token, None)
+            if not finished.cancelled() and (failure := finished.exception()) is not None:
+                record_unexpected_exception_without_raising(
+                    failure,
+                    component="application.observation_advice_semantic",
+                    operation="retire_failed",
+                )
+
+        task.add_done_callback(completed)
+        return task
+
     async def _retire_handle(self, handle: AdviceSemanticDrainHandle) -> None:
+        # The runtime release must finish even if another host cancels the drain waiter.
+        await asyncio.shield(self._schedule_retirement(handle))
+
+    async def _release_handle(self, handle: AdviceSemanticDrainHandle) -> None:
         if self._handles.get(handle.workspace_commitment) is not handle:
             return
         self.unregister(handle.workspace_commitment)

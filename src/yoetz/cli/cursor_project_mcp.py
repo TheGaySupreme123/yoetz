@@ -39,6 +39,7 @@ def run_cursor_project_mcp_command(
     accept: bool,
     preview_digest: str | None,
     json_output: bool,
+    project_binding: Literal["mcp-roots", "registered-project"] | None = None,
 ) -> int:
     """Use only explicit targets and the launcher that produced this CLI process."""
 
@@ -64,7 +65,9 @@ def run_cursor_project_mcp_command(
         launcher = resolve_yoetz_launcher(invocation)
         root = isolated_root()
         isolation = None if root is None else str(root)
-        target = CursorProjectMcpTarget(project_root.expanduser(), cursor_config_root.expanduser())
+        target = CursorProjectMcpTarget(
+            project_root.expanduser(), cursor_config_root.expanduser(), project_binding
+        )
         route = cast(Literal["policy", "strict"] | None, route_profile)
         if action == "status":
             body = status_cursor_project_mcp(target, launcher=launcher, isolation_root=isolation)

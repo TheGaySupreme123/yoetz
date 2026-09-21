@@ -57,6 +57,7 @@ class CursorProjectMcpError(ValueError):
 class CursorProjectMcpTarget:
     project_root: Path
     cursor_config_root: Path
+    project_binding: Literal["mcp-roots", "registered-project"] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,6 +240,7 @@ def inspect_project_mcp_registration(
     launcher: tuple[str, ...],
     route_profile: Route,
     isolation_root: str | None,
+    project_binding: Literal["mcp-roots", "registered-project"] = "mcp-roots",
 ) -> CursorProjectMcpRegistrationSnapshot:
     """Verify the exact project entry and capture its non-content identity for a live bridge.
 
@@ -249,7 +251,14 @@ def inspect_project_mcp_registration(
 
     if route_profile not in {"policy", "strict"}:
         raise _fail("command_invalid")
-    expected = _expected(launcher, isolation_root, route_profile)
+    expected = _expected(
+        launcher,
+        isolation_root,
+        route_profile,
+        project_root=project_root,
+        project_binding=project_binding,
+    )
+    legacy_selector = _expected(launcher, isolation_root, route_profile)
     with _directory(project_root) as project_descriptor:
         assert project_descriptor is not None
         project_identity = _identity(os.fstat(project_descriptor))
@@ -262,7 +271,9 @@ def inspect_project_mcp_registration(
             raise _fail("config_invalid")
         raw, config_identity = observed
         document = _document(raw)
-        if not _present(document) or _entry(document) != expected:
+        if not _present(document) or _entry(document) not in (
+            (expected, legacy_selector) if project_binding == "mcp-roots" else (expected,)
+        ):
             raise _fail("foreign_present")
         if _identity(os.fstat(config_directory)) != config_directory_identity:
             raise _fail("preview_stale")
@@ -311,8 +322,18 @@ def _present(document: Mapping[str, JsonValue]) -> bool:
 
 
 def _expected(
-    launcher: tuple[str, ...], root: str | None, route: Route, *, project_selector: bool = True
+    launcher: tuple[str, ...],
+    root: str | None,
+    route: Route,
+    *,
+    project_selector: bool = True,
+    project_root: Path | None = None,
+    project_binding: Literal["mcp-roots", "registered-project"] = "mcp-roots",
 ) -> dict[str, JsonValue]:
+    if project_binding not in {"mcp-roots", "registered-project"} or (
+        project_binding == "registered-project" and (project_root is None or not project_selector)
+    ):
+        raise _fail("command_invalid")
     if not valid_launcher(launcher):
         raise _fail("launcher_invalid")
     if root is not None:
@@ -322,7 +343,16 @@ def _expected(
             pass
     args: list[JsonValue] = [*launcher[1:], "mcp", "serve", "--host", "cursor"]
     if project_selector:
-        args.extend(("--project-root", _CURSOR_PROJECT_SELECTOR))
+        if project_root is not None:
+            _path(project_root)
+        args.extend(
+            (
+                "--project-root",
+                _CURSOR_PROJECT_SELECTOR if project_root is None else str(project_root),
+            )
+        )
+    if project_binding == "registered-project":
+        args.extend(("--project-binding", project_binding))
     if route == "strict":
         args.extend(("--semantic", "off"))
     entry: dict[str, JsonValue] = {"type": "stdio", "command": launcher[0], "args": args}
@@ -351,12 +381,30 @@ class _Inspection:
     state: str
     source: str
     route: Route | None
+    project_binding: Literal["mcp-roots", "registered-project"] | None
 
 
 def _inspect(
     target: CursorProjectMcpTarget, launcher: tuple[str, ...], root: str | None
 ) -> _Inspection:
-    policy, strict = _expected(launcher, root, "policy"), _expected(launcher, root, "strict")
+    policy = _expected(launcher, root, "policy", project_root=target.project_root)
+    strict = _expected(launcher, root, "strict", project_root=target.project_root)
+    cli_policy = _expected(
+        launcher,
+        root,
+        "policy",
+        project_root=target.project_root,
+        project_binding="registered-project",
+    )
+    cli_strict = _expected(
+        launcher,
+        root,
+        "strict",
+        project_root=target.project_root,
+        project_binding="registered-project",
+    )
+    placeholder_policy = _expected(launcher, root, "policy")
+    placeholder_strict = _expected(launcher, root, "strict")
     # Entries written before the explicit project selector remain safe to recognize as Yoetz's
     # own project source so the next preview can upgrade them in place.  They never get emitted
     # again, and foreign/user/plugin sources remain untouched.
@@ -365,8 +413,10 @@ def _inspect(
     identities: list[JsonValue] = []
     project_identity: tuple[int, int] | None = None
     for path in (target.project_root, target.cursor_config_root):
-        with _directory(path) as descriptor:
-            assert descriptor is not None
+        with _directory(path, optional=path == target.cursor_config_root) as descriptor:
+            if descriptor is None:
+                identities.append([str(path), None])
+                continue
             identity = _identity(os.fstat(descriptor))
             identities.append([str(path), *_canonical_identity(identity)])
             if path == target.project_root:
@@ -405,6 +455,7 @@ def _inspect(
     present = [i for i, document in enumerate(documents) if _present(document)]
     source = ("project", "user", "plugin")[present[0]] if len(present) == 1 else "none"
     route: Route | None = None
+    binding: Literal["mcp-roots", "registered-project"] | None = None
     if not present:
         state = "absent"
     elif len(present) > 1:
@@ -415,12 +466,14 @@ def _inspect(
         entry = _entry(documents[0])
         route = (
             "policy"
-            if entry == policy or entry == legacy_policy
+            if entry in (policy, placeholder_policy, legacy_policy, cli_policy)
             else "strict"
-            if entry == strict or entry == legacy_strict
+            if entry in (strict, placeholder_strict, legacy_strict, cli_strict)
             else None
         )
         state = "yoetz_owned" if route is not None else "foreign_present"
+        if route is not None:
+            binding = "registered-project" if entry in (cli_policy, cli_strict) else "mcp-roots"
     return _Inspection(
         raws,
         project_identity,
@@ -432,6 +485,7 @@ def _inspect(
         state,
         source,
         route,
+        binding,
     )
 
 
@@ -447,6 +501,7 @@ def status_cursor_project_mcp(
         "state": observed.state,
         "source": observed.source,
         "route_profile": observed.route,
+        "project_binding": observed.project_binding,
         "target_identity": observed.target_identity,
         "host_trust": "unknown",
         "runtime_binding": "unobserved",
@@ -462,10 +517,13 @@ def _plan(
 ) -> tuple[dict[str, JsonValue], _Inspection, bytes | None]:
     if action not in {"install", "remove"} or route_profile not in {None, "policy", "strict"}:
         raise _fail("command_invalid")
+    if target.project_binding not in {None, "mcp-roots", "registered-project"}:
+        raise _fail("command_invalid")
     observed = _inspect(target, launcher, isolation_root)
     if observed.state not in {"absent", "yoetz_owned"}:
         raise _fail(observed.state)
     route = route_profile or observed.route or "policy"
+    binding = target.project_binding or observed.project_binding or "mcp-roots"
     document = dict(observed.document)
     servers = dict(cast(Mapping[str, JsonValue], document.get("mcpServers", {})))
     replacement = observed.raws[0]
@@ -475,7 +533,13 @@ def _plan(
             del servers["yoetz"]
             mutation = "unregister"
     else:
-        entry = _expected(launcher, isolation_root, route)
+        entry = _expected(
+            launcher,
+            isolation_root,
+            route,
+            project_root=target.project_root,
+            project_binding=binding,
+        )
         if servers.get("yoetz") != entry:
             servers["yoetz"] = entry
             mutation = "register" if observed.state == "absent" else "reregister"
@@ -491,6 +555,8 @@ def _plan(
         "state_before": observed.state,
         "source": observed.source,
         "route_profile": route if action == "install" else observed.route,
+        "project_binding": binding if action == "install" else observed.project_binding,
+        "project_root": str(target.project_root),
         "target_identity": observed.target_identity,
         "config_identity_digest": observed.config_identity_digest,
         "launcher": list(launcher),
@@ -620,7 +686,11 @@ def apply_cursor_project_mcp(
         or after.target_identity != observed.target_identity
         or (
             action == "install"
-            and (after.source != "project" or after.route != body["route_profile"])
+            and (
+                after.source != "project"
+                or after.route != body["route_profile"]
+                or after.project_binding != body["project_binding"]
+            )
         )
     ):
         raise _fail("write_failed")

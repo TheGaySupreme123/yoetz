@@ -2028,6 +2028,7 @@ def _route_profile(
     yoetz_launchers: tuple[tuple[str, ...], ...] = (),
     *,
     expected_isolation_root: str | None | object = _UNSET_ISOLATION_ROOT,
+    expected_project_root: Path | None = None,
 ) -> Literal["strict", "policy"] | None:
     """Classify one MCP entry as an exact Yoetz route, else ``None``.
 
@@ -2080,6 +2081,16 @@ def _route_profile(
     if prefix is None or args[: len(prefix)] != prefix:
         return None
     rest = args[len(prefix) :]
+    if expected_project_root is not None:
+        for selector in (str(expected_project_root), "${workspaceFolder}"):
+            project_prefix = (*_MCP_SERVE_ARGS, "--project-root", selector)
+            for binding in ((), ("--project-binding", "registered-project")):
+                if selector == "${workspaceFolder}" and binding:
+                    continue
+                if rest == (*project_prefix, *binding):
+                    return "policy"
+                if rest == (*project_prefix, *binding, "--semantic", "off"):
+                    return "strict"
     if rest in _POLICY_ROUTE_ARGS:
         return "policy"
     if rest in _STRICT_ROUTE_ARGS:
@@ -2166,6 +2177,7 @@ def observe_cursor_mcp(
                 entry,
                 yoetz_launchers,
                 expected_isolation_root=expected_isolation_root,
+                expected_project_root=project_root if source is CursorMcpSource.PROJECT else None,
             ),
         )
         for source, entry in candidates

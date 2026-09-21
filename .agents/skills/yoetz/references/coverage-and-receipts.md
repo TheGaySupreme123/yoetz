@@ -448,3 +448,9 @@ When you delegate after that result, carry it into every assignment as a bounded
 These source-inspection restrictions apply to recovering consumer workflow calls. They do not
 prohibit inspecting source/tests when the assigned task is to develop or debug Yoetz itself.
 Never use the live SQLite databases or catalog as a substitute for supported operation status.
+
+For a returned start error with `start_busy_same_identity`, the reservation remains durable and
+only its fenced lease was yielded. Replay the exact start body and request ID once, without
+inventing session or writer IDs. `start_pending_same_identity` instead means a live lease remains:
+wait up to 60 seconds before the one exact replay. If still busy or pending, retain the original
+request and report the unresolved start. These continuations do not authorize a new task.

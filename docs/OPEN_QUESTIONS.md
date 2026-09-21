@@ -5,13 +5,14 @@
 
 ## Purpose
 
-The next product release candidate is **0.3.0** (release tracking: #785); **0.2.2** remains
-published until the candidate's gates pass. The candidate carries Linux/WSL compatibility fixes
-(**0.2.1**) and install-path fixes (**0.2.2**). The dated v0.1 decisions below remain history;
-the 0.2 re-dispositions govern the current line. Real WSL 2 and native Linux Claude/Cursor
-acceptance remain untested, native Codex
-multi-agent acceptance (#499, #507) remains open, and first run still connects Codex only (#767).
-Issue #767 remains a release gate until implemented or explicitly deferred by the maintainer.
+The next product release candidate is **0.3.0** (release tracking: #785); **0.2.4** remains
+the published line until the candidate's gates pass. The candidate carries Linux/WSL
+compatibility fixes (**0.2.1**), install-path fixes (**0.2.2**), the integration and session
+recovery repairs (**0.2.3**, #786) and the guided desktop installation (**0.2.4**, #767). The
+dated v0.1 decisions below remain history; the 0.2 re-dispositions govern the current line. Real
+WSL 2 and native Linux Claude/Cursor session acceptance remain untested and native Codex
+multi-agent acceptance (#499, #507) remains open. The #767 first-run gate landed in 0.2.4 and is
+carried here; its installation evidence is configuration evidence, not session acceptance.
 The privacy-receipt CLI bugs #731 and #732 are fixed in this candidate (#783). This version
 update does not close a gate or add a supported capability cell.
 

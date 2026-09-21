@@ -1,5 +1,29 @@
 # Cursor local integration runbook
 
+## Guided desktop connection (issue #767)
+
+Use `yoetz setup run --host cursor-ide` or `--host cursor-cli`. These are distinct installations:
+IDE uses MCP roots, while Agent CLI receives the explicit `registered-project` binding. Setup
+composes the native user plugin and an external MCP entry for the selected project in one exact
+review. The user-wide plugin scope is disclosed; regular Cursor and testing profiles are never
+silently interchanged. `--host-path`, `--host-config-root`, and `--project` override discovery.
+Agents first request `--non-interactive --json`, present the plan, and repeat its exact request ID
+and digest with `--accept`. OS-authenticated artifact presence still applies.
+
+`setup status|disconnect --host cursor-ide|cursor-cli` uses the same target options. Disconnect
+removes the owned user plugin and selected project's separately managed MCP entry; it preserves
+other projects, unrelated configuration and Yoetz data. A changed or foreign source is refused.
+A repeated exact connection is a no-op; a partial connection is re-previewed from its actual state.
+
+macOS uses LocalAuthentication; Linux and Windows through WSL 2 use the trusted PAM console path.
+Windows-side IDE discovery/configuration is not inferred from a Linux executable or directory.
+An IDE available only outside the selected WSL environment needs an explicit capability disposition.
+Track each OS and each IDE/CLI cell's exact-candidate installation, status, repeat setup,
+disconnect and reconnect in #767. Provider authentication and model sessions are outside that
+installation acceptance. The Windows-side IDE with Remote WSL remains unverified; #722, owned
+by the Yoetz integration maintainer, tracks that separate cell. CLI proof does not establish IDE proof. Existing evidence below
+remains limited to its named cells; configuration success never claims session activation.
+
 ## Conditional agent guidance
 
 The skill keeps its activation boundary, core workflow, and safety floor in the entrypoint.
@@ -99,19 +123,23 @@ The everyday Cursor profile must keep naming the everyday launcher by absolute p
 
 ## Linux and WSL
 
-Decision (issue #722): the Linux and WSL 2 native Cursor cell remains **unproven**.
-Plugin mutation requires a supported presence cell; the separate Linux PAM approval work
-(#719) supplies that ceremony, while builds without it refuse `human_authority_unavailable`
-off macOS. Inspect `authorization.human_presence` in the installed preview. Successful approval
-does not certify IDE discovery or native host activation.
-IDE discovery still reads the macOS bundle (`Contents/Info.plist` and the `CFBundleExecutable`
-digest); a Linux Cursor (AppImage or `.deb`) is reported as `cursor_ide_platform_unsupported`
-rather than as absent, and no `cursor_ide` identity is minted for it. Linux IDE discovery
-(executable digest plus the version from `resources/app/package.json`) remains unsupported.
-A Cursor inside WSL 2 can use Yoetz over MCP with a
-hand-added `yoetz mcp serve` entry; Cursor Cloud remains unsupported. The reviewed evidence case
-stays `cursor-ide-native-3.17.8-macos-arm64`; Linux x86-64 evidence for the Agent CLI cell is
-outstanding. Shared host facts are in [`linux-and-wsl.md`](linux-and-wsl.md).
+Installation evidence (2026-09-20, issue #767): the installed 0.2.4 wheel passed preview,
+connect, status, repeat/no-op, disconnect and reconnect for Cursor Agent CLI
+`2026.09.18-9a7762b` on Ubuntu 24.04 x86-64 and Ubuntu 24.04 inside actual WSL 2, and for
+Cursor IDE `3.21.16` on Ubuntu 24.04. The common setup discovery verifies the executable and
+reported version; the IDE install check verified its managed plugin and project MCP files.
+The [acceptance record](https://github.com/TheGaySupreme123/yoetz/issues/767#issuecomment-5750168131)
+binds the source, wheel digest and per-platform outcomes. Provider login and model runs were
+outside this installation acceptance.
+
+Native-session capability remains **unproven** for Linux/WSL under #722. The separate native
+IDE bundle inspector still reads macOS `Contents/Info.plist` and the executable digest; it
+returns `cursor_ide_platform_unsupported` for Linux rather than minting a native capability
+identity. This differs from the common installer's executable-backed discovery. The reviewed
+native evidence case stays `cursor-ide-native-3.17.8-macos-arm64`; installation success does not
+admit a new session/observation capability case. The Windows-side Cursor IDE with Remote WSL
+is unverified and remains owned by the integration maintainer in #722. Cursor Cloud is outside
+this scope. Shared host facts are in [`linux-and-wsl.md`](linux-and-wsl.md).
 
 ## Preview and install
 
@@ -170,9 +198,11 @@ through the cell for the platform, which the preview names under
   redirected shell, or a background process has no trusted console and fails closed. The account
   needs a password (`passwd`); a WSL 2 distribution sets one at first launch. Coverage: unit
   tests drive the ceremony with a scripted PAM, and CI on Ubuntu 24.04 proves only that real
-  Linux-PAM rejects a wrong password for the runner's account. An interactive approval on a
-  certified Linux x86-64 cell and under WSL 2 is not yet recorded; WSL 2 uses the same PAM stack
-  and no difference is known.
+  Linux-PAM rejects a wrong password for the runner's account. The 2026-09-20 installed
+  lifecycle checks additionally exercised successful real PAM approval on Ubuntu x86-64 and
+  WSL 2 using disposable local accounts. Each mutation required one password prompt; a
+  repeated no-op required none. A real interactive Linux setup also passed its confirmation
+  and single PAM prompt (issue #767).
 - **Any other platform** (`unsupported`): fails closed.
 
 Successful authentication consumes that pending once before install, replace, or remove.
@@ -236,7 +266,7 @@ Then invoke the exact intended Yoetz launcher to preview and install the project
 Install the native plugin with `--mcp-ownership external-registration` through the authenticated
 plugin lifecycle. Its launcher and isolated root must match the project entry. The project entry is
 `.cursor/mcp.json`, has the pinned launcher plus `mcp serve --host cursor --project-root
-${workspaceFolder}`, and carries only the validated `YOETZ_ISOLATED_ROOT` environment binding when
+<exact-project-root>`, and carries only the validated `YOETZ_ISOLATED_ROOT` environment binding when
 isolated. Strict mode appends `--semantic off`; omitting `--route-profile` preserves an existing
 owned route. The project registration command never launches a service and never grants AI-powered
 review egress or host trust. The startup selector is validated against the exact owned project
@@ -1147,3 +1177,39 @@ One host-specific fact already applies and is unchanged by ADR-030: the bridge d
 `authorize_command` to Cursor, because Cursor is never an agent-chat attestation client. The
 canonical body carries only the commands admitted for that host, so it omits the authorize step
 rather than naming a command the host cannot use.
+
+### Project selectors in the Agent CLI (0.2.3)
+
+New project registrations store the exact validated absolute project path. Cursor Agent CLI
+2026.09.18-9a7762b passes the IDE placeholder literally, so a placeholder registration fails
+before the bridge can initialize. Existing placeholder entries remain recognizable and valid
+for IDE clients that expand them; an accepted install preview upgrades them in place. Moving
+a project requires a new registration preview. The absolute selector only chooses among the
+native client roots: it never replaces roots/list or relaxes the ownership and session fences.
+
+
+### Explicit Agent CLI registration
+
+Agent CLI clients that do not supply MCP roots/list use an explicit project binding. Preview it
+with the intended installed launcher:
+
+```text
+yoetz integrate cursor project-mcp preview --project-root /absolute/project --cursor-config-root /absolute/cursor-config --project-binding registered-project
+```
+
+Review the named project, launcher, instance and route. Apply with the same arguments, replacing
+`preview` with `install` and adding `--accept --preview-digest <exact-preview-digest>`. Preserve or
+explicitly choose the existing policy/strict route; this mode grants no content or review egress.
+Restart the CLI MCP connection, enable the project source if the host requires it, and verify a
+native `start`, not just `mcp list`. Model-provided paths and hook CWD do not select the repository.
+
+Use `--project-binding mcp-roots` in a new accepted preview/install to return the entry to desktop
+root binding. Omitting the option preserves the mode of an owned entry. `status`, `preview-remove`
+and accepted `remove` remain supported. Moving/replacing the project or editing/replacing its
+MCP registration retires the serving process and requires a new connection.
+
+For a returned start error with `start_busy_same_identity`, the reservation remains durable and
+only its fenced lease was yielded. Replay the exact start body and request ID once, without
+inventing session or writer IDs. `start_pending_same_identity` instead means a live lease remains:
+wait up to 60 seconds before the one exact replay. If still busy or pending, retain the original
+request and report the unresolved start. These continuations do not authorize a new task.

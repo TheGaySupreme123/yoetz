@@ -1609,6 +1609,7 @@ class MemoryStartCatalogAdapter:
         if type(allocation) is not StartAllocation:
             raise _error(PublicErrorCode.INVALID_REQUEST)
         now = self._clock.now_utc()
+        # Validate the same timestamp representation the SQLite adapter persists.
         format_rfc3339_millis(now)
         async with self._lock:
             key, record = self._operation_for(allocation)

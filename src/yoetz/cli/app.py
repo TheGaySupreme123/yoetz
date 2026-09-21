@@ -1914,18 +1914,24 @@ def mcp_serve(
         Path | None,
         typer.Option(
             "--project-root",
-            help=(
-                "Cursor only: expanded project selector from the host's ${workspaceFolder}; "
-                "it must also be present in MCP roots/list."
-            ),
+            help=("Cursor only: exact project containing the approved MCP registration."),
         ),
     ] = None,
+    project_binding: Annotated[
+        Literal["mcp-roots", "registered-project"],
+        typer.Option(
+            "--project-binding",
+            help="Cursor binding: desktop host roots, or explicit registered project for Agent CLI.",
+        ),
+    ] = "mcp-roots",
 ) -> None:
     """Run the MCP stdio bridge."""
 
     module = importlib.import_module("yoetz.mcp.server")
     mcp_main = cast(Callable[..., None], getattr(module, "main"))
-    mcp_main(semantic=semantic, host=host, project_root=project_root)
+    mcp_main(
+        semantic=semantic, host=host, project_root=project_root, project_binding=project_binding
+    )
 
 
 @state_app.command("capture")
@@ -2110,6 +2116,13 @@ def _cursor_project_mcp_command(action: str) -> Callable[..., None]:
             str | None,
             typer.Option("--preview-digest", help="Exact reviewed project MCP preview digest."),
         ] = None,
+        project_binding: Annotated[
+            Literal["mcp-roots", "registered-project"] | None,
+            typer.Option(
+                "--project-binding",
+                help="Explicit Agent CLI binding; omitted preserves an owned entry, otherwise uses desktop roots.",
+            ),
+        ] = None,
         json_output: _JSON = False,
     ) -> None:
         harness = cast(str, context.find_root().find_object(str) or context.obj)
@@ -2125,6 +2138,7 @@ def _cursor_project_mcp_command(action: str) -> Callable[..., None]:
                 accept=accept,
                 preview_digest=preview_digest,
                 json_output=json_output,
+                project_binding=project_binding,
             )
         )
 
@@ -2507,7 +2521,9 @@ for _admission_action in ("status", "preview", "grant", "revoke"):
 def setup_run(
     non_interactive: Annotated[
         bool,
-        typer.Option("--non-interactive", help="Never prompt; report without mutating."),
+        typer.Option(
+            "--non-interactive", help="Never ask setup questions; apply only an accepted preview."
+        ),
     ] = False,
     codex_path: _CODEX_PATH = None,
     codex_home: Annotated[
@@ -2517,6 +2533,25 @@ def setup_run(
     accept: _ACCEPT = False,
     route_profile: _ROUTE_PROFILE = None,
     json_output: _JSON = False,
+    host: Annotated[
+        str | None,
+        typer.Option("--host", help="Agent to connect: codex, claude, cursor-ide or cursor-cli."),
+    ] = None,
+    host_path: Annotated[
+        Path | None, typer.Option("--host-path", help="Override the detected executable.")
+    ] = None,
+    host_config_root: Annotated[
+        Path | None,
+        typer.Option("--host-config-root", help="Override the selected host configuration."),
+    ] = None,
+    project: Annotated[Path | None, typer.Option("--project", help="Project to connect.")] = None,
+    request_value: Annotated[
+        str | None,
+        typer.Option("--request-id", help="Request identity returned by the connection preview."),
+    ] = None,
+    preview_digest: Annotated[
+        str | None, typer.Option("--preview-digest", help="Exact connection plan to accept.")
+    ] = None,
 ) -> None:
     """Run the guided first-run setup wizard."""
 
@@ -2534,15 +2569,80 @@ def setup_run(
                 accept=accept,
                 json_output=json_output,
                 route_profile=chosen_route,
+                host=host,
+                host_path=host_path,
+                host_config_root=host_config_root,
+                project=project,
+                request_value=request_value,
+                preview_digest=preview_digest,
             )
         )
     )
 
 
+@setup_app.command("disconnect")
+def setup_disconnect(
+    host: Annotated[str, typer.Option("--host", help="Agent to disconnect.")],
+    host_path: Annotated[Path | None, typer.Option("--host-path")] = None,
+    host_config_root: Annotated[Path | None, typer.Option("--host-config-root")] = None,
+    project: Annotated[Path | None, typer.Option("--project")] = None,
+    request_value: Annotated[str | None, typer.Option("--request-id")] = None,
+    preview_digest: Annotated[str | None, typer.Option("--preview-digest")] = None,
+    accept: _ACCEPT = False,
+    non_interactive: Annotated[bool, typer.Option("--non-interactive")] = False,
+    route_profile: _ROUTE_PROFILE = None,
+    json_output: _JSON = False,
+) -> None:
+    """Preview and remove the selected integration, preserving Yoetz data."""
+    from yoetz.cli.host_connection import run_host_connection
+
+    _finish(
+        run_host_connection(
+            host=host,
+            executable=host_path,
+            config_root=host_config_root,
+            project=(project or Path.cwd()).expanduser().resolve(),
+            action="disconnect",
+            route=cast(
+                Literal["strict", "policy"], _validated_route_profile(route_profile) or "strict"
+            ),
+            accept=accept,
+            interactive=not non_interactive and sys.stdin.isatty(),
+            request_value=request_value,
+            preview_digest=preview_digest,
+            json_output=json_output,
+        )
+    )
+
+
 @setup_app.command("status")
-def setup_status(json_output: _JSON = False) -> None:
+def setup_status(
+    json_output: _JSON = False,
+    host: Annotated[str | None, typer.Option("--host")] = None,
+    host_path: Annotated[Path | None, typer.Option("--host-path")] = None,
+    host_config_root: Annotated[Path | None, typer.Option("--host-config-root")] = None,
+    project: Annotated[Path | None, typer.Option("--project")] = None,
+    route_profile: _ROUTE_PROFILE = None,
+) -> None:
     """Show read-only setup posture without mutating anything."""
 
+    if host is not None:
+        from yoetz.cli.host_connection import run_host_connection
+
+        _finish(
+            run_host_connection(
+                host=host,
+                executable=host_path,
+                config_root=host_config_root,
+                project=(project or Path.cwd()).expanduser().resolve(),
+                route=cast(
+                    Literal["strict", "policy"], _validated_route_profile(route_profile) or "strict"
+                ),
+                json_output=json_output,
+                status_only=True,
+            )
+        )
+        return
     operation = _setup_operation("setup_status")
     _finish(run_async(lambda: operation(json_output=json_output)))
 

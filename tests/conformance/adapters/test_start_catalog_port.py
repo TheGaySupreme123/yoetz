@@ -693,7 +693,7 @@ async def test_yielded_start_preserves_each_milestone_and_fences_old_lease(
         assert live.value.code is PublicErrorCode.OPERATION_PENDING
         assert live.value.safe_details == {
             "reason_code": "start_lease_pending",
-            "continuation": "start_lease_wait",
+            "continuation": "start_pending_same_identity",
         }
         await catalog.yield_lease(allocated)
         with pytest.raises(PublicOperationError) as changed:

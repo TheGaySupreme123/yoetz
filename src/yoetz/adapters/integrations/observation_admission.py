@@ -403,7 +403,11 @@ def plan_admission(
         same_lane = ()
     pending = tuple(item for item in same_lane if item.kind == "pending")
     is_pre = envelope.event_kind == "PreToolUse"
-    is_success = envelope.event_kind == "PostToolUse" and proven_routine_success
+    is_success = (
+        envelope.event_kind == "PostToolUse"
+        and proven_routine_success
+        and _proven_routine_success(envelope)
+    )
     eligible = focused and bool(fence) and (routine_candidate if is_pre else is_success)
     if envelope.content_object_refs or any(
         gap not in _ROUTINE_SUMMARY_ALLOWED_GAPS for gap in envelope.gap_codes

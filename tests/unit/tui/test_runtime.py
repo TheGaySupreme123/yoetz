@@ -20,6 +20,69 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
+@pytest.mark.parametrize(
+    ("host", "installed", "enabled", "configured", "expected"),
+    [
+        ("claude", False, False, True, "absent"),
+        ("claude", True, False, True, "absent"),
+        ("claude", True, True, True, "yoetz_owned"),
+        ("cursor-cli", True, None, True, "yoetz_owned"),
+        ("cursor-ide", False, None, True, "absent"),
+        ("cursor-ide", True, None, False, "absent"),
+    ],
+)
+async def test_host_ownership_requires_complete_configuration_off_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    host: str,
+    installed: bool,
+    enabled: bool | None,
+    configured: bool,
+    expected: str,
+) -> None:
+    import threading
+
+    from yoetz.cli import host_connection
+
+    event_thread = threading.get_ident()
+
+    def select(*_args: object) -> object:
+        assert threading.get_ident() != event_thread
+        return object()
+
+    monkeypatch.setattr(host_connection, "select_installation", select)
+
+    def prepare(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            status=lambda: {"installed": installed, "enabled": enabled, "configured": configured}
+        )
+
+    monkeypatch.setattr(host_connection, "prepare_selected", prepare)
+    option = HarnessOption("/opt/agent", "1.0.0", "Agent", "", host=host)
+    assert await YoetzRuntime(cwd=tmp_path).mcp_state(option) == expected
+
+
+@pytest.mark.parametrize("host", ["claude", "cursor-ide", "cursor-cli"])
+async def test_non_codex_plugin_layers_use_selected_host_state(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, host: str
+) -> None:
+    from yoetz.tui.models import LayerState
+
+    seen: list[str] = []
+
+    async def status(_self: YoetzRuntime, option: HarnessOption) -> dict[str, object]:
+        seen.append(option.host)
+        return {"installed": True, "configured": True, "enabled": True}
+
+    monkeypatch.setattr(YoetzRuntime, "_host_connection_status", status)
+    option = HarnessOption("/opt/agent", "1.0.0", "Selected agent", "", host=host)
+    layers = await YoetzRuntime(cwd=tmp_path)._host_plugin_layers(option)  # pyright: ignore[reportPrivateUsage]
+    assert seen == [host]
+    assert layers[0].state is LayerState.VERIFIED
+    assert layers[0].detail == "Selected agent"
+    assert layers[1].state is LayerState.UNPROVEN
+
+
 async def test_detect_reports_connected_when_the_second_installation_is_owned(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -275,3 +338,34 @@ def test_host_entries_report_platform_sandbox_and_storage_without_mutating(
     assert verified["platform_cell"].detail == "Linux x86_64 (manylinux_2_28_x86_64)"
     assert verified["check_sandbox"].detail == "seatbelt"
     assert all(entry.remediation == "" for entry in verified.values())
+
+
+async def test_integration_preview_uses_activation_home_for_mcp(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from yoetz.adapters.integrations import codex_mcp
+    from yoetz.cli import setup
+    from yoetz.ports.harness_mcp import McpRegistrationError, McpRegistrationReason
+    from yoetz.tui.runtime import RuntimeError_
+
+    selected = tmp_path / "selected"
+    resolved = tmp_path / "resolved"
+    seen: list[Path | None] = []
+
+    def activation(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(codex_home=resolved)
+
+    class StopAtPreview:
+        def __init__(self, *, route_profile: str, codex_home: Path | None = None) -> None:
+            assert route_profile == "strict"
+            seen.append(codex_home)
+
+        async def preview_registration(self, _binary: object) -> object:
+            raise McpRegistrationError(McpRegistrationReason.TIMEOUT, {})
+
+    monkeypatch.setattr(setup, "codex_activation_preview", activation)
+    monkeypatch.setattr(codex_mcp, "CodexMcpAdapter", StopAtPreview)
+    runtime = YoetzRuntime(cwd=tmp_path)
+    with pytest.raises(RuntimeError_):
+        await runtime.integration_plan(CLI, selected, "strict")
+    assert seen == [resolved]

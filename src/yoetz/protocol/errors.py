@@ -442,8 +442,8 @@ ADMITTED_CONTINUATION_TOKENS: frozenset[str] = frozenset(
         "session_rebind_required",
         "sorted_set_required",
         "start_timeout_same_identity",
-        "start_busy_retry_ready",
-        "start_lease_wait",
+        "start_busy_same_identity",
+        "start_pending_same_identity",
         "storage_root_unsafe",
         "vault_initialization_required",
         "write_timeout_same_identity",
@@ -486,10 +486,6 @@ ADMITTED_CONTINUATION_TOKENS: frozenset[str] = frozenset(
 # boundary that knows it (``continuation_for_reason``).
 REASON_CODE_CONTINUATIONS: Mapping[str, str] = MappingProxyType(
     {
-        "start_busy_retry_ready": "start_busy_retry_ready",
-        "start_catalog_retry_ready": "start_busy_retry_ready",
-        "start_runtime_rebind_retry_ready": "start_busy_retry_ready",
-        "start_lease_pending": "start_lease_wait",
         "duplicate_set_member": "sorted_set_required",
         "endpoint_unsafe": "storage_root_unsafe",
         "expected_frontier_required": "frontier_refresh_required",
@@ -613,6 +609,10 @@ REASON_CODE_CONTINUATIONS: Mapping[str, str] = MappingProxyType(
         "service_stamp_required": "lineage_service_review",
         "session_lineage_fields_incomplete": "lineage_integrity_review",
         "stored_result_shape_invalid": "lineage_integrity_review",
+        "start_busy_retry_ready": "start_busy_same_identity",
+        "start_catalog_retry_ready": "start_busy_same_identity",
+        "start_runtime_rebind_retry_ready": "start_busy_same_identity",
+        "start_lease_pending": "start_pending_same_identity",
     }
 )
 if set(REASON_CODE_CONTINUATIONS.values()) - ADMITTED_CONTINUATION_TOKENS:

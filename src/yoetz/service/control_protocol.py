@@ -85,6 +85,10 @@ MAX_ORDINARY_CONTROL_FRAME_BYTES: Final = 1_048_576
 MAX_ACTIVE_REQUESTS_PER_SESSION: Final = 32
 
 _CONTROL_SCHEMA_VERSION: Final = "2.8.0"
+# The 0.2.3 line split request/result (2.6.1) from hello (2.6.0); the 0.3 line carries
+# every 2.6.1 addition inside its single live 2.8.0 contract, so all three agree.
+_CONTROL_RESULT_SCHEMA_VERSION: Final = _CONTROL_SCHEMA_VERSION
+_CONTROL_REQUEST_SCHEMA_VERSION: Final = _CONTROL_SCHEMA_VERSION
 _SCHEMA_VERSION: Final = "1.0.0"
 _MAX_IMPORT_SOURCE_BYTES: Final = 4 * 1024 * 1024
 _ERROR_REASONS: Final = frozenset(
@@ -390,7 +394,11 @@ def _validated_wire(value: object, schema_name: str) -> JsonObject:
         if not isinstance(wire, Mapping):
             _fail("frame_invalid")
         schema_version = (
-            _CONTROL_SCHEMA_VERSION
+            _CONTROL_RESULT_SCHEMA_VERSION
+            if schema_name == "control-result"
+            else _CONTROL_REQUEST_SCHEMA_VERSION
+            if schema_name == "control-request"
+            else _CONTROL_SCHEMA_VERSION
             if schema_name
             in {"control-hello", "control-hello-result", "control-request", "control-result"}
             else _SCHEMA_VERSION

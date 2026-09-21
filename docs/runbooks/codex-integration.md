@@ -1,5 +1,21 @@
 # Codex integration runbook
 
+## Guided desktop connection (issue #767)
+
+`yoetz setup run --host codex` exposes the existing project-skill, plugin, activation and MCP
+composition through the common desktop connection plan. Discovery offers the installation;
+`--host-path`, `--host-config-root`, and `--project` select exact alternatives. An agent requests
+`--non-interactive --json`, presents the changes, then repeats the returned request ID and preview
+digest with `--accept`. The selected home remains bound through every Codex probe and mutation.
+The historical `--codex-path`/`--codex-home` wizard remains a compatibility path.
+
+`setup status|disconnect --host codex` uses the same target options. Disconnect removes activation,
+the owned MCP entry and exact project skill, retaining inactive plugin sources and Yoetz data.
+Modified or foreign integration state is refused. Record native installation, fresh-session
+discovery/start, disconnect and reconnect for macOS, Linux and WSL 2 separately in #767. Desktop
+app availability and CLI availability remain distinct; an untested version/platform does not
+inherit certification from executable discovery or unit tests.
+
 ## Conditional agent guidance
 
 The skill keeps its activation boundary, core workflow, and safety floor in the entrypoint.
@@ -1031,6 +1047,16 @@ the new runtime, then restart the service and all Codex integrations before writ
 Mixed old and new writers are unsupported because a `/10` writer ignores the new pairing fields and
 can erase a deferred intent when it saves.
 
+Setup binds every MCP lookup, registration, verification, and removal to the same explicit
+Codex home used for plugin activation. Both `CODEX_HOME` and testing-wrapper
+`CODEX_TESTING_HOME` are passed to those subprocesses; the parent environment is unchanged.
+Registration and removal preview digests include the selected home, so approval for one home
+cannot be replayed against another. An unresolvable explicit home fails before registration.
+When activation first exposes the plugin-bundled MCP entry, the interactive wizard shows a fresh
+MCP preview and asks for confirmation once before registering the selected launcher. Declining,
+a foreign entry, or another intervening change stops the write. Noninteractive callers retain
+`preview_stale` and must obtain a fresh preview; old approval is never silently reused.
+
 ## 11. Security, privacy, and prohibited actions
 
 Codex is the v0.1 allowlisted first-party client for exact current-chat consent attestation.
@@ -1286,3 +1312,18 @@ corrected body once under a new `request_id`. The regression case is
 Provider-side failures reaching Codex through the app-server path keep their existing stage-typed
 diagnostics (issue #529). Classifying those failures into typed recovery tokens is tracked
 separately on issue #742 and is not part of ADR-030's first implementation.
+
+### Compatible newer transcript metadata (0.2.3)
+
+The structural compatibility parser accepts fractional metadata introduced by Codex 0.153.4
+without dropping the surrounding message or tool record: unrepresentable numeric leaves become
+null, while the record commitment still identifies the original bytes. Its token-usage wrapper
+is a known telemetry family from which no work evidence is inferred. Exact certified profiles
+are unchanged. This repair does not add multi-agent lineage or promote a newer host capability
+cell; unsupported shapes still report their coverage gaps.
+
+For a returned start error with `start_busy_same_identity`, the reservation remains durable and
+only its fenced lease was yielded. Replay the exact start body and request ID once, without
+inventing session or writer IDs. `start_pending_same_identity` instead means a live lease remains:
+wait up to 60 seconds before the one exact replay. If still busy or pending, retain the original
+request and report the unresolved start. These continuations do not authorize a new task.

@@ -96,6 +96,26 @@ _PUBLICATION_RECOVERY: Final = (
 )
 
 _DIRECTIVES: Final = (
+    RecoveryDirective(
+        token="start_busy_same_identity",
+        directive=(
+            "The start reservation is retained and its lease was released. Replay the exact "
+            "start body and request_id once; no session or writer IDs are needed. If contention "
+            "persists, retain the request and report the unresolved start."
+        ),
+        guidance_uri=_WORKFLOW_RECOVERY,
+        nudge="Do not create a replacement task to escape contention.",
+    ),
+    RecoveryDirective(
+        token="start_pending_same_identity",
+        directive=(
+            "Start still has a live lease. Wait up to 60 seconds, then replay the exact start "
+            "body and request_id once. Do not invent session or writer IDs. If still pending, "
+            "retain the request and report the unresolved start."
+        ),
+        guidance_uri=_WORKFLOW_RECOVERY,
+        nudge="A pending start does not prove failure.",
+    ),
     # --- timeout family (issue #669) -------------------------------------------------------
     RecoveryDirective(
         token="read_timeout_new_identity",
@@ -116,26 +136,6 @@ _DIRECTIVES: Final = (
         ),
         guidance_uri=_WORKFLOW_RECOVERY,
         nudge="Do not mint a fresh request_id, task, or sibling to escape an ambiguous write.",
-    ),
-    RecoveryDirective(
-        token="start_busy_retry_ready",
-        directive=(
-            "The start reservation is retained and its lease was released. Replay the exact "
-            "start body and request_id once; no session or writer IDs are needed. If contention "
-            "persists, retain that request and report the unresolved start."
-        ),
-        guidance_uri=_WORKFLOW_RECOVERY,
-        nudge="Do not create a replacement task to escape contention.",
-    ),
-    RecoveryDirective(
-        token="start_lease_wait",
-        directive=(
-            "Start still has a live lease. Wait up to 60 seconds, then replay the exact start "
-            "body and request_id once. Do not invent session or writer IDs. If still pending, "
-            "retain the request and report the unresolved start."
-        ),
-        guidance_uri=_WORKFLOW_RECOVERY,
-        nudge="A pending start does not prove failure.",
     ),
     RecoveryDirective(
         token="start_timeout_same_identity",
@@ -707,6 +707,11 @@ REASON_CODE_DIRECTIVE_EXEMPTIONS: Final[frozenset[str]] = frozenset(
         "internal_error",
         "entry_digest_mismatch",
         "event_family_not_admitted",
+        # These producer boundaries do not establish a yielded start lease. The start
+        # application maps definite, fenced lease yield to the exact-start continuation.
+        "catalog_busy",
+        "catalog_maintenance_busy",
+        "runtime_rebind_busy",
         "engine_family_wrong_author",
         "frame_invalid",
         "frame_too_large",

@@ -189,7 +189,7 @@ async def test_runtime_wait_bound_yields_reserved_start_and_mcp_exact_replay_com
         assert error["code"] == "BUNDLE_BUSY" and error["retryable"] is True
         assert error["safe_details"] == {
             "reason_code": "start_runtime_rebind_retry_ready",
-            "continuation": "start_busy_retry_ready",
+            "continuation": "start_busy_same_identity",
         }
         assert "start_runtime_rebind_retry_ready" in _text(result)
     finally:
@@ -232,7 +232,7 @@ async def test_real_catalog_busy_after_reservation_yields_and_recovers_through_m
         assert error["code"] == "BUNDLE_BUSY"
         assert error["safe_details"] == {
             "reason_code": "start_catalog_retry_ready",
-            "continuation": "start_busy_retry_ready",
+            "continuation": "start_busy_same_identity",
         }
         assert "start_catalog_retry_ready" in _text(result)
         recovered = _structured(await bridge.dispatch_start(request, transport))
@@ -274,7 +274,7 @@ async def test_catalog_lock_preserves_pending_when_lease_yield_cannot_commit(
         assert pending["code"] == "OPERATION_PENDING"
         assert pending["safe_details"] == {
             "reason_code": "start_lease_pending",
-            "continuation": "start_lease_wait",
+            "continuation": "start_pending_same_identity",
         }
         assert "start_lease_pending" in _text(pending_result)
         # Only a clock advance, never deletion or a fresh request, enables reclaim.

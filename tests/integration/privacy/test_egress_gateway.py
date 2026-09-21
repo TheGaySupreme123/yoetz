@@ -1704,3 +1704,92 @@ def test_unregistered_endpoint_profile_reports_factory_unavailable_not_a_silent_
     assert [reason for _digest, reason in reconciliation.unavailable_bindings] == [
         "factory_unavailable"
     ]
+
+
+@pytest.mark.parametrize("phase", ["parking", "provider", "receipt"])
+@pytest.mark.parametrize("clock_delta", [30, -30])
+def test_cancellation_at_each_admitted_await_terminalizes_without_redispatch(
+    phase: str, clock_delta: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = _Clock()
+    audit = _FullPrivacyAudit()
+    factory = _FakeExternalFactory(_script_factory)
+    gateway = _gateway(audit=audit, clock=clock, external_factory=factory)
+    policy = _policy(external_enabled=True, local_enabled=False)
+    effective = EffectivePrivacyPolicy(policy, 1, policy.policy_digest)
+    human = _human_authority(available=True)
+    entered = asyncio.Event()
+    first = True
+
+    async def pause_once() -> None:
+        nonlocal first
+        if first:
+            first = False
+            entered.set()
+            await asyncio.Event().wait()
+
+    park = audit.park_attempt_reconciliation
+    complete = audit.complete_egress
+    build = factory.build_evaluator
+
+    async def parking(dispatch_id: str, receipt: EgressReceipt) -> None:
+        if phase == "parking":
+            await pause_once()
+        await park(dispatch_id, receipt)
+
+    async def completing(dispatch_id: str, receipt: EgressReceipt) -> None:
+        if phase == "receipt":
+            await pause_once()
+        await complete(dispatch_id, receipt)
+
+    def building(binding: object, credential: object, request_commitment: object) -> object:
+        evaluator = build(binding, credential, request_commitment)
+        assert isinstance(evaluator, _FakeEvaluator)
+        evaluate = evaluator.evaluate
+
+        async def evaluating(case: object, deadline: object) -> object:
+            if phase == "provider":
+                await pause_once()
+            return await evaluate(case, deadline)
+
+        monkeypatch.setattr(evaluator, "evaluate", evaluating)
+        return evaluator
+
+    monkeypatch.setattr(audit, "park_attempt_reconciliation", parking)
+    monkeypatch.setattr(audit, "complete_egress", completing)
+    monkeypatch.setattr(factory, "build_evaluator", building)
+
+    async def run() -> None:
+        await _reconcile_repository(gateway, effective, human)
+        authorization = _authorization(
+            authorization_id="aut_60000000-0000-4000-8000-000000000097",
+            policy_digest=policy.policy_digest,
+            service_generation=human.service_generation,
+        )
+        audit.seed_authorized(authorization)
+        case = _case(
+            case_id="cas_60000000-0000-4000-8000-000000000098",
+            authorization=authorization,
+            payload=canonical_encode({"note": "hello"}),
+        )
+        pending = asyncio.create_task(
+            gateway.dispatch_external_semantic(case, authorization, _deadline(clock))
+        )
+        await asyncio.wait_for(entered.wait(), 5)
+        clock.utc += timedelta(seconds=clock_delta)
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(pending, 5)
+        assert audit.authorization_state(authorization.authorization_id) == "consumed"
+
+    asyncio.run(run())
+    assert len(audit.egress_receipts) == 1
+    receipt = audit.egress_receipts[0][1]
+    if phase != "receipt":
+        assert receipt.outcome is PrivacyOutcome.TRANSPORT_FAILED
+        assert receipt.safe_failure_reason is PrivacyReason.OUTCOME_UNKNOWN
+        assert receipt.finished_at == _NOW + timedelta(seconds=max(0, clock_delta))
+    else:
+        # The provider result already existed; cancellation preserves it instead of replacing it.
+        assert receipt.outcome is not PrivacyOutcome.TRANSPORT_FAILED
+    assert sum(item.evaluate_calls for item in factory.built) <= 1

@@ -72,8 +72,8 @@ async def test_welcome_shows_detection_and_offers_the_recommended_path(
         assert view.view_name == "welcome"
         labels = [option.label for option in _options(view)]
         assert labels == [
-            "Connect Yoetz to Codex",
-            "Set up Yoetz without Codex",
+            "Connect Yoetz to an agent",
+            "Set up Yoetz without an agent",
             "Exit",
         ]
 

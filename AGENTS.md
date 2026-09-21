@@ -94,6 +94,18 @@ The most common defect here is a change that works on the path you tested and is
 else. Apply the relevant entries when a change affects behavior or delivery. Report material
 coverage decisions and gaps; do not recite unrelated entries for every task:
 
+- **Consistent user experience.** Make installation, connection, everyday use, upgrades, recovery,
+  and disconnect equally simple and consistent wherever supported across macOS, Linux, and Windows
+  through WSL 2, and across Codex, Claude Code, and Cursor. Apply the same principle to every future
+  coding or non-coding agent host. Offer discovered installations and sensible defaults, explain
+  consequential choices in plain language, and automate mechanical steps through the supported
+  authority paths. Users should not need a host-specific runbook for an ordinary supported flow.
+  Reuse shared orchestration where practical; keep unavoidable OS or host differences in adapters
+  and concise, actionable continuations. Assess relevant host/OS combinations and reverse paths
+  before claiming parity. Record capability gaps and their follow-up owners in the owning issue
+  and runbook; a gap is not permission to silently omit a host. Consistency never weakens consent,
+  OS authentication, privacy, or evidence requirements, and does not imply native Windows or an
+  untested host/platform combination is supported.
 - **Hosts.** Codex, Claude Code, and Cursor each have an integration adapter under
   `src/yoetz/adapters/integrations/`. Host-shaped features need a decision per host, even if the
   decision is "not supported here", recorded in that host's `docs/runbooks/*-integration.md`.

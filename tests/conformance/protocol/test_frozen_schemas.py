@@ -24,8 +24,8 @@ _MANIFEST_PATH = "manifest.json"
 _SCHEMA_NAMESPACE = "https://schemas.yoetz.dev/0.1/"
 _EXPECTED_SCHEMA_MANIFEST_SCHEMA = "yoetz.schema-manifest/1.0.0"
 _EXPECTED_SCHEMA_MANIFEST_VERSION = "1.0.0"
-_EXPECTED_MEMBER_COUNT = 191
-_EXPECTED_REQUEST_RESULT_VERSION_COUNT = 46
+_EXPECTED_MEMBER_COUNT = 196
+_EXPECTED_REQUEST_RESULT_VERSION_COUNT = 47
 _EXPECTED_EVENT_VERSION_COUNT = 29
 
 
@@ -215,6 +215,8 @@ def test_schema_registry_is_complete() -> None:
             if path.endswith("-2.8.0.schema.json")
             else "2.7.0"
             if path.endswith("-2.7.0.schema.json")
+            else "2.6.1"
+            if path.endswith("-2.6.1.schema.json")
             else "2.6.0"
             if path.endswith("-2.6.0.schema.json")
             else "2.5.0"
@@ -223,6 +225,10 @@ def test_schema_registry_is_complete() -> None:
             if path.endswith("-2.4.0.schema.json")
             else "2.3.0"
             if path.endswith("-2.3.0.schema.json")
+            else "2.2.2"
+            if path.endswith("-2.2.2.schema.json")
+            else "2.2.1"
+            if path.endswith("-2.2.1.schema.json")
             else "2.2.0"
             if path.endswith("-2.2.0.schema.json")
             else "2.1.0"
@@ -458,6 +464,35 @@ def test_released_version_manifest_2_1_stays_frozen_at_its_released_snapshot() -
     root_bytes = (_ROOT_SCHEMA_DIR / "version/version-manifest-2.1.0.schema.json").read_bytes()
     packaged = _PACKAGE_SCHEMA_DIR.joinpath("version/version-manifest-2.1.0.schema.json")
     assert root_bytes == packaged.read_bytes()
+
+
+def test_released_version_manifest_2_2_retains_the_0_2_2_inventory() -> None:
+    document = _version_manifest_document("2.2.0")
+
+    assert document["properties"]["schema_version"]["const"] == "2.2.0"
+    assert int(_version_manifest_consts(document, "resource_counts")["total"]) == 199
+    assert (
+        _version_manifest_consts(document, "request_result_schema_versions")["control-result"]
+        == "2.6.0"
+    )
+
+
+def test_released_version_manifest_2_2_1_retains_the_0_2_3_inventory() -> None:
+    document = _version_manifest_document("2.2.1")
+    assert document["properties"]["schema_version"]["const"] == "2.2.1"
+    assert int(_version_manifest_consts(document, "resource_counts")["total"]) == 202
+    assert "host-connection" not in _version_manifest_consts(
+        document, "request_result_schema_versions"
+    )
+
+
+def test_released_version_manifest_2_2_2_retains_the_0_2_4_inventory() -> None:
+    document = _version_manifest_document("2.2.2")
+    assert document["properties"]["schema_version"]["const"] == "2.2.2"
+    assert int(_version_manifest_consts(document, "resource_counts")["total"]) == 204
+    requests = _version_manifest_consts(document, "request_result_schema_versions")
+    assert requests["host-connection"] == "1.0.0"
+    assert requests["control-result"] == "2.6.1"
 
 
 def test_live_version_manifest_2_3_tracks_the_current_inventory() -> None:

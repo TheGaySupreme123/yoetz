@@ -619,8 +619,8 @@ attempt owes. Accordingly:
    `PrivacyCoordinator.recover_started_request(request_id)` reports the terminal
    `SemanticEgressAttemptUnknown` for the exact request identity a cancelled dispatch minted — the
    cancelled dispatch never observes the prepared case digest — and the cancelled advice row stores
-   that reservation plus the provider identity. A cancelled row with no such provenance is proof
-   that no authorization was consumed.
+   that reservation plus the provider identity. A cancelled row without this provenance does not establish whether authority was consumed: a
+   bounded reconciliation may itself time out or fail. Inspect the privacy audit for that attempt.
 
 The invariant is unchanged and now holds: a consumed authorization ends in exactly one terminal
 receipt. Local-sink (`local_disclosure_pending`) cancellation is not covered by this amendment.

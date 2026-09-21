@@ -179,7 +179,7 @@ def _version_manifest_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     # pass and verifies a fixed point before reporting success.
     destination = source.parents[1] / entry.relative_path
     if entry.schema_version == "2.3.0" and not destination.exists():
-        document = _load_versioned_template(entry, "version/version-manifest-2.2.0.schema.json")
+        document = _load_versioned_template(entry, "version/version-manifest-2.2.2.schema.json")
         cast(dict[str, JsonValue], document["properties"])["schema_version"] = {
             "const": entry.schema_version
         }
@@ -1315,6 +1315,73 @@ def _simple_versioned_schema(
     entry: _RegistryEntry, source: str, replacements: Mapping[str, str]
 ) -> dict[str, JsonValue]:
     return _load_versioned_template(entry, source, replacements=replacements)
+
+
+def _control_request_v2_6_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Carry the existing selected-observation contract over the local control boundary."""
+
+    document = _simple_versioned_schema(entry, "service/control-request-2.6.0.schema.json", {})
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+    envelope = cast(dict[str, JsonValue], definitions["observation_envelope"])
+    envelope_properties = cast(dict[str, JsonValue], envelope["properties"])
+    structural = cast(dict[str, JsonValue], envelope_properties["structural_payload"])
+    properties = cast(dict[str, JsonValue], structural["properties"])
+    source = (
+        Path(__file__).resolve().parent.parent
+        / "schemas/observations/routine-read-summary-1.0.0.schema.json"
+    )
+    summary = cast(dict[str, JsonValue], json.loads(source.read_bytes()))
+    summary_envelope_properties = cast(dict[str, JsonValue], summary["properties"])
+    summary_structural = cast(
+        dict[str, JsonValue], summary_envelope_properties["structural_payload"]
+    )
+    summary_properties = cast(dict[str, JsonValue], summary_structural["properties"])
+    route_fields = (
+        "selection_task_id",
+        "selection_session_id",
+        "selection_writer_id",
+        "selection_authority_generation",
+    )
+    for field in route_fields:
+        properties[field] = summary_properties[field]
+    structural["dependentRequired"] = {
+        field: [peer for peer in route_fields if peer != field] for field in route_fields
+    }
+    properties["subject_state_digest"] = dict(
+        cast(dict[str, JsonValue], properties["command_digest"])
+    )
+    properties["protection_reference"] = {
+        "type": "string",
+        "minLength": 40,
+        "maxLength": 40,
+        "pattern": "^(?:obl|clm|fnd)_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    }
+    definitions["observation_envelope"] = {
+        "oneOf": [
+            envelope,
+            {"$ref": SCHEMA_NAMESPACE + "observations/routine-read-summary-1.0.0.schema.json"},
+        ]
+    }
+    return document
+
+
+def _control_result_v2_6_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Repair local receipt purposes without changing released 2.6 bytes or egress rules."""
+
+    document = _simple_versioned_schema(entry, "service/control-result-2.6.0.schema.json", {})
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+    local_receipt = cast(dict[str, JsonValue], definitions["local_disclosure_receipt"])
+    properties = cast(dict[str, JsonValue], local_receipt["properties"])
+    # This is the domain's local-purpose grammar. The stored agent-projection purpose
+    # contains underscores and cannot be renamed without changing canonical receipt bytes.
+    definitions["local_disclosure_purpose"] = {
+        "maxLength": 128,
+        "minLength": 1,
+        "pattern": "^[a-z][a-z0-9_-]{0,127}$",
+        "type": "string",
+    }
+    properties["purpose"] = {"$ref": "#/$defs/local_disclosure_purpose"}
+    return document
 
 
 def _finding_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
@@ -3750,6 +3817,22 @@ def _control_project_result_schema() -> dict[str, JsonValue]:
     }
 
 
+def _individual_observation_envelope(definitions: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    """Return the individual-observation branch of a control-request envelope definition.
+
+    Since ``2.6.1`` the ``observation_envelope`` definition is a ``oneOf`` whose first branch is
+    the individual native capture envelope and whose second is the closed routine-read-summary
+    reference. Later contracts extend the individual branch only; the summary branch stays the
+    reference to its own versioned schema.
+    """
+
+    envelope = cast(dict[str, JsonValue], definitions["observation_envelope"])
+    branches = envelope.get("oneOf")
+    if isinstance(branches, list):
+        return cast(dict[str, JsonValue], cast(list[JsonValue], branches)[0])
+    return envelope
+
+
 def _control_v2_8_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     """Extend frozen 2.7 with native cooperative-child correlation candidates."""
 
@@ -3762,7 +3845,7 @@ def _control_v2_8_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
     if entry.schema_name == "control-request":
         definitions = cast(dict[str, JsonValue], document["$defs"])
-        envelope = cast(dict[str, JsonValue], definitions["observation_envelope"])
+        envelope = _individual_observation_envelope(definitions)
         properties = cast(dict[str, JsonValue], envelope["properties"])
         structural = cast(dict[str, JsonValue], properties["structural_payload"])
         fields = cast(dict[str, JsonValue], structural["properties"])
@@ -3827,12 +3910,19 @@ def _control_v2_7_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     Main's 2.6 control files are a released observation/selection baseline and remain frozen.
     The 0.3 project and coordination additions are therefore an append-only 2.7 contract derived
     from those exact bytes, with the current operation-result references retargeted as usual.
+    The request and result envelopes derive from the released ``2.6.1`` patch (0.2.3): it carries
+    the selected-observation route fields, protected-read reference, subject-state digest, the
+    routine-read-summary branch, and the local disclosure purpose grammar that the 0.2 line
+    already ships. The hello envelopes have no ``2.6.1`` and derive from ``2.6.0``.
     """
 
+    template_version = (
+        "2.6.1" if entry.schema_name in {"control-request", "control-result"} else "2.6.0"
+    )
     source = (
         Path(__file__).resolve().parent.parent
         / "schemas"
-        / entry.relative_path.replace("2.7.0", "2.6.0")
+        / entry.relative_path.replace("2.7.0", template_version)
     )
     try:
         document = cast(dict[str, JsonValue], json.loads(source.read_bytes()))
@@ -3895,7 +3985,7 @@ def _control_v2_7_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         # observation payload.  These fields are intentionally current 2.7-only: the 2.6
         # document is frozen, while cloning it here must still track every field the domain
         # serializer can emit (including Cursor's generation identity).
-        observation_envelope = cast(dict[str, JsonValue], definitions["observation_envelope"])
+        observation_envelope = _individual_observation_envelope(definitions)
         envelope_properties = cast(dict[str, JsonValue], observation_envelope["properties"])
         structural_payload = cast(dict[str, JsonValue], envelope_properties["structural_payload"])
         structural_properties = cast(dict[str, JsonValue], structural_payload["properties"])
@@ -5992,6 +6082,18 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         None,
     ),
     _RegistryEntry(
+        "integrations/host-connection-1.0.0.schema.json",
+        "host-connection",
+        "1.0.0",
+        "request_result",
+        "setup-contract",
+        lambda: (
+            __import__(
+                "yoetz.protocol.host_connection", fromlist=["HostConnectionContract"]
+            ).HostConnectionContract
+        ),
+    ),
+    _RegistryEntry(
         "receipts/receipt-document-1.0.0.schema.json",
         "receipt-document",
         "1.0.0",
@@ -6280,6 +6382,22 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         None,
     ),
     _RegistryEntry(
+        "service/control-request-2.6.1.schema.json",
+        "control-request",
+        "2.6.1",
+        "request_result",
+        "local-control",
+        lambda: dict,
+    ),
+    _RegistryEntry(
+        "service/control-result-2.6.1.schema.json",
+        "control-result",
+        "2.6.1",
+        "request_result",
+        "local-control",
+        lambda: dict,
+    ),
+    _RegistryEntry(
         "service/control-hello-2.7.0.schema.json",
         "control-hello",
         "2.7.0",
@@ -6379,6 +6497,22 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "version/version-manifest-2.2.0.schema.json",
         "version-manifest",
         "2.2.0",
+        "version_manifest",
+        "version-report",
+        lambda: __import__("yoetz.version", fromlist=["VersionManifest"]).VersionManifest,
+    ),
+    _RegistryEntry(
+        "version/version-manifest-2.2.1.schema.json",
+        "version-manifest",
+        "2.2.1",
+        "version_manifest",
+        "version-report",
+        lambda: __import__("yoetz.version", fromlist=["VersionManifest"]).VersionManifest,
+    ),
+    _RegistryEntry(
+        "version/version-manifest-2.2.2.schema.json",
+        "version-manifest",
+        "2.2.2",
         "version_manifest",
         "version-report",
         lambda: __import__("yoetz.version", fromlist=["VersionManifest"]).VersionManifest,
@@ -6837,10 +6971,16 @@ def build_schema_documents(
             "version/version-manifest-2.0.0.schema.json",
             "version/version-manifest-2.1.0.schema.json",
             "version/version-manifest-2.2.0.schema.json",
+            "version/version-manifest-2.2.1.schema.json",
+            "version/version-manifest-2.2.2.schema.json",
         }:
             normalized = _frozen_version_manifest_schema(entry)
         elif entry.relative_path == "version/version-manifest-2.3.0.schema.json":
             normalized = _version_manifest_schema(entry)
+        elif entry.relative_path == "service/control-request-2.6.1.schema.json":
+            normalized = _control_request_v2_6_1_schema(entry)
+        elif entry.relative_path == "service/control-result-2.6.1.schema.json":
+            normalized = _control_result_v2_6_1_schema(entry)
         elif entry.relative_path == "privacy/privacy-policy-1.1.0.schema.json":
             normalized = _privacy_policy_v1_1_schema(entry)
         elif entry.relative_path == "privacy/outbound-case-1.1.0.schema.json":

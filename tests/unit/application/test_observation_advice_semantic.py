@@ -7,8 +7,10 @@ builder. No provider is ever called: the dispatch is a fake that records what it
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from types import SimpleNamespace
+from typing import cast
 
 import apsw
 import pytest
@@ -32,6 +34,7 @@ from yoetz.application.observation_advice_semantic import (
     ObservationAdviceSemanticWorker,
     addon_from_attempt,
 )
+from yoetz.application.observation_coordinator import ObservationCoordinator
 from yoetz.domain.observation import (
     ObservationCursor,
     ObservationEnvelope,
@@ -42,6 +45,7 @@ from yoetz.domain.observation import (
     ObservationStatusQuery,
 )
 from yoetz.domain.values import JsonObject, Timestamp
+from yoetz.ports.runtime import TaskRuntime
 from yoetz.protocol.canonical import strict_json_parse
 from yoetz.protocol.coverage import CheckType
 
@@ -833,3 +837,156 @@ def test_outcome_shape_is_closed() -> None:
         ObservationAdviceSemanticOutcome(
             status="failed", failure_reason="provider_failed", finding_ids=("fnd_x",)
         )
+
+
+def test_repeated_rebind_preserves_consumed_attempt_provenance_and_releases_once() -> None:
+    _db, repository = _repository()
+    basis = "sha256:" + "b" * 64
+    repository.schedule(
+        workspace=_COMMITMENT,
+        yoetz_session_id=_SESSION,
+        basis_digest=basis,
+        subject_digest=basis,
+        coverage_gaps=_GAPS,
+        packet_json=b"{}",
+        enqueued_at=_clock(),
+        max_pending=16,
+    )
+    entered = asyncio.Event()
+    reconciling = asyncio.Event()
+    finish_reconciliation = asyncio.Event()
+    released: list[bool] = []
+
+    async def dispatch(_: ObservationAdviceSemanticAttempt) -> ObservationAdviceSemanticOutcome:
+        entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("expected cancellation")
+
+    async def reconcile(_: ObservationAdviceSemanticAttempt) -> ObservationAdviceSemanticOutcome:
+        reconciling.set()
+        await finish_reconciliation.wait()
+        return ObservationAdviceSemanticOutcome(
+            status="cancelled",
+            failure_reason="cancelled",
+            attempt_receipt="egr_30000000-0000-4000-8000-0000000000d1",
+            provider_identity="provider-under-test",
+        )
+
+    async def on_idle() -> None:
+        released.append(True)
+
+    async def scenario() -> None:
+        supervisor = ObservationAdviceSemanticSupervisor(service_generation=1)
+        worker = ObservationAdviceSemanticWorker(
+            repository,
+            dispatch,
+            1,
+            "svc-1",
+            _clock,
+            _later,
+            reconcile,
+        )
+        assert supervisor.register(AdviceSemanticDrainHandle(_COMMITMENT, worker, on_idle=on_idle))
+        draining = asyncio.create_task(supervisor.drain_once())
+        await asyncio.wait_for(entered.wait(), 5)
+        supervisor.request_rebind(_COMMITMENT)
+        await asyncio.wait_for(reconciling.wait(), 5)
+        # A second host arrives while the first cancellation is reconciling consumed authority.
+        supervisor.request_rebind(_COMMITMENT)
+        finish_reconciliation.set()
+        await asyncio.wait_for(draining, 5)
+        await supervisor.stop()
+        assert not supervisor.has_handle(_COMMITMENT)
+
+    asyncio.run(scenario())
+    row = repository.lookup(yoetz_session_id=_SESSION, basis_digest=basis)
+    assert row is not None
+    assert row.status == "cancelled"
+    assert row.attempt_receipt == "egr_30000000-0000-4000-8000-0000000000d1"
+    assert row.provider_identity == "provider-under-test"
+    assert released == [True]
+
+
+def test_retirement_survives_cancelled_waiter_and_stop_joins_release() -> None:
+    _, repository = _repository()
+    entered = asyncio.Event()
+    release_gate = asyncio.Event()
+    released: list[bool] = []
+
+    async def dispatch(_: ObservationAdviceSemanticAttempt) -> ObservationAdviceSemanticOutcome:
+        raise AssertionError("an empty repository must not dispatch")
+
+    async def on_idle() -> None:
+        entered.set()
+        await release_gate.wait()
+        released.append(True)
+
+    async def scenario() -> None:
+        supervisor = ObservationAdviceSemanticSupervisor(service_generation=1)
+        worker = ObservationAdviceSemanticWorker(repository, dispatch, 1, "svc-1", _clock, _later)
+        assert supervisor.register(AdviceSemanticDrainHandle(_COMMITMENT, worker, on_idle=on_idle))
+        draining = asyncio.create_task(supervisor.drain_once())
+        await asyncio.wait_for(entered.wait(), 5)
+        draining.cancel()
+        stopping = asyncio.create_task(supervisor.stop())
+        release_gate.set()
+        await asyncio.wait_for(asyncio.gather(draining, stopping), 5)
+        assert not supervisor.has_handle(_COMMITMENT)
+
+    asyncio.run(scenario())
+    assert released == [True]
+
+
+def test_rebind_already_waiting_yields_newly_registered_advisory_handle() -> None:
+    _, repository = _repository()
+    released: list[object] = []
+    supervisor = ObservationAdviceSemanticSupervisor(service_generation=1)
+    owned = cast(
+        TaskRuntime,
+        SimpleNamespace(fence=SimpleNamespace(service_generation=1, service_instance_id="svc-1")),
+    )
+
+    async def dispatch(_: ObservationAdviceSemanticAttempt) -> ObservationAdviceSemanticOutcome:
+        raise AssertionError("foreground yield must prevent provider dispatch")
+
+    class Runtime:
+        def register_rebind_callback(
+            self, runtime: TaskRuntime, callback: Callable[[], None]
+        ) -> bool:
+            assert runtime is owned
+            assert supervisor.has_handle(_COMMITMENT)
+            callback()  # LocalBundleRuntime fires eagerly when a foreground start is waiting.
+            return True
+
+        def unregister_rebind_callback(
+            self, runtime: TaskRuntime, callback: Callable[[], None]
+        ) -> None:
+            assert runtime is owned
+
+        async def release(self, runtime: TaskRuntime) -> None:
+            released.append(runtime)
+
+    def store_for(_: object) -> SqliteObservationAdviceSemanticRepository:
+        return repository
+
+    coordinator = cast(
+        ObservationCoordinator,
+        SimpleNamespace(
+            advice_semantic_supervisor=supervisor,
+            advice_semantic_dispatch=dispatch,
+            advice_semantic_cancellation_reconciler=None,
+            runtime=Runtime(),
+            _observation_store=store_for,
+            _advice_semantic_repository=store_for,
+        ),
+    )
+
+    async def scenario() -> None:
+        registered = await ObservationCoordinator._register_advice_semantic_drain(  # pyright: ignore[reportPrivateUsage]
+            coordinator, _COMMITMENT, owned, deferred_runtime=owned
+        )
+        assert registered
+        await supervisor.stop()
+
+    asyncio.run(scenario())
+    assert released == [owned]

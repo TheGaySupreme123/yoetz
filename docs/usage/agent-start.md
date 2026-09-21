@@ -9,9 +9,23 @@ curl -fsSL https://raw.githubusercontent.com/TheGaySupreme123/yoetz/main/docs/us
 ```
 
 `https://yoetz.dev/agent-start` is the intended future home; this file is the authority today.
-Codex, Claude Code, and Cursor have first-party integrations — the first-run wizard connects Codex,
-while Claude Code and Cursor are connected afterwards through `yoetz integrate claude ...` and
-`yoetz integrate cursor ...` — and any agent can still use Yoetz over MCP with no integration.
+Codex, Claude Code, and Cursor share guided desktop connection setup. Use `yoetz setup status
+--json` to discover installations, then `yoetz setup run --host codex|claude|cursor-ide|cursor-cli
+--non-interactive --json` to preview the selected connection. Present the project, review mode,
+scope and proposed changes in plain language. After approval, use the exact `next_step` command
+returned by the preview, including its request ID and preview digest. `--accept` alone does not
+authorize unseen changes. Keep executable/configuration details available when needed; do not
+make the user enter paths that discovery already found. Use explicit path overrides for another
+installation. Do not substitute a testing profile for the selected regular installation.
+
+The same host choice works with `setup status --host ... --project ... --json` and
+`setup disconnect --host ... --project ...`. Disconnect previews before changing anything and
+preserves Yoetz data. Claude/Cursor connection can require an OS-authenticated local prompt;
+hand the exact continuation to a trusted local terminal when your host cannot provide it.
+An installed or configured report is not a connected session: open a fresh native session in the
+selected project and demonstrate a successful Yoetz `start`. Treat observation permission,
+provider credentials and disclosure as separate choices. Desktop scope is macOS, Linux, and
+Windows through WSL 2. Any agent can also use Yoetz over MCP without an integration.
 
 Assume the user may never have opened a terminal. Explain each step in one plain sentence before
 you run it, and before the first decision read

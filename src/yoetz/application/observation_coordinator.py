@@ -682,6 +682,9 @@ class ObservationCoordinator:
         default_factory=_empty_storage_corrupt_sessions, init=False, repr=False
     )
     _local_executor: ThreadPoolExecutor | None = field(default=None, init=False, repr=False)
+    _pending_releases: set[asyncio.Future[None]] = field(
+        default_factory=lambda: set[asyncio.Future[None]](), init=False, repr=False
+    )
     _capture_budget_exhausted: bool = field(default=False, init=False, repr=False)
     # A persisted root proof belongs to an older service generation until the
     # current coordinator has revalidated its route scope under the capture
@@ -1114,6 +1117,18 @@ class ObservationCoordinator:
             # Preserve ``needs_reconcile`` or unknown scope on any read error;
             # this path never weakens capture admission.
             return
+
+    def _release_finished(self, pending: asyncio.Future[None]) -> None:
+        self._pending_releases.discard(pending)
+        if pending.cancelled():
+            return
+        error = pending.exception()
+        if isinstance(error, Exception):
+            record_unexpected_exception_without_raising(
+                error,
+                component="application.observation_coordinator",
+                operation="observation_runtime_release_failed",
+            )
 
     def close(self) -> None:
         """Stop accepting local-store work; bounded lock waits let running workers retire."""
@@ -2575,13 +2590,16 @@ class ObservationCoordinator:
                         if store is not None:
                             await self._publish_capture_backlog(workspace, runtime, store)
                     finally:
-                        # Backlog feedback is optional.  A cancelled hook or a
-                        # failed feedback read must never strand the routed
-                        # runtime lease: the next same-bundle attach would see
-                        # a permanently live owner and remain BUNDLE_BUSY.
+                        # Feedback may be cancelled or fail. It never owns the runtime lease,
+                        # so that failure must not strand the bundle and block the next attach.
                         with_context = getattr(self.runtime, "release", None)
                         if with_context is not None:
-                            await with_context(runtime)
+                            # A second disconnect cancellation must not interrupt release
+                            # while it waits for the runtime registry lock.
+                            pending = asyncio.ensure_future(with_context(runtime))
+                            self._pending_releases.add(pending)
+                            pending.add_done_callback(self._release_finished)
+                            await asyncio.shield(pending)
             completed_runtime, completed_envelope, completed_result = completed_ingest
             try:
                 # Never wait for the lineage mutation lock while retaining a runtime lease:
@@ -5142,12 +5160,6 @@ class ObservationCoordinator:
                 if callable(unregister_rebind_obj)
                 else None
             )
-            callback_registered = False
-            if register_rebind is not None:
-                try:
-                    callback_registered = bool(register_rebind(bound_runtime, rebind_callback))
-                except Exception:
-                    callback_registered = False
 
             async def _after() -> None:
                 await self._run_advice(
@@ -5178,6 +5190,13 @@ class ObservationCoordinator:
                     await self.runtime.release(owned)
                 supervisor.notify(workspace)
                 return False
+            # A waiting foreground start can fire the callback synchronously at registration.
+            # Publish the handle first so that eager yield can retire this exact worker.
+            if register_rebind is not None:
+                try:
+                    callback_registered = bool(register_rebind(bound_runtime, rebind_callback))
+                except Exception:
+                    callback_registered = False
         except BaseException:
             if callback_registered and unregister_rebind is not None:
                 unregister_rebind(owned, rebind_callback)

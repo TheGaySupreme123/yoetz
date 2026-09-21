@@ -281,3 +281,12 @@ stop waiting before the review finishes. Recover with the same check request and
 `OPERATION_PENDING` means the existing check is still running. Repeated waits do not start another
 review or reset its budget. A completed result still needs to qualify before it can resolve a
 finding or support a completion claim.
+
+### Cancelled background review
+
+A foreground session attachment may cancel optional background review. Once disclosure authority
+is consumed, cancellation cannot prove that nothing was sent. The gateway records the owed
+`transport_failed` / `outcome_unknown` receipt through a shielded write. It also parks the bounded
+receipt before dispatch so a later service startup can reconcile an interrupted attempt, before
+admitting new attempts. Reconciliation never sends again or restores spent authority. The
+background result remains cancelled and retains available attempt and provider provenance.
