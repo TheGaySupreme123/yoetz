@@ -3363,6 +3363,16 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         None,
     ),
     _RegistryEntry(
+        "integrations/setup-readiness-1.0.0.schema.json",
+        "setup-readiness",
+        "1.0.0",
+        "request_result",
+        "setup-contract",
+        lambda: (
+            __import__("yoetz.protocol.setup_readiness", fromlist=["SetupReadiness"]).SetupReadiness
+        ),
+    ),
+    _RegistryEntry(
         "integrations/host-connection-1.0.0.schema.json",
         "host-connection",
         "1.0.0",

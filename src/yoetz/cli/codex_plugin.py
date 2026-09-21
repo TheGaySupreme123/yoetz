@@ -108,9 +108,12 @@ def run_codex_plugin_command(
     if harness != "codex" or command not in CODEX_PLUGIN_COMMANDS:
         sys.stderr.write("codex_plugin_command_invalid\n")
         return 2
-    if codex_home is None:
+    if codex_home is None and command != "status":
         sys.stderr.write("codex_home_required\n")
         return 2
+    from yoetz.adapters.integrations.codex_session_stream import resolve_codex_home
+
+    codex_home = resolve_codex_home(codex_home).absolute()
     binaries = discover_codex_binaries()
     try:
         chosen = _choose_binary(binaries, codex_path=codex_path, interactive=False)
@@ -128,6 +131,7 @@ def run_codex_plugin_command(
             )
             _emit(
                 {
+                    "inspected_codex_home": str(codex_home),
                     "skill_tree": skill_tree_state(target),
                     "state": inspection.state.value,
                 },

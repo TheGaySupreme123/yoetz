@@ -274,6 +274,14 @@ def run_host_connection(
                 "next_step": "Run the same setup command in a trusted local terminal; inspect status before retrying a partial connection.",
             }
         )
+        if host == "codex" and reason in {"destination_conflict", "foreign_entry_present"}:
+            report["next_step"] = (
+                "The selected Codex home and foreign configuration were preserved. "
+                "Create a fresh directory owned only by you (mode 0700), then rerun this "
+                "setup command with --host-config-root pointing to that directory. "
+                "For legacy Codex setup use --codex-home. If the conflict is in the "
+                "project's marketplace, inspect that file first; a new home cannot repair it."
+            )
         if isinstance(error, ConnectionError) and error.status is not None:
             report["status"] = error.status
         code = 1

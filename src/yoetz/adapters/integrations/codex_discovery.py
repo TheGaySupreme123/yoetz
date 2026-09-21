@@ -200,7 +200,9 @@ def default_codex_home(environ: Mapping[str, str] | None = None) -> Path | None:
     """
 
     env = os.environ if environ is None else environ
-    raw = env.get("CODEX_HOME")
+    raw = next(
+        (env[key] for key in ("CODEX_HOME", "CODEX_TESTING_HOME") if env.get(key, "").strip()), None
+    )
     candidates: list[Callable[[], Path]] = []
     if raw:
         candidates.append(lambda: Path(raw).expanduser())

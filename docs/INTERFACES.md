@@ -5432,3 +5432,32 @@ and milestones remain. Cancellation and ambiguous response loss do not yield tha
 ADR-030 continuation `start_busy_same_identity` names exact once-only replay after a successful
 lease yield; `start_pending_same_identity` names a live lease and the bounded 60-second wait before
 exact replay. Runtime/catalog producer reasons alone never imply a released start reservation.
+
+### Setup next-step and Codex inspection targeting (#737)
+
+`setup status --next --operation local|review|connection` emits `yoetz.setup-readiness/1`
+(`integrations/setup-readiness-1.0.0.schema.json`). It carries the selected project, inspected host
+configuration root, bounded reason, read-only prerequisite facts and one quoted `next_command`
+(or null when no setup prerequisite is missing). `connection_observed` is always false. Local and
+review operations evaluate service/vault/repository prerequisites; review additionally requires a
+provider binding and review permission. Connection-only evaluates the common host plan without
+requiring service or provider login. No native session or provider dispatch is inferred.
+
+Codex plugin/MCP/provider status gain the additive local inspection field `inspected_codex_home`.
+Their existing schema tokens remain unchanged; this field is not a service-wire or ledger field.
+All accept `--codex-home`, with explicit flag > `CODEX_HOME` > `CODEX_TESTING_HOME` > `~/.codex`
+precedence; every invoked Codex subprocess receives both variables bound to the selection.
+Explicit MCP previews bind the same home through registration, removal and reconnection.
+Plugin removal retains its explicit-home requirement. Setup status accepts Codex aliases for the
+common host target. Activation refusals expose `next_command` with the exact executable and home;
+that command obtains its own activation preview and requires its existing independent approval.
+
+Missing provider binding during privacy recipe preparation maps only the exact internal
+`privacy_setup_provider_binding_required` reason to public `provider_binding_required`.
+Other malformed bindings remain `grant_binding_invalid`; exception text never enters output.
+
+`setup vault` is a human-terminal-only composition of the existing initialization/unlock
+ceremonies. It stops before provider selection and policy changes. `setup status --next` selects
+it for an uninitialized vault; the common host connection command alone never stands in for
+vault initialization. Continuations retain module-invocation interpreter spelling so a symlinked
+virtual-environment Python does not lose its runtime pin.

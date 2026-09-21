@@ -232,6 +232,8 @@ async def mcp_route_observation(
     workspace_locator: Path | None = None,
     *,
     _state: Path | None = None,
+    codex_home: Path | None = None,
+    codex_path: str | None = None,
 ) -> dict[str, JsonValue]:
     """Report exclusive external/plugin MCP ownership without inferring runtime success.
 
@@ -264,9 +266,20 @@ async def mcp_route_observation(
     external_profile: str | None = None
     external_observed = False
     try:
+        from yoetz.adapters.integrations.codex_session_stream import resolve_codex_home
+
         binaries = discover_codex_binaries()
-        if binaries:
-            observation = await HarnessMcpService(CodexMcpAdapter()).observe(binaries[0])
+        binary = (
+            cli_setup._explicit_binary(codex_path)  # pyright: ignore[reportPrivateUsage]
+            if codex_path is not None
+            else binaries[0]
+            if len(binaries) == 1
+            else None
+        )
+        if binary is not None:
+            observation = await HarnessMcpService(
+                CodexMcpAdapter(codex_home=resolve_codex_home(codex_home).absolute())
+            ).observe(binary)
             external_state = observation.state.value
             external_profile = observation.route_profile
             external_observed = True
@@ -524,7 +537,11 @@ def machine_scope_request() -> JsonObject:
 
 
 async def provider_status_report(
-    *, workspace_locator: Path | None = None, _state: Path | None = None
+    *,
+    workspace_locator: Path | None = None,
+    _state: Path | None = None,
+    codex_home: Path | None = None,
+    codex_path: str | None = None,
 ) -> dict[str, JsonValue]:
     """Compose a nonsecret readiness snapshot from config, service, and policy."""
 
@@ -607,7 +624,16 @@ async def provider_status_report(
         credential_connected = None
         llm_inference_enabled = None
 
-    mcp_route = await mcp_route_observation(workspace_locator, _state=_state)
+    from yoetz.adapters.integrations.codex_session_stream import resolve_codex_home
+
+    selected_home = resolve_codex_home(codex_home).absolute()
+    mcp_route = (
+        await mcp_route_observation(workspace_locator, _state=_state)
+        if codex_home is None and codex_path is None
+        else await mcp_route_observation(
+            workspace_locator, _state=_state, codex_home=selected_home, codex_path=codex_path
+        )
+    )
     registered_profile = mcp_route.get("registered_profile")
     ownership_state = mcp_route.get("ownership_state")
     if ownership_state is None and mcp_route.get("registration_state") == "yoetz_owned":
@@ -775,6 +801,7 @@ async def provider_status_report(
 
     return {
         "schema": _SCHEMA,
+        "inspected_codex_home": str(selected_home),
         "verification_semantic": verification_semantic,
         "semantic_enabled": semantic_enabled,
         "endpoint_bound": endpoint_bound,
@@ -829,9 +856,11 @@ async def provider_status_report(
     }
 
 
-async def run_provider_status(*, json_output: bool) -> int:
+async def run_provider_status(
+    *, json_output: bool, codex_home: Path | None = None, codex_path: str | None = None
+) -> int:
     """Emit the readiness report and return a process exit code."""
 
-    report = await provider_status_report()
+    report = await provider_status_report(codex_home=codex_home, codex_path=codex_path)
     _emit(report, json_output=json_output)
     return 0 if report.get("semantic_ready") is True else 20

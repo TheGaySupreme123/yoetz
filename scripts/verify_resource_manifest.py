@@ -147,6 +147,18 @@ _CODEX_SKILL_MEMBERS: Final = (
 # is deliberately listed here; nothing is discovered by scanning the repository.
 _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     (
+        "schemas/integrations/setup-readiness-1.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "fixtures/integrations/setup-readiness.case.json",
+        "canonical_vector",
+        "application/json",
+        True,
+    ),
+    (
         "schemas/integrations/host-connection-1.0.0.schema.json",
         "json_schema",
         "application/schema+json",

@@ -748,6 +748,8 @@ class YoetzRuntime:
             f"Codex executable: {executable}",
             "Inspect it with: codex mcp get yoetz",
             "Yoetz will never replace or remove an entry it does not own.",
+            "To keep this configuration, create a new owner-private Codex home (mode 0700) "
+            "and select it in setup, or use setup run --host codex --host-config-root <new-home>.",
         )
 
     def project_root(self) -> Path:

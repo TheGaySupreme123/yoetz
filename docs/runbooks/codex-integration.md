@@ -1,5 +1,12 @@
 # Codex integration runbook
 
+For setup prerequisites, use `yoetz setup status --next --host codex` with the same
+executable, configuration root and project. `--operation connection` inspects installation without
+provider sign-in; `local` and `review` inspect their respective vault/privacy prerequisites.
+Storage-only continuation is `yoetz setup vault` in a trusted terminal. This shared #737 path adds
+no new native-session capability; Linux/WSL first-use and storage acceptance remain bounded by
+[the platform runbook](linux-and-wsl.md#setup-and-vault-acceptance-still-owned-by-737).
+
 ## Guided desktop connection (issue #767)
 
 `yoetz setup run --host codex` exposes the existing project-skill, plugin, activation and MCP
