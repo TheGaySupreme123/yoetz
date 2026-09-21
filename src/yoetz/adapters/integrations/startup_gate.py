@@ -223,6 +223,11 @@ class GateStore:
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, self.path)
+            directory = os.open(self.directory, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
         finally:
             temporary.unlink(missing_ok=True)
 
@@ -282,6 +287,11 @@ def accepted_publication(
                 required.discard(obligation)
             scope.required_refs = sorted(required)
         if name not in {"plan_published", "plan_revised"}:
+            continue
+        if draft["event_id"] == scope.plan_id and scope.plan_generation != scope.generation:
+            # Wall clocks can share a millisecond (or move backwards). An
+            # idempotent replay of the previous plan is not a new scope.
+            scope.plan_generation = None
             continue
         accepted_at = row.get("accepted_at")
         if not isinstance(accepted_at, str) or (

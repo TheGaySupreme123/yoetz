@@ -229,6 +229,22 @@ def test_new_session_boundary_requires_start_and_can_bind_new_task(host: Host) -
     assert not host.denied()
 
 
+def test_idempotent_old_plan_replay_cannot_renew_scope(host: Host) -> None:
+    host.start()
+    req, res = host.publication()
+    host.pre("publish_work", req)
+    host.post("publish_work", req, res)
+    host.boundary("prompt")
+    scope = host.store.read()
+    assert scope is not None
+    scope.began_at = "2000-01-01T00:00:00.000+00:00"  # Even a backward wall clock cannot renew it.
+    with host.store.locked():
+        host.store.write(scope)
+    host.pre("publish_work", req)
+    host.post("publish_work", req, res)
+    assert host.denied()
+
+
 @pytest.mark.parametrize("outcome", ["failure", "dry_run", "wrong_route", "stale"])
 def test_unaccepted_or_stale_plan_cannot_open_gate(host: Host, outcome: str) -> None:
     host.start()
