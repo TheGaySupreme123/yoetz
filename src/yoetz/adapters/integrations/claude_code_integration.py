@@ -1233,16 +1233,21 @@ def observe_claude_code_mcp(
     claude_config_root: Path,
     connector_entry: Mapping[str, JsonValue] | None = None,
     yoetz_launcher: tuple[str, ...] | None = None,
+    claude_json: Path | None = None,
 ) -> ClaudeCodeMcpObservation:
     """Observe all reachable sources without treating Claude precedence as ownership.
 
     ``yoetz_launcher`` is the artifact's exact bound launcher; entries that launch it with the
     exact ``mcp serve`` arguments are Yoetz routes just like a bare ``yoetz`` console script.
+    ``claude_json`` names the user configuration file when it does not sit inside
+    ``claude_config_root``; the default keeps the plugin status path's exact location.
     """
 
     candidates: list[tuple[ClaudeCodeMcpSource, str | None, Mapping[str, JsonValue]]] = []
     uncertain: list[ClaudeCodeMcpSource] = []
-    config, config_observed = _json_file(claude_config_root / ".claude.json")
+    config, config_observed = _json_file(
+        claude_config_root / ".claude.json" if claude_json is None else claude_json
+    )
     if not config_observed:
         uncertain.extend((ClaudeCodeMcpSource.LOCAL, ClaudeCodeMcpSource.USER))
     elif config is not None:
@@ -2174,4 +2179,167 @@ def apply_claude_code_plugin(
         after.installed_digest,
         after.enabled,
         changed,
+    )
+
+
+# Activation cues (issue #789). A Claude Code session receives Yoetz's "call `start` first" cue
+# through two channels: the MCP initialize instructions (any registration) and the plugin's
+# SessionStart hook (plugin-managed registrations only). A bare `yoetz mcp serve` entry the owner
+# wrote into Claude's own MCP configuration carries no hook, so it has no SessionStart cue; this
+# observation names that fact instead of leaving the owner to infer it from a session transcript.
+type ClaudeCodeMcpMode = Literal[
+    "plugin_managed", "bare_mcp", "dual", "absent", "foreign", "ambiguous"
+]
+type ClaudeCodeSessionStartCue = Literal["installed", "absent", "unobserved"]
+
+_MCP_MODE_BY_OWNERSHIP: Final[Mapping[McpOwnershipState, ClaudeCodeMcpMode]] = {
+    McpOwnershipState.PLUGIN: "plugin_managed",
+    McpOwnershipState.EXTERNAL: "bare_mcp",
+    McpOwnershipState.DUAL: "dual",
+    McpOwnershipState.ABSENT: "absent",
+    McpOwnershipState.FOREIGN: "foreign",
+    McpOwnershipState.AMBIGUOUS: "ambiguous",
+}
+# The rendered hook command (`_hooks_json`) and any owner-written settings hook that reaches the
+# same ingress both name this subcommand; matching on it keeps the cue check free of launcher
+# path comparisons.
+_SESSION_START_CUE_COMMAND: Final = "hooks claude-observe"
+_ACTIVATION_CUE_NOTES: Final = (
+    "cue_presence_does_not_prove_hook_ran",
+    "file_observation_only",
+    "plugin_hooks_require_enabled_plugin",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ClaudeCodeActivationCues:
+    """Which activation cues one Claude Code installation carries for one project.
+
+    Derived from file observation only. ``mcp_mode`` says which registration Claude would launch:
+    the plugin-owned ``.mcp.json`` (``plugin_managed``), a bare ``mcp serve`` entry the owner wrote
+    (``bare_mcp``), both (``dual``), none, a non-Yoetz entry (``foreign``), or an unreadable source
+    (``ambiguous``). ``session_start_cue`` says whether any installed hook file can deliver the
+    session-start context. Neither establishes that Claude loaded the plugin, that a hook ran, or
+    that the agent called ``start``; plugin hooks additionally need the plugin enabled, which
+    ``status_claude_code_plugin`` reports separately.
+    """
+
+    mcp_mode: ClaudeCodeMcpMode
+    mcp_source: ClaudeCodeMcpSource | None
+    route_profile: Literal["strict", "policy"] | None
+    session_start_cue: ClaudeCodeSessionStartCue
+    cue_sources: tuple[str, ...]
+
+    def as_json(self) -> dict[str, JsonValue]:
+        return {
+            "cue_sources": list(self.cue_sources),
+            "mcp_mode": self.mcp_mode,
+            "mcp_source": None if self.mcp_source is None else self.mcp_source.value,
+            "notes": list(_ACTIVATION_CUE_NOTES),
+            "route_profile": self.route_profile,
+            "session_start_cue": self.session_start_cue,
+        }
+
+
+def _user_config_file(
+    claude_config_root: Path,
+    *,
+    home: Path | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> Path:
+    """Locate Claude's user configuration file the way Claude Code itself does.
+
+    Claude Code keeps `.claude.json` inside `CLAUDE_CONFIG_DIR` when that variable names the
+    config root, and beside the default `~/.claude` directory (`~/.claude.json`) otherwise. Any
+    other explicit root reads its own in-root file. This mirrors `host_config_root`, which is
+    where `discover_hosts` takes the root from.
+    """
+
+    environment = os.environ if environ is None else environ
+    configured = environment.get("CLAUDE_CONFIG_DIR")
+    root = claude_config_root.expanduser().absolute()
+    if configured and Path(configured).expanduser().absolute() == root:
+        return claude_config_root / ".claude.json"
+    base = Path.home() if home is None else home
+    if root == (base / ".claude").expanduser().absolute():
+        return base / ".claude.json"
+    return claude_config_root / ".claude.json"
+
+
+def _session_start_cue_present(config: Mapping[str, JsonValue]) -> bool:
+    hooks = config.get("hooks")
+    if not isinstance(hooks, Mapping):
+        return False
+    entries = cast(Mapping[str, JsonValue], hooks).get("SessionStart")
+    if not isinstance(entries, list):
+        return False
+    for entry in cast(list[JsonValue], entries):
+        if not isinstance(entry, Mapping):
+            continue
+        inner = cast(Mapping[str, JsonValue], entry).get("hooks")
+        if not isinstance(inner, list):
+            continue
+        for hook in cast(list[JsonValue], inner):
+            if not isinstance(hook, Mapping):
+                continue
+            command = cast(Mapping[str, JsonValue], hook).get("command")
+            if isinstance(command, str) and _SESSION_START_CUE_COMMAND in command:
+                return True
+    return False
+
+
+def observe_claude_code_activation_cues(
+    *,
+    project_root: Path,
+    claude_config_root: Path,
+    marketplace_root: Path | None = None,
+    yoetz_launcher: tuple[str, ...] | None = None,
+    home: Path | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> ClaudeCodeActivationCues:
+    """Observe the activation cues one Claude Code installation carries for ``project_root``.
+
+    ``marketplace_root`` defaults to the managed ``yoetz-local`` marketplace under the config
+    root, the same location the guided connection renders into. ``yoetz_launcher`` is the exact
+    launcher that classifies a launcher-bound external registration as a Yoetz route; without it,
+    only a bare ``yoetz`` console-script entry is recognized and a launcher-bound entry reads as
+    ``foreign``. ``home`` and ``environ`` locate Claude's user configuration file exactly as
+    Claude does (`~/.claude.json` beside the default root, in-root under ``CLAUDE_CONFIG_DIR``).
+    """
+
+    root = (
+        claude_config_root / "plugins" / "marketplaces" / "yoetz-local"
+        if marketplace_root is None
+        else marketplace_root
+    )
+    plugin_root = root / "plugins" / "yoetz"
+    mcp = observe_claude_code_mcp(
+        plugin_root=plugin_root,
+        project_root=project_root,
+        claude_config_root=claude_config_root,
+        yoetz_launcher=yoetz_launcher,
+        claude_json=_user_config_file(claude_config_root, home=home, environ=environ),
+    )
+    sources: list[str] = []
+    unobserved = False
+    for name, path in (
+        ("plugin_hooks", plugin_root / "hooks" / "hooks.json"),
+        ("user_settings", claude_config_root / "settings.json"),
+        ("project_settings", project_root / ".claude" / "settings.json"),
+        ("project_local_settings", project_root / ".claude" / "settings.local.json"),
+    ):
+        config, observed = _json_file(path)
+        if not observed:
+            unobserved = True
+        elif config is not None and _session_start_cue_present(config):
+            sources.append(name)
+    cue: ClaudeCodeSessionStartCue = (
+        "installed" if sources else "unobserved" if unobserved else "absent"
+    )
+    return ClaudeCodeActivationCues(
+        _MCP_MODE_BY_OWNERSHIP[mcp.ownership_state],
+        mcp.winning_source,
+        mcp.route_profile,
+        cue,
+        tuple(sources),
     )

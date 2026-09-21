@@ -55,6 +55,57 @@ Claude documents PreToolUse `permissionDecision: deny` and exit 2, but this inte
 ship an owner-selected required-startup deny gate; instruction delivery is not enforcement
 (#692 remaining acceptance).
 
+### Instruction delivery on Claude Code (issue #789)
+
+Observed host facts, not documented Claude limits. Measured 2026-09-21 in Claude Code desktop
+sessions on the maintainer's machine against the installed 0.2.1 bridge, by comparing the
+rendered system-prompt attachment with the packaged text:
+
+- Claude Code renders MCP initialize `instructions` as a per-server block and keeps exactly the
+  first **2,048 characters**, then appends a literal `… [truncated]` marker. The 7,325-character
+  `agent-instructions.md` block was the only server block cut on that machine; it ended
+  mid-sentence before the `start` rule. Other servers' blocks (about 1.1–1.3 KB) were intact.
+- The same cap applies to each tool description once Claude loads it: `start` (2,140 chars),
+  `publish_work` (3,062) and `check` (4,156) are cut at 2,048 when shown. Trimming those
+  descriptions is a separate, host-independent follow-up recorded on the issue.
+- With about 200 registered tools, Claude Code defers MCP tool schemas: only names appear until the
+  agent runs `ToolSearch` for them. The initialize block is therefore the only unsolicited cue.
+- The Yoetz server is often still connecting when the agent takes its first action; its tools
+  and instructions then arrive one message later.
+
+The bridge therefore serves a Claude-specific initialize body: `yoetz mcp serve --host claude`
+renders `CLAUDE_CODE_INITIALIZE_INSTRUCTIONS` (at most `packaged_max_chars` = 964 characters),
+whose first two sentences are the trigger and the late-start rule, followed by the same route tail
+and startup-read destination disclosure (#479) as every other host. The bound is derived so that
+the text, the policy tail and the 1,000-byte disclosure ceiling fit under 2,048 together: the
+privacy disclosure is never the part that gets cut. `generic`, `codex` and `cursor` hosts keep the
+full document byte for byte. `tests/packaging/test_claude_code_instructions_cap.py` fails when
+the Claude text outgrows the recorded cap; `tests/unit/mcp/test_claude_code_instructions.py`
+locks the sentence order, the arithmetic and the other hosts' identity. Everything the compact
+body omits is one `read_guidance` call away.
+
+Activation cues by connection mode:
+
+| Mode | How it is registered | Initialize instructions | SessionStart cue | Skill |
+| --- | --- | --- | --- | --- |
+| Plugin-managed | `yoetz setup --host claude` (or `yoetz integrate claude plugin install`) renders the marketplace, hooks and plugin-owned `.mcp.json` | yes (compact body) | yes, once the plugin is enabled | `/yoetz:yoetz` |
+| Bare MCP | An owner-written `yoetz mcp serve --host claude` entry in Claude's own MCP configuration | yes (compact body) | **no** | none |
+
+A bare entry delivers only the initialize block; it has no `SessionStart` context, no
+auto-attach, no hooks and no skill catalog entry. `yoetz setup status --json` names the mode
+per discovered Claude installation under `hosts[].activation_cues`: `mcp_mode`
+(`plugin_managed`, `bare_mcp`, `dual`, `absent`, `foreign`, `ambiguous`), `mcp_source`,
+`route_profile`, `session_start_cue` (`installed`, `absent`, `unobserved`) and `cue_sources`
+(`plugin_hooks`, `user_settings`, `project_settings`, `project_local_settings`). The
+observation is file-only: it reads Claude's user configuration where Claude keeps it
+(`~/.claude.json` beside the default `~/.claude` root, or inside `CLAUDE_CONFIG_DIR`), the
+project `.mcp.json`, the managed marketplace and the settings hook files. It does not prove that
+the plugin is enabled, that a hook ran, or that a session called `start`. Shipping a
+`SessionStart` cue for bare registrations (issue #789 item 3a) is a host-registration change
+that remains open with the maintainer as owner; until then the documented remedy for a bare entry
+is the guided connection. The repository's own `AGENTS.md` states the `start`/receipt expectation
+for material work in this checkout, since the highest-priority instruction layer was silent.
+
 Design basis, checked 2026-09-09: Claude's [skills guidance](https://code.claude.com/docs/en/skills)
 recommends a use-case-first description and concise instructions with supporting references.
 Yoetz keeps this workflow in the conversation because a forked skill lacks that conversation's

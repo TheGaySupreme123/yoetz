@@ -239,7 +239,17 @@ consequential step — no install, no `setup run`, no registration until it is a
   use PAM through the trusted terminal; builds without that support refuse
   `human_authority_unavailable`. The user enters their account password only in that terminal.
   Successful installation does not establish native Linux host coverage. Claude Code can also
-  use a `yoetz mcp serve` entry in its own MCP configuration, added only after approval.
+  use a `yoetz mcp serve --host claude` entry in its own MCP configuration, added only after
+  approval. That bare entry delivers only the server's initialize instructions: no session-start
+  cue, no hooks, no `/yoetz:yoetz` skill. Prefer the guided connection (`yoetz setup --host
+  claude`), which installs the plugin that carries them. `yoetz setup status --json` reports which
+  mode each Claude installation is in and whether a session-start cue is installed
+  (`hosts[].activation_cues`).
+- Deferred tools: with many MCP servers registered, Claude Code lists only tool names until they
+  are loaded. Load the Yoetz schemas first (ToolSearch `select:mcp__yoetz__start,...`, or the
+  plugin-prefixed names) and call `start` before material work; if work already began, call
+  `start` now, publish the work so far as a bounded plan, and disclose the uncovered prefix in
+  the receipt.
 - Integration: `yoetz integrate claude plugin preview`, then `install` after the user approves
   the digest and completes the supported platform's presence ceremony. On Linux-capable builds,
   hand the `install` line to the user for the password prompt at their own terminal; running it

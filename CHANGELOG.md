@@ -4,6 +4,16 @@ All notable user-visible changes to Yoetz are documented in this file. Format is
 project-native heading style that marks the pending version as unreleased above
 reverse-chronological released versions.
 
+## Unreleased
+
+- Claude Code sessions receive a compact MCP initialize block that fits the host's observed
+  2,048-character rendering cap, with the "call `start` first" trigger and the late-start rule as
+  its first two sentences; other hosts keep the full document (#789).
+- Guidance, the Claude skill and `AGENTS.md` state what to do when material work began before
+  `start`, and how to load deferred Yoetz tool schemas by name.
+- `yoetz setup status --json` reports each Claude installation's MCP mode (plugin-managed or
+  bare) and whether a session-start cue is installed; a bare registration has none (#789).
+
 ## 0.2.4 — 2026-09-20
 
 - One guided installation and connection lifecycle for Codex, Claude Code, Cursor IDE and

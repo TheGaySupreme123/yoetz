@@ -52,9 +52,10 @@ CONNECTION_ERRORS = (
 )
 
 
-def installation_rows() -> list[JsonValue]:
-    return [
-        {
+def installation_rows(project: Path | None = None) -> list[JsonValue]:
+    rows: list[JsonValue] = []
+    for item in discover_hosts():
+        row: dict[str, JsonValue] = {
             "host": item.host,
             "label": item.label,
             "executable": str(item.executable),
@@ -62,9 +63,44 @@ def installation_rows() -> list[JsonValue]:
             "config_root": str(item.config_root),
             "support": item.support,
             "connection_observed": False,
+            "activation_cues": None,
         }
-        for item in discover_hosts()
-    ]
+        if item.host == "claude":
+            row["activation_cues"] = claude_activation_cues(item, project)
+        rows.append(row)
+    return rows
+
+
+def claude_activation_cues(
+    installation: HostInstallation, project: Path | None = None
+) -> dict[str, JsonValue] | None:
+    """Read-only Claude activation posture for ``setup status`` (issue #789).
+
+    Names whether the installation would launch Yoetz through the plugin or a bare MCP entry and
+    whether any installed hook can deliver the SessionStart cue. A bare entry has no cue; the
+    guided connection (``yoetz setup --host claude``) installs the plugin that carries one. ``None``
+    means the posture could not be read, never that no registration exists.
+    """
+
+    from yoetz.adapters.integrations.claude_code_integration import (
+        observe_claude_code_activation_cues,
+    )
+
+    launcher: tuple[str, ...] | None = None
+    invocation = invoking_launcher()
+    if invocation is not None:
+        try:
+            launcher = resolve_yoetz_launcher(invocation)
+        except CONNECTION_ERRORS:
+            launcher = None
+    try:
+        return observe_claude_code_activation_cues(
+            project_root=(Path.cwd() if project is None else project).absolute(),
+            claude_config_root=installation.config_root,
+            yoetz_launcher=launcher,
+        ).as_json()
+    except CONNECTION_ERRORS:
+        return None
 
 
 def select_installation(

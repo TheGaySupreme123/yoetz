@@ -16,6 +16,7 @@ from yoetz.mcp.semantic_destination import (
     MAX_DISCLOSURE_ENCODED_BYTES,
     SemanticDestinationDisclosure,
 )
+from yoetz.ports.control import McpHostProfile
 from yoetz.ports.integrations import YOETZ_WORKFLOW_TOOL_NAMES
 from yoetz.protocol.canonical import JsonValue
 from yoetz.protocol.schemas import (
@@ -27,6 +28,8 @@ from yoetz.protocol.schemas import (
 
 __all__ = [
     "ADVERTISED_SURFACE_BUDGET",
+    "CLAUDE_CODE_INITIALIZE_INSTRUCTIONS",
+    "CLAUDE_CODE_INSTRUCTIONS_BUDGET",
     "INITIALIZE_GUIDANCE_URIS",
     "ORDINARY_MCP_PRESENTATION_SCHEMA_VERSIONS",
     "ORDINARY_MCP_PUBLISH_EVENT_FAMILIES",
@@ -47,6 +50,7 @@ __all__ = [
 ]
 
 type McpRouteProfile = Literal["policy", "strict"]
+_HOST_PROFILES: Final[frozenset[str]] = frozenset({"generic", "codex", "claude", "cursor"})
 
 _SCHEMA_VERSION: Final = "1.0.0"
 _TOOL_INPUT_SCHEMA_VERSIONS: Final = MappingProxyType({"publish_work": "1.1.0", "status": "1.1.0"})
@@ -212,6 +216,52 @@ SERVER_INSTRUCTIONS_BUDGET: Final[Mapping[str, int]] = MappingProxyType(
         "packaged_max_encoded_bytes": 20_000,
         "max_encoded_bytes": 20_000 + MAX_DISCLOSURE_ENCODED_BYTES,
     }
+)
+
+# Observed host fact, not a documented Claude Code limit (issue #789): the Claude Code desktop app
+# renders MCP initialize `instructions`, and each tool description it loads, into the model's
+# context and keeps exactly the first 2,048 characters, then appends a literal "… [truncated]"
+# marker. Measured 2026-09-21 on Claude Code desktop against the 0.2.1 bridge; every other MCP
+# server on that machine stayed under the cap and Yoetz was the only block cut, mid-sentence,
+# before the rule that says to call `start`. The packaged Claude text is bounded so that it, the
+# policy route tail, and the longest admissible destination disclosure
+# (`MAX_DISCLOSURE_ENCODED_BYTES`, issue #479) fit under the cap together: the privacy disclosure
+# is never the part that gets cut. Other hosts keep the full `agent-instructions.md` document.
+# `packaged_max_chars` is derived: cap - len("\n\nRoute profile: policy. ") - len(policy tail)
+# - 1 joiner - disclosure ceiling - 1 trailing newline = 2048 - 25 - 57 - 1 - 1000 - 1.
+CLAUDE_CODE_INSTRUCTIONS_BUDGET: Final[Mapping[str, int]] = MappingProxyType(
+    {
+        "observed_host_cap_chars": 2_048,
+        "packaged_max_chars": 964,
+        "max_chars": 2_048,
+    }
+)
+_POLICY_ROUTE_TAIL: Final = "External AI-powered review follows the configured policy."
+_STRICT_ROUTE_TAIL: Final = (
+    "This route will not request external AI-powered review for this process lifetime."
+)
+# The Claude-host initialize text. Its first two sentences are the trigger and the late-start
+# rule, in imperative form, because those are the only lines guaranteed to survive a host that
+# cuts the block; everything else is one `read_guidance` call away.
+CLAUDE_CODE_INITIALIZE_INSTRUCTIONS: Final = (
+    "# Yoetz: call start first\n"
+    "\n"
+    "If this session will edit files, run state-changing commands, or delegate, call "
+    "`start` before that work. If material work already began without a task, call "
+    "`start` now, publish the work so far as a bounded plan, and disclose the uncovered "
+    "prefix in the receipt. If the tool list shows only names, load the schema first "
+    "(ToolSearch `select:mcp__yoetz__start` or the plugin-prefixed name). Read-only "
+    "questions skip it.\n"
+    "\n"
+    "Then `read_guidance` on `yoetz://guidance/agent-instructions.md` (safety floor, "
+    "catalog) and `yoetz://guidance/workflow.md`; do not list resources to find them. "
+    "Cadence: `publish_work` per material transition, `check`, then `receipt` last. Never"
+    " claim Yoetz is active before `start` returns; never invent a ledger task. If "
+    "`start` fails, follow its typed continuation, then ask the user; do not work without"
+    " a task.\n"
+    "\n"
+    "Yoetz records only what participants publish; a clean check does not mean the work "
+    "is correct."
 )
 
 # Reviewed budget for everything one host renders into the model's context to advertise Yoetz:
@@ -1832,6 +1882,7 @@ def server_instructions(
     profile: McpRouteProfile = "policy",
     *,
     semantic_destination: SemanticDestinationDisclosure | None = None,
+    host_profile: McpHostProfile = "generic",
 ) -> str:
     """Return the manifest-verified initialize instructions as strict UTF-8 text.
 
@@ -1840,30 +1891,61 @@ def server_instructions(
     ``mcp/semantic_destination.py`` and passes it here for the policy route only. It is typed,
     never a caller-authored string, and the strict route ignores it so strict instructions stay
     byte-identical whatever the configuration says.
+
+    ``host_profile`` selects the packaged body (issue #789): the ``claude`` host receives
+    ``CLAUDE_CODE_INITIALIZE_INSTRUCTIONS``, sized for that host's observed 2,048-character cap;
+    every other host receives the ``INITIALIZE_GUIDANCE_URIS`` document unchanged. The route
+    tail and the disclosure are composed identically for both bodies.
     """
 
     if profile not in TOOL_DESCRIPTORS:
         raise ValueError("mcp_route_profile_invalid")
+    if host_profile not in _HOST_PROFILES:
+        raise ValueError("mcp_host_profile_invalid")
     if semantic_destination is not None and (
         type(semantic_destination) is not SemanticDestinationDisclosure
     ):
         raise TypeError("semantic_destination_wrong_type")
-    base = "\n\n".join(
-        read_resource(uri).decode("utf-8", errors="strict").rstrip()
-        for uri in INITIALIZE_GUIDANCE_URIS
-    )
-    if profile != "policy":
-        return (
-            f"{base}\n\nRoute profile: {profile}. "
-            "This route will not request external AI-powered review for this process lifetime.\n"
+    if host_profile == "claude":
+        base = CLAUDE_CODE_INITIALIZE_INSTRUCTIONS
+    else:
+        base = "\n\n".join(
+            read_resource(uri).decode("utf-8", errors="strict").rstrip()
+            for uri in INITIALIZE_GUIDANCE_URIS
         )
-    tail = "External AI-powered review follows the configured policy."
+    if profile != "policy":
+        return f"{base}\n\nRoute profile: {profile}. {_STRICT_ROUTE_TAIL}\n"
+    tail = _POLICY_ROUTE_TAIL
     if semantic_destination is not None:
         tail += " " + semantic_destination.sentence
     return f"{base}\n\nRoute profile: {profile}. {tail}\n"
 
 
+def _lint_claude_code_instructions() -> None:
+    """Fail import when the Claude-host text can no longer survive the observed cap (#789)."""
+
+    text = CLAUDE_CODE_INITIALIZE_INSTRUCTIONS
+    budget = CLAUDE_CODE_INSTRUCTIONS_BUDGET
+    if not text.isascii() or len(text) > budget["packaged_max_chars"]:
+        raise RuntimeError("claude_code_instructions_over_budget")
+    if _FORBIDDEN_CLAIMS.search(text) is not None:
+        raise RuntimeError("descriptor_honesty_lint_failed")
+    if _BOUNDARY_TERMS.search(_GUIDANCE_URI.sub("yoetz-guidance-resource", text)) is not None:
+        raise RuntimeError("descriptor_boundary_lint_failed")
+    worst_case = (
+        len(text)
+        + len("\n\nRoute profile: policy. ")
+        + len(_POLICY_ROUTE_TAIL)
+        + 1
+        + MAX_DISCLOSURE_ENCODED_BYTES
+        + 1
+    )
+    if worst_case > budget["max_chars"] or budget["max_chars"] > budget["observed_host_cap_chars"]:
+        raise RuntimeError("claude_code_instructions_over_budget")
+
+
 _lint_descriptor_sets()
+_lint_claude_code_instructions()
 
 # Eagerly build presentation schemas so import fails closed on projection errors.
 for descriptor_set in TOOL_DESCRIPTORS.values():

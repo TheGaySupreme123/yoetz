@@ -5114,7 +5114,13 @@ facade and are never MCP tools.
   `PRESENTATION_INPUT_SCHEMA_BUDGETS`, `SERVER_INSTRUCTIONS_BUDGET`, `ADVERTISED_SURFACE_BUDGET`,
   and `advertised_surface_metrics()`. Initialize `instructions` carry the packaged
   `agent-instructions.md` document and then the route-profile suffix; every other guidance document
-  is fetched on demand through `resources/read` or `read_guidance`. A host may charge the
+  is fetched on demand through `resources/read` or `read_guidance`. `server_instructions()` also
+  takes `host_profile` (issue #789): the `claude` host receives `CLAUDE_CODE_INITIALIZE_INSTRUCTIONS`,
+  a packaged body bounded by `CLAUDE_CODE_INSTRUCTIONS_BUDGET` (`observed_host_cap_chars` 2,048,
+  the Claude Code desktop rendering cap recorded as an observed host fact in the Claude runbook;
+  `packaged_max_chars` 964, derived so the body, the policy tail and `MAX_DISCLOSURE_ENCODED_BYTES`
+  fit under the cap together; `max_chars` 2,048), with the same route tail and disclosure
+  composition; every other host keeps the packaged document byte for byte. A host may charge the
   `instructions` string once per advertised tool — Codex copies it into every tool `description` —
   so `SERVER_INSTRUCTIONS_BUDGET` bounds that string per route profile and
   `ADVERTISED_SURFACE_BUDGET` bounds the aggregate of instructions-per-tool plus every description
