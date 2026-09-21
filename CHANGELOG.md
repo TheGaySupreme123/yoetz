@@ -4,6 +4,13 @@ All notable user-visible changes to Yoetz are documented in this file. Format is
 project-native heading style that marks the pending version as unreleased above
 reverse-chronological released versions.
 
+## Unreleased
+
+- Add opt-in required startup for native Claude Code and Cursor plugins, with scope-bound plan
+  checks, owner controls, and same-task pending-operation recovery (#692). Native acceptance remains
+  bounded as documented in the required-startup runbook.
+- Deliver native startup guidance independently of observation consent and availability (#692).
+
 ## 0.2.4 — 2026-09-20
 
 - One guided installation and connection lifecycle for Codex, Claude Code, Cursor IDE and

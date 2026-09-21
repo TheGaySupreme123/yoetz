@@ -45,6 +45,8 @@ same-request recovery, and a named one-time repair before a blocked-startup user
 A first non-retryable failure alone does not permit continuing without Yoetz; see
 [startup failure precedence](../../guidance/coverage-and-receipts.md#startup-failure-precedence).
 Codex has no demonstrated PreToolUse deny gate; instruction delivery is not enforcement (#692).
+`--startup-mode required` is refused for Codex. The [native Claude/Cursor gate](required-startup.md)
+does not expand Codex capability claims.
 
 The Codex entrypoint is written directly for Codex and selected by its installer. The other native
 installers select their own skills. Keep installed-source evidence separate from compatibility

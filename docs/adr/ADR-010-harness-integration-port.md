@@ -16,6 +16,18 @@ evidence that observation ingest earns `hook_observed` only from real observatio
 
 ## Context
 
+### Required-startup amendment (issue #692, 2026-09-21)
+
+Native Claude Code and Cursor may opt into a generated tool gate through the owner-reviewed plugin
+lifecycle. Default optional observation remains separate. A static startup cue is independent of
+observation consent/storage. Readiness combines scope-bound accepted host workflow results with the
+current repository-bound service projection; mapping alone cannot admit work. Pending writes retain
+their identities and completion still needs the ordinary receipt workflow. The gate never approves
+Claude tools and asks for Cursor MCP admission, granting no privacy, credential or disclosure
+authority (ADR-018). New prompts and resumed scopes require fresh effective plans. Executable and
+host timeout failures bound enforcement. See [required startup](../runbooks/required-startup.md)
+for controls and native acceptance limits. Maintainer acknowledgement is recorded on #692.
+
 Yoetz is intended to work with any agent through MCP, with Codex as the first harness targeted by a
 first-party integration. Codex remains untested rather than supported until an exact capability
 cell satisfies E-002 and E-013. The drafted v0.1 tree did not express that split, and drifted toward

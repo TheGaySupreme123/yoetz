@@ -9,6 +9,17 @@ import pytest
 from yoetz.cli import entry, observe_hooks
 
 
+def test_cursor_pretool_import_or_handler_failure_stays_fail_open(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def fail(**_kwargs: object) -> int:
+        raise RuntimeError("private failure")
+
+    monkeypatch.setattr(observe_hooks, "handle_cursor_observe", fail)
+    assert entry._cursor_observe_fast_path(["--event", "preToolUse"]) == 0  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+    assert capsys.readouterr().out == '{"permission":"allow"}\n'
+
+
 def test_observe_fast_path_propagates_handler_exit_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

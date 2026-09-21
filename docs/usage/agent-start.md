@@ -362,3 +362,14 @@ Once integration is live, your operating instructions come from the guidance Yoe
 troubleshooting see [`docs/runbooks/codex-integration.md`](../runbooks/codex-integration.md); for
 what egress means before enabling any, [Privacy and AI-powered
 review](privacy-and-semantic-review.md).
+
+
+## Required startup
+
+The owner can select required startup for native Claude Code or Cursor plugins. In that mode,
+substantive tools wait for an accepted current task and plan. Each new user turn needs a fresh plan
+or revision on the same task. Text-only trivial answers can proceed immediately. Guidance, tool
+selection, clarification and recovery remain available, and ordinary approval still applies.
+Cursor may ask for approval of MCP calls. The owner can inspect the plugin's startup mode or return
+it to optional through the same plugin update controls. This option is not supported for Codex or
+portable Cursor plugins; native capability and timeout limits are described in the host runbooks.

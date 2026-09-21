@@ -21,6 +21,56 @@ from yoetz.kernel.policies.observation_advice import ObservationCompositionFact
 from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 
 
+@pytest.mark.parametrize("payload", [b"broken", b"{}", b'{"hook_event_name":"preToolUse"}'])
+def test_passive_pretool_output_never_blocks_cursor(tmp_path: Path, payload: bytes) -> None:
+    out = io.BytesIO()
+    assert (
+        observe_hooks.handle_cursor_observe(
+            event_name="preToolUse",
+            stdin_bytes=payload,
+            stdout=out,
+            _state=tmp_path,
+            skip_service=True,
+            observation_profile=CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
+        )
+        == 0
+    )
+    assert json.loads(out.getvalue()) == {"permission": "allow"}
+
+
+def test_passive_pretool_keeps_observation_and_emits_one_response(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    observed: list[str] = []
+
+    def observe(**kwargs: object) -> int:
+        observed.append(str(kwargs["event_name"]))
+        stream = cast(io.BytesIO, kwargs["stdout"])
+        stream.write(b"{}\n")
+        return 0
+
+    monkeypatch.setattr(observe_hooks, "handle_observe", observe)
+    out = io.BytesIO()
+    observe_hooks.handle_cursor_observe(
+        event_name="preToolUse",
+        stdin_bytes=json.dumps(
+            {
+                "session_id": "s",
+                "conversation_id": "s",
+                "workspace_roots": [str(tmp_path.resolve())],
+                "tool_name": "Read",
+                "tool_use_id": "call",
+            }
+        ).encode(),
+        stdout=out,
+        _state=tmp_path,
+        skip_service=True,
+        observation_profile=CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
+    )
+    assert observed == ["PreToolUse"]
+    assert out.getvalue() == b'{"permission":"allow"}\n'
+
+
 def _consented_store(tmp_path: Path) -> tuple[LocalObservationStore, str]:
     store = LocalObservationStore(_state=tmp_path)
     commitment = store.workspace_commitment(str(tmp_path.resolve()))

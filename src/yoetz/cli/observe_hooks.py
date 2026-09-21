@@ -4155,6 +4155,51 @@ def handle_cursor_observe(
     observation_profile: str | None = None,
     _entry_monotonic: float | None = None,
 ) -> int:
+    """Keep passive Cursor observation valid at its pre-tool permission boundary."""
+    import io
+
+    raw_event = event_name
+    if event_name is None:
+        stdin_bytes = (
+            sys.stdin.buffer.read(_MAX_CONTENT_CHUNK) if stdin_bytes is None else stdin_bytes
+        )
+        with contextlib.suppress(Exception):
+            candidate = read_cursor_hook_payload(stdin_bytes).get("hook_event_name")
+            raw_event = candidate if isinstance(candidate, str) else None
+    pre_tool = raw_event == "preToolUse"
+    # PreToolUse has no advice delivery: buffer the internal observer's empty
+    # output and emit one valid neutral permission response on every path.
+    try:
+        return _handle_cursor_observe(
+            event_name=event_name,
+            stdin_bytes=stdin_bytes,
+            stdout=io.BytesIO() if pre_tool else stdout,
+            workspace=workspace,
+            _state=_state,
+            connect=connect,
+            run_async=run_async,
+            skip_service=skip_service,
+            observation_profile=observation_profile,
+            _entry_monotonic=_entry_monotonic,
+        )
+    finally:
+        if pre_tool:
+            hook_io.stdout_json(_cursor_context_output("preToolUse", ""), stdout)
+
+
+def _handle_cursor_observe(
+    *,
+    event_name: str | None,
+    stdin_bytes: bytes | None = None,
+    stdout: BinaryIO | None = None,
+    workspace: str | None = None,
+    _state: Path | None = None,
+    connect: ServiceConnector | None = None,
+    run_async: AsyncRunner | None = None,
+    skip_service: bool = False,
+    observation_profile: str | None = None,
+    _entry_monotonic: float | None = None,
+) -> int:
     """Normalize one Cursor hook into bounded Yoetz observation.
 
     Cursor supplies prompts, transcript paths, file paths/edits, MCP inputs/results,

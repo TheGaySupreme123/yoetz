@@ -24,6 +24,7 @@ from yoetz.adapters.integrations.cursor_integration import (
     discover_cursor_cli,
     discover_cursor_ide,
     discover_cursor_sdk,
+    installed_cursor_startup_mode,
     observe_cursor_mcp,
     preview_cursor_plugin,
     remove_cursor_plugin,
@@ -47,6 +48,30 @@ from yoetz.version import read_verified_resource
 
 _REQUEST = request_id("req_10000000-0000-4000-8000-000000000001")
 _REVIEW_ID = "a" * 64
+
+
+def test_required_startup_install_inspect_and_reverse(tmp_path: Path) -> None:
+    launcher = _fake_yoetz(tmp_path / "bin" / "yoetz")
+    target = CursorPluginTarget(str(tmp_path / ".cursor"))
+    for index, mode in enumerate(("required", "optional")):
+        artifact = render_cursor_plugin(
+            PluginFormatProfile.CURSOR_PLUGIN_NATIVE,
+            yoetz_launcher=launcher,
+            startup_mode="required" if mode == "required" else "optional",
+        )
+        action = PluginArtifactAction.INSTALL if index == 0 else PluginArtifactAction.REPLACE
+        preview = preview_cursor_plugin(_REQUEST, target, action, artifact)
+        apply_cursor_plugin(
+            _REQUEST,
+            target,
+            action,
+            artifact,
+            accepted_preview_digest=preview.preview_digest,
+            authority=_authority(preview.preview_digest),
+            review=_AcceptingReview(),
+        )
+        assert installed_cursor_startup_mode(target) == mode
+        assert status_cursor_plugin(target, artifact).marker_valid
 
 
 class _AcceptingReview:
@@ -157,17 +182,17 @@ def test_portable_and_native_use_distinct_skill_entries_and_shared_guidance(
     resolved = str(executable.resolve())
     assert native.yoetz_launcher == (resolved,)
     assert all(
-        definition[0]["command"].startswith(f"{shlex.quote(resolved)} hooks cursor-observe ")
+        definition[-1]["command"].startswith(f"{shlex.quote(resolved)} hooks cursor-observe ")
         for definition in hooks["hooks"].values()
     )
-    assert {event: definition[0]["timeout"] for event, definition in hooks["hooks"].items()} == {
+    assert {event: definition[-1]["timeout"] for event, definition in hooks["hooks"].items()} == {
         "afterFileEdit": 5,
         "afterMCPExecution": 5,
         "sessionEnd": 3,
         "sessionStart": 10,
         "stop": 10,
     }
-    command = hooks["hooks"]["sessionStart"][0]["command"]
+    command = hooks["hooks"]["sessionStart"][-1]["command"]
     completed = subprocess.run(
         shlex.split(command),
         capture_output=True,
@@ -214,7 +239,7 @@ def test_plugin_managed_native_route_is_exact_and_external_omits_it(
     assert Path(launcher[0]).is_absolute()
     hooks = json.loads(managed.members["hooks/hooks.json"])
     assert all(
-        definition[0]["command"].startswith(f"{shlex.quote(launcher[0])} ")
+        definition[-1]["command"].startswith(f"{shlex.quote(launcher[0])} ")
         for definition in hooks["hooks"].values()
     )
 
@@ -256,7 +281,7 @@ def test_isolated_native_artifact_binds_root_in_mcp_and_hook_commands(
 
     hooks = json.loads(artifact.members["hooks/hooks.json"])["hooks"]
     for definition in hooks.values():
-        command = definition[0]["command"]
+        command = definition[-1]["command"]
         assert command.startswith(f"YOETZ_ISOLATED_ROOT={shlex.quote(str(isolated_root))} ")
         # Cursor executes command hooks as shell strings.  This also proves a path containing
         # spaces and a quote cannot escape the assignment.
@@ -385,7 +410,7 @@ def test_plugin_mcp_ignores_sanitized_path_and_foreign_older_yoetz(
     assert str(older) not in json.dumps(json.loads(shadowed.members["mcp.json"]))
     hooks = json.loads(shadowed.members["hooks/hooks.json"])
     assert all(
-        definition[0]["command"].startswith(f"{shlex.quote(str(invoking.resolve()))} ")
+        definition[-1]["command"].startswith(f"{shlex.quote(str(invoking.resolve()))} ")
         for definition in hooks["hooks"].values()
     )
     # Hooks and MCP bind the same launcher by construction.
@@ -647,7 +672,7 @@ def test_native_render_prefers_explicit_invoking_executable_over_path(
     assert artifact.yoetz_launcher == (resolved,)
     hooks = json.loads(artifact.members["hooks/hooks.json"])
     assert all(
-        definition[0]["command"].startswith(f"{shlex.quote(resolved)} hooks cursor-observe ")
+        definition[-1]["command"].startswith(f"{shlex.quote(resolved)} hooks cursor-observe ")
         for definition in hooks["hooks"].values()
     )
 
@@ -682,7 +707,7 @@ def test_native_render_preserves_module_entrypoint_launcher(
     hooks = json.loads(artifact.members["hooks/hooks.json"])
     prefix = f"{shlex.quote(resolved)} -m yoetz hooks cursor-observe "
     assert all(
-        definition[0]["command"].startswith(prefix) for definition in hooks["hooks"].values()
+        definition[-1]["command"].startswith(prefix) for definition in hooks["hooks"].values()
     )
 
 
@@ -958,7 +983,7 @@ def test_isolation_binding_reports_drift_and_unset_reverts_to_ambient(
         (tmp_path / ".cursor" / "plugins" / "local" / "yoetz" / "hooks" / "hooks.json").read_bytes()
     )["hooks"]
     assert all(
-        "YOETZ_ISOLATED_ROOT=" not in definition[0]["command"] for definition in hooks.values()
+        "YOETZ_ISOLATED_ROOT=" not in definition[-1]["command"] for definition in hooks.values()
     )
 
 

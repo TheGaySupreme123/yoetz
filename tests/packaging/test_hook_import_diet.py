@@ -225,7 +225,9 @@ def test_ordinary_native_hooks_call_entry_without_loading_full_cli(
         assert "yoetz.cli.app" not in loaded
         assert "typer" not in loaded
         assert "pydantic" not in loaded
-        assert completed.stdout == b"{}\n"
+        assert completed.stdout == (
+            b'{"permission":"allow"}\n' if command[1] == "cursor-observe" else b"{}\n"
+        )
 
         diagnostic = root / "state" / "observation" / "hook-diagnostics.jsonl"
         assert diagnostic.is_file(), (

@@ -103,11 +103,6 @@ def prepare_connection(
         ],
     }
     if installation.host == "claude":
-        artifact = claude.render_claude_code_plugin(
-            mcp_ownership=McpOwnership.PLUGIN_MANAGED,
-            route_profile=route,
-            yoetz_launcher=launcher,
-        )
         target = claude.ClaudeCodePluginTarget(
             str(project),
             str(installation.config_root),
@@ -115,6 +110,12 @@ def prepare_connection(
             str(installation.config_root / "plugins" / "marketplaces" / "yoetz-local"),
             str(installation.executable),
             claude.discover_claude_code(installation.executable),
+        )
+        artifact = claude.render_claude_code_plugin(
+            mcp_ownership=McpOwnership.PLUGIN_MANAGED,
+            route_profile=route,
+            yoetz_launcher=launcher,
+            startup_mode=claude.installed_claude_startup_mode(target) or "optional",
         )
         before = claude.status_claude_code_plugin(target, artifact)
         operation = (
@@ -172,12 +173,13 @@ def prepare_connection(
     elif installation.host in {"cursor-ide", "cursor-cli"}:
         config_existed = installation.config_root.exists()
         project_identity = (project.stat().st_dev, project.stat().st_ino)
+        cursor_target = cursor.CursorPluginTarget(str(installation.config_root))
         cursor_artifact = cursor.render_cursor_plugin(
             PluginFormatProfile.CURSOR_PLUGIN_NATIVE,
             mcp_ownership=McpOwnership.EXTERNAL_REGISTRATION,
             yoetz_launcher=launcher,
+            startup_mode=cursor.installed_cursor_startup_mode(cursor_target) or "optional",
         )
-        cursor_target = cursor.CursorPluginTarget(str(installation.config_root))
         project_target = mcp.CursorProjectMcpTarget(
             project,
             installation.config_root,
