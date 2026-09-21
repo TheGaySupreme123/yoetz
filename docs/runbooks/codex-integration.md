@@ -1055,3 +1055,30 @@ only its fenced lease was yielded. Replay the exact start body and request ID on
 inventing session or writer IDs. `start_pending_same_identity` instead means a live lease remains:
 wait up to 60 seconds before the one exact replay. If still busy or pending, retain the original
 request and report the unresolved start. These continuations do not authorize a new task.
+
+## Cold service attachment and recovery (issue #670)
+
+Codex SessionStart is synchronous even when tool hooks use the supported async profile. It
+keeps its ten-second registration budget; async tool delivery does not authorize background
+startup or service replacement.
+
+For an enabled, consented workspace with no mapped task, auto-attachment now gives the exact
+selected service one second to connect or start through its fixed, instance-pinned launcher.
+It never supersedes another installation. A compatible stamped holder that is still starting
+is reused; an incompatible or unknown holder is refused. The connection time counts toward
+the existing five-second attachment RPC budget. Turn-boundary retries retain their one-second
+outer budget; ordinary tool hooks and SessionEnd do not start a service. Local-only readiness
+probes and unconsented/disabled observation do not take this path.
+
+The native context distinguishes a service that is unavailable or still starting
+(`service_unavailable`), an incompatible holder (`service_incompatible`), and an answered
+admission conflict (`auto_attach_conflict`). Missing mapping remains explicit. Call cooperative
+`start` before material work and follow its exact continuation; a conflict needs an authorized
+task selector or explicit admission decision, not a service restart. Successful hook exit alone
+does not establish attachment. Task admission and ended-session recovery selectors are unchanged.
+
+Structural pre/post observations remain queued and keep their original identities across
+bootstrap. A later successful mapping permits their normal drain. Missing transient content
+remains a coverage gap; a recovered queue is not recovered content. Existing host/OS capability
+and consent requirements still apply. Automated host-contract tests do not establish native
+macOS, Linux, or Windows/WSL 2 acceptance. Native cold-start coverage remains tracked in #670.

@@ -4362,7 +4362,7 @@ def test_auto_start_error_classes_stay_closed_hook_diagnostic_reasons() -> None:
         ("vault_locked", "vault_locked"),
         ("request_timeout", "timeout"),
         ("privacy_projection_blocked", "privacy_authority_required"),
-        ("service_incompatible", "service_unavailable"),
+        ("service_incompatible", "service_incompatible"),
     ],
 )
 def test_auto_start_transport_failures_map_to_closed_diagnostic_reasons(
@@ -5547,3 +5547,270 @@ def test_nested_routine_outcome_survives_structural_mapping(
     assert (envelope.structural_payload.get("success") is True) is expected
     assert "tool_response" not in envelope.structural_payload
     assert "command" not in envelope.structural_payload
+
+
+@pytest.mark.parametrize(
+    ("source", "session"),
+    [
+        (ObservationSource.CODEX_HOOK, "cold-codex"),
+        (ObservationSource.CLAUDE_HOOK, "claude:cold"),
+        (ObservationSource.CURSOR_HOOK, "cursor:cold"),
+    ],
+)
+def test_cold_session_start_primes_selected_service_and_maps_each_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: ObservationSource, session: str
+) -> None:
+    import yoetz.service.client as service_client
+    from yoetz.ports.control import ControlError, WorkspaceLocator
+
+    store = LocalObservationStore(_state=tmp_path)
+    locator = str(tmp_path.resolve())
+    workspace = store.workspace_commitment(locator)
+    store.grant_consent(workspace)
+    client = _StartOkClient()
+    attempts: list[object] = []
+    spawned: list[bool] = []
+
+    async def cold_connect(_kind: object, **kwargs: object) -> object:
+        attempts.append(kwargs["workspace_locator"])
+        assert 0 < cast(float, kwargs["timeout_seconds"]) <= 1.0
+        if len(attempts) == 1:
+            raise ControlError("service_unavailable", retryable=True)
+        return client
+
+    def forbidden(**_kwargs: object) -> None:
+        raise AssertionError("hooks cannot supersede a holder")
+
+    monkeypatch.setattr(service_client, "_connect_service_attempt", cold_connect)
+    monkeypatch.setattr(service_client, "service_holder_identity", lambda: None)
+    monkeypatch.setattr(service_client, "_spawn_service_process", lambda: spawned.append(True))
+    monkeypatch.setattr(service_client, "supersede_incompatible_service", forbidden)
+    # Drain remains connect-only; only the attachment path invokes cold startup.
+    monkeypatch.setattr(observe_hooks_module, "_connect_service", lambda: _connector(client))
+    out = io.BytesIO()
+    assert (
+        handle_observe(
+            event_name="SessionStart",
+            stdin_bytes=json.dumps({"session_id": session, "source": "startup"}).encode(),
+            stdout=out,
+            workspace=locator,
+            _state=tmp_path,
+            source=source,
+            _output_event_name="sessionStart" if source is ObservationSource.CURSOR_HOOK else None,
+        )
+        == 0
+    )
+    assert spawned == [True]
+    assert attempts == [WorkspaceLocator(locator), WorkspaceLocator(locator)]
+    assert observe_hooks_module.load_mapping(session, _state=tmp_path) is not None
+    assert store.list_pending_outbox_rows(workspace) == ()
+    assert "call start with mode=attach" in out.getvalue().decode()
+
+
+@pytest.mark.parametrize(
+    ("reason", "cue"),
+    [
+        ("service_unavailable", "attachment pending: service_unavailable"),
+        ("service_incompatible", "hook did not replace it"),
+        ("request_timeout", "attachment pending: service_unavailable"),
+    ],
+)
+@pytest.mark.parametrize(
+    "source",
+    [ObservationSource.CODEX_HOOK, ObservationSource.CLAUDE_HOOK, ObservationSource.CURSOR_HOOK],
+)
+def test_startup_failure_context_exposes_only_trusted_recovery_tokens(
+    tmp_path: Path, source: ObservationSource, reason: str, cue: str
+) -> None:
+    from yoetz.ports.control import ControlError
+
+    store = LocalObservationStore(_state=tmp_path)
+    locator = str(tmp_path.resolve())
+    workspace = store.workspace_commitment(locator)
+    store.grant_consent(workspace)
+
+    async def unavailable(_kind: object) -> object:
+        raise ControlError(reason)
+
+    out = io.BytesIO()
+    assert (
+        handle_observe(
+            event_name="SessionStart",
+            stdin_bytes=json.dumps({"session_id": "failure-670", "source": "startup"}).encode(),
+            stdout=out,
+            workspace=locator,
+            _state=tmp_path,
+            connect=unavailable,  # type: ignore[arg-type]
+            source=source,
+            _output_event_name="sessionStart" if source is ObservationSource.CURSOR_HOOK else None,
+        )
+        == 0
+    )
+    assert cue in out.getvalue().decode()
+    assert observe_hooks_module.load_mapping("failure-670", _state=tmp_path) is None
+    assert store.list_pending_outbox_rows(workspace)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [ObservationSource.CODEX_HOOK, ObservationSource.CLAUDE_HOOK, ObservationSource.CURSOR_HOOK],
+)
+def test_bootstrap_backlog_keeps_pair_identity_and_missing_content_gap(
+    tmp_path: Path, source: ObservationSource
+) -> None:
+    from yoetz.domain.observation_profiles import (
+        CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
+        CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
+    )
+
+    profile = {
+        ObservationSource.CLAUDE_HOOK: CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
+        ObservationSource.CURSOR_HOOK: CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
+    }.get(source)
+    store = LocalObservationStore(_state=tmp_path)
+    locator = str(tmp_path.resolve())
+    workspace = store.workspace_commitment(locator)
+    store.grant_consent(workspace, content_capture_profiles=() if profile is None else (profile,))
+    client = _StartOkClient()
+    session = "bootstrap-pair"
+    canary = "TRANSIENT_BOOTSTRAP_CONTENT_670"
+
+    def observe(event: str, *, deferred: bool) -> None:
+        assert (
+            handle_observe(
+                event_name=event,
+                stdin_bytes=json.dumps(
+                    {
+                        "session_id": session,
+                        "tool_name": "shell",
+                        "tool_call_id": "bootstrap-tool",
+                        "correlation_id": "bootstrap-tool",
+                        "exit_status": 0,
+                        "visibility": "task",
+                        "visible_content": canary,
+                    }
+                ).encode(),
+                stdout=io.BytesIO(),
+                workspace=locator,
+                _state=tmp_path,
+                skip_service=deferred,
+                connect=_connector(client),  # type: ignore[arg-type]
+                source=source,
+                _content_capture_profile=profile,
+            )
+            == 0
+        )
+
+    observe("SessionStart", deferred=True)
+    observe("PreToolUse", deferred=True)
+    observe("PostToolUse", deferred=True)
+    pending = store.list_pending_outbox_rows(workspace)
+    assert len(pending) == 3
+    before = store.list_envelopes(workspace)
+    identities = {row.source_identity for row in before}
+    assert "unpaired_event" not in before[-1].gap_codes
+    assert "content_capture_unavailable" in store.status(ObservationStatusQuery(workspace)).gaps
+    observe("Stop", deferred=False)
+    assert observe_hooks_module.load_mapping(session, _state=tmp_path) is not None
+    # Contentless native-profile hooks defer bulk delivery to the normal drain.
+    asyncio.run(
+        observe_hooks_module._drain_outbox(  # pyright: ignore[reportPrivateUsage]
+            store,
+            workspace_commitment=workspace,
+            codex_session_id=session,
+            connect=cast(observe_hooks_module.HookDrainConnector, _connector(client)),
+            _state=tmp_path,
+        )
+    )
+    assert store.list_pending_outbox_rows(workspace) == ()
+    assert store.quarantined_count(workspace) == 0
+    assert identities <= {row.source_identity for row in store.list_envelopes(workspace)}
+    assert "content_capture_unavailable" in store.status(ObservationStatusQuery(workspace)).gaps
+    assert canary.encode() not in b"".join(
+        path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [ObservationSource.CODEX_HOOK, ObservationSource.CLAUDE_HOOK, ObservationSource.CURSOR_HOOK],
+)
+def test_reachable_service_admission_conflict_has_distinct_native_context(
+    tmp_path: Path, source: ObservationSource
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    locator = str(tmp_path.resolve())
+    store.grant_consent(store.workspace_commitment(locator))
+    client = _StartFailureClient(PublicErrorCode.SESSION_CONFLICT)
+    out = io.BytesIO()
+    assert (
+        handle_observe(
+            event_name="SessionStart",
+            stdin_bytes=json.dumps({"session_id": "admission-670", "source": "startup"}).encode(),
+            stdout=out,
+            workspace=locator,
+            _state=tmp_path,
+            connect=_connector(client),  # type: ignore[arg-type]
+            source=source,
+            _output_event_name="sessionStart" if source is ObservationSource.CURSOR_HOOK else None,
+        )
+        == 0
+    )
+    assert "attachment refused: auto_attach_conflict" in out.getvalue().decode()
+    assert "restarting the service does not select a task" in out.getvalue().decode()
+    assert len(client.requests) == 1
+    assert observe_hooks_module.load_mapping("admission-670", _state=tmp_path) is None
+
+
+@pytest.mark.anyio
+async def test_hook_connector_cannot_supersede_an_answering_incompatible_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import yoetz.service.client as service_client
+    from yoetz.ports.control import ControlError
+
+    signals: list[bool] = []
+    spawns: list[bool] = []
+
+    async def incompatible(_kind: object, **_kwargs: object) -> object:
+        raise ControlError("service_incompatible", retryable=True)
+
+    async def supersede(**_kwargs: object) -> bool:
+        signals.append(True)
+        return True
+
+    monkeypatch.setattr(service_client, "_connect_service_attempt", incompatible)
+    monkeypatch.setattr(service_client, "supersede_incompatible_service", supersede)
+    monkeypatch.setattr(service_client, "_spawn_service_process", lambda: spawns.append(True))
+    result = await observe_hooks_module._try_auto_start(  # pyright: ignore[reportPrivateUsage]
+        "incompatible-670", _state=tmp_path, workspace_locator=str(tmp_path.resolve())
+    )
+    assert result.reason == "service_incompatible"
+    assert result.mapping is None
+    assert signals == []
+    assert spawns == []
+
+
+@pytest.mark.anyio
+async def test_hook_cold_connection_enforces_budget_when_transport_never_returns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import yoetz.service.client as service_client
+
+    spawns: list[bool] = []
+
+    async def stalled() -> object:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(service_client, "connect_control", stalled)
+    monkeypatch.setattr(service_client, "_spawn_service_process", lambda: spawns.append(True))
+    monkeypatch.setattr(observe_hooks_module, "_HOOK_SERVICE_START_BUDGET_SECONDS", 0.1)
+    started = time.monotonic()
+    result = await observe_hooks_module._try_auto_start(  # pyright: ignore[reportPrivateUsage]
+        "budget-670", _state=tmp_path, workspace_locator=str(tmp_path.resolve())
+    )
+    assert time.monotonic() - started < 0.75
+    assert result.mapping is None
+    assert result.reason == "service_unavailable"
+    assert spawns == []

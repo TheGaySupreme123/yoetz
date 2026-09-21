@@ -111,7 +111,7 @@ from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode
 
 if TYPE_CHECKING:
     from yoetz.cli import hooks as hooks_cli
-    from yoetz.ports.control import ControlClientKind
+    from yoetz.ports.control import ControlClientKind, WorkspaceLocator
 
 __all__ = [
     "ADVICE_SAFE_EVENTS",
@@ -189,6 +189,7 @@ _HOOK_CONNECT_PREFLIGHT_SECONDS: Final = 1.0
 _AUTO_ATTACH_RETRY_EVENTS: Final = frozenset({"UserPromptSubmit", "Stop"})
 _AUTO_ATTACH_RETRY_BUDGET_SECONDS: Final = 1.0
 _AUTO_ATTACH_START_DEADLINE_MS: Final = 5_000
+_HOOK_SERVICE_START_BUDGET_SECONDS: Final = 1.0
 # End-to-end observability contract for one hook pass, process start included.
 # Never an abort point: the drain and preflight budgets own enforcement.
 # Derived from the enforced budgets nested inside one pass plus an allowance
@@ -283,6 +284,30 @@ def _connect_service() -> object:
     return connect_service
 
 
+async def _connect_attachment_service(
+    kind: ControlClientKind, *, workspace_locator: WorkspaceLocator | None = None
+) -> object:
+    """Prime only the selected service, within the synchronous hook budget.
+
+    Ordinary drains remain connect-only. The fixed launcher inherits instance pinning;
+    this path never supersedes a holder or conveys vault/disclosure authority.
+    """
+
+    from yoetz.service.client import connect_service, connect_service_on_demand
+
+    override = globals().get("connect_service")
+    if override is not None and override is not connect_service:
+        return await cast(Callable[..., Awaitable[object]], override)(
+            kind, workspace_locator=workspace_locator
+        )
+    return await connect_service_on_demand(
+        kind,
+        workspace_locator=workspace_locator,
+        timeout_seconds=_HOOK_SERVICE_START_BUDGET_SECONDS,
+        supersede_incompatible=False,
+    )
+
+
 class _HookDrainClient(Protocol):
     async def observation_ingest(
         self, body: DomainJsonValue, *, deadline_ms: int | None = None
@@ -359,11 +384,37 @@ if set(_AUTO_ATTACH_ERROR_REASONS) != set(PublicErrorCode):
 # absent here (a future addition) fall back to `service_unavailable`.
 _AUTO_ATTACH_CONTROL_REASONS: Final[Mapping[str, str]] = MappingProxyType(
     {
+        "service_incompatible": "service_incompatible",
+        "protocol_mismatch": "service_incompatible",
         "vault_locked": "vault_locked",
         "request_timeout": "timeout",
         "privacy_projection_blocked": "privacy_authority_required",
     }
 )
+
+
+def _attachment_recovery_context(reason: str) -> str:
+    """Render only trusted classifications, never host/error payload text."""
+
+    if reason == "service_incompatible":
+        return (
+            "Yoetz attachment pending: service_incompatible. The selected service has an "
+            "incompatible holder; the hook did not replace it. Call start and follow its exact "
+            "service recovery continuation. "
+        )
+    if reason in {"service_unavailable", "timeout"}:
+        return (
+            "Yoetz attachment pending: service_unavailable. The bounded service connection "
+            "did not complete. Call start before material work to finish service startup and "
+            "attachment; later turn hooks also retry within their budget. "
+        )
+    if reason == "auto_attach_conflict":
+        return (
+            "Yoetz attachment refused: auto_attach_conflict. The service answered but task "
+            "admission conflicted. Use a held session selector or follow start's explicit "
+            "admission continuation; restarting the service does not select a task. "
+        )
+    return "Yoetz attachment incomplete: mapping_missing. Follow the typed start result. "
 
 
 def _now() -> Timestamp:
@@ -1607,7 +1658,7 @@ async def _try_auto_start(
 
     try:
         if connect is None:
-            connector = cast(Callable[..., Awaitable[_StartClient]], _connect_service())
+            connector = cast(Callable[..., Awaitable[_StartClient]], _connect_attachment_service)
             client = await connector(
                 ControlClientKind.CLI,
                 workspace_locator=WorkspaceLocator(workspace_locator),
@@ -3020,6 +3071,7 @@ def handle_observe(
         # skip_service so local-only callers (e.g. the setup readiness probe)
         # never create or attach real ledger tasks.
         additional = ""
+        attach_reason: str | None = None
         attach_advisory_only = False
         mapping: LifecycleMapping | None = load_mapping(codex_session_id, _state=_state)
         drain_started = _monotonic()
@@ -3070,8 +3122,10 @@ def handle_observe(
                                         prune_surplus=True,
                                     )
 
+                                attach_outcome = cast(AutoAttachOutcome, _resolve_runner()(_attach))
+                                attach_reason = attach_outcome.reason
                                 mapping = _record_auto_attach(
-                                    cast(AutoAttachOutcome, _resolve_runner()(_attach)),
+                                    attach_outcome,
                                     resolved_event,
                                     _state=_state,
                                 )
@@ -3085,6 +3139,10 @@ def handle_observe(
                                     "necessary bootstrap clarification, call start to attach a task "
                                     "before substantive material work. " + _STARTUP_RECOVERY_CONTEXT
                                 )
+                                if attach_reason is not None:
+                                    additional = (
+                                        _attachment_recovery_context(attach_reason) + additional
+                                    )
                                 attach_advisory_only = True
                             else:
                                 additional = _active_context(mapping, mapping.last_frontier)

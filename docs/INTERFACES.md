@@ -1937,7 +1937,19 @@ lock to be released inside the same 30-second budget, then spawns and connects t
 this installation. It never signals a process it cannot identify through the owner-only stamp, a
 holder whose stamped identity equals this installation's, or anything on Windows; those cases and a
 holder that outlives the budget surface as `service_incompatible` whose bridge message names
-`yoetz service restart`. Plain `connect_service` (ordinary CLI commands and hooks) never supersedes.
+`yoetz service restart`. Plain `connect_service` (ordinary CLI commands and hook drains) never starts or supersedes.
+Consented hook auto-attachment uses the same fixed on-demand launcher with
+`supersede_incompatible=False` and a one-second connection/startup budget. It waits for an
+already-stamped compatible starting holder without spawning another process, and refuses an
+incompatible or unknown stamped identity without signalling it. The authenticated handshake
+remains authoritative; the stamp is only a pre-spawn hint. Startup and the auto-attach `start`
+share the existing five-second RPC budget; turn-boundary retries retain their one-second outer
+budget. A budget expiry leaves attachment incomplete and queued structural rows pending.
+SessionStart context distinguishes `service_unavailable`, `service_incompatible`,
+`auto_attach_conflict`, and `mapping_missing`, and directs the agent to explicit `start` before
+material work, then its exact typed continuation. Hook exit zero is graceful degradation, not
+proof of service readiness or a mapped task. No transient content is reconstructed from queued
+structural envelopes. This path conveys no initialization, unlock, privacy, or takeover authority.
 Bridges of the stale installation reconnect and are refused in turn, which is the correct outcome
 of an upgrade: the one per-user endpoint belongs to the installation actually in use. The MCP bridge supplies a
 **30-second** call deadline for `start`, `publish_work`, `respond`, `status`, and `receipt`, and a
@@ -3758,7 +3770,7 @@ the ordinary typed failure path remains. Every failed attempt records a closed h
 reason instead of a silent absent mapping: `auto_attach_workspace_unbound`,
 `auto_attach_request_invalid`, `auto_attach_conflict` (session, idempotency, or request-identity
 conflict), `auto_attach_refused`, `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`,
-`privacy_authority_required`, or the shared `service_unavailable`, `vault_locked`, `timeout`,
+`privacy_authority_required`, or the shared `service_unavailable`, `service_incompatible`, `vault_locked`, `timeout`,
 `storage_unsafe`, and `storage_corrupt` tokens. Turn-boundary hooks retry auto-attach under a
 bounded budget and record the same typed cause next to the `auto_attach_retry_failed` path marker
 when no mapping results. Busy lifecycle mutations are durable: observation-local schema `/11` adds a

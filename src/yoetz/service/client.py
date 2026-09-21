@@ -1437,10 +1437,21 @@ async def connect_service_on_demand(
             raise
     if time.monotonic() >= deadline:
         raise ControlError("service_unavailable", retryable=True)
-    try:
-        _spawn_service_process()
-    except OSError as exc:
-        raise ControlError("service_unavailable", retryable=True) from exc
+    # A consented hook may prime an absent service, but cannot replace a holder.
+    # Before its endpoint appears, reuse a stamped starting holder rather than
+    # launching another process on every short hook retry. Identity is advisory;
+    # the subsequent authenticated handshake remains the authority.
+    holder = service_holder_identity() if not supersede_incompatible else None
+    if holder is not None and (
+        holder.schema_manifest_digest != _manifest_digest_for_client()
+        or holder.service_version != __version__
+    ):
+        raise ControlError("service_incompatible", retryable=True)
+    if holder is None:
+        try:
+            _spawn_service_process()
+        except OSError as exc:
+            raise ControlError("service_unavailable", retryable=True) from exc
 
     last_error: ControlError | None = None
     while time.monotonic() < deadline:
