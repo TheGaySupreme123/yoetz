@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import plistlib
 import shlex
 import shutil
 import subprocess
@@ -1449,16 +1450,161 @@ def test_cursor_cli_discovery_normalizes_empty_and_invalid_utf8_identity(
         discover_cursor_cli(executable)
 
 
-def test_cursor_ide_discovery_names_the_platform_outside_a_macos_bundle(tmp_path: Path) -> None:
-    """A Linux Cursor (AppImage or .deb) has no Info.plist; say so by platform (issue #722)."""
+def test_cursor_ide_discovery_names_unavailable_layouts(tmp_path: Path) -> None:
 
     install_root = tmp_path / "cursor"
     install_root.mkdir()
 
-    with pytest.raises(ValueError, match="^cursor_ide_platform_unsupported$"):
+    with pytest.raises(ValueError, match="^cursor_ide_layout_unsupported$"):
         discover_cursor_ide(install_root, system="Linux")
+    with pytest.raises(ValueError, match="^cursor_ide_platform_unsupported$"):
+        discover_cursor_ide(install_root, system="Windows")
     with pytest.raises(ValueError, match="^cursor_ide_unavailable$"):
         discover_cursor_ide(install_root, system="Darwin")
+
+
+def _linux_cursor_package(tmp_path: Path) -> Path:
+    root = tmp_path / "usr" / "share" / "cursor"
+    metadata = root / "resources" / "app"
+    metadata.mkdir(parents=True)
+    (root / "cursor").write_bytes(b"\x7fELF\x02\x01" + b"\x00" * 12 + b"\x3e\x00native-binary")
+    (root / "cursor").chmod(0o755)
+    (metadata / "package.json").write_text('{"name":"Cursor","version":"3.21.16"}')
+    (metadata / "product.json").write_text(
+        json.dumps({"applicationName": "cursor", "commit": "8" * 40})
+    )
+    return root
+
+
+@pytest.mark.parametrize("selection", ["root", "binary", "symlink"])
+def test_linux_cursor_identity_reads_package_without_launching(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selection: str
+) -> None:
+    root = _linux_cursor_package(tmp_path)
+    selected = root if selection == "root" else root / "cursor"
+    if selection == "symlink":
+        selected = tmp_path / "cursor-link"
+        selected.symlink_to(root / "cursor")
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.cursor_integration.platform.machine", lambda: "x86_64"
+    )
+
+    def refuse_execution(*args: object, **kwargs: object) -> None:
+        pytest.fail("Identity discovery must not launch the IDE")
+
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.cursor_integration.subprocess.run", refuse_execution
+    )
+    identity = discover_cursor_ide(selected, system="Linux")
+    assert identity.surface == "cursor_ide"
+    assert identity.version == "3.21.16"
+    assert identity.build == "8" * 40
+    assert identity.os_name == "linux"
+    assert identity.architecture == "x86_64"
+    assert (
+        identity.artifact_digest
+        == "sha256:" + hashlib.sha256((root / "cursor").read_bytes()).hexdigest()
+    )
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"not json",
+        b"\xff",
+        b"[]",
+        b'{"version":null}',
+        b'{"version":""}',
+        b'{"version":"a","version":"b"}',
+        b" " * (1024 * 1024 + 1),
+    ],
+)
+def test_linux_cursor_identity_rejects_malformed_metadata(tmp_path: Path, content: bytes) -> None:
+    root = _linux_cursor_package(tmp_path)
+    (root / "resources" / "app" / "package.json").write_bytes(content)
+    with pytest.raises(ValueError, match="^cursor_ide_identity_invalid$"):
+        discover_cursor_ide(root, system="Linux")
+
+
+@pytest.mark.parametrize(
+    "member", ["cursor", "resources", "resources/app", "resources/app/product.json"]
+)
+def test_linux_cursor_identity_rejects_linked_package_members(tmp_path: Path, member: str) -> None:
+    root = _linux_cursor_package(tmp_path)
+    target = root / member
+    outside = tmp_path / "outside"
+    target.rename(outside)
+    target.symlink_to(outside)
+    with pytest.raises(ValueError, match="^cursor_ide_identity_invalid$"):
+        discover_cursor_ide(root, system="Linux")
+
+
+def test_linux_cursor_identity_rejects_foreign_product_and_windows_executable(
+    tmp_path: Path,
+) -> None:
+    root = _linux_cursor_package(tmp_path)
+    product = root / "resources" / "app" / "product.json"
+    original = product.read_bytes()
+    product.write_text('{"applicationName":"code","commit":"foreign"}')
+    with pytest.raises(ValueError, match="^cursor_ide_identity_invalid$"):
+        discover_cursor_ide(root, system="Linux")
+    product.write_bytes(original)
+    (root / "cursor").write_bytes(b"MZWindows executable")
+    with pytest.raises(ValueError, match="^cursor_ide_identity_invalid$"):
+        discover_cursor_ide(root, system="Linux")
+
+
+def test_linux_cursor_identity_requires_executable_and_available_root(tmp_path: Path) -> None:
+    root = _linux_cursor_package(tmp_path)
+    (root / "cursor").chmod(0o644)
+    with pytest.raises(ValueError, match="^cursor_ide_unavailable$"):
+        discover_cursor_ide(root, system="Linux")
+    with pytest.raises(ValueError, match="^cursor_ide_unavailable$"):
+        discover_cursor_ide(tmp_path / "missing", system="Linux")
+
+
+@pytest.mark.parametrize("machine,expected", [(62, "x86_64"), (183, "aarch64")])
+def test_linux_cursor_identity_uses_artifact_architecture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, machine: int, expected: str
+) -> None:
+    root = _linux_cursor_package(tmp_path)
+    executable = root / "cursor"
+    content = executable.read_bytes()
+    executable.write_bytes(content[:18] + machine.to_bytes(2, "little") + content[20:])
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.cursor_integration.platform.machine", lambda: "other"
+    )
+    assert discover_cursor_ide(root, system="Linux").architecture == expected
+
+
+def test_linux_cursor_identity_does_not_substitute_a_nearby_executable(tmp_path: Path) -> None:
+    root = _linux_cursor_package(tmp_path)
+    selected = root / "Cursor.exe"
+    selected.write_bytes(b"MZforeign binary")
+    with pytest.raises(ValueError, match="^cursor_ide_layout_unsupported$"):
+        discover_cursor_ide(selected, system="Linux")
+
+
+def test_macos_cursor_identity_keeps_bundle_version_build_and_digest(tmp_path: Path) -> None:
+    root = tmp_path / "Cursor.app"
+    executable = root / "Contents" / "MacOS" / "Cursor"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"macos executable")
+    (root / "Contents" / "Info.plist").write_bytes(
+        plistlib.dumps(
+            {
+                "CFBundleExecutable": "Cursor",
+                "CFBundleShortVersionString": "3.17.8",
+                "CFBundleVersion": "build-id",
+            }
+        )
+    )
+    identity = discover_cursor_ide(root, system="Darwin")
+    assert identity.version == "3.17.8"
+    assert identity.build == "build-id"
+    assert (
+        identity.artifact_digest == "sha256:" + hashlib.sha256(executable.read_bytes()).hexdigest()
+    )
 
 
 def test_unreadable_mcp_configuration_is_ambiguous_not_absent(tmp_path: Path) -> None:
