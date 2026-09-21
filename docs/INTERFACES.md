@@ -1619,7 +1619,8 @@ finding's original coverage to contain only the pre-existing AI-powered review, 
 host-observation tolerances and to have freshness outside
 `stale_after_material_change|redacted_gap|unknown`. For `semantic_model_derived` rows only the
 evidence-strength codes are tolerated, and the check must also record
-`succeeded/semantic_completed`. Any other gap — redacted or unavailable payloads, redacted objects,
+`succeeded/semantic_completed`. Outside the narrow command-gap partition described below, any
+other gap — redacted or unavailable payloads, redacted objects,
 missing refs, unknown events, completion scope, import range, or a code not in the list — blocks
 both proof classes. A local-only check therefore never resolves an AI-powered finding, and a
 weakened AI-powered review never resolves one either. A check that returns a finding again clears
@@ -5432,3 +5433,28 @@ and milestones remain. Cancellation and ambiguous response loss do not yield tha
 ADR-030 continuation `start_busy_same_identity` names exact once-only replay after a successful
 lease yield; `start_pending_same_identity` names a live lease and the bounded 60-second wait before
 exact replay. Runtime/catalog producer reasons alone never imply a released start reservation.
+
+### Command-gap independence for repaired action findings (issue #682)
+
+Maintainer acknowledgement: [issue #682](https://github.com/TheGaySupreme123/yoetz/issues/682#issuecomment-5761527250).
+`finding_resolution` admits a narrow exception for a deterministic `action_without_result`
+finding with readable original proof, one exact action-event subject, explicit readable obligation
+links, and an accepted linked result present at the checked frontier. It bounds the possible
+owners of `command_attempt_uncorroborated` and `command_attempt_mismatch` using all selected,
+plan-declared obligations that request commands. Only a proven disjoint action scope may ignore
+those codes for that finding's absence proof. The codes remain on the check and receipt.
+
+This is deliberately conservative: the partition includes selected command obligations even when
+a command was observed matching. An action sharing such an obligation still requires the command
+coverage to be repaired; an absent, ambiguous, redacted, or unbound relation never qualifies.
+A later material projection row cannot establish proof for an earlier checked frontier. The
+check's own finding suffix is immaterial to action/result/plan inputs. Explanations reconstruct
+the exact checked prefix when needed and identify overlapping obligation IDs (bounded to 16)
+or that independence remains unproven. All ordinary scope, policy, suppression, refiring,
+freshness and semantic requirements continue to apply.
+
+The reducer supplies the same projection context to the qualification predicate used by status
+and receipts. No new event schema, persisted proof metadata, or command execution claim is added.
+Historical event bytes remain intact; rebuilding a projection applies this bounded derivation to
+its accepted history. A held old check is still invalidated by a later response to a finding that
+check did not return. Resolved history does not remove receipt coverage limitations.

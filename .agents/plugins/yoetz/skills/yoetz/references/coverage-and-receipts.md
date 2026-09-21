@@ -427,3 +427,17 @@ only its fenced lease was yielded. Replay the exact start body and request ID on
 inventing session or writer IDs. `start_pending_same_identity` instead means a live lease remains:
 wait up to 60 seconds before the one exact replay. If still busy or pending, retain the original
 request and report the unresolved start. These continuations do not authorize a new task.
+
+### Unrelated command gaps and action-result repairs
+
+A readable deterministic `action_without_result` finding can resolve after a qualifying check
+of its accepted linked result when its explicit obligation scope is provably disjoint from every
+selected plan obligation requesting a command. `command_attempt_uncorroborated` and
+`command_attempt_mismatch` remain check/receipt coverage limits. This exception proves that the
+ledger action has a result; it never proves a command ran or succeeded.
+
+An overlapping command obligation, missing explicit link, unreadable input, or result newer than
+the tested frontier remains conservative. A selected command obligation is included in the
+partition even when its own command was observed matching. Status explains the overlapping
+obligation IDs or that independence is unproven. AI-powered findings still require completed
+AI-powered review; an acknowledgement or unchanged recheck does not repair a proof limitation.
