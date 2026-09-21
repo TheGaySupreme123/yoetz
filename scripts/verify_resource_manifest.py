@@ -153,12 +153,6 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
-        "fixtures/integrations/setup-readiness.case.json",
-        "canonical_vector",
-        "application/json",
-        True,
-    ),
-    (
         "schemas/integrations/host-connection-1.0.0.schema.json",
         "json_schema",
         "application/schema+json",
@@ -1167,6 +1161,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     (
         "schemas/version/version-manifest-2.2.2.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/version/version-manifest-2.2.3.schema.json",
         "json_schema",
         "application/schema+json",
         True,

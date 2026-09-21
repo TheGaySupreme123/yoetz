@@ -750,7 +750,7 @@ def build_version_manifest(*, include_optional_probes: bool = False) -> VersionM
     if not platform_cell().certified:
         limitations = tuple(sorted({*limitations, PLATFORM_CELL_UNTESTED}, key=str.encode))
     return VersionManifest(
-        schema_version="2.2.2",
+        schema_version="2.2.3",
         package_name="yoetz",
         package_version=_distribution_version("yoetz") or "0.1.0",
         protocol_version=PROTOCOL_VERSION,

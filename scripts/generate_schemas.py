@@ -177,8 +177,8 @@ def _version_manifest_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     # Bootstrap the new inventory from its frozen predecessor; the resource ripple
     # then binds the enlarged inventory and regenerates the final cardinalities.
     destination = source.parents[1] / entry.relative_path
-    if entry.schema_version == "2.2.2" and not destination.exists():
-        document = _load_versioned_template(entry, "version/version-manifest-2.2.1.schema.json")
+    if entry.schema_version == "2.2.3" and not destination.exists():
+        document = _load_versioned_template(entry, "version/version-manifest-2.2.2.schema.json")
         cast(dict[str, JsonValue], document["properties"])["schema_version"] = {
             "const": entry.schema_version
         }
@@ -3736,6 +3736,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "version-report",
         lambda: __import__("yoetz.version", fromlist=["VersionManifest"]).VersionManifest,
     ),
+    _RegistryEntry(
+        "version/version-manifest-2.2.3.schema.json",
+        "version-manifest",
+        "2.2.3",
+        "version_manifest",
+        "version-report",
+        lambda: __import__("yoetz.version", fromlist=["VersionManifest"]).VersionManifest,
+    ),
 )
 
 
@@ -4085,9 +4093,10 @@ def build_schema_documents(
             "version/version-manifest-2.1.0.schema.json",
             "version/version-manifest-2.2.0.schema.json",
             "version/version-manifest-2.2.1.schema.json",
+            "version/version-manifest-2.2.2.schema.json",
         }:
             normalized = _frozen_version_manifest_schema(entry)
-        elif entry.relative_path == "version/version-manifest-2.2.2.schema.json":
+        elif entry.relative_path == "version/version-manifest-2.2.3.schema.json":
             normalized = _version_manifest_schema(entry)
         elif entry.relative_path == "service/control-request-2.6.1.schema.json":
             normalized = _control_request_v2_6_1_schema(entry)

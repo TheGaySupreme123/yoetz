@@ -185,7 +185,7 @@ use it for MCP removal and reconnection too. Do not retarget the process by chan
 ambient variable. A foreign home is preserved; use a newly created mode-0700 home for a separate
 installation, and inspect any project marketplace conflict independently.
 
-A service-dependent consent approve first probes the selected service without starting it. Known
+A service-dependent approval first probes the selected service without starting it. Known
 unavailability preserves the pending identity; inspect consent status and retry that same valid
 identity after recovery. Atomic claiming remains the authorization boundary. Post-claim service
 loss consumes the review, as do denial, cancellation and expiry. Never invent a replacement

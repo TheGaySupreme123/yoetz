@@ -2628,7 +2628,7 @@ receipt values without rewriting stored receipts or the released `2.6.0` envelop
 request envelopes remain `2.6.0`; no new control method or 0.3 project contract is introduced.
 CLI JSON, terminal output and the prompt-loop menu render decoded UTC receipt timestamps in
 canonical millisecond RFC3339 form (issues #731 and #732). The added schema inventory is reported
-by version-manifest `2.2.2`; released `2.2.1` and earlier manifests retain their original bytes.
+by version-manifest `2.2.3`; released `2.2.2` and earlier manifests retain their original bytes.
 
 `PrivacyAuditPort.list_pending_disclosures(audience) -> PendingDisclosurePage` projects only
 `PendingDisclosureEntry(pending_id, task_id, expires_at)` for proposals in `awaiting_human` or
