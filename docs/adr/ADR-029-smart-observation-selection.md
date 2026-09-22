@@ -112,8 +112,9 @@ recovery budget inside its ordinary sweep budget. A workspace turn rotates throu
 existing session candidates, then performs at most one complete inventory bootstrap. Session
 cursor hints are bounded to 256 workspaces; eviction loses a hint, not accounting or authority.
 Recovery does not hold the general workflow/control gate or an outbox drain lease. Publication
-uses the same capture lock as reservation. Synchronous task metadata reads and local publication
-run off the service event loop; cancellation joins started worker operations before releasing
+uses the same capture lock as reservation. Both complete catalog scans use worker-owned read-only SQLite connections; opening,
+querying, decoding and closing happen in the worker, never through the shared catalog writer.
+Synchronous task metadata reads and local publication also run off the service event loop; cancellation joins started worker operations before releasing
 the lock or runtime. These joins can exceed the cooperative deadline. The deadline is not a hard
 promise about a contended storage operation's elapsed time. Every opened runtime must match
 its catalog task/session identity. The service/vault generation is checked before inventory reads,
@@ -123,9 +124,35 @@ cannot authorize releasing a reservation merely because its identity was not ret
 
 A recovered inventory proves accounting, not spare capacity: real count, byte, pending-pair and
 capture ceilings still govern admission. Recovery neither deletes loss/quarantine history nor
-creates task coverage. Independently propagating correctly attributed local selection losses to
-task/check coverage without a later admitted envelope remains a separate #695 implementation
-slice; a recovered/empty queue is not evidence that earlier losses were absent.
+creates complete task coverage. Retained, fully routed loss lanes are now independent durable
+maintenance demand (#695). Before capture recovery, each workspace turn attempts at most eight
+pending loss lanes, rotating past unavailable routes. A lane binds source, native session,
+source generation, original task/session/writer and capture-authority generation. One permanent
+`observation_input_loss` evidence marker per lane is appended through the existing observation
+writer and encrypted-payload commit path, followed by an internal task observation gap and advice.
+Only then is the local lane acknowledged. Reporting never replays the rejected input, advances a
+source cursor, grants content capture, changes loss counts/identities, or claims recovered bytes.
+The marker says at least one input was lost; exact cumulative counts remain in local accounting.
+Retries and restarts resolve the same task-wide operation before staging another payload.
+
+New checks reconcile this task's pending routed losses before freezing their case. Existing
+check operations preserve their original frozen inputs and idempotent results. Transient or
+unrecoverable publication failures remain fail-closed instead of omitting known task loss. A
+terminal route drift or quarantined marker operation may use the already authenticated runtime
+for the same task and a distinct deterministic recovery operation identity; the marker retains
+the original route and never retargets the loss. Route-valid lane-digest mismatches receive an
+explicit unreconciled loss marker; ranges whose route or source identity cannot be authenticated stay in local
+accounting and are never assigned to a task from a parser failure. Historical loss attribution survives
+same-task session supersession; it is never rebound to a new task or represented as a new
+observation under the current capture grant. Original authority identity remains part of the
+report even after that grant changes: reporting already-recorded loss is structural maintenance,
+not new observation or content permission.
+
+The existing 64-range retention bound still applies. Unrouted input and overflow-only aggregate
+history have no provable task attribution and remain visible locally; they are never broadcast
+to every task or assigned to a later mapping. A recovered/empty queue is not evidence that earlier
+losses were absent. Lane acknowledgement adds only private, bounded retry state; an older writer
+forgetting it can cause a replay but cannot duplicate the stable ledger marker.
 
 Detailed and larger capacity default to a current-session override. Workspace persistence is an
 explicit owner choice. A preview precedes non-default authority and describes scope, expiry,
