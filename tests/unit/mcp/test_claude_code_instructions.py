@@ -151,6 +151,16 @@ def test_advertised_surface_metrics_charge_the_selected_host_body() -> None:
     assert claude["instructions_encoded_bytes"] < generic["instructions_encoded_bytes"]
 
 
+def test_shared_guidance_retains_deferred_schema_and_late_start_recovery() -> None:
+    instructions = read_resource("yoetz://guidance/agent-instructions.md").decode("utf-8")
+    workflow = read_resource("yoetz://guidance/workflow.md").decode("utf-8")
+    assert "If the tool list shows only names, load the `start` schema first." in instructions
+    assert "If material work already began without a task, call `start` now" in instructions
+    assert "ToolSearch\n`select:mcp__yoetz__start`" in workflow
+    assert "| Material work began before `start` was called" in workflow
+    assert "backdate `occurred_at` to imply coverage that was not published" in workflow
+
+
 def test_the_claude_bridge_runtime_carries_the_compact_text() -> None:
     disclosure = disclose_semantic_destination(None)
     policy = bridge.build_bridge_runtime(
