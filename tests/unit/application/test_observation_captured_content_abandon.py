@@ -45,17 +45,17 @@ class _Clock:
 class _Objects:
     def __init__(self) -> None:
         self.refs: dict[str, ObjectRef] = {}
-        self.material: dict[str, bytes] = {}
+        self.staged_payloads: dict[int, bytes] = {}
         self.abandoned: list[object] = []
         self.fail_abandon = False
 
     async def stage(self, source: ObjectSource, metadata: ObjectMetadata) -> ObjectMetadata:
         assert source.data is not None
-        self.material[id(metadata)] = source.data
+        self.staged_payloads[id(metadata)] = source.data
         return metadata
 
     async def finalize(self, staged: ObjectMetadata) -> ObjectRef:
-        payload = self.material[id(staged)]
+        payload = self.staged_payloads[id(staged)]
         object_id = PREFIX_BY_KIND[IdKind.OBJECT] + str(uuid.uuid4())
         ref = ObjectRef(
             object_id,
@@ -113,8 +113,13 @@ class _UnknownManifestLookup(_FailingManifests):
         logical_identity: str,
         chunk: ObservationContentChunk,
     ) -> str | None:
-        del workspace, logical_identity, chunk
-        raise RuntimeError("manifest lookup unavailable")
+        if self.attempts:
+            raise RuntimeError("manifest lookup unavailable")
+        return super().content_manifest_object_id(
+            workspace=workspace,
+            logical_identity=logical_identity,
+            chunk=chunk,
+        )
 
 
 def _coordinator(tmp_path: Path, objects: _Objects) -> ObservationCoordinator:
@@ -280,7 +285,7 @@ async def test_committed_manifest_is_not_deleted(tmp_path: Path) -> None:
 
 @pytest.mark.anyio
 async def test_preexisting_manifest_owner_is_not_abandoned(tmp_path: Path) -> None:
-    db, store = _bundle()
+    db, _store = _bundle()
     objects = _Objects()
     envelope = _envelope("hook:owned")
     chunk = _chunk("call-owned")
@@ -338,6 +343,7 @@ async def test_preexisting_manifest_owner_is_not_abandoned(tmp_path: Path) -> No
             workspace=_WORKSPACE,
             envelope=envelope,
             chunks=(chunk,),
+            allow_incomplete_recovery=True,
         )
 
     assert objects.abandoned == []
