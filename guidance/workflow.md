@@ -84,6 +84,19 @@ Tell the user that Yoetz is being used, and claim activation only after `start` 
 continue-and-disclose fallback. A first non-retryable failure does not itself permit material work
 without a task. Never invent ledger, check, or receipt coverage.
 
+## Owner-selected required startup
+
+When the host reports required startup, a new session still follows the start/attach rules above.
+Before substantive tools, publish an accepted current plan containing its effective obligations.
+Each user-prompt boundary and resume/compaction requires a fresh plan revision or exact next-version
+restatement on the same task; use held session/writer ids and status rather than inventing a sibling.
+Text-only trivial answers need no bootstrap, but required mode also gates tools used for small edits.
+Discovery, guidance, clarification and Yoetz workflow/recovery calls remain available. A denial
+with `current_plan_required` or `live_plan_unverified` is not permission to change host settings,
+reinitialize a vault, discard pending writes, or disable the gate. Follow same-request recovery and
+surface an owner action when needed. Required startup does not approve semantic disclosure or prove
+completion. Cursor may ask for native approval of MCP calls in this mode.
+
 ## Material work
 
 Before substantive work, publish the bounded plan, requested outcomes, and acceptance evidence.

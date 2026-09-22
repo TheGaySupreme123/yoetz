@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Literal
 
 import pytest
 from typer.testing import CliRunner
@@ -96,6 +97,92 @@ def test_claude_cli_rejects_portable_format_and_unknown_preview_action(tmp_path:
     unknown = runner.invoke(app, _args(tmp_path, "preview", "--action", "replace"))
     assert unknown.exit_code == 1
     assert unknown.stderr == "claude_code_plugin_action_invalid\n"
+
+
+def test_claude_install_reports_post_mutation_startup_mode(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    import yoetz.cli.claude_code_integration as cli_module
+    from yoetz.adapters.integrations.claude_code_integration import ClaudeCodePluginAction
+    from yoetz.cli.claude_code_integration import run_claude_code_plugin_command
+    from yoetz.ports.plugin_artifacts import (
+        ArtifactAuthority,
+        PluginArtifactState,
+        PluginOperationState,
+    )
+
+    executable = _fake_claude(tmp_path)
+    project = tmp_path / "project"
+    project.mkdir()
+    artifact = cli_module.plugin_artifact("plugin-managed", "strict")
+    result = SimpleNamespace(
+        action=ClaudeCodePluginAction.INSTALL,
+        admission_cleanup=None,
+        artifact_digest=artifact.artifact_digest,
+        changed_files=(),
+        enabled=True,
+        installed_digest="sha256:" + "1" * 64,
+        operation_state=PluginOperationState.COMPLETED,
+        preview_digest="sha256:" + "2" * 64,
+        request_id="req_10000000-0000-4000-8000-000000000042",
+        state_after=PluginArtifactState.NATIVE_MANAGED,
+        state_before=PluginArtifactState.ABSENT,
+    )
+
+    class Presence:
+        def verify_artifact_review(self, authority: ArtifactAuthority) -> None:
+            _ = authority
+            pass
+
+    def fake_status(*_args: object) -> SimpleNamespace:
+        return SimpleNamespace(installed_digest=None)
+
+    def fake_preview(*_args: object) -> SimpleNamespace:
+        return SimpleNamespace()
+
+    def fake_apply(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        return result
+
+    def fake_installed(_target: object) -> Literal["optional"]:
+        return "optional"
+
+    def fake_authority(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    def fake_sweep(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(cli_module, "status_claude_code_plugin", fake_status)
+    monkeypatch.setattr(cli_module, "preview_claude_code_plugin", fake_preview)
+    monkeypatch.setattr(cli_module, "apply_claude_code_plugin", fake_apply)
+    monkeypatch.setattr(cli_module, "installed_claude_startup_mode", fake_installed)
+    monkeypatch.setattr(cli_module, "_artifact_authority", fake_authority)
+    monkeypatch.setattr(cli_module, "reverse_sweep", fake_sweep)
+    exit_code = run_claude_code_plugin_command(
+        "install",
+        harness="claude",
+        claude_path=executable,
+        claude_config_root=tmp_path / "claude-testing",
+        cache_root=tmp_path / "claude-testing" / "plugins" / "cache",
+        marketplace_root=tmp_path / "marketplace",
+        project_root=project,
+        format_name="native",
+        ownership_name="plugin-managed",
+        route_profile="strict",
+        requested_action=None,
+        request_value=result.request_id,
+        preview_digest=result.preview_digest,
+        accept=True,
+        json_output=True,
+        _state=tmp_path / "private-state",
+        _presence=Presence(),
+    )
+    assert exit_code == 0
+    body = json.loads(capsys.readouterr().out)
+    assert body["installed_digest"] is not None
+    assert body["installed_startup_mode"] == "optional"
 
 
 def test_claude_cli_export_writes_a_plugin_dir_root_without_host_state(tmp_path: Path) -> None:

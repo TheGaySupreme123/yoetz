@@ -21,6 +21,7 @@ from yoetz.adapters.integrations.claude_code_integration import (
     ClaudeCodePluginArtifact,
     ClaudeCodePluginTarget,
     apply_claude_code_plugin,
+    installed_claude_startup_mode,
     observe_claude_code_mcp,
     observe_claude_code_session_init,
     preview_claude_code_plugin,
@@ -43,6 +44,28 @@ from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.version import read_verified_resource
 
 _REQUEST = request_id("req_10000000-0000-4000-8000-000000000001")
+
+
+def test_required_startup_install_inspect_and_reverse(tmp_path: Path) -> None:
+    target = _target(tmp_path)
+    required = render_claude_code_plugin(startup_mode="required")
+    commands = _ClaudeFixture(required)
+    for index, artifact in enumerate((required, render_claude_code_plugin())):
+        commands.artifact = artifact
+        action = ClaudeCodePluginAction.INSTALL if index == 0 else ClaudeCodePluginAction.UPDATE
+        preview = preview_claude_code_plugin(_REQUEST, target, action, artifact, commands=commands)
+        apply_claude_code_plugin(
+            _REQUEST,
+            target,
+            action,
+            artifact,
+            accepted_preview_digest=preview.preview_digest,
+            authority=_authority(preview.preview_digest),
+            review=_Review(),
+            commands=commands,
+        )
+        assert installed_claude_startup_mode(target) == ("required" if index == 0 else "optional")
+        assert status_claude_code_plugin(target, artifact, commands=commands).marker_valid
 
 
 class _Review:
@@ -353,9 +376,9 @@ def test_native_projection_uses_claude_skill_and_shared_guidance_components() ->
         "^mcp__plugin_yoetz_yoetz__(start|publish_work|check|respond|status|receipt|read_guidance)$"
     )
     assert hooks["PostToolUseFailure"][0]["matcher"] == hooks["PostToolUse"][0]["matcher"]
-    assert all("CLAUDE_PROJECT_DIR" in row[0]["hooks"][0]["command"] for row in hooks.values())
+    assert all("CLAUDE_PROJECT_DIR" in row[0]["hooks"][-1]["command"] for row in hooks.values())
     assert all(
-        row[0]["hooks"][0]["command"].startswith(
+        row[0]["hooks"][-1]["command"].startswith(
             f"{shlex.quote(launcher[0])} hooks claude-observe "
         )
         for row in hooks.values()
@@ -366,7 +389,9 @@ def test_native_hook_timeouts_leave_room_for_local_capture_and_service_drain() -
     artifact = render_claude_code_plugin(observation_profile="ordinary")
     hooks = json.loads(artifact.members["hooks/hooks.json"])["hooks"]
 
-    assert {event: definition[0]["hooks"][0]["timeout"] for event, definition in hooks.items()} == {
+    assert {
+        event: definition[0]["hooks"][-1]["timeout"] for event, definition in hooks.items()
+    } == {
         "PermissionDenied": 5,
         "PermissionRequest": 5,
         "PreToolUse": 5,
@@ -399,7 +424,7 @@ def test_launcher_binding_uses_the_invoking_installation_and_marks_the_marker(
         "type": "stdio",
     }
     hook = json.loads(artifact.members["hooks/hooks.json"])["hooks"]["SessionStart"][0]
-    assert hook["hooks"][0]["command"].startswith(
+    assert hook["hooks"][-1]["command"].startswith(
         f"{shlex.quote(str(interpreter.resolve()))} -m yoetz hooks claude-observe "
     )
     # Two installations render two distinct artifacts; the digest binds the launcher.

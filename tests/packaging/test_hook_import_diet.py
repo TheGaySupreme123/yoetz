@@ -225,12 +225,44 @@ def test_ordinary_native_hooks_call_entry_without_loading_full_cli(
         assert "yoetz.cli.app" not in loaded
         assert "typer" not in loaded
         assert "pydantic" not in loaded
-        assert completed.stdout == b"{}\n"
+        assert completed.stdout == (
+            b'{"permission":"allow"}\n' if command[1] == "cursor-observe" else b"{}\n"
+        )
 
         diagnostic = root / "state" / "observation" / "hook-diagnostics.jsonl"
         assert diagnostic.is_file(), (
             "the ordinary profile event should reach its host-specific handler and record the "
             "minimal rejected payload in the isolated diagnostic stream"
         )
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+@pytest.mark.parametrize(
+    ("command", "payload"),
+    (
+        (
+            ("hooks", "startup-gate", "--host", "claude", "--event", "PreToolUse"),
+            b'{"session_id":"hook-import-diet-startup","cwd":"/project","tool_name":"Read"}',
+        ),
+        (("hooks", "startup-context", "--host", "claude"), b""),
+    ),
+)
+def test_required_startup_hooks_keep_the_import_diet(
+    command: tuple[str, ...], payload: bytes
+) -> None:
+    """Startup control must stay independent of observation and the full CLI graph."""
+
+    root = _short_private_root()
+    try:
+        report, completed = _run_entry_hook(command, payload=payload, isolated_root=root)
+        assert report["code"] == 0, report
+        assert report["error"] is None, report
+        loaded = set(cast(Sequence[object], report["modules"]))
+        assert "yoetz.cli.observe_hooks" not in loaded
+        assert "yoetz.cli.app" not in loaded
+        assert "typer" not in loaded
+        assert "pydantic" not in loaded
+        json.loads(completed.stdout.decode("utf-8"))
     finally:
         shutil.rmtree(root, ignore_errors=True)

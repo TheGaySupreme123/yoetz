@@ -61,8 +61,10 @@ current ids for `status`. Both startup messages route failures through exact con
 same-request recovery, and a named one-time repair before a blocked-startup user handoff.
 A first non-retryable failure alone does not permit continuing without Yoetz; see
 [startup failure precedence](../../guidance/coverage-and-receipts.md#startup-failure-precedence).
-Cursor has no demonstrated equivalent of Claude's PreToolUse deny gate in this integration;
-instruction delivery is not enforcement (#692).
+Native plugins can select `--startup-mode required` through the owner-reviewed lifecycle.
+See [required startup](required-startup.md) for current-plan gating, native MCP approval behavior,
+opt-out and exact acceptance limits. Portable Agent Plugins do not carry this gate; regular Cursor
+desktop enforcement remains unverified until the native acceptance run completes.
 
 Design basis, checked 2026-09-09: Cursor's [skills guidance](https://cursor.com/docs/skills)
 uses descriptions for relevance and loads references progressively. Yoetz therefore keeps the

@@ -947,6 +947,29 @@ def hooks_observe(
             pass
 
 
+@hooks_app.command("startup-context")
+def hooks_startup_context(
+    host: Annotated[Literal["claude", "cursor"], typer.Option("--host")],
+) -> None:
+    """Emit static native startup guidance without observation or service access."""
+
+    from yoetz.cli.startup_context import handle_startup_context
+
+    handle_startup_context(host=host)
+
+
+@hooks_app.command("startup-gate")
+def hooks_startup_gate(
+    host: Annotated[Literal["claude", "cursor"], typer.Option("--host")],
+    event: Annotated[str, typer.Option("--event")],
+) -> None:
+    """Run the owner-selected native required-startup hook."""
+
+    from yoetz.cli.startup_gate import handle_startup_gate
+
+    handle_startup_gate(host=host, event=event)
+
+
 @hooks_app.command("cursor-observe")
 def hooks_cursor_observe(
     event: Annotated[str, typer.Option("--event", help="Cursor hook event name.")],
@@ -980,7 +1003,9 @@ def hooks_cursor_observe(
         )
     except BaseException:
         try:
-            _stdout_json({})
+            from yoetz.cli.hook_io import cursor_context_output
+
+            _stdout_json(cursor_context_output(event, ""))
         except BaseException:
             pass
 
@@ -2407,6 +2432,13 @@ def _host_plugin_command(command_name: str) -> Callable[..., None]:
                 help="structural or ordinary native hooks; content capture requires separate consent.",
             ),
         ] = "structural",
+        startup_mode: Annotated[
+            str | None,
+            typer.Option(
+                "--startup-mode",
+                help="optional or required; defaults to the owned installed mode, or optional for a new install.",
+            ),
+        ] = None,
         ownership_name: Annotated[
             str,
             typer.Option("--mcp-ownership", help="external-registration or plugin-managed"),
@@ -2452,6 +2484,10 @@ def _host_plugin_command(command_name: str) -> Callable[..., None]:
         if harness in _PLUGIN_HOSTS and harness not in _PLUGIN_COMMAND_HOSTS[command_name]:
             _refuse_unsupported_plugin_command(harness, command_name)
             return
+        if startup_mode not in {None, "optional", "required"}:
+            raise typer.BadParameter("--startup-mode must be optional or required")
+        if startup_mode == "required" and (harness == "codex" or format_name != "native"):
+            raise typer.BadParameter("required startup needs native Claude or Cursor hooks")
         if observation_profile not in {"structural", "ordinary"}:
             raise typer.BadParameter("--observation-profile must be structural or ordinary")
         if observation_profile == "ordinary" and (harness == "codex" or format_name != "native"):
@@ -2486,6 +2522,7 @@ def _host_plugin_command(command_name: str) -> Callable[..., None]:
                 "project_root": project_root,
                 "format_name": format_name,
                 "observation_profile": observation_profile,
+                "startup_mode": startup_mode,
                 "ownership_name": ownership_name,
                 "route_profile": route_profile,
                 "requested_action": requested_action,
@@ -2506,6 +2543,7 @@ def _host_plugin_command(command_name: str) -> Callable[..., None]:
                     route_profile=route_profile,
                     development_enabled=development_enabled,
                     observation_profile=observation_profile,
+                    startup_mode=startup_mode or "optional",
                     json_output=json_output,
                 )
             )
@@ -2536,6 +2574,7 @@ def _host_plugin_command(command_name: str) -> Callable[..., None]:
                 "project_root": project_root,
                 "format_name": format_name,
                 "observation_profile": observation_profile,
+                "startup_mode": startup_mode,
                 "ownership_name": ownership_name,
                 "route_profile": route_profile,
                 "requested_action": requested_action,

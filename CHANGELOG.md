@@ -6,6 +6,10 @@ reverse-chronological released versions.
 
 ## Unreleased
 
+- Add opt-in required startup for native Claude Code and Cursor plugins, with scope-bound plan
+  checks, owner controls, and same-task pending-operation recovery (#692). Native acceptance remains
+  bounded as documented in the required-startup runbook.
+- Deliver native startup guidance independently of observation consent and availability (#692).
 - Claude Code sessions receive a compact MCP initialize block that fits the host's observed
   2,048-character rendering cap, with the "call `start` first" trigger and the late-start rule as
   its first two sentences; other hosts keep the full document (#789).

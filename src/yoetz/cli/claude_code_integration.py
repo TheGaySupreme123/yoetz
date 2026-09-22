@@ -20,6 +20,7 @@ from yoetz.adapters.integrations.claude_code_integration import (
     apply_claude_code_plugin,
     discover_claude_code,
     export_claude_code_plugin,
+    installed_claude_startup_mode,
     preview_claude_code_plugin,
     render_claude_code_plugin,
     status_claude_code_plugin,
@@ -96,6 +97,7 @@ def plugin_artifact(
     *,
     development_enabled: bool = False,
     observation_profile: str = "structural",
+    startup_mode: str = "optional",
 ) -> ClaudeCodePluginArtifact:
     ownerships = {
         "external-registration": McpOwnership.EXTERNAL_REGISTRATION,
@@ -112,6 +114,8 @@ def plugin_artifact(
         route = cast(Literal["strict", "policy"], route_name)
     else:
         raise ValueError("claude_code_mcp_route_invalid")
+    if startup_mode not in {"optional", "required"}:
+        raise ValueError("startup_mode_invalid")
     if observation_profile not in {"structural", "ordinary"}:
         raise ValueError("claude_code_observation_profile_invalid")
     return render_claude_code_plugin(
@@ -120,6 +124,7 @@ def plugin_artifact(
         yoetz_launcher=invoking_launcher(),
         development_enabled=development_enabled,
         observation_profile=cast(Literal["structural", "ordinary"], observation_profile),
+        startup_mode=cast(Literal["optional", "required"], startup_mode),
     )
 
 
@@ -131,6 +136,7 @@ def run_claude_code_plugin_export(
     development_enabled: bool,
     json_output: bool,
     observation_profile: str = "structural",
+    startup_mode: str = "optional",
 ) -> int:
     """Write the exact Claude plugin root for a ``claude --plugin-dir`` session.
 
@@ -146,6 +152,7 @@ def run_claude_code_plugin_export(
             route_profile,
             development_enabled=development_enabled,
             observation_profile=observation_profile,
+            startup_mode=startup_mode,
         )
         written = export_claude_code_plugin(artifact, output_root)
         _emit(
@@ -154,6 +161,7 @@ def run_claude_code_plugin_export(
                 "default_enabled": development_enabled,
                 "development": artifact.development,
                 "files": list(written),
+                "startup_mode": startup_mode,
                 "observation_profile": artifact.plan.host_extension_profile,
                 "mcp_ownership": artifact.plan.mcp_ownership.value,
                 "mcp_route_profile": artifact.plan.mcp_route_profile,
@@ -227,6 +235,7 @@ def run_claude_code_plugin_command(
     accept: bool,
     json_output: bool,
     observation_profile: str = "structural",
+    startup_mode: str | None = None,
     _state: Path | None = None,
     _presence: ArtifactUserPresencePort | None = None,
 ) -> int:
@@ -259,14 +268,23 @@ def run_claude_code_plugin_command(
             str(executable),
             identity,
         )
+        installed_mode = installed_claude_startup_mode(target)
+        startup_mode = startup_mode or installed_mode or "optional"
         artifact = plugin_artifact(
-            ownership_name, route_profile, observation_profile=observation_profile
+            ownership_name,
+            route_profile,
+            observation_profile=observation_profile,
+            startup_mode=startup_mode,
         )
         status = status_claude_code_plugin(target, artifact)
         if command == "status":
             _emit(
                 {
                     **_status_body(status),
+                    "startup_mode": startup_mode,
+                    "installed_startup_mode": installed_mode
+                    if status.installed_digest is not None
+                    else None,
                     "requested_observation_profile": artifact.plan.host_extension_profile,
                     "installed_observation_profile": (
                         artifact.plan.host_extension_profile
@@ -305,6 +323,7 @@ def run_claude_code_plugin_command(
                         admission_cleanup_preview("claude", project) if reverse_admission else None
                     ),
                     "artifact_digest": preview.artifact_digest,
+                    "startup_mode": startup_mode,
                     "observation_profile": artifact.plan.host_extension_profile,
                     "authorization": {
                         "operation": "plugin_artifact_apply",
@@ -366,6 +385,10 @@ def run_claude_code_plugin_command(
                     else None
                 ),
                 "artifact_digest": result.artifact_digest,
+                "startup_mode": startup_mode,
+                "installed_startup_mode": installed_claude_startup_mode(target)
+                if result.installed_digest is not None
+                else None,
                 "requested_observation_profile": artifact.plan.host_extension_profile,
                 "changed_files": list(result.changed_files),
                 "enabled": result.enabled,

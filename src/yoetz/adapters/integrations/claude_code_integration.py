@@ -714,10 +714,18 @@ def _mcp_json(route_profile: Literal["strict", "policy"], yoetz_launcher: tuple[
 
 
 def _hooks_json(
-    yoetz_launcher: tuple[str, ...], *, observation_profile: Literal["structural", "ordinary"]
+    yoetz_launcher: tuple[str, ...],
+    *,
+    observation_profile: Literal["structural", "ordinary"],
+    startup_mode: Literal["optional", "required"] = "optional",
 ) -> bytes:
     launcher = " ".join(shlex.quote(part) for part in yoetz_launcher)
     command = f'{launcher} hooks claude-observe --workspace "${{CLAUDE_PROJECT_DIR}}"'
+    startup_cue: dict[str, JsonValue] = {
+        "command": f"{launcher} hooks startup-context --host claude",
+        "timeout": 2,
+        "type": "command",
+    }
 
     def hook(event: str) -> dict[str, JsonValue]:
         # The hook entrypoint has a small import path, but a fresh process can
@@ -742,12 +750,24 @@ def _hooks_json(
             "PostToolUseFailure": [{"hooks": [hook("PostToolUseFailure")], "matcher": ".*"}],
             "SessionEnd": [{"hooks": [hook("SessionEnd")]}],
             "SessionStart": [
-                {"hooks": [hook("SessionStart")], "matcher": "startup|resume|clear|compact|fork"}
+                {
+                    "hooks": [startup_cue, hook("SessionStart")],
+                    "matcher": "startup|resume|clear|compact|fork",
+                }
             ],
             "Stop": [{"hooks": [hook("Stop")]}],
             "StopFailure": [{"hooks": [hook("StopFailure")]}],
         }
-        return canonical_encode(cast(JsonValue, {"hooks": hooks}))
+        return canonical_encode(
+            cast(
+                JsonValue,
+                {
+                    "hooks": _required_startup_hooks(hooks, launcher)
+                    if startup_mode == "required"
+                    else hooks
+                },
+            )
+        )
 
     hooks: dict[str, JsonValue] = {
         # Fires when auto mode (or a rule or another hook) denies the call, after the denial;
@@ -762,11 +782,66 @@ def _hooks_json(
         ],
         "SessionEnd": [{"hooks": [hook("SessionEnd")]}],
         "SessionStart": [
-            {"hooks": [hook("SessionStart")], "matcher": "startup|resume|clear|compact|fork"}
+            {
+                "hooks": [startup_cue, hook("SessionStart")],
+                "matcher": "startup|resume|clear|compact|fork",
+            }
         ],
         "Stop": [{"hooks": [hook("Stop")]}],
     }
-    return canonical_encode(cast(JsonValue, {"hooks": hooks}))
+    return canonical_encode(
+        cast(
+            JsonValue,
+            {
+                "hooks": _required_startup_hooks(hooks, launcher)
+                if startup_mode == "required"
+                else hooks
+            },
+        )
+    )
+
+
+def _required_startup_hooks(hooks: dict[str, JsonValue], launcher: str) -> dict[str, JsonValue]:
+    for event in (
+        "SessionStart",
+        "UserPromptSubmit",
+        "PreToolUse",
+        "PostToolUse",
+        "PostToolUseFailure",
+        "SessionEnd",
+    ):
+        gate: dict[str, JsonValue] = {
+            "hooks": [
+                {
+                    "type": "command",
+                    "timeout": 3,
+                    "command": f"{launcher} hooks startup-gate --host claude --event {event}",
+                }
+            ]
+        }
+        if event == "SessionStart":
+            gate["matcher"] = "startup|resume|clear|compact|fork"
+        if event in {"PreToolUse", "PostToolUse", "PostToolUseFailure"}:
+            gate["matcher"] = ".*"
+        existing = hooks.get(event, [])
+        assert isinstance(existing, list)
+        hooks[event] = [gate, *existing]
+    return hooks
+
+
+def installed_claude_startup_mode(
+    target: ClaudeCodePluginTarget,
+) -> Literal["optional", "required"] | None:
+    """Inspect marker-verified source bytes, including older owned versions."""
+    _validate_target(target)
+    root = Path(target.marketplace_root)
+    if not root.exists():
+        return "optional"
+    files = _safe_tree(root)
+    if not _valid_source_marker(files)[0]:
+        return None
+    hooks = files.get("plugins/yoetz/hooks/hooks.json", b"")
+    return "required" if b" hooks startup-gate --host claude " in hooks else "optional"
 
 
 def render_claude_code_plugin(
@@ -778,6 +853,7 @@ def render_claude_code_plugin(
     yoetz_launcher: Path | str | Sequence[str] | None = None,
     development_enabled: bool = False,
     observation_profile: Literal["structural", "ordinary"] = "structural",
+    startup_mode: Literal["optional", "required"] = "optional",
 ) -> ClaudeCodePluginArtifact:
     """Render Claude-native bytes from canonical packaged guidance.
 
@@ -788,6 +864,8 @@ def render_claude_code_plugin(
     """
 
     _version_tuple(version)
+    if startup_mode not in {"optional", "required"}:
+        raise ValueError("startup_mode_invalid")
     if type(mcp_ownership) is not McpOwnership:
         raise ValueError("claude_code_mcp_ownership_invalid")
     if type(development_enabled) is not bool:
@@ -815,7 +893,9 @@ def render_claude_code_plugin(
     }
     members: dict[str, bytes] = {
         ".claude-plugin/plugin.json": canonical_encode(manifest),
-        "hooks/hooks.json": _hooks_json(resolved_launcher, observation_profile=observation_profile),
+        "hooks/hooks.json": _hooks_json(
+            resolved_launcher, observation_profile=observation_profile, startup_mode=startup_mode
+        ),
         "skills/yoetz/SKILL.md": resources.read_bytes(_SKILL_PATH),
     }
     for name in _GUIDANCE_NAMES:

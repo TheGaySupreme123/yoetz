@@ -5510,6 +5510,28 @@ ADR-030 continuation `start_busy_same_identity` names exact once-only replay aft
 lease yield; `start_pending_same_identity` names a live lease and the bounded 60-second wait before
 exact replay. Runtime/catalog producer reasons alone never imply a released start reservation.
 
+## Native required-startup gate (issue #692)
+
+`render_claude_code_plugin` and native `render_cursor_plugin` accept `startup_mode=optional|required`.
+The default is optional. Lifecycle commands expose `--startup-mode`; omitting it preserves the
+marker-verified installed mode through `installed_claude_startup_mode` / `installed_cursor_startup_mode`.
+Status reports `startup_mode` and nullable `installed_startup_mode`. Common setup preserves that mode.
+The artifact inventory/digest owns the hook bytes; no public ledger/MCP wire schema changes.
+
+`hooks startup-context --host claude|cursor` reads only bounded packaged guidance and emits native
+SessionStart context. `hooks startup-gate --host ... --event ...` owns the separate required tool gate.
+Private `yoetz.startup-gate/1` state in `startup-gates/` uses owner-only files and a nonblocking
+per-host/session/workspace lock, generated generations, route ids, effective plan refs, accepted
+obligation refs and pending request refs/generations. Prose and host payloads are not retained.
+A successful host response only nominates readiness; `startup_gate_probe` reads live repository-bound
+compact status to confirm the route, plan and readable scope. An independent child deadline bounds
+service contention; no capture/drain locks or direct ledger reads are used.
+
+Claude returns deny or abstains. Cursor generic preToolUse returns allow/deny while the separate
+server-qualified MCP hook returns ask/deny, preserving ADR-018. Cursor permission hooks request
+failClosed; Claude command timeouts remain host-fail-open. No owner approval is inferred.
+See [required startup](runbooks/required-startup.md) for scope/recovery, lifecycle and proof limits.
+
 ### Setup next-step and Codex inspection targeting (#737)
 
 `setup status --next --operation local|review|connection` emits `yoetz.setup-readiness/1`

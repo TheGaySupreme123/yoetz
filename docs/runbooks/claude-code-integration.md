@@ -58,9 +58,9 @@ current ids for `status`. Both startup messages route failures through exact con
 same-request recovery, and a named one-time repair before a blocked-startup user handoff.
 A first non-retryable failure alone does not permit continuing without Yoetz; see
 [startup failure precedence](../../guidance/coverage-and-receipts.md#startup-failure-precedence).
-Claude documents PreToolUse `permissionDecision: deny` and exit 2, but this integration does not
-ship an owner-selected required-startup deny gate; instruction delivery is not enforcement
-(#692 remaining acceptance).
+Native plugins can select `--startup-mode required` through the owner-reviewed lifecycle.
+See [required startup](required-startup.md) for current-plan gating, opt-out, recovery and native
+acceptance limits. Optional instruction delivery alone remains non-enforcing.
 
 ### Instruction delivery on Claude Code (issue #789)
 
@@ -123,7 +123,8 @@ Yoetz keeps this workflow in the conversation because a forked skill lacks that 
 history. The [plugin guide](https://code.claude.com/docs/en/plugins) supplies the namespaced
 invocation; [hooks](https://code.claude.com/docs/en/hooks) and
 [sessions](https://code.claude.com/docs/en/sessions) explain the reload/resume context. Yoetz does
-not add `allowed-tools`, an automatic fork, or a new hook to personalize prose. The five shared
+not add `allowed-tools` or an automatic fork. The independent startup cue and optional required
+gate are described in the required-startup runbook. The five shared
 references still own evidence, consent, and receipt semantics. These sources justify instruction
 design, not a new tested Claude version or native behavioral acceptance result.
 

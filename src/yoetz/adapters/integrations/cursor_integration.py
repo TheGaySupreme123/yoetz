@@ -729,6 +729,7 @@ def _native_members(
     yoetz_launcher: tuple[str, ...],
     isolation_root: str | None,
     observation_profile: Literal["structural", "ordinary"],
+    startup_mode: Literal["optional", "required"] = "optional",
 ) -> dict[str, bytes]:
     manifest: dict[str, JsonValue] = {
         "author": {"name": "Yoetz contributors"},
@@ -770,6 +771,35 @@ def _native_members(
         event: [{"command": f"{hook_command} --event {event}", "timeout": hook_timeouts[event]}]
         for event in hook_events
     }
+    hooks["sessionStart"].insert(
+        0,
+        {
+            "command": f"{isolation_prefix}{launcher} hooks startup-context --host cursor",
+            "timeout": 2,
+        },
+    )
+    if startup_mode == "required":
+        # MCP ownership is available only on the specific before/after hooks.
+        for event in (
+            "sessionStart",
+            "beforeSubmitPrompt",
+            "preToolUse",
+            "beforeMCPExecution",
+            "afterMCPExecution",
+            "sessionEnd",
+        ):
+            hooks.setdefault(event, []).insert(
+                0,
+                {
+                    "command": f"{isolation_prefix}{launcher} hooks startup-gate --host cursor --event {event}",
+                    "timeout": 3,
+                    **(
+                        {"failClosed": True}
+                        if event in {"preToolUse", "beforeMCPExecution"}
+                        else {}
+                    ),
+                },
+            )
     members: dict[str, bytes] = {
         ".cursor-plugin/plugin.json": canonical_encode(manifest),
         "hooks/hooks.json": canonical_encode(cast(JsonValue, {"hooks": hooks, "version": 1})),
@@ -783,6 +813,23 @@ def _native_members(
     return members
 
 
+def installed_cursor_startup_mode(
+    target: CursorPluginTarget,
+) -> Literal["optional", "required"] | None:
+    """Inspect marker-verified installed bytes without assuming this version's digest."""
+    base, _identity = _target_path(target)
+    root = base / CURSOR_PLUGIN_RELATIVE_ROOT
+    if root.is_symlink():
+        return None
+    if not root.exists():
+        return "optional"
+    files = _safe_tree(root)
+    if not _valid_marker(files)[0]:
+        return None
+    hooks = files.get("hooks/hooks.json", b"")
+    return "required" if b" hooks startup-gate --host cursor " in hooks else "optional"
+
+
 def render_cursor_plugin(
     format_profile: PluginFormatProfile,
     *,
@@ -791,6 +838,7 @@ def render_cursor_plugin(
     source: PackagedPortableResources | None = None,
     yoetz_launcher: Path | str | Sequence[str] | None = None,
     observation_profile: Literal["structural", "ordinary"] = "structural",
+    startup_mode: Literal["optional", "required"] = "optional",
 ) -> CursorPluginArtifact:
     """Render one Cursor artifact from canonical packaged guidance bytes."""
 
@@ -803,6 +851,13 @@ def render_cursor_plugin(
         raise ValueError("cursor_mcp_ownership_invalid")
     if observation_profile not in {"structural", "ordinary"}:
         raise ValueError("cursor_observation_profile_invalid")
+    if startup_mode not in {"optional", "required"}:
+        raise ValueError("startup_mode_invalid")
+    if (
+        startup_mode == "required"
+        and format_profile is not PluginFormatProfile.CURSOR_PLUGIN_NATIVE
+    ):
+        raise ValueError("startup_mode_unsupported")
     resources = PackagedPortableResources() if source is None else source
     if (
         observation_profile == "ordinary"
@@ -826,6 +881,7 @@ def render_cursor_plugin(
         yoetz_launcher=resolved_yoetz_launcher,
         isolation_root=resolved_isolation_root,
         observation_profile=observation_profile,
+        startup_mode=startup_mode,
     )
     plan = PortablePluginPlan(
         name="yoetz",
