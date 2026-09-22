@@ -44,6 +44,7 @@ from yoetz.cli.project import project_app
 from yoetz.cli.render import (
     bounded_failure_line,
     ceremony_refusal_line,
+    render_error_recovery_lines,
     render_human_awaiting_human,
     render_human_check,
     render_human_error,
@@ -725,6 +726,12 @@ async def _call_workflow(
         branch = result.root
         if json_output or not sys.stdout.isatty():
             _stdout_json(wire)
+            if isinstance(branch, OperationFailureModel):
+                # stdout is the frozen wire failure result and admits no extra field, so the
+                # directive this renderer resolves from the token goes to stderr (ADR-030, #741).
+                recovery = render_error_recovery_lines(branch.error.safe_details)
+                if recovery:
+                    _stderr("\n".join(recovery))
         elif isinstance(branch, OperationFailureModel):
             _stderr(render_human_error(branch.error))
         elif isinstance(branch, CheckSuccessModel):

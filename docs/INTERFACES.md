@@ -273,12 +273,29 @@ instance, or ceremony refusal line whose local reason has a registered directive
 human-rendered CLI error path goes through one of `render_human_error`, `bounded_failure_line`, or
 `ceremony_refusal_line` in `yoetz.cli.render`, so the public-error renderer, the trusted-ceremony
 mapper, the interactive menu, the instance and path refusal line, the observe verbs, and the
-resource-integrity branch of `version` all render the same directive for the same reason. JSON
-renderings carry the continuation token where they already carry `safe_details` and gain no
-directive prose. Frozen command
+resource-integrity branch of `version` all render the same directive for the same reason. A
+coordination control refusal appends the directive its reason code maps to beneath its remedy line.
+Frozen command
 literals already allowlisted on `safe_details` (`prepare_command`, `review_command`,
 `authorize_command`) are rendered in that fixed order; which of them travel is decided upstream, so
 the clause reports what is present.
+
+JSON renderings carry the continuation token where they already carry `safe_details`. A JSON error
+body the CLI owns (the observe verbs' typed `error` object and the control-failure payload with
+`ok: false`) also carries a `recovery` object whenever the error resolves to a directive (ADR-030,
+issue #741). Its fields mirror the human lines one to one: `continuation`, `directive`, and, when
+present, `commands`, `guidance_uri`, and `nudge`. A claim-revision rejection carries `invariant` and
+`correction` instead of, or alongside, those fields. The CLI resolves the text itself from the
+checked-in registry, the same resolver its human lines use; nothing is read from the wire or from
+the error message. `recovery.continuation` is the stable key. The prose fields are advisory, may be
+reworded in any release without a schema change, and are never accepted back as input. A body with
+no resolvable directive has no `recovery` key.
+
+The workflow commands (`start`, `publish-work`, `check`, `respond`, `status`, `receipt`) print the
+frozen `operation-result-1.0.0` failure body on stdout in JSON or non-TTY mode. That schema admits no
+additional property, so stdout stays byte-identical to the wire result, and the CLI writes the same
+directive lines a terminal would show (`Continuation:`, `Next:`, …) to stderr. Exit codes are
+unchanged throughout.
 
 For `claim_revision_mismatch`, `safe_details` carries an allowlisted `invariant` naming the closed
 domain rule that rejected the draft, and both the MCP text projection and the CLI render an
