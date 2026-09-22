@@ -819,6 +819,11 @@ class Application:
     reconcile_observation_capture: Callable[[TaskRuntime], Awaitable[None]] | None = field(
         default=None, repr=False, compare=False
     )
+    # Historical loss is reconciled before a new CHECK freezes; already-frozen
+    # operations retain their original case. This hook may append loss evidence.
+    reconcile_observation_losses: Callable[[TaskRuntime], Awaitable[None]] | None = field(
+        default=None, repr=False, compare=False
+    )
     enforce_repository_identity: bool = True
     # The lineage coordinator is optional for pre-0004 test/catalog compositions.  READY
     # production composition supplies the SQLite-backed instance so status and start share one
@@ -860,6 +865,10 @@ class Application:
             raise TypeError("ready_recommendation_refresh_invalid")
         if self.observation_sweep_close is not None and not callable(self.observation_sweep_close):
             raise TypeError("observation_sweep_close_invalid")
+        if self.reconcile_observation_losses is not None and not callable(
+            self.reconcile_observation_losses
+        ):
+            raise TypeError("reconcile_observation_losses_invalid")
         if self.reconcile_observation_capture is not None and not callable(
             self.reconcile_observation_capture
         ):
@@ -2882,6 +2891,9 @@ class ServiceReadyContext:
     host_lineage_registry: HostLineageRegistryPort | None = field(
         default=None, repr=False, compare=False
     )
+    reconcile_observation_losses: Callable[[TaskRuntime], Awaitable[None]] | None = field(
+        default=None, repr=False, compare=False
+    )
     reconcile_observation_capture: Callable[[TaskRuntime], Awaitable[None]] | None = field(
         default=None, repr=False, compare=False
     )
@@ -2912,6 +2924,10 @@ class ServiceReadyContext:
             raise TypeError("ready_recommendation_refresh_invalid")
         if self.observation_sweep_close is not None and not callable(self.observation_sweep_close):
             raise TypeError("observation_sweep_close_invalid")
+        if self.reconcile_observation_losses is not None and not callable(
+            self.reconcile_observation_losses
+        ):
+            raise TypeError("reconcile_observation_losses_invalid")
         if self.reconcile_observation_capture is not None and not callable(
             self.reconcile_observation_capture
         ):
@@ -2979,6 +2995,7 @@ class ReadyApplicationFactory:
                 ready_recommendation_refresh=context.ready_recommendation_refresh,
                 observation_sweep_close=context.observation_sweep_close,
                 reconcile_observation_capture=context.reconcile_observation_capture,
+                reconcile_observation_losses=context.reconcile_observation_losses,
                 enforce_repository_identity=True,
                 lineage=context.lineage,
                 project_application=context.project_application,

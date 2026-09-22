@@ -203,12 +203,14 @@ subsequent encrypted-object readback, exact preservation of prior loss, and task
 The focused cases are in `tests/integration/service/test_capture_inventory_recovery.py` and
 `tests/unit/application/test_capture_recovery_scheduling.py`. They cover two real SQLite task
 stores and catalog routes, transient and permanently incomplete inventory, restart, cancellation
-while publication is running, an off-loop blocked task read, workspace/session fairness, real
+while publication is running, off-loop blocked task reads and both file-backed catalog scans, workspace/session fairness, real
 capture count pressure, and host-shaped Claude Code, Codex and Cursor parent/worker lanes. Runtime
 routing and control transport are in-process test doubles. These cases do not establish vendor
 installation, host deadline, full-daemon IPC throughput, or native concurrent delegation acceptance.
 
 Continue to run the existing fresh/retained concurrent adapter probe separately. Its latency and
-accounting measurements remain adapter-only evidence. Neither that probe nor a recovery summary
-proves that every local loss has reached task/check coverage; admission-independent loss
-propagation is a separate implementation slice of #695.
+accounting measurements remain adapter-only evidence. `tests/integration/service/test_selection_loss_recovery.py` separately verifies loss-to-task
+history and real check coverage with no subsequent native event, including committed-ledger/
+failed-acknowledgement restart recovery. These assertions use exact routed lanes and never
+reinterpret unattributed workspace totals as task loss. Neither a probe nor a recovery summary
+proves that every local loss has a known task attribution.

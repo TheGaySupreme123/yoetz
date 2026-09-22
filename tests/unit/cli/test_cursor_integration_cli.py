@@ -77,7 +77,7 @@ def _args(config: Path, project: Path, command: str, *extra: str) -> list[str]:
 
 
 def test_cursor_plugin_cli_binds_preview_install_status_and_remove(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # This scripted CLI lifecycle represents a legacy ambient install. Mock
     # only the adapter lookup; the process still runs with its isolated root.
@@ -129,6 +129,9 @@ def test_cursor_plugin_cli_binds_preview_install_status_and_remove(
         )
         == 0
     )
+    installed_body = json.loads(capsys.readouterr().out)
+    assert installed_body["installed_digest"] is not None
+    assert installed_body["installed_startup_mode"] == "optional"
     assert len(presence.seen) == 1
 
     status = runner.invoke(app, _args(config, project, "status"))
@@ -177,6 +180,7 @@ def test_cursor_plugin_cli_binds_preview_install_status_and_remove(
         )
         == 0
     )
+    capsys.readouterr()
     assert len(presence.seen) == 2
 
     remove_preview_result = runner.invoke(
@@ -206,6 +210,9 @@ def test_cursor_plugin_cli_binds_preview_install_status_and_remove(
         )
         == 0
     )
+    removed_body = json.loads(capsys.readouterr().out)
+    assert removed_body["installed_digest"] is None
+    assert removed_body["installed_startup_mode"] is None
     assert len(presence.seen) == 3
     assert not (config / "plugins" / "local" / "yoetz").exists()
     assert sentinel.read_text("utf-8") == "untouched\n"

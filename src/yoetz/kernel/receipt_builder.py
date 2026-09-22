@@ -30,6 +30,8 @@ from yoetz.domain.findings import (
 )
 from yoetz.domain.receipts import (
     CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP,
+    COMPLETION_CLAIM_OUTSIDE_PLAN_GAP,
+    COMPLETION_PLAN_NOT_CLAIMED_GAP,
     COMPLETION_SCOPE_DECLARED_NONE_GAP,
     COMPLETION_SCOPE_UNDECLARED_GAP,
     OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP,
@@ -68,6 +70,10 @@ from yoetz.domain.values import (
 )
 from yoetz.kernel.claims import effective_claim_items
 from yoetz.kernel.command_attempts import command_attempts
+from yoetz.kernel.completion_scope import (
+    SCOPE_REPAIR,
+    completion_scope_differences,
+)
 from yoetz.kernel.deterministic_checks import CaseAvailabilityFacts, CaseGap
 from yoetz.kernel.finding_resolution import finding_resolution_explanation
 from yoetz.kernel.lineage import LineageEvaluation, LineageRollupState
@@ -542,6 +548,37 @@ def _select_gaps(context: ReceiptBuildContext) -> tuple[ReceiptGap, ...]:
         context.projection.plans,
         context.projection.coverage_gaps,
     )
+    differences = completion_scope_differences(context.projection)
+
+    def scope_detail(code: str) -> str | None:
+        if code not in {COMPLETION_CLAIM_OUTSIDE_PLAN_GAP, COMPLETION_PLAN_NOT_CLAIMED_GAP}:
+            return None
+        pairs = [
+            (row.claim_id, refs)
+            for row in differences
+            if (
+                refs := (
+                    row.outside_plan
+                    if code == COMPLETION_CLAIM_OUTSIDE_PLAN_GAP
+                    else row.not_claimed
+                )
+            )
+        ]
+        # The gap code can be retained from a frozen check while the current projection has
+        # already repaired the relation. Do not render a contradictory zero-count detail.
+        if not pairs:
+            return None
+        count = sum(len(refs) for _, refs in pairs)
+        previews = [f"{claim}: {ref}" for claim, refs in pairs for ref in refs][:16]
+        relation_text = "; ".join(previews)
+        if count > 16:
+            relation_text += "; additional relations omitted"
+        return (
+            f"{len(pairs)} completion claim(s), {count} obligation relation(s)."
+            + (f" {relation_text}." if relation_text else "")
+            + f" {SCOPE_REPAIR}"
+        )
+
     values = tuple(
         ReceiptGap(
             code=gap.code,
@@ -550,7 +587,7 @@ def _select_gaps(context: ReceiptBuildContext) -> tuple[ReceiptGap, ...]:
                 plan_scope.no_obligations_reason.value
                 if gap.code == COMPLETION_SCOPE_DECLARED_NONE_GAP
                 and plan_scope.no_obligations_reason is not None
-                else None
+                else scope_detail(gap.code)
             ),
         )
         for gap in sorted(
@@ -1242,6 +1279,18 @@ def _sections(
             )
         else:
             gap_body = f"Coverage is limited by: {', '.join(gap_codes)}."
+        if COMPLETION_CLAIM_OUTSIDE_PLAN_GAP in gap_codes:
+            gap_body += (
+                " A completion claim covers obligations outside the effective plan. " + SCOPE_REPAIR
+            )
+        if COMPLETION_PLAN_NOT_CLAIMED_GAP in gap_codes:
+            gap_body += (
+                " Some declared plan obligations are outside a completion claim; whole-plan completion is not established. "
+                + SCOPE_REPAIR
+            )
+            bodies[ReceiptSectionKey.OUTSTANDING_WORK] += (
+                " Declared scope remains outside a completion claim, regardless of obligation resolution."
+            )
         if "routine_read_detail_omitted" in gap_codes:
             gap_body += (
                 " Successful routine reads are represented by bounded source summaries; "
@@ -1352,6 +1401,7 @@ def build_receipt(
             key=_ascii_key,
         )
     )
+    proof_state_cache: dict[tuple[int, int, str], ProjectionState | None] = {}
     sections = _sections(
         include=include,
         conclusion=conclusion,
@@ -1394,7 +1444,10 @@ def build_receipt(
         resolution_explanations=tuple(
             f"{finding.finding_id}: "
             + finding_resolution_explanation(
-                context.projection, finding.finding_id, context.records
+                context.projection,
+                finding.finding_id,
+                context.records,
+                proof_state_cache=proof_state_cache,
             )
             for finding in retained_findings[:10]
         )

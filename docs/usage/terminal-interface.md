@@ -281,3 +281,15 @@ all.
 
 If your environment cannot suspend, Yoetz says so and names the command to run instead. It does
 not offer to take the secret through the window as a fallback.
+
+For an operation-specific next command outside the interface, run
+`yoetz setup status --next --operation local|review|connection` with the same selected project,
+host executable and configuration root. Local setup does not require a provider; connection-only
+setup does not require provider sign-in. AI-powered review needs the provider binding before its
+repository privacy grant. Secrets still belong only in the trusted terminal ceremony. See
+[setup order and recovery](install-and-first-run.md#find-the-next-setup-step).
+
+`yoetz setup vault` initializes or unlocks only the selected installation's storage using the
+existing protected terminal ceremony. It diagnoses credential-store availability, retains the
+explicit passphrase fallback where needed, and stops before provider selection or privacy grants.
+It requires a local interactive terminal; agents show that continuation without supplying secrets.

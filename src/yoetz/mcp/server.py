@@ -425,6 +425,7 @@ def build_bridge_runtime(
     instructions = server_instructions(
         route_profile,
         semantic_destination=semantic_destination if route_profile == "policy" else None,
+        host_profile=host_profile,
     )
     if not instructions:
         raise RuntimeError("mcp_instructions_empty")

@@ -188,5 +188,5 @@ def test_setup_status_json_stays_canonical(
     result = _RUNNER.invoke(cli.app, ["setup", "status", "--json"])
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
-    assert payload["schema"] == "yoetz.setup-status/1"
+    assert payload["schema"] == "yoetz.setup-status/2"
     assert set(payload) >= {"discovered", "integration", "marker_present", "schema", "service"}

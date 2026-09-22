@@ -16,11 +16,12 @@ projection checkpoint all read the same fact.
 
 from __future__ import annotations
 
+from collections.abc import MutableMapping
 from dataclasses import replace
 from typing import Final
 
-from yoetz.domain.events import CheckRecordedPayload, LedgerRecord
-from yoetz.domain.findings import Finding, FindingOrigin, ResponseDisposition
+from yoetz.domain.events import CheckRecordedPayload, ClaimKind, LedgerRecord, RequestedItemKind
+from yoetz.domain.findings import Finding, FindingKind, FindingOrigin, ResponseDisposition
 from yoetz.domain.receipts import (
     OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
     OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP,
@@ -31,7 +32,9 @@ from yoetz.domain.receipts import (
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
     SEMANTIC_REVIEW_NOT_REQUESTED_GAP,
 )
-from yoetz.domain.values import EventId, FindingId
+from yoetz.domain.values import EventId, FindingId, ResultId
+from yoetz.kernel.claims import effective_claim_items
+from yoetz.kernel.plan_scope import current_plan_scope
 from yoetz.kernel.projections import FindingProjectionRecord, ProjectionState
 from yoetz.protocol.coverage import LedgerFreshness
 from yoetz.protocol.models import SemanticReason, SemanticStatus
@@ -73,7 +76,8 @@ _SEMANTIC_ONLY_GAPS: Final = frozenset(
 # Every other gap (redacted or unavailable payloads, redacted objects, missing refs, unknown
 # events, completion-scope gaps, import ranges, and any code not named here) means the check could
 # not read or bound the material, and blocks both proof classes. The set is closed on purpose: a
-# new gap code blocks resolution until someone decides otherwise here.
+# new gap code blocks resolution until someone decides otherwise here. Command gaps are never
+# added to this set: the separately proved subject partition below is their only exception.
 _EVIDENCE_STRENGTH_GAPS: Final = frozenset(
     {
         "evidence_content_digest_only",
@@ -108,6 +112,100 @@ _UNPROVEN_FRESHNESS: Final = frozenset(
         LedgerFreshness.STALE_AFTER_MATERIAL_CHANGE,
     }
 )
+_COMMAND_GAPS: Final = frozenset({"command_attempt_uncorroborated", "command_attempt_mismatch"})
+# Keep this local to avoid importing the policy module while reducers import this module. If the
+# work-integrity pack changes version, its action-result exception must be reviewed explicitly.
+_ACTION_WITHOUT_RESULT_POLICY: Final = ("work-integrity", "0.1.0")
+ProofStateCache = MutableMapping[tuple[int, int, str], ProjectionState | None]
+
+
+def _command_gap_partition(
+    finding: Finding, check: CheckRecordedPayload, state: ProjectionState | None
+) -> tuple[str, ...] | None:
+    """Conservatively bound every possible command-gap owner at the tested frontier.
+
+    Empty means proven independent. IDs mean overlapping command obligations; None means that
+    independence is unknown. We deliberately include matching command obligations as well:
+    absence of a relation on this read must never be turned into an absence proof. This narrow
+    partition needs no new check payload and never reinterprets a command as execution evidence.
+    """
+    if (
+        state is None
+        or state.frontier < check.subject_frontier.sequence
+        or finding.origin is not FindingOrigin.DETERMINISTIC
+        or finding.kind is not FindingKind.ACTION_WITHOUT_RESULT
+        or (finding.policy_id, finding.policy_version) != _ACTION_WITHOUT_RESULT_POLICY
+        or finding.coverage.ledger_freshness in _UNPROVEN_FRESHNESS
+        or not set(finding.coverage.known_gaps) <= _DETERMINISTIC_PROOF_TOLERATED_GAPS
+        or state.coverage_gaps
+        or len(finding.subject_refs) != 1
+    ):
+        return None
+    # A check's own finding suffix does not change these inputs. A newer material row or
+    # unreadable input prevents us from using current state as the historical checked state.
+    for rows in (state.plans, state.obligations, state.actions, state.results, state.claims):
+        if any(
+            row.payload is None or row.source_frontier > check.subject_frontier.sequence
+            for row in rows.values()
+        ):
+            return None
+    scope = current_plan_scope(state.plans, state.coverage_gaps)
+    if not scope.has_plan or scope.effective_obligation_refs is None:
+        return None
+    selected = {
+        ref
+        for _, row in effective_claim_items(state)
+        if row.payload is not None and row.payload.claim_kind is ClaimKind.COMPLETION
+        for ref in row.payload.obligation_refs
+    }
+    selected.update(
+        key
+        for key, row in state.obligations.items()
+        if row.payload is not None and row.payload.status.value == "resolved"
+    )
+    selected.intersection_update(scope.effective_obligation_refs)
+    if any(key not in state.obligations for key in selected):
+        return None
+    commands = {
+        key
+        for key in selected
+        if (payload := state.obligations[key].payload) is not None
+        and any(item.item_kind is RequestedItemKind.COMMAND for item in payload.requested_items)
+    }
+    if not commands:
+        return None  # No bounded producer for the recorded command gap.
+    actions = [
+        row for row in state.actions.values() if row.source_event_id == finding.subject_refs[0]
+    ]
+    if len(actions) != 1 or (action := actions[0].payload) is None or not action.obligation_refs:
+        return None
+    if any(ref not in state.obligations for ref in action.obligation_refs):
+        return None
+    if not any(
+        row.payload is not None and row.payload.action_id == action.action_id
+        for row in state.results.values()
+    ):
+        return None
+    related_through_action = set(commands.intersection(action.obligation_refs))
+    # command_attempts has a second explicit relation channel: a resolved command obligation can
+    # cite a result whose action is this very action. Treat that owner as overlapping too; otherwise
+    # an unknown command relation could be mislabeled independent merely because the action omitted
+    # the obligation from its direct refs.
+    related_through_result = {
+        key
+        for key in commands
+        if (
+            (payload := state.obligations[key].payload) is not None
+            and any(
+                ref.startswith("res_")
+                and (result := state.results.get(ResultId(ref))) is not None
+                and result.payload is not None
+                and result.payload.action_id == action.action_id
+                for ref in payload.resolution_evidence_refs
+            )
+        )
+    }
+    return tuple(sorted(related_through_action | related_through_result))
 
 
 def issue_key(finding: Finding) -> IssueKey:
@@ -183,6 +281,8 @@ def qualifying_check_resolves(
     finding_source_frontier: int,
     check: CheckRecordedPayload,
     returned_issue_keys: frozenset[IssueKey],
+    *,
+    proof_state: ProjectionState | None = None,
 ) -> bool:
     """True when *check* proves the issue *finding* reports is absent from the state it tested.
 
@@ -196,7 +296,9 @@ def qualifying_check_resolves(
         raise ValueError("finding_resolution_invalid")
     if type(finding_source_frontier) is not int or finding_source_frontier < 1:
         raise ValueError("finding_resolution_invalid")
-    return not resolution_blockers(finding, finding_source_frontier, check, returned_issue_keys)
+    return not resolution_blockers(
+        finding, finding_source_frontier, check, returned_issue_keys, proof_state=proof_state
+    )
 
 
 def resolution_blockers(
@@ -204,6 +306,8 @@ def resolution_blockers(
     finding_source_frontier: int,
     check: CheckRecordedPayload,
     returned_issue_keys: frozenset[IssueKey],
+    *,
+    proof_state: ProjectionState | None = None,
 ) -> tuple[str, ...]:
     """Explain the exact qualification predicate without weakening its proof requirements."""
 
@@ -230,14 +334,86 @@ def resolution_blockers(
             reasons.append("semantic_review_not_completed")
     else:
         tolerated = _DETERMINISTIC_PROOF_TOLERATED_GAPS
-        if not _deterministic_freshness_proven(finding, check, gaps):
+        freshness_gaps = gaps
+        if gaps & _COMMAND_GAPS:
+            partition = _command_gap_partition(finding, check, proof_state)
+            if partition == ():
+                tolerated = tolerated | _COMMAND_GAPS
+                freshness_gaps = gaps - _COMMAND_GAPS
+            elif partition is not None:
+                reasons.append("command_relation_overlaps_obligation:" + ",".join(partition[:16]))
+                if len(partition) > 16:
+                    reasons.append("additional_command_obligations_omitted")
+            else:
+                reasons.append("command_relation_independence_unproven")
+        if not _deterministic_freshness_proven(finding, check, freshness_gaps):
             reasons.append("freshness_or_original_proof_unreadable")
     reasons.extend("coverage:" + gap for gap in sorted(gaps - tolerated))
     return tuple(reasons)
 
 
+def _command_partition_candidate(
+    finding: Finding,
+    finding_source_frontier: int,
+    check: CheckRecordedPayload,
+    returned_issue_keys: frozenset[IssueKey],
+) -> bool:
+    """Return whether replay could affect this explanation's command-gap result.
+
+    Keep the cheap shape and applicability guards ahead of historical replay. In particular, a
+    status page may contain many semantic findings that can never use the local command exception.
+    """
+    return (
+        bool(set(check.coverage.known_gaps) & _COMMAND_GAPS)
+        and finding.origin is FindingOrigin.DETERMINISTIC
+        and finding.kind is FindingKind.ACTION_WITHOUT_RESULT
+        and (finding.policy_id, finding.policy_version) == _ACTION_WITHOUT_RESULT_POLICY
+        and finding_source_frontier <= check.subject_frontier.sequence
+        and issue_key(finding) not in returned_issue_keys
+        and check.suppressed_count == 0
+        and _policy_completed(check, finding)
+        and _scope_covers(check, finding)
+        and finding.coverage.ledger_freshness not in _UNPROVEN_FRESHNESS
+        and set(finding.coverage.known_gaps) <= _DETERMINISTIC_PROOF_TOLERATED_GAPS
+        and len(finding.subject_refs) == 1
+    )
+
+
+def _historical_proof_state(
+    check: CheckRecordedPayload,
+    candidate: LedgerRecord,
+    records: tuple[LedgerRecord, ...],
+    cache: ProofStateCache,
+) -> ProjectionState | None:
+    """Replay the pre-check projection, caching it for findings sharing that candidate."""
+    candidate_sequence = candidate.ledger.ingestion_sequence
+    key = (
+        candidate_sequence,
+        check.subject_frontier.sequence,
+        check.subject_frontier.head_digest,
+    )
+    if key in cache:
+        return cache[key]
+
+    # Rebuild the projection immediately before the candidate check. The shared partition then
+    # applies its own frontier guards: newer plan/obligation/action/result/claim rows fail closed,
+    # while an observation/evidence/finding suffix that the reducer permits remains equivalent.
+    proof_state: ProjectionState | None = None
+    pre_check = tuple(row for row in records if row.ledger.ingestion_sequence < candidate_sequence)
+    if len(pre_check) == candidate_sequence - 1:
+        from yoetz.kernel.reducers import replay
+
+        proof_state = replay(pre_check)
+    cache[key] = proof_state
+    return proof_state
+
+
 def finding_resolution_explanation(
-    state: ProjectionState, finding_id: FindingId, records: tuple[LedgerRecord, ...]
+    state: ProjectionState,
+    finding_id: FindingId,
+    records: tuple[LedgerRecord, ...],
+    *,
+    proof_state_cache: ProofStateCache | None = None,
 ) -> str:
     """A bounded presentation derived from the latest recorded candidate, never response prose."""
 
@@ -269,8 +445,18 @@ def finding_resolution_explanation(
     keys = frozenset(
         issue_key(row.payload) for row in returned if row is not None and row.payload is not None
     )
-    reasons = resolution_blockers(
+    proof_state = None
+    if _command_partition_candidate(
         finding_record.payload, finding_record.source_frontier, check, keys
+    ):
+        proof_state = _historical_proof_state(
+            check,
+            candidate,
+            records,
+            {} if proof_state_cache is None else proof_state_cache,
+        )
+    reasons = resolution_blockers(
+        finding_record.payload, finding_record.source_frontier, check, keys, proof_state=proof_state
     )
     returned_again = "issue_returned_again" in reasons
     relation = "Returned again" if returned_again else "Not returned; absence remains unproven"
@@ -306,6 +492,8 @@ def apply_check_resolution(
     findings: dict[FindingId, FindingProjectionRecord],
     check: CheckRecordedPayload,
     check_event_id: EventId,
+    *,
+    proof_state: ProjectionState | None = None,
 ) -> None:
     """Fold one recorded check into the resolution facts of the findings it could speak to.
 
@@ -335,7 +523,9 @@ def apply_check_resolution(
             or current_id in check.returned_finding_ids
         ):
             continue
-        if qualifying_check_resolves(record.payload, record.source_frontier, check, frozen_keys):
+        if qualifying_check_resolves(
+            record.payload, record.source_frontier, check, frozen_keys, proof_state=proof_state
+        ):
             findings[current_id] = replace(record, resolved_by_check_event_id=check_event_id)
 
 

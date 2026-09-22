@@ -3588,7 +3588,11 @@ async def _bootstrap_capture_reservations(
         recovery_routes = getattr(catalog, "recovery_routes", None)
         if not callable(recovery_routes):
             raise ValueError("capture_catalog_inventory_unavailable")
+        if not generation_is_current():
+            raise ValueError("capture_generation_changed")
         raw_routes = await cast(Callable[[], Awaitable[tuple[TaskRoute, ...]]], recovery_routes)()
+        if not generation_is_current():
+            raise ValueError("capture_generation_changed")
         if type(raw_routes) is not tuple:
             raise ValueError("capture_catalog_inventory_invalid")
         if any(type(route) is not TaskRoute for route in raw_routes):
@@ -3686,6 +3690,8 @@ async def _bootstrap_capture_reservations(
                         await runtime.release(task_runtime)
         # Re-read the catalog after all bundle reads.  A route change while
         # the inventory was in flight must not mint a proof for a stale set.
+        if not generation_is_current():
+            raise ValueError("capture_generation_changed")
         final_raw_routes = await cast(
             Callable[[], Awaitable[tuple[TaskRoute, ...]]], recovery_routes
         )()
@@ -5945,6 +5951,7 @@ async def provide_service_ready_context(
         lineage=lineage,
         project_application=project_application,
         host_lineage_registry=host_lineage_registry,
+        reconcile_observation_losses=observation_coordinator.reconcile_task_selection_losses,
     )
 
 

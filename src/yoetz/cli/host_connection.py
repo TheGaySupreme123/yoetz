@@ -50,11 +50,13 @@ CONNECTION_ERRORS = (
     OSError,
     ValueError,
 )
+_POSTURE_ERRORS = (*CONNECTION_ERRORS, RuntimeError)
 
 
-def installation_rows() -> list[JsonValue]:
-    return [
-        {
+def installation_rows(project: Path | None = None) -> list[JsonValue]:
+    rows: list[JsonValue] = []
+    for item in discover_hosts():
+        row: dict[str, JsonValue] = {
             "host": item.host,
             "label": item.label,
             "executable": str(item.executable),
@@ -62,9 +64,44 @@ def installation_rows() -> list[JsonValue]:
             "config_root": str(item.config_root),
             "support": item.support,
             "connection_observed": False,
+            "activation_cues": None,
         }
-        for item in discover_hosts()
-    ]
+        if item.host == "claude":
+            row["activation_cues"] = claude_activation_cues(item, project)
+        rows.append(row)
+    return rows
+
+
+def claude_activation_cues(
+    installation: HostInstallation, project: Path | None = None
+) -> dict[str, JsonValue] | None:
+    """Read-only Claude activation posture for ``setup status`` (issue #789).
+
+    Names whether the installation would launch Yoetz through the plugin or a bare MCP entry and
+    whether any installed hook can deliver the SessionStart cue. A bare entry has no cue; the
+    guided connection (``yoetz setup run --host claude``) installs the plugin that carries one. ``None``
+    means the posture could not be read, never that no registration exists.
+    """
+
+    from yoetz.adapters.integrations.claude_code_integration import (
+        observe_claude_code_activation_cues,
+    )
+
+    launcher: tuple[str, ...] | None = None
+    invocation = invoking_launcher()
+    if invocation is not None:
+        try:
+            launcher = resolve_yoetz_launcher(invocation)
+        except _POSTURE_ERRORS:
+            launcher = None
+    try:
+        return observe_claude_code_activation_cues(
+            project_root=(Path.cwd() if project is None else project).absolute(),
+            claude_config_root=installation.config_root,
+            yoetz_launcher=launcher,
+        ).as_json()
+    except _POSTURE_ERRORS:
+        return None
 
 
 def select_installation(
@@ -274,6 +311,14 @@ def run_host_connection(
                 "next_step": "Run the same setup command in a trusted local terminal; inspect status before retrying a partial connection.",
             }
         )
+        if host == "codex" and reason in {"destination_conflict", "foreign_entry_present"}:
+            report["next_step"] = (
+                "The selected Codex home and foreign configuration were preserved. "
+                "Create a fresh directory owned only by you (mode 0700), then rerun this "
+                "setup command with --host-config-root pointing to that directory. "
+                "For legacy Codex setup use --codex-home. If the conflict is in the "
+                "project's marketplace, inspect that file first; a new home cannot repair it."
+            )
         if isinstance(error, ConnectionError) and error.status is not None:
             report["status"] = error.status
         code = 1

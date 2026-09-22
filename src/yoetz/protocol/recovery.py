@@ -514,6 +514,7 @@ _LOCAL_REASON_CONTINUATIONS: Final[Mapping[str, str]] = MappingProxyType(
         "unknown_config_env_var": "config_correction_required",
         "unknown_config_key": "config_correction_required",
         # Human ceremony and consent (issues #147, #489, #519).
+        "ceremony_service_unavailable": "local_service_unavailable",
         "ceremony_unsupported": "ceremony_refusal_terminal",
         "chat_user_attestation_invalid": "consent_relay_correction",
         "chat_user_reauthentication_unavailable": "consent_relay_correction",
@@ -534,6 +535,7 @@ _LOCAL_REASON_CONTINUATIONS: Final[Mapping[str, str]] = MappingProxyType(
         "trusted_console_required": "consent_ceremony_required",
         "vault_locked": "vault_unlock_required",
         # Provider credentials (issue #520).
+        "provider_binding_required": "provider_setup_required",
         "provider_credential_invalid": "provider_setup_required",
         "provider_credential_required": "provider_setup_required",
         "provider_not_configured": "provider_setup_required",

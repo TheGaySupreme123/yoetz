@@ -154,6 +154,12 @@ asked; CI owns it.
   friends) is environment-dependent, not a standing baseline: re-run from a short checkout path
   before blaming a change.
 
+Material work in this checkout dogfoods the product: when a session will edit files, run
+state-changing commands, or delegate, call the Yoetz `start` tool before that work (load its schema
+by name first if the host lists only tool names), publish material transitions, and end with a
+`receipt`. If work began before `start`, call it now and disclose the uncovered prefix. This is
+an expectation, not an enforcement gate (#692 owns that); questions answered from reading skip it.
+
 For any packaged-resource inventory change, use the owning fixed-point command instead of running
 its dependent generators individually:
 

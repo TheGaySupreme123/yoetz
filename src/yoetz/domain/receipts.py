@@ -64,6 +64,8 @@ from yoetz.protocol.models import (
 
 __all__ = [
     "CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP",
+    "COMPLETION_CLAIM_OUTSIDE_PLAN_GAP",
+    "COMPLETION_PLAN_NOT_CLAIMED_GAP",
     "COMPLETION_SCOPE_DECLARED_NONE_GAP",
     "COMPLETION_SCOPE_UNDECLARED_GAP",
     "OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP",
@@ -107,6 +109,10 @@ __all__ = [
 # a clean completion verdict.
 COMPLETION_SCOPE_UNDECLARED_GAP: Final = "completion_scope_undeclared"
 COMPLETION_SCOPE_DECLARED_NONE_GAP: Final = "completion_scope_declared_none"
+# Completion claims are compared with the current plan independently. These are coverage facts,
+# not policy findings, and remain bounded to two fixed relation codes regardless of claim count.
+COMPLETION_CLAIM_OUTSIDE_PLAN_GAP: Final = "completion_claim_outside_plan"
+COMPLETION_PLAN_NOT_CLAIMED_GAP: Final = "completion_plan_not_claimed"
 # The applicable check still contributes its coverage, but only because every material event
 # appended after it answered a finding that same check returned. Its verdict is current as of the
 # frontier it tested, not the receipt's; the gap keeps the receipt from reading as re-checked here.

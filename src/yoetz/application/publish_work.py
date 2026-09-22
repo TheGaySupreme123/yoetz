@@ -79,6 +79,8 @@ from yoetz.domain.values import (
 from yoetz.domain.values import (
     JsonValue as DomainJsonValue,
 )
+from yoetz.kernel.completion_scope import with_completion_scope_coverage
+from yoetz.kernel.projections import PROJECTION_VERSION, ProjectionState
 from yoetz.kernel.reducers import replay
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.diagnostics import RuntimeCapability
@@ -91,6 +93,7 @@ from yoetz.ports.ledger import (
     OperationKind,
     OperationRecord,
     OperationState,
+    ProjectionView,
 )
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef, ObjectSource, StagedObject
 from yoetz.ports.runtime import (
@@ -936,6 +939,45 @@ async def _load_accepted_records(
     return ordered
 
 
+async def _projection_at_result_frontier(
+    runtime: TaskRuntime,
+    result: AppendResult,
+) -> ProjectionState:
+    """Read the adapter's validated projection and replay only on a frontier mismatch.
+
+    Both ledger adapters already replay and retain the exact projection as part of an accepted
+    append. Replaying the task-global history here duplicated that O(n) work on every successful
+    publish. A replayed operation or a concurrent suffix can point at an older frontier; in those
+    cases the cached projection cannot answer the requested historical result and the exact prefix
+    replay remains the conservative fallback.
+    """
+
+    stored = await runtime.ledger.load_projection(
+        runtime.session_id,
+        ProjectionView.CANDIDATE_FINDINGS,
+    )
+    if (
+        stored is not None
+        and stored.frontier == result.result_frontier
+        and stored.lag == 0
+        and not stored.rebuild_required
+        and stored.projection_version == PROJECTION_VERSION
+        and type(stored.state) is ProjectionState
+        and stored.state.frontier == stored.frontier.sequence
+        and stored.state.head_digest == stored.frontier.head_digest
+    ):
+        return stored.state
+    prefix = tuple(
+        [
+            row
+            async for row in runtime.ledger.load_events(
+                runtime.session_id, through=result.result_frontier.sequence
+            )
+        ]
+    )
+    return replay(prefix)
+
+
 def _accepted_model(record: LedgerRecord) -> PublishWorkAcceptedEventModel:
     return PublishWorkAcceptedEventModel(
         event_id=record.event_id,
@@ -968,6 +1010,8 @@ async def _internal_result(
     if result.warnings != expected_warnings:
         raise _error(PublicErrorCode.STORAGE_CORRUPT, "The accepted warnings are invalid.")
     records = await _load_accepted_records(runtime, result)
+    projection = await _projection_at_result_frontier(runtime, result)
+    coverage = with_completion_scope_coverage(prepared.coverage, projection)
     return PublishWorkInternalResult(
         protocol_version="0.1",
         schema_version="1.0.0",
@@ -982,8 +1026,8 @@ async def _internal_result(
         result_frontier=result.result_frontier,
         accepted_events=tuple(_accepted_model(record) for record in records),
         warning_codes=tuple(item.value for item in result.warnings),
-        coverage=prepared.coverage,
-        gaps=prepared.coverage.known_gaps,
+        coverage=coverage,
+        gaps=coverage.known_gaps,
         versions=PublishWorkVersionSliceModel(
             protocol_version="0.1",
             engine_version=runtime.engine_version,
@@ -1264,7 +1308,7 @@ async def _preflight_dry_run_feasibility(
     runtime: TaskRuntime,
     request: PublishWorkRequestModel,
     prepared: PreparedPublication,
-) -> Frontier:
+) -> tuple[Frontier, Coverage]:
     """Reject batches the real append path would reject before reporting would_accept.
 
     Matches ``append_batch`` acceptance for frontier sequence, event-id uniqueness, causal
@@ -1347,7 +1391,7 @@ async def _preflight_dry_run_feasibility(
             )
             provisional.append(record)
             previous_ledger = record.entry_digest
-        replay((*existing_records, *provisional))
+        projected = replay((*existing_records, *provisional))
     except ObligationResolutionMismatch as exc:
         draft_index: int | None = None
         if exc.event_id is not None:
@@ -1381,7 +1425,7 @@ async def _preflight_dry_run_feasibility(
         TypeError,
     ):
         raise _event_invalid("invalid_event_value_type") from None
-    return current
+    return current, with_completion_scope_coverage(prepared.coverage, projected)
 
 
 async def _execute_dry_run(
@@ -1394,7 +1438,7 @@ async def _execute_dry_run(
 
     # Intentionally skip operation lookup: dry_run must not consume or conflict on request_id.
     prepared = prepare_publication(request, channel=channel, app=app)
-    current = await _preflight_dry_run_feasibility(runtime, request, prepared)
+    current, coverage = await _preflight_dry_run_feasibility(runtime, request, prepared)
     frontier = FrontierModel.model_validate(dict(current.as_wire()))
     preview = tuple(
         PublishWorkDryRunPreviewEventModel(
@@ -1420,8 +1464,8 @@ async def _execute_dry_run(
         subject_frontier=frontier,
         result_frontier=frontier,
         would_accept=preview,
-        coverage=CoverageModel.model_validate(coverage_to_json(prepared.coverage)),
-        gaps=prepared.coverage.known_gaps,
+        coverage=CoverageModel.model_validate(coverage_to_json(coverage)),
+        gaps=coverage.known_gaps,
     )
     return PublishWorkResultModel.model_validate(
         body.model_dump(mode="json", by_alias=True, exclude_unset=True)

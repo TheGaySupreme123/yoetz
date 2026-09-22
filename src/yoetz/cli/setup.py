@@ -95,7 +95,7 @@ __all__ = [
 
 SETUP_MARKER_SCHEMA: Final = "yoetz.setup-wizard-marker/1"
 _REPORT_SCHEMA: Final = "yoetz.setup-wizard-report/1"
-_STATUS_SCHEMA: Final = "yoetz.setup-status/1"
+_STATUS_SCHEMA: Final = "yoetz.setup-status/2"
 _HARNESS_DISPLAY_NAMES: Final[dict[HarnessId, str]] = {HarnessId.CODEX: "Codex"}
 
 _NEXT_SERVICE: Final = "run 'yoetz service run' under your selected user supervisor"
@@ -1301,6 +1301,8 @@ async def _codex_integration_step(
         return {
             "outcome": "skipped",
             "reason": "foreign_entry_present",
+            "next_step": "Foreign configuration was preserved. Create a new owner-private "
+            "directory (mode 0700) and rerun setup with --codex-home <new-home>.",
             "state": mcp_preview.state_before.value,
             "plugin": {
                 "outcome": "skipped",
@@ -1534,7 +1536,21 @@ async def _codex_integration_step(
             "state": activated.state.value,
         }
     elif activation_plan is not None and selected_codex_home is not None:
+        from yoetz.cli.setup_readiness import continuation
+
         activation_report = {
+            "next_command": continuation(
+                [
+                    "recommend",
+                    "accept",
+                    "codex-plugin-activation",
+                    "--codex-path",
+                    binary.executable_path,
+                    "--codex-home",
+                    str(selected_codex_home),
+                ],
+                project=_canonical_setup_workspace(workspace),
+            ),
             "codex_home": str(selected_codex_home),
             "config_path": str(selected_codex_home / "config.toml"),
             "marketplace_registered": activation_plan.inspection.marketplace_registered,
@@ -1875,6 +1891,7 @@ async def _interactive_provider_setup(
     provider_choice: str | None = None,
     model: str | None = None,
     before_credential: Callable[[], Awaitable[str | None]] | None = None,
+    storage_only: bool = False,
 ) -> tuple[dict[str, JsonValue], dict[str, JsonValue]]:
     """Run trusted local setup ceremonies while keeping secrets out of wizard state."""
 
@@ -2038,9 +2055,17 @@ async def _interactive_provider_setup(
                 else:
                     typer.echo("Unlocking Yoetz from the platform credential store")
                     await unlock_vault(bytearray(auto_passphrase))
+            elif service.get("vault_mode") == "os_keyring" and storage_only:
+                from yoetz.cli.unlock import retry_keyring
+
+                await retry_keyring()
             service = await _service_reachability()
     except HumanCeremonyCliError as error:
         provider_report["credential_reason"] = error.reason
+
+    if storage_only:
+        wipe_auto_passphrase()
+        return _provider_setup_result(service, provider_report)
 
     if provider_choice is not None:
         selected_model = model
@@ -2725,6 +2750,9 @@ async def run_setup_wizard(
     )
 
     next_steps: list[JsonValue] = []
+    registration_next = registration.get("next_step")
+    if type(registration_next) is str:
+        _append_next_step(next_steps, registration_next)
     if not interactive:
         _append_next_step(next_steps, _NEXT_AGENT_GUIDE)
     if not service.get("reachable"):
@@ -2909,6 +2937,8 @@ def _emit_human_report(report: dict[str, JsonValue]) -> None:
                 f"{activation.get('state') or 'unknown'} "
                 f"(outcome={activation.get('outcome') or 'observed'})"
             )
+            if type(activation.get("next_command")) is str:
+                typer.echo(f"  Next: {activation['next_command']}")
             config_path = activation.get("config_path")
             if type(config_path) is str:
                 typer.echo(f"  Activated Codex config: {config_path}")
@@ -3011,6 +3041,22 @@ def _emit_human_report(report: dict[str, JsonValue]) -> None:
             typer.echo(f"  - {step}")
 
 
+async def run_vault_setup() -> int:
+    """Reuse the protected storage ceremony without configuring a model provider."""
+    if not _is_interactive_terminal():
+        typer.echo(
+            "trusted_console_required: run 'yoetz setup vault' in your local terminal", err=True
+        )
+        return 2
+    service = await _service_reachability(start_if_absent=True)
+    service, result = await _interactive_provider_setup(service, storage_only=True)
+    if service.get("state") != "ready" or result.get("credential_reason") is not None:
+        typer.echo("Vault setup is incomplete. Inspect 'yoetz setup status --next'.", err=True)
+        return 20
+    typer.echo("Vault ready. Provider configuration and privacy permissions were not changed.")
+    return 0
+
+
 async def setup_status(*, json_output: bool) -> int:
     """Read-only setup posture: discovery, registration state, service, marker."""
 
@@ -3074,6 +3120,12 @@ _MCP_EXIT_USAGE: Final = frozenset(
 
 def _mcp_error_exit(reason: str) -> int:
     typer.echo(f"mcp_registration_{reason}", err=True)
+    if reason == "foreign_entry_present":
+        typer.echo(
+            "Foreign configuration was preserved. Create a new owner-private Codex home "
+            "(mode 0700), then preview again with --codex-home <new-home>.",
+            err=True,
+        )
     return 2 if reason in _MCP_EXIT_USAGE else 20
 
 
@@ -3082,6 +3134,7 @@ async def integrate_mcp(
     harness: str,
     *,
     codex_path: str | None,
+    codex_home: Path | None = None,
     accept: bool,
     preview_digest: str | None,
     json_output: bool,
@@ -3118,7 +3171,10 @@ async def integrate_mcp(
     if chosen is None:
         return _usage_failure("no codex executable was found on PATH")
 
-    service = HarnessMcpService(_mcp_adapter(route_profile))
+    from yoetz.adapters.integrations.codex_session_stream import resolve_codex_home
+
+    selected_home = resolve_codex_home(codex_home).absolute()
+    service = HarnessMcpService(_mcp_adapter(route_profile, codex_home=selected_home))
     try:
         if action == "status":
             observation = await service.observe(chosen)
@@ -3148,6 +3204,7 @@ async def integrate_mcp(
             _emit(
                 {
                     "harness": harness,
+                    "inspected_codex_home": str(selected_home),
                     "isolation_binding": observation.isolation_binding,
                     "route_profile": observation.route_profile,
                     "state": observation.state.value,
@@ -3166,6 +3223,7 @@ async def integrate_mcp(
                         "action": preview.action.value,
                         "admission_cleanup": _admission_cleanup_preview(project_root),
                         "harness": harness,
+                        "inspected_codex_home": str(selected_home),
                         "isolated_root": preview.isolated_root,
                         "preview_digest": preview.preview_digest,
                         "route_profile": preview.route_profile,
@@ -3202,6 +3260,7 @@ async def integrate_mcp(
                         "action": "noop",
                         "admission_cleanup": _admission_reverse_sweep(project_root),
                         "harness": harness,
+                        "inspected_codex_home": str(selected_home),
                         "state_after": preview.state_before.value,
                         "state_before": preview.state_before.value,
                     },
@@ -3222,6 +3281,7 @@ async def integrate_mcp(
                     "action": result.action.value,
                     "admission_cleanup": _admission_reverse_sweep(project_root),
                     "harness": harness,
+                    "inspected_codex_home": str(selected_home),
                     "state_after": result.state_after.value,
                     "state_before": result.state_before.value,
                 },
@@ -3246,7 +3306,9 @@ async def integrate_mcp(
         ):
             # No explicit route input: preserve the existing yoetz-owned route
             # rather than letting the configuration derivation rewrite it (#389).
-            service = HarnessMcpService(_mcp_adapter(route_profile_before))
+            service = HarnessMcpService(
+                _mcp_adapter(route_profile_before, codex_home=selected_home)
+            )
             preview = await service.preview(chosen)
         if action == "preview":
             _emit(
@@ -3258,6 +3320,7 @@ async def integrate_mcp(
                         else None
                     ),
                     "harness": harness,
+                    "inspected_codex_home": str(selected_home),
                     "isolated_root": preview.isolated_root,
                     "preview_digest": preview.preview_digest,
                     "route_profile": preview.route_profile,
@@ -3294,6 +3357,7 @@ async def integrate_mcp(
                         else None
                     ),
                     "harness": harness,
+                    "inspected_codex_home": str(selected_home),
                     "state_after": preview.state_before.value,
                     "state_before": preview.state_before.value,
                 },
@@ -3320,6 +3384,7 @@ async def integrate_mcp(
                 else None
             ),
             "harness": harness,
+            "inspected_codex_home": str(selected_home),
             "state_after": result.state_after.value,
             "state_before": result.state_before.value,
         },

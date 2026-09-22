@@ -23,8 +23,15 @@ or prove correctness. A clean receipt is bounded by its recorded evidence and co
 
 Invoke the installed plugin skill as `/yoetz:yoetz`. Use only the currently declared Yoetz MCP
 tools and their current schemas. In a plugin-managed session their names normally use the
-`mcp__plugin_yoetz_yoetz__...` prefix; when the active registration exposes another exact name,
-use that declared name. Never guess a tool prefix, operation, argument, or result shape.
+`mcp__plugin_yoetz_yoetz__...` prefix; a bare `yoetz mcp serve` registration exposes
+`mcp__yoetz__...`; when the active registration exposes another exact name, use that declared
+name. Never guess a tool prefix, operation, argument, or result shape. When Claude Code defers
+tool schemas and the tool list shows only names, load the Yoetz schemas first with ToolSearch
+(`select:mcp__yoetz__start,mcp__yoetz__read_guidance,mcp__yoetz__publish_work,mcp__yoetz__status,mcp__yoetz__check,mcp__yoetz__respond,mcp__yoetz__receipt`,
+or the plugin-prefixed names); a deferred listing is not a reason to skip `start`. If material
+work already began before `start` (the server was still connecting at the first action, or the
+session simply started editing), call `start` now, publish the transitions so far as a bounded
+plan, and disclose the uncovered prefix in the receipt.
 
 Read the five installed relative references conditionally. They are the canonical workflow:
 

@@ -64,6 +64,7 @@ _REASONS: Final = frozenset(
         "observe",
         "outbox_overflow",
         "service_unavailable",
+        "service_incompatible",
         "vault_locked",
         "mapping_missing",
         "mapping_stale",

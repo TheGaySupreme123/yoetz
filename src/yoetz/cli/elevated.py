@@ -196,6 +196,26 @@ def _require_action_bound_user_presence() -> None:
     raise ElevatedBootstrapError("human_authority_unavailable")
 
 
+async def _preflight_service(pending: PendingElevatedConsent) -> None:
+    """Avoid consuming a valid approval when its service is already unavailable.
+
+    This is not authorization: the atomic claim, expiry and target checks still run,
+    and a service that disappears after the claim consumes the review as failed.
+    Local import/plugin decisions do not depend on the vault service.
+    """
+    if pending.operation not in {
+        "vault_initialize",
+        "vault_passphrase_rotate",
+        "provider_credential_set",
+        "provider_credential_rotate",
+        "repository_privacy_grant",
+    } or pending.expires_at_unix <= int(time.time()):
+        return
+    state = await _service_vault_state()
+    if state is None or state[0] not in {"ready", "locked"}:
+        raise ElevatedBootstrapError("ceremony_service_unavailable")
+
+
 async def review_elevated() -> dict[str, JsonValue]:
     """Review one pending operation after independently verified OS user presence."""
 
@@ -204,9 +224,27 @@ async def review_elevated() -> dict[str, JsonValue]:
     try:
         _require_action_bound_user_presence()
         with TrustedForegroundConsole() as console:
-            pending = claim_pending_for_review(for_console=True)
-            _render_review(console, pending)
-            selected = console.read_choice("Decision [approve/deny]: ", (b"approve", b"deny"))
+            observed = load_pending()
+            if observed is None:
+                raise ElevatedBootstrapError("pending_absent")
+            if observed.operation == "project_coordination_grant":
+                # Refuse unsupported console authority before display or mutation.
+                raise ElevatedBootstrapError("project_coordination_grant_requires_chat_authority")
+            try:
+                _render_review(console, observed)
+                selected = console.read_choice("Decision [approve/deny]: ", (b"approve", b"deny"))
+            except TrustedConsoleError, KeyboardInterrupt:
+                # Cancellation after displaying the review remains single-use. Availability
+                # preflight is the only new non-consuming path for a valid approval.
+                pending = claim_pending_for_review(for_console=True, expected_pending=observed)
+                if pending != observed:
+                    raise ElevatedBootstrapError("pending_tampered") from None
+                raise
+            if selected == b"approve":
+                await _preflight_service(observed)
+            pending = claim_pending_for_review(for_console=True, expected_pending=observed)
+            if pending != observed:
+                raise ElevatedBootstrapError("pending_tampered")
             if selected == b"deny":
                 complete_review(pending, outcome="denied")
                 consumed = True
@@ -326,7 +364,9 @@ async def authorize_elevated(
                 raise ElevatedBootstrapError("provider_credential_required")
         elif provider_credential is not None:
             raise ElevatedBootstrapError("provider_credential_forbidden")
-        pending = claim_pending_for_review()
+        if model.decision == "approve":
+            await _preflight_service(observed)
+        pending = claim_pending_for_review(expected_pending=observed)
         if pending != observed:
             raise ElevatedBootstrapError("pending_tampered")
         if pending.expires_at_unix <= int(time.time()):

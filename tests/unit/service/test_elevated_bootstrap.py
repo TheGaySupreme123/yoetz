@@ -29,6 +29,7 @@ from yoetz.service.elevated_bootstrap import (
     PendingElevatedConsent,
     catalog_payload,
     claim_pending_for_review,
+    clear_pending,
     complete_review,
     grant_target_digest,
     load_pending,
@@ -183,6 +184,19 @@ def test_review_claim_is_single_shot_for_approval_and_duplicate(tmp_path: Path) 
     with pytest.raises(ElevatedBootstrapError) as reused:
         complete_review(claimed, outcome="approved", _state=tmp_path)
     assert reused.value.reason == "pending_absent"
+
+
+def test_expected_review_claim_cannot_consume_a_replacement(tmp_path: Path) -> None:
+    displayed = prepare_pending("vault_initialize", target_digest=_TARGET, _state=tmp_path)
+    clear_pending(_state=tmp_path)
+    replacement = prepare_pending("vault_initialize", target_digest=_TARGET, _state=tmp_path)
+
+    with pytest.raises(ElevatedBootstrapError) as mismatch:
+        claim_pending_for_review(expected_pending=displayed, _state=tmp_path)
+
+    assert mismatch.value.reason == "pending_tampered"
+    assert load_pending(_state=tmp_path) == replacement
+    assert not (tmp_path / "elevated-bootstrap" / "elevated-bootstrap-reviewing.json").exists()
 
 
 @pytest.mark.parametrize("outcome", ["denied", "cancelled", "failed"])

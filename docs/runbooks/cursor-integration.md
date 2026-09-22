@@ -1,5 +1,12 @@
 # Cursor local integration runbook
 
+For setup prerequisites, use `yoetz setup status --next --host cursor-cli` with the same
+executable, configuration root and project. `--operation connection` inspects installation without
+provider sign-in; `local` and `review` inspect their respective vault/privacy prerequisites.
+Storage-only continuation is `yoetz setup vault` in a trusted terminal. This shared #737 path adds
+no new native-session capability; Linux/WSL first-use and storage acceptance remain bounded by
+[the platform runbook](linux-and-wsl.md#setup-and-vault-acceptance-still-owned-by-737).
+
 ## Guided desktop connection (issue #767)
 
 Use `yoetz setup run --host cursor-ide` or `--host cursor-cli`. These are distinct installations:
@@ -54,8 +61,10 @@ current ids for `status`. Both startup messages route failures through exact con
 same-request recovery, and a named one-time repair before a blocked-startup user handoff.
 A first non-retryable failure alone does not permit continuing without Yoetz; see
 [startup failure precedence](../../guidance/coverage-and-receipts.md#startup-failure-precedence).
-Cursor has no demonstrated equivalent of Claude's PreToolUse deny gate in this integration;
-instruction delivery is not enforcement (#692).
+Native plugins can select `--startup-mode required` through the owner-reviewed lifecycle.
+See [required startup](required-startup.md) for current-plan gating, native MCP approval behavior,
+opt-out and exact acceptance limits. Portable Agent Plugins do not carry this gate; regular Cursor
+desktop enforcement remains unverified until the native acceptance run completes.
 
 Design basis, checked 2026-09-09: Cursor's [skills guidance](https://cursor.com/docs/skills)
 uses descriptions for relevance and loads references progressively. Yoetz therefore keeps the
@@ -132,11 +141,28 @@ The [acceptance record](https://github.com/TheGaySupreme123/yoetz/issues/767#iss
 binds the source, wheel digest and per-platform outcomes. Provider login and model runs were
 outside this installation acceptance.
 
-Native-session capability remains **unproven** for Linux/WSL under #722. The separate native
-IDE bundle inspector still reads macOS `Contents/Info.plist` and the executable digest; it
-returns `cursor_ide_platform_unsupported` for Linux rather than minting a native capability
-identity. This differs from the common installer's executable-backed discovery. The reviewed
-native evidence case stays `cursor-ide-native-3.17.8-macos-arm64`; installation success does not
+The separate native IDE identity inspector (`discover_cursor_ide`) accepts the Linux installed
+package root, such as `/usr/share/cursor`, or its native `cursor` executable (including an explicit
+symlink to that executable). For an extracted AppImage, select its `usr/share/cursor` directory.
+It reads the version from `resources/app/package.json`, the build commit and Cursor application
+name from `resources/app/product.json`, and hashes the native ELF executable after requiring an
+ELF64 little-endian ET_EXEC or ET_DYN header. Version and commit metadata must be bounded printable
+ASCII identity fields. It does not launch
+the IDE, extract an AppImage, or change a host registration. Missing installations report
+`cursor_ide_unavailable`; an unextracted AppImage or unrecognized layout reports
+`cursor_ide_layout_unsupported`; malformed metadata, linked package members, and non-Linux
+executables report `cursor_ide_identity_invalid`. Select the native binary/root rather than the
+`resources/app/bin/cursor` shell wrapper. This inspector is distinct from common setup discovery,
+which probes the installed host's command and version. The macOS bundle inspector is unchanged.
+Today this inspector is library-only: no CLI, MCP, TUI, or receipt surface invokes it. A caller
+must supply the package root or native executable directly; this read does not add an operator
+selection step to common setup or host discovery.
+The [vendor installation guide](https://cursor.com/docs/get-started/quickstart) documents Linux
+package and AppImage installation.
+
+Native-session capability remains **unproven** for Linux/WSL under #722. An identity read on WSL
+applies only to a Linux installation inside that distribution, not the Windows-side IDE. The
+reviewed native evidence case stays `cursor-ide-native-3.17.8-macos-arm64`; installation success does not
 admit a new session/observation capability case. The Windows-side Cursor IDE with Remote WSL
 is unverified and remains owned by the integration maintainer in #722. Cursor Cloud is outside
 this scope. Shared host facts are in [`linux-and-wsl.md`](linux-and-wsl.md).
@@ -765,7 +791,7 @@ ended. A failed attempt records its typed cause (`auto_attach_workspace_unbound`
 `auto_attach_request_invalid`, `auto_attach_binding_ambiguous`, `auto_attach_conflict`,
 `auto_attach_refused`,
 `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`,
-`service_unavailable`, `vault_locked`, `timeout`, `storage_unsafe`, or `storage_corrupt`) in the
+`service_unavailable`, `service_incompatible`, `vault_locked`, `timeout`, `storage_unsafe`, or `storage_corrupt`) in the
 same diagnostics file, and the session keeps an observation-only binding until a retry or an
 explicit `start` maps it. For `vault_locked` on a never-initialized install, that explicit
 `start` returns the typed `vault_initialization_required` continuation (see Troubleshooting)
@@ -1117,8 +1143,17 @@ or toggle consent to manufacture a healthy status. Real hard limits continue to 
 inventory recovery, and previous loss counts and identities remain unchanged.
 
 Recovery emits fixed `capture_inventory_*` reason counts in its internal maintenance summary;
-these are not ledger receipts or a new hook diagnostic format. Historical local selection losses
-still need a separately attributed task/check propagation path when no later envelope is admitted.
+these are not ledger receipts or a new hook diagnostic format. Historical local selection losses with complete original route attribution are reported by
+service maintenance even when no later envelope is admitted. New checks reconcile their task's
+pending losses first. Each source/session/generation/route lane produces one permanent
+`observation_input_loss` marker, preserving all local counts and identities. Missing original
+attribution and overflow-only range history remain visible locally rather than being assigned to
+an unrelated task. A terminal route drift or quarantined marker operation uses the same task
+runtime with a distinct deterministic recovery operation; transient publication failures remain
+fail-closed. Catalog scans run through separate read-only worker connections, keeping the service
+event loop available during both inventory reads.
+Route-valid lane-digest mismatches are reported with the same explicit loss gap and an
+unreconciled marker; malformed routes or source identities remain local.
 Host-shaped regression tests, including interleaved parent/worker routes and encrypted readback,
 are not a version-pinned acceptance run inside the installed vendor application.
 
@@ -1213,3 +1248,31 @@ only its fenced lease was yielded. Replay the exact start body and request ID on
 inventing session or writer IDs. `start_pending_same_identity` instead means a live lease remains:
 wait up to 60 seconds before the one exact replay. If still busy or pending, retain the original
 request and report the unresolved start. These continuations do not authorize a new task.
+
+## Cold service attachment and recovery (issue #670)
+
+Cursor sessionStart returns the shared result through Cursor's `additional_context` contract,
+within the existing ten-second registration budget. Tool hooks keep their five-second budget.
+
+For an enabled, consented workspace with no mapped task, auto-attachment now gives the exact
+selected service one second to connect or start through its fixed, instance-pinned launcher.
+It never supersedes another installation. A compatible stamped holder that is still starting
+is reused only while an owner-only nonblocking flock probe confirms that the singleton is held;
+an unheld stale stamp is ignored and the fixed launcher makes a normal flock-protected start
+attempt. A live incompatible or unknown holder is refused. The connection time counts toward
+the existing five-second attachment RPC budget. Turn-boundary retries retain their one-second
+outer budget and reserve part of it for the start RPC after a shorter connector arm; ordinary tool hooks and SessionEnd do not start a service. Local-only readiness
+probes and unconsented/disabled observation do not take this path.
+
+The native context distinguishes a service that is unavailable or still starting
+(`service_unavailable`), an incompatible holder (`service_incompatible`), and an answered
+admission conflict (`auto_attach_conflict`). Missing mapping remains explicit. Call cooperative
+`start` before material work and follow its exact continuation; a conflict needs an authorized
+task selector or explicit admission decision, not a service restart. Successful hook exit alone
+does not establish attachment. Task admission and ended-session recovery selectors are unchanged.
+
+Structural pre/post observations remain queued and keep their original identities across
+bootstrap. A later successful mapping permits their normal drain. Missing transient content
+remains a coverage gap; a recovered queue is not recovered content. Existing host/OS capability
+and consent requirements still apply. Automated host-contract tests do not establish native
+macOS, Linux, or Windows/WSL 2 acceptance. Native cold-start coverage remains tracked in #670.

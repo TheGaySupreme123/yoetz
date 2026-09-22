@@ -23,6 +23,11 @@ Prepared public-alpha release candidate; publication remains gated by #785. See
   opt-in, and generation-bound coordination grants. Retrying a project mutation recovers its
   recorded operation without creating a second project or repeating a membership change
   (issues #505–#508).
+- Opt-in required startup for native Claude Code and Cursor plugins, with scope-bound plan
+  checks, owner controls, and same-task pending-operation recovery (#692, #797). Native acceptance
+  remains bounded as documented in the required-startup runbook.
+- `yoetz setup status --json` reports each Claude installation's MCP mode (plugin-managed or
+  bare) and whether a session-start cue is installed; a bare registration has none (#789).
 
 ### Changed
 
@@ -40,6 +45,12 @@ Prepared public-alpha release candidate; publication remains gated by #785. See
 - Linux sandbox readiness is documented as a fact of the client host, separately from the
   semantic runtime evaluator; this adds no WSL or AppArmor acceptance claim (#765).
 - The Grok provider preset names grok-4.6 (#763).
+- Native startup guidance is delivered independently of observation consent and availability
+  (#692). Claude Code sessions receive a compact MCP initialize block that fits the host's
+  observed 2,048-character rendering cap, with the "call `start` first" trigger and the
+  late-start rule as its first two sentences; other hosts keep the full document (#789).
+- Guidance, the Claude skill and `AGENTS.md` state what to do when material work began before
+  `start`, and how to load deferred Yoetz tool schemas by name (#789).
 
 ### Fixed
 
@@ -66,7 +77,12 @@ Prepared public-alpha release candidate; publication remains gated by #785. See
   and every 0.2.3 and 0.2.4 repair: Codex home-aware setup, Cursor exact-path and Agent CLI
   project binding, fractional Codex metadata, selected observations and routine summaries across
   local control, contended session attachment with shielded lease release, and the foreground
-  desktop approval and runtime-retaining host handoffs (#786, #787, #788).
+  desktop approval and runtime-retaining host handoffs (#786, #787, #788). It also carries the
+  0.2 repairs prepared for 0.2.5: cold session attachment within host hook budgets (#790),
+  complete capture recovery and loss reporting (#792), claim and plan scope differences in status
+  and receipts (#793), unrelated command gaps partitioned from repair proof (#794), Linux Cursor
+  IDE identification without launching it (#795), and approval-preserving setup that inspects the
+  selected installation (#796).
 ## 0.2.4 — 2026-09-20
 
 - One guided installation and connection lifecycle for Codex, Claude Code, Cursor IDE and

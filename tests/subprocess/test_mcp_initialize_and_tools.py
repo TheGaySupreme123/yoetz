@@ -11,7 +11,12 @@ from typing import cast
 import pytest
 from mcp import types
 
-from yoetz.mcp.descriptors import INITIALIZE_GUIDANCE_URIS, TOOL_DESCRIPTORS, server_instructions
+from yoetz.mcp.descriptors import (
+    CLAUDE_CODE_INSTRUCTIONS_BUDGET,
+    INITIALIZE_GUIDANCE_URIS,
+    TOOL_DESCRIPTORS,
+    server_instructions,
+)
 from yoetz.mcp.resources import GUIDANCE_RESOURCES
 from yoetz.mcp.resources import read_resource as read_guidance_resource
 from yoetz.mcp.semantic_destination import (
@@ -29,8 +34,9 @@ def anyio_backend() -> str:
 def _run_raw(
     *frames: Mapping[str, object],
     semantic: str = "on",
+    host: str = "generic",
 ) -> tuple[list[dict[str, object]], bytes]:
-    child = f"from yoetz.mcp.server import main; main(semantic={semantic!r})"
+    child = f"from yoetz.mcp.server import main; main(semantic={semantic!r}, host={host!r})"
     process = subprocess.Popen(
         [sys.executable, "-I", "-c", child],
         stdin=subprocess.PIPE,
@@ -163,6 +169,28 @@ async def test_static_inventory_is_exact_and_verified() -> None:
     assert "Do not call `resources/list` or `list_mcp_resources` to find Yoetz guidance" in (
         BRIDGE_RUNTIME.instructions
     )
+
+
+def test_raw_initialize_for_the_claude_host_serves_the_capped_instructions() -> None:
+    # Issue #789: Claude Code desktop keeps the first 2,048 characters of this block. The
+    # `--host claude` bridge therefore serves the compact Claude body instead of the packaged
+    # document, with the same route tail and startup-read disclosure as every other host.
+    frames, _stderr = _run_raw(
+        _initialize(types.LATEST_PROTOCOL_VERSION),
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        host="claude",
+    )
+    initialize = cast(dict[str, object], frames[0]["result"])
+    instructions = cast(str, initialize["instructions"])
+    assert instructions == server_instructions(
+        "policy",
+        host_profile="claude",
+        semantic_destination=read_semantic_destination_disclosure(),
+    )
+    assert instructions.startswith("# Yoetz: call start first\n\n")
+    assert len(instructions) <= CLAUDE_CODE_INSTRUCTIONS_BUDGET["observed_host_cap_chars"]
+    assert DISCLOSURE_PREFIX in instructions
+    assert "Route profile: policy." in instructions
 
 
 def test_raw_initialize_lists_exact_capabilities_tools_and_resources() -> None:

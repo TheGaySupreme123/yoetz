@@ -196,3 +196,16 @@ root secret even if a human approved the operation.
 separate work under ADR-011.
 
 **Standing danger mode.** Rejected because its scope outlives one exact operation and digest.
+
+### Service availability before claim (#737)
+
+Before claiming an otherwise valid service-dependent approval (vault initialize/rotation,
+provider credential set/rotation, or repository privacy grant), the CLI reads the ordinary
+service status without starting a service. An unavailable or transitioning service returns
+`ceremony_service_unavailable` without consuming that pending identity. Terminal review reads and
+displays an unclaimed snapshot first, then atomically claims and compares the exact snapshot
+before executing the chosen action. Denial needs no service; cancellation after displaying the
+review remains single-use. Expiry is still checked by the claim path. A concurrent target change
+fails closed, and a service loss after claim consumes the attempt as failed. Local-only import and
+plugin decisions have no new service prerequisite. The preflight grants no authority and makes no
+availability guarantee for the later confidential operation.

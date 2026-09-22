@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import plistlib
 import shlex
 import shutil
 import subprocess
@@ -24,6 +25,7 @@ from yoetz.adapters.integrations.cursor_integration import (
     discover_cursor_cli,
     discover_cursor_ide,
     discover_cursor_sdk,
+    installed_cursor_startup_mode,
     observe_cursor_mcp,
     preview_cursor_plugin,
     remove_cursor_plugin,
@@ -47,6 +49,30 @@ from yoetz.version import read_verified_resource
 
 _REQUEST = request_id("req_10000000-0000-4000-8000-000000000001")
 _REVIEW_ID = "a" * 64
+
+
+def test_required_startup_install_inspect_and_reverse(tmp_path: Path) -> None:
+    launcher = _fake_yoetz(tmp_path / "bin" / "yoetz")
+    target = CursorPluginTarget(str(tmp_path / ".cursor"))
+    for index, mode in enumerate(("required", "optional")):
+        artifact = render_cursor_plugin(
+            PluginFormatProfile.CURSOR_PLUGIN_NATIVE,
+            yoetz_launcher=launcher,
+            startup_mode="required" if mode == "required" else "optional",
+        )
+        action = PluginArtifactAction.INSTALL if index == 0 else PluginArtifactAction.REPLACE
+        preview = preview_cursor_plugin(_REQUEST, target, action, artifact)
+        apply_cursor_plugin(
+            _REQUEST,
+            target,
+            action,
+            artifact,
+            accepted_preview_digest=preview.preview_digest,
+            authority=_authority(preview.preview_digest),
+            review=_AcceptingReview(),
+        )
+        assert installed_cursor_startup_mode(target) == mode
+        assert status_cursor_plugin(target, artifact).marker_valid
 
 
 class _AcceptingReview:
@@ -157,17 +183,17 @@ def test_portable_and_native_use_distinct_skill_entries_and_shared_guidance(
     resolved = str(executable.resolve())
     assert native.yoetz_launcher == (resolved,)
     assert all(
-        definition[0]["command"].startswith(f"{shlex.quote(resolved)} hooks cursor-observe ")
+        definition[-1]["command"].startswith(f"{shlex.quote(resolved)} hooks cursor-observe ")
         for definition in hooks["hooks"].values()
     )
-    assert {event: definition[0]["timeout"] for event, definition in hooks["hooks"].items()} == {
+    assert {event: definition[-1]["timeout"] for event, definition in hooks["hooks"].items()} == {
         "afterFileEdit": 5,
         "afterMCPExecution": 5,
         "sessionEnd": 3,
         "sessionStart": 10,
         "stop": 10,
     }
-    command = hooks["hooks"]["sessionStart"][0]["command"]
+    command = hooks["hooks"]["sessionStart"][-1]["command"]
     completed = subprocess.run(
         shlex.split(command),
         capture_output=True,
@@ -214,7 +240,7 @@ def test_plugin_managed_native_route_is_exact_and_external_omits_it(
     assert Path(launcher[0]).is_absolute()
     hooks = json.loads(managed.members["hooks/hooks.json"])
     assert all(
-        definition[0]["command"].startswith(f"{shlex.quote(launcher[0])} ")
+        definition[-1]["command"].startswith(f"{shlex.quote(launcher[0])} ")
         for definition in hooks["hooks"].values()
     )
 
@@ -256,7 +282,7 @@ def test_isolated_native_artifact_binds_root_in_mcp_and_hook_commands(
 
     hooks = json.loads(artifact.members["hooks/hooks.json"])["hooks"]
     for definition in hooks.values():
-        command = definition[0]["command"]
+        command = definition[-1]["command"]
         assert command.startswith(f"YOETZ_ISOLATED_ROOT={shlex.quote(str(isolated_root))} ")
         # Cursor executes command hooks as shell strings.  This also proves a path containing
         # spaces and a quote cannot escape the assignment.
@@ -385,7 +411,7 @@ def test_plugin_mcp_ignores_sanitized_path_and_foreign_older_yoetz(
     assert str(older) not in json.dumps(json.loads(shadowed.members["mcp.json"]))
     hooks = json.loads(shadowed.members["hooks/hooks.json"])
     assert all(
-        definition[0]["command"].startswith(f"{shlex.quote(str(invoking.resolve()))} ")
+        definition[-1]["command"].startswith(f"{shlex.quote(str(invoking.resolve()))} ")
         for definition in hooks["hooks"].values()
     )
     # Hooks and MCP bind the same launcher by construction.
@@ -647,7 +673,7 @@ def test_native_render_prefers_explicit_invoking_executable_over_path(
     assert artifact.yoetz_launcher == (resolved,)
     hooks = json.loads(artifact.members["hooks/hooks.json"])
     assert all(
-        definition[0]["command"].startswith(f"{shlex.quote(resolved)} hooks cursor-observe ")
+        definition[-1]["command"].startswith(f"{shlex.quote(resolved)} hooks cursor-observe ")
         for definition in hooks["hooks"].values()
     )
 
@@ -682,7 +708,7 @@ def test_native_render_preserves_module_entrypoint_launcher(
     hooks = json.loads(artifact.members["hooks/hooks.json"])
     prefix = f"{shlex.quote(resolved)} -m yoetz hooks cursor-observe "
     assert all(
-        definition[0]["command"].startswith(prefix) for definition in hooks["hooks"].values()
+        definition[-1]["command"].startswith(prefix) for definition in hooks["hooks"].values()
     )
 
 
@@ -958,7 +984,7 @@ def test_isolation_binding_reports_drift_and_unset_reverts_to_ambient(
         (tmp_path / ".cursor" / "plugins" / "local" / "yoetz" / "hooks" / "hooks.json").read_bytes()
     )["hooks"]
     assert all(
-        "YOETZ_ISOLATED_ROOT=" not in definition[0]["command"] for definition in hooks.values()
+        "YOETZ_ISOLATED_ROOT=" not in definition[-1]["command"] for definition in hooks.values()
     )
 
 
@@ -1449,16 +1475,197 @@ def test_cursor_cli_discovery_normalizes_empty_and_invalid_utf8_identity(
         discover_cursor_cli(executable)
 
 
-def test_cursor_ide_discovery_names_the_platform_outside_a_macos_bundle(tmp_path: Path) -> None:
-    """A Linux Cursor (AppImage or .deb) has no Info.plist; say so by platform (issue #722)."""
+def test_cursor_ide_discovery_names_unavailable_layouts(tmp_path: Path) -> None:
 
     install_root = tmp_path / "cursor"
     install_root.mkdir()
 
-    with pytest.raises(ValueError, match="^cursor_ide_platform_unsupported$"):
+    with pytest.raises(ValueError, match="^cursor_ide_layout_unsupported$"):
         discover_cursor_ide(install_root, system="Linux")
+    with pytest.raises(ValueError, match="^cursor_ide_platform_unsupported$"):
+        discover_cursor_ide(install_root, system="Windows")
     with pytest.raises(ValueError, match="^cursor_ide_unavailable$"):
         discover_cursor_ide(install_root, system="Darwin")
+
+
+def _linux_cursor_package(tmp_path: Path) -> Path:
+    root = tmp_path / "usr" / "share" / "cursor"
+    metadata = root / "resources" / "app"
+    metadata.mkdir(parents=True)
+    (root / "cursor").write_bytes(
+        b"\x7fELF\x02\x01" + b"\x00" * 10 + b"\x03\x00" + b"\x3e\x00native-binary"
+    )
+    (root / "cursor").chmod(0o755)
+    (metadata / "package.json").write_text('{"name":"Cursor","version":"3.21.16"}')
+    (metadata / "product.json").write_text(
+        json.dumps({"applicationName": "cursor", "commit": "8" * 40})
+    )
+    return root
+
+
+@pytest.mark.parametrize("selection", ["root", "binary", "symlink"])
+def test_linux_cursor_identity_reads_package_without_launching(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selection: str
+) -> None:
+    root = _linux_cursor_package(tmp_path)
+    selected = root if selection == "root" else root / "cursor"
+    if selection == "symlink":
+        selected = tmp_path / "cursor-link"
+        selected.symlink_to(root / "cursor")
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.cursor_integration.platform.machine", lambda: "x86_64"
+    )
+
+    def refuse_execution(*args: object, **kwargs: object) -> None:
+        pytest.fail("Identity discovery must not launch the IDE")
+
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.cursor_integration.subprocess.run", refuse_execution
+    )
+    identity = discover_cursor_ide(selected, system="Linux")
+    assert identity.surface == "cursor_ide"
+    assert identity.version == "3.21.16"
+    assert identity.build == "8" * 40
+    assert identity.os_name == "linux"
+    assert identity.architecture == "x86_64"
+    assert (
+        identity.artifact_digest
+        == "sha256:" + hashlib.sha256((root / "cursor").read_bytes()).hexdigest()
+    )
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"not json",
+        b"\xff",
+        b"[]",
+        b'{"version":null}',
+        b'{"version":""}',
+        b'{"version":"a","version":"b"}',
+        b" " * (1024 * 1024 + 1),
+    ],
+)
+def test_linux_cursor_identity_rejects_malformed_metadata(tmp_path: Path, content: bytes) -> None:
+    root = _linux_cursor_package(tmp_path)
+    (root / "resources" / "app" / "package.json").write_bytes(content)
+    with pytest.raises(ValueError, match="^cursor_ide_identity_invalid$"):
+        discover_cursor_ide(root, system="Linux")
+
+
+@pytest.mark.parametrize("elf_type", [0, 1, 4])
+def test_linux_cursor_identity_rejects_non_loadable_elf_types(
+    tmp_path: Path, elf_type: int
+) -> None:
+    root = _linux_cursor_package(tmp_path)
+    executable = root / "cursor"
+    content = executable.read_bytes()
+    executable.write_bytes(content[:16] + elf_type.to_bytes(2, "little") + content[18:])
+    with pytest.raises(ValueError, match="^cursor_ide_identity_invalid$"):
+        discover_cursor_ide(root, system="Linux")
+
+
+@pytest.mark.parametrize("elf_type", [2, 3])
+def test_linux_cursor_identity_accepts_loadable_elf_types(tmp_path: Path, elf_type: int) -> None:
+    root = _linux_cursor_package(tmp_path)
+    executable = root / "cursor"
+    content = executable.read_bytes()
+    executable.write_bytes(content[:16] + elf_type.to_bytes(2, "little") + content[18:])
+    assert discover_cursor_ide(root, system="Linux").surface == "cursor_ide"
+
+
+@pytest.mark.parametrize("field", ["version", "commit"])
+def test_linux_cursor_identity_rejects_control_characters(tmp_path: Path, field: str) -> None:
+    root = _linux_cursor_package(tmp_path)
+    metadata_path = (
+        root / "resources" / "app" / ("package.json" if field == "version" else "product.json")
+    )
+    metadata = json.loads(metadata_path.read_text())
+    metadata[field] = "3.21.16\nunsafe" if field == "version" else "8" * 20 + "\x7f"
+    metadata_path.write_text(json.dumps(metadata))
+    with pytest.raises(ValueError, match="^cursor_ide_identity_invalid$"):
+        discover_cursor_ide(root, system="Linux")
+
+
+@pytest.mark.parametrize(
+    "member", ["cursor", "resources", "resources/app", "resources/app/product.json"]
+)
+def test_linux_cursor_identity_rejects_linked_package_members(tmp_path: Path, member: str) -> None:
+    root = _linux_cursor_package(tmp_path)
+    target = root / member
+    outside = tmp_path / "outside"
+    target.rename(outside)
+    target.symlink_to(outside)
+    with pytest.raises(ValueError, match="^cursor_ide_identity_invalid$"):
+        discover_cursor_ide(root, system="Linux")
+
+
+def test_linux_cursor_identity_rejects_foreign_product_and_windows_executable(
+    tmp_path: Path,
+) -> None:
+    root = _linux_cursor_package(tmp_path)
+    product = root / "resources" / "app" / "product.json"
+    original = product.read_bytes()
+    product.write_text('{"applicationName":"code","commit":"foreign"}')
+    with pytest.raises(ValueError, match="^cursor_ide_identity_invalid$"):
+        discover_cursor_ide(root, system="Linux")
+    product.write_bytes(original)
+    (root / "cursor").write_bytes(b"MZWindows executable")
+    with pytest.raises(ValueError, match="^cursor_ide_identity_invalid$"):
+        discover_cursor_ide(root, system="Linux")
+
+
+def test_linux_cursor_identity_requires_executable_and_available_root(tmp_path: Path) -> None:
+    root = _linux_cursor_package(tmp_path)
+    (root / "cursor").chmod(0o644)
+    with pytest.raises(ValueError, match="^cursor_ide_unavailable$"):
+        discover_cursor_ide(root, system="Linux")
+    with pytest.raises(ValueError, match="^cursor_ide_unavailable$"):
+        discover_cursor_ide(tmp_path / "missing", system="Linux")
+
+
+@pytest.mark.parametrize("machine,expected", [(62, "x86_64"), (183, "aarch64")])
+def test_linux_cursor_identity_uses_artifact_architecture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, machine: int, expected: str
+) -> None:
+    root = _linux_cursor_package(tmp_path)
+    executable = root / "cursor"
+    content = executable.read_bytes()
+    executable.write_bytes(content[:18] + machine.to_bytes(2, "little") + content[20:])
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.cursor_integration.platform.machine", lambda: "other"
+    )
+    assert discover_cursor_ide(root, system="Linux").architecture == expected
+
+
+def test_linux_cursor_identity_does_not_substitute_a_nearby_executable(tmp_path: Path) -> None:
+    root = _linux_cursor_package(tmp_path)
+    selected = root / "Cursor.exe"
+    selected.write_bytes(b"MZforeign binary")
+    with pytest.raises(ValueError, match="^cursor_ide_layout_unsupported$"):
+        discover_cursor_ide(selected, system="Linux")
+
+
+def test_macos_cursor_identity_keeps_bundle_version_build_and_digest(tmp_path: Path) -> None:
+    root = tmp_path / "Cursor.app"
+    executable = root / "Contents" / "MacOS" / "Cursor"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"macos executable")
+    (root / "Contents" / "Info.plist").write_bytes(
+        plistlib.dumps(
+            {
+                "CFBundleExecutable": "Cursor",
+                "CFBundleShortVersionString": "3.17.8",
+                "CFBundleVersion": "build-id",
+            }
+        )
+    )
+    identity = discover_cursor_ide(root, system="Darwin")
+    assert identity.version == "3.17.8"
+    assert identity.build == "build-id"
+    assert (
+        identity.artifact_digest == "sha256:" + hashlib.sha256(executable.read_bytes()).hexdigest()
+    )
 
 
 def test_unreadable_mcp_configuration_is_ambiguous_not_absent(tmp_path: Path) -> None:

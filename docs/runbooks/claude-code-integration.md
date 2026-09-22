@@ -1,5 +1,12 @@
 # Claude Code native integration
 
+For setup prerequisites, use `yoetz setup status --next --host claude` with the same
+executable, configuration root and project. `--operation connection` inspects installation without
+provider sign-in; `local` and `review` inspect their respective vault/privacy prerequisites.
+Storage-only continuation is `yoetz setup vault` in a trusted terminal. This shared #737 path adds
+no new native-session capability; Linux/WSL first-use and storage acceptance remain bounded by
+[the platform runbook](linux-and-wsl.md#setup-and-vault-acceptance-still-owned-by-737).
+
 ## Guided desktop connection (issue #767)
 
 Prefer `yoetz setup run --host claude` for ordinary setup. It discovers the executable and
@@ -51,8 +58,64 @@ current ids for `status`. Both startup messages route failures through exact con
 same-request recovery, and a named one-time repair before a blocked-startup user handoff.
 A first non-retryable failure alone does not permit continuing without Yoetz; see
 [startup failure precedence](../../guidance/coverage-and-receipts.md#startup-failure-precedence).
-Claude documents PreToolUse `permissionDecision: deny` and exit 2, but this integration does not
-ship an owner-selected required-startup deny gate; instruction delivery is not enforcement.
+Native plugins can select `--startup-mode required` through the owner-reviewed lifecycle.
+See [required startup](required-startup.md) for current-plan gating, opt-out, recovery and native
+acceptance limits. Optional instruction delivery alone remains non-enforcing.
+
+### Instruction delivery on Claude Code (issue #789)
+
+Observed host facts, not documented Claude limits. Measured 2026-09-21 in Claude Code desktop
+sessions on the maintainer's machine against the installed 0.2.1 bridge, by comparing the
+rendered system-prompt attachment with the packaged text:
+
+- Claude Code renders MCP initialize `instructions` as a per-server block and keeps exactly the
+  first **2,048 characters**, then appends a literal `… [truncated]` marker. In the historical
+  session, the installed 0.2.1 bridge supplied a 7,325-character `agent-instructions.md` block;
+  it was the only server block cut on that machine and ended mid-sentence before the `start` rule.
+  The current source candidate is 7,791 bytes before rendering, so that source measurement is not
+  presented as a re-measurement of the historical desktop session. Other servers' blocks (about
+  1.1–1.3 KB) were intact.
+- The same cap applies to each tool description once Claude loads it. Current source measurements
+  are `start` (2,140 chars), `publish_work` (3,065) and `check` (4,192); each exceeds the cap and
+  remains a separate, host-independent follow-up recorded on the issue.
+- With about 200 registered tools, Claude Code defers MCP tool schemas: only names appear until the
+  agent runs `ToolSearch` for them. The initialize block is therefore the only unsolicited cue.
+- The Yoetz server is often still connecting when the agent takes its first action; its tools
+  and instructions then arrive one message later.
+
+The bridge therefore serves a Claude-specific initialize body: `yoetz mcp serve --host claude`
+renders `CLAUDE_CODE_INITIALIZE_INSTRUCTIONS` (at most `packaged_max_chars` = 964 characters),
+whose first two sentences are the trigger and the late-start rule, followed by the same route tail
+and startup-read destination disclosure (#479) as every other host. The bound is derived so that
+the text, the policy tail and the 1,000-byte disclosure ceiling fit under 2,048 together: the
+privacy disclosure is never the part that gets cut. `generic`, `codex` and `cursor` hosts keep the
+full document byte for byte. `tests/packaging/test_claude_code_instructions_cap.py` fails when
+the Claude text outgrows the recorded cap; `tests/unit/mcp/test_claude_code_instructions.py`
+locks the sentence order, the arithmetic and the other hosts' identity. Everything the compact
+body omits is one `read_guidance` call away.
+
+Activation cues by connection mode:
+
+| Mode | How it is registered | Initialize instructions | SessionStart cue | Skill |
+| --- | --- | --- | --- | --- |
+| Plugin-managed | `yoetz setup run --host claude` (or `yoetz integrate claude plugin install`) renders the marketplace, hooks and plugin-owned `.mcp.json` | yes (compact body) | yes, once the plugin is enabled | `/yoetz:yoetz` |
+| Bare MCP | An owner-written `yoetz mcp serve --host claude` entry in Claude's own MCP configuration | yes (compact body when `--host claude` is present; generic body for a legacy bare `mcp serve` entry) | **no** | none |
+
+A bare entry delivers only the initialize block; it has no `SessionStart` context, no
+auto-attach, no hooks and no skill catalog entry. `yoetz setup status --json` names the mode
+per discovered Claude installation under `hosts[].activation_cues`: `mcp_mode`
+(`plugin_managed`, `bare_mcp`, `dual`, `absent`, `foreign`, `ambiguous`), `mcp_source`,
+`route_profile`, `host_profile` (`claude` for the compact initialize body, `generic` for a legacy
+bare `mcp serve` entry), `session_start_cue` (`installed`, `absent`, `unobserved`) and `cue_sources`
+(`plugin_hooks`, `user_settings`, `project_settings`, `project_local_settings`). The
+observation is file-only: it reads Claude's user configuration where Claude keeps it
+(`~/.claude.json` beside the default `~/.claude` root, or inside `CLAUDE_CONFIG_DIR`), the
+project `.mcp.json`, the managed marketplace and the settings hook files. It does not prove that
+the plugin is enabled, that a hook ran, or that a session called `start`. Shipping a
+`SessionStart` cue for bare registrations (issue #789 item 3a) is a host-registration change
+that remains open with the maintainer as owner; until then the documented remedy for a bare entry
+is the guided connection. The repository's own `AGENTS.md` states the `start`/receipt expectation
+for material work in this checkout, since the highest-priority instruction layer was silent.
 
 Design basis, checked 2026-09-09: Claude's [skills guidance](https://code.claude.com/docs/en/skills)
 recommends a use-case-first description and concise instructions with supporting references.
@@ -60,7 +123,8 @@ Yoetz keeps this workflow in the conversation because a forked skill lacks that 
 history. The [plugin guide](https://code.claude.com/docs/en/plugins) supplies the namespaced
 invocation; [hooks](https://code.claude.com/docs/en/hooks) and
 [sessions](https://code.claude.com/docs/en/sessions) explain the reload/resume context. Yoetz does
-not add `allowed-tools`, an automatic fork, or a new hook to personalize prose. The five shared
+not add `allowed-tools` or an automatic fork. The independent startup cue and optional required
+gate are described in the required-startup runbook. The five shared
 references still own evidence, consent, and receipt semantics. These sources justify instruction
 design, not a new tested Claude version or native behavioral acceptance result.
 
@@ -575,7 +639,7 @@ payload-free `hook_diagnostics` reason
 (`auto_attach_workspace_unbound`, `auto_attach_request_invalid`, `auto_attach_binding_ambiguous`,
 `auto_attach_conflict`,
 `auto_attach_refused`, `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`,
-`privacy_authority_required`, `service_unavailable`, `vault_locked`, `timeout`, `storage_unsafe`,
+`privacy_authority_required`, `service_unavailable`, `service_incompatible`, `vault_locked`, `timeout`, `storage_unsafe`,
 or `storage_corrupt`) and the session keeps an observation-only binding; `UserPromptSubmit` and
 `Stop` retry under the bounded budget, while teardown `SessionEnd` records its lifecycle intent and
 defers service delivery without spending an auto-attach retry. An explicit cooperative MCP `start`
@@ -956,8 +1020,17 @@ or toggle consent to manufacture a healthy status. Real hard limits continue to 
 inventory recovery, and previous loss counts and identities remain unchanged.
 
 Recovery emits fixed `capture_inventory_*` reason counts in its internal maintenance summary;
-these are not ledger receipts or a new hook diagnostic format. Historical local selection losses
-still need a separately attributed task/check propagation path when no later envelope is admitted.
+these are not ledger receipts or a new hook diagnostic format. Historical local selection losses with complete original route attribution are reported by
+service maintenance even when no later envelope is admitted. New checks reconcile their task's
+pending losses first. Each source/session/generation/route lane produces one permanent
+`observation_input_loss` marker, preserving all local counts and identities. Missing original
+attribution and overflow-only range history remain visible locally rather than being assigned to
+an unrelated task. A terminal route drift or quarantined marker operation uses the same task
+runtime with a distinct deterministic recovery operation; transient publication failures remain
+fail-closed. Catalog scans run through separate read-only worker connections, keeping the service
+event loop available during both inventory reads.
+Route-valid lane-digest mismatches are reported with the same explicit loss gap and an
+unreconciled marker; malformed routes or source identities remain local.
 Host-shaped regression tests, including interleaved parent/worker routes and encrypted readback,
 are not a version-pinned acceptance run inside the installed vendor application.
 
@@ -1040,3 +1113,31 @@ only its fenced lease was yielded. Replay the exact start body and request ID on
 inventing session or writer IDs. `start_pending_same_identity` instead means a live lease remains:
 wait up to 60 seconds before the one exact replay. If still busy or pending, retain the original
 request and report the unresolved start. These continuations do not authorize a new task.
+
+## Cold service attachment and recovery (issue #670)
+
+Claude Code SessionStart returns its result through synchronous `additionalContext`, within
+the existing ten-second registration budget. Ordinary tool hooks keep their five-second budget.
+
+For an enabled, consented workspace with no mapped task, auto-attachment now gives the exact
+selected service one second to connect or start through its fixed, instance-pinned launcher.
+It never supersedes another installation. A compatible stamped holder that is still starting
+is reused only while an owner-only nonblocking flock probe confirms that the singleton is held;
+an unheld stale stamp is ignored and the fixed launcher makes a normal flock-protected start
+attempt. A live incompatible or unknown holder is refused. The connection time counts toward
+the existing five-second attachment RPC budget. Turn-boundary retries retain their one-second
+outer budget and reserve part of it for the start RPC after a shorter connector arm; ordinary tool hooks and SessionEnd do not start a service. Local-only readiness
+probes and unconsented/disabled observation do not take this path.
+
+The native context distinguishes a service that is unavailable or still starting
+(`service_unavailable`), an incompatible holder (`service_incompatible`), and an answered
+admission conflict (`auto_attach_conflict`). Missing mapping remains explicit. Call cooperative
+`start` before material work and follow its exact continuation; a conflict needs an authorized
+task selector or explicit admission decision, not a service restart. Successful hook exit alone
+does not establish attachment. Task admission and ended-session recovery selectors are unchanged.
+
+Structural pre/post observations remain queued and keep their original identities across
+bootstrap. A later successful mapping permits their normal drain. Missing transient content
+remains a coverage gap; a recovered queue is not recovered content. Existing host/OS capability
+and consent requirements still apply. Automated host-contract tests do not establish native
+macOS, Linux, or Windows/WSL 2 acceptance. Native cold-start coverage remains tracked in #670.

@@ -1436,3 +1436,101 @@ async def test_failed_send_bounds_every_concurrent_pending_caller() -> None:
         await _settle_loop_callbacks()
 
         assert [context.get("message") for context in contexts] == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("compatible", [True, False])
+async def test_hook_startup_reuses_starting_holder_without_spawning_or_signalling(
+    monkeypatch: pytest.MonkeyPatch, compatible: bool
+) -> None:
+    import yoetz.service.client as client_module
+    from yoetz.service.lifecycle import SingletonHolder
+
+    expected = object()
+    calls = 0
+
+    async def connect(_kind: ControlClientKind, **_kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ControlError("service_unavailable", retryable=True)
+        return expected
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("a hook must not spawn beside or signal an existing holder")
+
+    holder = SingletonHolder(
+        pid=123,
+        instance_id=None,
+        schema_manifest_digest="selected" if compatible else "other",
+        service_version=client_module.__version__,
+    )
+    monkeypatch.setattr(client_module, "service_holder_identity", lambda: holder)
+    monkeypatch.setattr(client_module, "_singleton_holder_lock_is_held", lambda: True)
+    monkeypatch.setattr(client_module, "_manifest_digest_for_client", lambda: "selected")
+    monkeypatch.setattr(client_module, "_connect_service_attempt", connect)
+    monkeypatch.setattr(client_module, "_spawn_service_process", forbidden)
+    monkeypatch.setattr(client_module, "supersede_incompatible_service", forbidden)
+    if compatible:
+        assert (
+            await connect_service_on_demand(
+                ControlClientKind.CLI, timeout_seconds=0.2, supersede_incompatible=False
+            )
+            is expected
+        )
+        assert calls == 2
+    else:
+        with pytest.raises(ControlError, match="service_incompatible"):
+            await connect_service_on_demand(
+                ControlClientKind.CLI, timeout_seconds=0.2, supersede_incompatible=False
+            )
+        assert calls == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("digest", ["selected", "other"])
+async def test_hook_startup_spawns_after_an_unheld_holder_stamp(
+    monkeypatch: pytest.MonkeyPatch,
+    digest: str,
+) -> None:
+    """An unheld stamp, including an old-version one, must not block hook startup."""
+
+    import yoetz.service.client as client_module
+    from yoetz.service.lifecycle import SingletonHolder
+
+    expected = object()
+    calls = 0
+    spawned = 0
+
+    async def connect(_kind: ControlClientKind, **_kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ControlError("service_unavailable", retryable=True)
+        return expected
+
+    def spawn() -> None:
+        nonlocal spawned
+        spawned += 1
+
+    holder = SingletonHolder(
+        pid=123,
+        instance_id=None,
+        schema_manifest_digest=digest,
+        service_version=client_module.__version__,
+    )
+    monkeypatch.setattr(client_module, "service_holder_identity", lambda: holder)
+    monkeypatch.setattr(client_module, "_singleton_holder_lock_is_held", lambda: False)
+    monkeypatch.setattr(client_module, "_manifest_digest_for_client", lambda: "selected")
+    monkeypatch.setattr(client_module, "_connect_service_attempt", connect)
+    monkeypatch.setattr(client_module, "_spawn_service_process", spawn)
+    monkeypatch.setattr(client_module, "_SERVICE_START_POLL_SECONDS", 0.01)
+
+    connected = await connect_service_on_demand(
+        ControlClientKind.CLI,
+        timeout_seconds=0.2,
+        supersede_incompatible=False,
+    )
+    assert connected is expected
+    assert calls == 2
+    assert spawned == 1
