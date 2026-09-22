@@ -364,3 +364,76 @@ def test_codex_review_budget_default_and_explicit_limits() -> None:
         values["timeout_seconds"] = seconds
         with pytest.raises(ConfigError):
             ExternalRuntimeProfileConfig.model_validate(values)
+
+
+def test_legacy_codex_binding_loads_with_bounded_phase_budget_defaults() -> None:
+    """A binding written before #571 keeps its single effort for routine checks."""
+
+    legacy = _external_runtime().model_dump()
+    for key in ("routine_reasoning_effort", "routine_output_limit", "final_output_limit"):
+        legacy.pop(key)
+    runtime = ExternalRuntimeProfileConfig.model_validate(legacy)
+
+    assert runtime.routine_reasoning_effort is None
+    assert runtime.effective_routine_reasoning_effort == "high"
+    assert runtime.routine_output_limit == 4096
+    assert runtime.final_output_limit == 8192
+    assert runtime.review_budget_facts() == {
+        "routine": {
+            "reasoning_effort": "high",
+            "output_limit": 4096,
+            "effort_source": "legacy_single_effort",
+        },
+        "final": {"reasoning_effort": "high", "output_limit": 8192, "effort_source": "configured"},
+    }
+
+
+def test_codex_phase_budgets_are_independent_and_bounded() -> None:
+    values = _external_runtime().model_dump()
+    values.update(routine_reasoning_effort="low", routine_output_limit=1, final_output_limit=8192)
+    runtime = ExternalRuntimeProfileConfig.model_validate(values)
+    assert runtime.effective_routine_reasoning_effort == "low"
+    assert runtime.review_budget_facts()["routine"] == {
+        "reasoning_effort": "low",
+        "output_limit": 1,
+        "effort_source": "configured",
+    }
+    for key in ("routine_output_limit", "final_output_limit"):
+        for limit in (0, 8193):
+            bad = _external_runtime().model_dump()
+            bad[key] = limit
+            with pytest.raises(ConfigError):
+                ExternalRuntimeProfileConfig.model_validate(bad)
+    bad = _external_runtime().model_dump()
+    bad["routine_reasoning_effort"] = "not an identifier"
+    with pytest.raises(ConfigError):
+        ExternalRuntimeProfileConfig.model_validate(bad)
+
+
+def test_rendered_codex_binding_emits_phase_budget_keys_only_when_explicit() -> None:
+    import tomllib
+
+    from yoetz.config.load import validate_config_mapping
+    from yoetz.config.write import render_config_toml
+
+    legacy = YoetzConfig(profile="codex-subscription", external_runtime=_external_runtime())
+    legacy_text = render_config_toml(legacy)
+    for key in ("routine_reasoning_effort", "routine_output_limit", "final_output_limit"):
+        assert key not in legacy_text
+    assert validate_config_mapping(tomllib.loads(legacy_text)) == legacy
+
+    explicit_runtime = _external_runtime().model_copy(
+        update={
+            "routine_reasoning_effort": "medium",
+            "routine_output_limit": 2048,
+            "final_output_limit": 6000,
+        }
+    )
+    explicit = YoetzConfig(profile="codex-subscription", external_runtime=explicit_runtime)
+    text = render_config_toml(explicit)
+    assert 'routine_reasoning_effort = "medium"' in text
+    assert "routine_output_limit = 2048" in text
+    assert "final_output_limit = 6000" in text
+    loaded = validate_config_mapping(tomllib.loads(text))
+    assert loaded == explicit
+    assert render_config_toml(loaded) == text

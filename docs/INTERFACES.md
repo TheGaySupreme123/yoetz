@@ -3222,9 +3222,12 @@ slice (`role`, identity, `attempted_count`, `terminal_reason_counts`, `last_term
 `codex-chatgpt-subscription@1` is the only v1 external-runtime profile. Its configuration is the
 closed `ExternalRuntimeProfileConfig`: exact absolute executable and dedicated-home paths;
 executable, app-server-schema, capability-cell, and isolated-config SHA-256 digests;
-runtime/source/capability identities; capability-evidence expiry; model; reasoning effort;
-timeout; and retry cap. It has no token, OAuth endpoint, generic provider URL, headers, or open
-options map. Expired capability evidence fails before child launch. `account/read`, model
+runtime/source/capability identities; capability-evidence expiry; model; reasoning effort
+(the final-profile effort); timeout; and retry cap. It also has the optional
+`routine_reasoning_effort` (absent means routine checks keep `reasoning_effort`) and
+`routine_output_limit`/`final_output_limit` (output tokens, 1–8192, defaults 4096/8192). The
+writer emits these three keys only when they carry an explicit choice. It has no token, OAuth
+endpoint, generic provider URL, headers, or open options map. Expired capability evidence fails before child launch. `account/read`, model
 discovery, login, and logout are structural app-server operations and never a task-content probe.
 
 `SemanticEvaluatorPort.evaluate(case: ApprovedProviderCase, deadline: Deadline) -> SemanticResult`
@@ -3339,6 +3342,26 @@ the literal `upstream_body_observability=unavailable`. Email, credential paths/b
 or workspace IDs, prompt/reasoning/event/stderr text, and an asserted upstream body digest are
 forbidden. `turn_acknowledged=true` plus ambiguous transport or cleanup maps to
 `unavailable/outcome_unknown` and is not retriable.
+
+**Semantic budget profile (issue #571, ADR-006 amendment).** `SemanticBudgetProfile` is the
+closed pair `routine | final` (`yoetz.ports.semantic_budget`).
+`select_semantic_budget_profile(projection)` returns `final` when the frozen projection holds an
+effective, readable `completion` claim, and `routine` otherwise. The selected value is frozen as
+`execution.budget_profile` in the `yoetz.semantic-case/2` snapshot. An absent key reads as
+`final`, and any other value is `semantic_execution_invalid`. It is exposed to the provider
+factory only for the duration of one physical dispatch, and dispatches outside a check see
+`final`. For `external_runtime_oauth`, the selected profile maps to the binding's configured
+effort and output limit:
+
+- `runtime_evidence.reasoning_effort` is the effort the attempt sent in `turn/start`.
+- `sampling_params.max_output_tokens` is the per-check output limit Yoetz enforced on the
+  runtime's visible output counters (`output_tokens − reasoning_output_tokens`).
+- `selection_sha256` is `canonical_digest({"budget_profile", "model", "output_limit",
+  "reasoning_effort"})`. Attempts recorded before #571 committed to
+  `{"model", "reasoning_effort"}`.
+
+A snapshot over the limit ends the turn as `output_oversize`. The provenance wire shape is
+unchanged.
 
 `semantic_required` means AI-powered review success is required for a complete verdict, not required
 for returning already-computed local truth. Missing approved external/local capability, privacy
@@ -4802,6 +4825,10 @@ current-session repository binding's `repository_grant_state == "granted"`. `end
 service's `fallback_provider` capability), and a separate `fallback_provider_credential`
 blocker (`not_connected` with its own next command, or `unknown`); the fallback is never an
 input to `semantic_ready`, and a single-endpoint install omits the fallback fields entirely.
+A Codex-subscription endpoint (primary or fallback) adds `review_budgets`. It is shaped
+`{"routine"|"final": {"reasoning_effort", "output_limit", "effort_source"}}`, where
+`effort_source` is `configured` or `legacy_single_effort`. `yoetz provider codex-subscription
+status` (`yoetz.codex-subscription-status/1`) carries the same object.
 `repository_grant_state` and `repository_migration_state` expose the separate repository-authority
 inputs without inventing another readiness verdict. `agent_route_semantic_ready` is
 `semantic_ready` **and** one exclusive observed owner (`external|plugin`) with

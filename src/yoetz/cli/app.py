@@ -3528,8 +3528,22 @@ def provider_codex_subscription_setup(
         ),
     ] = None,
     reasoning_effort: Annotated[
-        str, typer.Option("--reasoning-effort", help="Exact reasoning effort.")
+        str,
+        typer.Option(
+            "--reasoning-effort",
+            help="Exact reasoning effort for final (completion) reviews.",
+        ),
     ] = "high",
+    routine_reasoning_effort: Annotated[
+        str | None,
+        typer.Option(
+            "--routine-reasoning-effort",
+            help=(
+                "Exact reasoning effort for routine checkpoint reviews. Defaults to medium for "
+                "a new binding and preserves an existing binding's routine choice when omitted."
+            ),
+        ),
+    ] = None,
     codex_home: Annotated[
         Path | None,
         typer.Option("--codex-home", help="Dedicated owner-private evaluator CODEX_HOME."),
@@ -3572,6 +3586,7 @@ def provider_codex_subscription_setup(
         codex_subscription_setup,
         default_codex_home,
         default_codex_subscription_model,
+        default_codex_subscription_routine_effort,
         resolve_supported_codex_executable,
     )
 
@@ -3585,6 +3600,11 @@ def provider_codex_subscription_setup(
             raise ValueError("codex_runtime_capability_unsupported")
         destination = default_codex_home() if codex_home is None else codex_home
         selected_model = default_codex_subscription_model() if model is None else model
+        selected_routine = (
+            default_codex_subscription_routine_effort()
+            if routine_reasoning_effort is None
+            else routine_reasoning_effort
+        )
         typer.echo("Codex with ChatGPT subscription")
         typer.echo(f"  runtime: {native}")
         typer.echo(f"  executable_sha256: {digest}")
@@ -3592,7 +3612,15 @@ def provider_codex_subscription_setup(
         typer.echo(f"  capability cell: {cell.capability_cell_sha256}")
         typer.echo(f"  cell evidence expires: {cell.capability_evidence_expires_at}")
         typer.echo(f"  dedicated CODEX_HOME: {destination}")
-        typer.echo(f"  model/reasoning: {selected_model} / {reasoning_effort}")
+        typer.echo(f"  model: {selected_model}")
+        typer.echo(
+            f"  reasoning: final {reasoning_effort} / routine "
+            + (
+                f"{reasoning_effort} (legacy single effort kept)"
+                if selected_routine is None
+                else selected_routine
+            )
+        )
         typer.echo("  destination: OpenAI through Codex-managed ChatGPT authentication")
         typer.echo("  data-use posture: unknown; your ChatGPT plan and terms apply")
         typer.echo("  Yoetz sends only a privacy-approved case; Codex owns the upstream body.")
@@ -3621,6 +3649,7 @@ def provider_codex_subscription_setup(
                     codex_home=destination,
                     model=selected_model,
                     reasoning_effort=reasoning_effort,
+                    routine_reasoning_effort=selected_routine,
                     login_mode="device_code" if device_code else "browser",
                     open_browser=open_browser,
                     switch_account=switch_account,
