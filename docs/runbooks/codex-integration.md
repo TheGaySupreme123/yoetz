@@ -899,8 +899,9 @@ A Codex hook body over the 256 KiB ingress cap (`MAX_HOOK_STDIN_BYTES`) is refus
 before any parse. Codex does not use Cursor's 1 MiB identity skim, so the oversized event stays
 an unparsed gap. The hook stays fail-open and the host continues. Yoetz records the bounded
 `codex_payload_too_large` reason against that event in `yoetz observe status` hook diagnostics,
-and notes the `payload_too_large` coverage gap on the consented workspace so receipts and
-coverage wording carry the loss. Before this, the refusal reached the outer handler as the bare
+and notes the `payload_too_large` coverage gap on the consented workspace, where
+`yoetz observe status` shows it. That workspace gap does not yet reach task receipts: no row
+exists, so a receipt simply has no evidence for the dropped event rather than naming the loss. Before this, the refusal reached the outer handler as the bare
 `observe` reason, which named neither the cause nor the affected event, and the native
 `post-tool-use`, `user-prompt-submit`, and `session-start` entry points recorded nothing at all
 because they parse the body before handing the same bytes to the observation ingress.

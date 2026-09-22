@@ -721,8 +721,9 @@ A Claude Code hook body over the 256 KiB ingress cap (`MAX_HOOK_STDIN_BYTES`) is
 stdin, before any parse. Claude Code does not use Cursor's 1 MiB identity skim, so the oversized
 event stays an unparsed gap. The hook stays fail-open and the host continues. Yoetz records the
 bounded `claude_payload_too_large` reason against that event in `yoetz observe status` hook
-diagnostics, and notes the `payload_too_large` coverage gap on the consented workspace so
-receipts and coverage wording carry the loss. This host ingress previously swallowed every
+diagnostics, and notes the `payload_too_large` coverage gap on the consented workspace, where
+`yoetz observe status` shows it. That workspace gap does not yet reach task receipts: no row
+exists, so a receipt simply has no evidence for the dropped event rather than naming the loss. This host ingress previously swallowed every
 refusal into a bare `{}` with no record at all, so a dropped large edit left no trace.
 The cap is fixed and shared by every host; raising it is not an operator control. Each reader
 consumes at most cap-plus-one bytes, so the true size of a refused body is never measured and

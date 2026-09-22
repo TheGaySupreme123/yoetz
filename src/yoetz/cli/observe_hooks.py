@@ -2860,9 +2860,9 @@ def note_payload_too_large(
 
     Two records, because there are two audiences. The bounded owner-only
     diagnostic tells an operator which host lost which event; the workspace
-    coverage gap makes the same loss reach ``observe status`` and receipt
-    coverage wording, so an edit that was dropped at the door can never read as
-    captured work (issue #667).
+    coverage gap makes the same loss reach ``observe status``. It does not yet
+    reach task receipts, which read only the ledger; there the dropped edit has
+    no evidence at all, so it can never read as captured work (issue #667).
     """
 
     # Cursor reaches this after its 1 MiB skim cap or a parsed body that kept
