@@ -4560,6 +4560,22 @@ not a rollback candidate and remains preserved as `modified` or `recovery_requir
 
 ### Cursor local harness contract (issue #153)
 
+`discover_cursor_ide` reads installation identity without proving activation or a native-session
+capability cell. The macOS path uses bundle metadata and the main executable digest. The Linux
+path accepts an explicit package root or native executable, resolves the selected path, reads
+`resources/app/package.json` version and `resources/app/product.json` commit/application name,
+and hashes the executable after reading its ELF64 little-endian ET_EXEC/ET_DYN signature and
+x86-64/aarch64 architecture. Version and commit metadata are bounded printable ASCII identity
+fields.
+Internal package symlinks are
+refused; metadata reads are bounded to 1 MiB each. Missing roots/executables are unavailable,
+unrecognized layouts are `cursor_ide_layout_unsupported`, and malformed or foreign identities
+are `cursor_ide_identity_invalid`. Inspection never executes the package or extends profile
+`evidence_case_ids`. A Linux identity inside WSL supplies no Windows-side IDE or Remote WSL
+session evidence (issue #722). The helper currently has no CLI, MCP, TUI, or receipt caller;
+library callers and unit tests are its only entry points until a separate integration wires it
+into setup or discovery.
+
 `HarnessId` membership is now `claude|codex|cursor`. Adding Cursor changed no method on `IntegrationsPort`,
 `PluginArtifactPort`, `HarnessMcpPort`, `ObservationPort`, or the six workflow operations.
 `PluginFormatProfile` membership adds `cursor_plugin_native`; `HostSurface` adds

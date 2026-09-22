@@ -125,11 +125,28 @@ The [acceptance record](https://github.com/TheGaySupreme123/yoetz/issues/767#iss
 binds the source, wheel digest and per-platform outcomes. Provider login and model runs were
 outside this installation acceptance.
 
-Native-session capability remains **unproven** for Linux/WSL under #722. The separate native
-IDE bundle inspector still reads macOS `Contents/Info.plist` and the executable digest; it
-returns `cursor_ide_platform_unsupported` for Linux rather than minting a native capability
-identity. This differs from the common installer's executable-backed discovery. The reviewed
-native evidence case stays `cursor-ide-native-3.17.8-macos-arm64`; installation success does not
+The separate native IDE identity inspector (`discover_cursor_ide`) accepts the Linux installed
+package root, such as `/usr/share/cursor`, or its native `cursor` executable (including an explicit
+symlink to that executable). For an extracted AppImage, select its `usr/share/cursor` directory.
+It reads the version from `resources/app/package.json`, the build commit and Cursor application
+name from `resources/app/product.json`, and hashes the native ELF executable after requiring an
+ELF64 little-endian ET_EXEC or ET_DYN header. Version and commit metadata must be bounded printable
+ASCII identity fields. It does not launch
+the IDE, extract an AppImage, or change a host registration. Missing installations report
+`cursor_ide_unavailable`; an unextracted AppImage or unrecognized layout reports
+`cursor_ide_layout_unsupported`; malformed metadata, linked package members, and non-Linux
+executables report `cursor_ide_identity_invalid`. Select the native binary/root rather than the
+`resources/app/bin/cursor` shell wrapper. This inspector is distinct from common setup discovery,
+which probes the installed host's command and version. The macOS bundle inspector is unchanged.
+Today this inspector is library-only: no CLI, MCP, TUI, or receipt surface invokes it. A caller
+must supply the package root or native executable directly; this read does not add an operator
+selection step to common setup or host discovery.
+The [vendor installation guide](https://cursor.com/docs/get-started/quickstart) documents Linux
+package and AppImage installation.
+
+Native-session capability remains **unproven** for Linux/WSL under #722. An identity read on WSL
+applies only to a Linux installation inside that distribution, not the Windows-side IDE. The
+reviewed native evidence case stays `cursor-ide-native-3.17.8-macos-arm64`; installation success does not
 admit a new session/observation capability case. The Windows-side Cursor IDE with Remote WSL
 is unverified and remains owned by the integration maintainer in #722. Cursor Cloud is outside
 this scope. Shared host facts are in [`linux-and-wsl.md`](linux-and-wsl.md).
