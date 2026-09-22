@@ -33,6 +33,7 @@ from yoetz.domain.findings import (
 )
 from yoetz.domain.receipts import (
     CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP,
+    COMPLETION_CLAIM_OUTSIDE_PLAN_GAP,
     COMPLETION_SCOPE_DECLARED_NONE_GAP,
     COMPLETION_SCOPE_UNDECLARED_GAP,
     PolicyVersionEntry,
@@ -756,6 +757,29 @@ def test_empty_completion_scope_gap_dominates_unresolved_actionable_finding(
 
     assert receipt.findings == (finding,)
     assert receipt.conclusion is ReceiptConclusion.INSUFFICIENT_COVERAGE
+
+
+def test_frozen_scope_gap_without_current_relation_omits_zero_detail() -> None:
+    """A repaired current projection must not render a stale frozen gap as zero relations."""
+
+    coverage = _coverage(gaps=(COMPLETION_CLAIM_OUTSIDE_PLAN_GAP,))
+    gap = CaseGap(
+        f"check_coverage:{COMPLETION_CLAIM_OUTSIDE_PLAN_GAP}",
+        COMPLETION_CLAIM_OUTSIDE_PLAN_GAP,
+        (),
+    )
+    receipt = _build(
+        _context(
+            check=_check(CheckVerdict.INSUFFICIENT_COVERAGE, coverage),
+            coverage=coverage,
+            gaps=(gap,),
+        )
+    )
+
+    rendered_gap = next(
+        item for item in receipt.gaps if item.code == COMPLETION_CLAIM_OUTSIDE_PLAN_GAP
+    )
+    assert rendered_gap.detail is None
 
 
 def test_declared_resolved_scope_has_distinct_clean_wording() -> None:
