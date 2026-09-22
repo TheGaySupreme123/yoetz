@@ -24,8 +24,8 @@ _MANIFEST_PATH = "manifest.json"
 _SCHEMA_NAMESPACE = "https://schemas.yoetz.dev/0.1/"
 _EXPECTED_SCHEMA_MANIFEST_SCHEMA = "yoetz.schema-manifest/1.0.0"
 _EXPECTED_SCHEMA_MANIFEST_VERSION = "1.0.0"
-_EXPECTED_MEMBER_COUNT = 150
-_EXPECTED_REQUEST_RESULT_VERSION_COUNT = 43
+_EXPECTED_MEMBER_COUNT = 153
+_EXPECTED_REQUEST_RESULT_VERSION_COUNT = 44
 _EXPECTED_EVENT_VERSION_COUNT = 16
 
 
@@ -212,6 +212,10 @@ def test_schema_registry_is_complete() -> None:
             if path.endswith("-2.4.0.schema.json")
             else "2.3.0"
             if path.endswith("-2.3.0.schema.json")
+            else "2.2.3"
+            if path.endswith("-2.2.3.schema.json")
+            else "2.2.4"
+            if path.endswith("-2.2.4.schema.json")
             else "2.2.2"
             if path.endswith("-2.2.2.schema.json")
             else "2.2.1"
@@ -452,12 +456,12 @@ def test_released_version_manifest_2_2_1_retains_the_0_2_3_inventory() -> None:
     )
 
 
-def test_live_version_manifest_2_2_2_tracks_the_current_inventory() -> None:
+def test_live_version_manifest_2_2_4_tracks_the_current_inventory() -> None:
     from yoetz.version import REVIEWED_RESOURCE_COUNT
 
-    document = _version_manifest_document("2.2.2")
+    document = _version_manifest_document("2.2.4")
 
-    assert document["properties"]["schema_version"]["const"] == "2.2.2"
+    assert document["properties"]["schema_version"]["const"] == "2.2.4"
     counts = _version_manifest_consts(document, "resource_counts")
     assert int(counts["total"]) == REVIEWED_RESOURCE_COUNT
     assert sum(int(count) for name, count in counts.items() if name != "total") == int(
@@ -470,6 +474,21 @@ def test_live_version_manifest_2_2_2_tracks_the_current_inventory() -> None:
     assert events["claim_recorded"] == "1.1.0"
     requests = _version_manifest_consts(document, "request_result_schema_versions")
     assert requests["publish-work-request"] == "1.1.0"
+
+
+def test_released_version_manifest_2_2_2_retains_the_0_2_4_inventory() -> None:
+    document = _version_manifest_document("2.2.2")
+    assert document["properties"]["schema_version"]["const"] == "2.2.2"
+    assert int(_version_manifest_consts(document, "resource_counts")["total"]) == 204
+    requests = _version_manifest_consts(document, "request_result_schema_versions")
+    assert "host-connection" in requests
+    assert "setup-status" not in requests
+
+
+def test_released_version_manifest_2_2_3_retains_the_0_2_5_inventory() -> None:
+    document = _version_manifest_document("2.2.3")
+    assert document["properties"]["schema_version"]["const"] == "2.2.3"
+    assert int(_version_manifest_consts(document, "resource_counts")["total"]) == 206
 
 
 def test_schema_documents_are_frozen_when_catalog_available() -> None:
