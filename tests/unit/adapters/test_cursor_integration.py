@@ -1541,9 +1541,7 @@ def test_linux_cursor_identity_rejects_non_loadable_elf_types(
 
 
 @pytest.mark.parametrize("elf_type", [2, 3])
-def test_linux_cursor_identity_accepts_loadable_elf_types(
-    tmp_path: Path, elf_type: int
-) -> None:
+def test_linux_cursor_identity_accepts_loadable_elf_types(tmp_path: Path, elf_type: int) -> None:
     root = _linux_cursor_package(tmp_path)
     executable = root / "cursor"
     content = executable.read_bytes()
@@ -1552,12 +1550,10 @@ def test_linux_cursor_identity_accepts_loadable_elf_types(
 
 
 @pytest.mark.parametrize("field", ["version", "commit"])
-def test_linux_cursor_identity_rejects_control_characters(
-    tmp_path: Path, field: str
-) -> None:
+def test_linux_cursor_identity_rejects_control_characters(tmp_path: Path, field: str) -> None:
     root = _linux_cursor_package(tmp_path)
-    metadata_path = root / "resources" / "app" / (
-        "package.json" if field == "version" else "product.json"
+    metadata_path = (
+        root / "resources" / "app" / ("package.json" if field == "version" else "product.json")
     )
     metadata = json.loads(metadata_path.read_text())
     metadata[field] = "3.21.16\nunsafe" if field == "version" else "8" * 20 + "\x7f"
