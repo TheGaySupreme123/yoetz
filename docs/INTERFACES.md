@@ -332,6 +332,9 @@ identity, refs) plus coverage/gaps. It appends nothing, records no operation, do
 `request_id`, and does not move the frontier — same non-citable discipline as
 `status view=candidate_findings`. A subsequent real publish may reuse the same `request_id`.
 `dry_run: null` is rejected; omit the field or pass a boolean.
+The coverage on an accepted internal success is derived from the authored envelope coverage and the
+resulting projection, so its diagnostic `known_gaps` are reporting output and must not be copied into
+the coverage of a later event envelope.
 The preferred recovery read after any ambiguous write is `status view=operation` with
 `filter.operation_request_id` set to the write's `request_id`: it is a state lookup for that
 operation identity (`absent`/`pending`/`complete`/`quarantined`) within the authenticated task,
@@ -995,6 +998,10 @@ the readable effective current plan declares zero obligations, exactly one appli
   `no_obligations_reason`;
 - `completion_scope_declared_none` — the effective plan has no obligation refs and carries a typed
   reason.
+- `completion_claim_outside_plan` — an effective completion claim names an obligation outside the
+  readable current plan.
+- `completion_plan_not_claimed` — the readable current plan names an obligation omitted by an
+  effective completion claim.
 
 Both force `coverage_incomplete`, `insufficient_coverage`, and an insufficient-coverage receipt.
 The typed declaration records the participant's scope decision but never purchases a clean verdict.
@@ -5444,4 +5451,6 @@ counts stay plan-derived. Receipt gap details contain at most 16 ID-pair example
 relation counts, with an explicit omission marker; default privacy projection still applies.
 Partial claims are accepted. Material/superseded claims are excluded, and unavailable input is
 not an empty scope. Multiple partial claims are compared independently; older effective claims
-are compared to the current plan until explicitly superseded. See ADR-019 for repair semantics.
+are compared to the current plan until explicitly superseded. A later plan revision that waives a
+previously claimed obligation changes the current plan but does not rewrite that claim, so the
+outside-plan code remains expected until the claim is superseded. See ADR-019 for repair semantics.

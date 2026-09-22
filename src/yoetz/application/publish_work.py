@@ -79,6 +79,7 @@ from yoetz.domain.values import (
     JsonValue as DomainJsonValue,
 )
 from yoetz.kernel.completion_scope import with_completion_scope_coverage
+from yoetz.kernel.projections import ProjectionState
 from yoetz.kernel.reducers import replay
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.diagnostics import RuntimeCapability
@@ -91,6 +92,7 @@ from yoetz.ports.ledger import (
     OperationKind,
     OperationRecord,
     OperationState,
+    ProjectionView,
 )
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef, ObjectSource, StagedObject
 from yoetz.ports.runtime import (
@@ -906,6 +908,45 @@ async def _load_accepted_records(
     return ordered
 
 
+async def _projection_at_result_frontier(
+    runtime: TaskRuntime,
+    result: AppendResult,
+) -> ProjectionState:
+    """Read the adapter's validated projection and replay only on a frontier mismatch.
+
+    Both ledger adapters already replay and retain the exact projection as part of an accepted
+    append. Replaying the task-global history here duplicated that O(n) work on every successful
+    publish. A replayed operation or a concurrent suffix can point at an older frontier; in those
+    cases the cached projection cannot answer the requested historical result and the exact prefix
+    replay remains the conservative fallback.
+    """
+
+    stored = await runtime.ledger.load_projection(
+        runtime.session_id,
+        ProjectionView.CANDIDATE_FINDINGS,
+    )
+    if (
+        stored is not None
+        and stored.frontier == result.result_frontier
+        and stored.lag == 0
+        and not stored.rebuild_required
+        and stored.projection_version == runtime.projection_version
+        and type(stored.state) is ProjectionState
+        and stored.state.frontier == stored.frontier.sequence
+        and stored.state.head_digest == stored.frontier.head_digest
+    ):
+        return cast(ProjectionState, stored.state)
+    prefix = tuple(
+        [
+            row
+            async for row in runtime.ledger.load_events(
+                runtime.session_id, through=result.result_frontier.sequence
+            )
+        ]
+    )
+    return replay(prefix)
+
+
 def _accepted_model(record: LedgerRecord) -> PublishWorkAcceptedEventModel:
     return PublishWorkAcceptedEventModel(
         event_id=record.event_id,
@@ -938,15 +979,8 @@ async def _internal_result(
     if result.warnings != expected_warnings:
         raise _error(PublicErrorCode.STORAGE_CORRUPT, "The accepted warnings are invalid.")
     records = await _load_accepted_records(runtime, result)
-    prefix = tuple(
-        [
-            row
-            async for row in runtime.ledger.load_events(
-                runtime.session_id, through=result.result_frontier.sequence
-            )
-        ]
-    )
-    coverage = with_completion_scope_coverage(prepared.coverage, replay(prefix))
+    projection = await _projection_at_result_frontier(runtime, result)
+    coverage = with_completion_scope_coverage(prepared.coverage, projection)
     return PublishWorkInternalResult(
         protocol_version="0.1",
         schema_version="1.0.0",

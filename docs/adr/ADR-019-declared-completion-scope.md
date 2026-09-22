@@ -90,7 +90,9 @@ existing unknown-input semantics rather than producing invented differences.
 
 Comparisons are per claim: multiple partial claims do not implicitly combine into whole-plan
 completion. An older unsuperseded claim remains a current assertion and is compared with a later
-plan too; the author can explicitly supersede it. Narrowing a claim does not reopen a resolved
+plan too; the author can explicitly supersede it. This includes a later explicit `waived` change:
+waiver changes the current plan declaration, but it does not rewrite the historical claim, so the
+claim remains outside the current plan until replaced. Narrowing a claim does not reopen a resolved
 obligation or remove it from the plan. Its omitted scope stays visible as outside that claim's
 completion coverage. A full-scope claim, explicit plan revision, or claim replacement is the
 supported repair; the checker never edits these declarations itself.

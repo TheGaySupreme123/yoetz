@@ -403,4 +403,6 @@ and claim together before committing. To narrow/correct an existing claim, publi
 A partial completion claim remains permitted, but the omitted plan scope is not covered by that
 claim even if those obligation rows are resolved. Separate partial claims do not automatically
 combine into a whole-plan completion claim. Explicitly replace older completion claims after
-scope changes when their assertions no longer describe the intended current scope.
+scope changes when their assertions no longer describe the intended current scope. A later
+`waived` plan change removes an obligation from the current plan but leaves an older effective claim
+intact; that claim therefore continues to report `completion_claim_outside_plan` until superseded.

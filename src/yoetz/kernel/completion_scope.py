@@ -5,14 +5,20 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 from yoetz.domain.events import ClaimKind
+from yoetz.domain.receipts import (
+    COMPLETION_CLAIM_OUTSIDE_PLAN_GAP,
+    COMPLETION_PLAN_NOT_CLAIMED_GAP,
+)
 from yoetz.domain.values import ClaimId, ObligationId
 from yoetz.kernel.claims import effective_claim_items
 from yoetz.kernel.plan_scope import current_plan_scope
 from yoetz.kernel.projections import ProjectionState
 from yoetz.protocol.coverage import Coverage, LedgerFreshness
 
-CLAIM_OUTSIDE_PLAN = "completion_claim_outside_plan"
-PLAN_NOT_CLAIMED = "completion_plan_not_claimed"
+# Keep the short names local to this comparison module while the canonical gap constants live with
+# the other receipt gap vocabulary. Receipt/check consumers import the canonical names directly.
+CLAIM_OUTSIDE_PLAN = COMPLETION_CLAIM_OUTSIDE_PLAN_GAP
+PLAN_NOT_CLAIMED = COMPLETION_PLAN_NOT_CLAIMED_GAP
 SCOPE_REPAIR = (
     "Add intended work with plan_revised obligation_changes change=carried, or publish a full "
     "plan_published restatement at exactly the next plan version. Alternatively replace the "
@@ -31,9 +37,10 @@ class CompletionScopeDifference:
 def completion_scope_differences(state: ProjectionState) -> tuple[CompletionScopeDifference, ...]:
     """Compare each effective claim independently; never infer scope or merge claims.
 
-    A prior claim remains effective until explicitly superseded. A later plan change therefore
-    requires reviewing that assertion against the current scope too. Missing/unreadable inputs
-    are left to the existing unknown-input coverage, never interpreted as an empty declaration.
+    A prior claim remains effective until explicitly superseded. A later plan change, including an
+    explicit waiver, therefore requires reviewing that assertion against the current scope too.
+    Missing/unreadable inputs are left to the existing unknown-input coverage, never interpreted as
+    an empty declaration.
     """
 
     scope = current_plan_scope(state.plans, state.coverage_gaps)
