@@ -36,6 +36,7 @@ from yoetz.kernel.finding_resolution import (
 )
 from yoetz.kernel.projections import (
     FindingProjectionRecord,
+    ProjectionState,
     empty_projection_state,
     projection_from_snapshot,
     projection_snapshot,
@@ -581,4 +582,223 @@ def test_resolution_explanation_preserves_scope_policy_suppression_and_refire() 
         "findings_suppressed",
         "matching_policy_not_completed",
         "subject_outside_checked_scope",
+    )
+
+
+def _command_proof_state() -> ProjectionState:
+    from builders.policy_cases import act, make_case, obligation_record, plan_record, record, res
+    from yoetz.domain.events import (
+        ActionKind,
+        ActionRecordedPayload,
+        ObligationPublishedPayload,
+        ObligationStatus,
+        PlanPublishedPayload,
+        RequestedItem,
+        RequestedItemKind,
+        ResultOutcome,
+        ResultRecordedPayload,
+    )
+
+    return make_case(
+        plans={1: plan_record(PlanPublishedPayload(1, "Plan", (obl(1), obl(2))), 1)},
+        obligations={
+            obl(1): obligation_record(
+                ObligationPublishedPayload(obl(1), "Edit", "Result", ObligationStatus.OPEN), 2
+            ),
+            obl(2): obligation_record(
+                ObligationPublishedPayload(
+                    obl(2),
+                    "Test",
+                    "Result",
+                    ObligationStatus.RESOLVED,
+                    requested_items=(
+                        RequestedItem(RequestedItemKind.COMMAND, "pytest unrelated.py"),
+                    ),
+                    resolution_evidence_refs=(res(2),),
+                ),
+                3,
+            ),
+        },
+        actions={
+            act(1): record(
+                ActionRecordedPayload(act(1), ActionKind.EDIT, "Edit", obligation_refs=(obl(1),)),
+                10,
+            )
+        },
+        results={res(1): record(ResultRecordedPayload(res(1), act(1), ResultOutcome.SUCCESS), 20)},
+    ).projection
+
+
+@pytest.mark.parametrize("gap", ("command_attempt_uncorroborated", "command_attempt_mismatch"))
+def test_command_gap_only_allows_proven_independent_action_result(gap: str) -> None:
+    from yoetz.kernel.finding_resolution import resolution_blockers
+
+    finding = _finding(kind=FindingKind.ACTION_WITHOUT_RESULT, subject_refs=(evt(10),))
+    check = _check(tested=100, coverage=_coverage(gaps=(gap,)))
+    state = _command_proof_state()
+    assert resolution_blockers(finding, 4, check, frozenset(), proof_state=state) == ()
+    assert qualifying_check_resolves(finding, 4, check, frozenset(), proof_state=state)
+    assert not qualifying_check_resolves(finding, 4, check, frozenset())
+
+
+def test_command_gap_relation_through_resolution_result_blocks_independence() -> None:
+    """A command obligation's result link is an explicit relation to the action too."""
+    from builders.policy_cases import obligation_record, res
+    from yoetz.kernel.finding_resolution import resolution_blockers
+
+    state = _command_proof_state()
+    command_obligation = state.obligations[obl(2)]
+    assert command_obligation.payload is not None
+    state = replace(
+        state,
+        obligations={
+            **state.obligations,
+            obl(2): obligation_record(
+                replace(command_obligation.payload, resolution_evidence_refs=(res(1),)),
+                command_obligation.source_frontier,
+            ),
+        },
+    )
+    finding = _finding(kind=FindingKind.ACTION_WITHOUT_RESULT, subject_refs=(evt(10),))
+    check = _check(tested=100, coverage=_coverage(gaps=("command_attempt_uncorroborated",)))
+    reasons = resolution_blockers(finding, 4, check, frozenset(), proof_state=state)
+    assert "command_relation_overlaps_obligation:" + obl(2) in reasons
+
+
+def test_explanation_cache_is_scoped_to_the_candidate_check() -> None:
+    """Two checks can share a subject frontier without sharing a pre-check projection."""
+    from types import SimpleNamespace
+    from typing import cast
+
+    from yoetz.domain.events import LedgerRecord
+    from yoetz.kernel.finding_resolution import (
+        _historical_proof_state,  # pyright: ignore[reportPrivateUsage]
+    )
+    from yoetz.kernel.projections import empty_projection_state
+
+    replayed: list[tuple[int, ...]] = []
+
+    def fake_replay(events: tuple[LedgerRecord, ...]) -> ProjectionState:
+        replayed.append(tuple(event.ledger.ingestion_sequence for event in events))
+        return empty_projection_state()
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr("yoetz.kernel.reducers.replay", fake_replay)
+    try:
+        check = cast(
+            CheckRecordedPayload,
+            SimpleNamespace(subject_frontier=SimpleNamespace(sequence=1, head_digest=_DIGEST)),
+        )
+        records = cast(
+            tuple[LedgerRecord, ...],
+            tuple(
+                SimpleNamespace(ledger=SimpleNamespace(ingestion_sequence=sequence))
+                for sequence in (1, 2)
+            ),
+        )
+        first = cast(LedgerRecord, SimpleNamespace(ledger=SimpleNamespace(ingestion_sequence=2)))
+        second = cast(LedgerRecord, SimpleNamespace(ledger=SimpleNamespace(ingestion_sequence=3)))
+        cache: dict[tuple[int, int, str], ProjectionState | None] = {}
+        _historical_proof_state(check, first, records, cache)
+        _historical_proof_state(check, second, records, cache)
+    finally:
+        monkeypatch.undo()
+    assert replayed == [(1,), (1, 2)]
+
+
+@pytest.mark.parametrize(
+    "weakness",
+    (
+        "missing_result",
+        "late_result",
+        "unbound_action",
+        "unreadable_result",
+        "unknown_plan",
+        "missing_obligation",
+        "overlap",
+        "original_gap",
+        "semantic",
+        "other_kind",
+        "refired",
+        "suppressed",
+        "stale",
+        "scoped_away",
+    ),
+)
+def test_command_partition_never_upgrades_weak_or_overlapping_proof(weakness: str) -> None:
+    from builders.policy_cases import act, record, res
+    from yoetz.kernel.finding_resolution import resolution_blockers
+
+    state = _command_proof_state()
+    finding = _finding(kind=FindingKind.ACTION_WITHOUT_RESULT, subject_refs=(evt(10),))
+    check = _check(tested=100, coverage=_coverage(gaps=("command_attempt_uncorroborated",)))
+    keys: frozenset[tuple[object, ...]] = frozenset()
+    if weakness == "missing_result":
+        state = replace(state, results={})
+    elif weakness == "late_result":
+        check = _check(tested=15, coverage=check.coverage)
+    elif weakness in {"unbound_action", "overlap"}:
+        action = state.actions[act(1)]
+        assert action.payload is not None
+        state = replace(
+            state,
+            actions={
+                act(1): record(
+                    replace(
+                        action.payload,
+                        obligation_refs=() if weakness == "unbound_action" else (obl(2),),
+                    ),
+                    10,
+                )
+            },
+        )
+    elif weakness == "unreadable_result":
+        state = replace(
+            state, results={res(1): replace(state.results[res(1)], payload=None, redacted=True)}
+        )
+    elif weakness == "unknown_plan":
+        state = replace(state, plans={})
+    elif weakness == "missing_obligation":
+        state = replace(state, obligations={obl(2): state.obligations[obl(2)]})
+    elif weakness == "original_gap":
+        finding = replace(finding, coverage=_coverage(gaps=("missing_ref",)))
+    elif weakness == "semantic":
+        finding = _finding(
+            kind=FindingKind.ACTION_WITHOUT_RESULT,
+            subject_refs=(evt(10),),
+            origin=FindingOrigin.SEMANTIC_MODEL_DERIVED,
+        )
+    elif weakness == "other_kind":
+        finding = _finding()
+    elif weakness == "refired":
+        keys = frozenset({issue_key(finding)})
+    elif weakness == "suppressed":
+        check = replace(check, suppressed_count=1)
+    elif weakness == "stale":
+        check = replace(
+            check,
+            coverage=_coverage(
+                gaps=check.coverage.known_gaps,
+                freshness=LedgerFreshness.STALE_AFTER_MATERIAL_CHANGE,
+            ),
+        )
+    elif weakness == "scoped_away":
+        check = replace(check, scope=CheckScopeModel(claim_ids=(clm(99),), obligation_ids=()))
+    reasons = resolution_blockers(finding, 4, check, keys, proof_state=state)
+    assert reasons
+    if weakness == "overlap":
+        assert "command_relation_overlaps_obligation:" + obl(2) in reasons
+
+
+def test_independent_command_gap_can_coexist_with_tolerated_host_gaps() -> None:
+    finding = _finding(kind=FindingKind.ACTION_WITHOUT_RESULT, subject_refs=(evt(10),))
+    check = _check(
+        tested=100,
+        coverage=_coverage(
+            gaps=("command_attempt_uncorroborated", "content_unselected"),
+            freshness=LedgerFreshness.REDACTED_GAP,
+        ),
+    )
+    assert qualifying_check_resolves(
+        finding, 4, check, frozenset(), proof_state=_command_proof_state()
     )
