@@ -4565,8 +4565,10 @@ def test_session_start_records_the_typed_cause_when_auto_attach_fails(
 
     assert code == 0
     assert observe_hooks_module.load_mapping("claude:locked", _state=tmp_path) is None
-    assert "no ledger task is mapped yet" in out.getvalue().decode()
     rendered = out.getvalue().decode()
+    assert "no ledger task is mapped yet" in rendered
+    assert "attachment incomplete: no mapping was produced" in rendered
+    assert "mapping_missing" not in rendered
     assert "After guidance reads, tool/schema discovery" in rendered
     assert "call start to attach a task before substantive material work" in rendered
     assert "same-request recovery first" in rendered
@@ -5058,19 +5060,22 @@ def test_hook_total_budget_covers_the_budgets_nested_inside_one_pass() -> None:
 
     module = observe_hooks_module
     preflight = module._HOOK_CONNECT_PREFLIGHT_SECONDS  # pyright: ignore[reportPrivateUsage]
+    service_start = module._HOOK_SERVICE_START_BUDGET_SECONDS  # pyright: ignore[reportPrivateUsage]
     drain = module._HOOK_DRAIN_BUDGET_SECONDS  # pyright: ignore[reportPrivateUsage]
     end_drain = module._SESSION_END_DRAIN_BUDGET_SECONDS  # pyright: ignore[reportPrivateUsage]
     allowance = module._HOOK_LOCAL_STAGE_ALLOWANCE_SECONDS  # pyright: ignore[reportPrivateUsage]
     total = module._HOOK_TOTAL_BUDGET_SECONDS  # pyright: ignore[reportPrivateUsage]
     attach = module._AUTO_ATTACH_RETRY_BUDGET_SECONDS  # pyright: ignore[reportPrivateUsage]
+    retry_service_start = module._AUTO_ATTACH_RETRY_SERVICE_START_BUDGET_SECONDS  # pyright: ignore[reportPrivateUsage]
     attach_events = module._AUTO_ATTACH_RETRY_EVENTS  # pyright: ignore[reportPrivateUsage]
     budget_for = module._hook_total_budget_seconds  # pyright: ignore[reportPrivateUsage]
 
     # Beyond the enforced budgets, a pass pays the local stages (import,
     # store, advice); the measured cost on a full 1 MiB store is ~0.5s.
-    assert total >= preflight + max(drain, end_drain) + 0.5
+    assert total >= preflight + service_start + max(drain, end_drain) + 0.5
     # Derivation, not coincidence: the total is the sum of its parts.
-    assert total == preflight + drain + allowance
+    assert total == preflight + service_start + drain + allowance
+    assert 0 < retry_service_start < attach
     # Events that may legitimately retry auto-attach carry that budget too.
     for event in (*attach_events, "SessionStart"):
         assert budget_for(event) >= total + attach
@@ -5814,3 +5819,52 @@ async def test_hook_cold_connection_enforces_budget_when_transport_never_returns
     assert result.mapping is None
     assert result.reason == "service_unavailable"
     assert spawns == []
+
+
+@pytest.mark.parametrize(
+    ("event_name", "consented"),
+    [
+        ("PreToolUse", True),
+        ("PostToolUse", True),
+        ("SessionEnd", True),
+        ("SessionStart", False),
+    ],
+)
+def test_non_attachment_hooks_never_spawn_a_service(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    event_name: str,
+    consented: bool,
+) -> None:
+    """Only consented session/turn-boundary attachment may use the on-demand launcher."""
+
+    import yoetz.service.client as service_client
+
+    store = LocalObservationStore(_state=tmp_path)
+    locator = str(tmp_path.resolve())
+    workspace = store.workspace_commitment(locator)
+    if consented:
+        store.grant_consent(workspace)
+    spawned: list[bool] = []
+
+    def forbidden_spawn() -> None:
+        spawned.append(True)
+        raise AssertionError(f"{event_name} must not start the service")
+
+    monkeypatch.setattr(service_client, "_spawn_service_process", forbidden_spawn)
+    payload: dict[str, object] = {"session_id": "no-start", "hook_event_name": event_name}
+    if event_name in {"PreToolUse", "PostToolUse"}:
+        payload.update({"tool_name": "shell", "exit_status": 0})
+    assert (
+        handle_observe(
+            event_name=event_name,
+            stdin_bytes=json.dumps(payload).encode(),
+            stdout=io.BytesIO(),
+            workspace=locator,
+            _state=tmp_path,
+            connect=_connector(_InstantAckClient()) if consented else None,  # type: ignore[arg-type]
+            _output_event_name="sessionStart" if event_name == "SessionStart" else None,
+        )
+        == 0
+    )
+    assert spawned == []

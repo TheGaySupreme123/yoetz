@@ -893,9 +893,11 @@ the existing ten-second registration budget. Ordinary tool hooks keep their five
 For an enabled, consented workspace with no mapped task, auto-attachment now gives the exact
 selected service one second to connect or start through its fixed, instance-pinned launcher.
 It never supersedes another installation. A compatible stamped holder that is still starting
-is reused; an incompatible or unknown holder is refused. The connection time counts toward
+is reused only while an owner-only nonblocking flock probe confirms that the singleton is held;
+an unheld stale stamp is ignored and the fixed launcher makes a normal flock-protected start
+attempt. A live incompatible or unknown holder is refused. The connection time counts toward
 the existing five-second attachment RPC budget. Turn-boundary retries retain their one-second
-outer budget; ordinary tool hooks and SessionEnd do not start a service. Local-only readiness
+outer budget and reserve part of it for the start RPC after a shorter connector arm; ordinary tool hooks and SessionEnd do not start a service. Local-only readiness
 probes and unconsented/disabled observation do not take this path.
 
 The native context distinguishes a service that is unavailable or still starting

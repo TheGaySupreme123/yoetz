@@ -188,6 +188,9 @@ _HOOK_CONNECT_PREFLIGHT_SECONDS: Final = 1.0
 # rows but never spends the extra attach retry budget.
 _AUTO_ATTACH_RETRY_EVENTS: Final = frozenset({"UserPromptSubmit", "Stop"})
 _AUTO_ATTACH_RETRY_BUDGET_SECONDS: Final = 1.0
+# The retry event has a one-second outer hook allowance. Leave room for its start RPC after the
+# on-demand connector has spawned or found a service; SessionStart keeps the larger cold-start arm.
+_AUTO_ATTACH_RETRY_SERVICE_START_BUDGET_SECONDS: Final = 0.4
 _AUTO_ATTACH_START_DEADLINE_MS: Final = 5_000
 _HOOK_SERVICE_START_BUDGET_SECONDS: Final = 1.0
 # End-to-end observability contract for one hook pass, process start included.
@@ -199,6 +202,7 @@ _HOOK_SERVICE_START_BUDGET_SECONDS: Final = 1.0
 _HOOK_LOCAL_STAGE_ALLOWANCE_SECONDS: Final = 1.0
 _HOOK_TOTAL_BUDGET_SECONDS: Final = (
     _HOOK_CONNECT_PREFLIGHT_SECONDS
+    + _HOOK_SERVICE_START_BUDGET_SECONDS
     + _HOOK_DRAIN_BUDGET_SECONDS
     + _HOOK_LOCAL_STAGE_ALLOWANCE_SECONDS
 )
@@ -285,7 +289,10 @@ def _connect_service() -> object:
 
 
 async def _connect_attachment_service(
-    kind: ControlClientKind, *, workspace_locator: WorkspaceLocator | None = None
+    kind: ControlClientKind,
+    *,
+    workspace_locator: WorkspaceLocator | None = None,
+    timeout_seconds: float | None = None,
 ) -> object:
     """Prime only the selected service, within the synchronous hook budget.
 
@@ -303,7 +310,9 @@ async def _connect_attachment_service(
     return await connect_service_on_demand(
         kind,
         workspace_locator=workspace_locator,
-        timeout_seconds=_HOOK_SERVICE_START_BUDGET_SECONDS,
+        timeout_seconds=(
+            _HOOK_SERVICE_START_BUDGET_SECONDS if timeout_seconds is None else timeout_seconds
+        ),
         supersede_incompatible=False,
     )
 
@@ -414,7 +423,9 @@ def _attachment_recovery_context(reason: str) -> str:
             "admission conflicted. Use a held session selector or follow start's explicit "
             "admission continuation; restarting the service does not select a task. "
         )
-    return "Yoetz attachment incomplete: mapping_missing. Follow the typed start result. "
+    # The local diagnostic retains the exact closed reason. The model-facing fallback stays
+    # reason-neutral because storage, consent, and authoring failures are not mapping failures.
+    return "Yoetz attachment incomplete: no mapping was produced. Follow the typed start result. "
 
 
 def _now() -> Timestamp:
@@ -1576,6 +1587,7 @@ async def _try_auto_start(
     workspace_locator: str | None,
     recovery_mapping: LifecycleMapping | None = None,
     connect: HookStartConnector | None = None,
+    service_start_timeout_seconds: float | None = None,
 ) -> AutoAttachOutcome:
     """Service `start` for consented SessionStart auto-attach, or a typed reason.
 
@@ -1662,6 +1674,7 @@ async def _try_auto_start(
             client = await connector(
                 ControlClientKind.CLI,
                 workspace_locator=WorkspaceLocator(workspace_locator),
+                timeout_seconds=service_start_timeout_seconds,
             )
         else:
             client = await connect(ControlClientKind.CLI)
@@ -2132,6 +2145,7 @@ async def _try_workspace_auto_start(
     _state: Path | None,
     connect: HookStartConnector | None,
     prune_surplus: bool = False,
+    service_start_timeout_seconds: float | None = None,
 ) -> AutoAttachOutcome:
     """Auto-start, holding every eligible predecessor stable through recovery.
 
@@ -2187,14 +2201,25 @@ async def _try_workspace_auto_start(
                         if candidates_owned and _recovery_scan_still_valid(
                             store, workspace_commitment, scan, _state=_state
                         ):
-                            outcome = await _try_auto_start(
-                                codex_session_id,
-                                _state=_state,
-                                harness_id=harness_id,
-                                workspace_locator=workspace_locator,
-                                recovery_mapping=recovery,
-                                connect=connect,
-                            )
+                            if service_start_timeout_seconds is None:
+                                outcome = await _try_auto_start(
+                                    codex_session_id,
+                                    _state=_state,
+                                    harness_id=harness_id,
+                                    workspace_locator=workspace_locator,
+                                    recovery_mapping=recovery,
+                                    connect=connect,
+                                )
+                            else:
+                                outcome = await _try_auto_start(
+                                    codex_session_id,
+                                    _state=_state,
+                                    harness_id=harness_id,
+                                    workspace_locator=workspace_locator,
+                                    recovery_mapping=recovery,
+                                    connect=connect,
+                                    service_start_timeout_seconds=service_start_timeout_seconds,
+                                )
                             if outcome.mapping is not None and outcome.recovered:
                                 with contextlib.suppress(Exception):
                                     consumed = _rewrite_ended_predecessor_mappings(
@@ -2222,12 +2247,21 @@ async def _try_workspace_auto_start(
     # A resumed predecessor or changed local state invalidates the capability.
     # Still run the ordinary request so the hook records the service's typed
     # conflict instead of inventing a local success or silently doing nothing.
+    if service_start_timeout_seconds is None:
+        return await _try_auto_start(
+            codex_session_id,
+            _state=_state,
+            harness_id=harness_id,
+            workspace_locator=workspace_locator,
+            connect=connect,
+        )
     return await _try_auto_start(
         codex_session_id,
         _state=_state,
         harness_id=harness_id,
         workspace_locator=workspace_locator,
         connect=connect,
+        service_start_timeout_seconds=service_start_timeout_seconds,
     )
 
 
@@ -3301,6 +3335,9 @@ def handle_observe(
                                 harness_id=harness_id,
                                 workspace_locator=workspace_locator,
                                 connect=cast(HookStartConnector | None, connect),
+                                service_start_timeout_seconds=(
+                                    _AUTO_ATTACH_RETRY_SERVICE_START_BUDGET_SECONDS
+                                ),
                             )
                             return await asyncio.wait_for(
                                 attach,

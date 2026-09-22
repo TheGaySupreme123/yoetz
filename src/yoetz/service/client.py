@@ -1315,6 +1315,17 @@ def service_holder_identity() -> SingletonHolder | None:
         return None
 
 
+def _singleton_holder_lock_is_held() -> bool | None:
+    """Corroborate an advisory holder stamp with the owner-only singleton flock."""
+
+    from yoetz.service.lifecycle import probe_singleton_holder_lock
+
+    try:
+        return probe_singleton_holder_lock(_singleton_lock_path())
+    except Exception:
+        return None
+
+
 async def wait_for_singleton_release(pid: int, *, deadline: float) -> bool:
     """Poll until the stamped holder ``pid`` no longer owns the singleton, or the deadline passes."""
 
@@ -1438,11 +1449,18 @@ async def connect_service_on_demand(
     if time.monotonic() >= deadline:
         raise ControlError("service_unavailable", retryable=True)
     # A consented hook may prime an absent service, but cannot replace a holder.
-    # Before its endpoint appears, reuse a stamped starting holder rather than
-    # launching another process on every short hook retry. Identity is advisory;
-    # the subsequent authenticated handshake remains the authority.
+    # Before its endpoint appears, reuse a stamped starting holder only when the owner-only flock
+    # is still held. A stale stamp is treated as absent regardless of its recorded version, so a
+    # crashed or reused-pid service cannot suppress hook-driven startup forever. Identity remains
+    # advisory; the subsequent authenticated handshake remains the authority.
     holder = service_holder_identity() if not supersede_incompatible else None
-    if holder is not None and (
+    lock_held = _singleton_holder_lock_is_held() if holder is not None else None
+    if holder is not None and lock_held is not True:
+        # The lock, rather than a stamped pid, is the authority. If it cannot be corroborated,
+        # let the fixed launcher make a normal flock-protected attempt; it cannot supersede a live
+        # holder and it gives a stale stamp a path back to startup.
+        holder = None
+    elif holder is not None and (
         holder.schema_manifest_digest != _manifest_digest_for_client()
         or holder.service_version != __version__
     ):

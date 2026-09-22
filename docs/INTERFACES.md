@@ -1939,14 +1939,17 @@ holder whose stamped identity equals this installation's, or anything on Windows
 holder that outlives the budget surface as `service_incompatible` whose bridge message names
 `yoetz service restart`. Plain `connect_service` (ordinary CLI commands and hook drains) never starts or supersedes.
 Consented hook auto-attachment uses the same fixed on-demand launcher with
-`supersede_incompatible=False` and a one-second connection/startup budget. It waits for an
-already-stamped compatible starting holder without spawning another process, and refuses an
-incompatible or unknown stamped identity without signalling it. The authenticated handshake
-remains authoritative; the stamp is only a pre-spawn hint. Startup and the auto-attach `start`
-share the existing five-second RPC budget; turn-boundary retries retain their one-second outer
-budget. A budget expiry leaves attachment incomplete and queued structural rows pending.
-SessionStart context distinguishes `service_unavailable`, `service_incompatible`,
-`auto_attach_conflict`, and `mapping_missing`, and directs the agent to explicit `start` before
+`supersede_incompatible=False` and a one-second connection/startup budget. It reuses an
+already-stamped compatible starting holder only while an owner-only nonblocking flock probe
+confirms that the singleton is still held; an unheld stale stamp is ignored and the fixed
+launcher makes a normal flock-protected start attempt. A live incompatible or unknown stamped
+holder is refused without signalling it. The authenticated handshake remains authoritative; the
+stamp is only a pre-spawn hint. Startup and the auto-attach `start` share the existing five-second
+RPC budget; turn-boundary retries retain their one-second outer budget and reserve part of it for
+the start RPC after a shorter connector arm. A budget expiry leaves attachment incomplete and
+queued structural rows pending. SessionStart context distinguishes `service_unavailable`,
+`service_incompatible`, `auto_attach_conflict`, and an incomplete mapping without asserting
+`mapping_missing`, and directs the agent to explicit `start` before
 material work, then its exact typed continuation. Hook exit zero is graceful degradation, not
 proof of service readiness or a mapped task. No transient content is reconstructed from queued
 structural envelopes. This path conveys no initialization, unlock, privacy, or takeover authority.
