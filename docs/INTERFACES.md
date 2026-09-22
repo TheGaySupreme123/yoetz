@@ -332,6 +332,9 @@ identity, refs) plus coverage/gaps. It appends nothing, records no operation, do
 `request_id`, and does not move the frontier — same non-citable discipline as
 `status view=candidate_findings`. A subsequent real publish may reuse the same `request_id`.
 `dry_run: null` is rejected; omit the field or pass a boolean.
+The coverage on an accepted internal success is derived from the authored envelope coverage and the
+resulting projection, so its diagnostic `known_gaps` are reporting output and must not be copied into
+the coverage of a later event envelope.
 The preferred recovery read after any ambiguous write is `status view=operation` with
 `filter.operation_request_id` set to the write's `request_id`: it is a state lookup for that
 operation identity (`absent`/`pending`/`complete`/`quarantined`) within the authenticated task,
@@ -995,6 +998,10 @@ the readable effective current plan declares zero obligations, exactly one appli
   `no_obligations_reason`;
 - `completion_scope_declared_none` — the effective plan has no obligation refs and carries a typed
   reason.
+- `completion_claim_outside_plan` — an effective completion claim names an obligation outside the
+  readable current plan.
+- `completion_plan_not_claimed` — the readable current plan names an obligation omitted by an
+  effective completion claim.
 
 Both force `coverage_incomplete`, `insufficient_coverage`, and an insufficient-coverage receipt.
 The typed declaration records the participant's scope decision but never purchases a clean verdict.
@@ -3655,7 +3662,29 @@ The closed internal recovery outcomes are `capture_inventory_recovered`,
 `capture_inventory_unknown`, `capture_inventory_disabled`, `capture_inventory_busy`, and
 `capture_inventory_timeout`. They contribute only fixed reason counts to
 `ObservationDrainSummary.reasons`, not row delivery/attempt counts, coverage gaps, or raw
-exception text. No new diagnostic/RPC schema or task-loss event is introduced. A successful
+exception text. No new diagnostic/RPC or event schema is introduced. `recovery_routes()` owns a separate
+read-only connection for each file-backed complete scan and joins its worker on cancellation.
+The shared writable catalog connection never crosses to that worker.
+
+`LocalObservationStore.pending_selection_losses(workspace)` returns at most 64 retained,
+fully validated and routed lanes; `selection_loss_workspaces(task_id)` filters the returned
+maintenance work to one authenticated task after bounded durable workspace discovery.
+`acknowledge_selection_loss(workspace, lane)` follows committed
+reporting. `ObservationCoordinator.reconcile_task_selection_losses(runtime)` imports only that
+task's historical losses before a new check freezes its inputs. Existing check operations bypass
+this reconciliation. The service sweep attempts eight lanes per workspace turn with a rotating
+cursor. A terminal route drift or quarantined marker operation uses the supplied same-task
+runtime and a distinct deterministic recovery operation identity; transient publication failures
+remain fail-closed. Route-valid lane-digest mismatches receive an explicit unreconciled loss
+marker; malformed routes or source identities remain local accounting and are not attributed to
+a task by the recovery path.
+A service-authenticated `evidence_recorded` marker carries `observation_input_loss` in coverage;
+`TaskObservationPort.record_selection_loss` records an internal `observation_gap` in task history
+without using native admission or advancing its cursor. Its `selection-loss/1.0.0` cursor namespace
+is internal bookkeeping, not a native read position. Full original attribution is retained in
+the evidence payload and selection route fields. One task-wide operation per lane makes
+commit-before-ack recovery idempotent; source/authority generations and original session/writer
+remain part of lane identity. Unrouted and overflow-only history remains local. A successful
 inventory does not clear loss identity/count history or bypass a real hard capacity limit.
 
 Outcome semantics and back-pressure vocabulary (ADR-022 decisions 12–13):
@@ -4378,7 +4407,12 @@ legacy external-registration fields `registration_state`, `registered_profile`, 
 `external_registration|plugin_managed|dual|foreign|null`; `ownership_state` uses
 `McpOwnershipState`. `observed: false` means exclusive ownership was not read unambiguously, not
 that none is registered. `registered_profile: null` with `observed: true` means the observed state
-has no single Yoetz route (`absent|dual|foreign`).
+has no single Yoetz route (`absent|dual|foreign`). A host with multiple discovered Codex
+executables is left unobserved until the caller selects one with `--codex-path`; `provider status`
+reports the closed `codex_binary_selection` blocker and a quoted continuation retaining the
+invoking launcher, isolation root and inspected Codex home. An explicitly unresolved
+`--codex-path` uses the `not_found` state of that blocker. No arbitrary executable is chosen for a
+readiness claim.
 A strict registered route adds a `mcp_route_profile` blocker
 with `scope: "agent_route"` and never moves `semantic_ready` or the exit code, because ADR-018
 decision 2 makes the route ceiling process-local — CLI and terminal checks still dispatch. Route
@@ -5497,6 +5531,36 @@ Claude returns deny or abstains. Cursor generic preToolUse returns allow/deny wh
 server-qualified MCP hook returns ask/deny, preserving ADR-018. Cursor permission hooks request
 failClosed; Claude command timeouts remain host-fail-open. No owner approval is inferred.
 See [required startup](runbooks/required-startup.md) for scope/recovery, lifecycle and proof limits.
+
+### Setup next-step and Codex inspection targeting (#737)
+
+`setup status --next --operation local|review|connection` emits `yoetz.setup-readiness/1`
+(`integrations/setup-readiness-1.0.0.schema.json`). It carries the selected project, inspected host
+configuration root, bounded reason, read-only prerequisite facts and one quoted `next_command`
+(or null when no setup prerequisite is missing). `connection_observed` is always false. Local and
+review operations evaluate service/vault/repository prerequisites; review additionally requires a
+provider binding and review permission. Connection-only evaluates the common host plan without
+requiring service or provider login. No native session or provider dispatch is inferred.
+
+Codex plugin/MCP/provider status gain the additive local inspection field `inspected_codex_home`.
+Their existing schema tokens remain unchanged; this field is not a service-wire or ledger field.
+All accept `--codex-home`, with explicit flag > `CODEX_HOME` > `CODEX_TESTING_HOME` > `~/.codex`
+precedence; every invoked Codex subprocess receives both variables bound to the selection.
+Explicit MCP previews bind the same home through registration, removal and reconnection.
+Plugin removal retains its explicit-home requirement. Setup status accepts Codex aliases for the
+common host target. Activation refusals expose `next_command` with the exact executable and home;
+that command obtains its own activation preview and requires its existing independent approval.
+
+Missing provider binding during privacy recipe preparation maps only the exact internal
+`privacy_setup_provider_binding_required` reason to public `provider_binding_required`.
+Other malformed bindings remain `grant_binding_invalid`; exception text never enters output.
+
+`setup vault` is a human-terminal-only composition of the existing initialization/unlock
+ceremonies. It stops before provider selection and policy changes. `setup status --next` selects
+it for an uninitialized vault; the common host connection command alone never stands in for
+vault initialization. Continuations retain module-invocation interpreter spelling so a symlinked
+virtual-environment Python does not lose its runtime pin.
+
 ### Completion claim scope diagnostics (issue #679)
 
 `kernel/completion_scope.py` owns the comparison between each readable effective completion
@@ -5542,47 +5606,3 @@ and receipts. No new event schema, persisted proof metadata, or command executio
 Historical event bytes remain intact; rebuilding a projection applies this bounded derivation to
 its accepted history. A held old check is still invalidated by a later response to a finding that
 check did not return. Resolved history does not remove receipt coverage limitations.
-
-### Setup next-step and Codex inspection targeting (#737)
-
-`setup status --next --operation local|review|connection` emits `yoetz.setup-readiness/1`
-(`integrations/setup-readiness-1.0.0.schema.json`). It carries the selected project, inspected host
-configuration root, bounded reason, read-only prerequisite facts and one quoted `next_command`
-(or null when no setup prerequisite is missing). `connection_observed` is always false. Local and
-review operations evaluate service/vault/repository prerequisites; review additionally requires a
-provider binding and review permission. Connection-only evaluates the common host plan without
-requiring service or provider login. No native session or provider dispatch is inferred.
-
-Codex plugin/MCP/provider status gain the additive local inspection field `inspected_codex_home`.
-Their existing schema tokens remain unchanged; this field is not a service-wire or ledger field.
-All accept `--codex-home`, with explicit flag > `CODEX_HOME` > `CODEX_TESTING_HOME` > `~/.codex`
-precedence; every invoked Codex subprocess receives both variables bound to the selection.
-Explicit MCP previews bind the same home through registration, removal and reconnection.
-Plugin removal retains its explicit-home requirement. Setup status accepts Codex aliases for the
-common host target. Activation refusals expose `next_command` with the exact executable and home;
-that command obtains its own activation preview and requires its existing independent approval.
-
-Missing provider binding during privacy recipe preparation maps only the exact internal
-`privacy_setup_provider_binding_required` reason to public `provider_binding_required`.
-Other malformed bindings remain `grant_binding_invalid`; exception text never enters output.
-
-`setup vault` is a human-terminal-only composition of the existing initialization/unlock
-ceremonies. It stops before provider selection and policy changes. `setup status --next` selects
-it for an uninitialized vault; the common host connection command alone never stands in for
-vault initialization. Continuations retain module-invocation interpreter spelling so a symlinked
-virtual-environment Python does not lose its runtime pin.
-
-### Completion claim scope diagnostics (issue #679)
-
-`kernel/completion_scope.py` owns the comparison between each readable effective completion
-claim and `current_plan_scope`. `completion_claim_outside_plan` and `completion_plan_not_claimed`
-are fixed coverage codes carried by publication previews/results, status, checks, and receipts.
-There are at most two case gaps regardless of relation count. Status readiness uses its existing
-`coverage_gaps_declared` condition; declared/open obligation counts stay plan-derived. Receipt gap
-details contain at most 16 ID-pair examples plus full relation counts, with an explicit omission
-marker; default privacy projection still applies. Partial claims are accepted. Material/superseded
-claims are excluded, and unavailable input is not an empty scope. Multiple partial claims are
-compared independently; older effective claims are compared to the current plan until explicitly
-superseded. A later plan revision that waives a previously claimed obligation changes the current
-plan but does not rewrite that claim, so the outside-plan code remains expected until the claim is
-superseded. See ADR-019 for repair semantics.
