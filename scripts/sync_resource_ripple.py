@@ -193,6 +193,8 @@ def _write_pass(repo_root: Path) -> bool:
             "--only",
             "integrations/host-connection-1.0.0.schema.json",
             "--only",
+            "integrations/setup-readiness-1.0.0.schema.json",
+            "--only",
             "integrations/setup-status-2.0.0.schema.json",
         ),
         ("sync_repository_authority_schemas.py", "--write"),

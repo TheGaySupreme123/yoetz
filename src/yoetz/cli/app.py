@@ -599,6 +599,21 @@ def _elevated_failure(error: Exception) -> int:
             reason if type(reason) is str else "failed", prefix="elevated_bootstrap"
         )
     )
+    if reason in {
+        "ceremony_service_unavailable",
+        "provider_binding_required",
+        "repository_privacy_scope_unavailable",
+    }:
+        from yoetz.cli.setup_readiness import continuation
+
+        recipe = "review" if reason == "provider_binding_required" else "local"
+        _stderr(
+            "Next: "
+            + continuation(
+                ["setup", "status", "--next", "--operation", recipe],
+                project=Path.cwd(),
+            )
+        )
     return 2
 
 
@@ -2175,6 +2190,7 @@ def _integration_mcp_command(action: str) -> Callable[..., None]:
     def command(
         context: typer.Context,
         codex_path: _CODEX_PATH = None,
+        codex_home: Annotated[Path | None, typer.Option("--codex-home")] = None,
         accept: _ACCEPT = False,
         preview_digest: Annotated[
             str | None,
@@ -2202,6 +2218,7 @@ def _integration_mcp_command(action: str) -> Callable[..., None]:
                     action,
                     harness,
                     codex_path=codex_path,
+                    codex_home=codex_home,
                     accept=accept,
                     preview_digest=preview_digest,
                     json_output=json_output,
@@ -2706,6 +2723,8 @@ def setup_disconnect(
     host: Annotated[str, typer.Option("--host", help="Agent to disconnect.")],
     host_path: Annotated[Path | None, typer.Option("--host-path")] = None,
     host_config_root: Annotated[Path | None, typer.Option("--host-config-root")] = None,
+    codex_home: Annotated[Path | None, typer.Option("--codex-home")] = None,
+    codex_path: _CODEX_PATH = None,
     project: Annotated[Path | None, typer.Option("--project")] = None,
     request_value: Annotated[str | None, typer.Option("--request-id")] = None,
     preview_digest: Annotated[str | None, typer.Option("--preview-digest")] = None,
@@ -2716,6 +2735,12 @@ def setup_disconnect(
 ) -> None:
     """Preview and remove the selected integration, preserving Yoetz data."""
     from yoetz.cli.host_connection import run_host_connection
+
+    if codex_home is not None or codex_path is not None:
+        if host != "codex" or host_path is not None or host_config_root is not None:
+            raise typer.BadParameter("Codex options cannot be combined with other host targets")
+        host_path = None if codex_path is None else Path(codex_path)
+        host_config_root = codex_home
 
     _finish(
         run_host_connection(
@@ -2736,9 +2761,22 @@ def setup_disconnect(
     )
 
 
+@setup_app.command("vault")
+def setup_vault() -> None:
+    """Initialize or unlock storage in a trusted terminal, without provider setup."""
+    operation = _setup_operation("run_vault_setup")
+    _finish(run_async(operation))
+
+
 @setup_app.command("status")
 def setup_status(
     json_output: _JSON = False,
+    next_step: Annotated[bool, typer.Option("--next")] = False,
+    operation: Annotated[
+        str, typer.Option("--operation", help="local, review or connection")
+    ] = "local",
+    codex_home: Annotated[Path | None, typer.Option("--codex-home")] = None,
+    codex_path: _CODEX_PATH = None,
     host: Annotated[str | None, typer.Option("--host")] = None,
     host_path: Annotated[Path | None, typer.Option("--host-path")] = None,
     host_config_root: Annotated[Path | None, typer.Option("--host-config-root")] = None,
@@ -2747,6 +2785,32 @@ def setup_status(
 ) -> None:
     """Show read-only setup posture without mutating anything."""
 
+    if operation not in {"local", "review", "connection"}:
+        raise typer.BadParameter("--operation must be local, review or connection")
+    if codex_home is not None or codex_path is not None:
+        if host not in {None, "codex"} or host_config_root is not None or host_path is not None:
+            raise typer.BadParameter("Codex options cannot be combined with other host targets")
+        host, host_config_root = "codex", codex_home
+        host_path = None if codex_path is None else Path(codex_path)
+    if next_step:
+        from yoetz.cli.setup_readiness import setup_next
+
+        _finish(
+            setup_next(
+                operation=cast(Literal["local", "review", "connection"], operation),
+                host=host,
+                executable=host_path,
+                config_root=host_config_root,
+                project=(project or Path.cwd()).expanduser().resolve(),
+                route=cast(
+                    Literal["strict", "policy"],
+                    _validated_route_profile(route_profile)
+                    or ("policy" if operation == "review" else "strict"),
+                ),
+                json_output=json_output,
+            )
+        )
+        return
     if host is not None:
         from yoetz.cli.host_connection import run_host_connection
 
@@ -2764,8 +2828,8 @@ def setup_status(
             )
         )
         return
-    operation = _setup_operation("setup_status")
-    _finish(run_async(lambda: operation(json_output=json_output)))
+    status_operation = _setup_operation("setup_status")
+    _finish(run_async(lambda: status_operation(json_output=json_output)))
 
 
 async def _trusted_call(operation: Callable[[], Awaitable[object]], json_output: bool) -> int:
@@ -3716,12 +3780,22 @@ def provider_codex_subscription_rollback(json_output: _JSON = False) -> None:
 
 
 @provider_app.command("status")
-def provider_status(json_output: _JSON = False) -> None:
+def provider_status(
+    json_output: _JSON = False,
+    codex_home: Annotated[Path | None, typer.Option("--codex-home")] = None,
+    codex_path: _CODEX_PATH = None,
+) -> None:
     """Report whether external AI-powered review is structurally ready to dispatch."""
 
     from yoetz.cli.provider_status import run_provider_status
 
-    _finish(run_async(lambda: run_provider_status(json_output=json_output)))
+    _finish(
+        run_async(
+            lambda: run_provider_status(
+                json_output=json_output, codex_home=codex_home, codex_path=codex_path
+            )
+        )
+    )
 
 
 def _semantic_fallback_payload(path: Path, config: object) -> dict[str, JsonValue]:
@@ -4581,6 +4655,8 @@ def elevated_prepare(
                 )
             except elevated_error:
                 raise
+            except privacy.ProviderBindingRequiredError:
+                raise elevated_error("provider_binding_required") from None
             except (ConfigError, KeyError, TypeError, ValueError) as exc:
                 raise elevated_error("grant_binding_invalid") from exc
             return 0

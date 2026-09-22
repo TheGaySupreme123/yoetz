@@ -22,7 +22,11 @@ from typer.testing import CliRunner
 
 from yoetz.cli import elevated
 from yoetz.cli.app import app
-from yoetz.cli.privacy_setup import build_candidate_policy, recipe_answers
+from yoetz.cli.privacy_setup import (
+    ProviderBindingRequiredError,
+    build_candidate_policy,
+    recipe_answers,
+)
 from yoetz.cli.trusted_console import TrustedForegroundConsole
 from yoetz.config.models import ConfigError
 from yoetz.domain.privacy import (
@@ -53,6 +57,15 @@ from yoetz.service.elevated_bootstrap import (
     prepare_pending,
     repository_grant_binding,
 )
+
+
+@pytest.fixture(autouse=True)
+def service_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    # These tests exercise isolated consent state, never the developer's singleton.
+    async def state() -> tuple[str, str]:
+        return "ready", "passphrase"
+
+    monkeypatch.setattr(elevated, "_service_vault_state", state)
 
 
 class _Console:
@@ -2160,3 +2173,180 @@ def test_menu_credential_ceremony_supplies_the_scoped_reauthentication_secret() 
     assert credential is None
     assert reauthentication is not None
     assert bytes(reauthentication) == b"scoped-reauth"
+
+
+@pytest.mark.parametrize("channel", ["chat", "terminal"])
+def test_service_down_preserves_pending_then_same_request_succeeds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    channel: str,
+) -> None:
+    available = False
+
+    async def state() -> tuple[str, str] | None:
+        return ("locked", "uninitialized") if available else None
+
+    async def complete(*_args: object) -> dict[str, str]:
+        return {"state": "ready", "reason": "succeeded"}
+
+    monkeypatch.setattr(elevated, "_service_vault_state", state)
+    monkeypatch.setattr(elevated, "_complete_vault_initialize_generated", complete)
+    monkeypatch.setattr(elevated, "_complete_approved", complete)
+
+    async def run() -> None:
+        nonlocal available
+        with (
+            _patch_state(tmp_path),
+            _patch_verified_presence(),
+            patch("yoetz.cli.elevated.TrustedForegroundConsole", return_value=_Console()),
+        ):
+            pending = prepare_pending("vault_initialize", target_digest="sha256:" + "a" * 64)
+
+            async def authorize() -> object:
+                if channel == "terminal":
+                    return await elevated.review_elevated()
+                return await elevated.authorize_elevated(_chat_attestation(pending))
+
+            with pytest.raises(ElevatedBootstrapError, match="ceremony_service_unavailable"):
+                await authorize()
+            assert load_pending() == pending
+            assert '"outcome":"failed"' not in audit_path().read_text()
+            available = True
+            await authorize()
+            assert load_pending() is None
+
+    anyio.run(run)
+
+
+@pytest.mark.parametrize("channel", ["chat", "terminal"])
+def test_service_loss_after_claim_consumes_approval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    channel: str,
+) -> None:
+    async def lost(*_args: object) -> dict[str, str]:
+        assert load_pending() is None
+        raise ElevatedBootstrapError("ceremony_service_unavailable")
+
+    monkeypatch.setattr(elevated, "_complete_vault_initialize_generated", lost)
+    monkeypatch.setattr(elevated, "_complete_approved", lost)
+
+    async def run() -> None:
+        with (
+            _patch_state(tmp_path),
+            _patch_verified_presence(),
+            patch("yoetz.cli.elevated.TrustedForegroundConsole", return_value=_Console()),
+        ):
+            pending = prepare_pending("vault_initialize", target_digest="sha256:" + "a" * 64)
+            with pytest.raises(ElevatedBootstrapError, match="ceremony_service_unavailable"):
+                if channel == "terminal":
+                    await elevated.review_elevated()
+                else:
+                    await elevated.authorize_elevated(_chat_attestation(pending))
+            assert load_pending() is None
+            assert '"outcome":"failed"' in audit_path().read_text()
+
+    anyio.run(run)
+
+
+@pytest.mark.parametrize("channel", ["chat", "terminal"])
+def test_denial_does_not_require_running_service(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    channel: str,
+) -> None:
+    async def forbidden() -> None:
+        raise AssertionError("denial must not probe the service")
+
+    monkeypatch.setattr(elevated, "_service_vault_state", forbidden)
+
+    async def run() -> None:
+        with (
+            _patch_state(tmp_path),
+            _patch_verified_presence(),
+            patch("yoetz.cli.elevated.TrustedForegroundConsole", return_value=_Console(b"deny")),
+        ):
+            pending = prepare_pending("vault_initialize", target_digest="sha256:" + "a" * 64)
+            result = (
+                await elevated.review_elevated()
+                if channel == "terminal"
+                else (
+                    await elevated.authorize_elevated(_chat_attestation(pending, decision="deny"))
+                )
+            )
+            assert result["outcome"] == "denied"
+            assert load_pending() is None
+
+    anyio.run(run)
+
+
+@pytest.mark.parametrize(
+    "failure,reason",
+    [
+        ("privacy_setup_provider_binding_required", "provider_binding_required"),
+        ("privacy_setup_recipe_invalid", "grant_binding_invalid"),
+        ("private exception text", "grant_binding_invalid"),
+    ],
+)
+def test_grant_prepare_classifies_provider_binding_only(
+    tmp_path: Path,
+    failure: str,
+    reason: str,
+) -> None:
+    async def snapshot() -> SimpleNamespace:
+        return SimpleNamespace(
+            bound_scope={"workspace_ref_commitment": _GRANT_REPOSITORY_COMMITMENT},
+            authority_digest=_GRANT_AUTHORITY_DIGEST,
+            composed_policy=_GRANT_CURRENT,
+        )
+
+    exception = (
+        ProviderBindingRequiredError()
+        if failure == "privacy_setup_provider_binding_required"
+        else ValueError(failure)
+    )
+    with (
+        _patch_state(tmp_path),
+        patch("yoetz.cli.privacy_setup.get_privacy_setup_snapshot", side_effect=snapshot),
+        patch("yoetz.cli.privacy_setup.configured_bindings", return_value=(None, None)),
+        patch("yoetz.cli.privacy_setup.recipe_answers", side_effect=exception),
+    ):
+        result = CliRunner().invoke(
+            app, ["consent", "prepare", "repository_privacy_grant", "--recipe", "expanded_review"]
+        )
+        assert result.exit_code == 2
+        assert "elevated_bootstrap: " + reason in result.stderr
+        assert load_pending() is None
+        assert "private exception text" not in result.stderr
+        if reason == "provider_binding_required":
+            assert "yoetz --set" in result.stderr
+
+
+@pytest.mark.parametrize("channel", ["chat", "terminal"])
+def test_expiry_during_preflight_does_not_leave_reusable_approval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    channel: str,
+) -> None:
+    async def run() -> None:
+        with (
+            _patch_state(tmp_path),
+            _patch_verified_presence(),
+            patch("yoetz.cli.elevated.TrustedForegroundConsole", return_value=_Console()),
+        ):
+            pending = prepare_pending("vault_initialize", target_digest="sha256:" + "a" * 64)
+
+            async def expire() -> tuple[str, str]:
+                monkeypatch.setattr(elevated.time, "time", lambda: pending.expires_at_unix + 1)
+                return "locked", "uninitialized"
+
+            monkeypatch.setattr(elevated, "_service_vault_state", expire)
+            with pytest.raises(ElevatedBootstrapError):
+                if channel == "terminal":
+                    await elevated.review_elevated()
+                else:
+                    await elevated.authorize_elevated(_chat_attestation(pending))
+            assert load_pending() is None
+            assert '"outcome":"approved"' not in audit_path().read_text()
+
+    anyio.run(run)

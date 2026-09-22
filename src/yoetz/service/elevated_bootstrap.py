@@ -1230,13 +1230,24 @@ def _exact_match(left: str, right: str) -> bool:
     return hmac.compare_digest(left, right)
 
 
-def claim_pending_for_review(*, _state: Path | None = None) -> PendingElevatedConsent:
-    """Atomically consume one pending request for a verified-console review."""
+def claim_pending_for_review(
+    *,
+    expected_pending: PendingElevatedConsent | None = None,
+    _state: Path | None = None,
+) -> PendingElevatedConsent:
+    """Atomically consume one pending request for a verified-console review.
+
+    ``expected_pending`` binds a delayed console decision to the record that was displayed.  The
+    comparison runs under the same state lock as the hard-link claim, so a request prepared after
+    the displayed one expires cannot be consumed by the earlier prompt.
+    """
 
     with _PendingStateLock(_state):
         pending = _load_pending_unlocked(_state=_state)
         if pending is None:
             raise ElevatedBootstrapError("pending_absent")
+        if expected_pending is not None and pending != expected_pending:
+            raise ElevatedBootstrapError("pending_tampered")
         if not operation_spec(pending.operation).implemented:
             raise ElevatedBootstrapError("operation_not_implemented")
         source = pending_path(_state=_state)
