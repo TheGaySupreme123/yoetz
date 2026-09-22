@@ -5441,8 +5441,10 @@ Maintainer acknowledgement: [issue #682](https://github.com/TheGaySupreme123/yoe
 finding with readable original proof, one exact action-event subject, explicit readable obligation
 links, and an accepted linked result present at the checked frontier. It bounds the possible
 owners of `command_attempt_uncorroborated` and `command_attempt_mismatch` using all selected,
-plan-declared obligations that request commands. Only a proven disjoint action scope may ignore
-those codes for that finding's absence proof. The codes remain on the check and receipt.
+plan-declared obligations that request commands. The relation includes both an action's direct
+`obligation_refs` and a selected obligation's `resolution_evidence_refs → result → action` link.
+Only a proven disjoint action relation may ignore those codes for that finding's absence proof. The
+codes remain on the check and receipt.
 
 This is deliberately conservative: the partition includes selected command obligations even when
 a command was observed matching. An action sharing such an obligation still requires the command
@@ -5450,7 +5452,10 @@ coverage to be repaired; an absent, ambiguous, redacted, or unbound relation nev
 A later material projection row cannot establish proof for an earlier checked frontier. The
 check's own finding suffix is immaterial to action/result/plan inputs. Explanations reconstruct
 the exact checked prefix when needed and identify overlapping obligation IDs (bounded to 16)
-or that independence remains unproven. All ordinary scope, policy, suppression, refiring,
+or that independence remains unproven. Once independence is proven, the command codes are removed
+before freshness is evaluated, so the existing closed host-observation exception may also admit a
+`redacted_gap` check when all remaining gaps are tolerated host/evidence limits; projection
+redactions and unknown relations still block. All ordinary scope, policy, suppression, refiring,
 freshness and semantic requirements continue to apply.
 
 The reducer supplies the same projection context to the qualification predicate used by status

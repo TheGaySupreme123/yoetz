@@ -16,6 +16,7 @@ projection checkpoint all read the same fact.
 
 from __future__ import annotations
 
+from collections.abc import MutableMapping
 from dataclasses import replace
 from typing import Final
 
@@ -31,7 +32,7 @@ from yoetz.domain.receipts import (
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
     SEMANTIC_REVIEW_NOT_REQUESTED_GAP,
 )
-from yoetz.domain.values import EventId, FindingId
+from yoetz.domain.values import EventId, FindingId, ResultId
 from yoetz.kernel.claims import effective_claim_items
 from yoetz.kernel.plan_scope import current_plan_scope
 from yoetz.kernel.projections import FindingProjectionRecord, ProjectionState
@@ -112,6 +113,10 @@ _UNPROVEN_FRESHNESS: Final = frozenset(
     }
 )
 _COMMAND_GAPS: Final = frozenset({"command_attempt_uncorroborated", "command_attempt_mismatch"})
+# Keep this local to avoid importing the policy module while reducers import this module. If the
+# work-integrity pack changes version, its action-result exception must be reviewed explicitly.
+_ACTION_WITHOUT_RESULT_POLICY: Final = ("work-integrity", "0.1.0")
+ProofStateCache = MutableMapping[tuple[int, str], ProjectionState | None]
 
 
 def _command_gap_partition(
@@ -129,7 +134,7 @@ def _command_gap_partition(
         or state.frontier < check.subject_frontier.sequence
         or finding.origin is not FindingOrigin.DETERMINISTIC
         or finding.kind is not FindingKind.ACTION_WITHOUT_RESULT
-        or (finding.policy_id, finding.policy_version) != ("work-integrity", "0.1.0")
+        or (finding.policy_id, finding.policy_version) != _ACTION_WITHOUT_RESULT_POLICY
         or finding.coverage.ledger_freshness in _UNPROVEN_FRESHNESS
         or not set(finding.coverage.known_gaps) <= _DETERMINISTIC_PROOF_TOLERATED_GAPS
         or state.coverage_gaps
@@ -181,7 +186,26 @@ def _command_gap_partition(
         for row in state.results.values()
     ):
         return None
-    return tuple(sorted(commands.intersection(action.obligation_refs)))
+    related_through_action = set(commands.intersection(action.obligation_refs))
+    # command_attempts has a second explicit relation channel: a resolved command obligation can
+    # cite a result whose action is this very action. Treat that owner as overlapping too; otherwise
+    # an unknown command relation could be mislabeled independent merely because the action omitted
+    # the obligation from its direct refs.
+    related_through_result = {
+        key
+        for key in commands
+        if (
+            (payload := state.obligations[key].payload) is not None
+            and any(
+                ref.startswith("res_")
+                and (result := state.results.get(ResultId(ref))) is not None
+                and result.payload is not None
+                and result.payload.action_id == action.action_id
+                for ref in payload.resolution_evidence_refs
+            )
+        )
+    }
+    return tuple(sorted(related_through_action | related_through_result))
 
 
 def issue_key(finding: Finding) -> IssueKey:
@@ -328,8 +352,69 @@ def resolution_blockers(
     return tuple(reasons)
 
 
+def _command_partition_candidate(
+    finding: Finding,
+    finding_source_frontier: int,
+    check: CheckRecordedPayload,
+    returned_issue_keys: frozenset[IssueKey],
+) -> bool:
+    """Return whether replay could affect this explanation's command-gap result.
+
+    Keep the cheap shape and applicability guards ahead of historical replay. In particular, a
+    status page may contain many semantic findings that can never use the local command exception.
+    """
+    return (
+        bool(set(check.coverage.known_gaps) & _COMMAND_GAPS)
+        and finding.origin is FindingOrigin.DETERMINISTIC
+        and finding.kind is FindingKind.ACTION_WITHOUT_RESULT
+        and (finding.policy_id, finding.policy_version) == _ACTION_WITHOUT_RESULT_POLICY
+        and finding_source_frontier <= check.subject_frontier.sequence
+        and issue_key(finding) not in returned_issue_keys
+        and check.suppressed_count == 0
+        and _policy_completed(check, finding)
+        and _scope_covers(check, finding)
+        and finding.coverage.ledger_freshness not in _UNPROVEN_FRESHNESS
+        and set(finding.coverage.known_gaps) <= _DETERMINISTIC_PROOF_TOLERATED_GAPS
+        and len(finding.subject_refs) == 1
+    )
+
+
+def _historical_proof_state(
+    check: CheckRecordedPayload,
+    candidate: LedgerRecord,
+    records: tuple[LedgerRecord, ...],
+    cache: ProofStateCache,
+) -> ProjectionState | None:
+    """Replay one exact checked prefix, caching it for all findings sharing the check."""
+    key = (check.subject_frontier.sequence, check.subject_frontier.head_digest)
+    if key in cache:
+        return cache[key]
+
+    # The reducer intentionally refuses to use a projection that has advanced past the tested
+    # frontier. Replaying that prefix for an explanation would otherwise disagree with the
+    # fail-closed resolution result when material rows landed before the check was appended.
+    prefix = tuple(
+        row for row in records if row.ledger.ingestion_sequence <= check.subject_frontier.sequence
+    )
+    proof_state: ProjectionState | None = None
+    if (
+        candidate.ledger.ingestion_sequence == check.subject_frontier.sequence + 1
+        and prefix
+        and prefix[-1].entry_digest == check.subject_frontier.head_digest
+    ):
+        from yoetz.kernel.reducers import replay
+
+        proof_state = replay(prefix)
+    cache[key] = proof_state
+    return proof_state
+
+
 def finding_resolution_explanation(
-    state: ProjectionState, finding_id: FindingId, records: tuple[LedgerRecord, ...]
+    state: ProjectionState,
+    finding_id: FindingId,
+    records: tuple[LedgerRecord, ...],
+    *,
+    proof_state_cache: ProofStateCache | None = None,
 ) -> str:
     """A bounded presentation derived from the latest recorded candidate, never response prose."""
 
@@ -362,17 +447,15 @@ def finding_resolution_explanation(
         issue_key(row.payload) for row in returned if row is not None and row.payload is not None
     )
     proof_state = None
-    if set(check.coverage.known_gaps) & _COMMAND_GAPS:
-        # Derive from the exact historical prefix; later results/observations cannot improve it.
-        from yoetz.kernel.reducers import replay
-
-        prefix = tuple(
-            row
-            for row in records
-            if row.ledger.ingestion_sequence <= check.subject_frontier.sequence
+    if _command_partition_candidate(
+        finding_record.payload, finding_record.source_frontier, check, keys
+    ):
+        proof_state = _historical_proof_state(
+            check,
+            candidate,
+            records,
+            {} if proof_state_cache is None else proof_state_cache,
         )
-        if prefix and prefix[-1].entry_digest == check.subject_frontier.head_digest:
-            proof_state = replay(prefix)
     reasons = resolution_blockers(
         finding_record.payload, finding_record.source_frontier, check, keys, proof_state=proof_state
     )

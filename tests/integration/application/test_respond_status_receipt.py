@@ -3875,6 +3875,9 @@ async def test_command_gap_partition_preserves_receipt_coverage(
         assert receipt.conclusion == (
             "unresolved_findings_remain" if overlap else "insufficient_coverage"
         )
+        if fmt != "json":
+            assert receipt.human_text is not None
+            assert "command_attempt_uncorroborated" in receipt.human_text
     response = await app.respond(
         RespondRequest.model_validate(
             {
@@ -3900,4 +3903,19 @@ async def test_command_gap_partition_preserves_receipt_coverage(
             }
         )
     )
+    frontier = receipt.result_frontier
     assert "check_not_applicable" in receipt.coverage.known_gaps
+    status = await app.status(
+        StatusRequest.model_validate(
+            {
+                **base(),
+                "expected_frontier": _frontier(frontier),
+                "view": "findings",
+                "limit": "100",
+                "filter": {"include_resolved": True},
+            }
+        )
+    )
+    assert isinstance(status.page, StatusFindingsPageModel)
+    final = next(row for row in status.page.items if row.finding_id == target.finding_id)
+    assert final.resolved is (not overlap)

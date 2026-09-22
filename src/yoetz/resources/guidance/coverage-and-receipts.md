@@ -431,8 +431,10 @@ request and report the unresolved start. These continuations do not authorize a 
 ### Unrelated command gaps and action-result repairs
 
 A readable deterministic `action_without_result` finding can resolve after a qualifying check
-of its accepted linked result when its explicit obligation scope is provably disjoint from every
-selected plan obligation requesting a command. `command_attempt_uncorroborated` and
+of its accepted linked result when its explicit action relation is provably disjoint from every
+selected plan obligation requesting a command. The relation includes both the action's direct
+`obligation_refs` and a selected obligation's `resolution_evidence_refs → result → action` link.
+`command_attempt_uncorroborated` and
 `command_attempt_mismatch` remain check/receipt coverage limits. This exception proves that the
 ledger action has a result; it never proves a command ran or succeeded.
 
@@ -441,3 +443,7 @@ the tested frontier remains conservative. A selected command obligation is inclu
 partition even when its own command was observed matching. Status explains the overlapping
 obligation IDs or that independence is unproven. AI-powered findings still require completed
 AI-powered review; an acknowledgement or unchanged recheck does not repair a proof limitation.
+When the partition proves independence, the command codes are removed before the ordinary local
+freshness rule runs, so the existing tolerated host-observation exception may also admit a
+`redacted_gap` check when all remaining gaps are in that closed host/evidence set. Projection
+redactions, unreadable payloads, and unknown relations still fail closed.

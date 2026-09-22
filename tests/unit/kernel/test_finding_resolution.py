@@ -641,6 +641,30 @@ def test_command_gap_only_allows_proven_independent_action_result(gap: str) -> N
     assert not qualifying_check_resolves(finding, 4, check, frozenset())
 
 
+def test_command_gap_relation_through_resolution_result_blocks_independence() -> None:
+    """A command obligation's result link is an explicit relation to the action too."""
+    from builders.policy_cases import obligation_record, res
+    from yoetz.kernel.finding_resolution import resolution_blockers
+
+    state = _command_proof_state()
+    command_obligation = state.obligations[obl(2)]
+    assert command_obligation.payload is not None
+    state = replace(
+        state,
+        obligations={
+            **state.obligations,
+            obl(2): obligation_record(
+                replace(command_obligation.payload, resolution_evidence_refs=(res(1),)),
+                command_obligation.source_frontier,
+            ),
+        },
+    )
+    finding = _finding(kind=FindingKind.ACTION_WITHOUT_RESULT, subject_refs=(evt(10),))
+    check = _check(tested=100, coverage=_coverage(gaps=("command_attempt_uncorroborated",)))
+    reasons = resolution_blockers(finding, 4, check, frozenset(), proof_state=state)
+    assert "command_relation_overlaps_obligation:" + obl(2) in reasons
+
+
 @pytest.mark.parametrize(
     "weakness",
     (

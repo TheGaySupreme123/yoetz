@@ -1196,6 +1196,7 @@ def build_receipt(
             key=_ascii_key,
         )
     )
+    proof_state_cache: dict[tuple[int, str], ProjectionState | None] = {}
     sections = _sections(
         include=include,
         conclusion=conclusion,
@@ -1238,7 +1239,10 @@ def build_receipt(
         resolution_explanations=tuple(
             f"{finding.finding_id}: "
             + finding_resolution_explanation(
-                context.projection, finding.finding_id, context.records
+                context.projection,
+                finding.finding_id,
+                context.records,
+                proof_state_cache=proof_state_cache,
             )
             for finding in retained_findings[:10]
         )
