@@ -165,12 +165,13 @@ def _bundle() -> tuple[apsw.Connection, SqliteObservationStore]:
 
 
 def _store_error(code: PublicErrorCode) -> PublicOperationError:
-    return PublicOperationError(code, "Observation content manifest was not recorded.", retryable=False)
+    return PublicOperationError(
+        code, "Observation content manifest was not recorded.", retryable=False
+    )
 
 
-def _request_id(coordinator: ObservationCoordinator) -> str:
-    digest = "sha256:" + hashlib.sha256(_PLAINTEXT).hexdigest()
-    return coordinator._stable_operation_id(digest)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+def _request_id(coordinator: ObservationCoordinator, object_id: str) -> str:
+    return coordinator._captured_abandon_request_id(object_id)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.anyio
@@ -243,10 +244,15 @@ async def test_abandon_failure_is_logged_and_does_not_hide_the_store_error(
         )
 
     assert raised.value.code is PublicErrorCode.STORAGE_CORRUPT
-    assert objects.refs
-    records = lookup_diagnostic_records(request_id=_request_id(coordinator))
+    assert len(objects.refs) == 1
+    (object_id,) = objects.refs
+    records = lookup_diagnostic_records(request_id=_request_id(coordinator, object_id))
     assert records
     assert records[-1]["operation"] == "observation_object_abandon_failed"
+    content_request_id = coordinator._stable_operation_id(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        "sha256:" + hashlib.sha256(_PLAINTEXT).hexdigest()
+    )
+    assert not lookup_diagnostic_records(request_id=content_request_id)
     rendered = str(records)
     assert "SECRET" not in rendered
     assert "captured output" not in rendered
@@ -348,9 +354,9 @@ async def test_preexisting_manifest_owner_is_not_abandoned(tmp_path: Path) -> No
 
     assert objects.abandoned == []
     assert object_id in objects.refs
-    assert db.execute(
-        "SELECT object_id FROM observation_content_manifests"
-    ).fetchone() == (object_id,)
+    assert db.execute("SELECT object_id FROM observation_content_manifests").fetchone() == (
+        object_id,
+    )
     assert db.execute("SELECT count(*) FROM events").fetchone() == (0,)
 
 
@@ -416,7 +422,7 @@ async def test_approved_check_manifest_failure_abandons_and_success_keeps_the_ob
 
     assert object_id is not None
     assert object_id in objects.refs
-    assert db.execute(
-        "SELECT object_id FROM observation_content_manifests"
-    ).fetchone() == (object_id,)
+    assert db.execute("SELECT object_id FROM observation_content_manifests").fetchone() == (
+        object_id,
+    )
     assert db.execute("SELECT count(*) FROM events").fetchone() == (0,)

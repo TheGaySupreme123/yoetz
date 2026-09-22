@@ -207,4 +207,7 @@ manifest row is never abandoned, including a pre-existing weak row whose later u
 `LIMIT_EXCEEDED` is a non-commit of the new row: the budget gap is still recorded and later parts
 of that ticket are not staged, and the unowned object is abandoned rather than retained. The
 24-hour orphan sweep remains the fallback. Ledger append, disclosure, and host surfaces are
-unchanged.
+unchanged. The abandon diagnostic's request id derives from the random object id, never from the
+captured bytes. Residual: the lookup trusts the connection's post-rollback view, so an I/O failure
+inside the SQLite commit itself, whose WAL frame a later recovery replays, could leave a row naming
+an abandoned object. That row then fails verified resolution; it cannot return other bytes.

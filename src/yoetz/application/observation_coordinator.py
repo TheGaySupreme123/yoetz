@@ -4219,7 +4219,6 @@ class ObservationCoordinator:
                         logical_identity=content_identity,
                         chunk=stored_chunk,
                         object_id=ref.object_id,
-                        request_id=self._stable_operation_id(content_digest),
                     )
                 any_unavailable = True
                 await note_unavailable()
@@ -4250,12 +4249,8 @@ class ObservationCoordinator:
                         logical_identity=content_identity,
                         chunk=stored_chunk,
                         object_id=ref.object_id,
-                        request_id=self._stable_operation_id(content_digest),
                     )
-                if (
-                    type(exc) is PublicOperationError
-                    and exc.code is PublicErrorCode.LIMIT_EXCEEDED
-                ):
+                if type(exc) is PublicOperationError and exc.code is PublicErrorCode.LIMIT_EXCEEDED:
                     any_unavailable = True
                     self._capture_budget_exhausted = True
                     await note_budget_exhausted()
@@ -4879,7 +4874,6 @@ class ObservationCoordinator:
                 logical_identity=logical_identity,
                 chunk=chunk,
                 object_id=ref.object_id,
-                request_id=self._stable_operation_id(content_digest),
             )
             raise
         return ref.object_id
@@ -4912,7 +4906,6 @@ class ObservationCoordinator:
         logical_identity: str,
         chunk: ObservationContentChunk,
         object_id: str,
-        request_id: str,
     ) -> None:
         """Abandon one captured object whose manifest reference did not commit.
 
@@ -4921,7 +4914,8 @@ class ObservationCoordinator:
         names ``object_id`` is that owner. A lookup that fails is not proof, so
         the object stays for generation-fenced GC. Abandon failure is logged as
         ``observation_object_abandon_failed`` and does not replace the caller's
-        error.
+        error. The log id derives from the random object id, never from the
+        captured bytes, so the diagnostic cannot fingerprint content.
         """
 
         if self._manifest_names_captured_object(
@@ -4937,7 +4931,14 @@ class ObservationCoordinator:
             (staged,),
             component="application.observation_coordinator",
             operation="observation_object_abandon_failed",
-            request_id=request_id,
+            request_id=self._captured_abandon_request_id(object_id),
+        )
+
+    def _captured_abandon_request_id(self, object_id: str) -> str:
+        return self._stable_operation_id(
+            canonical_digest(
+                JsonObject({"operation": "observation_captured_abandon", "object_id": object_id})
+            )
         )
 
     def _manifest_names_captured_object(
