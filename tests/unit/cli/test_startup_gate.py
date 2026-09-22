@@ -462,6 +462,40 @@ def test_unknown_error_code_keeps_pending_ticket_and_closes_gate(host: Host) -> 
     assert host.denied()
 
 
+@pytest.mark.parametrize(
+    "invalid_context",
+    [
+        {"session_id": "", "conversation_id": ""},
+        {"cwd": None, "workspace_roots": []},
+    ],
+)
+def test_tracked_bootstrap_fails_closed_on_missing_identity_or_workspace(
+    host: Host, invalid_context: dict[str, JsonValue]
+) -> None:
+    start_response = host.call(
+        "PreToolUse" if host.host == "claude" else "beforeMCPExecution",
+        tool_name="mcp__yoetz__start" if host.host == "claude" else "start",
+        mcp_server_name="yoetz",
+        tool_input={"request_id": new_id(IdKind.REQUEST)},
+        **invalid_context,
+    )
+    if host.host == "claude":
+        details = start_response.get("hookSpecificOutput")
+        assert isinstance(details, dict)
+        assert details.get("permissionDecision") == "deny"
+    else:
+        assert start_response["permission"] == "deny"
+
+    guidance_response = host.call(
+        "PreToolUse" if host.host == "claude" else "beforeMCPExecution",
+        tool_name="ReadMcpResource",
+        mcp_server_name="yoetz",
+        tool_input={"uri": "yoetz://guidance/workflow.md"},
+        **invalid_context,
+    )
+    assert guidance_response == ({} if host.host == "claude" else {"permission": "ask"})
+
+
 def test_reset_marker_failure_uses_prompt_boundary_block(
     host: Host, monkeypatch: pytest.MonkeyPatch
 ) -> None:

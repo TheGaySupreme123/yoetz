@@ -39,6 +39,7 @@ from yoetz.domain.events import (
     EventSchema,
     EvidenceKind,
     EvidenceRecordedPayload,
+    LedgerRecord,
     ResultOutcome,
     ResultRecordedPayload,
     RuntimeProfile,
@@ -83,7 +84,15 @@ from yoetz.kernel.reducers import replay
 from yoetz.mcp.summaries import summary_for_status
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.importer import ImporterPort, ImportStatusSnapshot
-from yoetz.ports.ledger import AppendCommand, AppendEntry, CheckCommitResult, OperationKind
+from yoetz.ports.ledger import (
+    AppendCommand,
+    AppendEntry,
+    CheckCommitResult,
+    LedgerPort,
+    OperationKind,
+    ProjectionView,
+    StoredProjection,
+)
 from yoetz.ports.objects import (
     ObjectKind,
     ObjectMetadata,
@@ -3717,9 +3726,325 @@ async def test_scoped_check_that_excludes_the_subject_resolves_nothing() -> None
 
 
 @pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))
+@pytest.mark.parametrize("repair", ("carried", "restated", "narrowed"))
+async def test_completion_scope_difference_is_visible_and_repairable(
+    ledger_backend: Literal["memory", "sqlite"], repair: str
+) -> None:
+    """679: preview, append, status, replay, check and receipt share the same scope."""
+    app, runtime, _ = _build_app(ledger_backend=ledger_backend)
+    started = await app.start(start_request(61000, title="Scope consistency"))
+    a, b = protocol_id("obl_", 61001), protocol_id("obl_", 61002)
+    evidence = protocol_id("evd_", 61003)
+    old_claim = protocol_id("clm_", 61004)
+    serial = 61100
+    frontier = started.frontier
+    requests: list[PublishWorkRequest] = []
+
+    def draft(name: str, payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        nonlocal serial
+        serial += 1
+        return {
+            "event_id": protocol_id("evt_", serial),
+            "schema": {"name": name, "version": "1.1.0" if name == "claim_recorded" else "1.0.0"},
+            "occurred_at": "2026-07-19T12:00:00.000Z",
+            "causal_parents": [],
+            "artifact_refs": [],
+            "evidence_refs": [],
+            "payload": payload,
+        }
+
+    async def publish(drafts: list[dict[str, JsonValue]], *, preview: bool = False) -> object:
+        nonlocal serial, frontier
+        serial += 1
+        request = PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", serial)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(frontier),
+                "event_drafts": drafts,
+                "dry_run": preview,
+            }
+        )
+        requests.append(request)
+        result = await app.publish_work(request)
+        if type(result) is PublishWorkInternalResult:
+            frontier = result.result_frontier
+        return result
+
+    obligations: list[dict[str, JsonValue]] = [
+        {
+            "obligation_id": key,
+            "description": "Synthetic work",
+            "evidence_expectation": "Evidence",
+            "status": "open",
+        }
+        for key in (a, b)
+    ]
+    await publish(
+        [
+            draft(
+                "plan_published", {"plan_version": 1, "summary": "Plan A", "obligation_refs": [a]}
+            ),
+            *(draft("obligation_published", value) for value in obligations),
+            draft(
+                "evidence_recorded",
+                {
+                    "evidence_id": evidence,
+                    "evidence_kind": "other",
+                    "strength": "metadata_only",
+                    "description": "Synthetic evidence",
+                    "observed_at": "2026-07-19T12:00:00.000Z",
+                },
+            ),
+            *(
+                draft(
+                    "obligation_published",
+                    {**value, "status": "resolved", "resolution_evidence_refs": [evidence]},
+                )
+                for value in obligations
+            ),
+        ]
+    )
+    claimed = [
+        draft(
+            "claim_recorded",
+            {
+                "claim_id": old_claim,
+                "claim_kind": "completion",
+                "statement": "A and B complete",
+                "obligation_refs": [a, b],
+                "supporting_refs": [evidence],
+                "limitation_refs": [],
+                "supersedes_claim_refs": [],
+            },
+        )
+    ]
+    preview = await publish(claimed, preview=True)
+    assert isinstance(preview, PublishWorkResult)
+    assert "completion_claim_outside_plan" in preview.root.gaps  # type: ignore[union-attr]
+    committed = await publish(claimed)
+    assert isinstance(committed, PublishWorkInternalResult)
+    assert "completion_claim_outside_plan" in committed.gaps
+    claim_request = requests[-1]
+
+    async def inspect() -> tuple[CheckCommitResult, object]:
+        nonlocal serial, frontier
+        serial += 1
+        status = await app.status(
+            StatusRequest.model_validate(
+                {
+                    **_request_base(protocol_id("req_", serial)),
+                    "session_id": started.session_id,
+                    "writer_id": started.writer_id,
+                    "view": "compact",
+                    "limit": "10",
+                }
+            )
+        )
+        serial += 1
+        check = await app.check(
+            CheckRequest.model_validate(
+                {
+                    **_request_base(protocol_id("req_", serial)),
+                    "session_id": started.session_id,
+                    "writer_id": started.writer_id,
+                    "expected_frontier": _frontier(frontier),
+                    "mode": "deterministic_only",
+                    "max_findings": "10",
+                }
+            )
+        )
+        assert type(check) is CheckCommitResult
+        frontier = check.result_frontier
+        return check, status
+
+    checked, status = await inspect()
+    assert "completion_claim_outside_plan" in checked.coverage.known_gaps
+    assert getattr(status, "closure_readiness").declared_obligation_count == "1"
+    assert "coverage_gaps_declared" in getattr(status, "closure_readiness").blocking_conditions
+    for fmt in ("json", "markdown", "text"):
+        serial += 1
+        receipt = await app.receipt(
+            ReceiptRequest.model_validate(
+                {
+                    **_request_base(protocol_id("req_", serial)),
+                    "task_id": started.task_id,
+                    "session_id": started.session_id,
+                    "writer_id": started.writer_id,
+                    "expected_frontier": _frontier(frontier),
+                    "format": fmt,
+                    "include": "standard",
+                    "redaction_profile": "full_local",
+                }
+            )
+        )
+        frontier = receipt.result_frontier
+        assert receipt.conclusion == "insufficient_coverage"
+        assert "completion_claim_outside_plan" in receipt.coverage.known_gaps
+        assert "plan_revised" in str(receipt.document if fmt == "json" else receipt.human_text)
+
+    if repair == "carried":
+        fixed = draft(
+            "plan_revised",
+            {
+                "plan_version": 2,
+                "supersedes_plan_version": 1,
+                "summary": "Include B",
+                "reason": "New work",
+                "obligation_changes": [{"obligation_id": b, "change": "carried"}],
+            },
+        )
+    elif repair == "restated":
+        fixed = draft(
+            "plan_published", {"plan_version": 2, "summary": "Include B", "obligation_refs": [a, b]}
+        )
+    else:
+        fixed = draft(
+            "claim_recorded",
+            {
+                "claim_id": protocol_id("clm_", 61999),
+                "claim_kind": "completion",
+                "statement": "Only A",
+                "obligation_refs": [a],
+                "supporting_refs": [evidence],
+                "limitation_refs": [],
+                "supersedes_claim_refs": [old_claim],
+            },
+        )
+    await publish([fixed])
+    checked, _ = await inspect()
+    assert "completion_claim_outside_plan" not in checked.coverage.known_gaps
+    assert "completion_plan_not_claimed" not in checked.coverage.known_gaps
+    ledger, _ = next(iter(runtime.resources.values()))
+    records = tuple([row async for row in ledger.load_events(started.session_id)])
+    from yoetz.kernel.completion_scope import completion_scope_codes
+
+    assert completion_scope_codes(replay(records)) == ()
+
+    retried = await app.publish_work(claim_request)
+    assert isinstance(retried, PublishWorkInternalResult)
+    assert retried.result_frontier == committed.result_frontier
+    assert retried.gaps == committed.gaps
+    if repair != "narrowed":
+        await publish(
+            [
+                draft(
+                    "claim_recorded",
+                    {
+                        "claim_id": protocol_id("clm_", 61998),
+                        "claim_kind": "completion",
+                        "statement": "Partial A",
+                        "obligation_refs": [a],
+                        "supporting_refs": [evidence],
+                        "limitation_refs": [],
+                        "supersedes_claim_refs": [old_claim],
+                    },
+                )
+            ]
+        )
+        partial, partial_status = await inspect()
+        assert "completion_plan_not_claimed" in partial.coverage.known_gaps
+        assert getattr(partial_status, "closure_readiness").open_obligation_count == "0"
+        serial += 1
+        receipt = await app.receipt(
+            ReceiptRequest.model_validate(
+                {
+                    **_request_base(protocol_id("req_", serial)),
+                    "task_id": started.task_id,
+                    "session_id": started.session_id,
+                    "writer_id": started.writer_id,
+                    "expected_frontier": _frontier(frontier),
+                    "format": "text",
+                    "include": "standard",
+                    "redaction_profile": "full_local",
+                }
+            )
+        )
+        assert "outside a completion claim" in str(receipt.human_text)
+        assert receipt.conclusion == "insufficient_coverage"
+
+
+@pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))
+async def test_publish_reuses_validated_projection_and_falls_back_for_stale_metadata(
+    ledger_backend: Literal["memory", "sqlite"], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Normal appends use the stored projection; invalid metadata keeps historical replay safe."""
+
+    app, workflow_runtime, _ = _build_app(ledger_backend=ledger_backend)
+    started, checked, _ = await _bootstrap_finding(app, seed=7000)
+    ledger, _objects = workflow_runtime.resources[started.task_id]
+    ledger_port = cast(LedgerPort, ledger)
+    original_load_events = ledger_port.load_events
+    event_loads: list[tuple[int, int | None]] = []
+
+    def observed_load_events(
+        loaded_session_id: str, *, after: int = 0, through: int | None = None
+    ) -> AsyncIterator[LedgerRecord]:
+        event_loads.append((after, through))
+        return original_load_events(loaded_session_id, after=after, through=through)
+
+    monkeypatch.setattr(ledger_port, "load_events", observed_load_events)
+    frontier = checked.result_frontier
+
+    async def publish_action(
+        request_tail: int, event_tail: int, action_tail: int
+    ) -> PublishWorkInternalResult:
+        nonlocal frontier
+        published = await app.publish_work(
+            PublishWorkRequest.model_validate(
+                {
+                    **_request_base(protocol_id("req_", request_tail)),
+                    "session_id": started.session_id,
+                    "writer_id": started.writer_id,
+                    "expected_frontier": _frontier(frontier),
+                    "event_drafts": (
+                        {
+                            "event_id": protocol_id("evt_", event_tail),
+                            "schema": {"name": "action_recorded", "version": "1.0.0"},
+                            "occurred_at": "2026-07-19T12:00:00.000Z",
+                            "causal_parents": (),
+                            "payload": {
+                                "action_id": protocol_id("act_", action_tail),
+                                "action_kind": "other",
+                                "description": "Exercise cached projection publication.",
+                            },
+                            "artifact_refs": (),
+                            "evidence_refs": (),
+                        },
+                    ),
+                }
+            )
+        )
+        assert type(published) is PublishWorkInternalResult
+        frontier = published.result_frontier
+        return published
+
+    await publish_action(7100, 7101, 7102)
+    assert event_loads
+    assert all(after > 0 for after, _through in event_loads)
+
+    original_load_projection = ledger_port.load_projection
+
+    async def stale_projection(
+        loaded_session_id: str, view: ProjectionView
+    ) -> StoredProjection | None:
+        stored = await original_load_projection(loaded_session_id, view)
+        if stored is not None and view is ProjectionView.CANDIDATE_FINDINGS:
+            return replace(stored, lag=1)
+        return stored
+
+    event_loads.clear()
+    monkeypatch.setattr(ledger_port, "load_projection", stale_projection)
+    await publish_action(7103, 7104, 7105)
+    assert any(after == 0 for after, _through in event_loads)
+
+
+@pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))
 @pytest.mark.parametrize("overlap", (False, True))
+@pytest.mark.parametrize("scope_mismatch", (False, True))
 async def test_command_gap_partition_preserves_receipt_coverage(
-    ledger_backend: Literal["memory", "sqlite"], overlap: bool
+    ledger_backend: Literal["memory", "sqlite"], overlap: bool, scope_mismatch: bool
 ) -> None:
     """682: real append, repair, recheck and receipts keep independent proof separate."""
     app, runtime, _ = _build_app(ledger_backend=ledger_backend)
@@ -3834,7 +4159,25 @@ async def test_command_gap_partition_preserves_receipt_coverage(
             ),
         ]
     )
+    if scope_mismatch:
+        await publish(
+            [
+                draft(
+                    "claim_recorded",
+                    {
+                        "claim_id": protocol_id("clm_", 62007),
+                        "claim_kind": "completion",
+                        "statement": "Only A is covered by this claim",
+                        "obligation_refs": [a],
+                        "supporting_refs": [ra],
+                    },
+                )
+            ]
+        )
+    should_resolve = not overlap and not scope_mismatch
     second = await check()
+    if scope_mismatch:
+        assert "completion_plan_not_claimed" in second.coverage.known_gaps
     assert not any(f.kind is FindingKind.ACTION_WITHOUT_RESULT for f in second.findings)
     assert "command_attempt_uncorroborated" in second.coverage.known_gaps
     status = await app.status(
@@ -3844,7 +4187,7 @@ async def test_command_gap_partition_preserves_receipt_coverage(
     )
     assert isinstance(status.page, StatusFindingsPageModel)
     current = next(row for row in status.page.items if row.finding_id == target.finding_id)
-    assert current.resolved is (not overlap)
+    assert current.resolved is should_resolve
     if overlap:
         assert "command_relation_overlaps_obligation:" + a in str(current.detail)
     ledger, _ = next(iter(runtime.resources.values()))
@@ -3853,10 +4196,13 @@ async def test_command_gap_partition_preserves_receipt_coverage(
     from yoetz.kernel.projections import projection_from_snapshot, projection_snapshot
 
     rebuilt = replay(records)
-    assert finding_is_resolved(rebuilt, target.finding_id) is (not overlap)
-    assert finding_is_resolved(
-        projection_from_snapshot(projection_snapshot(rebuilt)), target.finding_id
-    ) is (not overlap)
+    assert finding_is_resolved(rebuilt, target.finding_id) is should_resolve
+    assert (
+        finding_is_resolved(
+            projection_from_snapshot(projection_snapshot(rebuilt)), target.finding_id
+        )
+        is should_resolve
+    )
     for fmt in ("json", "markdown", "text"):
         receipt = await app.receipt(
             ReceiptRequest.model_validate(
@@ -3872,8 +4218,10 @@ async def test_command_gap_partition_preserves_receipt_coverage(
         )
         frontier = receipt.result_frontier
         assert "command_attempt_uncorroborated" in receipt.coverage.known_gaps
+        if scope_mismatch:
+            assert "completion_plan_not_claimed" in receipt.coverage.known_gaps
         assert receipt.conclusion == (
-            "unresolved_findings_remain" if overlap else "insufficient_coverage"
+            "insufficient_coverage" if should_resolve else "unresolved_findings_remain"
         )
         if fmt != "json":
             assert receipt.human_text is not None
@@ -3917,4 +4265,4 @@ async def test_command_gap_partition_preserves_receipt_coverage(
     )
     assert isinstance(status.page, StatusFindingsPageModel)
     final = next(row for row in status.page.items if row.finding_id == target.finding_id)
-    assert final.resolved is (not overlap)
+    assert final.resolved is should_resolve

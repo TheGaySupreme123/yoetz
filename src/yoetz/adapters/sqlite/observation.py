@@ -37,6 +37,7 @@ from yoetz.domain.observation import (
     observation_envelope_from_json,
     observation_envelope_to_json,
 )
+from yoetz.domain.observation_loss import ObservationSelectionLoss
 from yoetz.domain.observation_profiles import (
     is_content_capture_profile,
     validate_content_capture_profile,
@@ -490,6 +491,54 @@ class SqliteObservationStore:
                 None,
                 envelope.cursor,
             )
+
+    async def record_selection_loss(
+        self, workspace: str, loss: ObservationSelectionLoss, observed_at: Timestamp
+    ) -> None:
+        """Record an internal accounting gap, without admitting input or moving a cursor.
+
+        The cursor fields identify a service marker, not a recovered native event.
+        Original task/session/source/authority attribution is retained explicitly.
+        """
+
+        envelope = ObservationEnvelope(
+            loss.session_commitment,
+            "observation_gap",
+            "selection-loss:" + loss.lane,
+            loss.source,
+            ObservationCursor(
+                loss.source_generation, 0, 0, loss.session_commitment, "selection-loss/1.0.0"
+            ),
+            observed_at,
+            JsonObject(
+                {
+                    "hook_name": "observation_gap",
+                    "selection_task_id": loss.task_id,
+                    "selection_session_id": loss.session_id,
+                    "selection_writer_id": loss.writer_id,
+                    "selection_authority_generation": loss.authority_generation,
+                }
+            ),
+            (),
+            (ObservationGapCode.OBSERVATION_INPUT_LOSS.value,),
+        )
+        key = _dedup_key(workspace, envelope)
+        async with self._lock:
+            with _ledger_write_boundary(), self._db:
+                if (
+                    self._db.execute(
+                        "SELECT 1 FROM observation_dedup WHERE dedup_key = ?", (key,)
+                    ).fetchone()
+                    is not None
+                ):
+                    return
+                self._db.execute(
+                    "INSERT INTO observation_dedup(dedup_key, workspace_commitment, ingested_at) "
+                    "VALUES (?, ?, ?)",
+                    (key, workspace, observed_at.wire),
+                )
+                self._insert_event(workspace, envelope)
+                self._trim_retention(workspace)
 
     async def status(self, query: ObservationStatusQuery) -> ObservationStatus:
         if type(query) is not ObservationStatusQuery:

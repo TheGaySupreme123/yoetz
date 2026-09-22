@@ -332,6 +332,9 @@ identity, refs) plus coverage/gaps. It appends nothing, records no operation, do
 `request_id`, and does not move the frontier — same non-citable discipline as
 `status view=candidate_findings`. A subsequent real publish may reuse the same `request_id`.
 `dry_run: null` is rejected; omit the field or pass a boolean.
+The coverage on an accepted internal success is derived from the authored envelope coverage and the
+resulting projection, so its diagnostic `known_gaps` are reporting output and must not be copied into
+the coverage of a later event envelope.
 The preferred recovery read after any ambiguous write is `status view=operation` with
 `filter.operation_request_id` set to the write's `request_id`: it is a state lookup for that
 operation identity (`absent`/`pending`/`complete`/`quarantined`) within the authenticated task,
@@ -995,6 +998,10 @@ the readable effective current plan declares zero obligations, exactly one appli
   `no_obligations_reason`;
 - `completion_scope_declared_none` — the effective plan has no obligation refs and carries a typed
   reason.
+- `completion_claim_outside_plan` — an effective completion claim names an obligation outside the
+  readable current plan.
+- `completion_plan_not_claimed` — the readable current plan names an obligation omitted by an
+  effective completion claim.
 
 Both force `coverage_incomplete`, `insufficient_coverage`, and an insufficient-coverage receipt.
 The typed declaration records the participant's scope decision but never purchases a clean verdict.
@@ -3655,7 +3662,29 @@ The closed internal recovery outcomes are `capture_inventory_recovered`,
 `capture_inventory_unknown`, `capture_inventory_disabled`, `capture_inventory_busy`, and
 `capture_inventory_timeout`. They contribute only fixed reason counts to
 `ObservationDrainSummary.reasons`, not row delivery/attempt counts, coverage gaps, or raw
-exception text. No new diagnostic/RPC schema or task-loss event is introduced. A successful
+exception text. No new diagnostic/RPC or event schema is introduced. `recovery_routes()` owns a separate
+read-only connection for each file-backed complete scan and joins its worker on cancellation.
+The shared writable catalog connection never crosses to that worker.
+
+`LocalObservationStore.pending_selection_losses(workspace)` returns at most 64 retained,
+fully validated and routed lanes; `selection_loss_workspaces(task_id)` filters the returned
+maintenance work to one authenticated task after bounded durable workspace discovery.
+`acknowledge_selection_loss(workspace, lane)` follows committed
+reporting. `ObservationCoordinator.reconcile_task_selection_losses(runtime)` imports only that
+task's historical losses before a new check freezes its inputs. Existing check operations bypass
+this reconciliation. The service sweep attempts eight lanes per workspace turn with a rotating
+cursor. A terminal route drift or quarantined marker operation uses the supplied same-task
+runtime and a distinct deterministic recovery operation identity; transient publication failures
+remain fail-closed. Route-valid lane-digest mismatches receive an explicit unreconciled loss
+marker; malformed routes or source identities remain local accounting and are not attributed to
+a task by the recovery path.
+A service-authenticated `evidence_recorded` marker carries `observation_input_loss` in coverage;
+`TaskObservationPort.record_selection_loss` records an internal `observation_gap` in task history
+without using native admission or advancing its cursor. Its `selection-loss/1.0.0` cursor namespace
+is internal bookkeeping, not a native read position. Full original attribution is retained in
+the evidence payload and selection route fields. One task-wide operation per lane makes
+commit-before-ack recovery idempotent; source/authority generations and original session/writer
+remain part of lane identity. Unrouted and overflow-only history remains local. A successful
 inventory does not clear loss identity/count history or bypass a real hard capacity limit.
 
 Outcome semantics and back-pressure vocabulary (ADR-022 decisions 12–13):
@@ -5486,6 +5515,20 @@ Claude returns deny or abstains. Cursor generic preToolUse returns allow/deny wh
 server-qualified MCP hook returns ask/deny, preserving ADR-018. Cursor permission hooks request
 failClosed; Claude command timeouts remain host-fail-open. No owner approval is inferred.
 See [required startup](runbooks/required-startup.md) for scope/recovery, lifecycle and proof limits.
+### Completion claim scope diagnostics (issue #679)
+
+`kernel/completion_scope.py` owns the comparison between each readable effective completion
+claim and `current_plan_scope`. `completion_claim_outside_plan` and
+`completion_plan_not_claimed` are fixed coverage codes carried by publication previews/results,
+status, checks, and receipts. There are at most two case gaps regardless of relation count.
+Status readiness uses its existing `coverage_gaps_declared` condition; declared/open obligation
+counts stay plan-derived. Receipt gap details contain at most 16 ID-pair examples plus full
+relation counts, with an explicit omission marker; default privacy projection still applies.
+Partial claims are accepted. Material/superseded claims are excluded, and unavailable input is
+not an empty scope. Multiple partial claims are compared independently; older effective claims
+are compared to the current plan until explicitly superseded. A later plan revision that waives a
+previously claimed obligation changes the current plan but does not rewrite that claim, so the
+outside-plan code remains expected until the claim is superseded. See ADR-019 for repair semantics.
 
 ### Command-gap independence for repaired action findings (issue #682)
 

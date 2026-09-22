@@ -58,6 +58,7 @@ from yoetz.domain.values import (
     validate_sha256_digest,
 )
 from yoetz.kernel.claims import effective_claim_items
+from yoetz.kernel.completion_scope import completion_scope_codes
 from yoetz.kernel.plan_scope import current_plan_scope
 from yoetz.kernel.projections import (
     ProjectionRecord,
@@ -1509,6 +1510,11 @@ def build_deterministic_case(
             missing_sources.add(event_id(gap.subject_refs[0]))
         elif gap.code == "unknown_event":
             unknown_events.add(event_id(gap.subject_refs[0]))
+
+    # Two bounded relation codes, independent of the number of claims/obligations.
+    # No subjects here: this is completion coverage, not a ledger-staleness finding.
+    for code in completion_scope_codes(projection):
+        _add_gap(gaps, code, code, ())
 
     scope_gap = completion_scope_gap(projection)
     if scope_gap is not None:

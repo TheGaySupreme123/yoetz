@@ -336,6 +336,9 @@ def handle_startup_gate(
         payload = read_cursor_hook_payload(stdin_bytes)
         # Bootstrap and same-request recovery remain available even if local
         # gate state cannot be read or the per-session lock is busy.
+        # Resolve the workflow name before validating host identity or opening
+        # the sidecar so tracked writes fail closed on every early error.
+        tool = workflow_tool(payload, host, event)
         admitted = event in _PRE and bootstrap_tool(payload, host, event)
         session = payload.get("session_id") if host == "claude" else payload.get("conversation_id")
         if not isinstance(session, str) or not session:
@@ -347,7 +350,6 @@ def handle_startup_gate(
         )
         if workspace is None:
             raise ValueError("startup_gate_workspace_invalid")
-        tool = workflow_tool(payload, host, event)
         request = _object(payload.get("tool_input"))
         store = GateStore(host, session, workspace, root=_state)
         with _locked_for_event(store, event):
@@ -505,7 +507,7 @@ def handle_startup_gate(
         output = (
             reset_failure_output(host, event)
             if event in _RESET
-            else gate_output(host, event, admitted, "readiness_unavailable")
+            else gate_output(host, event, admitted, reason)
         )
     stdout_json(output, stdout)
     return 0

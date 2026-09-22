@@ -98,6 +98,17 @@ The typed declaration clears the status readiness blocker; it does not buy a cle
 positive declared count whose obligations are all resolved is the distinct resolved-scope state.
 Redacted or unreadable scope remains unknown and never becomes zero.
 
+When a plan changes after an effective completion claim, the claim and the current plan are still
+compared independently:
+
+- `completion_claim_outside_plan` means the claim names an obligation the current plan no longer
+  declares;
+- `completion_plan_not_claimed` means the current plan declares an obligation the claim omits.
+
+An explicit waiver removes an obligation from the current plan; it does not supersede or rewrite a
+historical completion claim. The relation remains a coverage limitation until the claim is replaced
+or the plan is deliberately restated to match the intended scope.
+
 ## Candidate findings are not a check
 
 `status` with `view=candidate_findings` is an advisory read. No verdict, no IDs, no receipt, and the
