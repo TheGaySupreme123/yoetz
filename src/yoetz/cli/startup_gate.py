@@ -24,6 +24,7 @@ from yoetz.cli.hook_io import (
 )
 from yoetz.ports.integrations import YOETZ_WORKFLOW_TOOL_NAMES
 from yoetz.protocol.canonical import JsonValue
+from yoetz.protocol.errors import PublicErrorCode
 from yoetz.protocol.ids import IdKind, is_valid_id
 
 _WORKFLOW = frozenset(YOETZ_WORKFLOW_TOOL_NAMES)
@@ -31,6 +32,17 @@ _DISCOVERY = frozenset({"ToolSearch", "AskUserQuestion", "AskQuestion", "ListMcp
 _PRE = frozenset({"PreToolUse", "preToolUse", "beforeMCPExecution"})
 _POST = frozenset({"PostToolUse", "PostToolUseFailure", "afterMCPExecution"})
 _RESET = frozenset({"SessionStart", "sessionStart", "UserPromptSubmit", "beforeSubmitPrompt"})
+_TRACKED_WRITES = frozenset({"start", "publish_work"})
+_RETRYABLE_FAILURE_CODES = frozenset(
+    {
+        PublicErrorCode.OPERATION_PENDING.value,
+        PublicErrorCode.INTERNAL_ERROR.value,
+        PublicErrorCode.SERVICE_UNAVAILABLE.value,
+    }
+)
+_TERMINAL_FAILURE_CODES = frozenset(
+    code.value for code in PublicErrorCode if code.value not in _RETRYABLE_FAILURE_CODES
+)
 _NOTICE = (
     "Yoetz required startup is active. Read yoetz://guidance/workflow.md and load Yoetz tools. "
     "Start or attach this host session, then publish an accepted current-scope plan containing "
@@ -178,11 +190,8 @@ def clear_pending(scope: GateScope, rid: str) -> None:
 
 def terminal_failure(result: Mapping[str, JsonValue]) -> bool:
     error = result.get("error")
-    return (
-        result.get("ok") is False
-        and isinstance(error, dict)
-        and error.get("code") not in {"OPERATION_PENDING", "INTERNAL_ERROR", "SERVICE_UNAVAILABLE"}
-    )
+    code = None if not isinstance(error, dict) else error.get("code")
+    return result.get("ok") is False and type(code) is str and code in _TERMINAL_FAILURE_CODES
 
 
 def recover_pending(scope: GateScope, result: Mapping[str, JsonValue]) -> None:
@@ -322,6 +331,7 @@ def handle_startup_gate(
 ) -> int:
     admitted, reason = False, "readiness_unavailable"
     output: dict[str, JsonValue] | None = None
+    tool: str | None = None
     try:
         payload = read_cursor_hook_payload(stdin_bytes)
         # Bootstrap and same-request recovery remain available even if local
@@ -337,9 +347,9 @@ def handle_startup_gate(
         )
         if workspace is None:
             raise ValueError("startup_gate_workspace_invalid")
-        store = GateStore(host, session, workspace, root=_state)
         tool = workflow_tool(payload, host, event)
         request = _object(payload.get("tool_input"))
+        store = GateStore(host, session, workspace, root=_state)
         with _locked_for_event(store, event):
             # A reset owns the lock and is the only operation allowed to
             # replace an invalidated sidecar. Preserve its route and pending
@@ -382,7 +392,7 @@ def handle_startup_gate(
                 )
                 if admitted:
                     admitted = True
-                    if tool in {"start", "publish_work"} and not cursor_mcp:
+                    if tool in _TRACKED_WRITES and not cursor_mcp:
                         try:
                             invalidated = store.is_invalidated()
                         except Exception:
@@ -486,6 +496,12 @@ def handle_startup_gate(
         if output is None:
             output = gate_output(host, event, admitted, reason)
     except Exception:
+        # A bootstrap write must be represented in the sidecar before the host
+        # may run it. If lock acquisition or state persistence fails, never
+        # return the bootstrap admission that was computed before the failure.
+        if event in _PRE and tool in _TRACKED_WRITES:
+            admitted = False
+            reason = "startup_gate_state_unavailable"
         output = (
             reset_failure_output(host, event)
             if event in _RESET

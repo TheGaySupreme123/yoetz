@@ -422,6 +422,46 @@ def test_successful_reset_after_failure_preserves_pending_request_identity(
     assert not host.store.invalidation_path.exists()
 
 
+def test_lock_contention_denies_tracked_bootstrap_writes_without_mutating_scope(
+    host: Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host.start()
+    host.publish()
+    before = host.store.read()
+    assert before is not None and before.candidate
+
+    def busy_locked(_store: GateStore):
+        raise BlockingIOError("simulated contention")
+
+    monkeypatch.setattr(GateStore, "locked", busy_locked)
+    start_request: dict[str, JsonValue] = {"request_id": new_id(IdKind.REQUEST)}
+    publish_request, _result = host.publication()
+    for tool, request in (("start", start_request), ("publish_work", publish_request)):
+        response = host.pre(tool, request)
+        if host.host == "claude":
+            details = response.get("hookSpecificOutput")
+            assert isinstance(details, dict)
+            assert details.get("permissionDecision") == "deny"
+        else:
+            assert response["permission"] == "deny"
+
+    after = host.store.read()
+    assert after is not None and after == before
+    assert start_request["request_id"] not in after.pending
+    assert publish_request["request_id"] not in after.pending
+
+
+def test_unknown_error_code_keeps_pending_ticket_and_closes_gate(host: Host) -> None:
+    host.start()
+    request, result = host.publication()
+    host.pre("publish_work", request)
+    result.update(ok=False, error={"code": "UNKNOWN_ERROR"})
+    host.post("publish_work", request, result)
+    scope = host.store.read()
+    assert scope is not None and request["request_id"] in scope.pending
+    assert host.denied()
+
+
 def test_reset_marker_failure_uses_prompt_boundary_block(
     host: Host, monkeypatch: pytest.MonkeyPatch
 ) -> None:

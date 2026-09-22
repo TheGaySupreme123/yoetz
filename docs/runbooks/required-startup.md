@@ -89,6 +89,11 @@ have a 3 s host timeout. Controlled failures at a block-capable boundary deny su
 Bootstrap still reaches normal host admission even when gate state is unreadable. Errors expose only
 closed reasons, never payloads.
 
+Tracked bootstrap `start` and `publish_work` calls are admitted only after their request identity is
+persisted under the sidecar lock. Lock contention or a state-write failure therefore denies that
+tracked call; read-only workflow/status recovery remains available and no unrecorded write is
+treated as admitted.
+
 A user-prompt reset writes a new scope before clearing the prior invalidation marker. If that write
 fails, the marker makes ordinary readers fail closed; the next reset reads the old sidecar only while
 holding the reset lock, so its route and every pending request identity survive recovery. If the
