@@ -187,6 +187,7 @@ class GateStore:
         key = hashlib.sha256(json.dumps([host, session, workspace]).encode()).hexdigest()
         self.path = self.directory / f"{key}.json"
         self.lock_path = self.directory / f"{key}.lock"
+        self.invalidation_path = self.directory / f"{key}.invalid"
 
     @contextmanager
     def locked(self) -> Generator[None]:
@@ -205,8 +206,45 @@ class GateStore:
             os.close(fd)
 
     def read(self) -> GateScope | None:
+        # A reset that could not be persisted leaves this durable marker behind.
+        # It takes precedence over any stale scope, including one rewritten by a
+        # process that held the lock while the reset was contended.
+        if _read_private(self.invalidation_path) is not None:
+            return None
         raw = _read_private(self.path)
         return None if raw is None else _decode(raw)
+
+    def invalidate(self) -> bool:
+        """Durably make this scope unreadable until a reset succeeds."""
+
+        try:
+            fd = os.open(
+                self.invalidation_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+            )
+        except FileExistsError:
+            return True
+        except OSError:
+            return False
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(b"invalidated\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            directory = os.open(self.directory, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+            return True
+        except OSError:
+            return False
+
+    def clear_invalidation(self) -> None:
+        """Clear a prior invalidation only after a reset state was written."""
+
+        self.invalidation_path.unlink(missing_ok=True)
 
     def write(self, scope: GateScope) -> None:
         data = json.dumps(

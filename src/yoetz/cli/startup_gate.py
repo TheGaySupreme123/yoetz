@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import shutil
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import BinaryIO, Literal, cast
 
@@ -19,12 +22,11 @@ from yoetz.cli.hook_io import (
     read_cursor_hook_payload,
     stdout_json,
 )
+from yoetz.ports.integrations import YOETZ_WORKFLOW_TOOL_NAMES
 from yoetz.protocol.canonical import JsonValue
 from yoetz.protocol.ids import IdKind, is_valid_id
 
-_WORKFLOW = frozenset(
-    {"start", "publish_work", "status", "check", "respond", "receipt", "read_guidance"}
-)
+_WORKFLOW = frozenset(YOETZ_WORKFLOW_TOOL_NAMES)
 _DISCOVERY = frozenset({"ToolSearch", "AskUserQuestion", "AskQuestion", "ListMcpResources"})
 _PRE = frozenset({"PreToolUse", "preToolUse", "beforeMCPExecution"})
 _POST = frozenset({"PostToolUse", "PostToolUseFailure", "afterMCPExecution"})
@@ -196,10 +198,45 @@ def recover_pending(scope: GateScope, result: Mapping[str, JsonValue]) -> None:
         clear_pending(scope, rid)
 
 
+def _invalidate_state(store: GateStore) -> None:
+    """Persist an invalidation marker when a scope boundary cannot be persisted."""
+
+    if not store.invalidate():
+        raise OSError("startup_gate_reset_invalidation_failed")
+
+
+@contextmanager
+def _locked_for_event(store: GateStore, event: str):
+    """Retry reset locks briefly, invalidating state when reset persistence fails."""
+
+    if event not in _RESET:
+        with store.locked():
+            yield
+        return
+    for attempt in range(16):
+        try:
+            with store.locked():
+                yield
+                store.clear_invalidation()
+            return
+        except BlockingIOError:
+            if attempt == 15:
+                _invalidate_state(store)
+                raise
+            time.sleep(0.01)
+        except Exception:
+            _invalidate_state(store)
+            raise
+
+
 def _probe(scope: GateScope, workspace: str) -> bool:
     try:
+        environment = dict(os.environ)
+        environment.pop("PYTHONPATH", None)
+        environment.pop("PYTHONSTARTUP", None)
+        environment["PYTHONNOUSERSITE"] = "1"
         result = subprocess.run(
-            [sys.executable, "-m", "yoetz.cli.startup_gate_probe"],
+            [sys.executable, "-I", "-m", "yoetz.cli.startup_gate_probe"],
             input=json.dumps(
                 {
                     "route": scope.route,
@@ -212,6 +249,8 @@ def _probe(scope: GateScope, workspace: str) -> bool:
             stderr=subprocess.DEVNULL,
             timeout=1.25,
             check=False,
+            cwd=os.path.sep,
+            env=environment,
         )
         return result.returncode == 0 and result.stdout.strip() == b'{"ready": true}'
     except OSError, subprocess.TimeoutExpired:
@@ -273,7 +312,7 @@ def handle_startup_gate(
         store = GateStore(host, session, workspace, root=_state)
         tool = workflow_tool(payload, host, event)
         request = _object(payload.get("tool_input"))
-        with store.locked():
+        with _locked_for_event(store, event):
             scope = store.read()
             if event in _RESET:
                 keep = event in {"UserPromptSubmit", "beforeSubmitPrompt"} or payload.get(
@@ -314,7 +353,11 @@ def handle_startup_gate(
                         rid = None if request is None else request.get("request_id")
                         if isinstance(rid, str) and is_valid_id(IdKind.REQUEST, rid):
                             if len(scope.pending) >= 32 and rid not in scope.pending:
+                                # Preserve every ambiguous write identity. The
+                                # caller must retry one of those exact requests
+                                # before another pending ticket can be admitted.
                                 admitted = False
+                                reason = "pending_operation_capacity"
                             else:
                                 scope.pending[rid] = tool
                                 scope.pending_generations.setdefault(rid, scope.generation)

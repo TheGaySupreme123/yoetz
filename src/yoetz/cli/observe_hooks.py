@@ -4169,8 +4169,9 @@ def handle_cursor_observe(
     pre_tool = raw_event == "preToolUse"
     # PreToolUse has no advice delivery: buffer the internal observer's empty
     # output and emit one valid neutral permission response on every path.
+    completed = False
     try:
-        return _handle_cursor_observe(
+        result = _handle_cursor_observe(
             event_name=event_name,
             stdin_bytes=stdin_bytes,
             stdout=io.BytesIO() if pre_tool else stdout,
@@ -4182,8 +4183,10 @@ def handle_cursor_observe(
             observation_profile=observation_profile,
             _entry_monotonic=_entry_monotonic,
         )
+        completed = True
+        return result
     finally:
-        if pre_tool:
+        if pre_tool and completed:
             hook_io.stdout_json(_cursor_context_output("preToolUse", ""), stdout)
 
 

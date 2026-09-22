@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,6 +14,7 @@ from typing import Literal
 import pytest
 
 from yoetz.adapters.integrations.startup_gate import GateScope, GateStore
+from yoetz.cli import startup_gate as startup_gate_module
 from yoetz.cli.startup_gate import bootstrap_tool, gate_output, handle_startup_gate
 from yoetz.protocol.canonical import JsonValue
 from yoetz.protocol.ids import IdKind, new_id
@@ -185,6 +188,34 @@ def host(tmp_path: Path, request: pytest.FixtureRequest) -> Host:
     return Host(tmp_path, "claude" if name == "claude" else "cursor")
 
 
+def test_probe_uses_an_isolated_child_import_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: dict[str, object] = {}
+
+    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        calls["command"] = command
+        calls.update(kwargs)
+        return subprocess.CompletedProcess(command, 0, b'{"ready": true}', b"")
+
+    monkeypatch.setattr("yoetz.cli.startup_gate.subprocess.run", run)
+    assert startup_gate_module._probe(GateScope.fresh(), str(tmp_path))  # pyright: ignore[reportPrivateUsage]
+    assert calls["command"] == [sys.executable, "-I", "-m", "yoetz.cli.startup_gate_probe"]
+    assert calls["cwd"] == os.path.sep
+    environment = calls["env"]
+    assert isinstance(environment, dict)
+    assert "PYTHONPATH" not in environment
+    assert "PYTHONSTARTUP" not in environment
+
+
+def test_workflow_allowlist_tracks_the_canonical_registry() -> None:
+    from yoetz.ports.integrations import YOETZ_WORKFLOW_TOOL_NAMES
+
+    assert startup_gate_module._WORKFLOW == frozenset(  # pyright: ignore[reportPrivateUsage]
+        YOETZ_WORKFLOW_TOOL_NAMES
+    )
+
+
 def test_investigation_and_delegation_denied_until_accepted_current_plan(host: Host) -> None:
     assert host.denied("Read") and host.denied("Agent") and host.denied("Task")
     host.start()
@@ -291,6 +322,62 @@ def test_live_probe_failure_denies_but_bootstrap_remains_available(host: Host) -
     for tool in ("read_guidance", "status", "check", "respond", "receipt"):
         response = host.pre(tool, {})
         assert response == ({} if host.host == "claude" else {"permission": "ask"})
+
+
+def test_pending_start_ticket_capacity_does_not_brick_bootstrap(host: Host) -> None:
+    request_ids: list[str] = []
+    for _ in range(32):
+        request_id = new_id(IdKind.REQUEST)
+        request_ids.append(request_id)
+        response = host.pre("start", {"request_id": request_id})
+        assert response == ({} if host.host == "claude" else {"permission": "ask"})
+
+    blocked_request = new_id(IdKind.REQUEST)
+    blocked = host.pre("start", {"request_id": blocked_request})
+    if host.host == "claude":
+        details = blocked.get("hookSpecificOutput")
+        assert isinstance(details, dict)
+        assert details.get("permissionDecision") == "deny"
+        reason = details.get("permissionDecisionReason")
+        assert isinstance(reason, str) and "pending_operation_capacity" in reason
+    else:
+        assert blocked["permission"] == "deny"
+        assert blocked["user_message"] == "Yoetz startup: pending_operation_capacity."
+
+    # The exact request identity remains the supported recovery path at capacity.
+    retry = host.pre("start", {"request_id": request_ids[0]})
+    assert retry == ({} if host.host == "claude" else {"permission": "ask"})
+
+    scope = host.store.read()
+    assert scope is not None
+    assert len(scope.pending) == 32
+    assert set(request_ids) == set(scope.pending)
+    assert blocked_request not in scope.pending
+    assert host.denied()
+
+
+def test_reset_persistence_failure_invalidates_the_previous_candidate(
+    host: Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host.start()
+    host.publish()
+    scope = host.store.read()
+    assert scope is not None and scope.candidate
+
+    def fail_write(_store: GateStore, _scope: GateScope) -> None:
+        raise OSError("simulated reset write failure")
+
+    monkeypatch.setattr(GateStore, "write", fail_write)
+    host.boundary("prompt")
+    assert host.store.path.exists()
+    assert host.store.read() is None
+    assert host.store.invalidation_path.exists()
+    monkeypatch.undo()
+    host.store.write(GateScope.fresh(scope))
+    assert host.store.read() is None
+    host.boundary("prompt")
+    assert not host.store.invalidation_path.exists()
+    assert host.denied()
 
 
 def test_corrupt_gate_state_does_not_deadlock_bootstrap(host: Host) -> None:

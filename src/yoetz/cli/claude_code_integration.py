@@ -387,7 +387,7 @@ def run_claude_code_plugin_command(
                 "artifact_digest": result.artifact_digest,
                 "startup_mode": startup_mode,
                 "installed_startup_mode": installed_claude_startup_mode(target)
-                if status.installed_digest is not None
+                if result.installed_digest is not None
                 else None,
                 "requested_observation_profile": artifact.plan.host_extension_profile,
                 "changed_files": list(result.changed_files),
