@@ -702,7 +702,7 @@ the rotated session and writer so pending predecessor rows drain on the successo
 (`session_superseded` is followed, not quarantined as `ledger_rejected`). Recovery first takes a nonblocking workspace reservation, then holds ordered locks for every eligible ended same-host session through full candidate revalidation, the service RPC, authorized rewrites, and pruning. The revalidation covers unmapped sessions, cross-workspace ownership, mapping identity, and mapping recency; a busy workspace reservation defers with `auto_attach_recovery_busy`, while candidate-lock contention or changed state falls back to the ordinary request. A failed attempt records its typed cause (`auto_attach_workspace_unbound`,
 `auto_attach_request_invalid`, `auto_attach_conflict`, `auto_attach_refused`,
 `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`,
-`service_unavailable`, `vault_locked`, `timeout`, `storage_unsafe`, or `storage_corrupt`) in the
+`service_unavailable`, `service_incompatible`, `vault_locked`, `timeout`, `storage_unsafe`, or `storage_corrupt`) in the
 same diagnostics file, and the session keeps an observation-only binding until a retry or an
 explicit `start` maps it. For `vault_locked` on a never-initialized install, that explicit
 `start` returns the typed `vault_initialization_required` continuation (see Troubleshooting)
@@ -1128,3 +1128,31 @@ only its fenced lease was yielded. Replay the exact start body and request ID on
 inventing session or writer IDs. `start_pending_same_identity` instead means a live lease remains:
 wait up to 60 seconds before the one exact replay. If still busy or pending, retain the original
 request and report the unresolved start. These continuations do not authorize a new task.
+
+## Cold service attachment and recovery (issue #670)
+
+Cursor sessionStart returns the shared result through Cursor's `additional_context` contract,
+within the existing ten-second registration budget. Tool hooks keep their five-second budget.
+
+For an enabled, consented workspace with no mapped task, auto-attachment now gives the exact
+selected service one second to connect or start through its fixed, instance-pinned launcher.
+It never supersedes another installation. A compatible stamped holder that is still starting
+is reused only while an owner-only nonblocking flock probe confirms that the singleton is held;
+an unheld stale stamp is ignored and the fixed launcher makes a normal flock-protected start
+attempt. A live incompatible or unknown holder is refused. The connection time counts toward
+the existing five-second attachment RPC budget. Turn-boundary retries retain their one-second
+outer budget and reserve part of it for the start RPC after a shorter connector arm; ordinary tool hooks and SessionEnd do not start a service. Local-only readiness
+probes and unconsented/disabled observation do not take this path.
+
+The native context distinguishes a service that is unavailable or still starting
+(`service_unavailable`), an incompatible holder (`service_incompatible`), and an answered
+admission conflict (`auto_attach_conflict`). Missing mapping remains explicit. Call cooperative
+`start` before material work and follow its exact continuation; a conflict needs an authorized
+task selector or explicit admission decision, not a service restart. Successful hook exit alone
+does not establish attachment. Task admission and ended-session recovery selectors are unchanged.
+
+Structural pre/post observations remain queued and keep their original identities across
+bootstrap. A later successful mapping permits their normal drain. Missing transient content
+remains a coverage gap; a recovered queue is not recovered content. Existing host/OS capability
+and consent requirements still apply. Automated host-contract tests do not establish native
+macOS, Linux, or Windows/WSL 2 acceptance. Native cold-start coverage remains tracked in #670.
