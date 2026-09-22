@@ -248,10 +248,11 @@ jobs:
           useradd -m -s /bin/bash dogfood
           password="$(openssl rand -hex 24)"
           echo "dogfood:${password}" | chpasswd
-          install -d -m 0700 -o dogfood -g dogfood /home/dogfood/.config/dogfood
-          printf '%s' "${password}" > /home/dogfood/.config/dogfood/ospw
-          chown dogfood:dogfood /home/dogfood/.config/dogfood/ospw
-          chmod 0600 /home/dogfood/.config/dogfood/ospw
+          account_home="$(getent passwd dogfood | cut -d: -f6)"
+          install -d -m 0700 -o dogfood -g dogfood "${account_home}/.config/dogfood"
+          printf '%s' "${password}" > "${account_home}/.config/dogfood/ospw"
+          chown dogfood:dogfood "${account_home}/.config/dogfood/ospw"
+          chmod 0600 "${account_home}/.config/dogfood/ospw"
           curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
           apt-get install -y nodejs
           node --version
