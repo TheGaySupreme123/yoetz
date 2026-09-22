@@ -1,8 +1,15 @@
-"""Validate the retained exact-worktree Codex dogfood parity gate (issues #463/#464/#518/#561).
+"""Validate the retained exact-worktree Codex dogfood parity gate (issues #463/#464/#518/#561/#567).
 
 The input is a bounded structural report assembled from the runbook's named commands. It carries
 digests and closed states only: no paths, prompts, transcripts, credentials, or provider payloads.
 Run ``--phase preflight`` before launching Codex; a non-zero result forbids the launch.
+
+Two digest kinds stay apart (issue #567). ``*_path_digest`` fields bind canonical path identity
+only and cannot prove that a file's bytes stayed the same. The optional ``normal_target`` lane
+binds normal-target file bytes as before/after content observations (SHA-256, size, existence,
+observation time — never content); when present, it decides whether ``normal_target_unchanged``
+may pass and which specific reason a failure must carry. ``--observe PATH`` prints those
+observations for the operator to copy into the report.
 """
 
 from __future__ import annotations
@@ -18,12 +25,28 @@ from typing import Final, Literal, TypedDict, cast
 
 GateStatus = Literal["pass", "fail", "unsupported", "blocked", "not_run"]
 
-_SCHEMA: Final = "yoetz.codex-dogfood-parity/3"
+_SCHEMA: Final = "yoetz.codex-dogfood-parity/4"
 _MAX_REPORT_BYTES: Final = 131_072
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$", re.ASCII)
 _SOURCE_REF = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$", re.ASCII)
 _TOKEN = re.compile(r"^[a-z][a-z0-9_]{0,127}$", re.ASCII)
 _VERSION = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.+-]{0,127}$", re.ASCII)
+_OBSERVED_AT = re.compile(
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$", re.ASCII
+)
+_MAX_NORMAL_TARGET_FILES: Final = 32
+_CONTENT_BYTE_LIMIT: Final = 16_777_216
+_OBSERVABLE_PRESENCE: Final = frozenset({"present", "absent"})
+_CONTENT_PRESENCE: Final = frozenset(
+    {"present", "absent", "not_regular", "oversized", "unreadable", "unstable"}
+)
+# Specific ``normal_target_unchanged`` failure reasons the content lane derives, strongest first.
+NORMAL_TARGET_CONTENT_REASONS: Final = (
+    "normal_target_content_unobservable",
+    "normal_target_path_and_content_changed",
+    "normal_target_content_changed",
+    "normal_target_path_moved",
+)
 # Exact Codex releases with a fixture-proven rollout parser profile (mirrors
 # ``codex_capability_cells.CODEX_ROLLOUT_PARSER_PROOFS``; a unit test keeps them equal). The
 # stream facet may be advertised only for one of these; a neighbouring release stays
@@ -104,18 +127,36 @@ class DogfoodScope(TypedDict):
 
 
 class DogfoodYoetzIsolation(TypedDict):
+    """Path-identity digests only: equal digests mean a shared target, not unchanged bytes."""
+
     mode: Literal["isolated", "ambient", "unknown"]
     normal_mode: Literal["isolated", "ambient", "unknown"]
-    state_digest: str
-    endpoint_digest: str
-    storage_digest: str
-    config_digest: str
-    executable_digest: str
-    normal_state_digest: str
-    normal_endpoint_digest: str
-    normal_storage_digest: str
-    normal_config_digest: str
-    normal_executable_digest: str
+    state_path_digest: str
+    endpoint_path_digest: str
+    storage_path_digest: str
+    config_path_digest: str
+    executable_path_digest: str
+    normal_state_path_digest: str
+    normal_endpoint_path_digest: str
+    normal_storage_path_digest: str
+    normal_config_path_digest: str
+    normal_executable_path_digest: str
+
+
+class ContentObservation(TypedDict):
+    """One file's bytes as SHA-256, size, existence, and time; never the content itself."""
+
+    path_digest: str
+    presence: str
+    content_digest: str | None
+    size_bytes: int | None
+    observed_at: str
+
+
+class NormalTargetFile(TypedDict):
+    slot: str
+    before: ContentObservation
+    after: ContentObservation | None
 
 
 class DogfoodIdentity(TypedDict):
@@ -180,16 +221,16 @@ def _parse_yoetz_isolation(value: object) -> DogfoodYoetzIsolation:
         raise _error("yoetz_isolation_invalid")
     row = cast(dict[str, object], value)
     digest_fields = (
-        "state_digest",
-        "endpoint_digest",
-        "storage_digest",
-        "config_digest",
-        "executable_digest",
-        "normal_state_digest",
-        "normal_endpoint_digest",
-        "normal_storage_digest",
-        "normal_config_digest",
-        "normal_executable_digest",
+        "state_path_digest",
+        "endpoint_path_digest",
+        "storage_path_digest",
+        "config_path_digest",
+        "executable_path_digest",
+        "normal_state_path_digest",
+        "normal_endpoint_path_digest",
+        "normal_storage_path_digest",
+        "normal_config_path_digest",
+        "normal_executable_path_digest",
     )
     if set(row) != {"mode", "normal_mode", *digest_fields}:
         raise _error("yoetz_isolation_fields_invalid")
@@ -205,17 +246,130 @@ def _parse_yoetz_isolation(value: object) -> DogfoodYoetzIsolation:
     return DogfoodYoetzIsolation(
         mode=cast(Literal["isolated", "ambient", "unknown"], mode),
         normal_mode=cast(Literal["isolated", "ambient", "unknown"], normal_mode),
-        state_digest=digests["state_digest"],
-        endpoint_digest=digests["endpoint_digest"],
-        storage_digest=digests["storage_digest"],
-        config_digest=digests["config_digest"],
-        executable_digest=digests["executable_digest"],
-        normal_state_digest=digests["normal_state_digest"],
-        normal_endpoint_digest=digests["normal_endpoint_digest"],
-        normal_storage_digest=digests["normal_storage_digest"],
-        normal_config_digest=digests["normal_config_digest"],
-        normal_executable_digest=digests["normal_executable_digest"],
+        state_path_digest=digests["state_path_digest"],
+        endpoint_path_digest=digests["endpoint_path_digest"],
+        storage_path_digest=digests["storage_path_digest"],
+        config_path_digest=digests["config_path_digest"],
+        executable_path_digest=digests["executable_path_digest"],
+        normal_state_path_digest=digests["normal_state_path_digest"],
+        normal_endpoint_path_digest=digests["normal_endpoint_path_digest"],
+        normal_storage_path_digest=digests["normal_storage_path_digest"],
+        normal_config_path_digest=digests["normal_config_path_digest"],
+        normal_executable_path_digest=digests["normal_executable_path_digest"],
     )
+
+
+def _parse_content_observation(value: object) -> ContentObservation:
+    if type(value) is not dict:
+        raise _error("normal_target_observation_invalid")
+    row = cast(dict[str, object], value)
+    if set(row) != {"path_digest", "presence", "content_digest", "size_bytes", "observed_at"}:
+        raise _error("normal_target_observation_fields_invalid")
+    presence = row["presence"]
+    observed_at = row["observed_at"]
+    content_digest = row["content_digest"]
+    raw_size = row["size_bytes"]
+    size_bytes: int | None = None
+    if presence not in _CONTENT_PRESENCE:
+        raise _error("normal_target_presence_invalid")
+    if type(observed_at) is not str or _OBSERVED_AT.fullmatch(observed_at) is None:
+        raise _error("normal_target_observed_at_invalid")
+    if presence == "present":
+        _require_digest(content_digest, "normal_target_content_digest_invalid")
+        if type(raw_size) is not int or not 0 <= raw_size <= _CONTENT_BYTE_LIMIT:
+            raise _error("normal_target_size_invalid")
+        size_bytes = raw_size
+    elif content_digest is not None or raw_size is not None:
+        # Only a complete, stable read of a present regular file may carry byte evidence.
+        raise _error("normal_target_absent_shape_invalid")
+    return ContentObservation(
+        path_digest=_require_digest(row["path_digest"], "normal_target_path_digest_invalid"),
+        presence=cast(str, presence),
+        content_digest=cast(str | None, content_digest),
+        size_bytes=size_bytes,
+        observed_at=observed_at,
+    )
+
+
+def _parse_normal_target(value: object) -> tuple[NormalTargetFile, ...] | None:
+    if value is None:
+        return None
+    if type(value) is not dict:
+        raise _error("normal_target_invalid")
+    row = cast(dict[str, object], value)
+    if set(row) != {"files"}:
+        raise _error("normal_target_fields_invalid")
+    files = row["files"]
+    if type(files) is not list:
+        raise _error("normal_target_files_invalid")
+    items = cast(list[object], files)
+    if not items or len(items) > _MAX_NORMAL_TARGET_FILES:
+        raise _error("normal_target_files_invalid")
+    parsed: list[NormalTargetFile] = []
+    for item in items:
+        if type(item) is not dict:
+            raise _error("normal_target_file_invalid")
+        entry = cast(dict[str, object], item)
+        if set(entry) != {"slot", "before", "after"}:
+            raise _error("normal_target_file_fields_invalid")
+        slot = entry["slot"]
+        if type(slot) is not str or _TOKEN.fullmatch(slot) is None:
+            raise _error("normal_target_slot_invalid")
+        before = _parse_content_observation(entry["before"])
+        after = None if entry["after"] is None else _parse_content_observation(entry["after"])
+        if after is not None and after["observed_at"] < before["observed_at"]:
+            raise _error("normal_target_observation_order_invalid")
+        parsed.append(NormalTargetFile(slot=slot, before=before, after=after))
+    slots = [entry["slot"] for entry in parsed]
+    if len(set(slots)) != len(slots):
+        raise _error("normal_target_slot_duplicate")
+    return tuple(parsed)
+
+
+def _content_equal(before: ContentObservation, after: ContentObservation) -> bool:
+    return (
+        before["presence"] == after["presence"]
+        and before["content_digest"] == after["content_digest"]
+        and before["size_bytes"] == after["size_bytes"]
+    )
+
+
+def normal_target_file_change(entry: NormalTargetFile) -> str | None:
+    """Classify one normal-target slot; ``None`` means path identity and bytes both held.
+
+    Path identity and byte content are compared independently, so a retargeted or moved file
+    with identical bytes (``normal_target_path_moved``) stays distinguishable from a path-stable
+    byte change (``normal_target_content_changed``).
+    """
+
+    before = entry["before"]
+    after = entry["after"]
+    if after is None:
+        return "normal_target_after_snapshot_missing"
+    if (
+        before["presence"] not in _OBSERVABLE_PRESENCE
+        or after["presence"] not in _OBSERVABLE_PRESENCE
+    ):
+        return "normal_target_content_unobservable"
+    path_moved = before["path_digest"] != after["path_digest"]
+    content_changed = not _content_equal(before, after)
+    if path_moved and content_changed:
+        return "normal_target_path_and_content_changed"
+    if content_changed:
+        return "normal_target_content_changed"
+    if path_moved:
+        return "normal_target_path_moved"
+    return None
+
+
+def _normal_target_reason(files: tuple[NormalTargetFile, ...]) -> str | None:
+    changes = {normal_target_file_change(entry) for entry in files}
+    if "normal_target_after_snapshot_missing" in changes:
+        return "normal_target_after_snapshot_missing"
+    for reason in NORMAL_TARGET_CONTENT_REASONS:
+        if reason in changes:
+            return reason
+    return None
 
 
 def _parse_identity(value: object) -> DogfoodIdentity:
@@ -445,6 +599,32 @@ def _validate_out_of_scope_facets(
             raise _error("out_of_scope_facet_not_not_run")
 
 
+def _validate_normal_target(
+    files: tuple[NormalTargetFile, ...], facets: Mapping[str, GateRow]
+) -> None:
+    """Bind the snapshot and unchanged facets to the byte-content lane (issue #567)."""
+
+    snapshot = facets["normal_target_snapshot"]
+    if snapshot["status"] == "pass" and any(
+        entry["before"]["presence"] not in _OBSERVABLE_PRESENCE for entry in files
+    ):
+        raise _error("normal_target_snapshot_unobservable")
+    unchanged = facets["normal_target_unchanged"]
+    reason = _normal_target_reason(files)
+    if reason == "normal_target_after_snapshot_missing":
+        if unchanged["status"] == "pass":
+            raise _error("normal_target_after_snapshot_missing")
+        return
+    if reason is not None:
+        # A path-stable byte change (or move, or unobservable file) cannot pass, and its failure
+        # names the derived cause instead of a generic drift token.
+        if unchanged["status"] != "fail" or unchanged["reason"] != reason:
+            raise _error("normal_target_unchanged_content_mismatch")
+        return
+    if unchanged["reason"] in NORMAL_TARGET_CONTENT_REASONS:
+        raise _error("normal_target_unchanged_content_mismatch")
+
+
 def classify_codex_dogfood_report(document: object) -> DogfoodGateResult:
     """Validate one report and derive the preflight/full outcomes without score collapsing."""
 
@@ -452,13 +632,14 @@ def classify_codex_dogfood_report(document: object) -> DogfoodGateResult:
         raise _error("report_invalid")
     report = cast(dict[str, object], document)
     if (
-        set(report) != {"schema", "identity", "scope", "observed", "facets"}
+        set(report) != {"schema", "identity", "scope", "observed", "normal_target", "facets"}
         or report["schema"] != _SCHEMA
     ):
         raise _error("report_fields_invalid")
     identity = _parse_identity(report["identity"])
     scope = _parse_scope(report["scope"])
     observed = _parse_observed(report["observed"])
+    normal_target = _parse_normal_target(report["normal_target"])
     raw_facets = report["facets"]
     if type(raw_facets) is not dict:
         raise _error("facet_inventory_invalid")
@@ -486,11 +667,11 @@ def classify_codex_dogfood_report(document: object) -> DogfoodGateResult:
         if isolation["mode"] != "isolated" or isolation["normal_mode"] != "ambient":
             raise _error("service_isolation_identity_mismatch")
         shared_identity_pairs = (
-            (isolation["state_digest"], isolation["normal_state_digest"]),
-            (isolation["endpoint_digest"], isolation["normal_endpoint_digest"]),
-            (isolation["storage_digest"], isolation["normal_storage_digest"]),
-            (isolation["config_digest"], isolation["normal_config_digest"]),
-            (isolation["executable_digest"], isolation["normal_executable_digest"]),
+            (isolation["state_path_digest"], isolation["normal_state_path_digest"]),
+            (isolation["endpoint_path_digest"], isolation["normal_endpoint_path_digest"]),
+            (isolation["storage_path_digest"], isolation["normal_storage_path_digest"]),
+            (isolation["config_path_digest"], isolation["normal_config_path_digest"]),
+            (isolation["executable_path_digest"], isolation["normal_executable_path_digest"]),
         )
         if any(resolved == normal for resolved, normal in shared_identity_pairs):
             raise _error("service_isolation_identity_shared")
@@ -516,6 +697,8 @@ def classify_codex_dogfood_report(document: object) -> DogfoodGateResult:
         raise _error("hook_coverage_missing")
     if facets["session_stream"]["status"] == "pass" and not observed["stream_coverage"]:
         raise _error("stream_coverage_missing")
+    if normal_target is not None:
+        _validate_normal_target(normal_target, facets)
 
     consent = facets["observation_consent"]
     if consent["status"] != "pass" and consent["next_action"] != (
@@ -600,11 +783,38 @@ def _load(path: Path) -> object:
         raise _error("report_json_invalid") from exc
 
 
+def observe_normal_target(paths: list[Path]) -> list[dict[str, object]]:
+    """Digest-only content observations for ``normal_target`` before/after rows.
+
+    Reuses the product's bounded observer so the report and ``yoetz service isolation
+    --content-digests`` share one shape. Paths are hashed into ``path_digest``, never echoed.
+    """
+
+    from yoetz.cli.isolation_status import observe_file_content
+
+    return [dict(observe_file_content(path)) for path in paths]
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("report", type=Path)
+    parser.add_argument("report", type=Path, nargs="?")
     parser.add_argument("--phase", choices=("preflight", "full"), default="full")
+    parser.add_argument(
+        "--observe",
+        type=Path,
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="Print a digest-only content observation of PATH instead of validating a report.",
+    )
     args = parser.parse_args(argv)
+    if args.observe:
+        if args.report is not None:
+            parser.error("--observe does not take a report")
+        print(json.dumps(observe_normal_target(args.observe), separators=(",", ":")))
+        return 0
+    if args.report is None:
+        parser.error("a report path is required")
     try:
         result = classify_codex_dogfood_report(_load(args.report))
     except DogfoodGateError as exc:
