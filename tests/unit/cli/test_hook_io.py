@@ -329,3 +329,23 @@ def test_cursor_ingress_skims_a_complete_oversize_body_and_drops_content() -> No
     with pytest.raises(ProtocolValueError) as one_past_skim:
         read_cursor_hook_ingress(exact + b"z")
     assert one_past_skim.value.reason_code == "payload_too_large"
+
+
+@pytest.mark.parametrize(
+    ("body", "reason"),
+    [
+        (b'{"hook_event_name":"afterFileEdit","pad":"\x00', "nul_byte_forbidden"),
+        (b'{"hook_event_name":"afterFileEdit","pad":"\xff', "invalid_utf8"),
+        (b'{"hook_event_name":"afterFileEdit","pad":"', "malformed_json"),
+    ],
+)
+def test_cursor_ingress_never_trusts_an_unsafe_oversize_body(body: bytes, reason: str) -> None:
+    # Each body is past the trusted cap and inside the skim cap. The last one
+    # is a truncated prefix: it must not become an identity view.
+    oversized = body + b"x" * MAX_HOOK_STDIN_BYTES + (b'"}' if reason != "malformed_json" else b"")
+    assert MAX_HOOK_STDIN_BYTES < len(oversized) <= MAX_HOOK_SKIM_BYTES
+
+    with pytest.raises(CursorOversizedPayloadError) as refused:
+        read_cursor_hook_ingress(oversized)
+
+    assert refused.value.reason_code == reason
