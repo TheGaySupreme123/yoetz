@@ -2031,6 +2031,12 @@ async def execute_check_commit(
                 False,
             )
         digest = _request_digest(request, scope, packs, route_profile=route_profile)
+        reconcile_losses = getattr(app, "reconcile_observation_losses", None)
+        if callable(reconcile_losses):
+            existing = await runtime.ledger.lookup_operation(request.writer_id, request.request_id)
+            if existing is None:
+                await cast(Callable[[TaskRuntime], Awaitable[None]], reconcile_losses)(runtime)
+
         try:
             frozen_or_replay = await runtime.ledger.freeze_case(
                 request.session_id,

@@ -328,6 +328,7 @@ def test_renderers_keep_old_default_and_emit_bounded_ordinary_subscriptions(tmp_
         "--observation-profile claude-code-ordinary-observation-v1" in item["command"]
         for definitions in claude_hooks.values()
         for item in definitions[0]["hooks"]
+        if "hooks claude-observe " in item["command"]
     )
     assert "FileChanged" not in claude_hooks
     assert "PostToolBatch" not in claude_hooks
@@ -343,6 +344,7 @@ def test_renderers_keep_old_default_and_emit_bounded_ordinary_subscriptions(tmp_
         "--observation-profile cursor-ordinary-observation-v1" in item["command"]
         for definitions in cursor_hooks.values()
         for item in definitions
+        if "hooks cursor-observe " in item["command"]
     )
     assert "beforeShellExecution" not in cursor_hooks
     assert "afterFileEdit" not in cursor_hooks

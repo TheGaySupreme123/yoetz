@@ -80,6 +80,7 @@ from yoetz.domain.values import (
     writer_id,
 )
 from yoetz.kernel.command_attempts import command_attempts
+from yoetz.kernel.completion_scope import completion_scope_codes, with_completion_scope_coverage
 from yoetz.kernel.deterministic_checks import (
     CaseAvailabilityFacts,
     DeterministicCase,
@@ -903,7 +904,7 @@ def compact_status_coverage(
     the same predicate as the receipt so status and receipts cannot disagree either.
     """
 
-    baseline = records[-1].coverage
+    baseline = with_completion_scope_coverage(records[-1].coverage, projection)
     latest = projection.latest_tested_state
     if latest is None:
         return baseline
@@ -1141,6 +1142,7 @@ def _projection_items(
         return tuple(evidence_items)
     if view is ProjectionView.FINDINGS:
         finding_items: list[ProjectionItem] = []
+        proof_state_cache: dict[tuple[int, int, str], ProjectionState | None] = {}
         ordered = sorted(
             (
                 record.payload
@@ -1161,7 +1163,12 @@ def _projection_items(
                     summary=finding.summary,
                     detail=append_resolution_explanation(
                         finding.detail,
-                        finding_resolution_explanation(projection, finding.finding_id, records),
+                        finding_resolution_explanation(
+                            projection,
+                            finding.finding_id,
+                            records,
+                            proof_state_cache=proof_state_cache,
+                        ),
                     ),
                     subject_refs=finding.subject_refs,
                     policy_id=cast(
@@ -1220,6 +1227,7 @@ def _projection_items(
                 and record.payload.status.value == "open"
             )
         )
+        proof_state_cache: dict[tuple[int, int, str], ProjectionState | None] = {}
         unanswered_findings = tuple(
             StatusCompactFindingModel(
                 finding_id=finding.finding_id,
@@ -1228,7 +1236,12 @@ def _projection_items(
                 summary=finding.summary,
                 detail=append_resolution_explanation(
                     finding.detail,
-                    finding_resolution_explanation(projection, finding.finding_id, records),
+                    finding_resolution_explanation(
+                        projection,
+                        finding.finding_id,
+                        records,
+                        proof_state_cache=proof_state_cache,
+                    ),
                 ),
             )
             for finding in sorted(
@@ -1266,7 +1279,9 @@ def _projection_items(
         item_freshness = min(projection.freshness, item_coverage.ledger_freshness)
         item_gaps = tuple(
             sorted(
-                set(_status_gap_codes(projection.coverage_gaps)) | set(item_coverage.known_gaps),
+                set(_status_gap_codes(projection.coverage_gaps))
+                | set(completion_scope_codes(projection))
+                | set(item_coverage.known_gaps),
                 key=str.encode,
             )
         )
@@ -2075,7 +2090,13 @@ class MemoryLedgerAdapter:
                 next_position = IdProjectionPosition(last.evidence_id)
             elif type(last) is StatusResultItemModel:
                 next_position = IdProjectionPosition(last.result_id)
-        status_gaps = _status_gap_codes(effective_projection.coverage_gaps)
+        status_gaps = tuple(
+            sorted(
+                set(_status_gap_codes(effective_projection.coverage_gaps))
+                | set(completion_scope_codes(effective_projection)),
+                key=str.encode,
+            )
+        )
         if view is ProjectionView.COMPACT:
             # Compact status exposes the same applicable-check fold as the item and as the
             # receipt. In particular, an observation-only suffix keeps the check attributable
@@ -2090,7 +2111,9 @@ class MemoryLedgerAdapter:
             )
             coverage = replace(compact_coverage, known_gaps=status_gaps)
         else:
-            coverage = replace(prefix[-1].coverage, known_gaps=status_gaps)
+            coverage = with_completion_scope_coverage(
+                replace(prefix[-1].coverage, known_gaps=status_gaps), effective_projection
+            )
         page = ProjectionPage(
             query.view,
             selected,

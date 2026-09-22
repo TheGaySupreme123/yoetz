@@ -64,6 +64,42 @@ Compatibility extras (the standard install already contains these exact dependen
 | `semantic-openai` | Existing install-command alias for the HTTP client and OpenAI SDK |
 | `portable-recovery` | Existing install-command alias for Argon2 recovery/passphrase support |
 
+## Find the next setup step
+
+Run `yoetz setup status --next --operation local` from your project for local-only use,
+`--operation review` for AI-powered review, or `--operation connection` to connect an agent
+without provider sign-in. Add `--host codex|claude|cursor-ide|cursor-cli`, `--host-path`,
+`--host-config-root`, and `--project` to inspect a specific installation. For Codex,
+`--codex-path` and `--codex-home` are also accepted. `--json` returns the same next command.
+This read-only check does not start services, unlock the vault, grant permission, or activate a host.
+
+Follow the displayed command, then rerun status. Local use needs a running service, an initialized
+and unlocked vault, and repository privacy setup. AI-powered review additionally needs a provider
+binding before approving a provider-backed privacy recipe; run `yoetz --set` to configure one.
+The connection-only path checks the selected host without requiring a provider or a vault login.
+Use the command exactly as displayed: it retains the selected Yoetz installation and project.
+
+`yoetz setup vault` initializes or unlocks only the selected installation's storage using the
+existing protected terminal ceremony. It diagnoses credential-store availability, retains the
+explicit passphrase fallback where needed, and stops before provider selection or privacy grants.
+It requires a local interactive terminal; agents show that continuation without supplying secrets.
+
+If a service-dependent approval reports `ceremony_service_unavailable` before it is claimed,
+start the selected service and inspect `yoetz consent status`; the same unexpired pending decision
+can be retried. If the service fails after the approval was claimed, the attempt is consumed and
+requires fresh preparation. Denial, cancellation, expiry, and target checks still apply.
+`--accept` does not approve unseen activation: `activation_confirmation_required` includes the
+exact `recommend accept codex-plugin-activation` command with the selected executable and home.
+
+For Codex inspection, plugin status, MCP status, provider status, and setup disconnect all accept
+`--codex-home`.
+Selection is explicit flag, then `CODEX_HOME`, then `CODEX_TESTING_HOME`, then `~/.codex`.
+The payload's `inspected_codex_home` names the selected home; invoked Codex commands receive both
+home variables set to it. Use that same explicit home for removal and reconnection. A foreign
+configuration is preserved. To use a separate installation, create a fresh directory owned only
+by you (mode 0700) and select it with `--host-config-root` (or legacy `--codex-home`). A project
+marketplace conflict still requires inspecting the project; changing the home does not fix it.
+
 ## Linux
 
 Yoetz runs on macOS and Linux. The certified cells are macOS 11 or later on Apple silicon and

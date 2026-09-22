@@ -155,3 +155,36 @@ for session activation/observation remain **outstanding** (issue #722). Separate
 records successful installed 0.2.4 setup lifecycles for all three CLIs on both Ubuntu x86-64 and
 actual WSL 2, plus the Cursor IDE installation on Ubuntu. Successful real PAM approval was
 exercised using disposable local accounts; no provider authentication or model task was required.
+
+The Cursor IDE identity inspector can read a Linux package or extracted AppImage's native
+executable and package metadata without launching it (#722). This identifies installed bytes;
+it does not admit a native-session evidence case. On WSL, use the Linux installation root for
+that inspection. Windows executables and the Windows-side IDE with Remote WSL are separate,
+unverified surfaces; an accessible Windows launcher is not a Linux IDE identity. Layout and
+failure details are in the [Cursor runbook](cursor-integration.md#linux-and-wsl).
+
+## Setup and vault acceptance still owned by #737
+
+Use `setup status --next --operation local|review|connection` to identify the next prerequisite
+for the selected installation. The common host flow and the terminal interface retain the same
+storage capability diagnosis and human-secret boundary. No Windows credential bridge is added.
+
+The [0.2.4 installation evidence](https://github.com/TheGaySupreme123/yoetz/issues/767#issuecomment-5750168131)
+records preview, connect, status, no-op, disconnect and reconnect on macOS, Ubuntu 24.04, and actual
+WSL 2 for Codex CLI, Claude Code and Cursor Agent CLI. It excludes provider login and model tasks.
+The prior 0.2.3 WSL run recorded above tested passphrase unlock after distribution restart. These
+are historical installed-artifact observations, not execution of the #737 repair revision.
+
+Remaining acceptance is owned by the setup/security maintainer in #737: fresh published-flow
+first useful native-agent use on WSL; desktop Secret Service locked/unavailable and interruption
+recovery on the repair revision; and a safe revocation design for stored auto-unlock. Existing
+unit tests cover staged initialization/rotation recovery, secret wiping, lock state and rejected
+backends. They do not replace those native acceptance runs. Native-session capability and the
+Windows-side Cursor IDE/Remote WSL cell remain with #722.
+
+`service lock` locks the live vault; it does not revoke a stored restart secret. ADR-008 deliberately
+withholds a delete-only auto-unlock disable operation because a generated-passphrase vault could
+become unrecoverable. Do not delete credential-store entries as a workaround. The remaining
+revocation requirement needs an atomic human-passphrase rewrap plus removal design before it can
+be called complete. Passphrase-only users must still unlock after service/WSL restart; the prompt
+keeps their vault key out of plaintext files, shell history, and agent chat.

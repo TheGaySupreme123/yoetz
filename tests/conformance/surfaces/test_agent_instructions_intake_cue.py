@@ -45,6 +45,9 @@ _CUE_SENTENCES: Final = (
 def _assert_intake_cue_within_first_512(data: bytes) -> None:
     assert data == data.decode("utf-8").encode("utf-8")
     window = data[:_INTAKE_WINDOW]
+    heading_end = data.find(b"\n")
+    paragraph_end = data.find(b"\n\n", heading_end + 1)
+    assert paragraph_end >= 0 and paragraph_end + 2 <= _INTAKE_WINDOW
     for sentence in _CUE_SENTENCES:
         assert sentence in window, f"missing from the intake window: {sentence!r}"
 

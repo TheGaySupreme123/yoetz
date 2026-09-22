@@ -23,6 +23,7 @@ from yoetz.domain.events import (
 )
 from yoetz.domain.findings import FINDING_KIND_TRAITS, Finding, FindingKind, FindingOrigin
 from yoetz.domain.receipts import (
+    COMPLETION_CLAIM_OUTSIDE_PLAN_GAP,
     COMPLETION_SCOPE_DECLARED_NONE_GAP,
     COMPLETION_SCOPE_UNDECLARED_GAP,
 )
@@ -250,6 +251,12 @@ def test_replay_redaction_gaps_keep_typed_roots_and_caps() -> None:
     case = build_deterministic_case(replay(records), records, CaseAvailabilityFacts())
     gaps = {(gap.code, gap.subject_refs) for gap in case.gaps}
     assert gaps == {
+        # The fixture deliberately waives the only current plan obligation after recording a
+        # completion claim. The claim remains effective, so ADR-019 requires this relation gap.
+        (
+            COMPLETION_CLAIM_OUTSIDE_PLAN_GAP,
+            (),
+        ),
         (
             COMPLETION_SCOPE_UNDECLARED_GAP,
             (),

@@ -45,7 +45,7 @@ from yoetz.ports.ledger import FrozenCase
 from yoetz.ports.runtime import BundleRuntimePort, RouteCommand, TaskRuntime
 from yoetz.ports.start_catalog import StartAllocation, StartCatalogPort, TaskRoute, TaskRouteState
 from yoetz.protocol.canonical import JsonValue as CanonicalJsonValue
-from yoetz.protocol.canonical import canonical_encode
+from yoetz.protocol.canonical import canonical_digest, canonical_encode
 from yoetz.protocol.ids import IdKind
 
 _REPOSITORY = "hmac-sha256:" + "7" * 64
@@ -125,7 +125,17 @@ async def _world(tmp_path: Path, *, host: str = "claude") -> _World:
 
     clock = catalog_fixture._Clock(datetime(2026, 9, 10, tzinfo=UTC))  # pyright: ignore[reportPrivateUsage]
     installation = native._ids(IdKind.INSTALLATION, 695)  # pyright: ignore[reportPrivateUsage]
-    catalog = catalog_fixture._sqlite_catalog(installation, clock)  # pyright: ignore[reportPrivateUsage]
+    # Exercise the production separate-connection catalog scan, including WAL
+    # visibility, path checks, schema checks, and worker ownership.
+    tmp_path.chmod(0o700)
+    catalog = await ready_module.open_ready_catalog(
+        tmp_path / "catalog.sqlite3",
+        installation_id=installation,
+        service_generation=1,
+        lookup=catalog_fixture._Lookup(),  # pyright: ignore[reportPrivateUsage]
+        clock=clock,
+        ids=catalog_fixture._Ids(),  # pyright: ignore[reportPrivateUsage, reportArgumentType]
+    )
     allocations: list[StartAllocation] = []
     for seed in (1, 2):
         request = await catalog_fixture._command(  # pyright: ignore[reportPrivateUsage]
@@ -850,6 +860,15 @@ async def test_parent_worker_routes_recover_and_keep_encrypted_content_task_scop
         assert world.local.pending_outbox_count(world.workspace) == 0
         assert world.requests == []
         assert (await sweeper.sweep()).reasons == (("capture_inventory_recovered", 1),)
+        assert not world.local.pending_selection_losses(world.workspace)
+        for task in (world.runtime, world.sibling):
+            assert (await task.ledger.load_frontier()).sequence > 0
+        parent_gaps = world.observation.list_envelopes(world.workspace)
+        worker_gaps = world.sibling_observation.list_envelopes(world.workspace)
+        assert len(parent_gaps) == len(worker_gaps) == 1
+        assert parent_gaps[0].structural_payload["selection_task_id"] == world.runtime.task_id
+        assert worker_gaps[0].structural_payload["selection_task_id"] == world.sibling.task_id
+        assert parent_gaps[0].session_commitment != worker_gaps[0].session_commitment
         # Interleave lanes through the same shared local store and service; no
         # second independently bootstrapped coordinator may mint a partial proof.
         for index in range(3):
@@ -988,5 +1007,120 @@ async def test_partial_ticket_ids_do_not_release_an_unlisted_reservation(
         assert status["count"] == 2
         assert status["byte_count"] == 17
         assert not world.routes.held
+    finally:
+        world.coordinator.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("scan", (1, 2), ids=("initial", "final"))
+@pytest.mark.parametrize("cancel", (False, True), ids=("complete", "cancel"))
+@pytest.mark.parametrize("retained", (0, 1024), ids=("small", "retained"))
+async def test_catalog_scan_owns_reader_off_loop_and_joins_cancellation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scan: int, cancel: bool, retained: int
+) -> None:
+    world = await _world(tmp_path)
+    db = world.catalog._db  # pyright: ignore[reportPrivateUsage]
+    with db:
+        for index in range(retained):
+            task = native._ids(IdKind.TASK, 20000 + index)  # pyright: ignore[reportPrivateUsage]
+            session = native._ids(IdKind.SESSION, 30000 + index)  # pyright: ignore[reportPrivateUsage]
+            path = f"tasks/{task}"
+            digest = canonical_digest(
+                {"task_id": task, "bundle_relpath": path, "route_generation": 1}
+            )
+            db.execute(
+                "INSERT INTO task_routes(task_id, active_session_id, bundle_relpath, "
+                "route_generation, active_route_identity_digest, state, created_at, updated_at, "
+                "repository_privacy_commitment) VALUES (?, ?, ?, 1, ?, 'active', ?, ?, ?)",
+                (
+                    task,
+                    session,
+                    path,
+                    digest,
+                    "2026-09-10T00:00:00.000Z",
+                    "2026-09-10T00:00:00.000Z",
+                    "hmac-sha256:" + "8" * 64,
+                ),
+            )
+    entered, resume = threading.Event(), threading.Event()
+    loop_thread = threading.get_ident()
+    original = SqliteStartCatalog._decode_recovery_routes  # pyright: ignore[reportPrivateUsage]
+    readers: list[apsw.Connection] = []
+
+    def read(db: apsw.Connection, columns: str) -> tuple[TaskRoute, ...]:
+        assert threading.get_ident() != loop_thread
+        assert db.readonly("main")
+        readers.append(db)
+        if len(readers) == scan:
+            entered.set()
+            if not resume.wait(5):
+                raise TimeoutError("test_catalog_rendezvous")
+        routes = original(db, columns)
+        assert len(routes) == retained + 2
+        return routes
+
+    monkeypatch.setattr(SqliteStartCatalog, "_decode_recovery_routes", staticmethod(read))
+    operation = asyncio.create_task(world.coordinator.recover_capture_inventory(world.workspace))
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        assert not operation.done()
+        if cancel:
+            operation.cancel()
+            operation.cancel()
+        # This callback must run while the reader is still blocked, proving
+        # responsiveness without using a sleep to infer scheduling success.
+        pulse = asyncio.Event()
+        asyncio.get_running_loop().call_soon(pulse.set)
+        await asyncio.wait_for(pulse.wait(), 0.5)
+        assert not operation.done()
+        assert world.coordinator._capture_lock.locked()  # pyright: ignore[reportPrivateUsage]
+        assert world.routes.held
+        resume.set()
+        if cancel:
+            with pytest.raises(asyncio.CancelledError):
+                await operation
+            assert not world.local.capture_reservation_bootstrap_ready(world.workspace)
+        else:
+            assert await operation is ObservationCaptureRecoveryOutcome.RECOVERED
+        assert not world.routes.held
+        for reader in readers:
+            with pytest.raises(apsw.ConnectionClosedError):
+                reader.execute("SELECT 1")
+    finally:
+        resume.set()
+        if not operation.done():
+            operation.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await operation
+        world.coordinator.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("scan", (1, 2))
+async def test_generation_change_during_catalog_scan_leaves_inventory_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scan: int
+) -> None:
+    world = await _world(tmp_path)
+    current = True
+    world.wire(generation_is_current=lambda: current)
+    original = world.catalog.recovery_routes
+    calls = 0
+
+    async def changed() -> tuple[TaskRoute, ...]:
+        nonlocal calls, current
+        result = await original()
+        calls += 1
+        if calls == scan:
+            current = False
+        return result
+
+    monkeypatch.setattr(world.catalog, "recovery_routes", changed)
+    try:
+        assert (
+            await world.coordinator.recover_capture_inventory(world.workspace)
+            is ObservationCaptureRecoveryOutcome.INVENTORY_UNKNOWN
+        )
+        assert not world.local.capture_reservation_bootstrap_ready(world.workspace)
+        assert calls == scan
     finally:
         world.coordinator.close()

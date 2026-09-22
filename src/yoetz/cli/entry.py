@@ -207,9 +207,9 @@ def _cursor_observe_fast_path(arguments: list[str]) -> int | None:
         )
     except BaseException:
         try:
-            from yoetz.cli.hook_io import stdout_json
+            from yoetz.cli.hook_io import cursor_context_output, stdout_json
 
-            stdout_json({})
+            stdout_json(cursor_context_output(event, ""))
         except BaseException:
             pass
     return 0
@@ -297,6 +297,25 @@ def main() -> None:
     """Installed console entry point."""
 
     argv = sys.argv[1:]
+    if (
+        len(argv) == 6
+        and argv[:3] == ["hooks", "startup-gate", "--host"]
+        and argv[3] in {"claude", "cursor"}
+        and argv[4] == "--event"
+    ):
+        from yoetz.cli.startup_gate import handle_startup_gate
+
+        raise SystemExit(
+            handle_startup_gate(host="claude" if argv[3] == "claude" else "cursor", event=argv[5])
+        )
+    if (
+        len(argv) == 4
+        and argv[:3] == ["hooks", "startup-context", "--host"]
+        and argv[3] in {"claude", "cursor"}
+    ):
+        from yoetz.cli.startup_context import handle_startup_context
+
+        raise SystemExit(handle_startup_context(host="claude" if argv[3] == "claude" else "cursor"))
     if len(argv) >= 2 and argv[0] == "hooks" and argv[1] == "observe":
         code = _observe_fast_path(argv[2:])
         if code is not None:

@@ -1701,14 +1701,25 @@ def _exact_match(left: str, right: str) -> bool:
 
 
 def claim_pending_for_review(
-    *, for_console: bool = False, _state: Path | None = None
+    *,
+    for_console: bool = False,
+    expected_pending: PendingElevatedConsent | None = None,
+    _state: Path | None = None,
 ) -> PendingElevatedConsent:
-    """Atomically claim a request, refusing unsupported console authority before mutation."""
+    """Atomically consume one pending request for a verified-console review.
+
+    ``for_console`` refuses operations that need chat authority before any mutation.
+    ``expected_pending`` binds a delayed console decision to the record that was displayed.  The
+    comparison runs under the same state lock as the hard-link claim, so a request prepared after
+    the displayed one expires cannot be consumed by the earlier prompt.
+    """
 
     with _PendingStateLock(_state):
         pending = _load_pending_unlocked(_state=_state)
         if pending is None:
             raise ElevatedBootstrapError("pending_absent")
+        if expected_pending is not None and pending != expected_pending:
+            raise ElevatedBootstrapError("pending_tampered")
         if not operation_spec(pending.operation).implemented:
             raise ElevatedBootstrapError("operation_not_implemented")
         if for_console and pending.operation == "project_coordination_grant":

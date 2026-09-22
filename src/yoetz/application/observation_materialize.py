@@ -48,6 +48,7 @@ from yoetz.domain.observation import (
     observation_content_binding_matches,
     routine_read_summary_from_envelope,
 )
+from yoetz.domain.observation_loss import ObservationSelectionLoss
 from yoetz.domain.values import (
     Actor,
     ActorType,
@@ -87,6 +88,7 @@ __all__ = [
     "STREAM_COMPLETED_EVENT_KINDS",
     "canonical_logical_identity",
     "materialize_observation_envelope",
+    "materialize_selection_loss",
     "materialize_observation_inspection_snapshot",
     "materialize_observation_outcome_correction",
     "observation_claim_identity",
@@ -746,6 +748,71 @@ def materialize_observation_inspection_snapshot(
         coverage,
         PublicationChannel.HOOK_OBSERVED,
         tuple(sorted(inspection_gaps, key=str.encode)),
+        None,
+    )
+
+
+def materialize_selection_loss(
+    loss: ObservationSelectionLoss, *, observed_at: Timestamp
+) -> MaterializedObservationBatch:
+    """Publish one permanent coverage limitation per exact historical loss lane.
+
+    This is a service report of retained accounting, not a fabricated host
+    action/result, cursor advancement, captured content, or a count reset.
+    """
+
+    from yoetz.protocol.canonical import canonical_encode
+
+    identity = "selection-loss:" + loss.lane
+    version = "selection-loss/1.0.0"
+    payload = EvidenceRecordedPayload(
+        evidence_id(
+            stable_observation_id(
+                kind=IdKind.EVIDENCE,
+                task_id=loss.task_id,
+                source_identity=identity,
+                mapping_version=version,
+                role="loss_evidence",
+            )
+        ),
+        EvidenceKind.OTHER,
+        EvidenceImmutability.METADATA_ONLY,
+        observed_at,
+        description=(
+            "At least one non-replayable observation was lost. This permanent lane "
+            + (
+                "marker carries route-valid but unreconciled local metadata; "
+                if loss.unreconciled
+                else "marker reports historical coverage loss; "
+            )
+            + "exact aggregate counts remain in local selection accounting. Attribution: "
+            + canonical_encode(loss.identity()).decode()
+        ),
+    )
+    coverage = replace(
+        coverage_for_channel(PublicationChannel.HOOK_OBSERVED),
+        authorship_assurance=AuthorshipAssurance.SERVICE_AUTHENTICATED,
+        artifact_observation=ArtifactObservation.PUBLISHED_ONLY,
+        known_gaps=(ObservationGapCode.OBSERVATION_INPUT_LOSS.value,),
+    )
+    item = _draft(
+        event=stable_observation_id(
+            kind=IdKind.EVENT,
+            task_id=loss.task_id,
+            source_identity=identity,
+            mapping_version=version,
+            role="loss_event",
+        ),
+        schema_name="evidence_recorded",
+        occurred_at=observed_at,
+        payload=payload,
+        role="selection_loss",
+    )
+    return MaterializedObservationBatch(
+        (item,),
+        coverage,
+        PublicationChannel.HOOK_OBSERVED,
+        (ObservationGapCode.OBSERVATION_INPUT_LOSS.value,),
         None,
     )
 

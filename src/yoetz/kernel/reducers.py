@@ -1236,7 +1236,7 @@ def reduce_event(
                 # Resolution is a fold over every recorded check, not a property of the latest
                 # one: a finding proven absent stays resolved when a later weaker check adds
                 # nothing, and is re-fired only when a check returns the same issue again.
-                apply_check_resolution(findings, check, accepted.event_id)
+                apply_check_resolution(findings, check, accepted.event_id, proof_state=state)
         elif family == "redaction_recorded":
             event_targets = set(accepted.projection_locator.redaction_target_event_ids)
             object_targets = accepted.projection_locator.redaction_target_object_ids

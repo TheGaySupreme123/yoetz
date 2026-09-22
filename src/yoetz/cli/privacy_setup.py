@@ -50,6 +50,7 @@ from yoetz.protocol.consent import RepositoryPrivacyRecipe
 from yoetz.protocol.models import DataCategory
 
 __all__ = [
+    "ProviderBindingRequiredError",
     "PrivacyRecipe",
     "PrivacySetupReport",
     "PrivacySetupSnapshot",
@@ -63,6 +64,14 @@ __all__ = [
 ]
 
 type PrivacyRecipe = RepositoryPrivacyRecipe | Literal["expanded_review", "custom"]
+
+
+class ProviderBindingRequiredError(ValueError):
+    """Raised when a provider-backed privacy recipe has no external provider binding."""
+
+    def __init__(self) -> None:
+        super().__init__("privacy_setup_provider_binding_required")
+
 
 _SEMANTIC_CATEGORIES: Final = (
     DataCategory.BOUNDED_STRUCTURAL_METADATA,
@@ -267,7 +276,7 @@ def build_candidate_policy(
     # External LLM binding is independent of the global ceiling: package update checks may
     # raise network_egress_permitted without binding an AI-powered review provider.
     if answers.network_egress != (answers.external_provider is not None):
-        raise ValueError("privacy_setup_provider_binding_required")
+        raise ProviderBindingRequiredError
     if answers.credential_probe and not answers.network_egress:
         raise ValueError("privacy_setup_credential_probe_requires_provider")
     if (
@@ -512,7 +521,7 @@ def _recipe_answers(
         raise ValueError("privacy_setup_recipe_invalid")
     network = recipe != "private"
     if network and external is None:
-        raise ValueError("privacy_setup_provider_binding_required")
+        raise ProviderBindingRequiredError
     context = {
         "private": ReviewContextProfile.STRUCTURAL,
         "metadata_only": ReviewContextProfile.STRUCTURAL,
@@ -808,7 +817,7 @@ def _ask_custom_answers(
     )
 
     if network and not use_provider:
-        raise ValueError("privacy_setup_provider_binding_required")
+        raise ProviderBindingRequiredError
     if local_models and local is None:
         raise ValueError("privacy_setup_local_model_binding_required")
     return PrivacySetupAnswers(

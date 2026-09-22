@@ -1,5 +1,12 @@
 # Codex integration runbook
 
+For setup prerequisites, use `yoetz setup status --next --host codex` with the same
+executable, configuration root and project. `--operation connection` inspects installation without
+provider sign-in; `local` and `review` inspect their respective vault/privacy prerequisites.
+Storage-only continuation is `yoetz setup vault` in a trusted terminal. This shared #737 path adds
+no new native-session capability; Linux/WSL first-use and storage acceptance remain bounded by
+[the platform runbook](linux-and-wsl.md#setup-and-vault-acceptance-still-owned-by-737).
+
 ## Guided desktop connection (issue #767)
 
 `yoetz setup run --host codex` exposes the existing project-skill, plugin, activation and MCP
@@ -15,6 +22,17 @@ Modified or foreign integration state is refused. Record native installation, fr
 discovery/start, disconnect and reconnect for macOS, Linux and WSL 2 separately in #767. Desktop
 app availability and CLI availability remain distinct; an untested version/platform does not
 inherit certification from executable discovery or unit tests.
+
+## Linux and WSL
+
+This integration uses the standalone Codex CLI installation path on Linux and WSL 2. This runbook
+does not configure or certify a Linux desktop application. The TUI labels a Linux executable as
+`Codex CLI` and reserves `Codex Desktop` for an application bundle path, describing the installation
+shape rather than activation or session capability. The common setup flow, service, and project binding still require the same
+explicit target and fresh-session evidence as macOS. Native Linux/WSL capability remains bounded
+by its recorded evidence; installation discovery and TUI labels do not imply a native-session
+capability. Shared facts are in the [Linux/WSL runbook](linux-and-wsl.md), and the installation
+evidence is recorded in #767.
 
 ## Conditional agent guidance
 
@@ -45,6 +63,8 @@ same-request recovery, and a named one-time repair before a blocked-startup user
 A first non-retryable failure alone does not permit continuing without Yoetz; see
 [startup failure precedence](../../guidance/coverage-and-receipts.md#startup-failure-precedence).
 Codex has no demonstrated PreToolUse deny gate; instruction delivery is not enforcement (#692).
+`--startup-mode required` is refused for Codex. The [native Claude/Cursor gate](required-startup.md)
+does not expand Codex capability claims.
 
 The Codex entrypoint is written directly for Codex and selected by its installer. The other native
 installers select their own skills. Keep installed-source evidence separate from compatibility
@@ -103,7 +123,10 @@ cell, preflight must show no external/global `yoetz` registration, bind strict o
 preview, and install the full digest-bound artifact without invoking `codex mcp add`. Dual,
 foreign, or unobservable ownership stops the operation. `yoetz provider status --json` reports
 `owner_source`, `ownership_state`, and the observed route profile; only one exclusively observed
-policy owner can make `agent_route_semantic_ready` true.
+policy owner can make `agent_route_semantic_ready` true. If more than one Codex executable is
+discovered, provide `--codex-path <exact-executable>` so the report can inspect one selected
+installation; the report keeps the route unread and supplies a bounded continuation retaining the
+selected home, launcher and isolation root when no selector is given.
 
 ## 2. Prerequisites and exact supported scope
 
@@ -1028,7 +1051,7 @@ egress.
 | MCP unavailable | Diagnose through separate MCP configuration/startup steps. |
 | Trigger absent or failed | Use the manual re-grounding procedure; never edit hook configuration through this integration. |
 | `observe status` shows no envelopes for a session | Read `hook_diagnostics.reasons`: `workspace_unresolvable` means the hook's `--workspace` locator could not be canonicalized; `workspace_unconsented` means the session's Git root carries no active consent (a session started in a subdirectory canonicalizes to the same root as the consent, so grant consent at the repository root); `paused` means consent is paused. A successful ingest records no diagnostic, so read `recent_count` together with the envelopes: no new envelopes and a zero `recent_count` means the hooks never reached the ingress or the runtime gate is disabled, not that a binding drop occurred. |
-| `observe status` shows `mapping_present: false` after a consented `SessionStart` | The hook sends `start mode=create_or_attach` with the canonical `--workspace` root as `workspace_ref` and `codex-session:<session_id>` as `external_ref`. Before automatic new-pair admission, it scans private local lifecycle mappings for an eligible ended same-host session. A unique mapping from a received `SessionEnd`, with every other bound session ended and the candidate bound only to this consented workspace, is selected before the ordinary request: the hook holds the workspace and predecessor lifecycle locks, revalidates ownership and state, and sends one `mode=attach` request carrying that selector plus the new pair. The catalog then requires one mapped task, the selector still active, no sibling task, the matching repository-privacy binding, and no start already pending for that route. Recovery takes a nonblocking workspace reservation before pruning or scanning, then holds it with ordered locks for every eligible ended same-host session through full candidate revalidation, the service RPC, authorized rewrites, and pruning. The revalidation includes unmapped sessions, cross-workspace ownership, mapping identities, and mapping recency; a busy workspace reservation or candidate-lock contention or a changed snapshot returns `auto_attach_recovery_busy` rather than creating work from an unstable selector. A successful recovery rewrites every ended same-host predecessor mapping for that task to the rotated session and writer so pending predecessor rows drain on the successor route rather than being quarantined. With no usable persisted selector, automatic `create_or_attach` admits the new pair as independent work, including beside a dormant task. `workspace_task_exists` identifies only explicit `mode=create` colliding with an identical pair; workspace membership never selects a task. The candidate set is bounded (#549): a recovery unbinds the ended predecessors it consumed, and each `SessionStart` pass keeps at most the 32 most recently mapped ended bindings per workspace, pruning unmapped ended sessions first; a binding is never pruned while its session is live or while a pending or quarantined row still names it, so protected rows may keep the total above 32, ended unmapped rows still terminalize, and a pruned session that resumes re-binds on its next hook event. The public error reveals no selector; a hard crash without `SessionEnd` remains fail-closed rather than being guessed from age. Otherwise read `hook_diagnostics.reasons` for the typed cause: `auto_attach_workspace_unbound` (no paired request was legal), `auto_attach_request_invalid` (an authoring defect — file it), `auto_attach_conflict` / `auto_attach_refused` (the service answered and declined), `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`, `vault_locked`, `timeout`, `storage_unsafe` / `storage_corrupt`, or `service_unavailable` (the daemon was still starting; `UserPromptSubmit` and `Stop` retry under the bounded budget; teardown `SessionEnd` records its lifecycle intent and drains without an auto-attach retry). An explicit MCP `start` remains the recovery path; for `vault_locked` on a never-initialized install, that `start` returns the typed `vault_initialization_required` continuation below rather than a dead end. |
+| `observe status` shows `mapping_present: false` after a consented `SessionStart` | The hook sends `start mode=create_or_attach` with the canonical `--workspace` root as `workspace_ref` and `codex-session:<session_id>` as `external_ref`. Before automatic new-pair admission, it scans private local lifecycle mappings for an eligible ended same-host session. A unique mapping from a received `SessionEnd`, with every other bound session ended and the candidate bound only to this consented workspace, is selected before the ordinary request: the hook holds the workspace and predecessor lifecycle locks, revalidates ownership and state, and sends one `mode=attach` request carrying that selector plus the new pair. The catalog then requires one mapped task, the selector still active, no sibling task, the matching repository-privacy binding, and no start already pending for that route. Recovery takes a nonblocking workspace reservation before pruning or scanning, then holds it with ordered locks for every eligible ended same-host session through full candidate revalidation, the service RPC, authorized rewrites, and pruning. The revalidation includes unmapped sessions, cross-workspace ownership, mapping identities, and mapping recency; a busy workspace reservation or candidate-lock contention or a changed snapshot returns `auto_attach_recovery_busy` rather than creating work from an unstable selector. A successful recovery rewrites every ended same-host predecessor mapping for that task to the rotated session and writer so pending predecessor rows drain on the successor route rather than being quarantined. With no usable persisted selector, automatic `create_or_attach` admits the new pair as independent work, including beside a dormant task. `workspace_task_exists` identifies only explicit `mode=create` colliding with an identical pair; workspace membership never selects a task. The candidate set is bounded (#549): a recovery unbinds the ended predecessors it consumed, and each `SessionStart` pass keeps at most the 32 most recently mapped ended bindings per workspace, pruning unmapped ended sessions first; a binding is never pruned while its session is live or while a pending or quarantined row still names it, so protected rows may keep the total above 32, ended unmapped rows still terminalize, and a pruned session that resumes re-binds on its next hook event. The public error reveals no selector; a hard crash without `SessionEnd` remains fail-closed rather than being guessed from age. Otherwise read `hook_diagnostics.reasons` for the typed cause: `auto_attach_workspace_unbound` (no paired request was legal), `auto_attach_request_invalid` (an authoring defect — file it), `auto_attach_conflict` / `auto_attach_refused` (the service answered and declined), `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`, `vault_locked`, `timeout`, `storage_unsafe` / `storage_corrupt`, `service_incompatible`, or `service_unavailable` (the daemon was still starting; `UserPromptSubmit` and `Stop` retry under the bounded budget; teardown `SessionEnd` records its lifecycle intent and drains without an auto-attach retry). An explicit MCP `start` remains the recovery path; for `vault_locked` on a never-initialized install, that `start` returns the typed `vault_initialization_required` continuation below rather than a dead end. |
 | `observe status` shows `mapping_stale` after every resume or compaction | Before issue #578 the `yoetz hooks session-start` status read connected without a workspace locator, so the daemon's repository fence refused every probe as `SESSION_CONFLICT` and a live mapping was reported stale. The rendered command now passes `--workspace .`, and the probe selects its locator in a fixed order (issue #659): an explicit project path other than the bare `.`, then the host payload's session `cwd` (a subdirectory resolves to the repository root), then the hook's own working directory. The host cwd outranks the bare `.` because Codex hook working directories are not stable across surfaces; an explicit path that cannot be canonicalized never falls through to another repository. `yoetz hooks observe --event SessionStart` and the shared mapped-session lane derive the probe locator the same way when no explicit workspace was consented. A fence refusal is `status_workspace_unbound` / `status_workspace_mismatch` with a keep-the-mapping advisory, and a companion diagnostic row names the locator source (`locator_source_explicit`, `locator_source_host_payload`, `locator_source_cwd`, `locator_absent`, or `locator_unresolvable`) so an absent context and a supplied one that failed to resolve are distinguishable; `mapping_stale` means the daemon actually reported the session replaced, and the advisory names the replacement ids. |
 | The agent created a sibling task instead of continuing the auto-attached one | The `SessionStart` context names the mapped `session_id` and `writer_id` and says to continue with `start mode=attach` by that session id; guidance and the `start` tool description name the canonical absolute repository root as `workspace_ref`, the value the hook commits (issue #580). The agent's successful scoped `start` re-binds the mapping through `yoetz hooks post-tool-use` from `structuredContent`; a scoped start that binds nothing records `start_bind_unparsed` / `start_bind_invalid_ids` / `start_bind_write_failed`. |
 | `observe status` shows pending `mapping_missing` after a runtime route conflict | A non-retryable `SESSION_CONFLICT` while acquiring the task runtime keeps the envelope pending for a later drain after its lifecycle mapping is repaired. The route must still pass its ownership checks. Non-retryable conflicts after runtime acquisition remain `ledger_rejected` and enter quarantine. Retryable route conflicts report `service_unavailable` and stay pending. |
@@ -1248,8 +1271,17 @@ or toggle consent to manufacture a healthy status. Real hard limits continue to 
 inventory recovery, and previous loss counts and identities remain unchanged.
 
 Recovery emits fixed `capture_inventory_*` reason counts in its internal maintenance summary;
-these are not ledger receipts or a new hook diagnostic format. Historical local selection losses
-still need a separately attributed task/check propagation path when no later envelope is admitted.
+these are not ledger receipts or a new hook diagnostic format. Historical local selection losses with complete original route attribution are reported by
+service maintenance even when no later envelope is admitted. New checks reconcile their task's
+pending losses first. Each source/session/generation/route lane produces one permanent
+`observation_input_loss` marker, preserving all local counts and identities. Missing original
+attribution and overflow-only range history remain visible locally rather than being assigned to
+an unrelated task. A terminal route drift or quarantined marker operation uses the same task
+runtime with a distinct deterministic recovery operation; transient publication failures remain
+fail-closed. Catalog scans run through separate read-only worker connections, keeping the service
+event loop available during both inventory reads.
+Route-valid lane-digest mismatches are reported with the same explicit loss gap and an
+unreconciled marker; malformed routes or source identities remain local.
 Host-shaped regression tests, including interleaved parent/worker routes and encrypted readback,
 are not a version-pinned acceptance run inside the installed vendor application.
 
@@ -1328,3 +1360,32 @@ only its fenced lease was yielded. Replay the exact start body and request ID on
 inventing session or writer IDs. `start_pending_same_identity` instead means a live lease remains:
 wait up to 60 seconds before the one exact replay. If still busy or pending, retain the original
 request and report the unresolved start. These continuations do not authorize a new task.
+
+## Cold service attachment and recovery (issue #670)
+
+Codex SessionStart is synchronous even when tool hooks use the supported async profile. It
+keeps its ten-second registration budget; async tool delivery does not authorize background
+startup or service replacement.
+
+For an enabled, consented workspace with no mapped task, auto-attachment now gives the exact
+selected service one second to connect or start through its fixed, instance-pinned launcher.
+It never supersedes another installation. A compatible stamped holder that is still starting
+is reused only while an owner-only nonblocking flock probe confirms that the singleton is held;
+an unheld stale stamp is ignored and the fixed launcher makes a normal flock-protected start
+attempt. A live incompatible or unknown holder is refused. The connection time counts toward
+the existing five-second attachment RPC budget. Turn-boundary retries retain their one-second
+outer budget and reserve part of it for the start RPC after a shorter connector arm; ordinary tool hooks and SessionEnd do not start a service. Local-only readiness
+probes and unconsented/disabled observation do not take this path.
+
+The native context distinguishes a service that is unavailable or still starting
+(`service_unavailable`), an incompatible holder (`service_incompatible`), and an answered
+admission conflict (`auto_attach_conflict`). Missing mapping remains explicit. Call cooperative
+`start` before material work and follow its exact continuation; a conflict needs an authorized
+task selector or explicit admission decision, not a service restart. Successful hook exit alone
+does not establish attachment. Task admission and ended-session recovery selectors are unchanged.
+
+Structural pre/post observations remain queued and keep their original identities across
+bootstrap. A later successful mapping permits their normal drain. Missing transient content
+remains a coverage gap; a recovered queue is not recovered content. Existing host/OS capability
+and consent requirements still apply. Automated host-contract tests do not establish native
+macOS, Linux, or Windows/WSL 2 acceptance. Native cold-start coverage remains tracked in #670.

@@ -179,7 +179,7 @@ def _version_manifest_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     # pass and verifies a fixed point before reporting success.
     destination = source.parents[1] / entry.relative_path
     if entry.schema_version == "2.3.0" and not destination.exists():
-        document = _load_versioned_template(entry, "version/version-manifest-2.2.2.schema.json")
+        document = _load_versioned_template(entry, "version/version-manifest-2.2.4.schema.json")
         cast(dict[str, JsonValue], document["properties"])["schema_version"] = {
             "const": entry.schema_version
         }
@@ -6082,6 +6082,16 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         None,
     ),
     _RegistryEntry(
+        "integrations/setup-readiness-1.0.0.schema.json",
+        "setup-readiness",
+        "1.0.0",
+        "request_result",
+        "setup-contract",
+        lambda: (
+            __import__("yoetz.protocol.setup_readiness", fromlist=["SetupReadiness"]).SetupReadiness
+        ),
+    ),
+    _RegistryEntry(
         "integrations/host-connection-1.0.0.schema.json",
         "host-connection",
         "1.0.0",
@@ -6092,6 +6102,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
                 "yoetz.protocol.host_connection", fromlist=["HostConnectionContract"]
             ).HostConnectionContract
         ),
+    ),
+    _RegistryEntry(
+        "integrations/setup-status-2.0.0.schema.json",
+        "setup-status",
+        "2.0.0",
+        "request_result",
+        "setup-contract",
+        lambda: __import__("yoetz.protocol.setup_status", fromlist=["SetupStatus"]).SetupStatus,
     ),
     _RegistryEntry(
         "receipts/receipt-document-1.0.0.schema.json",
@@ -6513,6 +6531,22 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "version/version-manifest-2.2.2.schema.json",
         "version-manifest",
         "2.2.2",
+        "version_manifest",
+        "version-report",
+        lambda: __import__("yoetz.version", fromlist=["VersionManifest"]).VersionManifest,
+    ),
+    _RegistryEntry(
+        "version/version-manifest-2.2.3.schema.json",
+        "version-manifest",
+        "2.2.3",
+        "version_manifest",
+        "version-report",
+        lambda: __import__("yoetz.version", fromlist=["VersionManifest"]).VersionManifest,
+    ),
+    _RegistryEntry(
+        "version/version-manifest-2.2.4.schema.json",
+        "version-manifest",
+        "2.2.4",
         "version_manifest",
         "version-report",
         lambda: __import__("yoetz.version", fromlist=["VersionManifest"]).VersionManifest,
@@ -6973,6 +7007,8 @@ def build_schema_documents(
             "version/version-manifest-2.2.0.schema.json",
             "version/version-manifest-2.2.1.schema.json",
             "version/version-manifest-2.2.2.schema.json",
+            "version/version-manifest-2.2.3.schema.json",
+            "version/version-manifest-2.2.4.schema.json",
         }:
             normalized = _frozen_version_manifest_schema(entry)
         elif entry.relative_path == "version/version-manifest-2.3.0.schema.json":

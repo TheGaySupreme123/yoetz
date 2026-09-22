@@ -247,10 +247,16 @@ def cursor_context_output(
     ``additional_context``, while ``stop`` can optionally submit a
     ``followup_message``.  Stop follow-ups are disabled by default because
     Cursor treats them as a new user message.  ``postToolUseFailure`` and the
-    other Cursor hook events currently have no consumable output channel and
-    emit ``{}``.
+    other advice-less Cursor events emit ``{}``. Passive ``preToolUse``
+    observation returns ``permission: allow`` to avoid an invalid permission
+    response; native MCP admission remains separate.
     """
 
+    # A passive pre-tool observer must explicitly pass the hook's permission
+    # boundary. Cursor rejects an empty/invalid permission response. Native
+    # MCP admission remains a separate beforeMCPExecution/host decision.
+    if raw_event == "preToolUse":
+        return {"permission": "allow"}
     bounded = text.strip()
     if not bounded:
         return {}
