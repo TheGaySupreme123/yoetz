@@ -14,13 +14,7 @@ part of installation or recovery.
 A new session's first workflow operation is `start` (create or attach), after guidance reads,
 tool/schema discovery, and necessary bootstrap clarification. This includes `read_guidance`
 and commands needed to read installed references or discover tool schemas. Call `start`
-before substantive research, commands, edits, or delegation. Where the host defers tool schemas
-and lists only names, load the `start` schema by name first (on Claude Code, ToolSearch
-`select:mcp__yoetz__start` or the declared plugin-prefixed name); a deferred listing is not a
-reason to skip the call. If material work already began before `start` (the server was still
-connecting at the first action, or the session simply started editing), call `start` now, publish
-the transitions so far as a bounded plan, and disclose the uncovered prefix in the receipt.
-If it fails, follow exact
+before substantive research, commands, edits, or delegation. If it fails, follow exact
 typed continuations and same-request recovery first, including a named one-time repair.
 If startup remains blocked without an applicable recovery path, ask the user for intro and
 guidance; do not invent a substitute workflow. Continuing without a ledger task is permitted
@@ -64,7 +58,6 @@ result or a typed boundary.
 | The same-task pair/session cannot be recovered, every prior write has a known terminal outcome, and the user declares a bounded remaining or repaired verification scope | Start one intentional sibling with `mode=create`, the same canonical workspace, and a different stable `external_ref`. Give it a fresh plan, evidence, checks, and native binding; begin with a bounded handoff note that the predecessor receipt remains separate and unresolved. | Silently replace the task, inherit findings/obligations/evidence, reuse cross-task IDs without an existing contract, or invent lineage. |
 | Recovery is exhausted but no new scope is declared, or a sibling would only make the old receipt look clean | Keep the old receipt and limitations, report the bounded failure, and wait for a supported continuation decision. | Loop through new siblings, move unresolved findings out of view, or present the latest sibling as whole-work closure. |
 | The ledger has immutable proof limits, writes are terminal, and a fresh review of the repaired/current state is wanted | Use one explicitly scoped verification sibling on a healthy authorized binding. Publish its current-state plan and obligations, collect new admissible evidence/checks, verify native mapping, and disclose the old receipt's limits. | Repeat work only to obtain a smaller finding count, drop outstanding acceptance criteria, or present the sibling as proof that the old task was resolved. |
-| Material work began before `start` was called (deferred tool schemas, a server still connecting at the first action, or a session that simply started editing) | Call `start` now with the ordinary selectors. Publish a bounded plan whose summary names the transitions already completed, publish their results and evidence as caller-asserted facts, and disclose the uncovered prefix as a coverage gap in the receipt. | Keep working without a task, backdate `occurred_at` to imply coverage that was not published, or claim that the ledger covers the pre-start work. |
 | The first `start` fails | Follow exact continuations and same-request recovery first, including a named one-time repair. Outside the fallback below, if startup remains blocked without an applicable recovery path, ask the user for intro and guidance and pause material work. | Invent a substitute workflow, skip recovery, keep working without a ledger task, or treat hook mapping as activation. |
 | After successful startup Yoetz becomes unavailable, or a named one-time repair/retry ends in terminal unavailability | Continue ordinary work only when Yoetz is optional, the user/host permits it, and no write or approval remains pending; disclose which subsequent work lacks Yoetz proof. A first non-retryable `start` failure alone does not qualify. Once healthy, use the sibling row only when a tracked continuation is still wanted and no write is ambiguous. | Claim a live task, finding, verdict, or receipt, bypass startup handoff, or reset old findings by switching tasks. |
 

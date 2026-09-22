@@ -5535,3 +5535,18 @@ ceremonies. It stops before provider selection and policy changes. `setup status
 it for an uninitialized vault; the common host connection command alone never stands in for
 vault initialization. Continuations retain module-invocation interpreter spelling so a symlinked
 virtual-environment Python does not lose its runtime pin.
+
+### Completion claim scope diagnostics (issue #679)
+
+`kernel/completion_scope.py` owns the comparison between each readable effective completion
+claim and `current_plan_scope`. `completion_claim_outside_plan` and `completion_plan_not_claimed`
+are fixed coverage codes carried by publication previews/results, status, checks, and receipts.
+There are at most two case gaps regardless of relation count. Status readiness uses its existing
+`coverage_gaps_declared` condition; declared/open obligation counts stay plan-derived. Receipt gap
+details contain at most 16 ID-pair examples plus full relation counts, with an explicit omission
+marker; default privacy projection still applies. Partial claims are accepted. Material/superseded
+claims are excluded, and unavailable input is not an empty scope. Multiple partial claims are
+compared independently; older effective claims are compared to the current plan until explicitly
+superseded. A later plan revision that waives a previously claimed obligation changes the current
+plan but does not rewrite that claim, so the outside-plan code remains expected until the claim is
+superseded. See ADR-019 for repair semantics.
