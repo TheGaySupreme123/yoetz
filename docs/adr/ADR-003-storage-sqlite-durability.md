@@ -179,6 +179,27 @@ host integrations, object roots, observation consent, event bytes, and frontiers
 observation, content, provider, disclosure, or egress authority. Explicit backup, restore, and
 ad-hoc `migrate execute` continue to use their own exact review and plan-digest contract.
 
+### Amendment — semantic progress table and the v15 target (2026-09-22, issue #571 A2)
+
+Bundle migration `0015` adds one STRICT, WITHOUT ROWID table, `semantic_progress`, keyed by the
+existing `semantic_jobs.job_id`. It holds only closed structural values: the attempt ordinal, the
+furthest non-terminal phase and its rank (a CHECK binds the two), and three exact-millisecond UTC
+timestamps (`phase_entered_at`, `queued_at`, `deadline_at`). The terminal phase is never stored;
+it is derived from the terminal `semantic_jobs` row, so each job has exactly one terminal state.
+Nothing is backfilled: jobs created before `0015` report no progress.
+
+Progress rows are written through their own owner-fenced `BEGIN IMMEDIATE` transactions beside
+the in-memory oracle rather than through it, because a completed operation's job is not reloaded
+into the oracle after restart but its terminal progress must stay readable. The insert happens
+once per job and a replay never rewrites it; an update applies only when it moves
+`(attempt_ordinal, phase_rank)` strictly forward for the job's active attempt of a leased job.
+
+The automatic READY-boundary upgrade now targets schema `15` from sources `12`, `13`, and `14`,
+with migration IDs `0013`–`0015` in its plan digest. A v14 bundle applies only `0015`. The v10
+layout check now receives the real pending migration set rather than only the last registry
+entry. Preservation comparison ignores a migration-created table only while it is empty, so an
+upgrade cannot hide a populated table that the source did not have.
+
 ## Consequences
 
 Platform wheels (not pure-Python) on macOS arm64 + manylinux_2_28 x86_64; Yoetz owns security

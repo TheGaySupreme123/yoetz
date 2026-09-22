@@ -67,6 +67,7 @@ from yoetz.domain.privacy import (
 )
 from yoetz.domain.values import validate_commitment, validate_sha256_digest
 from yoetz.observability.privacy import privacy_request_commitment
+from yoetz.observability.semantic_context import report_semantic_progress
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.ids import IdPort
 from yoetz.ports.keys import MacKeyHandle
@@ -94,7 +95,7 @@ from yoetz.ports.semantic import (
 )
 from yoetz.protocol.canonical import canonical_digest
 from yoetz.protocol.ids import IdKind
-from yoetz.protocol.models import SemanticStatus
+from yoetz.protocol.models import SemanticProgressPhase, SemanticStatus
 
 __all__ = [
     "ExternalProviderFactory",
@@ -763,6 +764,11 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
         receipt: EgressReceipt | None = None
         try:
             await self._park_attempt_reconciliation(dispatch_id, unknown_receipt)
+            # Structural progress only (issue #571 A2). A runtime-backed evaluator reports its own
+            # launch, validation, and sampling phases; a direct request samples immediately.
+            await report_semantic_progress(SemanticProgressPhase.CASE_ADMITTED)
+            if credential_authority != "external_runtime_oauth":
+                await report_semantic_progress(SemanticProgressPhase.PROVIDER_SAMPLING)
             try:
                 result = await evaluator.evaluate(case, deadline)
                 result = _with_policy_digest(result, case)
@@ -1049,6 +1055,8 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
         except Exception:  # noqa: BLE001 - a lost consume race is bounded here
             return _local_unavailable_result(case)
 
+        await report_semantic_progress(SemanticProgressPhase.CASE_ADMITTED)
+        await report_semantic_progress(SemanticProgressPhase.PROVIDER_SAMPLING)
         result = await evaluator.evaluate(case, deadline)
         # Only the rebind is fenced here: an evaluator failure keeps propagating exactly as before.
         try:

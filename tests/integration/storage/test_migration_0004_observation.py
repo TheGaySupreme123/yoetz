@@ -48,6 +48,7 @@ def test_schema_three_upgrade_applies_0004_tables(tmp_path: Path) -> None:
         "0012",
         "0013",
         "0014",
+        "0015",
     )
     expected = {
         "observation_inspection_snapshots",

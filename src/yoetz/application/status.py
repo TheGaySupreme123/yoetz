@@ -7,6 +7,7 @@ import hashlib
 import hmac
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from typing import Final, Literal, Protocol, cast
 
 from pydantic import BaseModel
@@ -21,6 +22,7 @@ from yoetz.domain.values import (
     Frontier,
     SemanticContinuation,
     disclosure_continuation,
+    format_rfc3339_millis,
     repository_grant_continuation,
 )
 from yoetz.kernel.deterministic_checks import (
@@ -49,6 +51,7 @@ from yoetz.ports.ledger import (
     ProjectionPosition,
     ProjectionQuery,
     ProjectionView,
+    SemanticProgressRecord,
 )
 from yoetz.ports.runtime import BundleRuntimePort, RouteAccess, RouteCommand, TaskRuntime
 from yoetz.ports.start_catalog import StartCatalogPort
@@ -74,6 +77,7 @@ from yoetz.protocol.coverage import (
 )
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.models import (
+    SemanticProgressPhase,
     StatusAdvicePageModel,
     StatusAssignmentFilterModel,
     StatusAssignmentPageModel,
@@ -100,11 +104,17 @@ from yoetz.protocol.models import (
     StatusProjectPageModel,
     StatusRequest,
     StatusResultsPageModel,
+    StatusSemanticProgressModel,
     StatusVersionSliceModel,
     StatusVersionsPageModel,
 )
 
-__all__ = ["Application", "StatusInternalResult", "execute_status"]
+__all__ = [
+    "Application",
+    "StatusInternalResult",
+    "execute_status",
+    "semantic_progress_wire",
+]
 
 _PACKS = ("research-evidence/0.1.0", "work-integrity/0.1.0")
 _CURSOR_VERSION = "1"
@@ -620,10 +630,84 @@ async def _operation_continuation(
     return result
 
 
+def semantic_progress_wire(
+    record: SemanticProgressRecord, observed_at: datetime
+) -> dict[str, JsonValue]:
+    """Project one durable progress record onto the bounded structural wire (issue #571 A2).
+
+    Durations are derived here, at one service observation time, so every rendering of the same
+    page agrees. Only closed phase/outcome/reason values, an ordinal, and service timestamps leave.
+    """
+
+    if type(record) is not SemanticProgressRecord or type(observed_at) is not datetime:
+        raise ValueError("status_semantic_progress_invalid")
+    observed = observed_at.replace(microsecond=observed_at.microsecond // 1000 * 1000)
+
+    def _ms(start: datetime, end: datetime) -> int:
+        return max(0, int((end - start).total_seconds() * 1000))
+
+    terminal = record.phase is SemanticProgressPhase.TERMINAL
+    wire: dict[str, JsonValue] = {
+        "phase": record.phase.value,
+        "attempt_ordinal": str(record.attempt_ordinal),
+        "queued_at": format_rfc3339_millis(record.queued_at),
+        "phase_entered_at": format_rfc3339_millis(record.phase_entered_at),
+        "deadline_at": format_rfc3339_millis(record.deadline_at),
+        "observed_at": format_rfc3339_millis(observed),
+        "elapsed_ms": str(_ms(record.queued_at, record.phase_entered_at if terminal else observed)),
+    }
+    if terminal:
+        assert record.terminal_outcome is not None and record.terminal_reason is not None
+        wire["condition"] = "terminal"
+        wire["terminal_outcome"] = record.terminal_outcome
+        wire["terminal_reason"] = record.terminal_reason.value
+    else:
+        remaining = _ms(observed, record.deadline_at)
+        wire["remaining_ms"] = str(remaining)
+        wire["condition"] = "active" if remaining > 0 else "overdue"
+    return wire
+
+
+async def _operation_semantic_progress(
+    app: Application, runtime: TaskRuntime, operation: object | None
+) -> dict[str, JsonValue] | None:
+    """Read best-effort structural progress for one check operation; never fail recovery."""
+
+    if (
+        type(operation) is not OperationRecord
+        or operation.operation_kind is not OperationKind.CHECK
+        or operation.state not in {OperationState.PENDING, OperationState.COMPLETE}
+    ):
+        return None
+    load = getattr(runtime.ledger, "load_semantic_progress", None)
+    if not callable(load):
+        return None
+    try:
+        record = await cast(Callable[[str, str], Awaitable[SemanticProgressRecord | None]], load)(
+            operation.writer_id, operation.operation_id
+        )
+        if record is None:
+            return None
+        clock = getattr(app, "clock", None)
+        now = clock.now_utc() if clock is not None else datetime.now(UTC)
+        wire = semantic_progress_wire(record, now)
+        StatusSemanticProgressModel.model_validate(wire)
+        return wire
+    except Exception as exc:  # noqa: BLE001 - progress enriches recovery, never blocks it
+        record_unexpected_exception_without_raising(
+            exc,
+            component="application.status",
+            operation="status_semantic_progress_unavailable",
+            request_id=operation.operation_id,
+        )
+        return None
+
+
 def _operation_page_from_record(
     operation_request_id: str,
     operation: object | None,
     continuation: Mapping[str, JsonValue] | None = None,
+    semantic_progress: Mapping[str, JsonValue] | None = None,
 ) -> StatusOperationPageModel:
     """Project one operation record into the recovery page, or a bounded not-found page.
 
@@ -658,6 +742,8 @@ def _operation_page_from_record(
             # original result scrolled away or the context was compacted.
             if continuation is not None and kind == "check":
                 pending["continuation"] = cast(JsonValue, dict(continuation))
+            if semantic_progress is not None and kind == "check":
+                pending["semantic_progress"] = cast(JsonValue, dict(semantic_progress))
             return StatusOperationPageModel.model_validate(pending)
         if record.state is OperationState.QUARANTINED:
             return StatusOperationPageModel.model_validate(
@@ -673,14 +759,15 @@ def _operation_page_from_record(
         # Only publish_work stores the AppendResult shape used here. Other complete kinds surface
         # without accepted-event detail so recovery stays bounded and honest.
         if record.operation_kind is not OperationKind.PUBLISH_WORK:
-            return StatusOperationPageModel.model_validate(
-                {
-                    "operation_request_id": operation_request_id,
-                    "found": True,
-                    "state": "complete",
-                    "operation_kind": kind,
-                }
-            )
+            complete: dict[str, JsonValue] = {
+                "operation_request_id": operation_request_id,
+                "found": True,
+                "state": "complete",
+                "operation_kind": kind,
+            }
+            if semantic_progress is not None and kind == "check":
+                complete["semantic_progress"] = cast(JsonValue, dict(semantic_progress))
+            return StatusOperationPageModel.model_validate(complete)
         source = _mapping(strict_json_parse(record.result_canonical))
         accepted_raw = source["accepted"]
         if type(accepted_raw) is not tuple and type(accepted_raw) is not list:
@@ -1150,9 +1237,13 @@ async def execute_status(
                     runtime,
                     operation,
                 )
+            semantic_progress = await _operation_semantic_progress(app, runtime, operation)
             try:
                 page = _operation_page_from_record(
-                    request.filter.operation_request_id, operation, continuation
+                    request.filter.operation_request_id,
+                    operation,
+                    continuation,
+                    semantic_progress,
                 )
             except (AttributeError, TypeError, ValueError) as exc:
                 raise _error(

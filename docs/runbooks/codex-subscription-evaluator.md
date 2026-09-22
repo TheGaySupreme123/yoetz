@@ -329,4 +329,28 @@ the service-owned check runs, replay reports pending; after completion it recove
 result. A host disconnect does not cancel an admitted review. Explicit control cancellation while
 attached or `yoetz service stop` stops the owned execution; service stop affects the selected
 installation, including its other active work. The maintenance gate can delay ordinary status
-reads during review. Detailed progress phases and parallel review scheduling remain separate work.
+reads during review; `status view=operation` for the running check is the one read admitted
+beside it. Parallel review scheduling remains separate work.
+
+### Structural progress phases (#571 A2)
+
+`status view=operation` with the check's request ID reports `semantic_progress` for the running
+or finished review. For this runtime the phases map to native steps as follows:
+
+| Phase | Reported when |
+| --- | --- |
+| `queued` | the service claims a physical attempt (ordinal increments on retry) |
+| `case_admitted` | the privacy audit consumes the egress authorization, before launch |
+| `runtime_starting` | before the isolated app-server child is launched and initialized |
+| `account_model_validation` | after `initialized`, before `account/read`, `model/list`, `thread/start` |
+| `provider_sampling` | after `turn/start` is acknowledged `inProgress` |
+| `response_validation` | when `turn/completed` arrives, before the judgment is parsed and recorded |
+| `cleanup` | before the interrupt (on failure) and process-group cleanup, on every launched path |
+| `terminal` | derived from the terminal job row, with its outcome and reason |
+
+A launch or pre-sampling failure goes straight to `cleanup`, so `status` distinguishes a stalled
+start from a long sampling turn. Token-usage, rate-limit, delta, plan, and commentary notifications
+do not produce phases and nothing from them is recorded. `overdue` means the frozen deadline passed
+without a terminal row; replay the same check request to reclaim and terminalize it. To diagnose a
+failed attempt, keep using `yoetz service diagnostics --request-id req_…` for failure stages;
+progress is the live view, not the failure record.

@@ -155,8 +155,11 @@ __all__ = [
     "ProviderJudgmentInsufficientModel",
     "ProviderJudgmentModel",
     "ProviderJudgmentNoDiscrepancyModel",
+    "SEMANTIC_PROGRESS_PHASE_RANK",
+    "SemanticProgressPhase",
     "SemanticReason",
     "SemanticStatus",
+    "StatusSemanticProgressModel",
     "StartRequest",
     "StartRequestModel",
     "StartResult",
@@ -346,6 +349,29 @@ class SemanticReason(str, Enum):  # noqa: UP042 - exact public wire enum base
     DEPENDENCY_CHANGED = "dependency_changed"
     CASE_CAPACITY_EXCEEDED = "case_capacity_exceeded"
     COORDINATOR_FAILURE = "coordinator_failure"
+
+
+class SemanticProgressPhase(str, Enum):  # noqa: UP042 - exact public wire enum base
+    """Structural phase of one durable AI-powered review job (issue #571 item A2).
+
+    Declaration order is execution order. A job's recorded phase only moves forward: within one
+    physical attempt by this order, and across attempts by attempt ordinal. ``terminal`` is
+    derived from the terminal job row, so there is exactly one terminal state per job.
+    """
+
+    QUEUED = "queued"
+    CASE_ADMITTED = "case_admitted"
+    RUNTIME_STARTING = "runtime_starting"
+    ACCOUNT_MODEL_VALIDATION = "account_model_validation"
+    PROVIDER_SAMPLING = "provider_sampling"
+    RESPONSE_VALIDATION = "response_validation"
+    CLEANUP = "cleanup"
+    TERMINAL = "terminal"
+
+
+SEMANTIC_PROGRESS_PHASE_RANK: Final[Mapping[SemanticProgressPhase, int]] = MappingProxyType(
+    {phase: index for index, phase in enumerate(SemanticProgressPhase, start=1)}
+)
 
 
 VALID_SEMANTIC_REASONS: Final[Mapping[SemanticStatus, frozenset[SemanticReason]]] = (
@@ -633,6 +659,10 @@ def _semantic_reason_from_wire(value: object) -> SemanticReason:
     return _enum_from_wire(value, SemanticReason)
 
 
+def _semantic_progress_phase_from_wire(value: object) -> SemanticProgressPhase:
+    return _enum_from_wire(value, SemanticProgressPhase)
+
+
 def _validate_id_wire(kind: IdKind, value: object) -> str:
     return validate_id(kind, value)
 
@@ -824,6 +854,9 @@ ReceiptRedactionProfileWire = Annotated[
 ]
 SemanticStatusWire = Annotated[SemanticStatus, BeforeValidator(_semantic_status_from_wire)]
 SemanticReasonWire = Annotated[SemanticReason, BeforeValidator(_semantic_reason_from_wire)]
+SemanticProgressPhaseWire = Annotated[
+    SemanticProgressPhase, BeforeValidator(_semantic_progress_phase_from_wire)
+]
 
 ActorAssertionIdWire = Annotated[str, BeforeValidator(_actor_assertion_id_wire)]
 RequestIdWire = Annotated[str, BeforeValidator(_request_id_wire)]
@@ -3632,8 +3665,58 @@ class StatusOperationAcceptedEventModel(_ClosedModel):
     projection_status: Literal["projected", "unknown_unprojected"]
 
 
+class StatusSemanticProgressModel(_ClosedModel):
+    """Bounded structural progress of the AI-powered review job behind one check operation.
+
+    Every field is service-authored structure: a closed phase, an attempt ordinal, service
+    timestamps, derived durations, and the closed terminal outcome and reason of the durable job.
+    It never carries tokens, reasoning, prompt or response text, credentials, or account identity.
+    ``elapsed_ms`` and ``remaining_ms`` are computed by the service at ``observed_at``.
+    """
+
+    optional_non_null_fields = frozenset({"remaining_ms", "terminal_outcome", "terminal_reason"})
+
+    phase: SemanticProgressPhaseWire
+    attempt_ordinal: CanonicalUInt64Wire
+    queued_at: TimestampWire
+    phase_entered_at: TimestampWire
+    deadline_at: TimestampWire
+    observed_at: TimestampWire
+    elapsed_ms: CanonicalUInt64Wire
+    remaining_ms: CanonicalUInt64Wire | None = None
+    condition: Literal["active", "overdue", "terminal"]
+    terminal_outcome: Literal["succeeded", "failed", "quarantined"] | None = None
+    terminal_reason: SemanticReasonWire | None = None
+
+    @model_validator(mode="after")
+    def _validate_semantic_progress(self) -> StatusSemanticProgressModel:
+        terminal = self.phase is SemanticProgressPhase.TERMINAL
+        if terminal != (self.condition == "terminal"):
+            raise ValueError("status_semantic_progress_invalid")
+        if terminal:
+            if (
+                self.terminal_outcome is None
+                or self.terminal_reason is None
+                or self.remaining_ms is not None
+            ):
+                raise ValueError("status_semantic_progress_invalid")
+        else:
+            if (
+                self.terminal_outcome is not None
+                or self.terminal_reason is not None
+                or self.remaining_ms is None
+                or (self.condition == "active") != (int(self.remaining_ms) > 0)
+            ):
+                raise ValueError("status_semantic_progress_invalid")
+            if int(self.attempt_ordinal) == 0 and self.phase is not SemanticProgressPhase.QUEUED:
+                raise ValueError("status_semantic_progress_invalid")
+        return self
+
+
 class StatusOperationPageModel(_ClosedModel):
     """One request-id-keyed operation recovery page within the authenticated task."""
+
+    optional_non_null_fields = frozenset({"semantic_progress"})
 
     operation_request_id: RequestIdWire
     found: bool
@@ -3647,10 +3730,17 @@ class StatusOperationPageModel(_ClosedModel):
     # decision returns the same continuation its check result carried. Every other operation
     # state returns null, so its presence is never ambiguous.
     continuation: CheckContinuationModel | None = None
+    # Issue #571 A2: structural progress of the AI-powered review job behind a check. Omitted when
+    # the operation is not a check or no durable progress was recorded for it.
+    semantic_progress: StatusSemanticProgressModel | None = None
     next_cursor: None = None
 
     @model_validator(mode="after")
     def _validate_operation_page(self) -> StatusOperationPageModel:
+        if self.semantic_progress is not None and not (
+            self.operation_kind == "check" and self.state in {"pending", "complete"}
+        ):
+            raise ValueError("status_operation_page_invalid")
         if (
             self.continuation is not None
             and self.continuation.replay_request_id != self.operation_request_id
@@ -4639,6 +4729,18 @@ _STATUS_OPERATION_STRUCTURAL_POINTERS: Final = (
         "/page/outcome",
         # Nullable frontier objects are leaves when null and expand when present.
         "/page/result_frontier",
+        # Issue #571 A2: service-derived structural progress; no provider or user content.
+        "/page/semantic_progress/attempt_ordinal",
+        "/page/semantic_progress/condition",
+        "/page/semantic_progress/deadline_at",
+        "/page/semantic_progress/elapsed_ms",
+        "/page/semantic_progress/observed_at",
+        "/page/semantic_progress/phase",
+        "/page/semantic_progress/phase_entered_at",
+        "/page/semantic_progress/queued_at",
+        "/page/semantic_progress/remaining_ms",
+        "/page/semantic_progress/terminal_outcome",
+        "/page/semantic_progress/terminal_reason",
         "/page/state",
         "/page/subject_frontier",
     )
@@ -5056,7 +5158,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 1151:
+    if len(result) != 1162:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 

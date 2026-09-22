@@ -38,6 +38,7 @@ SLASH_COMMANDS: Final[tuple[SlashCommand, ...]] = (
     SlashCommand("project", "show project members and coordination state"),
     SlashCommand("observe", "show selected and effective observation detail and capacity"),
     SlashCommand("check", "run a verification check"),
+    SlashCommand("progress", "show the latest check's review phase and elapsed time"),
     SlashCommand("receipt", "view or export an honest receipt"),
     SlashCommand("connect", "connect or repair an agent integration"),
     SlashCommand("disconnect", "remove an agent integration and retain Yoetz data"),

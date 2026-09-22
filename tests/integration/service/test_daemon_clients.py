@@ -3455,3 +3455,112 @@ async def test_failed_response_write_is_a_recorded_transport_fact_not_frame_inva
     found = lookup_diagnostic_records(correlation_id, root=tmp_path)
     assert [entry["reason"] for entry in found] == ["connection_failed"]
     assert [context.get("message") for context in contexts] == []
+
+
+def _operation_status_body() -> StatusRequest:
+    return StatusRequest.model_validate(
+        {
+            **_status_body().model_dump(mode="json", exclude_none=True),
+            "request_id": "req_00000000-0000-4000-8000-000000000043",
+            "view": "operation",
+            "limit": "1",
+            "filter": {"operation_request_id": "req_00000000-0000-4000-8000-000000000030"},
+        }
+    )
+
+
+@pytest.mark.anyio
+async def test_operation_status_reads_live_while_a_semantic_check_holds_the_gates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #571 A2: progress is readable during a long check; other reads still wait."""
+
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+    composition = daemon.composition
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = application.check
+    statuses: list[str] = []
+    original_status = application.status
+
+    async def held_check(*args: object, **kwargs: object) -> object:
+        entered.set()
+        await release.wait()
+        return await original(*args, **kwargs)  # pyright: ignore[reportArgumentType]
+
+    async def observed_status(request: object, **kwargs: object) -> object:
+        assert isinstance(request, StatusRequest)
+        # The admitted read runs while the check still owns both dispatch gates; record the view
+        # only after proving that, so a failed proof cannot satisfy the assertion below.
+        assert composition.maintenance_gate.locked()
+        assert composition.observation_gate.locked()
+        statuses.append(request.view)
+        return await original_status(request, **kwargs)  # pyright: ignore[reportArgumentType]
+
+    async def project_completed(*_args: object, **_kwargs: object) -> object:
+        return JsonObject({"ok": True})
+
+    monkeypatch.setattr(application, "check", held_check)
+    monkeypatch.setattr(application, "status", observed_status)
+    monkeypatch.setattr(daemon, "_project_completed_response", project_completed)
+    check_body = _check_body().model_copy(update={"mode": "semantic_required"})
+    check_task = asyncio.create_task(
+        daemon.dispatch(ControlClientKind.CLI, _request(daemon, ControlMethod.CHECK, check_body))
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5.0)
+        live = await asyncio.wait_for(
+            daemon.dispatch(
+                ControlClientKind.MCP_BRIDGE,
+                _request(daemon, ControlMethod.STATUS, _operation_status_body()),
+            ),
+            timeout=5.0,
+        )
+        # This harness supplies no public StatusResult, so the envelope itself is not the
+        # subject; the handler ran to completion while the check still held both gates.
+        assert not (isinstance(live.body, ControlError) and live.body.reason == "request_timeout")
+        assert statuses == ["operation"]
+        waiting = await daemon.dispatch(
+            ControlClientKind.CLI,
+            _request(daemon, ControlMethod.STATUS, _status_body(), deadline_ms=50),
+        )
+        assert waiting.outcome == "error"
+        assert isinstance(waiting.body, ControlError)
+        assert waiting.body.reason == "request_timeout"
+        assert statuses == ["operation"]
+        assert not check_task.done()
+    finally:
+        release.set()
+        await asyncio.wait_for(check_task, timeout=5.0)
+        assert application.check_requests == [check_body]
+        assert not composition.maintenance_gate.locked()
+        assert not composition.observation_gate.locked()
+        await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_operation_status_still_waits_behind_recovery_maintenance() -> None:
+    """Only a service-owned check opens the read window; recovery keeps full exclusion."""
+
+    daemon, _application, _vault, _listener = _daemon()
+    await daemon.start()
+    composition = daemon.composition
+    effects = daemon_module._LockedHumanEffects(  # pyright: ignore[reportPrivateUsage]
+        cast(ServiceLifecycle, SimpleNamespace()),
+        cast(VaultService, SimpleNamespace()),
+        daemon_module._PrivacyPolicyAppRelay(),  # pyright: ignore[reportPrivateUsage]
+        maintenance_gate=composition.maintenance_gate,
+        observation_gate=composition.observation_gate,
+    )
+    await effects._acquire_recovery_maintenance("recovery-gate")  # pyright: ignore[reportPrivateUsage]
+    try:
+        blocked = await daemon.dispatch(
+            ControlClientKind.CLI,
+            _request(daemon, ControlMethod.STATUS, _operation_status_body(), deadline_ms=50),
+        )
+        assert blocked.outcome == "error"
+        assert isinstance(blocked.body, ControlError)
+        assert blocked.body.reason == "request_timeout"
+    finally:
+        effects._release_recovery_maintenance("recovery-gate")  # pyright: ignore[reportPrivateUsage]
+        await daemon.close()

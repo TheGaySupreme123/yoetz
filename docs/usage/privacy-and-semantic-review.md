@@ -282,6 +282,19 @@ stop waiting before the review finishes. Recover with the same check request and
 review or reset its budget. A completed result still needs to qualify before it can resolve a
 finding or support a completion claim.
 
+While a review runs, `status` with `view: "operation"` and the check's request ID shows where it
+is: queued, case admitted, runtime starting, account and model validation, provider sampling,
+response validation, cleanup, or terminal. It also shows the attempt number, the elapsed time,
+the fixed deadline, and the time remaining. After the review ends it shows the outcome and its
+reason. This read answers even while the check is still running; other status views wait for
+the check to finish. In the terminal interface, a running check shows the same phase and elapsed
+time, and `/progress` reads the latest check again. An `overdue` condition means the deadline
+passed without a recorded result; retry the same check request ID to recover it.
+
+Progress names phases only. It never shows prompt or response text, streamed tokens, reasoning,
+token counts, your account, or credentials. A phase is not evidence that the review is correct.
+Checks started before this version show no progress.
+
 ### Cancelled background review
 
 A foreground session attachment may cancel optional background review. Once disclosure authority

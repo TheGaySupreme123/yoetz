@@ -275,6 +275,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
+        "fixtures/canonical/status-semantic-progress-1.4.0.case.json",
+        "canonical_vector",
+        "application/json",
+        True,
+    ),
+    (
         "fixtures/canonical/unicode-normalization-distinct.case.json",
         "canonical_vector",
         "application/json",
@@ -311,6 +317,7 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ("migrations/bundle/0012.sql", "migration", "application/sql", True),
     ("migrations/bundle/0013.sql", "migration", "application/sql", True),
     ("migrations/bundle/0014.sql", "migration", "application/sql", True),
+    ("migrations/bundle/0015.sql", "migration", "application/sql", True),
     ("migrations/catalog/0001.sql", "migration", "application/sql", True),
     ("migrations/catalog/0002.sql", "migration", "application/sql", True),
     ("migrations/catalog/0003.sql", "migration", "application/sql", True),

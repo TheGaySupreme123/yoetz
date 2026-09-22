@@ -8,7 +8,13 @@ import pytest
 
 from builders.tui_runtime import RECOMMEND_PRIVATE, FakeRuntime
 from yoetz.tui.app import YoetzTui
-from yoetz.tui.models import CheckMode, PrivacyPosture, ProviderOption, ProviderPosture
+from yoetz.tui.models import (
+    CheckMode,
+    PrivacyPosture,
+    ProviderOption,
+    ProviderPosture,
+    TaskStatusPage,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -714,6 +720,69 @@ async def test_check_offers_the_three_modes_and_passes_the_chosen_one_through(
         await pilot.press("down", "down", "enter")  # local only
         await pilot.pause()
         assert runtime.checks == [("upload", CheckMode.DETERMINISTIC_ONLY)]
+
+
+async def test_check_shows_live_review_progress_until_the_result_arrives(
+    make_app: MakeApp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #571 A2: a waiting check shows its structural phase, then its verdict."""
+
+    import asyncio
+
+    class _SlowCheckRuntime(FakeRuntime):
+        def __init__(self) -> None:
+            super().__init__()
+            self.release = asyncio.Event()
+
+        async def run_check(self, title: str, mode: CheckMode) -> tuple[str, tuple[str, ...]]:
+            self.checks.append((title, mode))
+            await self.release.wait()
+            return "pass", ("Verdict: pass",)
+
+        async def check_progress(self, title: str) -> TaskStatusPage:
+            page = await super().check_progress(title)
+            self.release.set()
+            return page
+
+    runtime = _SlowCheckRuntime()
+    app = make_app(runtime=runtime)
+    app.progress_poll_seconds = 0.0
+    app._active_task_title = "upload"  # pyright: ignore[reportPrivateUsage]
+    settled: list[tuple[str, tuple[str, ...]]] = []
+    original_settle = app.settle
+
+    def record_settle(level: object, title: str, body: object = (), **kwargs: object) -> object:
+        settled.append((title, tuple(body)))  # type: ignore[arg-type]
+        return original_settle(level, title, body, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(app, "settle", record_settle)
+    async with app.run_test(size=WIDE) as pilot:
+        await pilot.pause()
+        await run_command(pilot, app, "/check")
+        await pilot.press("down", "down", "enter")  # local only
+        await pilot.pause()
+        await pilot.pause()
+        assert runtime.progress_reads == ["upload"]
+        assert (
+            "Checking upload (local checks only)",
+            (
+                "Semantic review phase: provider_sampling (attempt 1, active)",
+                "Semantic review elapsed: 42s; remaining 858s; deadline 2026-09-22T12:15:00.000Z",
+            ),
+        ) in settled
+        assert "Check complete: pass" in transcript(app)
+
+
+async def test_progress_command_reads_the_latest_check_operation(make_app: MakeApp) -> None:
+    runtime = FakeRuntime()
+    app = make_app(runtime=runtime)
+    app._active_task_title = "upload"  # pyright: ignore[reportPrivateUsage]
+    async with app.run_test(size=WIDE) as pilot:
+        await pilot.pause()
+        await run_command(pilot, app, "/progress")
+        assert runtime.progress_reads == ["upload"]
+        text = transcript(app)
+        assert "Semantic review phase: provider_sampling (attempt 1, active)" in text
 
 
 async def test_receipt_offers_the_supported_formats(make_app: MakeApp) -> None:

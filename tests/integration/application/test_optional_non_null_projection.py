@@ -73,9 +73,11 @@ from yoetz.protocol.models import (
     StatusAdviceItemModel,
     StatusCompactObligationModel,
     StatusObligationItemModel,
+    StatusOperationPageModel,
     StatusProjectDetectionModel,
     StatusProjectPageModel,
     StatusRequest,
+    StatusSemanticProgressModel,
     StatusStructuralSubjectStateModel,
     StatusVersionSliceModel,
     public_model_to_wire,
@@ -148,6 +150,11 @@ _RESULT_OPTIONAL_NON_NULL: tuple[tuple[type[BaseModel], frozenset[str]], ...] = 
         ),
     ),
     (StatusProjectDetectionModel, frozenset({"resource_paths"})),
+    (StatusOperationPageModel, frozenset({"semantic_progress"})),
+    (
+        StatusSemanticProgressModel,
+        frozenset({"remaining_ms", "terminal_outcome", "terminal_reason"}),
+    ),
     (StatusProjectPageModel, frozenset({"title", "description", "title_ref", "description_ref"})),
     (StatusStructuralSubjectStateModel, frozenset({"tree_digest", "diff_digest"})),
     (StatusVersionSliceModel, frozenset({"route_profile"})),
@@ -1017,7 +1024,16 @@ def test_every_result_optional_non_null_field_has_an_unset_projection_case() -> 
         ("StatusVersionSliceModel", "route_profile"): (
             "test_status_version_slice_omits_unset_route_profile"
         ),
+        # Issue #571 A2: tests/integration/application/test_status_pending_operation_projection.py
+        ("StatusOperationPageModel", "semantic_progress"): (
+            "test_pending_check_operation_page_projects_to_the_client"
+        ),
     }
+    for field in ("remaining_ms", "terminal_outcome", "terminal_reason"):
+        # The sampling case omits the terminal pair; the terminal case omits remaining_ms.
+        covered["StatusSemanticProgressModel", field] = (
+            "test_semantic_progress_agrees_across_json_text_mcp_and_tui"
+        )
     for model, fields in (
         ("StartSuccessModel", ("attach_handle", "parent_task_id", "depth", "origin", "acceptance")),
         ("CheckSuccessModel", ("children", "advisory_notes")),

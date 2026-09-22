@@ -75,3 +75,45 @@ class CheckWaits:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+class CheckReadWindow:
+    """Admit bounded operation-status reads while a service-owned check holds the dispatch gates.
+
+    A semantic check can hold the maintenance and observation gates for many minutes. Its live
+    structural progress (issue #571 A2) is only useful if ``status view=operation`` can be read
+    meanwhile. The window is open only while a detached check owns both gates, so maintenance,
+    recovery, and observation sweeps are still excluded for as long as a reader runs: the owner
+    closes the window and drains every admitted reader before it releases the gates. Every other
+    request keeps waiting on the gates as before.
+    """
+
+    def __init__(self) -> None:
+        self._open = False
+        self._readers = 0
+        self._drained = asyncio.Event()
+        self._drained.set()
+
+    @property
+    def admits_readers(self) -> bool:
+        return self._open
+
+    def open(self) -> None:
+        self._open = True
+
+    async def close(self) -> None:
+        self._open = False
+        await self._drained.wait()
+
+    def enter(self) -> None:
+        if not self._open:
+            raise RuntimeError("check_read_window_closed")
+        self._readers += 1
+        self._drained.clear()
+
+    def leave(self) -> None:
+        if self._readers <= 0:
+            raise RuntimeError("check_read_window_unbalanced")
+        self._readers -= 1
+        if self._readers == 0:
+            self._drained.set()

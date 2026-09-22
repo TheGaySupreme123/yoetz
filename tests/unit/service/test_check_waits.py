@@ -142,3 +142,29 @@ async def test_retained_waiters_have_a_fixed_capacity() -> None:
     finally:
         await waits.close()
         await asyncio.gather(*waiters, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_read_window_admits_only_while_open_and_close_drains_readers() -> None:
+    """Issue #571 A2: the gate owner cannot release its gates under an admitted reader."""
+
+    from yoetz.service.check_waits import CheckReadWindow
+
+    window = CheckReadWindow()
+    assert not window.admits_readers
+    with pytest.raises(RuntimeError):
+        window.enter()
+    window.open()
+    assert window.admits_readers
+    window.enter()
+    closing = asyncio.create_task(window.close())
+    done, _pending = await asyncio.wait({closing}, timeout=0)
+    # Closing stops new admissions at once but waits for the active reader.
+    assert not window.admits_readers
+    assert not done
+    with pytest.raises(RuntimeError):
+        window.enter()
+    window.leave()
+    await asyncio.wait_for(closing, timeout=1.0)
+    with pytest.raises(RuntimeError):
+        window.leave()

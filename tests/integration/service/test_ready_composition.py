@@ -73,6 +73,7 @@ from yoetz.protocol.models import (
     StartResult,
 )
 from yoetz.service.bundle_upgrade import (
+    BUNDLE_UPGRADE_TARGET_VERSION,
     BackupEvidence,
     BundleIntegrity,
     BundleUpgradeError,
@@ -1326,7 +1327,9 @@ async def test_default_startup_bundle_upgrade_runs_real_effects_on_isolated_v12_
     assert (backup_sets[0] / "backup-manifest.json").is_file()
     inspection = apsw.Connection(str(bundle), flags=apsw.SQLITE_OPEN_READONLY)
     try:
-        assert inspection.execute("PRAGMA user_version").fetchone() == (14,)
+        assert inspection.execute("PRAGMA user_version").fetchone() == (
+            BUNDLE_UPGRADE_TARGET_VERSION,
+        )
     finally:
         inspection.close(force=True)
 

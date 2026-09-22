@@ -51,6 +51,7 @@ from yoetz.domain.privacy import (
     RequestCommitment,
 )
 from yoetz.domain.values import validate_sha256_digest
+from yoetz.observability.semantic_context import report_semantic_progress
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.secret_memory import ProviderAttemptAuthBinding
 from yoetz.ports.semantic import (
@@ -72,7 +73,7 @@ from yoetz.protocol.canonical import (
     strict_json_parse,
 )
 from yoetz.protocol.errors import ProtocolValueError
-from yoetz.protocol.models import SemanticStatus
+from yoetz.protocol.models import SemanticProgressPhase, SemanticStatus
 
 __all__ = [
     "CODEX_APP_SERVER_SCHEMA_SHA256",
@@ -1763,6 +1764,7 @@ class CodexAppServerEvaluator:
         raw_size = 0
         try:
             self.profile.verify_capability_evidence(self.clock.now_utc())
+            await report_semantic_progress(SemanticProgressPhase.RUNTIME_STARTING)
             runtime = await _launch(self.profile)
             initialize = await runtime.request(
                 0,
@@ -1783,6 +1785,7 @@ class CodexAppServerEvaluator:
             )
             _validate_initialize(self.profile, initialize)
             await runtime.send({"method": "initialized"})
+            await report_semantic_progress(SemanticProgressPhase.ACCOUNT_MODEL_VALIDATION)
             account_result = await runtime.request(
                 1,
                 "account/read",
@@ -1835,6 +1838,7 @@ class CodexAppServerEvaluator:
             if type(turn_id) is not str or not turn_id or turn.get("status") != "inProgress":
                 raise ValueError("codex_turn_ack_invalid")
             turn_acknowledged = True
+            await report_semantic_progress(SemanticProgressPhase.PROVIDER_SAMPLING)
 
             # Codex tags each agent message as interim ``commentary`` or the ``final_answer``.
             # Commentary is narration the constrained-output schema never governs; it is
@@ -1929,6 +1933,7 @@ class CodexAppServerEvaluator:
                         (final_texts if phase == "final_answer" else untagged_texts).append(text)
                 if method != "turn/completed":
                     continue
+                await report_semantic_progress(SemanticProgressPhase.RESPONSE_VALIDATION)
                 params = _object(message.get("params"))
                 completed = _object(params.get("turn"))
                 if params.get("threadId") != thread_id or completed.get("id") != turn_id:
@@ -1957,13 +1962,17 @@ class CodexAppServerEvaluator:
             )
         finally:
             try:
-                if (
-                    runtime is not None
-                    and thread_id is not None
-                    and turn_id is not None
-                    and failure
-                ):
-                    await _interrupt(runtime, thread_id, turn_id)
+                try:
+                    if runtime is not None:
+                        await report_semantic_progress(SemanticProgressPhase.CLEANUP)
+                finally:
+                    if (
+                        runtime is not None
+                        and thread_id is not None
+                        and turn_id is not None
+                        and failure
+                    ):
+                        await _interrupt(runtime, thread_id, turn_id)
             finally:
                 cleanup = await _cleanup_guaranteed(runtime)
 

@@ -42,6 +42,7 @@ from yoetz.protocol.ids import IdKind, validate_actor_id, validate_id
 from yoetz.protocol.models import (
     MAX_EVENTS_PER_BATCH,
     CheckScopeModel,
+    SemanticProgressPhase,
     SemanticReason,
     SemanticStatus,
     StatusAssignmentItemModel,
@@ -102,6 +103,7 @@ __all__ = [
     "SemanticContinuation",
     "SemanticDisclosureWait",
     "SemanticJobRecord",
+    "SemanticProgressRecord",
     "StoredProjection",
 ]
 
@@ -1095,6 +1097,47 @@ class SemanticAttemptRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class SemanticProgressRecord:
+    """Durable structural progress of one AI-powered review job (issue #571 item A2).
+
+    ``attempt_ordinal`` is 0 until the first attempt is claimed. ``queued_at`` and
+    ``deadline_at`` are written once when progress begins; ``deadline_at`` is the job's frozen
+    total execution expiry, never a caller wait. A terminal record is derived from the terminal
+    job row, so ``phase`` is ``terminal`` exactly when ``terminal_outcome`` is present.
+    """
+
+    job_id: str
+    attempt_ordinal: int
+    phase: SemanticProgressPhase
+    phase_entered_at: datetime
+    queued_at: datetime
+    deadline_at: datetime
+    terminal_outcome: Literal["succeeded", "failed", "quarantined"] | None = None
+    terminal_reason: SemanticReason | None = None
+
+    def __post_init__(self) -> None:
+        _id(IdKind.SEMANTIC_JOB, self.job_id)
+        _uint(self.attempt_ordinal)
+        if type(self.phase) is not SemanticProgressPhase:
+            raise _invalid()
+        _utc(self.phase_entered_at)
+        _utc(self.queued_at)
+        _utc(self.deadline_at)
+        terminal = self.phase is SemanticProgressPhase.TERMINAL
+        if terminal:
+            if (
+                type(self.terminal_outcome) is not str
+                or self.terminal_outcome not in {"succeeded", "failed", "quarantined"}
+                or type(self.terminal_reason) is not SemanticReason
+            ):
+                raise _invalid()
+        elif self.terminal_outcome is not None or self.terminal_reason is not None:
+            raise _invalid()
+        elif self.attempt_ordinal == 0 and self.phase is not SemanticProgressPhase.QUEUED:
+            raise _invalid()
+
+
+@dataclass(frozen=True, slots=True)
 class SemanticDisclosureWait:
     """One suspended AI-powered review attempt awaiting a local disclosure decision.
 
@@ -1669,6 +1712,31 @@ class LedgerPort(Protocol):
     ) -> SemanticDisclosureWait | None: ...
 
     async def resolve_disclosure_wait(self, job_id: str) -> SemanticDisclosureWait: ...
+
+    async def begin_semantic_progress(
+        self, job_id: str, queued_at: datetime, deadline_at: datetime
+    ) -> None:
+        """Create the ``queued`` progress row for a non-terminal job once; later calls no-op."""
+
+        ...
+
+    async def advance_semantic_progress(
+        self,
+        handle: SemanticAttemptHandle,
+        phase: SemanticProgressPhase,
+        observed_at: datetime,
+    ) -> bool:
+        """Move progress forward for the job's active attempt; return whether it advanced.
+
+        A write that would not move ``(attempt_ordinal, phase)`` strictly forward, names an
+        attempt that is no longer active, or targets a terminal job is ignored.
+        """
+
+        ...
+
+    async def load_semantic_progress(
+        self, writer_id: str, operation_id: str
+    ) -> SemanticProgressRecord | None: ...
 
     async def renew_leases(self, lease: OperationLease) -> OperationLease:
         """Return a replacement lease under the operation's authenticated lifetime policy.

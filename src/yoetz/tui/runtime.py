@@ -310,6 +310,9 @@ class YoetzRuntime:
         self._sessions: dict[str, _WorkSession] = {}
         self._opened_titles: list[str] = []
         self._pending_checks: dict[str, object] = {}
+        # The request id of the latest check per task, kept so its structural progress can be
+        # read while it runs and recovered after a client wait ends (issue #571 A2).
+        self._check_request_ids: dict[str, str] = {}
 
     # -- discovery ------------------------------------------------------
 
@@ -1601,6 +1604,33 @@ class YoetzRuntime:
             receipt_available=False,
         )
 
+    async def check_progress(self, title: str) -> TaskStatusPage:
+        """Read the latest check's operation page, including structural review progress."""
+
+        from yoetz.cli.render import render_human_status
+        from yoetz.protocol.models import StatusRequestModel
+
+        session = self._sessions.get(title)
+        if session is None:
+            raise RuntimeError_("task_not_open", "open the task first")
+        request_id = self._check_request_ids.get(title)
+        if request_id is None:
+            raise RuntimeError_("check_not_started", "run a check for this task first")
+        request = StatusRequestModel.model_validate(
+            {
+                **self._workflow_identity(),
+                "session_id": session.session_id,
+                "writer_id": session.writer_id,
+                "view": "operation",
+                "limit": "1",
+                "filter": {"operation_request_id": request_id},
+            }
+        )
+        async with self._client() as client:
+            result = await client.status(request)
+        success = self._unwrap(result, "the check progress could not be read")
+        return TaskStatusPage(tuple(render_human_status(success).splitlines()), None)
+
     async def run_check(self, title: str, mode: CheckMode) -> tuple[str, tuple[str, ...]]:
         """Run one check in the requested mode and report it without softening."""
 
@@ -1623,6 +1653,7 @@ class YoetzRuntime:
                 }
             )
         )
+        self._check_request_ids[title] = str(request.request_id)
         async with self._client() as client:
             result = await client.check(request)
         success = self._unwrap(result, "the check could not be completed")

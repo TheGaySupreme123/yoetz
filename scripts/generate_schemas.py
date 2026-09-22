@@ -2817,9 +2817,88 @@ def _status_result_v1_4_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
             },
         ]
     )
+    _add_status_semantic_progress(definitions)
     document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
     document["title"] = f"Yoetz status result {entry.schema_version}"
     return document
+
+
+def _add_status_semantic_progress(definitions: dict[str, JsonValue]) -> None:
+    """Add optional structural AI-powered review progress to check operation pages (#571 A2)."""
+
+    models = __import__(
+        "yoetz.protocol.models", fromlist=["SemanticProgressPhase", "SemanticReason"]
+    )
+    phases = [phase.value for phase in models.SemanticProgressPhase]
+    reasons = sorted(
+        (reason.value for reason in models.SemanticReason),
+        key=lambda item: str(item).encode("ascii"),
+    )
+    terminal_fields: list[JsonValue] = [
+        {"required": ["terminal_outcome"]},
+        {"required": ["terminal_reason"]},
+    ]
+    definitions["semantic_progress"] = {
+        "additionalProperties": False,
+        "allOf": [
+            {
+                "if": {"properties": {"phase": {"const": "terminal"}}, "required": ["phase"]},
+                "then": {
+                    "not": {"required": ["remaining_ms"]},
+                    "properties": {"condition": {"const": "terminal"}},
+                    "required": ["terminal_outcome", "terminal_reason"],
+                },
+                "else": {
+                    "not": {"anyOf": terminal_fields},
+                    "properties": {"condition": {"enum": ["active", "overdue"]}},
+                    "required": ["remaining_ms"],
+                },
+            }
+        ],
+        "properties": {
+            "attempt_ordinal": {"$ref": "#/$defs/canonical_uint"},
+            "condition": {"enum": ["active", "overdue", "terminal"], "type": "string"},
+            "deadline_at": {"$ref": "#/$defs/timestamp"},
+            "elapsed_ms": {"$ref": "#/$defs/canonical_uint"},
+            "observed_at": {"$ref": "#/$defs/timestamp"},
+            "phase": {"enum": cast(list[JsonValue], phases), "type": "string"},
+            "phase_entered_at": {"$ref": "#/$defs/timestamp"},
+            "queued_at": {"$ref": "#/$defs/timestamp"},
+            "remaining_ms": {"$ref": "#/$defs/canonical_uint"},
+            "terminal_outcome": {
+                "enum": ["failed", "quarantined", "succeeded"],
+                "type": "string",
+            },
+            "terminal_reason": {"enum": cast(list[JsonValue], reasons), "type": "string"},
+        },
+        "required": [
+            "attempt_ordinal",
+            "condition",
+            "deadline_at",
+            "elapsed_ms",
+            "observed_at",
+            "phase",
+            "phase_entered_at",
+            "queued_at",
+        ],
+        "type": "object",
+    }
+    operation_page = cast(dict[str, JsonValue], definitions["operation_page"])
+    operation_properties = cast(dict[str, JsonValue], operation_page["properties"])
+    operation_properties["semantic_progress"] = {"$ref": "#/$defs/semantic_progress"}
+    operation_rules = cast(list[JsonValue], operation_page.setdefault("allOf", []))
+    operation_rules.append(
+        {
+            "if": {"required": ["semantic_progress"]},
+            "then": {
+                "properties": {
+                    "operation_kind": {"const": "check"},
+                    "state": {"enum": ["pending", "complete"]},
+                },
+                "required": ["operation_kind", "state"],
+            },
+        }
+    )
 
 
 def _receipt_document_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:

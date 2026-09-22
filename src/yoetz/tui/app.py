@@ -104,12 +104,20 @@ _PROFILE_FOR_RECIPE: Final[dict[str, str]] = {
 }
 
 
+def _progress_lines(lines: Sequence[str]) -> tuple[str, ...]:
+    """Keep only the structural review-progress lines of a rendered operation page."""
+
+    return tuple(line for line in lines if line.startswith("Semantic review"))
+
+
 class YoetzTui(App[int]):
     """The interactive Yoetz surface. A presentation layer over existing services."""
 
     CSS: ClassVar[str] = YOETZ_CSS
     TITLE = "Yoetz"
     BINDINGS: ClassVar[list[Any]] = []
+    # How often a running check's structural progress is re-read while its result is awaited.
+    progress_poll_seconds: float = 5.0
 
     def __init__(
         self,
@@ -350,6 +358,7 @@ class YoetzTui(App[int]):
             "lineage": self.command_lineage,
             "project": self.command_project,
             "check": self.command_check,
+            "progress": self.command_progress,
             "receipt": self.command_receipt,
             "connect": self.command_connect,
             "disconnect": self.command_disconnect,
@@ -1987,13 +1996,37 @@ class YoetzTui(App[int]):
         if chosen is None:
             return
         mode = CheckMode(chosen)
-        self.say(Level.ACTIVE, f"Checking {title} ({mode.label.lower()})")
-        verdict, lines = await self.runtime.run_check(title, mode)
+        heading = f"Checking {title} ({mode.label.lower()})"
+        self.say(Level.ACTIVE, heading)
+        check = asyncio.ensure_future(self.runtime.run_check(title, mode))
+        try:
+            while True:
+                done, _pending = await asyncio.wait({check}, timeout=self.progress_poll_seconds)
+                if done:
+                    break
+                # Structural phase and elapsed time only; the check itself keeps running
+                # service-side even if this view stops polling (issue #571 A2).
+                try:
+                    progress = await self.runtime.check_progress(title)
+                except RuntimeError_:
+                    continue
+                self.settle(Level.ACTIVE, heading, _progress_lines(progress.lines))
+        finally:
+            if not check.done():
+                check.cancel()
+        verdict, lines = check.result()
         if verdict == "awaiting_human":
             self.settle(Level.ACTIVE, "Check awaiting your decision", lines)
             return
         level = Level.VERIFIED if verdict == "pass" else Level.UNPROVEN
         self.settle(level, f"Check complete: {verdict}", lines)
+
+    async def command_progress(self) -> None:
+        title = await self._require_task()
+        if title is None:
+            return
+        page = await self.runtime.check_progress(title)
+        self.settle(Level.ACTIVE, "Check progress", page.lines)
 
     async def command_receipt(self) -> None:
         title = await self._require_task()

@@ -221,7 +221,12 @@ from yoetz.observability.logging import (
     record_bounded_event_without_raising,
     record_unexpected_exception_without_raising,
 )
-from yoetz.observability.semantic_context import semantic_check_request
+from yoetz.observability.semantic_context import (
+    SemanticProgressSink,
+    report_semantic_progress,
+    semantic_check_request,
+    semantic_progress_sink,
+)
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.control import ControlError, ControlMethod
 from yoetz.ports.diagnostics import (
@@ -239,7 +244,12 @@ from yoetz.ports.keys import (
     MacKeyHandle,
     MacKeyPurpose,
 )
-from yoetz.ports.ledger import FrozenCase, LedgerPort
+from yoetz.ports.ledger import (
+    FrozenCase,
+    LedgerPort,
+    SemanticAttemptHandle,
+    SemanticJobRecord,
+)
 from yoetz.ports.maintenance import PrivacyAuditBackupSnapshot
 from yoetz.ports.objects import (
     ObjectKind,
@@ -288,12 +298,14 @@ from yoetz.protocol.canonical import canonical_digest, canonical_encode, strict_
 from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind, new_id, validate_id
 from yoetz.protocol.models import (
+    SemanticProgressPhase,
     SemanticReason,
     SemanticStatus,
     validate_semantic_provenance_binding,
 )
 from yoetz.service.bundle_upgrade import (
     BUNDLE_UPGRADE_SOURCE_VERSION,
+    BUNDLE_UPGRADE_SOURCE_VERSIONS,
     BUNDLE_UPGRADE_TARGET_VERSION,
     BackupEvidence,
     BundleIntegrity,
@@ -1181,9 +1193,9 @@ async def _bundle_upgrade_targets(
                 continue
             # Current bundles without a pending upgrade do not need their privacy object set
             # re-hashed merely to prove that startup can skip them.  A stale source or an
-            # interrupted v14 operation still gets the exact roots that enter the coordinator's
-            # plan digest and CAS checks.
-            needs_privacy_roots = schema_version in {12, 13} or (
+            # interrupted target-version operation still gets the exact roots that enter the
+            # coordinator's plan digest and CAS checks.
+            needs_privacy_roots = schema_version in BUNDLE_UPGRADE_SOURCE_VERSIONS or (
                 schema_version == BUNDLE_UPGRADE_TARGET_VERSION
                 and _bundle_upgrade_has_pending(catalog_db, installation_id, route.task_id)
             )
@@ -3029,6 +3041,54 @@ def _map_egress_to_final(
     return FinalSemanticEvaluation(SemanticStatus.FAILED, SemanticReason.COORDINATOR_FAILURE)
 
 
+def _progress_millis(value: datetime) -> datetime:
+    return value.replace(microsecond=value.microsecond - value.microsecond % 1000)
+
+
+async def _begin_semantic_progress(
+    runtime: TaskRuntime, job: SemanticJobRecord, deadline_at: datetime, clock: ClockPort
+) -> None:
+    """Create the job's ``queued`` progress row; progress never blocks or fails a check."""
+
+    begin = getattr(runtime.ledger, "begin_semantic_progress", None)
+    if not callable(begin):
+        return
+    try:
+        await cast(Callable[[str, datetime, datetime], Awaitable[None]], begin)(
+            job.job_id,
+            _progress_millis(clock.now_utc()),
+            _progress_millis(deadline_at),
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - telemetry must not fail the check
+        record_unexpected_exception_without_raising(
+            exc,
+            component="semantic_progress",
+            operation="semantic_progress_begin_failed",
+            request_id=job.operation_id,
+        )
+
+
+def _attempt_progress_sink(
+    runtime: TaskRuntime, handle: SemanticAttemptHandle, clock: ClockPort
+) -> SemanticProgressSink | None:
+    """Bind structural phase writes to exactly one claimed physical attempt."""
+
+    advance = getattr(runtime.ledger, "advance_semantic_progress", None)
+    if not callable(advance):
+        return None
+    write = cast(
+        Callable[[SemanticAttemptHandle, SemanticProgressPhase, datetime], Awaitable[bool]],
+        advance,
+    )
+
+    async def _sink(phase: SemanticProgressPhase) -> None:
+        await write(handle, phase, _progress_millis(clock.now_utc()))
+
+    return _sink
+
+
 @dataclass(frozen=True, slots=True)
 class _SemanticExecution:
     provider: ProviderBinding
@@ -4288,6 +4348,9 @@ def _privacy_gated_semantic_evaluator(
                     semantic_case.case_digest,
                     case_ref,
                 )
+            # Structural progress starts at the frozen execution deadline; a recovered job keeps
+            # its original row, so replay never restarts its elapsed time (issue #571 A2).
+            await _begin_semantic_progress(runtime, job, execution.expires_at, clock)
 
             def _dispatch_for(
                 binding: ProviderBinding,
@@ -4363,8 +4426,27 @@ def _privacy_gated_semantic_evaluator(
 
                     assert type(handle) is _Handle
                     diagnostic_token = semantic_check_request.set(frozen.lease.operation_id)
+                    progress_token = semantic_progress_sink.set(
+                        _attempt_progress_sink(runtime, handle, clock)
+                    )
                     stage = "privacy_admission"
+
+                    async def _mapped(result: object) -> FinalSemanticEvaluation:
+                        final = _map_egress_to_final(
+                            result,
+                            ids,
+                            attempt_id=handle.attempt_id,
+                            operation_request_id=frozen.lease.operation_id,
+                        )
+                        if final.status in {SemanticStatus.SUCCEEDED, SemanticStatus.INVALID}:
+                            # A provider response came back and is now validated and recorded.
+                            await report_semantic_progress(
+                                SemanticProgressPhase.RESPONSE_VALIDATION
+                            )
+                        return final
+
                     try:
+                        await report_semantic_progress(SemanticProgressPhase.QUEUED)
                         # The local observation store is the authority for retained
                         # content. Its generation must still be current after all
                         # object resolution and before candidate bytes can enter the
@@ -4401,12 +4483,7 @@ def _privacy_gated_semantic_evaluator(
                             )
                             if recovered is not None:
                                 stage = "response_mapping"
-                                return _map_egress_to_final(
-                                    recovered,
-                                    ids,
-                                    attempt_id=handle.attempt_id,
-                                    operation_request_id=frozen.lease.operation_id,
-                                )
+                                return await _mapped(recovered)
                         if (
                             wait is not None
                             and wait.job_id == handle.job_id
@@ -4425,12 +4502,7 @@ def _privacy_gated_semantic_evaluator(
                         else:
                             result = await _evaluate_with_fence(candidate, attempt_deadline)
                         stage = "response_mapping"
-                        return _map_egress_to_final(
-                            result,
-                            ids,
-                            attempt_id=handle.attempt_id,
-                            operation_request_id=frozen.lease.operation_id,
-                        )
+                        return await _mapped(result)
                     except BaseException as exc:
                         record_unexpected_exception_without_raising(
                             exc,
@@ -4440,6 +4512,7 @@ def _privacy_gated_semantic_evaluator(
                         )
                         raise
                     finally:
+                        semantic_progress_sink.reset(progress_token)
                         semantic_check_request.reset(diagnostic_token)
 
                 return _dispatch

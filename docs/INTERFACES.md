@@ -384,8 +384,9 @@ ids/digests; `pending`/`quarantined` report kind without those fields; `absent` 
 them; non-publish completions report kind without append-shaped event detail. A pending check that
 is awaiting repository setup or a one-use disclosure decision reconstructs its typed continuation
 from the routed task ledger using the operation's recorded writer, so a same-task session/writer
-rotation does not strand the decision. Lookups are scoped to the authenticated task. A request
-from another task is reported as absent.
+rotation does not strand the decision. A pending or complete check may also carry structural
+`semantic_progress` (see "Structural semantic progress"). Lookups are scoped to the authenticated
+task. A request from another task is reported as absent.
 MCP `publish_work` performs the same envelope-first operation lookup when the supplied body fails
 schema validation (so a malformed retry body can still recover a committed operation) — except
 under a declared `dry_run: true`, which appends nothing, so no prior-operation lookup can change
@@ -5908,7 +5909,42 @@ a completed operation replays from its ledger with current client disclosure pro
 control cancellation while attached and service shutdown cancel the owned work. Local coroutine
 cancellation merely stops waiting for a check. Other workflow cancellation behavior is unchanged.
 The existing maintenance gate may delay other task reads while a check runs; this change supplies
-pending/replay continuity, not new progress phases or concurrent-check scheduling (#571).
+pending/replay continuity, not concurrent-check scheduling. Structural progress for the running
+check is readable through `status view=operation` (next section).
+
+### Structural semantic progress (#571 A2)
+
+`status view=operation` for a pending or complete check whose AI-powered review job recorded
+progress adds an optional `semantic_progress` object to the page (status result schema 1.4.0; it
+is omitted, never null, otherwise). Fields: `phase` (closed: `queued`, `case_admitted`,
+`runtime_starting`, `account_model_validation`, `provider_sampling`, `response_validation`,
+`cleanup`, `terminal`), `attempt_ordinal` (canonical uint; `0` until the first attempt is
+claimed), `queued_at`, `phase_entered_at`, `deadline_at`, `observed_at` (timestamps), `elapsed_ms`
+(canonical uint), and `condition` (`active`, `overdue`, `terminal`). A non-terminal object also has
+`remaining_ms`; a terminal one has `terminal_outcome` (`succeeded`, `failed`, `quarantined`) and
+`terminal_reason` (a `SemanticReason`) and no `remaining_ms`. `condition` is `active` exactly when
+`remaining_ms` is positive. Durations are computed by the service at `observed_at`; terminal
+`elapsed_ms` is frozen at the terminal time. `deadline_at` is the frozen execution expiry.
+
+Phases move forward only (by phase order within an attempt, then by attempt ordinal); a retry
+restarts at `queued` with the next ordinal. The terminal phase is derived from the terminal
+`semantic_jobs` row, so exactly one terminal state exists and survives restart. Storage is bundle
+table `semantic_progress` (bundle schema 15, migration `0015`); ledger port methods are
+`begin_semantic_progress(job_id, queued_at, deadline_at)` (insert once; replay is a no-op),
+`advance_semantic_progress(handle, phase, observed_at) -> bool` (only the active attempt of a
+leased job, only forward, never `terminal`), and `load_semantic_progress(writer_id, operation_id)`.
+The read-only runtime facade exposes the load. Provider and gateway code report phases through
+`yoetz.observability.semantic_context.report_semantic_progress(phase)`; the service binds the
+`semantic_progress_sink` context variable to exactly one claimed attempt, and a recording failure
+is a bounded `semantic_progress` diagnostic that never changes the attempt.
+
+While a service-owned check holds the maintenance and observation gates, the daemon admits
+`status view=operation` reads beside it through `CheckReadWindow`; the check drains admitted
+readers before releasing the gates. All other ordinary calls keep waiting on the gates. The CLI
+human status rendering prints `Semantic review …` lines; the MCP text summary adds `operation
+state`, `semantic phase`, `attempt`, `condition`, `elapsed ms`, and either `remaining ms` or the
+terminal outcome; the terminal interface polls the page while its own check runs and offers
+`/progress`. Receipts are unchanged: progress is live telemetry, not a coverage fact.
 
 
 `FinalSemanticEvaluation.case_content_gaps` carries bounded native-resolution omissions from the

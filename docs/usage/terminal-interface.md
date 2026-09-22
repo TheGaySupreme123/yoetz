@@ -112,6 +112,7 @@ Type `/` to open the filtered command list.
 | `/status` | show setup, readiness, and current work |
 | `/work` | open a task by title to view claims, evidence, and findings |
 | `/check` | run a verification check |
+| `/progress` | show the latest check's review phase and elapsed time |
 | `/receipt` | view or export an honest receipt |
 | `/connect` | connect or repair an agent integration |
 | `/privacy` | choose what may leave this computer |
@@ -241,7 +242,11 @@ invent one — so tasks are reached by name.
 
 `/check` offers three modes, mapping to the existing check modes: use deeper review when
 available, require deeper review, or local checks only. An unavailable deeper
-review is reported as a limitation, never as a success.
+review is reported as a limitation, never as a success. While a check with deeper review is
+running, its line shows the review phase, attempt, elapsed time, and time left before the fixed
+deadline, refreshed every few seconds. `/progress` reads the latest check of the open task again,
+including after the result arrives. Progress names phases only; it is not evidence that the
+review is correct.
 
 `/receipt` produces Markdown, plain text, or JSON. The readable view leads with the verdict, then
 coverage, open findings, limitations, whether deeper review contributed, freshness, and — always
