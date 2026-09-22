@@ -168,6 +168,7 @@ _MAX_FILE_BYTES: Final = 262_144
 _MAX_FILES: Final = 64
 _MAX_PATH: Final = 4_096
 _MAX_CURSOR_IDENTITY_BYTES: Final = 4_096
+_MAX_CURSOR_IDENTITY_METADATA_BYTES: Final = 1_048_576
 _GUIDANCE_NAMES: Final = (
     "agent-instructions.md",
     "coverage-and-receipts.md",
@@ -654,6 +655,17 @@ def _validate_digest(value: object) -> str:
     ):
         raise ValueError("cursor_digest_invalid")
     return value
+
+
+def _valid_cursor_identity_text(value: object) -> bool:
+    """Accept bounded printable ASCII metadata for structural identity fields."""
+
+    return (
+        type(value) is str
+        and bool(value)
+        and len(value) <= 128
+        and all(0x20 <= ord(character) <= 0x7E for character in value)
+    )
 
 
 def _inventory(members: Mapping[str, bytes]) -> tuple[ManagedPluginFile, ...]:
@@ -2275,7 +2287,11 @@ def _discover_linux_cursor_ide(app_path: Path) -> CursorCapabilityIdentity:
             raise ValueError("cursor_ide_unavailable")
         with executable.open("rb") as stream:
             header = stream.read(20)
-            if len(header) != 20 or header[:6] != b"\x7fELF\x02\x01":
+            if (
+                len(header) != 20
+                or header[:6] != b"\x7fELF\x02\x01"
+                or int.from_bytes(header[16:18], "little") not in {2, 3}
+            ):
                 raise ValueError("cursor_ide_identity_invalid")
         architecture = {62: "x86_64", 183: "aarch64"}.get(int.from_bytes(header[18:20], "little"))
         if architecture is None:
@@ -2286,8 +2302,8 @@ def _discover_linux_cursor_ide(app_path: Path) -> CursorCapabilityIdentity:
             if path.is_symlink() or not path.is_file():
                 raise ValueError("cursor_ide_identity_invalid")
             with path.open("rb") as stream:
-                content = stream.read(1024 * 1024 + 1)
-            if len(content) > 1024 * 1024:
+                content = stream.read(_MAX_CURSOR_IDENTITY_METADATA_BYTES + 1)
+            if len(content) > _MAX_CURSOR_IDENTITY_METADATA_BYTES:
                 raise ValueError("cursor_ide_identity_invalid")
             value = strict_json_parse(content)
             if not isinstance(value, Mapping):
@@ -2297,7 +2313,7 @@ def _discover_linux_cursor_ide(app_path: Path) -> CursorCapabilityIdentity:
         version = package.get("version")
         build = product.get("commit")
         if product.get("applicationName") != "cursor" or not all(
-            type(value) is str and value and len(value) <= 128 for value in (version, build)
+            _valid_cursor_identity_text(value) for value in (version, build)
         ):
             raise ValueError("cursor_ide_identity_invalid")
         return CursorCapabilityIdentity(

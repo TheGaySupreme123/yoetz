@@ -16,6 +16,17 @@ discovery/start, disconnect and reconnect for macOS, Linux and WSL 2 separately 
 app availability and CLI availability remain distinct; an untested version/platform does not
 inherit certification from executable discovery or unit tests.
 
+## Linux and WSL
+
+Linux and WSL 2 use the Codex CLI installation path; OpenAI does not publish a Linux Codex Desktop
+application. The TUI therefore labels a Linux executable as `Codex CLI` and reserves `Codex Desktop`
+for an application bundle path, describing the installation shape rather than activation or
+session capability. The common setup flow, service, and project binding still require the same
+explicit target and fresh-session evidence as macOS. Native Linux/WSL capability remains bounded
+by its recorded evidence; installation discovery and TUI labels do not imply a native-session
+capability. Shared facts are in the [Linux/WSL runbook](linux-and-wsl.md), and the installation
+evidence is recorded in #767.
+
 ## Conditional agent guidance
 
 The skill keeps its activation boundary, core workflow, and safety floor in the entrypoint.

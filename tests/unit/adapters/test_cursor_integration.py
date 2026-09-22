@@ -1467,7 +1467,9 @@ def _linux_cursor_package(tmp_path: Path) -> Path:
     root = tmp_path / "usr" / "share" / "cursor"
     metadata = root / "resources" / "app"
     metadata.mkdir(parents=True)
-    (root / "cursor").write_bytes(b"\x7fELF\x02\x01" + b"\x00" * 12 + b"\x3e\x00native-binary")
+    (root / "cursor").write_bytes(
+        b"\x7fELF\x02\x01" + b"\x00" * 10 + b"\x03\x00" + b"\x3e\x00native-binary"
+    )
     (root / "cursor").chmod(0o755)
     (metadata / "package.json").write_text('{"name":"Cursor","version":"3.21.16"}')
     (metadata / "product.json").write_text(
@@ -1522,6 +1524,44 @@ def test_linux_cursor_identity_reads_package_without_launching(
 def test_linux_cursor_identity_rejects_malformed_metadata(tmp_path: Path, content: bytes) -> None:
     root = _linux_cursor_package(tmp_path)
     (root / "resources" / "app" / "package.json").write_bytes(content)
+    with pytest.raises(ValueError, match="^cursor_ide_identity_invalid$"):
+        discover_cursor_ide(root, system="Linux")
+
+
+@pytest.mark.parametrize("elf_type", [0, 1, 4])
+def test_linux_cursor_identity_rejects_non_loadable_elf_types(
+    tmp_path: Path, elf_type: int
+) -> None:
+    root = _linux_cursor_package(tmp_path)
+    executable = root / "cursor"
+    content = executable.read_bytes()
+    executable.write_bytes(content[:16] + elf_type.to_bytes(2, "little") + content[18:])
+    with pytest.raises(ValueError, match="^cursor_ide_identity_invalid$"):
+        discover_cursor_ide(root, system="Linux")
+
+
+@pytest.mark.parametrize("elf_type", [2, 3])
+def test_linux_cursor_identity_accepts_loadable_elf_types(
+    tmp_path: Path, elf_type: int
+) -> None:
+    root = _linux_cursor_package(tmp_path)
+    executable = root / "cursor"
+    content = executable.read_bytes()
+    executable.write_bytes(content[:16] + elf_type.to_bytes(2, "little") + content[18:])
+    assert discover_cursor_ide(root, system="Linux").surface == "cursor_ide"
+
+
+@pytest.mark.parametrize("field", ["version", "commit"])
+def test_linux_cursor_identity_rejects_control_characters(
+    tmp_path: Path, field: str
+) -> None:
+    root = _linux_cursor_package(tmp_path)
+    metadata_path = root / "resources" / "app" / (
+        "package.json" if field == "version" else "product.json"
+    )
+    metadata = json.loads(metadata_path.read_text())
+    metadata[field] = "3.21.16\nunsafe" if field == "version" else "8" * 20 + "\x7f"
+    metadata_path.write_text(json.dumps(metadata))
     with pytest.raises(ValueError, match="^cursor_ide_identity_invalid$"):
         discover_cursor_ide(root, system="Linux")
 

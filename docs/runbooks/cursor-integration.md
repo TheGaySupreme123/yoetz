@@ -129,13 +129,18 @@ The separate native IDE identity inspector (`discover_cursor_ide`) accepts the L
 package root, such as `/usr/share/cursor`, or its native `cursor` executable (including an explicit
 symlink to that executable). For an extracted AppImage, select its `usr/share/cursor` directory.
 It reads the version from `resources/app/package.json`, the build commit and Cursor application
-name from `resources/app/product.json`, and hashes the native ELF executable. It does not launch
+name from `resources/app/product.json`, and hashes the native ELF executable after requiring an
+ELF64 little-endian ET_EXEC or ET_DYN header. Version and commit metadata must be bounded printable
+ASCII identity fields. It does not launch
 the IDE, extract an AppImage, or change a host registration. Missing installations report
 `cursor_ide_unavailable`; an unextracted AppImage or unrecognized layout reports
 `cursor_ide_layout_unsupported`; malformed metadata, linked package members, and non-Linux
 executables report `cursor_ide_identity_invalid`. Select the native binary/root rather than the
 `resources/app/bin/cursor` shell wrapper. This inspector is distinct from common setup discovery,
 which probes the installed host's command and version. The macOS bundle inspector is unchanged.
+Today this inspector is library-only: no CLI, MCP, TUI, or receipt surface invokes it. A caller
+must supply the package root or native executable directly; this read does not add an operator
+selection step to common setup or host discovery.
 The [vendor installation guide](https://cursor.com/docs/get-started/quickstart) documents Linux
 package and AppImage installation.
 
