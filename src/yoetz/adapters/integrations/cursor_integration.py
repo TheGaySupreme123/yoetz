@@ -168,6 +168,7 @@ _MAX_FILE_BYTES: Final = 262_144
 _MAX_FILES: Final = 64
 _MAX_PATH: Final = 4_096
 _MAX_CURSOR_IDENTITY_BYTES: Final = 4_096
+_MAX_CURSOR_IDENTITY_METADATA_BYTES: Final = 1_048_576
 _GUIDANCE_NAMES: Final = (
     "agent-instructions.md",
     "coverage-and-receipts.md",
@@ -654,6 +655,17 @@ def _validate_digest(value: object) -> str:
     ):
         raise ValueError("cursor_digest_invalid")
     return value
+
+
+def _valid_cursor_identity_text(value: object) -> bool:
+    """Accept bounded printable ASCII metadata for structural identity fields."""
+
+    return (
+        type(value) is str
+        and bool(value)
+        and len(value) <= 128
+        and all(0x20 <= ord(character) <= 0x7E for character in value)
+    )
 
 
 def _inventory(members: Mapping[str, bytes]) -> tuple[ManagedPluginFile, ...]:
@@ -2218,18 +2230,15 @@ def _digest_file(path: Path) -> str:
 
 
 def discover_cursor_ide(app_path: Path, *, system: str | None = None) -> CursorCapabilityIdentity:
-    """Identify a Cursor IDE bundle by its macOS ``Info.plist`` and main executable.
+    """Read an IDE installation identity without executing it or certifying a host cell."""
 
-    Only the macOS application bundle layout is reviewed. A Linux Cursor (AppImage or ``.deb``)
-    has no ``Contents/Info.plist``; rather than reporting it as absent, name the platform so the
-    IDE cell reads as unsupported there (issue #722). Plugin approval and IDE discovery are
-    independent capabilities; adding a Linux presence cell does not identify a Linux IDE.
-    """
+    resolved_system = platform.system() if system is None else system
+    if resolved_system == "Linux":
+        return _discover_linux_cursor_ide(app_path)
 
     info_path = app_path / "Contents" / "Info.plist"
     executable_root = app_path / "Contents" / "MacOS"
     if app_path.is_symlink() or not info_path.is_file() or info_path.is_symlink():
-        resolved_system = platform.system() if system is None else system
         if resolved_system != "Darwin" and not info_path.exists():
             raise ValueError("cursor_ide_platform_unsupported")
         raise ValueError("cursor_ide_unavailable")
@@ -2251,6 +2260,74 @@ def discover_cursor_ide(app_path: Path, *, system: str | None = None) -> CursorC
         platform.system().lower(),
         platform.machine().lower(),
     )
+
+
+def _discover_linux_cursor_ide(app_path: Path) -> CursorCapabilityIdentity:
+    """Inspect the installed package root (also inside an extracted AppImage).
+
+    Accept an explicit root or a symlink to its native executable. Never run an AppImage,
+    CLI shell wrapper, or Windows launcher to infer a Linux IDE identity.
+    """
+
+    try:
+        selected = app_path.resolve(strict=True)
+        root = selected if selected.is_dir() else selected.parent
+        executable = root / "cursor"
+        if selected != root and selected != executable:
+            raise ValueError("cursor_ide_layout_unsupported")
+        metadata_root = root / "resources" / "app"
+        # Package members must stay in this installation. The selected installation itself
+        # may be reached through the package manager's ordinary executable symlink.
+        members = (root / "resources", metadata_root, executable)
+        if any(member.is_symlink() for member in members):
+            raise ValueError("cursor_ide_identity_invalid")
+        if not metadata_root.is_dir():
+            raise ValueError("cursor_ide_layout_unsupported")
+        if not executable.is_file() or not os.access(executable, os.X_OK):
+            raise ValueError("cursor_ide_unavailable")
+        with executable.open("rb") as stream:
+            header = stream.read(20)
+            if (
+                len(header) != 20
+                or header[:6] != b"\x7fELF\x02\x01"
+                or int.from_bytes(header[16:18], "little") not in {2, 3}
+            ):
+                raise ValueError("cursor_ide_identity_invalid")
+        architecture = {62: "x86_64", 183: "aarch64"}.get(int.from_bytes(header[18:20], "little"))
+        if architecture is None:
+            raise ValueError("cursor_ide_identity_invalid")
+        metadata: list[Mapping[str, JsonValue]] = []
+        for name in ("package.json", "product.json"):
+            path = metadata_root / name
+            if path.is_symlink() or not path.is_file():
+                raise ValueError("cursor_ide_identity_invalid")
+            with path.open("rb") as stream:
+                content = stream.read(_MAX_CURSOR_IDENTITY_METADATA_BYTES + 1)
+            if len(content) > _MAX_CURSOR_IDENTITY_METADATA_BYTES:
+                raise ValueError("cursor_ide_identity_invalid")
+            value = strict_json_parse(content)
+            if not isinstance(value, Mapping):
+                raise ValueError("cursor_ide_identity_invalid")
+            metadata.append(value)
+        package, product = metadata
+        version = package.get("version")
+        build = product.get("commit")
+        if product.get("applicationName") != "cursor" or not all(
+            _valid_cursor_identity_text(value) for value in (version, build)
+        ):
+            raise ValueError("cursor_ide_identity_invalid")
+        return CursorCapabilityIdentity(
+            "cursor_ide",
+            cast(str, version),
+            cast(str, build),
+            _digest_file(executable),
+            "linux",
+            architecture,
+        )
+    except (OSError, RuntimeError) as exc:
+        raise ValueError("cursor_ide_unavailable") from exc
+    except ProtocolValueError as exc:
+        raise ValueError("cursor_ide_identity_invalid") from exc
 
 
 def discover_cursor_cli(executable: Path) -> CursorCapabilityIdentity:

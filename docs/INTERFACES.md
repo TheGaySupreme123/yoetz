@@ -1619,7 +1619,8 @@ finding's original coverage to contain only the pre-existing AI-powered review, 
 host-observation tolerances and to have freshness outside
 `stale_after_material_change|redacted_gap|unknown`. For `semantic_model_derived` rows only the
 evidence-strength codes are tolerated, and the check must also record
-`succeeded/semantic_completed`. Any other gap — redacted or unavailable payloads, redacted objects,
+`succeeded/semantic_completed`. Outside the narrow command-gap partition described below, any
+other gap — redacted or unavailable payloads, redacted objects,
 missing refs, unknown events, completion scope, import range, or a code not in the list — blocks
 both proof classes. A local-only check therefore never resolves an AI-powered finding, and a
 weakened AI-powered review never resolves one either. A check that returns a finding again clears
@@ -1937,7 +1938,22 @@ lock to be released inside the same 30-second budget, then spawns and connects t
 this installation. It never signals a process it cannot identify through the owner-only stamp, a
 holder whose stamped identity equals this installation's, or anything on Windows; those cases and a
 holder that outlives the budget surface as `service_incompatible` whose bridge message names
-`yoetz service restart`. Plain `connect_service` (ordinary CLI commands and hooks) never supersedes.
+`yoetz service restart`. Plain `connect_service` (ordinary CLI commands and hook drains) never starts or supersedes.
+Consented hook auto-attachment uses the same fixed on-demand launcher with
+`supersede_incompatible=False` and a one-second connection/startup budget. It reuses an
+already-stamped compatible starting holder only while an owner-only nonblocking flock probe
+confirms that the singleton is still held; an unheld stale stamp is ignored and the fixed
+launcher makes a normal flock-protected start attempt. A live incompatible or unknown stamped
+holder is refused without signalling it. The authenticated handshake remains authoritative; the
+stamp is only a pre-spawn hint. Startup and the auto-attach `start` share the existing five-second
+RPC budget; turn-boundary retries retain their one-second outer budget and reserve part of it for
+the start RPC after a shorter connector arm. A budget expiry leaves attachment incomplete and
+queued structural rows pending. SessionStart context distinguishes `service_unavailable`,
+`service_incompatible`, `auto_attach_conflict`, and an incomplete mapping without asserting
+`mapping_missing`, and directs the agent to explicit `start` before
+material work, then its exact typed continuation. Hook exit zero is graceful degradation, not
+proof of service readiness or a mapped task. No transient content is reconstructed from queued
+structural envelopes. This path conveys no initialization, unlock, privacy, or takeover authority.
 Bridges of the stale installation reconnect and are refused in turn, which is the correct outcome
 of an upgrade: the one per-user endpoint belongs to the installation actually in use. The MCP bridge supplies a
 **30-second** call deadline for `start`, `publish_work`, `respond`, `status`, and `receipt`, and a
@@ -3758,7 +3774,7 @@ the ordinary typed failure path remains. Every failed attempt records a closed h
 reason instead of a silent absent mapping: `auto_attach_workspace_unbound`,
 `auto_attach_request_invalid`, `auto_attach_conflict` (session, idempotency, or request-identity
 conflict), `auto_attach_refused`, `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`,
-`privacy_authority_required`, or the shared `service_unavailable`, `vault_locked`, `timeout`,
+`privacy_authority_required`, or the shared `service_unavailable`, `service_incompatible`, `vault_locked`, `timeout`,
 `storage_unsafe`, and `storage_corrupt` tokens. Turn-boundary hooks retry auto-attach under a
 bounded budget and record the same typed cause next to the `auto_attach_retry_failed` path marker
 when no mapping results. Busy lifecycle mutations are durable: observation-local schema `/11` adds a
@@ -4564,6 +4580,22 @@ harness, scope, and Yoetz version identity. A marker-consistent prior or fabrica
 not a rollback candidate and remains preserved as `modified` or `recovery_required`.
 
 ### Cursor local harness contract (issue #153)
+
+`discover_cursor_ide` reads installation identity without proving activation or a native-session
+capability cell. The macOS path uses bundle metadata and the main executable digest. The Linux
+path accepts an explicit package root or native executable, resolves the selected path, reads
+`resources/app/package.json` version and `resources/app/product.json` commit/application name,
+and hashes the executable after reading its ELF64 little-endian ET_EXEC/ET_DYN signature and
+x86-64/aarch64 architecture. Version and commit metadata are bounded printable ASCII identity
+fields.
+Internal package symlinks are
+refused; metadata reads are bounded to 1 MiB each. Missing roots/executables are unavailable,
+unrecognized layouts are `cursor_ide_layout_unsupported`, and malformed or foreign identities
+are `cursor_ide_identity_invalid`. Inspection never executes the package or extends profile
+`evidence_case_ids`. A Linux identity inside WSL supplies no Windows-side IDE or Remote WSL
+session evidence (issue #722). The helper currently has no CLI, MCP, TUI, or receipt caller;
+library callers and unit tests are its only entry points until a separate integration wires it
+into setup or discovery.
 
 `HarnessId` membership is now `claude|codex|cursor`. Adding Cursor changed no method on `IntegrationsPort`,
 `PluginArtifactPort`, `HarnessMcpPort`, `ObservationPort`, or the six workflow operations.
@@ -5443,3 +5475,34 @@ and milestones remain. Cancellation and ambiguous response loss do not yield tha
 ADR-030 continuation `start_busy_same_identity` names exact once-only replay after a successful
 lease yield; `start_pending_same_identity` names a live lease and the bounded 60-second wait before
 exact replay. Runtime/catalog producer reasons alone never imply a released start reservation.
+
+### Command-gap independence for repaired action findings (issue #682)
+
+Maintainer acknowledgement: [issue #682](https://github.com/TheGaySupreme123/yoetz/issues/682#issuecomment-5761527250).
+`finding_resolution` admits a narrow exception for a deterministic `action_without_result`
+finding with readable original proof, one exact action-event subject, explicit readable obligation
+links, and an accepted linked result present at the checked frontier. It bounds the possible
+owners of `command_attempt_uncorroborated` and `command_attempt_mismatch` using all selected,
+plan-declared obligations that request commands. The relation includes both an action's direct
+`obligation_refs` and a selected obligation's `resolution_evidence_refs → result → action` link.
+Only a proven disjoint action relation may ignore those codes for that finding's absence proof. The
+codes remain on the check and receipt.
+
+This is deliberately conservative: the partition includes selected command obligations even when
+a command was observed matching. An action sharing such an obligation still requires the command
+coverage to be repaired; an absent, ambiguous, redacted, or unbound relation never qualifies.
+A later material projection row cannot establish proof for an earlier checked frontier. The
+check's own finding suffix is immaterial to action/result/plan inputs. Explanations reconstruct
+the projection immediately before the candidate check when needed; the same per-row frontier
+guards identify overlapping obligation IDs (bounded to 16) or that independence remains unproven.
+Once independence is proven, the command codes are removed
+before freshness is evaluated, so the existing closed host-observation exception may also admit a
+`redacted_gap` check when all remaining gaps are tolerated host/evidence limits; projection
+redactions and unknown relations still block. All ordinary scope, policy, suppression, refiring,
+freshness and semantic requirements continue to apply.
+
+The reducer supplies the same projection context to the qualification predicate used by status
+and receipts. No new event schema, persisted proof metadata, or command execution claim is added.
+Historical event bytes remain intact; rebuilding a projection applies this bounded derivation to
+its accepted history. A held old check is still invalidated by a later response to a finding that
+check did not return. Resolved history does not remove receipt coverage limitations.
