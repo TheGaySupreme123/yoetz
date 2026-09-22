@@ -671,7 +671,9 @@ def test_explanation_cache_is_scoped_to_the_candidate_check() -> None:
     from typing import cast
 
     from yoetz.domain.events import LedgerRecord
-    from yoetz.kernel.finding_resolution import _historical_proof_state
+    from yoetz.kernel.finding_resolution import (
+        _historical_proof_state,  # pyright: ignore[reportPrivateUsage]
+    )
     from yoetz.kernel.projections import empty_projection_state
 
     replayed: list[tuple[int, ...]] = []
