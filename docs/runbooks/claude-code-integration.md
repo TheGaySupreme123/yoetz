@@ -1116,6 +1116,13 @@ inventing session or writer IDs. `start_pending_same_identity` instead means a l
 wait up to 60 seconds before the one exact replay. If still busy or pending, retain the original
 request and report the unresolved start. These continuations do not authorize a new task.
 
+**CLI JSON (issue #741).** When an agent in this host runs `yoetz` in a shell with `--json`, a
+CLI-owned JSON error body carries a `recovery` object resolved from the same registry. A workflow
+command (`start`, `publish-work`, `check`, `respond`, `status`, `receipt`) also prints JSON when
+stdout is not a TTY; its failure keeps the exact wire body on stdout and writes the directive
+lines to stderr. This is CLI behavior shared by every host; no Claude Code-specific behavior is
+configured.
+
 ## Cold service attachment and recovery (issue #670)
 
 Claude Code SessionStart returns its result through synchronous `additionalContext`, within

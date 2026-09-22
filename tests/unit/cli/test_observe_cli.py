@@ -20,6 +20,7 @@ from yoetz.cli import observe as observe_cli
 from yoetz.cli.app import app
 from yoetz.cli.hook_diagnostics import record_hook_diagnostic
 from yoetz.cli.observe_hooks import handle_observe
+from yoetz.cli.render import local_recovery_json
 from yoetz.domain.observation import (
     OBSERVATION_BACKPRESSURE_REASON,
     ObservationGapCode,
@@ -1016,6 +1017,7 @@ def test_status_maps_real_lock_open_permission_refusal_without_leaking_path(
         "operation": "status",
         "reason": "storage_unavailable",
         "retryable": True,
+        "recovery": local_recovery_json("storage_unavailable"),
     }
     assert str(state) not in result.stdout
     assert "internal_error" not in result.stdout

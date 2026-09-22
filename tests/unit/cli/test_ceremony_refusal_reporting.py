@@ -373,18 +373,28 @@ class TestEveryHumanCliErrorCarriesADirective:
         assert captured.startswith("observation_status_failed:workspace_unresolvable: ")
         assert "Continuation: storage_root_unsafe" in captured
 
-    def test_an_observe_json_failure_carries_no_directive_prose(
+    def test_an_observe_json_failure_carries_the_resolved_directive(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """ADR-030: the token travels and the text does not, so JSON keeps its shape."""
+        """ADR-030 as amended for #741: a CLI-owned JSON body carries what the human line says.
+
+        The token stays authoritative and the text is resolved by this renderer, so the JSON
+        ``recovery`` object and the human ``Continuation:``/``Next:`` lines cannot disagree.
+        """
 
         from yoetz.cli import observe as observe_cli
+        from yoetz.cli.render import local_recovery_json, render_local_recovery_lines
 
         observe_cli.observe_status(workspace="", json_output=True, _state=tmp_path)
 
         body = json.loads(capsys.readouterr().out)["error"]
-        assert set(body) == {"code", "message", "operation", "reason", "retryable"}
-        assert "Continuation:" not in json.dumps(body)
+        assert set(body) == {"code", "message", "operation", "reason", "retryable", "recovery"}
+        recovery = body["recovery"]
+        assert recovery == local_recovery_json("workspace_unresolvable")
+        assert recovery["continuation"] == "storage_root_unsafe"
+        lines = render_local_recovery_lines("workspace_unresolvable")
+        assert f"Continuation: {recovery['continuation']}" in lines
+        assert f"Next: {recovery['directive']}" in lines
 
     def test_a_resource_integrity_version_failure_names_its_continuation(
         self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch

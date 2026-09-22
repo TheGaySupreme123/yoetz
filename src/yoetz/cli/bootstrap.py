@@ -304,8 +304,17 @@ def control_failure(
         stderr_writer(_with_correlation("\n".join(lines), error))
         return exit_code_for(code)
     if error.reason in _COORDINATION_CONTROL_ERROR_REASONS:
+        from yoetz.cli.render import recovery_directive_json, render_recovery_directive_lines
+        from yoetz.protocol.recovery import continuation_for_reason, directive_for
+
         remedy = _COORDINATION_CONTROL_GUIDANCE[error.reason]
-        stderr_writer(f"{error.reason}: {remedy}")
+        # A coordination reason code maps to a registered directive like any protocol reason;
+        # the remedy names the condition, the directive the recovery rule (ADR-030, #741).
+        coordination_directive = directive_for(continuation_for_reason(error.reason))
+        lines = [f"{error.reason}: {remedy}"]
+        if coordination_directive is not None:
+            lines.extend(render_recovery_directive_lines(coordination_directive))
+        stderr_writer("\n".join(lines))
         if json_output:
             payload: dict[str, JsonValue] = {
                 "ok": False,
@@ -315,6 +324,8 @@ def control_failure(
             }
             if error.correlation_id is not None:
                 payload["correlation_id"] = error.correlation_id
+            if coordination_directive is not None:
+                payload["recovery"] = recovery_directive_json(coordination_directive)
             stdout_writer(payload)
         return exit_code_for(code)
     if error.reason in {"service_incompatible", "protocol_mismatch"}:
