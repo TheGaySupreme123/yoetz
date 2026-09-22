@@ -281,11 +281,123 @@ async def test_wrong_runtime_cannot_retarget_a_loss(tmp_path: Path) -> None:
     try:
         await asyncio.to_thread(_native_failed_command, world, "claude", "lost", "not-retained")
         world.routes.runtimes[world.runtime.session_id] = world.sibling
-        with pytest.raises(ValueError, match="selection_loss_route_changed"):
-            await world.coordinator.reconcile_task_selection_losses(world.runtime)
-        assert world.local.pending_selection_losses(world.workspace)
-        assert (await world.runtime.ledger.load_frontier()).sequence == 0
+        await world.coordinator.reconcile_task_selection_losses(world.runtime)
+        assert not world.local.pending_selection_losses(world.workspace)
+        assert (await world.runtime.ledger.load_frontier()).sequence > 0
+        assert len(world.observation.list_envelopes(world.workspace)) == 1
         assert world.sibling_observation.list_envelopes(world.workspace) == ()
+    finally:
+        world.coordinator.close()
+
+
+@pytest.mark.anyio
+async def test_quarantined_loss_marker_uses_one_recovery_operation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hashlib import sha256
+
+    from yoetz.ports.ledger import (
+        CheckPhase,
+        OperationKind,
+        OperationQuarantineCode,
+        OperationRecord,
+        OperationState,
+    )
+
+    world = await _world(tmp_path)
+    try:
+        await asyncio.to_thread(_native_failed_command, world, "claude", "lost", "not-retained")
+        report = world.local.pending_selection_losses(world.workspace)[0]
+        from yoetz.domain.observation_loss import ObservationSelectionLoss
+        from yoetz.protocol.canonical import canonical_digest
+
+        loss = ObservationSelectionLoss.from_local_range(report)
+        digest = canonical_digest(
+            {
+                "format": "yoetz.selection-loss-report/1",
+                "task_id": loss.task_id,
+                "lane": loss.lane,
+            }
+        )
+        operation_id = world.coordinator._stable_operation_id(digest)  # pyright: ignore[reportPrivateUsage]
+        terminal = world.coordinator.clock.now_utc()
+        result = b"{}"
+        quarantined = OperationRecord(
+            cast(str, world.runtime.writer_id),
+            operation_id,
+            OperationKind.PUBLISH_WORK,
+            digest,
+            OperationState.QUARANTINED,
+            CheckPhase.TERMINAL,
+            None,
+            None,
+            None,
+            None,
+            None,
+            result,
+            "sha256:" + sha256(result).hexdigest(),
+            None,
+            OperationQuarantineCode.OPERATION_KIND_STATE_CONTRADICTION,
+            terminal,
+        )
+        original_lookup = world.runtime.ledger.lookup_task_operation
+
+        async def lookup(writer_id: str, candidate_id: str) -> OperationRecord | None:
+            if candidate_id == operation_id:
+                return quarantined
+            return await original_lookup(writer_id, candidate_id)
+
+        monkeypatch.setattr(world.runtime.ledger, "lookup_task_operation", lookup)
+        await world.coordinator.reconcile_task_selection_losses(world.runtime)
+
+        assert not world.local.pending_selection_losses(world.workspace)
+        reopened = LocalObservationStore(_state=tmp_path / "state")
+        assert not reopened.pending_selection_losses(world.workspace)
+        assert len(world.observation.list_envelopes(world.workspace)) == 1
+        assert (await world.runtime.ledger.load_frontier()).sequence > 0
+    finally:
+        world.coordinator.close()
+
+
+@pytest.mark.anyio
+async def test_route_valid_malformed_lane_keeps_explicit_loss_coverage(tmp_path: Path) -> None:
+    from yoetz.domain.observation_loss import ObservationSelectionLoss
+    from yoetz.domain.values import JsonObject
+
+    world = await _world(tmp_path)
+    try:
+        await asyncio.to_thread(_native_failed_command, world, "claude", "lost", "not-retained")
+        state = world.local._load(world.workspace)  # pyright: ignore[reportPrivateUsage]
+        entry = dict(state.selection_loss_ranges[0])
+        entry["lane"] = "sha256:" + "0" * 64
+        state.selection_loss_ranges = (JsonObject(entry),)
+        world.local._save(world.workspace, state)  # pyright: ignore[reportPrivateUsage]
+
+        await world.coordinator.reconcile_task_selection_losses(world.runtime)
+
+        assert not world.local.pending_selection_losses(world.workspace)
+        normalized = ObservationSelectionLoss.from_local_range_for_recovery(JsonObject(entry))
+        state = world.local._load(world.workspace)  # pyright: ignore[reportPrivateUsage]
+        state.selection_reported_loss_lanes = tuple(
+            [f"sha256:{index:064x}" for index in range(64)] + [normalized.lane]
+        )
+        world.local._save(world.workspace, state)  # pyright: ignore[reportPrivateUsage]
+        reopened = LocalObservationStore(_state=tmp_path / "state")
+        assert not reopened.pending_selection_losses(world.workspace)
+        assert len(world.observation.list_envelopes(world.workspace)) == 1
+        frontier = await world.runtime.ledger.load_frontier()
+        frozen = await world.runtime.ledger.freeze_case(
+            world.runtime.session_id,
+            cast(str, world.runtime.writer_id),
+            frontier.sequence,
+            _ids(IdKind.REQUEST, 9251),
+            "sha256:" + "0" * 64,
+        )
+        assert isinstance(frozen, FrozenCase)
+        assert any(
+            "observation_input_loss" in coverage.known_gaps
+            for coverage in frozen.case.coverage_by_ref.values()
+        )
     finally:
         world.coordinator.close()
 

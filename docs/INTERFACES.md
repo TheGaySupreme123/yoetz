@@ -3644,10 +3644,17 @@ read-only connection for each file-backed complete scan and joins its worker on 
 The shared writable catalog connection never crosses to that worker.
 
 `LocalObservationStore.pending_selection_losses(workspace)` returns at most 64 retained,
-fully routed lanes; `acknowledge_selection_loss(workspace, lane)` follows committed reporting.
-`ObservationCoordinator.reconcile_task_selection_losses(runtime)` imports only that task's
-historical losses before a new check freezes its inputs. Existing check operations bypass this
-reconciliation. The service sweep attempts eight lanes per workspace turn with a rotating cursor.
+fully validated and routed lanes; `selection_loss_workspaces(task_id)` filters the returned
+maintenance work to one authenticated task after bounded durable workspace discovery.
+`acknowledge_selection_loss(workspace, lane)` follows committed
+reporting. `ObservationCoordinator.reconcile_task_selection_losses(runtime)` imports only that
+task's historical losses before a new check freezes its inputs. Existing check operations bypass
+this reconciliation. The service sweep attempts eight lanes per workspace turn with a rotating
+cursor. A terminal route drift or quarantined marker operation uses the supplied same-task
+runtime and a distinct deterministic recovery operation identity; transient publication failures
+remain fail-closed. Route-valid lane-digest mismatches receive an explicit unreconciled loss
+marker; malformed routes or source identities remain local accounting and are not attributed to
+a task by the recovery path.
 A service-authenticated `evidence_recorded` marker carries `observation_input_loss` in coverage;
 `TaskObservationPort.record_selection_loss` records an internal `observation_gap` in task history
 without using native admission or advancing its cursor. Its `selection-loss/1.0.0` cursor namespace

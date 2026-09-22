@@ -136,12 +136,17 @@ The marker says at least one input was lost; exact cumulative counts remain in l
 Retries and restarts resolve the same task-wide operation before staging another payload.
 
 New checks reconcile this task's pending routed losses before freezing their case. Existing
-check operations preserve their original frozen inputs and idempotent results. If required
-attribution or publication fails, a new check fails closed instead of omitting known task loss.
-Historical loss attribution survives same-task session supersession; it is never rebound to a
-new task or represented as a new observation under the current capture grant. Original authority
-identity remains part of the report even after that grant changes: reporting already-recorded
-loss is structural maintenance, not new observation or content permission.
+check operations preserve their original frozen inputs and idempotent results. Transient or
+unrecoverable publication failures remain fail-closed instead of omitting known task loss. A
+terminal route drift or quarantined marker operation may use the already authenticated runtime
+for the same task and a distinct deterministic recovery operation identity; the marker retains
+the original route and never retargets the loss. Route-valid lane-digest mismatches receive an
+explicit unreconciled loss marker; ranges whose route or source identity cannot be authenticated stay in local
+accounting and are never assigned to a task from a parser failure. Historical loss attribution survives
+same-task session supersession; it is never rebound to a new task or represented as a new
+observation under the current capture grant. Original authority identity remains part of the
+report even after that grant changes: reporting already-recorded loss is structural maintenance,
+not new observation or content permission.
 
 The existing 64-range retention bound still applies. Unrouted input and overflow-only aggregate
 history have no provable task attribution and remain visible locally; they are never broadcast

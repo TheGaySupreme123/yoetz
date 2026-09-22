@@ -317,6 +317,26 @@ def _append_result_from_committed(record: object) -> AppendResult | None:
         return None
 
 
+def _selection_loss_operation_digest(
+    loss: ObservationSelectionLoss, *, quarantined_recovery: bool = False
+) -> str:
+    """Return the stable operation identity for one loss marker.
+
+    A quarantined append operation is terminal.  It must not be retried under the
+    same operation id, but a fresh task-scoped marker can still report the retained
+    loss when the ledger is otherwise writable.
+    """
+
+    value: dict[str, str] = {
+        "format": "yoetz.selection-loss-report/1",
+        "task_id": loss.task_id,
+        "lane": loss.lane,
+    }
+    if quarantined_recovery:
+        value["recovery"] = "quarantined"
+    return canonical_digest(JsonObject(value))
+
+
 __all__ = [
     "ObservationAdviceHook",
     "ObservationCoordinator",
@@ -784,16 +804,105 @@ class ObservationCoordinator:
     async def reconcile_task_selection_losses(self, runtime: TaskRuntime) -> None:
         """Before a new CHECK, publish only losses already bound to this task.
 
-        A failure retains the exact lane and fails the new check closed. Completed
-        or already-frozen check requests bypass this hook and keep their result.
+        Transient failures retain the exact lane and fail the new check closed.
+        A terminal route drift or quarantined marker operation uses the supplied
+        task runtime to publish the same historical marker without rebinding the
+        loss to another task. Completed or already-frozen check requests bypass
+        this hook and keep their result.
         """
 
-        workspaces = await self._local(self.local.selection_loss_workspaces)
+        workspaces = await self._local(
+            partial(self.local.selection_loss_workspaces, runtime.task_id)
+        )
         for workspace in workspaces:
-            await self._reconcile_selection_losses(workspace, task_id=runtime.task_id)
+            await self._reconcile_selection_losses(
+                workspace,
+                task_id=runtime.task_id,
+                fallback_runtime=runtime,
+            )
+
+    async def _append_selection_loss_marker(
+        self,
+        runtime: TaskRuntime,
+        loss: ObservationSelectionLoss,
+        batch: MaterializedObservationBatch,
+        operation_digest: str,
+    ) -> AppendResult | None:
+        """Append a loss marker, recovering once from a quarantined operation.
+
+        A pending operation remains retryable and a completed operation is decoded
+        as-is.  Only a terminally quarantined marker gets a distinct deterministic
+        operation identity; this preserves idempotency while preventing one
+        malformed historical append from permanently blocking its task's checks.
+        """
+
+        writer_id = runtime.writer_id
+        if writer_id is None:
+            return None
+        operation_id = self._stable_operation_id(operation_digest)
+        existing = await runtime.ledger.lookup_task_operation(writer_id, operation_id)
+        if existing is None:
+            return await self._append_structural_batch(runtime, batch, operation_digest)
+        if existing.request_digest != operation_digest:
+            raise PublicOperationError(
+                PublicErrorCode.IDEMPOTENCY_CONFLICT,
+                "Observation loss operation identity conflicts with stored history.",
+                retryable=False,
+            )
+        if existing.state is OperationState.COMPLETE:
+            committed = _append_result_from_committed(existing)
+            if committed is None:
+                raise PublicOperationError(
+                    PublicErrorCode.STORAGE_CORRUPT,
+                    "Stored observation loss operation cannot be replayed.",
+                    retryable=False,
+                )
+            return committed
+        if existing.state is OperationState.PENDING:
+            raise PublicOperationError(
+                PublicErrorCode.OPERATION_PENDING,
+                "Observation loss reporting is still pending.",
+                retryable=True,
+            )
+
+        recovery_digest = _selection_loss_operation_digest(loss, quarantined_recovery=True)
+        recovery_id = self._stable_operation_id(recovery_digest)
+        recovery = await runtime.ledger.lookup_task_operation(writer_id, recovery_id)
+        if recovery is not None:
+            if recovery.request_digest != recovery_digest:
+                raise PublicOperationError(
+                    PublicErrorCode.IDEMPOTENCY_CONFLICT,
+                    "Observation loss recovery identity conflicts with stored history.",
+                    retryable=False,
+                )
+            if recovery.state is OperationState.COMPLETE:
+                committed = _append_result_from_committed(recovery)
+                if committed is None:
+                    raise PublicOperationError(
+                        PublicErrorCode.STORAGE_CORRUPT,
+                        "Stored observation loss recovery cannot be replayed.",
+                        retryable=False,
+                    )
+                return committed
+            if recovery.state is OperationState.PENDING:
+                raise PublicOperationError(
+                    PublicErrorCode.OPERATION_PENDING,
+                    "Observation loss recovery is still pending.",
+                    retryable=True,
+                )
+            raise PublicOperationError(
+                PublicErrorCode.STORAGE_CORRUPT,
+                "Observation loss recovery is quarantined.",
+                retryable=False,
+            )
+        return await self._append_structural_batch(runtime, batch, recovery_digest)
 
     async def _reconcile_selection_losses(
-        self, workspace: str, *, task_id: str | None = None
+        self,
+        workspace: str,
+        *,
+        task_id: str | None = None,
+        fallback_runtime: TaskRuntime | None = None,
     ) -> None:
         reports = await self._local(partial(self.local.pending_selection_losses, workspace))
         if not reports:
@@ -808,10 +917,16 @@ class ObservationCoordinator:
         # At most 64 durable lanes exist per workspace. No whole transcript or
         # input content is read and no native admission/capture path is invoked.
         for report in reports:
-            route = observation_selection_route(report.get("route"))
-            if task_id is not None and (route is None or route[0] != task_id):
+            try:
+                route = observation_selection_route(report.get("route"))
+                if task_id is not None and (route is None or route[0] != task_id):
+                    continue
+                loss = ObservationSelectionLoss.from_local_range_for_recovery(report)
+            except ProtocolValueError, TypeError, ValueError:
+                # A malformed route cannot be safely attributed to a task. A
+                # route-valid range is normalized by the recovery constructor;
+                # only the remaining unrouteable state stays local.
                 continue
-            loss = ObservationSelectionLoss.from_local_range(report)
             if task_id is None:
                 if (
                     workspace not in self._selection_loss_after
@@ -820,25 +935,41 @@ class ObservationCoordinator:
                     self._selection_loss_after.pop(next(iter(self._selection_loss_after)))
                 self._selection_loss_after[workspace] = loss.lane
             current: TaskRuntime | None = None
+            current_is_owned = False
             try:
                 async with self._lock:
-                    current = await self._route_selection_loss(loss)
-                    if current.task_id != loss.task_id:
-                        raise ValueError("selection_loss_route_changed")
+                    try:
+                        current = await self._route_selection_loss(loss)
+                        current_is_owned = True
+                        if current.task_id != loss.task_id:
+                            await self.runtime.release(current)
+                            current = None
+                            current_is_owned = False
+                            raise ValueError("selection_loss_route_changed")
+                    except (PublicOperationError, ValueError) as exc:
+                        # A non-retryable route failure is terminal for this
+                        # historical lane, but the caller's authenticated task
+                        # runtime is still safe to use for the service marker.
+                        # Retryable failures retain the fail-closed check path.
+                        if (
+                            task_id is None
+                            or fallback_runtime is None
+                            or fallback_runtime.task_id != loss.task_id
+                            or isinstance(exc, PublicOperationError)
+                            and exc.retryable
+                        ):
+                            raise
+                        current = fallback_runtime
+                        current_is_owned = False
                     store = self._observation_store(current)
                     observed_at = timestamp_from_datetime(self.clock.now_utc())
                     batch = materialize_selection_loss(loss, observed_at=observed_at)
-                    operation_digest = canonical_digest(
-                        JsonObject(
-                            {
-                                "format": "yoetz.selection-loss-report/1",
-                                "task_id": loss.task_id,
-                                "lane": loss.lane,
-                            }
-                        )
-                    )
-                    committed = await self._append_structural_batch(
-                        current, batch, operation_digest
+                    operation_digest = _selection_loss_operation_digest(loss)
+                    committed = await self._append_selection_loss_marker(
+                        current,
+                        loss,
+                        batch,
+                        operation_digest,
                     )
                     if committed is None:
                         raise ValueError("selection_loss_not_committed")
@@ -861,7 +992,7 @@ class ObservationCoordinator:
                         operation="selection_loss_report_failed",
                     )
             finally:
-                if current is not None:
+                if current is not None and current_is_owned:
                     await self.runtime.release(current)
 
     async def _route_selection_loss(self, loss: ObservationSelectionLoss) -> TaskRuntime:

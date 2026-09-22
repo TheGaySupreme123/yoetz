@@ -69,6 +69,7 @@ from yoetz.domain.observation_budget import (
     PressureState,
     evaluate_pressure,
 )
+from yoetz.domain.observation_loss import ObservationSelectionLoss
 from yoetz.domain.observation_profiles import (
     is_content_capture_profile,
     validate_content_capture_profile,
@@ -4769,14 +4770,16 @@ class LocalObservationStore:
     def _pending_selection_losses(state: _WorkspaceState) -> tuple[JsonObject, ...]:
         result: list[JsonObject] = []
         for item in state.selection_loss_ranges:
-            if item.get("lane") in state.selection_reported_loss_lanes:
-                continue
             try:
-                route = observation_selection_route(item.get("route"))
-            except ValueError, TypeError:
+                loss = ObservationSelectionLoss.from_local_range_for_recovery(item)
+            except ProtocolValueError, TypeError, ValueError:
                 continue
-            if route is not None:
-                result.append(item)
+            if (
+                item.get("lane") in state.selection_reported_loss_lanes
+                or loss.lane in state.selection_reported_loss_lanes
+            ):
+                continue
+            result.append(item)
         return tuple(result)
 
     def acknowledge_selection_loss(self, workspace: str, lane: str) -> None:
@@ -4786,22 +4789,62 @@ class LocalObservationStore:
             state = self._load(workspace)
             if lane in state.selection_reported_loss_lanes:
                 return
-            if not any(item.get("lane") == lane for item in state.selection_loss_ranges):
+            matched = False
+            for item in state.selection_loss_ranges:
+                if item.get("lane") == lane:
+                    matched = True
+                    break
+                try:
+                    normalized = ObservationSelectionLoss.from_local_range_for_recovery(item)
+                except ProtocolValueError, TypeError, ValueError:
+                    continue
+                if normalized.lane == lane:
+                    matched = True
+                    break
+            if not matched:
                 return
+            active_lanes: set[str] = set()
+            for item in state.selection_loss_ranges:
+                raw_lane = item.get("lane")
+                if type(raw_lane) is str:
+                    active_lanes.add(raw_lane)
+            for item in state.selection_loss_ranges:
+                try:
+                    active_lanes.add(
+                        ObservationSelectionLoss.from_local_range_for_recovery(item).lane
+                    )
+                except ProtocolValueError, TypeError, ValueError:
+                    continue
             state.selection_reported_loss_lanes = tuple(
-                sorted((*state.selection_reported_loss_lanes, lane))
+                sorted(
+                    {*state.selection_reported_loss_lanes, lane} & active_lanes,
+                    key=str.encode,
+                )
             )
             self._save(workspace, state)
 
-    def selection_loss_workspaces(self) -> tuple[str, ...]:
-        """Discover durable maintenance demand without requiring a host event."""
+    def selection_loss_workspaces(self, task_id: str | None = None) -> tuple[str, ...]:
+        """Discover durable maintenance demand without requiring a host event.
+
+        A task check supplies its authenticated task id so unrelated workspace
+        lanes are excluded from the returned maintenance work after the bounded
+        durable workspace discovery.
+        """
 
         with self._lock:
-            return tuple(
-                workspace
-                for workspace, state in self._iter_workspaces()
-                if self._pending_selection_losses(state)
-            )
+            workspaces: list[str] = []
+            for workspace, state in self._iter_workspaces():
+                pending = self._pending_selection_losses(state)
+                if task_id is None:
+                    if pending:
+                        workspaces.append(workspace)
+                    continue
+                for item in pending:
+                    route = observation_selection_route(item.get("route"))
+                    if route is not None and route[0] == task_id:
+                        workspaces.append(workspace)
+                        break
+            return tuple(workspaces)
 
     def consume_admission_loss_notice(self, workspace: str) -> bool:
         with self._lock:
@@ -9121,6 +9164,30 @@ class LocalObservationStore:
                 capture_reservation_bootstrap = None
                 capture_backlog_scope_unknown = True
         pressure_snapshots = _load_pressure_snapshots(raw.get("pressure_snapshots"))
+        selection_loss_ranges = tuple(
+            JsonObject(cast(Mapping[str, JsonValue], item))
+            for item in cast(tuple[JsonValue, ...], raw.get("selection_loss_ranges", ()))[:64]
+        )
+        selection_loss_lanes = {
+            item.get("lane") for item in selection_loss_ranges if type(item.get("lane")) is str
+        }
+        for item in selection_loss_ranges:
+            try:
+                selection_loss_lanes.add(
+                    ObservationSelectionLoss.from_local_range_for_recovery(item).lane
+                )
+            except ProtocolValueError, TypeError, ValueError:
+                continue
+        selection_reported_loss_lanes = tuple(
+            sorted(
+                {
+                    lane
+                    for lane in cast(tuple[str, ...], raw.get("selection_reported_loss_lanes", ()))
+                    if type(lane) is str and lane in selection_loss_lanes
+                },
+                key=str.encode,
+            )
+        )
         state = _WorkspaceState(
             consent=consent,
             admission_buffer=admission_buffer_from_json(raw.get("admission_buffer")),
@@ -9135,13 +9202,8 @@ class LocalObservationStore:
             selection_summarized_count=int(cast(int, raw.get("selection_summarized_count", 0))),
             selection_rejected_count=int(cast(int, raw.get("selection_rejected_count", 0))),
             selection_loss_commitment=cast(str | None, raw.get("selection_loss_commitment")),
-            selection_loss_ranges=tuple(
-                JsonObject(cast(Mapping[str, JsonValue], item))
-                for item in cast(tuple[JsonValue, ...], raw.get("selection_loss_ranges", ()))[:64]
-            ),
-            selection_reported_loss_lanes=tuple(
-                cast(tuple[str, ...], raw.get("selection_reported_loss_lanes", ()))[:64]
-            ),
+            selection_loss_ranges=selection_loss_ranges,
+            selection_reported_loss_lanes=selection_reported_loss_lanes,
             selection_last_loss_notice_ms=cast(
                 int | None, raw.get("selection_last_loss_notice_ms")
             ),

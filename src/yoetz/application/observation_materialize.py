@@ -770,8 +770,13 @@ def materialize_selection_loss(
         observed_at,
         description=(
             "At least one non-replayable observation was lost. This permanent lane "
-            "marker reports historical coverage loss; exact aggregate counts remain in local "
-            "selection accounting. Attribution: " + canonical_encode(loss.identity()).decode()
+            + (
+                "marker carries route-valid but unreconciled local metadata; "
+                if loss.unreconciled
+                else "marker reports historical coverage loss; "
+            )
+            + "exact aggregate counts remain in local selection accounting. Attribution: "
+            + canonical_encode(loss.identity()).decode()
         ),
     )
     coverage = replace(

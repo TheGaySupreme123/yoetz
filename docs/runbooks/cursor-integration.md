@@ -1021,8 +1021,12 @@ service maintenance even when no later envelope is admitted. New checks reconcil
 pending losses first. Each source/session/generation/route lane produces one permanent
 `observation_input_loss` marker, preserving all local counts and identities. Missing original
 attribution and overflow-only range history remain visible locally rather than being assigned to
-an unrelated task. Catalog scans run through separate read-only worker connections, keeping the
-service event loop available during both inventory reads.
+an unrelated task. A terminal route drift or quarantined marker operation uses the same task
+runtime with a distinct deterministic recovery operation; transient publication failures remain
+fail-closed. Catalog scans run through separate read-only worker connections, keeping the service
+event loop available during both inventory reads.
+Route-valid lane-digest mismatches are reported with the same explicit loss gap and an
+unreconciled marker; malformed routes or source identities remain local.
 Host-shaped regression tests, including interleaved parent/worker routes and encrypted readback,
 are not a version-pinned acceptance run inside the installed vendor application.
 

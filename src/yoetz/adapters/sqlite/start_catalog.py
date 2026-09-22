@@ -517,13 +517,24 @@ class SqliteStartCatalog:
         except asyncio.CancelledError:
             # Keep connection cleanup owned, even under repeated READY teardown
             # cancellation. The enclosing capture lock/runtime outlive the read.
+            cancellation: asyncio.CancelledError | None = None
+            current = asyncio.current_task()
             while not worker.done():
                 try:
-                    await asyncio.wait((worker,))
-                except asyncio.CancelledError:
-                    continue
+                    await asyncio.shield(worker)
+                except asyncio.CancelledError as exc:
+                    if cancellation is None:
+                        cancellation = exc
+                    # A shutdown coordinator may cancel this task repeatedly while
+                    # the reader owns its connection. Consume those requests until
+                    # the worker joins, then propagate one cancellation below.
+                    if current is not None:
+                        while current.cancelling():
+                            current.uncancel()
             worker.exception()
-            raise
+            if cancellation is not None:
+                raise cancellation
+            raise asyncio.CancelledError
 
     @staticmethod
     def _read_recovery_routes(path: Path, columns: str) -> tuple[TaskRoute, ...]:
