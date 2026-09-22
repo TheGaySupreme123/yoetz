@@ -138,6 +138,13 @@ records successful installed 0.2.4 setup lifecycles for all three CLIs on both U
 actual WSL 2, plus the Cursor IDE installation on Ubuntu. Successful real PAM approval was
 exercised using disposable local accounts; no provider authentication or model task was required.
 
+The Cursor IDE identity inspector can read a Linux package or extracted AppImage's native
+executable and package metadata without launching it (#722). This identifies installed bytes;
+it does not admit a native-session evidence case. On WSL, use the Linux installation root for
+that inspection. Windows executables and the Windows-side IDE with Remote WSL are separate,
+unverified surfaces; an accessible Windows launcher is not a Linux IDE identity. Layout and
+failure details are in the [Cursor runbook](cursor-integration.md#linux-and-wsl).
+
 ## Setup and vault acceptance still owned by #737
 
 Use `setup status --next --operation local|review|connection` to identify the next prerequisite

@@ -1937,7 +1937,22 @@ lock to be released inside the same 30-second budget, then spawns and connects t
 this installation. It never signals a process it cannot identify through the owner-only stamp, a
 holder whose stamped identity equals this installation's, or anything on Windows; those cases and a
 holder that outlives the budget surface as `service_incompatible` whose bridge message names
-`yoetz service restart`. Plain `connect_service` (ordinary CLI commands and hooks) never supersedes.
+`yoetz service restart`. Plain `connect_service` (ordinary CLI commands and hook drains) never starts or supersedes.
+Consented hook auto-attachment uses the same fixed on-demand launcher with
+`supersede_incompatible=False` and a one-second connection/startup budget. It reuses an
+already-stamped compatible starting holder only while an owner-only nonblocking flock probe
+confirms that the singleton is still held; an unheld stale stamp is ignored and the fixed
+launcher makes a normal flock-protected start attempt. A live incompatible or unknown stamped
+holder is refused without signalling it. The authenticated handshake remains authoritative; the
+stamp is only a pre-spawn hint. Startup and the auto-attach `start` share the existing five-second
+RPC budget; turn-boundary retries retain their one-second outer budget and reserve part of it for
+the start RPC after a shorter connector arm. A budget expiry leaves attachment incomplete and
+queued structural rows pending. SessionStart context distinguishes `service_unavailable`,
+`service_incompatible`, `auto_attach_conflict`, and an incomplete mapping without asserting
+`mapping_missing`, and directs the agent to explicit `start` before
+material work, then its exact typed continuation. Hook exit zero is graceful degradation, not
+proof of service readiness or a mapped task. No transient content is reconstructed from queued
+structural envelopes. This path conveys no initialization, unlock, privacy, or takeover authority.
 Bridges of the stale installation reconnect and are refused in turn, which is the correct outcome
 of an upgrade: the one per-user endpoint belongs to the installation actually in use. The MCP bridge supplies a
 **30-second** call deadline for `start`, `publish_work`, `respond`, `status`, and `receipt`, and a
@@ -3758,7 +3773,7 @@ the ordinary typed failure path remains. Every failed attempt records a closed h
 reason instead of a silent absent mapping: `auto_attach_workspace_unbound`,
 `auto_attach_request_invalid`, `auto_attach_conflict` (session, idempotency, or request-identity
 conflict), `auto_attach_refused`, `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`,
-`privacy_authority_required`, or the shared `service_unavailable`, `vault_locked`, `timeout`,
+`privacy_authority_required`, or the shared `service_unavailable`, `service_incompatible`, `vault_locked`, `timeout`,
 `storage_unsafe`, and `storage_corrupt` tokens. Turn-boundary hooks retry auto-attach under a
 bounded budget and record the same typed cause next to the `auto_attach_retry_failed` path marker
 when no mapping results. Busy lifecycle mutations are durable: observation-local schema `/11` adds a
@@ -4564,6 +4579,22 @@ harness, scope, and Yoetz version identity. A marker-consistent prior or fabrica
 not a rollback candidate and remains preserved as `modified` or `recovery_required`.
 
 ### Cursor local harness contract (issue #153)
+
+`discover_cursor_ide` reads installation identity without proving activation or a native-session
+capability cell. The macOS path uses bundle metadata and the main executable digest. The Linux
+path accepts an explicit package root or native executable, resolves the selected path, reads
+`resources/app/package.json` version and `resources/app/product.json` commit/application name,
+and hashes the executable after reading its ELF64 little-endian ET_EXEC/ET_DYN signature and
+x86-64/aarch64 architecture. Version and commit metadata are bounded printable ASCII identity
+fields.
+Internal package symlinks are
+refused; metadata reads are bounded to 1 MiB each. Missing roots/executables are unavailable,
+unrecognized layouts are `cursor_ide_layout_unsupported`, and malformed or foreign identities
+are `cursor_ide_identity_invalid`. Inspection never executes the package or extends profile
+`evidence_case_ids`. A Linux identity inside WSL supplies no Windows-side IDE or Remote WSL
+session evidence (issue #722). The helper currently has no CLI, MCP, TUI, or receipt caller;
+library callers and unit tests are its only entry points until a separate integration wires it
+into setup or discovery.
 
 `HarnessId` membership is now `claude|codex|cursor`. Adding Cursor changed no method on `IntegrationsPort`,
 `PluginArtifactPort`, `HarnessMcpPort`, `ObservationPort`, or the six workflow operations.
