@@ -91,7 +91,8 @@ requires fresh preparation. Denial, cancellation, expiry, and target checks stil
 `--accept` does not approve unseen activation: `activation_confirmation_required` includes the
 exact `recommend accept codex-plugin-activation` command with the selected executable and home.
 
-For Codex inspection, plugin status, MCP status, and provider status all accept `--codex-home`.
+For Codex inspection, plugin status, MCP status, provider status, and setup disconnect all accept
+`--codex-home`.
 Selection is explicit flag, then `CODEX_HOME`, then `CODEX_TESTING_HOME`, then `~/.codex`.
 The payload's `inspected_codex_home` names the selected home; invoked Codex commands receive both
 home variables set to it. Use that same explicit home for removal and reconnection. A foreign

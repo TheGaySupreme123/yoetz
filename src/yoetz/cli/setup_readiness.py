@@ -14,7 +14,7 @@ from yoetz.adapters.integrations.launcher import invoking_launcher, resolve_yoet
 from yoetz.cli.privacy_setup import configured_bindings, get_privacy_setup_snapshot
 from yoetz.config.paths import isolated_root
 from yoetz.protocol.canonical import JsonValue
-from yoetz.protocol.setup_readiness import SetupReadiness
+from yoetz.protocol.setup_readiness import SetupReadiness, SetupReadinessReason
 
 type SetupOperation = Literal["local", "review", "connection"]
 
@@ -104,7 +104,7 @@ def setup_next(
         {} if operation == "connection" else anyio.run(installation_readiness, project, operation)
     )
     arguments = cast(list[str] | None, facts.pop("arguments", None))
-    reason = str(facts.pop("reason", "ready"))
+    reason = cast(SetupReadinessReason, str(facts.pop("reason", "ready")))
     selected_home: str | None = None
     if host is not None:
         try:

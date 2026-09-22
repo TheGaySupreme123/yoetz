@@ -22,7 +22,11 @@ from typer.testing import CliRunner
 
 from yoetz.cli import elevated
 from yoetz.cli.app import app
-from yoetz.cli.privacy_setup import build_candidate_policy, recipe_answers
+from yoetz.cli.privacy_setup import (
+    ProviderBindingRequiredError,
+    build_candidate_policy,
+    recipe_answers,
+)
 from yoetz.cli.trusted_console import TrustedForegroundConsole
 from yoetz.config.models import ConfigError
 from yoetz.domain.privacy import (
@@ -2296,11 +2300,16 @@ def test_grant_prepare_classifies_provider_binding_only(
             composed_policy=_GRANT_CURRENT,
         )
 
+    exception = (
+        ProviderBindingRequiredError()
+        if failure == "privacy_setup_provider_binding_required"
+        else ValueError(failure)
+    )
     with (
         _patch_state(tmp_path),
         patch("yoetz.cli.privacy_setup.get_privacy_setup_snapshot", side_effect=snapshot),
         patch("yoetz.cli.privacy_setup.configured_bindings", return_value=(None, None)),
-        patch("yoetz.cli.privacy_setup.recipe_answers", side_effect=ValueError(failure)),
+        patch("yoetz.cli.privacy_setup.recipe_answers", side_effect=exception),
     ):
         result = CliRunner().invoke(
             app, ["consent", "prepare", "repository_privacy_grant", "--recipe", "expanded_review"]

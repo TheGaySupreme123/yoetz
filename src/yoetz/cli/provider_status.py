@@ -228,6 +228,23 @@ def _mcp_local_composition(service_state: str | None, *, service_observed: bool)
     return "unknown"
 
 
+def _codex_binary_selection_command(selected_home: Path) -> str:
+    """Render a selector continuation that retains the inspected runtime and Codex home."""
+
+    from yoetz.cli.setup_readiness import continuation
+
+    return continuation(
+        [
+            "provider",
+            "status",
+            "--codex-path",
+            "<exact-executable>",
+            "--codex-home",
+            str(selected_home),
+        ]
+    )
+
+
 async def mcp_route_observation(
     workspace_locator: Path | None = None,
     *,
@@ -265,17 +282,25 @@ async def mcp_route_observation(
     external_state: str | None = None
     external_profile: str | None = None
     external_observed = False
+    binary_selection: str | None = None
     try:
         from yoetz.adapters.integrations.codex_session_stream import resolve_codex_home
 
         binaries = discover_codex_binaries()
-        binary = (
-            cli_setup._explicit_binary(codex_path)  # pyright: ignore[reportPrivateUsage]
-            if codex_path is not None
-            else binaries[0]
-            if len(binaries) == 1
-            else None
-        )
+        if codex_path is not None:
+            binary = cli_setup._explicit_binary(codex_path)  # pyright: ignore[reportPrivateUsage]
+            if binary is None:
+                binary_selection = "explicit_path_unresolved"
+        elif len(binaries) == 1:
+            binary = binaries[0]
+        elif len(binaries) > 1:
+            # A readiness report must never silently inspect an arbitrary installation when the
+            # operator has not selected one. Keep the route unreadable and provide the exact
+            # selector in the composed report below.
+            binary = None
+            binary_selection = "multiple"
+        else:
+            binary = None
         if binary is not None:
             observation = await HarnessMcpService(
                 CodexMcpAdapter(codex_home=resolve_codex_home(codex_home).absolute())
@@ -349,7 +374,7 @@ async def mcp_route_observation(
         and route_profile != _applied_profile
     )
 
-    return {
+    result: dict[str, JsonValue] = {
         "registration_state": external_state,
         "registered_profile": route_profile,
         "configured_profile": configured,
@@ -361,6 +386,9 @@ async def mcp_route_observation(
         "applied_profile": _applied_profile,
         "drift_since_install": _drift_since_install,
     }
+    if binary_selection is not None:
+        result["binary_selection"] = binary_selection
+    return result
 
 
 def _admission_repository_root(workspace_locator: Path | None) -> Path:
@@ -627,6 +655,8 @@ async def provider_status_report(
     from yoetz.adapters.integrations.codex_session_stream import resolve_codex_home
 
     selected_home = resolve_codex_home(codex_home).absolute()
+    # Keep the no-selector call shape for read-only integrations that override the route probe;
+    # the probe itself resolves the same selected home before invoking Codex.
     mcp_route = (
         await mcp_route_observation(workspace_locator, _state=_state)
         if codex_home is None and codex_path is None
@@ -649,6 +679,11 @@ async def provider_status_report(
     # here: this surface is read-only.
     grant_permits_review = llm_inference_enabled is True and repository_grant_state == "granted"
     grant_known = llm_inference_enabled is not None and repository_grant_state is not None
+    binary_selection_command = (
+        _codex_binary_selection_command(selected_home)
+        if mcp_route.get("binary_selection") in {"multiple", "explicit_path_unresolved"}
+        else None
+    )
 
     blockers: list[dict[str, JsonValue]] = []
     if service_state != "ready":
@@ -757,6 +792,24 @@ async def provider_status_report(
                 "condition": "mcp_ownership_state",
                 "state": ownership_state or "ambiguous",
                 "scope": "agent_route",
+            }
+        )
+    if mcp_route.get("binary_selection") == "multiple":
+        blockers.append(
+            {
+                "condition": "codex_binary_selection",
+                "state": "multiple",
+                "scope": "agent_route",
+                "next_command": binary_selection_command,
+            }
+        )
+    elif mcp_route.get("binary_selection") == "explicit_path_unresolved":
+        blockers.append(
+            {
+                "condition": "codex_binary_selection",
+                "state": "not_found",
+                "scope": "agent_route",
+                "next_command": binary_selection_command,
             }
         )
     for host, admission in host_admission.items():

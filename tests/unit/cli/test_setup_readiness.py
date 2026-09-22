@@ -8,12 +8,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 from tests.builders.privacy_policies import local_only_policy
 
 from yoetz.cli import setup
 from yoetz.cli import setup_readiness as module
 from yoetz.protocol.canonical import JsonValue
 from yoetz.protocol.schemas import validate_schema_instance
+from yoetz.protocol.setup_readiness import SetupReadiness
 
 
 @pytest.mark.anyio
@@ -131,6 +133,24 @@ def test_readiness_golden_contract() -> None:
     root = Path(__file__).resolve().parents[3]
     payload = json.loads((root / "fixtures/integrations/setup-readiness.case.json").read_bytes())
     validate_schema_instance("setup-readiness", "1.0.0", payload)
+
+
+def test_readiness_contract_bounds_reason_and_fact_inventory() -> None:
+    base: dict[str, JsonValue] = {
+        "schema": "yoetz.setup-readiness/1",
+        "operation": "local",
+        "reason": "ready",
+        "project": "/workspace/project",
+        "inspected_config_root": None,
+        "next_command": None,
+        "facts": {},
+    }
+    with pytest.raises(ValidationError):
+        SetupReadiness.model_validate({**base, "reason": "caller-authored"})
+    with pytest.raises(ValidationError):
+        SetupReadiness.model_validate(
+            {**base, "facts": {str(index): index for index in range(33)}}
+        )
 
 
 @pytest.mark.parametrize("host", ["codex", "claude", "cursor-cli", "cursor-ide"])

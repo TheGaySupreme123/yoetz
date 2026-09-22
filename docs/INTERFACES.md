@@ -4357,7 +4357,12 @@ legacy external-registration fields `registration_state`, `registered_profile`, 
 `external_registration|plugin_managed|dual|foreign|null`; `ownership_state` uses
 `McpOwnershipState`. `observed: false` means exclusive ownership was not read unambiguously, not
 that none is registered. `registered_profile: null` with `observed: true` means the observed state
-has no single Yoetz route (`absent|dual|foreign`).
+has no single Yoetz route (`absent|dual|foreign`). A host with multiple discovered Codex
+executables is left unobserved until the caller selects one with `--codex-path`; `provider status`
+reports the closed `codex_binary_selection` blocker and a quoted continuation retaining the
+invoking launcher, isolation root and inspected Codex home. An explicitly unresolved
+`--codex-path` uses the `not_found` state of that blocker. No arbitrary executable is chosen for a
+readiness claim.
 A strict registered route adds a `mcp_route_profile` blocker
 with `scope: "agent_route"` and never moves `semantic_ready` or the exit code, because ADR-018
 decision 2 makes the route ceiling process-local — CLI and terminal checks still dispatch. Route

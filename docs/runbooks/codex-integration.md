@@ -110,7 +110,10 @@ cell, preflight must show no external/global `yoetz` registration, bind strict o
 preview, and install the full digest-bound artifact without invoking `codex mcp add`. Dual,
 foreign, or unobservable ownership stops the operation. `yoetz provider status --json` reports
 `owner_source`, `ownership_state`, and the observed route profile; only one exclusively observed
-policy owner can make `agent_route_semantic_ready` true.
+policy owner can make `agent_route_semantic_ready` true. If more than one Codex executable is
+discovered, provide `--codex-path <exact-executable>` so the report can inspect one selected
+installation; the report keeps the route unread and supplies a bounded continuation retaining the
+selected home, launcher and isolation root when no selector is given.
 
 ## 2. Prerequisites and exact supported scope
 

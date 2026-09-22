@@ -2930,7 +2930,7 @@ def test_schema_catalog_record_shape_and_indexes_are_exact() -> None:
     root = resources.files("yoetz").joinpath("resources", "schemas")
     manifest_bytes = root.joinpath("manifest.json").read_bytes()
     assert catalog.manifest_digest == f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
-    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 5_142
+    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 5_143
 
 
 def test_schema_name_derivation_and_version_maps_are_exact() -> None:

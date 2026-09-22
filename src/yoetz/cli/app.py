@@ -2723,6 +2723,8 @@ def setup_disconnect(
     host: Annotated[str, typer.Option("--host", help="Agent to disconnect.")],
     host_path: Annotated[Path | None, typer.Option("--host-path")] = None,
     host_config_root: Annotated[Path | None, typer.Option("--host-config-root")] = None,
+    codex_home: Annotated[Path | None, typer.Option("--codex-home")] = None,
+    codex_path: _CODEX_PATH = None,
     project: Annotated[Path | None, typer.Option("--project")] = None,
     request_value: Annotated[str | None, typer.Option("--request-id")] = None,
     preview_digest: Annotated[str | None, typer.Option("--preview-digest")] = None,
@@ -2733,6 +2735,12 @@ def setup_disconnect(
 ) -> None:
     """Preview and remove the selected integration, preserving Yoetz data."""
     from yoetz.cli.host_connection import run_host_connection
+
+    if codex_home is not None or codex_path is not None:
+        if host != "codex" or host_path is not None or host_config_root is not None:
+            raise typer.BadParameter("Codex options cannot be combined with other host targets")
+        host_path = None if codex_path is None else Path(codex_path)
+        host_config_root = codex_home
 
     _finish(
         run_host_connection(
@@ -4647,14 +4655,10 @@ def elevated_prepare(
                 )
             except elevated_error:
                 raise
+            except privacy.ProviderBindingRequiredError:
+                raise elevated_error("provider_binding_required") from None
             except (ConfigError, KeyError, TypeError, ValueError) as exc:
-                reason = (
-                    "provider_binding_required"
-                    if type(exc) is ValueError
-                    and str(exc) == "privacy_setup_provider_binding_required"
-                    else "grant_binding_invalid"
-                )
-                raise elevated_error(reason) from exc
+                raise elevated_error("grant_binding_invalid") from exc
             return 0
 
         try:

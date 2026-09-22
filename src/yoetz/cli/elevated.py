@@ -216,13 +216,13 @@ async def review_elevated() -> dict[str, JsonValue]:
             except TrustedConsoleError, KeyboardInterrupt:
                 # Cancellation after displaying the review remains single-use. Availability
                 # preflight is the only new non-consuming path for a valid approval.
-                pending = claim_pending_for_review()
+                pending = claim_pending_for_review(expected_pending=observed)
                 if pending != observed:
                     raise ElevatedBootstrapError("pending_tampered") from None
                 raise
             if selected == b"approve":
                 await _preflight_service(observed)
-            pending = claim_pending_for_review()
+            pending = claim_pending_for_review(expected_pending=observed)
             if pending != observed:
                 raise ElevatedBootstrapError("pending_tampered")
             if selected == b"deny":
@@ -344,7 +344,7 @@ async def authorize_elevated(
             raise ElevatedBootstrapError("provider_credential_forbidden")
         if model.decision == "approve":
             await _preflight_service(observed)
-        pending = claim_pending_for_review()
+        pending = claim_pending_for_review(expected_pending=observed)
         if pending != observed:
             raise ElevatedBootstrapError("pending_tampered")
         if pending.expires_at_unix <= int(time.time()):

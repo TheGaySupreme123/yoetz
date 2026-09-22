@@ -622,6 +622,72 @@ async def test_route_probe_failure_degrades_instead_of_raising(
     assert report["agent_route_semantic_ready"] is False
 
 
+async def test_multiple_codex_binaries_require_an_explicit_route_selector(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from yoetz.ports.harness_mcp import HarnessBinary
+    from yoetz.ports.integrations import HarnessId
+
+    _install(monkeypatch, tmp_path, provider=_provider())
+    monkeypatch.setattr(module, "mcp_route_observation", _REAL_ROUTE_OBSERVATION)
+    chosen_home = tmp_path / "selected-home"
+    chosen_home.mkdir(mode=0o700)
+    from yoetz.cli import setup_readiness
+
+    monkeypatch.setattr(setup_readiness, "invoking_launcher", lambda: ("/opt/yoetz/bin/yoetz",))
+    monkeypatch.setattr(setup_readiness, "isolated_root", lambda: tmp_path / "isolated-root")
+    binaries = (
+        HarnessBinary(HarnessId.CODEX, "/opt/codex-a", "0.150.1", "untested"),
+        HarnessBinary(HarnessId.CODEX, "/opt/codex-b", "0.150.1", "untested"),
+    )
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.codex_discovery.discover_codex_binaries",
+        lambda: binaries,
+    )
+
+    report = await module.provider_status_report(_state=tmp_path, codex_home=chosen_home)
+
+    route = cast(dict[str, object], report["mcp_route"])
+    assert route["binary_selection"] == "multiple"
+    blockers = cast(tuple[dict[str, object], ...], report["blockers"])
+    selection = next(item for item in blockers if item["condition"] == "codex_binary_selection")
+    assert selection["state"] == "multiple"
+    assert selection["scope"] == "agent_route"
+    command = cast(str, selection["next_command"])
+    assert "/opt/yoetz/bin/yoetz" in command
+    assert "YOETZ_ISOLATED_ROOT=" + str(tmp_path / "isolated-root") in command
+    assert "--codex-path '<exact-executable>'" in command
+    assert "--codex-home " + str(chosen_home) in command
+    assert report["next_commands"] == (command,)
+
+
+async def test_unresolvable_explicit_codex_path_has_a_bounded_selector_hint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from yoetz.ports.harness_mcp import HarnessBinary
+    from yoetz.ports.integrations import HarnessId
+
+    _install(monkeypatch, tmp_path, provider=_provider())
+    monkeypatch.setattr(module, "mcp_route_observation", _REAL_ROUTE_OBSERVATION)
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.codex_discovery.discover_codex_binaries",
+        lambda: (HarnessBinary(HarnessId.CODEX, "/opt/codex", "0.150.1", "untested"),),
+    )
+
+    report = await module.provider_status_report(
+        _state=tmp_path, codex_path=str(tmp_path / "missing-codex")
+    )
+
+    route = cast(dict[str, object], report["mcp_route"])
+    assert route["binary_selection"] == "explicit_path_unresolved"
+    blockers = cast(tuple[dict[str, object], ...], report["blockers"])
+    assert any(
+        item.get("condition") == "codex_binary_selection"
+        and item.get("state") == "not_found"
+        for item in blockers
+    )
+
+
 async def test_registration_drift_from_configuration_is_visible(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

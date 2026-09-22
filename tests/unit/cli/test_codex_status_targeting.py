@@ -102,6 +102,38 @@ async def test_mcp_and_provider_probes_bind_explicit_home(
     assert set(seen) == {chosen}
 
 
+@pytest.mark.anyio
+async def test_provider_probe_binds_testing_home_when_no_home_is_passed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    testing = tmp_path / "testing"
+    testing.mkdir(mode=0o700)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.setenv("CODEX_TESTING_HOME", str(testing))
+    binary = HarnessBinary(HarnessId.CODEX, "/test/codex", "0.150.1", "untested")
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.codex_discovery.discover_codex_binaries", lambda: (binary,)
+    )
+    seen: list[Path | None] = []
+
+    def runner(
+        _argv: tuple[str, ...], *, codex_home: Path | None = None
+    ) -> codex_mcp.CommandOutput:
+        seen.append(codex_home)
+        return codex_mcp.CommandOutput(1, b"")
+
+    monkeypatch.setattr(codex_mcp, "_default_runner", runner)
+    monkeypatch.setattr(codex_mcp, "isolated_root", lambda: None)
+    monkeypatch.setattr(codex_mcp, "installed_launcher", lambda: None)
+
+    route = await provider_status.mcp_route_observation(tmp_path, _state=tmp_path)
+
+    assert route["observed"] is False
+    assert seen
+    assert set(seen) == {testing}
+
+
 def test_bound_runner_overrides_both_ambient_homes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -136,3 +168,36 @@ def test_discovery_and_connection_honor_testing_home_before_default(
     assert default_codex_home(env) == testing
     assert host_config_root("codex", environ=env) == testing
     assert resolve_codex_home(env=env) == testing
+
+
+def test_setup_disconnect_accepts_the_selected_codex_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: dict[str, object] = {}
+
+    def disconnect(**kwargs: object) -> int:
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr("yoetz.cli.host_connection.run_host_connection", disconnect)
+    home = tmp_path / "selected-home"
+    result = CliRunner().invoke(
+        app,
+        [
+            "setup",
+            "disconnect",
+            "--host",
+            "codex",
+            "--codex-home",
+            str(home),
+            "--project",
+            str(tmp_path),
+            "--non-interactive",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["host"] == "codex"
+    assert captured["config_root"] == home
+    assert captured["executable"] is None
