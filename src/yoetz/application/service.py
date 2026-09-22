@@ -631,6 +631,11 @@ class Application:
     reconcile_observation_capture: Callable[[TaskRuntime], Awaitable[None]] | None = field(
         default=None, repr=False, compare=False
     )
+    # Historical loss is reconciled before a new CHECK freezes; already-frozen
+    # operations retain their original case. This hook may append loss evidence.
+    reconcile_observation_losses: Callable[[TaskRuntime], Awaitable[None]] | None = field(
+        default=None, repr=False, compare=False
+    )
     enforce_repository_identity: bool = True
     _close_lock: asyncio.Lock = field(init=False, repr=False, compare=False)
     _close_task: asyncio.Task[None] | None = field(
@@ -655,6 +660,10 @@ class Application:
             raise TypeError("ready_recommendation_refresh_invalid")
         if self.observation_sweep_close is not None and not callable(self.observation_sweep_close):
             raise TypeError("observation_sweep_close_invalid")
+        if self.reconcile_observation_losses is not None and not callable(
+            self.reconcile_observation_losses
+        ):
+            raise TypeError("reconcile_observation_losses_invalid")
         if self.reconcile_observation_capture is not None and not callable(
             self.reconcile_observation_capture
         ):
@@ -1462,6 +1471,9 @@ class ServiceReadyContext:
     observation_sweep_close: Callable[[], None] | None = field(
         default=None, repr=False, compare=False
     )
+    reconcile_observation_losses: Callable[[TaskRuntime], Awaitable[None]] | None = field(
+        default=None, repr=False, compare=False
+    )
     reconcile_observation_capture: Callable[[TaskRuntime], Awaitable[None]] | None = field(
         default=None, repr=False, compare=False
     )
@@ -1490,6 +1502,10 @@ class ServiceReadyContext:
             raise TypeError("ready_recommendation_refresh_invalid")
         if self.observation_sweep_close is not None and not callable(self.observation_sweep_close):
             raise TypeError("observation_sweep_close_invalid")
+        if self.reconcile_observation_losses is not None and not callable(
+            self.reconcile_observation_losses
+        ):
+            raise TypeError("reconcile_observation_losses_invalid")
         if self.reconcile_observation_capture is not None and not callable(
             self.reconcile_observation_capture
         ):
@@ -1556,6 +1572,7 @@ class ReadyApplicationFactory:
                 ready_recommendation_refresh=context.ready_recommendation_refresh,
                 observation_sweep_close=context.observation_sweep_close,
                 reconcile_observation_capture=context.reconcile_observation_capture,
+                reconcile_observation_losses=context.reconcile_observation_losses,
                 enforce_repository_identity=True,
                 advice_semantic_supervisor=context.advice_semantic_supervisor,
             )
