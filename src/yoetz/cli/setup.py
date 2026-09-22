@@ -95,7 +95,7 @@ __all__ = [
 
 SETUP_MARKER_SCHEMA: Final = "yoetz.setup-wizard-marker/1"
 _REPORT_SCHEMA: Final = "yoetz.setup-wizard-report/1"
-_STATUS_SCHEMA: Final = "yoetz.setup-status/1"
+_STATUS_SCHEMA: Final = "yoetz.setup-status/2"
 _HARNESS_DISPLAY_NAMES: Final[dict[HarnessId, str]] = {HarnessId.CODEX: "Codex"}
 
 _NEXT_SERVICE: Final = "run 'yoetz service run' under your selected user supervisor"

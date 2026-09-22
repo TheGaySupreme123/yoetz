@@ -2651,7 +2651,7 @@ receipt values without rewriting stored receipts or the released `2.6.0` envelop
 request envelopes remain `2.6.0`; no new control method or 0.3 project contract is introduced.
 CLI JSON, terminal output and the prompt-loop menu render decoded UTC receipt timestamps in
 canonical millisecond RFC3339 form (issues #731 and #732). The added schema inventory is reported
-by version-manifest `2.2.3`; released `2.2.2` and earlier manifests retain their original bytes.
+by current version-manifest `2.2.4`; released `2.2.3` and earlier manifests retain their original bytes.
 
 `PrivacyAuditPort.list_pending_disclosures(audience) -> PendingDisclosurePage` projects only
 `PendingDisclosureEntry(pending_id, task_id, expires_at)` for proposals in `awaiting_human` or
@@ -4279,7 +4279,7 @@ is surfaced before mutation: the wizard preview and report carry `route_profile_
 ordinary digest-bound re-registration.
 The setup-wizard
 schema tokens are `yoetz.setup-wizard-marker/1`, `yoetz.setup-wizard-report/1`,
-`yoetz.setup-status/1`, `yoetz.mcp-registration-preview/1` (ambient) / `2` (isolated) / `3`
+`yoetz.setup-status/2`, `yoetz.mcp-registration-preview/1` (ambient) / `2` (isolated) / `3`
 (installed absolute launcher), and `yoetz.mcp-unregistration-preview/1` (ambient) / `2`
 (isolated) / `3` (installed absolute launcher); the marker lives at
 `state_dir()/setup-wizard.json` via
@@ -4289,8 +4289,13 @@ schema tokens are `yoetz.setup-wizard-marker/1`, `yoetz.setup-wizard-report/1`,
 
 The #767 desktop entrypoints are `setup run|status|disconnect --host
 codex|claude|cursor-ide|cursor-cli`, with `--host-path`, `--host-config-root`, and `--project`
-overrides. `setup-status/1` adds the executable-backed `hosts` inventory alongside its legacy
-Codex `discovered` rows. Inventory is not connection proof. `yoetz.host-connection-plan/1` binds
+overrides. `setup-status/2` adds the executable-backed `hosts` inventory and Claude activation
+posture alongside its legacy Codex `discovered` rows. Inventory is not connection proof. The CLI
+envelope is version-tagged for compatibility and is owned by
+`schemas/integrations/setup-status-2.0.0.schema.json` with the representative
+`fixtures/integrations/setup-status.case.json` vector. The `/2` tag leaves the historical
+unversioned status shape outside the released contract.
+`yoetz.host-connection-plan/1` binds
 the request, installation, project, route, adapter previews and changes to `preview_digest`.
 `yoetz.host-connection-report/1` names `preview`, `completed`, `unchanged`, `status` or `incomplete`,
 with the plan, layer-specific status, reason and continuation where applicable.
@@ -5180,7 +5185,13 @@ facade and are never MCP tools.
   `PRESENTATION_INPUT_SCHEMA_BUDGETS`, `SERVER_INSTRUCTIONS_BUDGET`, `ADVERTISED_SURFACE_BUDGET`,
   and `advertised_surface_metrics()`. Initialize `instructions` carry the packaged
   `agent-instructions.md` document and then the route-profile suffix; every other guidance document
-  is fetched on demand through `resources/read` or `read_guidance`. A host may charge the
+  is fetched on demand through `resources/read` or `read_guidance`. `server_instructions()` also
+  takes `host_profile` (issue #789): the `claude` host receives `CLAUDE_CODE_INITIALIZE_INSTRUCTIONS`,
+  a packaged body bounded by `CLAUDE_CODE_INSTRUCTIONS_BUDGET` (`observed_host_cap_chars` 2,048,
+  the Claude Code desktop rendering cap recorded as an observed host fact in the Claude runbook;
+  `packaged_max_chars` 964, derived so the body, the policy tail and `MAX_DISCLOSURE_ENCODED_BYTES`
+  fit under the cap together; `max_chars` 2,048), with the same route tail and disclosure
+  composition; every other host keeps the packaged document byte for byte. A host may charge the
   `instructions` string once per advertised tool — Codex copies it into every tool `description` —
   so `SERVER_INSTRUCTIONS_BUDGET` bounds that string per route profile and
   `ADVERTISED_SURFACE_BUDGET` bounds the aggregate of instructions-per-tool plus every description

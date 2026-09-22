@@ -1196,7 +1196,7 @@ def test_setup_status_is_read_only(wizard_env: dict[str, object]) -> None:
     result = _RUNNER.invoke(cli.app, ["setup", "status", "--json"])
     assert result.exit_code == 0
     report = json.loads(result.stdout)
-    assert report["schema"] == "yoetz.setup-status/1"
+    assert report["schema"] == "yoetz.setup-status/2"
     assert report["discovered"][0]["registration_state"] == "yoetz_owned"
     # `yoetz_owned` reads the same for both serve commands, so the row has to name the route.
     assert report["discovered"][0]["registered_route_profile"] == "strict"

@@ -159,6 +159,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
+        "schemas/integrations/setup-status-2.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
         "fixtures/agent-plugins/codex-project-plugin-managed-mcp.case.json",
         "compatibility_manifest",
         "application/json",
@@ -1167,6 +1173,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     (
         "schemas/version/version-manifest-2.2.3.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/version/version-manifest-2.2.4.schema.json",
         "json_schema",
         "application/schema+json",
         True,

@@ -56,7 +56,7 @@ __all__ = [
 SCHEMA_NAMESPACE: Final = "https://schemas.yoetz.dev/0.1/"
 SCHEMA_MANIFEST_SCHEMA: Final = "yoetz.schema-manifest/1.0.0"
 SCHEMA_MANIFEST_VERSION: Final = "1.0.0"
-SCHEMA_MEMBER_COUNT: Final = 152
+SCHEMA_MEMBER_COUNT: Final = 154
 
 _DRAFT_2020_12: Final = "https://json-schema.org/draft/2020-12/schema"
 _SCHEMA_MEDIA_TYPE: Final = "application/schema+json"
@@ -398,9 +398,11 @@ def _derive_kind(path: str) -> SchemaKind:
 
 def _derive_role(path: str) -> SchemaArtifactRole:
     directory, filename = path.split("/", 1)
-    if directory == "integrations" and filename.startswith("setup-readiness-"):
-        return SchemaArtifactRole.SETUP_CONTRACT
     if directory == "integrations" and filename.startswith("host-connection-"):
+        return SchemaArtifactRole.SETUP_CONTRACT
+    if directory == "integrations" and filename.startswith("setup-status-"):
+        return SchemaArtifactRole.SETUP_CONTRACT
+    if directory == "integrations" and filename.startswith("setup-readiness-"):
         return SchemaArtifactRole.SETUP_CONTRACT
     if directory == "common":
         if filename.startswith("operation-result-"):
@@ -650,7 +652,7 @@ def _load_catalog_state() -> _CatalogState:
             key=lambda item: item.schema_name.replace("-", "_").encode("ascii"),
         )
     }
-    if len(request_versions_dict) != 44 or len(event_versions_dict) != 16:
+    if len(request_versions_dict) != 45 or len(event_versions_dict) != 16:
         _protocol_error("schema_catalog_incomplete")
 
     catalog = SchemaCatalog(
