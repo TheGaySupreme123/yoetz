@@ -463,6 +463,68 @@ def test_unknown_error_code_keeps_pending_ticket_and_closes_gate(host: Host) -> 
 
 
 @pytest.mark.parametrize(
+    "error_code",
+    [
+        "IDEMPOTENCY_CONFLICT",
+        "REQUEST_IDENTITY_CONFLICT",
+    ],
+)
+def test_identity_conflict_keeps_original_pending_ticket(host: Host, error_code: str) -> None:
+    host.start()
+    host.publish()
+    request, result = host.publication(version=2)
+    host.pre("publish_work", request)
+    before = host.store.read()
+    assert before is not None
+
+    result.update(ok=False, error={"code": error_code})
+    host.post("publish_work", request, result)
+
+    after = host.store.read()
+    assert after is not None
+    rid = request["request_id"]
+    assert isinstance(rid, str)
+    assert after.pending.get(rid) == "publish_work"
+    assert after.pending_refs.get(rid) == before.pending_refs.get(rid)
+    assert host.denied()
+
+
+def test_mismatched_same_request_retry_preserves_original_ticket(host: Host) -> None:
+    host.start()
+    host.publish()
+    request, result = host.publication(version=2)
+    host.pre("publish_work", request)
+    before = host.store.read()
+    assert before is not None
+    rid = request["request_id"]
+    assert isinstance(rid, str)
+
+    blocked = host.pre("start", {"request_id": rid})
+    if host.host == "claude":
+        details = blocked.get("hookSpecificOutput")
+        assert isinstance(details, dict)
+        assert details.get("permissionDecision") == "deny"
+        reason = details.get("permissionDecisionReason")
+        assert isinstance(reason, str) and "request_identity_conflict" in reason
+    else:
+        assert blocked["permission"] == "deny"
+        assert blocked["user_message"] == "Yoetz startup: request_identity_conflict."
+
+    after_retry = host.store.read()
+    assert after_retry is not None
+    assert after_retry.pending.get(rid) == "publish_work"
+    assert after_retry.pending_refs.get(rid) == before.pending_refs.get(rid)
+
+    result.update(ok=False, error={"code": "REQUEST_IDENTITY_CONFLICT"})
+    host.post("publish_work", request, result)
+    after_conflict = host.store.read()
+    assert after_conflict is not None
+    assert after_conflict.pending.get(rid) == "publish_work"
+    assert after_conflict.pending_refs.get(rid) == before.pending_refs.get(rid)
+    assert host.denied()
+
+
+@pytest.mark.parametrize(
     "invalid_context",
     [
         {"session_id": "", "conversation_id": ""},

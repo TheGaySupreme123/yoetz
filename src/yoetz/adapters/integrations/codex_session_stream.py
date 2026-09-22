@@ -309,7 +309,7 @@ def resolve_codex_home(
     *,
     env: Mapping[str, str] | None = None,
 ) -> Path:
-    """Resolve the selected owner-private Codex home (never disclosed by callers)."""
+    """Resolve the selected owner-private Codex home for a bound local inspection."""
 
     if explicit is not None:
         return Path(explicit).expanduser()

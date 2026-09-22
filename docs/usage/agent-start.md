@@ -31,6 +31,15 @@ Assume the user may never have opened a terminal. Explain each step in one plain
 you run it, and before the first decision read
 [Ask in chat when you have no question tool](#ask-in-chat-when-you-have-no-question-tool).
 
+Before an out-of-order setup retry, use `yoetz setup status --next --operation local|review|connection`
+with the selected `--host`, `--host-path`, `--host-config-root`, and `--project`. The response names
+one next command bound to that runtime and project. Connection alone needs no provider sign-in;
+local use needs no provider; provider-backed privacy requires a configured binding first.
+A service-down preflight preserves an unclaimed pending approval, but never resurrects an approval
+already claimed, denied, cancelled, or expired. Continue only through the exact existing consent
+procedure. Never ask for a vault passphrase in chat. The terminal interface uses the same storage
+choices and common host connection preview; installation and activation remain separate facts.
+
 ## 0. Check the platform first — you do this
 
 Yoetz runs on macOS and Linux. Native Windows is not supported: the package installs, but every
@@ -239,7 +248,17 @@ consequential step — no install, no `setup run`, no registration until it is a
   use PAM through the trusted terminal; builds without that support refuse
   `human_authority_unavailable`. The user enters their account password only in that terminal.
   Successful installation does not establish native Linux host coverage. Claude Code can also
-  use a `yoetz mcp serve` entry in its own MCP configuration, added only after approval.
+  use a `yoetz mcp serve --host claude` entry in its own MCP configuration, added only after
+  approval. That bare entry delivers only the server's initialize instructions: no session-start
+  cue, no hooks, no `/yoetz:yoetz` skill. Prefer the guided connection (`yoetz setup run --host
+  claude`), which installs the plugin that carries them. `yoetz setup status --json` reports which
+  mode each Claude installation is in and whether a session-start cue is installed
+  (`hosts[].activation_cues`).
+- Deferred tools: with many MCP servers registered, Claude Code lists only tool names until they
+  are loaded. Load the Yoetz schemas first (ToolSearch `select:mcp__yoetz__start,...`, or the
+  plugin-prefixed names) and call `start` before material work; if work already began, call
+  `start` now, publish the work so far as a bounded plan, and disclose the uncovered prefix in
+  the receipt.
 - Integration: `yoetz integrate claude plugin preview`, then `install` after the user approves
   the digest and completes the supported platform's presence ceremony. On Linux-capable builds,
   hand the `install` line to the user for the password prompt at their own terminal; running it

@@ -40,8 +40,17 @@ _RETRYABLE_FAILURE_CODES = frozenset(
         PublicErrorCode.SERVICE_UNAVAILABLE.value,
     }
 )
+_PRESERVE_PENDING_CODES = _RETRYABLE_FAILURE_CODES | frozenset(
+    {
+        # A rejected replay can conflict with an operation that was already accepted or whose
+        # outcome is still ambiguous. Keep the original ticket until an exact retry or status
+        # recovery proves its outcome.
+        PublicErrorCode.IDEMPOTENCY_CONFLICT.value,
+        PublicErrorCode.REQUEST_IDENTITY_CONFLICT.value,
+    }
+)
 _TERMINAL_FAILURE_CODES = frozenset(
-    code.value for code in PublicErrorCode if code.value not in _RETRYABLE_FAILURE_CODES
+    code.value for code in PublicErrorCode if code.value not in _PRESERVE_PENDING_CODES
 )
 _NOTICE = (
     "Yoetz required startup is active. Read yoetz://guidance/workflow.md and load Yoetz tools. "
@@ -417,10 +426,17 @@ def handle_startup_gate(
                                     # before another pending ticket can be admitted.
                                     admitted = False
                                     reason = "pending_operation_capacity"
+                                elif rid in scope.pending and scope.pending[rid] != tool:
+                                    # A request id is bound to its original workflow operation;
+                                    # do not let a mismatched replay replace its ticket metadata.
+                                    admitted = False
+                                    reason = "request_identity_conflict"
                                 else:
-                                    scope.pending[rid] = tool
+                                    scope.pending.setdefault(rid, tool)
                                     scope.pending_generations.setdefault(rid, scope.generation)
-                                    scope.pending_refs[rid] = proposed_obligations(request)
+                                    scope.pending_refs.setdefault(
+                                        rid, proposed_obligations(request)
+                                    )
                                     store.write(scope)
                 elif scope is None or not scope.candidate:
                     reason = "current_plan_required"
