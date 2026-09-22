@@ -48,9 +48,9 @@ CONNECTION_ERRORS = (
     ElevatedBootstrapError,
     RuntimeError_,
     OSError,
-    RuntimeError,
     ValueError,
 )
+_POSTURE_ERRORS = (*CONNECTION_ERRORS, RuntimeError)
 
 
 def installation_rows(project: Path | None = None) -> list[JsonValue]:
@@ -92,7 +92,7 @@ def claude_activation_cues(
     if invocation is not None:
         try:
             launcher = resolve_yoetz_launcher(invocation)
-        except CONNECTION_ERRORS:
+        except _POSTURE_ERRORS:
             launcher = None
     try:
         return observe_claude_code_activation_cues(
@@ -100,7 +100,7 @@ def claude_activation_cues(
             claude_config_root=installation.config_root,
             yoetz_launcher=launcher,
         ).as_json()
-    except CONNECTION_ERRORS:
+    except _POSTURE_ERRORS:
         return None
 
 
