@@ -214,6 +214,18 @@ class GateStore:
         raw = _read_private(self.path)
         return None if raw is None else _decode(raw)
 
+    def read_for_reset(self) -> GateScope | None:
+        """Read the previous scope while the reset lock is held.
+
+        A reset must preserve the route and every pending request identity from
+        the previous sidecar.  The invalidation marker still makes ordinary
+        readers fail closed, but a reset that owns the lock is the recovery
+        operation which may replace that marker with a freshly written scope.
+        """
+
+        raw = _read_private(self.path)
+        return None if raw is None else _decode(raw)
+
     def invalidate(self) -> bool:
         """Durably make this scope unreadable until a reset succeeds."""
 

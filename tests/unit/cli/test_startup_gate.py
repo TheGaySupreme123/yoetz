@@ -380,6 +380,69 @@ def test_reset_persistence_failure_invalidates_the_previous_candidate(
     assert host.denied()
 
 
+def test_successful_reset_after_failure_preserves_pending_request_identity(
+    host: Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host.start()
+    request: dict[str, JsonValue] = {"request_id": new_id(IdKind.REQUEST)}
+    host.pre("start", request)
+    before = host.store.read()
+    assert before is not None and request["request_id"] in before.pending
+
+    def fail_write(_store: GateStore, _scope: GateScope) -> None:
+        raise OSError("simulated reset write failure")
+
+    monkeypatch.setattr(GateStore, "write", fail_write)
+    host.boundary("prompt")
+    assert host.store.read() is None
+    assert host.store.invalidation_path.exists()
+
+    monkeypatch.undo()
+    host.boundary("prompt")
+    after = host.store.read()
+    assert after is not None
+    assert after.route == before.route
+    assert request["request_id"] in after.pending
+    assert after.plan_generation is None
+    assert not host.store.invalidation_path.exists()
+
+
+def test_reset_marker_failure_uses_prompt_boundary_block(
+    host: Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host.start()
+    host.publish()
+
+    def fail_write(_store: GateStore, _scope: GateScope) -> None:
+        raise OSError("simulated reset write failure")
+
+    def fail_invalidate(_store: GateStore) -> bool:
+        return False
+
+    monkeypatch.setattr(GateStore, "write", fail_write)
+    monkeypatch.setattr(GateStore, "invalidate", fail_invalidate)
+    response = host.call("UserPromptSubmit" if host.host == "claude" else "beforeSubmitPrompt")
+    if host.host == "claude":
+        assert response["decision"] == "block"
+        reason = response.get("reason")
+        assert isinstance(reason, str) and "could not safely advance" in reason
+    else:
+        assert response["continue"] is False
+        message = response.get("user_message")
+        assert isinstance(message, str) and "could not safely advance" in message
+
+    session_response = host.call("SessionStart" if host.host == "claude" else "sessionStart")
+    if host.host == "claude":
+        assert "decision" not in session_response
+        details = session_response.get("hookSpecificOutput")
+        assert isinstance(details, dict)
+        context = details.get("additionalContext")
+    else:
+        assert "continue" not in session_response
+        context = session_response.get("additional_context")
+    assert isinstance(context, str) and "cannot block the first prompt" in context
+
+
 def test_corrupt_gate_state_does_not_deadlock_bootstrap(host: Host) -> None:
     host.store.path.write_bytes(b"broken")
     assert host.denied()

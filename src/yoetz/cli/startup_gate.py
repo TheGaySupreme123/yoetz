@@ -39,6 +39,16 @@ _NOTICE = (
     "pending operations with their original request ids. Text-only trivial answers need no "
     "bootstrap. The owner can replace this plugin with --startup-mode optional to disable the gate."
 )
+_RESET_FAILURE_NOTICE = (
+    "Yoetz required startup could not safely advance this turn. Retry the exact prompt after "
+    "the host's Yoetz state is writable; pending requests keep their original request ids. "
+    "Substantive tool calls remain blocked until a fresh accepted plan is recorded."
+)
+_RESET_FAILURE_CONTEXT = (
+    "Yoetz required startup could not safely advance this session boundary. The host's "
+    "session-start hook cannot block the first prompt or tool; repair writable state and retry "
+    "before substantive work. Pending requests keep their original request ids."
+)
 
 
 def _object(value: object) -> Mapping[str, JsonValue] | None:
@@ -283,6 +293,24 @@ def gate_output(host: str, event: str, admitted: bool, reason: str) -> dict[str,
     }
 
 
+def reset_failure_output(host: str, event: str) -> dict[str, JsonValue]:
+    """Report a failed scope boundary using the host's supported control field.
+
+    Claude's UserPromptSubmit and Cursor's beforeSubmitPrompt can block the
+    current turn. Their session-start events are context-only, so they receive
+    a bounded diagnostic and the following native pre-tool gate remains the
+    enforcement boundary when durable invalidation succeeded.
+    """
+
+    if host == "claude" and event == "UserPromptSubmit":
+        return {"decision": "block", "reason": _RESET_FAILURE_NOTICE}
+    if host == "cursor" and event == "beforeSubmitPrompt":
+        return {"continue": False, "user_message": _RESET_FAILURE_NOTICE}
+    if host == "claude":
+        return claude_context_output(event, _RESET_FAILURE_CONTEXT)
+    return cursor_context_output(event, _RESET_FAILURE_CONTEXT)
+
+
 def handle_startup_gate(
     *,
     host: Literal["claude", "cursor"],
@@ -313,7 +341,10 @@ def handle_startup_gate(
         tool = workflow_tool(payload, host, event)
         request = _object(payload.get("tool_input"))
         with _locked_for_event(store, event):
-            scope = store.read()
+            # A reset owns the lock and is the only operation allowed to
+            # replace an invalidated sidecar. Preserve its route and pending
+            # identities while GateScope.fresh clears the current readiness.
+            scope = store.read_for_reset() if event in _RESET else store.read()
             if event in _RESET:
                 keep = event in {"UserPromptSubmit", "beforeSubmitPrompt"} or payload.get(
                     "source"
@@ -439,6 +470,10 @@ def handle_startup_gate(
         if output is None:
             output = gate_output(host, event, admitted, reason)
     except Exception:
-        output = gate_output(host, event, admitted, "readiness_unavailable")
+        output = (
+            reset_failure_output(host, event)
+            if event in _RESET
+            else gate_output(host, event, admitted, "readiness_unavailable")
+        )
     stdout_json(output, stdout)
     return 0

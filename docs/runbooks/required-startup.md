@@ -85,8 +85,19 @@ plan prose matches the user's intent.
 
 Gate locks are nonblocking and independent of observation locks, capture, spool, drain and advice.
 The service probe has a 650 ms asynchronous budget inside a 1.25 s subprocess deadline; gate hooks
-have a 3 s host timeout. Controlled failures deny substantive tools. Bootstrap still reaches normal
-host admission even when gate state is unreadable. Errors expose only closed reasons, never payloads.
+have a 3 s host timeout. Controlled failures at a block-capable boundary deny substantive tools.
+Bootstrap still reaches normal host admission even when gate state is unreadable. Errors expose only
+closed reasons, never payloads.
+
+A user-prompt reset writes a new scope before clearing the prior invalidation marker. If that write
+fails, the marker makes ordinary readers fail closed; the next reset reads the old sidecar only while
+holding the reset lock, so its route and every pending request identity survive recovery. If the
+marker itself cannot be created because the state directory is unavailable, Claude
+`UserPromptSubmit` returns its native `decision: block` result and Cursor `beforeSubmitPrompt`
+returns `continue: false`. Claude `SessionStart` and Cursor `sessionStart` are context-only events;
+they report the bounded storage error but cannot block the first prompt or tool. A storage fault at
+that boundary therefore remains an explicit limit on fail-closed coverage until the host reaches a
+block-capable prompt or tool hook, and this feature does not claim universal fail-closed behavior.
 
 These budgets do not guarantee OS scheduling before the host kills a command.
 [Claude's contract](https://code.claude.com/docs/en/hooks#timeouts) lets command-hook timeouts proceed
