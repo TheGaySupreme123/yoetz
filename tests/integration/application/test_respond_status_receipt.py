@@ -3909,7 +3909,6 @@ async def test_command_gap_partition_preserves_receipt_coverage(
         StatusRequest.model_validate(
             {
                 **base(),
-                "expected_frontier": _frontier(frontier),
                 "view": "findings",
                 "limit": "100",
                 "filter": {"include_resolved": True},

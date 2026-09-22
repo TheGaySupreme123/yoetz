@@ -5451,8 +5451,9 @@ a command was observed matching. An action sharing such an obligation still requ
 coverage to be repaired; an absent, ambiguous, redacted, or unbound relation never qualifies.
 A later material projection row cannot establish proof for an earlier checked frontier. The
 check's own finding suffix is immaterial to action/result/plan inputs. Explanations reconstruct
-the exact checked prefix when needed and identify overlapping obligation IDs (bounded to 16)
-or that independence remains unproven. Once independence is proven, the command codes are removed
+the projection immediately before the candidate check when needed; the same per-row frontier
+guards identify overlapping obligation IDs (bounded to 16) or that independence remains unproven.
+Once independence is proven, the command codes are removed
 before freshness is evaluated, so the existing closed host-observation exception may also admit a
 `redacted_gap` check when all remaining gaps are tolerated host/evidence limits; projection
 redactions and unknown relations still block. All ordinary scope, policy, suppression, refiring,

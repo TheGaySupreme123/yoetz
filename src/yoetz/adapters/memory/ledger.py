@@ -1103,7 +1103,7 @@ def _projection_items(
         return tuple(evidence_items)
     if view is ProjectionView.FINDINGS:
         finding_items: list[ProjectionItem] = []
-        proof_state_cache: dict[tuple[int, str], ProjectionState | None] = {}
+        proof_state_cache: dict[tuple[int, int, str], ProjectionState | None] = {}
         ordered = sorted(
             (
                 record.payload
@@ -1188,7 +1188,7 @@ def _projection_items(
                 and record.payload.status.value == "open"
             )
         )
-        proof_state_cache: dict[tuple[int, str], ProjectionState | None] = {}
+        proof_state_cache: dict[tuple[int, int, str], ProjectionState | None] = {}
         unanswered_findings = tuple(
             StatusCompactFindingModel(
                 finding_id=finding.finding_id,

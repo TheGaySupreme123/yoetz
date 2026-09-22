@@ -1196,7 +1196,7 @@ def build_receipt(
             key=_ascii_key,
         )
     )
-    proof_state_cache: dict[tuple[int, str], ProjectionState | None] = {}
+    proof_state_cache: dict[tuple[int, int, str], ProjectionState | None] = {}
     sections = _sections(
         include=include,
         conclusion=conclusion,

@@ -116,7 +116,7 @@ _COMMAND_GAPS: Final = frozenset({"command_attempt_uncorroborated", "command_att
 # Keep this local to avoid importing the policy module while reducers import this module. If the
 # work-integrity pack changes version, its action-result exception must be reviewed explicitly.
 _ACTION_WITHOUT_RESULT_POLICY: Final = ("work-integrity", "0.1.0")
-ProofStateCache = MutableMapping[tuple[int, str], ProjectionState | None]
+ProofStateCache = MutableMapping[tuple[int, int, str], ProjectionState | None]
 
 
 def _command_gap_partition(
@@ -385,26 +385,25 @@ def _historical_proof_state(
     records: tuple[LedgerRecord, ...],
     cache: ProofStateCache,
 ) -> ProjectionState | None:
-    """Replay one exact checked prefix, caching it for all findings sharing the check."""
-    key = (check.subject_frontier.sequence, check.subject_frontier.head_digest)
+    """Replay the pre-check projection, caching it for findings sharing that candidate."""
+    candidate_sequence = candidate.ledger.ingestion_sequence
+    key = (
+        candidate_sequence,
+        check.subject_frontier.sequence,
+        check.subject_frontier.head_digest,
+    )
     if key in cache:
         return cache[key]
 
-    # The reducer intentionally refuses to use a projection that has advanced past the tested
-    # frontier. Replaying that prefix for an explanation would otherwise disagree with the
-    # fail-closed resolution result when material rows landed before the check was appended.
-    prefix = tuple(
-        row for row in records if row.ledger.ingestion_sequence <= check.subject_frontier.sequence
-    )
+    # Rebuild the projection immediately before the candidate check. The shared partition then
+    # applies its own frontier guards: newer plan/obligation/action/result/claim rows fail closed,
+    # while an observation/evidence/finding suffix that the reducer permits remains equivalent.
     proof_state: ProjectionState | None = None
-    if (
-        candidate.ledger.ingestion_sequence == check.subject_frontier.sequence + 1
-        and prefix
-        and prefix[-1].entry_digest == check.subject_frontier.head_digest
-    ):
+    pre_check = tuple(row for row in records if row.ledger.ingestion_sequence < candidate_sequence)
+    if len(pre_check) == candidate_sequence - 1:
         from yoetz.kernel.reducers import replay
 
-        proof_state = replay(prefix)
+        proof_state = replay(pre_check)
     cache[key] = proof_state
     return proof_state
 

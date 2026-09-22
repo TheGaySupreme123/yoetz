@@ -665,6 +665,45 @@ def test_command_gap_relation_through_resolution_result_blocks_independence() ->
     assert "command_relation_overlaps_obligation:" + obl(2) in reasons
 
 
+def test_explanation_cache_is_scoped_to_the_candidate_check() -> None:
+    """Two checks can share a subject frontier without sharing a pre-check projection."""
+    from types import SimpleNamespace
+    from typing import cast
+
+    from yoetz.domain.events import LedgerRecord
+    from yoetz.kernel.finding_resolution import _historical_proof_state
+    from yoetz.kernel.projections import empty_projection_state
+
+    replayed: list[tuple[int, ...]] = []
+
+    def fake_replay(events: tuple[LedgerRecord, ...]) -> ProjectionState:
+        replayed.append(tuple(event.ledger.ingestion_sequence for event in events))
+        return empty_projection_state()
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr("yoetz.kernel.reducers.replay", fake_replay)
+    try:
+        check = cast(
+            CheckRecordedPayload,
+            SimpleNamespace(subject_frontier=SimpleNamespace(sequence=1, head_digest=_DIGEST)),
+        )
+        records = cast(
+            tuple[LedgerRecord, ...],
+            tuple(
+                SimpleNamespace(ledger=SimpleNamespace(ingestion_sequence=sequence))
+                for sequence in (1, 2)
+            ),
+        )
+        first = cast(LedgerRecord, SimpleNamespace(ledger=SimpleNamespace(ingestion_sequence=2)))
+        second = cast(LedgerRecord, SimpleNamespace(ledger=SimpleNamespace(ingestion_sequence=3)))
+        cache: dict[tuple[int, int, str], ProjectionState | None] = {}
+        _historical_proof_state(check, first, records, cache)
+        _historical_proof_state(check, second, records, cache)
+    finally:
+        monkeypatch.undo()
+    assert replayed == [(1,), (1, 2)]
+
+
 @pytest.mark.parametrize(
     "weakness",
     (
