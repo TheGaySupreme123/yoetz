@@ -718,10 +718,11 @@ REASON_CODE_DIRECTIVE_EXEMPTIONS: Final[frozenset[str]] = frozenset(
         "ledger_assigned_field_in_request_identity",
         "method_forbidden",
         "not_an_accepted_envelope",
-        # A host handed one hook ingress more bytes than the fixed stdin cap admits. The
-        # agent cannot shrink what the host already wrote, and the ingress deliberately
-        # reads only cap-plus-one bytes, so there is no repair to name beyond the coverage
-        # gap the hook records for the affected event (issue #667).
+        # A host handed one hook ingress more bytes than the fixed stdin cap admits, and
+        # the handler did not retain a structural row. The agent cannot shrink what the
+        # host already wrote. Cursor may instead retain identity under payload_content_omitted
+        # when the complete body fits the skim cap; this reason is the no-row refusal
+        # (issue #667).
         "payload_too_large",
         "peer_untrusted",
         "provider_attempt_provenance_is_not_final",

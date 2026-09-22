@@ -136,13 +136,14 @@ unknown, or unpaired as appropriate and is surfaced as a content gap when the bo
 is not silently converted into a successful routine summary. Capture status describes configuration,
 not proof that bytes were captured or selected for a check.
 
-A single hook event is also bounded: Yoetz reads at most 256 KiB of the body a host hands it. An
-edit to a large enough file can exceed that, because a host sends the whole new file content inside
-the event. Such an event is not observed at all — not partially observed — and Yoetz records it as
-a `payload_too_large` coverage gap for that workspace, visible in `yoetz observe status` beside the
-host and hook event it belongs to. Everything else in the session keeps ingesting normally, and a
-receipt cannot report the dropped edit as captured work. Nothing about the refused event is read,
-so the record names only the host, the hook event, and the limit.
+A single hook event is also bounded. Yoetz fully reads a host body of at most 256 KiB. An edit to
+a large enough file can exceed that, because a host sends the whole new file content inside the
+event. Codex and Claude Code record that event as a `payload_too_large` coverage gap and do not
+keep a partial record. Cursor can keep the edit's identity when the complete event fits in 1 MiB:
+the session, tool, call, and a path commitment when a short path is present, with the file content
+left out. That row is `payload_content_omitted`. A Cursor event over 1 MiB, or one that is not a
+complete valid document, is the same unparsed `payload_too_large` gap. Either way the rest of the
+session keeps ingesting, and a receipt cannot report the omitted or dropped bytes as captured work.
 
 Summary coverage, current pressure, capture availability, delivery, and selection for a particular
 check are separate facts. A summary or an empty queue cannot support a claim of full per-call

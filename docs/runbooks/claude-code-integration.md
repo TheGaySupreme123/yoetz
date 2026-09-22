@@ -654,7 +654,8 @@ require their own evidence.
 ### Oversized hook payloads (issue #667)
 
 A Claude Code hook body over the 256 KiB ingress cap (`MAX_HOOK_STDIN_BYTES`) is refused at
-stdin, before any parse. The hook stays fail-open and the host continues. Yoetz records the
+stdin, before any parse. Claude Code does not use Cursor's 1 MiB identity skim, so the oversized
+event stays an unparsed gap. The hook stays fail-open and the host continues. Yoetz records the
 bounded `claude_payload_too_large` reason against that event in `yoetz observe status` hook
 diagnostics, and notes the `payload_too_large` coverage gap on the consented workspace so
 receipts and coverage wording carry the loss. This host ingress previously swallowed every

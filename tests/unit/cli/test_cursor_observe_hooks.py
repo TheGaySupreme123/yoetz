@@ -20,7 +20,7 @@ from yoetz.application.recommendations import (
     store_recommendation_state,
 )
 from yoetz.cli import observe_hooks
-from yoetz.cli.hook_io import MAX_HOOK_STDIN_BYTES
+from yoetz.cli.hook_io import MAX_HOOK_SKIM_BYTES, MAX_HOOK_STDIN_BYTES
 from yoetz.domain.observation import (
     ObservationGapCode,
     ObservationSource,
@@ -1029,7 +1029,12 @@ def test_cursor_version_mapping_distinguishes_ide_cli_unknown_and_omitted() -> N
     assert observation_pairing_contract("cursor", None) == ("post_only", "generation_id")
 
 
-def test_cursor_oversized_payload_records_scoped_size_gap_and_keeps_ingesting(
+def _structural_text(envelope: object) -> str:
+    payload = getattr(envelope, "structural_payload")
+    return canonical_encode(payload).decode("utf-8")
+
+
+def test_cursor_oversized_edit_keeps_identity_and_omits_content(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -1040,6 +1045,7 @@ def test_cursor_oversized_payload_records_scoped_size_gap_and_keeps_ingesting(
         + b"x" * MAX_HOOK_STDIN_BYTES
         + b'"}]}'
     )
+    assert MAX_HOOK_STDIN_BYTES < len(oversize) <= MAX_HOOK_SKIM_BYTES
     stdout = io.BytesIO()
 
     assert (
@@ -1057,26 +1063,33 @@ def test_cursor_oversized_payload_records_scoped_size_gap_and_keeps_ingesting(
     assert stdout.getvalue() == b"{}\n"
     diagnostic = (tmp_path / "observation/hook-diagnostics.jsonl").read_text(encoding="utf-8")
     row = json.loads(diagnostic.splitlines()[0])
-    # Scoped to the affected hook event and named for its own cause, so an
-    # oversized ordinary edit is no longer reported as a malformed vendor
-    # envelope (issue #667).
     assert row == {
         "event": "PostToolUse",
-        "reason": "cursor_payload_too_large",
+        "reason": "cursor_payload_content_omitted",
         "ts": row["ts"],
     }
     assert "cursor_payload_invalid" not in diagnostic
+    assert "cursor_payload_too_large" not in diagnostic
     assert "EDIT_CANARY" not in diagnostic
-    assert (
-        ObservationGapCode.PAYLOAD_TOO_LARGE.value
-        in store.status(ObservationStatusQuery(commitment)).gaps
-    )
+    envelopes = store.list_envelopes(commitment)
+    assert len(envelopes) == 1
+    omitted = envelopes[0]
+    assert ObservationGapCode.PAYLOAD_CONTENT_OMITTED.value in omitted.gap_codes
+    assert ObservationGapCode.PAYLOAD_TOO_LARGE.value not in omitted.gap_codes
+    assert omitted.content_object_refs == ()
+    assert omitted.structural_payload["changed_paths_digest"]
+    structural = _structural_text(omitted)
+    assert "EDIT_CANARY" not in structural
+    assert "xxxxx" not in structural
+    gaps = store.status(ObservationStatusQuery(commitment)).gaps
+    assert ObservationGapCode.PAYLOAD_CONTENT_OMITTED.value in gaps
+    assert ObservationGapCode.PAYLOAD_TOO_LARGE.value not in gaps
     captured = capsys.readouterr().err
-    assert "payload_too_large" in captured
-    assert str(MAX_HOOK_STDIN_BYTES) in captured
+    assert "payload_content_omitted" in captured
     assert "EDIT_CANARY" not in captured
 
-    # The refused event costs only itself: the next ordinary edit still ingests.
+    # The omission costs only that edit: the next ordinary edit still ingests
+    # without inheriting the content-omission gap on its own row.
     assert (
         observe_hooks.handle_cursor_observe(
             event_name="afterFileEdit",
@@ -1095,4 +1108,138 @@ def test_cursor_oversized_payload_records_scoped_size_gap_and_keeps_ingesting(
         == 0
     )
 
-    assert store.list_envelopes(commitment)
+    follow = store.list_envelopes(commitment)
+    assert len(follow) == 2
+    assert ObservationGapCode.PAYLOAD_CONTENT_OMITTED.value not in follow[1].gap_codes
+
+
+def test_cursor_ordinary_oversize_write_pairs_pre_and_post_without_content(
+    tmp_path: Path,
+) -> None:
+    store, commitment = _consented_store(tmp_path)
+    store.grant_consent(
+        commitment,
+        content_capture_profiles=(CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,),
+    )
+    contents = b"Y" * MAX_HOOK_STDIN_BYTES
+
+    def body(event: str) -> bytes:
+        encoded = (
+            b'{"conversation_id":"cursor-write","hook_event_name":"'
+            + event.encode()
+            + b'","tool_name":"Write","tool_use_id":"toolu_write_interfaces",'
+            b'"tool_input":{"path":"docs/INTERFACES.md","contents":"' + contents + b'"}}'
+        )
+        assert MAX_HOOK_STDIN_BYTES < len(encoded) <= MAX_HOOK_SKIM_BYTES
+        return encoded
+
+    for event in ("preToolUse", "postToolUse"):
+        assert (
+            observe_hooks.handle_cursor_observe(
+                event_name=event,
+                stdin_bytes=body(event),
+                stdout=io.BytesIO(),
+                workspace=str(tmp_path),
+                _state=tmp_path,
+                skip_service=True,
+                observation_profile=CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
+            )
+            == 0
+        )
+
+    envelopes = store.list_envelopes(commitment)
+    assert [envelope.event_kind for envelope in envelopes] == ["PreToolUse", "PostToolUse"]
+    assert {envelope.structural_payload["tool_call_id"] for envelope in envelopes} == {
+        "toolu_write_interfaces"
+    }
+    assert {envelope.structural_payload["tool_name"] for envelope in envelopes} == {"Write"}
+    digests = {envelope.structural_payload["changed_paths_digest"] for envelope in envelopes}
+    assert len(digests) == 1
+    assert None not in digests
+    for envelope in envelopes:
+        assert ObservationGapCode.PAYLOAD_CONTENT_OMITTED.value in envelope.gap_codes
+        assert envelope.content_object_refs == ()
+        structural = _structural_text(envelope)
+        assert "INTERFACES.md" not in structural
+        assert "YYYYY" not in structural
+
+
+def test_cursor_body_over_skim_cap_stays_an_unparsed_gap(
+    tmp_path: Path,
+) -> None:
+    store, commitment = _consented_store(tmp_path)
+    oversize = b'{"hook_event_name":"afterFileEdit","pad":"' + (b"x" * MAX_HOOK_SKIM_BYTES) + b'"}'
+    assert len(oversize) > MAX_HOOK_SKIM_BYTES
+
+    assert (
+        observe_hooks.handle_cursor_observe(
+            event_name="afterFileEdit",
+            stdin_bytes=oversize,
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+
+    diagnostic = (tmp_path / "observation/hook-diagnostics.jsonl").read_text(encoding="utf-8")
+    row = json.loads(diagnostic.splitlines()[0])
+    assert row["reason"] == "cursor_payload_too_large"
+    assert "cursor_payload_content_omitted" not in diagnostic
+    assert store.list_envelopes(commitment) == ()
+    assert (
+        ObservationGapCode.PAYLOAD_TOO_LARGE.value
+        in store.status(ObservationStatusQuery(commitment)).gaps
+    )
+
+
+def test_cursor_oversize_without_identity_stays_an_unparsed_gap(tmp_path: Path) -> None:
+    store, commitment = _consented_store(tmp_path)
+    anonymous = b'{"edits":[{"new_string":"' + b"x" * MAX_HOOK_STDIN_BYTES + b'"}]}'
+    assert MAX_HOOK_STDIN_BYTES < len(anonymous) <= MAX_HOOK_SKIM_BYTES
+
+    assert (
+        observe_hooks.handle_cursor_observe(
+            event_name="afterFileEdit",
+            stdin_bytes=anonymous,
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+
+    assert store.list_envelopes(commitment) == ()
+    assert (
+        ObservationGapCode.PAYLOAD_TOO_LARGE.value
+        in store.status(ObservationStatusQuery(commitment)).gaps
+    )
+
+
+def test_cursor_oversized_malformed_body_is_not_a_structural_row(tmp_path: Path) -> None:
+    store, commitment = _consented_store(tmp_path)
+    duplicate = (
+        b'{"hook_event_name":"afterFileEdit","hook_event_name":"afterFileEdit","pad":"'
+        + b"x" * MAX_HOOK_STDIN_BYTES
+        + b'"}'
+    )
+    assert MAX_HOOK_STDIN_BYTES < len(duplicate) <= MAX_HOOK_SKIM_BYTES
+
+    assert (
+        observe_hooks.handle_cursor_observe(
+            event_name="afterFileEdit",
+            stdin_bytes=duplicate,
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+
+    diagnostic = (tmp_path / "observation/hook-diagnostics.jsonl").read_text(encoding="utf-8")
+    reasons = {json.loads(line)["reason"] for line in diagnostic.splitlines()}
+    assert reasons == {"cursor_payload_invalid", "cursor_payload_too_large"}
+    assert store.list_envelopes(commitment) == ()

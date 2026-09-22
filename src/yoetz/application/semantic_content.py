@@ -96,6 +96,7 @@ _CONTENT_GAPS: Final = frozenset(
         ObservationGapCode.CONTENT_REDACTED.value,
         ObservationGapCode.CONTENT_UNSELECTED.value,
         ObservationGapCode.TRUNCATED_PAYLOAD.value,
+        ObservationGapCode.PAYLOAD_CONTENT_OMITTED.value,
     }
 )
 _CORRELATION_KEYS: Final = (

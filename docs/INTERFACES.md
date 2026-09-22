@@ -465,13 +465,18 @@ free text from input. CLI exit classes (0/2/10/11/20/30/40/70/130) map from code
   `MAX_ORDINARY_CONTROL_FRAME_BYTES = 1_048_576` for every frame except the exact closed
   `import_codex_jsonl` call. That one branch may exceed the ordinary cap only when its canonical
   base64 decodes to at most `MAX_IMPORT_SOURCE_BYTES`; no other method inherits the larger bound.
-- Host hook ingress (`cli/hook_io.py`): `MAX_HOOK_STDIN_BYTES = 262_144` (256 KiB), the one cap
-  for every host's hook stdin body and shared by `cli/hooks.py`. Each reader consumes at most
-  cap-plus-one bytes, so an oversized body's true size is never measured and never recorded. A
-  body over the cap raises `payload_too_large` before the NUL scan, the UTF-8 decode, and the
-  JSON parse; an empty body still raises `invalid_event_value_type`. The two were one reason, so
-  an ordinary edit that outgrew the cap was indistinguishable from a malformed envelope
-  (issue #667).
+- Host hook ingress (`cli/hook_io.py`): `MAX_HOOK_STDIN_BYTES = 262_144` (256 KiB) is the trusted
+  full-parse cap for every host's hook stdin body and is shared by `cli/hooks.py`. A body at or
+  under that cap is parsed in full. Codex, Claude Code, and Cursor's pure
+  `read_cursor_hook_payload` replay raise `payload_too_large` before the NUL scan, the UTF-8
+  decode, and the JSON parse when the body is over that cap; an empty body still raises
+  `invalid_event_value_type`. Cursor observation (`read_cursor_hook_ingress`) may read a complete
+  body up to `MAX_HOOK_SKIM_BYTES = 1_048_576` (1 MiB), the ordinary local-control frame cap. Inside
+  that skim cap the same safety rules parse the document and the handler keeps a closed identity
+  view: session, tool, call id, bounded path text used only for a path commitment, and scalar
+  outcome fields. File contents, edits, prompts, and command text are not retained. A body over
+  the skim cap raises `payload_too_large` before any parse. A complete oversized body that fails
+  the NUL, UTF-8, duplicate-key, or JSON checks yields no identity view (issue #667).
 - Digests render as `sha256:<64 lowercase hex>`; commitments as `hmac-sha256:<64 lowercase hex>`.
 - Writer/ledger sequences and frontier sequences cross the wire as canonical base-10 integer
   strings (`"0" | [1-9][0-9]*`, with writer/ledger sequences positive). This is not a blanket
@@ -3621,11 +3626,15 @@ Shared closed types:
   tree first and then redacts decoded string keys and values, preserving structural punctuation;
   any redaction-created duplicate key is rejected instead of silently merging fields.
 - `ObservationGapCode` — closed coverage tokens. `payload_too_large` is one host hook event whose
-  body exceeded `MAX_HOOK_STDIN_BYTES` and was therefore never parsed; it is not
-  `truncated_payload`, which is an admitted payload clipped after parsing. Nothing about such an
-  event is knowable beyond the host that ran it and the hook name that host named on its own
-  command line, so it mints no structural row and binds to the workspace through the
-  command-line locator alone. `session_superseded` is a mapped host session
+  body exceeded `MAX_HOOK_STDIN_BYTES` and was not admitted as a structural row. Codex and Claude
+  Code always stop there. Cursor stops there when the body does not fit `MAX_HOOK_SKIM_BYTES` or
+  the skim cannot validate a complete document. It is not `truncated_payload`, which is an
+  admitted payload clipped after parsing. Nothing about such an event is knowable beyond the host
+  that ran it and the hook name that host named on its own command line, so it mints no structural
+  row and binds to the workspace through the command-line locator alone.
+  `payload_content_omitted` is the Cursor case that did validate: the structural row keeps the
+  closed identity and an empty content-reference list, and coverage must not treat the omitted
+  native bytes as captured. `session_superseded` is a mapped host session
   whose Yoetz route was retired and whose successor binding could not be followed; it is never
   `ledger_rejected` and never `mapping_missing` (issue #577). `unsupported_event` is an admitted profile with
   an unrecognized wrapper or nested item, or a known wrapper with an incompatible payload shape
@@ -4286,14 +4295,15 @@ repeating every minute. A hook whose own pre-flush still fails structurally reco
 
 A host body refused at stdin ingress for its size is accounted the same way, per host:
 `codex_payload_too_large`, `claude_payload_too_large`, and `cursor_payload_too_large` are the
-bounded hook reasons, recorded against the hook event name the host supplied on the command line —
-the only identity available, since the body was never parsed. Each also notes the
-`payload_too_large` coverage gap on the consented workspace, so `observe status` and receipt
-coverage wording carry the loss instead of an unexplained absence. The reason names the host
-because the reading process is the last place that still knows which one it was. Before these, an
-oversized Cursor write recorded the generic `cursor_payload_invalid`, an oversized Codex event
-degraded to the bare `observe` token, and an oversized Claude Code event recorded nothing at all
-(issue #667).
+bounded hook reasons, recorded against the hook event name the host supplied on the command line.
+Codex and Claude Code never parse that body, so the hook name is their only identity, and each
+notes the `payload_too_large` coverage gap on the consented workspace. Cursor notes that same
+no-row gap when the body exceeds `MAX_HOOK_SKIM_BYTES` or fails validation inside it. When Cursor
+does validate a complete body inside the skim cap, the reason is `cursor_payload_content_omitted`
+and the structural row carries `payload_content_omitted` instead of `payload_too_large`. Before
+these, an oversized Cursor write recorded the generic `cursor_payload_invalid`, an oversized Codex
+event degraded to the bare `observe` token, and an oversized Claude Code event recorded nothing at
+all (issue #667).
 
 `ObservationSelection` separates Focused/Detailed from the 512/2,048/8,192 count profiles.
 `ObservationSelectionSettings` resolves a live session override, then an explicit workspace
@@ -5146,8 +5156,11 @@ duration, capability profile, and an installation-keyed HMAC changed-path commit
 boundary and truncated to the canonical integer `duration_ms`; the canonical parser remains
 float-free. Discarded vendor-field floats are replaced transiently, and malformed or unsafe Cursor
 envelopes remain fail-open while recording the payload-free `cursor_payload_invalid` diagnostic; a
-body over the shared 256 KiB hook ingress cap is separated from that vendor-shape refusal and
-records `cursor_payload_too_large` with the `payload_too_large` coverage gap instead.
+body over the shared 256 KiB hook ingress cap is separated from that vendor-shape refusal. A
+complete body that also fits the 1 MiB skim cap is admitted as a structural row with
+`payload_content_omitted` and `cursor_payload_content_omitted`. A larger body, or a complete
+oversized body that fails validation, records `cursor_payload_too_large` with the
+`payload_too_large` coverage gap and no structural row.
 The `model` spelling from execution/file-edit events normalizes to `model_id`; a valid `model_id`
 spelling wins when both are present. It discards
 prompt, reasoning, response text, paths, file contents/edits, MCP/tool inputs/results, transcripts,

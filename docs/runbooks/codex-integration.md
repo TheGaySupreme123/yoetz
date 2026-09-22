@@ -873,7 +873,8 @@ account for the CLI read in coverage and capacity.
 ### Oversized hook payloads (issue #667)
 
 A Codex hook body over the 256 KiB ingress cap (`MAX_HOOK_STDIN_BYTES`) is refused at stdin,
-before any parse. The hook stays fail-open and the host continues. Yoetz records the bounded
+before any parse. Codex does not use Cursor's 1 MiB identity skim, so the oversized event stays
+an unparsed gap. The hook stays fail-open and the host continues. Yoetz records the bounded
 `codex_payload_too_large` reason against that event in `yoetz observe status` hook diagnostics,
 and notes the `payload_too_large` coverage gap on the consented workspace so receipts and
 coverage wording carry the loss. Before this, the refusal reached the outer handler as the bare

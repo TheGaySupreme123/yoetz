@@ -46,7 +46,8 @@ from yoetz.cli import hook_io
 from yoetz.cli.hook_diagnostics import record_hook_diagnostic, record_hook_timing
 from yoetz.cli.hook_io import (
     MAX_HOOK_STDIN_BYTES,
-    read_cursor_hook_payload,
+    CursorOversizedPayloadError,
+    read_cursor_hook_ingress,
     read_hook_payload,
 )
 from yoetz.cli.hook_io import (
@@ -559,6 +560,26 @@ def _cursor_capability_profile_id(cursor_version: object) -> str | None:
     if version is None:
         return None
     return _CURSOR_VERSION_TO_PROFILE.get(version, _CURSOR_UNTESTED_PROFILE_ID)
+
+
+def _cursor_nested_edit_path(payload: Mapping[str, JsonValue]) -> str | None:
+    """Return one bounded edit path from a Cursor tool input, or nothing.
+
+    The string is used only to derive a path commitment. It is not stored.
+    A value over the workspace-locator bound is omitted rather than clipped.
+    """
+
+    nested = payload.get("tool_input")
+    if not isinstance(nested, Mapping):
+        return None
+    for key in ("path", "file_path", "target_file", "filePath"):
+        value = nested.get(key)
+        if type(value) is not str or not value:
+            continue
+        if len(value.encode("utf-8")) > 8_192 or "\n" in value or "\r" in value:
+            return None
+        return value
+    return None
 
 
 def _resolve_cursor_workspace(
@@ -2819,6 +2840,7 @@ def handle_observe(
     _child_attribution_gap: bool = False,
     _content_capture_profile: str | None = None,
     _content_payload: Mapping[str, JsonValue] | None = None,
+    _ingress_gap: str | None = None,
 ) -> int:
     """Bounded observation ingress for Codex lifecycle hooks. Always exits 0.
 
@@ -3223,6 +3245,8 @@ def handle_observe(
                             source_generation,
                         )
             gap_codes: list[str] = []
+            if _ingress_gap is not None:
+                gap_codes.append(_ingress_gap)
             if not deferred_lifecycle_recorded:
                 gap_codes.append(ObservationGapCode.OUTBOX_OVERFLOW.value)
                 store.note_session_coverage_gap(
@@ -3415,6 +3439,10 @@ def handle_observe(
                     )
                 if capture_authority_known and not content_authorized:
                     gap_codes.append(ObservationGapCode.CONTENT_UNSELECTED.value)
+            # An oversized Cursor skim already omitted native content. Do not
+            # re-read the identity view as a capture source (issue #667).
+            if _ingress_gap is not None:
+                content_authorized = False
             if not capture_authority_known:
                 gap_codes.append(ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
             if tuple(sorted(set(gap_codes), key=str.encode)) != envelope.gap_codes:
@@ -4997,15 +5025,36 @@ def handle_cursor_observe(
             }
         )
     try:
+        content_omitted = False
         try:
-            payload = read_cursor_hook_payload(stdin_bytes)
+            payload, content_omitted = read_cursor_hook_ingress(stdin_bytes)
+        except CursorOversizedPayloadError as exc:
+            # The complete body fit the skim cap and failed a safety check.
+            # It must not become a structural row. Name the vendor-shape
+            # refusal and the size loss separately (issue #667).
+            if exc.reason_code != "payload_too_large":
+                with contextlib.suppress(BaseException):
+                    record_hook_diagnostic(
+                        "cursor_payload_invalid",
+                        event_map.get(event_name or "", "unknown_event"),
+                        _state=_state,
+                    )
+                with contextlib.suppress(BaseException):
+                    _stderr_line("hook_cursor_observe_degraded: invalid_payload")
+            note_payload_too_large(
+                event_map.get(event_name or "", "unknown_event"),
+                source=ObservationSource.CURSOR_HOOK,
+                workspace=workspace,
+                _state=_state,
+            )
+            with contextlib.suppress(BaseException):
+                hook_io.stdout_json({}, stdout)
+            return 0
         except ProtocolValueError as exc:
             # Cursor emits vendor-shaped decimal durations. Keep malformed host
             # ingress fail-open, but make the dropped event visible through the
-            # bounded owner-only diagnostic stream. An ordinary edit to a large
-            # file is rejected here too, and reporting it as a malformed
-            # envelope hid a real coverage loss behind a vendor-shape
-            # complaint (issue #667).
+            # bounded owner-only diagnostic stream. A body over the skim cap is
+            # refused here, before any parse, as payload_too_large (issue #667).
             if exc.reason_code == "payload_too_large":
                 note_payload_too_large(
                     event_map.get(event_name or "", "unknown_event"),
@@ -5027,9 +5076,20 @@ def handle_cursor_observe(
             with contextlib.suppress(BaseException):
                 hook_io.stdout_json({}, stdout)
             return 0
+
+        def finish_without_row() -> int:
+            if content_omitted:
+                note_payload_too_large(
+                    event_map.get(event_name or "", "unknown_event"),
+                    source=ObservationSource.CURSOR_HOOK,
+                    workspace=workspace,
+                    _state=_state,
+                )
+            return 0 if hook_io.stdout_json({}, stdout) else 0
+
         raw_event = event_name or payload.get("hook_event_name")
         if type(raw_event) is not str or raw_event not in event_map:
-            return 0 if hook_io.stdout_json({}, stdout) else 0
+            return finish_without_row()
         session_token = _token_or_none(payload.get("session_id"))
         conversation_token = _token_or_none(payload.get("conversation_id"))
         # One host conversation must stay one Yoetz session (#417). sessionStart
@@ -5047,7 +5107,7 @@ def handle_cursor_observe(
                     record_hook_diagnostic(
                         "cursor_session_ambiguous", event_map[raw_event], _state=_state
                     )
-                return 0 if hook_io.stdout_json({}, stdout) else 0
+                return finish_without_row()
             session = session_token
         elif session_token is None and conversation_token is not None:
             session = (
@@ -5056,7 +5116,7 @@ def handle_cursor_observe(
         else:
             session = session_token
         if session is None or len(session) > _MAX_TOKEN_CHARS - len(_CURSOR_SESSION_PREFIX):
-            return 0 if hook_io.stdout_json({}, stdout) else 0
+            return finish_without_row()
         resolved_workspace = _resolve_cursor_workspace(payload, workspace)
         if resolved_workspace is None:
             # No structural envelope is created until the workspace locator
@@ -5066,11 +5126,11 @@ def handle_cursor_observe(
                 record_hook_diagnostic(
                     "workspace_unresolvable", event_map[raw_event], _state=_state
                 )
-            return 0 if hook_io.stdout_json({}, stdout) else 0
+            return finish_without_row()
         _bind_cursor_start(payload, raw_event=raw_event, session=session, _state=_state)
         if ordinary_profile and raw_event == "afterMCPExecution":
             # No duplicate structural row, content capture, or advice delivery.
-            return 0 if hook_io.stdout_json({}, stdout) else 0
+            return finish_without_row()
         cursor_version = _token_or_none(payload.get("cursor_version"))
         capability_profile_id = (
             CURSOR_ORDINARY_OBSERVATION_PROFILE_ID
@@ -5168,13 +5228,20 @@ def handle_cursor_observe(
                 structural["action"] = "routine_read"
         elif ordinary_profile and raw_event == "preToolUse":
             structural["action"] = "cursor_tool_pending"
-        path_value = payload.get("file_path")
-        if raw_event == "afterFileEdit" and type(path_value) is str and path_value:
+        path_value = payload.get("file_path") if raw_event == "afterFileEdit" else None
+        if content_omitted and not (type(path_value) is str and path_value):
+            path_value = _cursor_nested_edit_path(payload)
+        if (
+            type(path_value) is str
+            and path_value
+            and (raw_event == "afterFileEdit" or content_omitted)
+        ):
             store = LocalObservationStore(_state=_state)
             structural["changed_paths_digest"] = hook_source_commitment(
                 store.key_material(), f"cursor-path:{path_value}"
             )
-            structural.setdefault("tool_name", "cursor_file_edit")
+            if raw_event == "afterFileEdit":
+                structural.setdefault("tool_name", "cursor_file_edit")
         parameters = payload.get("model_params")
         if type(parameters) is list:
             for item in parameters:
@@ -5183,6 +5250,18 @@ def handle_cursor_observe(
                     if effort is not None:
                         structural["model_effort"] = effort
                     break
+        if content_omitted:
+            with contextlib.suppress(BaseException):
+                _stderr_line(
+                    "hook_cursor_observe_degraded: payload_content_omitted; "
+                    "structural identity retained; native content omitted; see observe status"
+                )
+            with contextlib.suppress(BaseException):
+                record_hook_diagnostic(
+                    "cursor_payload_content_omitted",
+                    event_map[raw_event],
+                    _state=_state,
+                )
         return handle_observe(
             event_name=event_map[raw_event],
             stdin_bytes=canonical_encode(structural),
@@ -5198,7 +5277,10 @@ def handle_cursor_observe(
             _content_capture_profile=(
                 CURSOR_ORDINARY_OBSERVATION_PROFILE_ID if ordinary_profile else None
             ),
-            _content_payload=payload if ordinary_profile else None,
+            _content_payload=None if content_omitted or not ordinary_profile else payload,
+            _ingress_gap=(
+                ObservationGapCode.PAYLOAD_CONTENT_OMITTED.value if content_omitted else None
+            ),
         )
     except BaseException:
         with contextlib.suppress(BaseException):
