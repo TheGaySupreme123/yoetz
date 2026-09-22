@@ -311,6 +311,10 @@ class ClaudeCodeMcpObservation:
     present_sources: tuple[ClaudeCodeMcpSource, ...]
     observed: bool
     host_admission_supported: bool
+    # Which initialize body the winning route serves. A legacy bare ``mcp serve`` route is still
+    # policy/strict for admission, but has no host identity and therefore receives the generic
+    # guidance body rather than Claude's compact body.
+    host_profile: Literal["generic", "claude"] | None = None
 
     def __post_init__(self) -> None:
         if type(self.ownership_state) is not McpOwnershipState:
@@ -321,6 +325,7 @@ class ClaudeCodeMcpObservation:
             self.route_profile not in {None, "strict", "policy"}
             or type(self.observed) is not bool
             or type(self.host_admission_supported) is not bool
+            or self.host_profile not in {None, "generic", "claude"}
         ):
             raise ValueError("claude_code_mcp_observation_invalid")
         if type(self.present_sources) is not tuple or any(
@@ -337,6 +342,8 @@ class ClaudeCodeMcpObservation:
             self.ownership_state not in {McpOwnershipState.EXTERNAL, McpOwnershipState.PLUGIN}
             and self.route_profile is not None
         ):
+            raise ValueError("claude_code_mcp_observation_invalid")
+        if self.route_profile is None and self.host_profile is not None:
             raise ValueError("claude_code_mcp_observation_invalid")
         if self.host_admission_supported and (
             not self.observed
@@ -1226,6 +1233,36 @@ def _route_profile(
     return None
 
 
+def _initialize_host_profile(
+    entry: Mapping[str, JsonValue], yoetz_launcher: tuple[str, ...] | None = None
+) -> Literal["generic", "claude"]:
+    """Classify the initialize body for an already recognized Yoetz route.
+
+    The route profile answers the semantic question (policy versus strict). The host profile is a
+    separate fact: only the explicit ``--host claude`` argv selects the compact Claude body. Old
+    owner-written ``mcp serve`` entries remain valid routes, but they cannot safely be assumed to
+    have been launched by Claude and therefore use the generic body.
+    """
+
+    raw_args = entry.get("args")
+    command = entry.get("command")
+    if not isinstance(raw_args, (list, tuple)):
+        raise ValueError("claude_code_mcp_observation_invalid")
+    args = tuple(cast(Sequence[object], raw_args))
+    if command == "yoetz":
+        prefix: tuple[str, ...] = ()
+    elif yoetz_launcher is not None and command == yoetz_launcher[0]:
+        prefix = yoetz_launcher[1:]
+    else:
+        raise ValueError("claude_code_mcp_observation_invalid")
+    if args[: len(prefix)] != prefix:
+        raise ValueError("claude_code_mcp_observation_invalid")
+    rest = args[len(prefix) :]
+    if tuple(rest[:4]) == ("mcp", "serve", "--host", "claude"):
+        return "claude"
+    return "generic"
+
+
 def observe_claude_code_mcp(
     *,
     plugin_root: Path,
@@ -1298,19 +1335,24 @@ def observe_claude_code_mcp(
     if not candidates:
         return ClaudeCodeMcpObservation(McpOwnershipState.ABSENT, None, None, (), True, False)
     profiles = [
-        (source, name, _route_profile(entry, yoetz_launcher)) for source, name, entry in candidates
+        (source, name, entry, _route_profile(entry, yoetz_launcher))
+        for source, name, entry in candidates
     ]
-    present = tuple(source for source, _name, _profile in profiles)
-    if any(profile is None for _source, _name, profile in profiles):
-        source = next(source for source, _name, profile in profiles if profile is None)
+    present = tuple(source for source, _name, _entry, _profile in profiles)
+    if any(profile is None for _source, _name, _entry, profile in profiles):
+        source = next(source for source, _name, _entry, profile in profiles if profile is None)
         return ClaudeCodeMcpObservation(
             McpOwnershipState.FOREIGN, source, None, present, True, False
         )
     plugin_profiles = [
-        profile for source, _name, profile in profiles if source is ClaudeCodeMcpSource.PLUGIN
+        profile
+        for source, _name, _entry, profile in profiles
+        if source is ClaudeCodeMcpSource.PLUGIN
     ]
     external_profiles = [
-        profile for source, _name, profile in profiles if source is not ClaudeCodeMcpSource.PLUGIN
+        profile
+        for source, _name, _entry, profile in profiles
+        if source is not ClaudeCodeMcpSource.PLUGIN
     ]
     if plugin_profiles and external_profiles:
         return ClaudeCodeMcpObservation(
@@ -1320,7 +1362,7 @@ def observe_claude_code_mcp(
         return ClaudeCodeMcpObservation(
             McpOwnershipState.AMBIGUOUS, present[0], None, present, True, False
         )
-    source, name, profile = profiles[0]
+    source, name, entry, profile = profiles[0]
     assert profile is not None
     return ClaudeCodeMcpObservation(
         McpOwnershipState.PLUGIN
@@ -1335,6 +1377,7 @@ def observe_claude_code_mcp(
         # (docs/INTERFACES.md). The policy-route requirement is enforced separately at grant,
         # which refuses `route_not_policy` for any non-policy route (host_admission.py).
         name == "yoetz" and source is not ClaudeCodeMcpSource.CLAUDE_AI_CONNECTOR,
+        _initialize_host_profile(entry, yoetz_launcher),
     )
 
 
@@ -2218,10 +2261,11 @@ class ClaudeCodeActivationCues:
     Derived from file observation only. ``mcp_mode`` says which registration Claude would launch:
     the plugin-owned ``.mcp.json`` (``plugin_managed``), a bare ``mcp serve`` entry the owner wrote
     (``bare_mcp``), both (``dual``), none, a non-Yoetz entry (``foreign``), or an unreadable source
-    (``ambiguous``). ``session_start_cue`` says whether any installed hook file can deliver the
-    session-start context. Neither establishes that Claude loaded the plugin, that a hook ran, or
-    that the agent called ``start``; plugin hooks additionally need the plugin enabled, which
-    ``status_claude_code_plugin`` reports separately.
+    (``ambiguous``). ``host_profile`` says whether the winning route explicitly requests Claude's
+    compact initialize body or remains a legacy generic route. ``session_start_cue`` says whether
+    any installed hook file can deliver the session-start context. Neither establishes that Claude
+    loaded the plugin, that a hook ran, or that the agent called ``start``; plugin hooks
+    additionally need the plugin enabled, which ``status_claude_code_plugin`` reports separately.
     """
 
     mcp_mode: ClaudeCodeMcpMode
@@ -2229,6 +2273,7 @@ class ClaudeCodeActivationCues:
     route_profile: Literal["strict", "policy"] | None
     session_start_cue: ClaudeCodeSessionStartCue
     cue_sources: tuple[str, ...]
+    host_profile: Literal["generic", "claude"] | None = None
 
     def as_json(self) -> dict[str, JsonValue]:
         return {
@@ -2236,6 +2281,7 @@ class ClaudeCodeActivationCues:
             "mcp_mode": self.mcp_mode,
             "mcp_source": None if self.mcp_source is None else self.mcp_source.value,
             "notes": list(_ACTIVATION_CUE_NOTES),
+            "host_profile": self.host_profile,
             "route_profile": self.route_profile,
             "session_start_cue": self.session_start_cue,
         }
@@ -2342,4 +2388,5 @@ def observe_claude_code_activation_cues(
         mcp.route_profile,
         cue,
         tuple(sources),
+        mcp.host_profile,
     )

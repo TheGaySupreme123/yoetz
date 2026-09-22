@@ -16,6 +16,7 @@ from yoetz.mcp.descriptors import (
     CLAUDE_CODE_INITIALIZE_INSTRUCTIONS,
     CLAUDE_CODE_INSTRUCTIONS_BUDGET,
     INITIALIZE_GUIDANCE_URIS,
+    advertised_surface_metrics,
     server_instructions,
 )
 from yoetz.mcp.resources import read_resource
@@ -136,6 +137,18 @@ def test_every_other_host_keeps_the_packaged_document_byte_for_byte(host_profile
     # The full document is the thing Claude cannot render; it must stay over the cap here so a
     # future edit does not silently swap the hosts' bodies.
     assert len(policy) > CAP
+
+
+def test_advertised_surface_metrics_charge_the_selected_host_body() -> None:
+    generic = advertised_surface_metrics("policy")
+    claude = advertised_surface_metrics("policy", host_profile="claude")
+    assert generic["instructions_encoded_bytes"] == len(
+        server_instructions("policy").encode("utf-8")
+    )
+    assert claude["instructions_encoded_bytes"] == len(
+        server_instructions("policy", host_profile="claude").encode("utf-8")
+    )
+    assert claude["instructions_encoded_bytes"] < generic["instructions_encoded_bytes"]
 
 
 def test_the_claude_bridge_runtime_carries_the_compact_text() -> None:

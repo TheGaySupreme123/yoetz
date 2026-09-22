@@ -286,20 +286,26 @@ def advertised_surface_metrics(
     profile: McpRouteProfile = "policy",
     *,
     semantic_destination: SemanticDestinationDisclosure | None = None,
+    host_profile: McpHostProfile = "generic",
 ) -> dict[str, int]:
     """Return the byte cost of one route profile's complete advertised MCP surface.
 
     ``replicated_encoded_bytes`` charges the instructions block once per advertised tool, which is
     what a host that inlines `instructions` into each tool description actually spends.
     ``semantic_destination`` is the policy-route disclosure the bridge appends (#479); pass the
-    longest one to measure the worst case.
+    longest one to measure the worst case. ``host_profile`` selects the initialize body charged by
+    the host, so Claude's compact surface can be measured separately from the generic surface.
     """
 
     if profile not in TOOL_DESCRIPTORS:
         raise ValueError("mcp_route_profile_invalid")
     descriptors = TOOL_DESCRIPTORS[profile]
     instructions_bytes = len(
-        server_instructions(profile, semantic_destination=semantic_destination).encode("utf-8")
+        server_instructions(
+            profile,
+            semantic_destination=semantic_destination,
+            host_profile=host_profile,
+        ).encode("utf-8")
     )
     description_bytes = sum(len(item.description.encode("utf-8")) for item in descriptors)
     schema_bytes = sum(

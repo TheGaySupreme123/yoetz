@@ -4234,7 +4234,7 @@ is surfaced before mutation: the wizard preview and report carry `route_profile_
 ordinary digest-bound re-registration.
 The setup-wizard
 schema tokens are `yoetz.setup-wizard-marker/1`, `yoetz.setup-wizard-report/1`,
-`yoetz.setup-status/1`, `yoetz.mcp-registration-preview/1` (ambient) / `2` (isolated) / `3`
+`yoetz.setup-status/2`, `yoetz.mcp-registration-preview/1` (ambient) / `2` (isolated) / `3`
 (installed absolute launcher), and `yoetz.mcp-unregistration-preview/1` (ambient) / `2`
 (isolated) / `3` (installed absolute launcher); the marker lives at
 `state_dir()/setup-wizard.json` via
@@ -4244,8 +4244,11 @@ schema tokens are `yoetz.setup-wizard-marker/1`, `yoetz.setup-wizard-report/1`,
 
 The #767 desktop entrypoints are `setup run|status|disconnect --host
 codex|claude|cursor-ide|cursor-cli`, with `--host-path`, `--host-config-root`, and `--project`
-overrides. `setup-status/1` adds the executable-backed `hosts` inventory alongside its legacy
-Codex `discovered` rows. Inventory is not connection proof. `yoetz.host-connection-plan/1` binds
+overrides. `setup-status/2` adds the executable-backed `hosts` inventory and Claude activation
+posture alongside its legacy Codex `discovered` rows. Inventory is not connection proof. The CLI
+envelope is version-tagged for compatibility; a standalone JSON Schema and golden fixture for
+this legacy status document remain an open #789 follow-up.
+`yoetz.host-connection-plan/1` binds
 the request, installation, project, route, adapter previews and changes to `preview_digest`.
 `yoetz.host-connection-report/1` names `preview`, `completed`, `unchanged`, `status` or `incomplete`,
 with the plan, layer-specific status, reason and continuation where applicable.

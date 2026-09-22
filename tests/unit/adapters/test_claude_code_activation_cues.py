@@ -57,6 +57,7 @@ def test_a_bare_mcp_entry_in_the_user_config_has_no_session_start_cue(tmp_path: 
     assert cues.mcp_mode == "bare_mcp"
     assert cues.mcp_source is ClaudeCodeMcpSource.USER
     assert cues.route_profile == "policy"
+    assert cues.host_profile == "claude"
     assert cues.session_start_cue == "absent"
     assert cues.cue_sources == ()
     assert cues.as_json() == {
@@ -68,6 +69,7 @@ def test_a_bare_mcp_entry_in_the_user_config_has_no_session_start_cue(tmp_path: 
             "file_observation_only",
             "plugin_hooks_require_enabled_plugin",
         ],
+        "host_profile": "claude",
         "route_profile": "policy",
         "session_start_cue": "absent",
     }
@@ -97,6 +99,7 @@ def test_the_user_config_file_is_located_the_way_claude_code_locates_it(tmp_path
     )
     assert default_root.mcp_mode == "bare_mcp"
     assert default_root.mcp_source is ClaudeCodeMcpSource.USER
+    assert default_root.host_profile == "generic"
     configured_root = observe_claude_code_activation_cues(
         project_root=project,
         claude_config_root=config,
@@ -114,6 +117,19 @@ def test_the_user_config_file_is_located_the_way_claude_code_locates_it(tmp_path
     )
     assert explicit_root.mcp_mode == "bare_mcp"
     assert explicit_root.route_profile == "strict"
+    assert explicit_root.host_profile == "generic"
+
+
+def test_a_legacy_bare_route_reports_the_generic_initialize_body(tmp_path: Path) -> None:
+    config, project = _roots(tmp_path)
+    (config / ".claude.json").write_text(
+        json.dumps(_mcp_entry("yoetz", ["mcp", "serve"])), encoding="utf-8"
+    )
+    cues = observe_claude_code_activation_cues(project_root=project, claude_config_root=config)
+    assert cues.mcp_mode == "bare_mcp"
+    assert cues.route_profile == "policy"
+    assert cues.host_profile == "generic"
+    assert cues.as_json()["host_profile"] == "generic"
 
 
 def test_a_plugin_managed_registration_carries_the_rendered_session_start_hook(
@@ -143,6 +159,7 @@ def test_a_plugin_managed_registration_carries_the_rendered_session_start_hook(
     assert cues.mcp_mode == "plugin_managed"
     assert cues.mcp_source is ClaudeCodeMcpSource.PLUGIN
     assert cues.route_profile == "strict"
+    assert cues.host_profile == "claude"
     assert cues.session_start_cue == "installed"
     assert cues.cue_sources == ("plugin_hooks",)
     # A bare entry beside the plugin entry is the dual state the runbook already documents.
@@ -169,6 +186,7 @@ def test_settings_hooks_count_as_cues_and_unreadable_files_are_reported(tmp_path
             "file_observation_only",
             "plugin_hooks_require_enabled_plugin",
         ],
+        "host_profile": None,
         "route_profile": None,
         "session_start_cue": "absent",
     }

@@ -241,7 +241,7 @@ consequential step — no install, no `setup run`, no registration until it is a
   Successful installation does not establish native Linux host coverage. Claude Code can also
   use a `yoetz mcp serve --host claude` entry in its own MCP configuration, added only after
   approval. That bare entry delivers only the server's initialize instructions: no session-start
-  cue, no hooks, no `/yoetz:yoetz` skill. Prefer the guided connection (`yoetz setup --host
+  cue, no hooks, no `/yoetz:yoetz` skill. Prefer the guided connection (`yoetz setup run --host
   claude`), which installs the plugin that carries them. `yoetz setup status --json` reports which
   mode each Claude installation is in and whether a session-start cue is installed
   (`hosts[].activation_cues`).

@@ -62,12 +62,15 @@ sessions on the maintainer's machine against the installed 0.2.1 bridge, by comp
 rendered system-prompt attachment with the packaged text:
 
 - Claude Code renders MCP initialize `instructions` as a per-server block and keeps exactly the
-  first **2,048 characters**, then appends a literal `… [truncated]` marker. The 7,325-character
-  `agent-instructions.md` block was the only server block cut on that machine; it ended
-  mid-sentence before the `start` rule. Other servers' blocks (about 1.1–1.3 KB) were intact.
-- The same cap applies to each tool description once Claude loads it: `start` (2,140 chars),
-  `publish_work` (3,062) and `check` (4,156) are cut at 2,048 when shown. Trimming those
-  descriptions is a separate, host-independent follow-up recorded on the issue.
+  first **2,048 characters**, then appends a literal `… [truncated]` marker. In the historical
+  session, the installed 0.2.1 bridge supplied a 7,325-character `agent-instructions.md` block;
+  it was the only server block cut on that machine and ended mid-sentence before the `start` rule.
+  The current source candidate is 7,791 bytes before rendering, so that source measurement is not
+  presented as a re-measurement of the historical desktop session. Other servers' blocks (about
+  1.1–1.3 KB) were intact.
+- The same cap applies to each tool description once Claude loads it. Current source measurements
+  are `start` (2,140 chars), `publish_work` (3,065) and `check` (4,192); each exceeds the cap and
+  remains a separate, host-independent follow-up recorded on the issue.
 - With about 200 registered tools, Claude Code defers MCP tool schemas: only names appear until the
   agent runs `ToolSearch` for them. The initialize block is therefore the only unsolicited cue.
 - The Yoetz server is often still connecting when the agent takes its first action; its tools
@@ -88,14 +91,15 @@ Activation cues by connection mode:
 
 | Mode | How it is registered | Initialize instructions | SessionStart cue | Skill |
 | --- | --- | --- | --- | --- |
-| Plugin-managed | `yoetz setup --host claude` (or `yoetz integrate claude plugin install`) renders the marketplace, hooks and plugin-owned `.mcp.json` | yes (compact body) | yes, once the plugin is enabled | `/yoetz:yoetz` |
-| Bare MCP | An owner-written `yoetz mcp serve --host claude` entry in Claude's own MCP configuration | yes (compact body) | **no** | none |
+| Plugin-managed | `yoetz setup run --host claude` (or `yoetz integrate claude plugin install`) renders the marketplace, hooks and plugin-owned `.mcp.json` | yes (compact body) | yes, once the plugin is enabled | `/yoetz:yoetz` |
+| Bare MCP | An owner-written `yoetz mcp serve --host claude` entry in Claude's own MCP configuration | yes (compact body when `--host claude` is present; generic body for a legacy bare `mcp serve` entry) | **no** | none |
 
 A bare entry delivers only the initialize block; it has no `SessionStart` context, no
 auto-attach, no hooks and no skill catalog entry. `yoetz setup status --json` names the mode
 per discovered Claude installation under `hosts[].activation_cues`: `mcp_mode`
 (`plugin_managed`, `bare_mcp`, `dual`, `absent`, `foreign`, `ambiguous`), `mcp_source`,
-`route_profile`, `session_start_cue` (`installed`, `absent`, `unobserved`) and `cue_sources`
+`route_profile`, `host_profile` (`claude` for the compact initialize body, `generic` for a legacy
+bare `mcp serve` entry), `session_start_cue` (`installed`, `absent`, `unobserved`) and `cue_sources`
 (`plugin_hooks`, `user_settings`, `project_settings`, `project_local_settings`). The
 observation is file-only: it reads Claude's user configuration where Claude keeps it
 (`~/.claude.json` beside the default `~/.claude` root, or inside `CLAUDE_CONFIG_DIR`), the

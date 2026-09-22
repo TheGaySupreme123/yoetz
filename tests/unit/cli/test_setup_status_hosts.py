@@ -51,6 +51,7 @@ def test_installation_rows_name_the_claude_mcp_mode_and_session_start_cue(
             "file_observation_only",
             "plugin_hooks_require_enabled_plugin",
         ],
+        "host_profile": "claude",
         "route_profile": "policy",
         "session_start_cue": "absent",
     }
@@ -59,8 +60,9 @@ def test_installation_rows_name_the_claude_mcp_mode_and_session_start_cue(
     assert cursor_row["activation_cues"] is None
 
 
+@pytest.mark.parametrize("failure", [OSError("unreadable"), RuntimeError("home unavailable")])
 def test_an_unreadable_claude_posture_is_none_not_a_failure(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: Exception
 ) -> None:
     claude = HostInstallation(
         "claude", Path("/opt/claude"), "2.1.261", tmp_path / "missing", "Claude Code"
@@ -69,7 +71,7 @@ def test_an_unreadable_claude_posture_is_none_not_a_failure(
     monkeypatch.setattr(cli, "invoking_launcher", lambda: None)
 
     def broken(**_kwargs: object) -> object:
-        raise OSError("unreadable")
+        raise failure
 
     import yoetz.adapters.integrations.claude_code_integration as adapter
 

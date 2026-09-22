@@ -48,6 +48,7 @@ CONNECTION_ERRORS = (
     ElevatedBootstrapError,
     RuntimeError_,
     OSError,
+    RuntimeError,
     ValueError,
 )
 
@@ -78,7 +79,7 @@ def claude_activation_cues(
 
     Names whether the installation would launch Yoetz through the plugin or a bare MCP entry and
     whether any installed hook can deliver the SessionStart cue. A bare entry has no cue; the
-    guided connection (``yoetz setup --host claude``) installs the plugin that carries one. ``None``
+    guided connection (``yoetz setup run --host claude``) installs the plugin that carries one. ``None``
     means the posture could not be read, never that no registration exists.
     """
 
