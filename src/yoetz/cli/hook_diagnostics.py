@@ -90,6 +90,11 @@ _REASONS: Final = frozenset(
         "codex_payload_too_large",
         "claude_payload_too_large",
         "cursor_payload_too_large",
+        # Cursor retained a structural identity for one hook body over the
+        # trusted cap and inside the skim cap. Content was not captured. Codex
+        # and Claude Code do not skim, so they have no sibling of this reason
+        # (issue #667).
+        "cursor_payload_content_omitted",
         "auto_attach_retry_failed",
         # Why a consented SessionStart (or its turn-boundary retry) produced no
         # mapping (#459). Before these, every auto-attach failure collapsed to a
