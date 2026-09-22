@@ -31,6 +31,15 @@ Assume the user may never have opened a terminal. Explain each step in one plain
 you run it, and before the first decision read
 [Ask in chat when you have no question tool](#ask-in-chat-when-you-have-no-question-tool).
 
+Before an out-of-order setup retry, use `yoetz setup status --next --operation local|review|connection`
+with the selected `--host`, `--host-path`, `--host-config-root`, and `--project`. The response names
+one next command bound to that runtime and project. Connection alone needs no provider sign-in;
+local use needs no provider; provider-backed privacy requires a configured binding first.
+A service-down preflight preserves an unclaimed pending approval, but never resurrects an approval
+already claimed, denied, cancelled, or expired. Continue only through the exact existing consent
+procedure. Never ask for a vault passphrase in chat. The terminal interface uses the same storage
+choices and common host connection preview; installation and activation remain separate facts.
+
 ## 0. Check the platform first — you do this
 
 Yoetz runs on macOS and Linux. Native Windows is not supported: the package installs, but every

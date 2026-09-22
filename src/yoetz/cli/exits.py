@@ -224,6 +224,15 @@ REMEDIATION_MESSAGES: Final = MappingProxyType(
         "provider_credential_invalid": (
             "the piped credential must be 1..8192 bytes with no NUL, carriage return, or newline"
         ),
+        "ceremony_service_unavailable": (
+            "the selected service is unavailable; run 'yoetz service restart', then inspect "
+            "'yoetz consent status' and retry the same pending decision if it is still valid. "
+            "An approval already claimed before service loss stays consumed"
+        ),
+        "provider_binding_required": (
+            "this review recipe needs a configured provider; run 'yoetz --set' "
+            "before preparing the repository grant again. Local-only setup needs no provider"
+        ),
         "provider_not_configured": (
             "no provider and model are configured for this installation; run 'yoetz --set' first"
         ),

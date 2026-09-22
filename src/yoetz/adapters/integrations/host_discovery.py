@@ -55,8 +55,11 @@ def host_config_root(
     environment = os.environ if environ is None else environ
     base = Path.home() if home is None else home
     if host == "codex":
-        value = environment.get("CODEX_HOME")
-        return Path(value).expanduser().absolute() if value else base / ".codex"
+        for key in ("CODEX_HOME", "CODEX_TESTING_HOME"):
+            value = environment.get(key)
+            if value and value.strip():
+                return Path(value).expanduser().absolute()
+        return base / ".codex"
     if host == "claude":
         value = environment.get("CLAUDE_CONFIG_DIR")
         return Path(value).expanduser().absolute() if value else base / ".claude"

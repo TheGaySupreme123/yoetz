@@ -1,0 +1,1 @@
+{"connection_observed":false,"facts":{"service":{"reachable":false,"state":null,"vault_mode":null}},"inspected_config_root":null,"next_command":"cd /workspace/project && /opt/yoetz/bin/yoetz service restart","operation":"local","project":"/workspace/project","reason":"service_unavailable","schema":"yoetz.setup-readiness/1"}

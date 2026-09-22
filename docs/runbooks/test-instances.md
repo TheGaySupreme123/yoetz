@@ -165,3 +165,37 @@ removes only that test tree. `YOETZ_CANDIDATE_PYTHON` still chooses the exact ca
 a conflicting runtime pin refuses the test root instead of falling back to its original instance.
 For installed service tests, provision the candidate at the helper's exact root and use its
 absolute interpreter. No ambient vault or credentials are copied.
+
+## Setup order and exact targeting (#737)
+
+Use the pinned absolute launcher returned by provisioning for every step. Inspect
+`<launcher> setup status --next --operation local --project <project> --json` first. Start the
+selected service, initialize/unlock the vault through its supported human ceremony, and establish
+the private repository grant. For AI-powered review, configure the provider before preparing a
+provider-backed repository grant, then approve that exact grant. Preview the common host
+connection with its executable, private configuration root and project; accept only its returned
+request/digest, then launch a fresh host. Connection-only installation can happen before provider
+sign-in. No generic `--accept` grants credentials, disclosure or activation authority.
+
+For Codex, plugin/MCP/provider status all accept `--codex-home` and report
+`inspected_codex_home`; `--codex-path` selects the binary. Precedence for read-only default selection
+is explicit home, `CODEX_HOME`, `CODEX_TESTING_HOME`, then `~/.codex`. Both home variables are forced
+to the selected value for each Codex subprocess. Plugin removal still requires an explicit home;
+use it for MCP removal and reconnection too. Do not retarget the process by changing only one
+ambient variable. A foreign home is preserved; use a newly created mode-0700 home for a separate
+installation, and inspect any project marketplace conflict independently. When discovery finds more
+than one Codex executable, provider status stays unread for the agent route and prints a quoted
+continuation with `--codex-path <exact-executable>` and the selected `--codex-home`; pass the same
+selector to every follow-up probe. The continuation retains the invoking launcher and isolation
+root. An explicitly missing selector reports the same bounded next action without echoing the path.
+
+A service-dependent approval first probes the selected service without starting it. Known
+unavailability preserves the pending identity; inspect consent status and retry that same valid
+identity after recovery. Atomic claiming remains the authorization boundary. Post-claim service
+loss consumes the review, as do denial, cancellation and expiry. Never invent a replacement
+attestation or treat the preflight as authority.
+
+`yoetz setup vault` initializes or unlocks only the selected installation's storage using the
+existing protected terminal ceremony. It diagnoses credential-store availability, retains the
+explicit passphrase fallback where needed, and stops before provider selection or privacy grants.
+It requires a local interactive terminal; agents show that continuation without supplying secrets.

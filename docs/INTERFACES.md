@@ -2651,7 +2651,7 @@ receipt values without rewriting stored receipts or the released `2.6.0` envelop
 request envelopes remain `2.6.0`; no new control method or 0.3 project contract is introduced.
 CLI JSON, terminal output and the prompt-loop menu render decoded UTC receipt timestamps in
 canonical millisecond RFC3339 form (issues #731 and #732). The added schema inventory is reported
-by version-manifest `2.2.2`; released `2.2.1` and earlier manifests retain their original bytes.
+by version-manifest `2.2.3`; released `2.2.2` and earlier manifests retain their original bytes.
 
 `PrivacyAuditPort.list_pending_disclosures(audience) -> PendingDisclosurePage` projects only
 `PendingDisclosureEntry(pending_id, task_id, expires_at)` for proposals in `awaiting_human` or
@@ -4402,7 +4402,12 @@ legacy external-registration fields `registration_state`, `registered_profile`, 
 `external_registration|plugin_managed|dual|foreign|null`; `ownership_state` uses
 `McpOwnershipState`. `observed: false` means exclusive ownership was not read unambiguously, not
 that none is registered. `registered_profile: null` with `observed: true` means the observed state
-has no single Yoetz route (`absent|dual|foreign`).
+has no single Yoetz route (`absent|dual|foreign`). A host with multiple discovered Codex
+executables is left unobserved until the caller selects one with `--codex-path`; `provider status`
+reports the closed `codex_binary_selection` blocker and a quoted continuation retaining the
+invoking launcher, isolation root and inspected Codex home. An explicitly unresolved
+`--codex-path` uses the `not_found` state of that blocker. No arbitrary executable is chosen for a
+readiness claim.
 A strict registered route adds a `mcp_route_profile` blocker
 with `scope: "agent_route"` and never moves `semantic_ready` or the exit code, because ADR-018
 decision 2 makes the route ceiling process-local — CLI and terminal checks still dispatch. Route
@@ -5493,6 +5498,35 @@ and milestones remain. Cancellation and ambiguous response loss do not yield tha
 ADR-030 continuation `start_busy_same_identity` names exact once-only replay after a successful
 lease yield; `start_pending_same_identity` names a live lease and the bounded 60-second wait before
 exact replay. Runtime/catalog producer reasons alone never imply a released start reservation.
+
+### Setup next-step and Codex inspection targeting (#737)
+
+`setup status --next --operation local|review|connection` emits `yoetz.setup-readiness/1`
+(`integrations/setup-readiness-1.0.0.schema.json`). It carries the selected project, inspected host
+configuration root, bounded reason, read-only prerequisite facts and one quoted `next_command`
+(or null when no setup prerequisite is missing). `connection_observed` is always false. Local and
+review operations evaluate service/vault/repository prerequisites; review additionally requires a
+provider binding and review permission. Connection-only evaluates the common host plan without
+requiring service or provider login. No native session or provider dispatch is inferred.
+
+Codex plugin/MCP/provider status gain the additive local inspection field `inspected_codex_home`.
+Their existing schema tokens remain unchanged; this field is not a service-wire or ledger field.
+All accept `--codex-home`, with explicit flag > `CODEX_HOME` > `CODEX_TESTING_HOME` > `~/.codex`
+precedence; every invoked Codex subprocess receives both variables bound to the selection.
+Explicit MCP previews bind the same home through registration, removal and reconnection.
+Plugin removal retains its explicit-home requirement. Setup status accepts Codex aliases for the
+common host target. Activation refusals expose `next_command` with the exact executable and home;
+that command obtains its own activation preview and requires its existing independent approval.
+
+Missing provider binding during privacy recipe preparation maps only the exact internal
+`privacy_setup_provider_binding_required` reason to public `provider_binding_required`.
+Other malformed bindings remain `grant_binding_invalid`; exception text never enters output.
+
+`setup vault` is a human-terminal-only composition of the existing initialization/unlock
+ceremonies. It stops before provider selection and policy changes. `setup status --next` selects
+it for an uninitialized vault; the common host connection command alone never stands in for
+vault initialization. Continuations retain module-invocation interpreter spelling so a symlinked
+virtual-environment Python does not lose its runtime pin.
 
 ### Completion claim scope diagnostics (issue #679)
 

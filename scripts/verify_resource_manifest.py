@@ -147,6 +147,12 @@ _CODEX_SKILL_MEMBERS: Final = (
 # is deliberately listed here; nothing is discovered by scanning the repository.
 _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     (
+        "schemas/integrations/setup-readiness-1.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
         "schemas/integrations/host-connection-1.0.0.schema.json",
         "json_schema",
         "application/schema+json",
@@ -1155,6 +1161,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     (
         "schemas/version/version-manifest-2.2.2.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/version/version-manifest-2.2.3.schema.json",
         "json_schema",
         "application/schema+json",
         True,
