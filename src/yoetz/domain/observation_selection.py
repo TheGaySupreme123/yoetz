@@ -501,7 +501,7 @@ def _routine_facts(payload: Mapping[str, CanonicalJsonValue]) -> _RoutineFacts:
         return _RoutineFacts(True, "routine_tool")
     if lowered in SHELL_TOOLS:
         return _routine_shell_facts(payload)
-    if lowered in _EDIT_TOOL_HINTS or any(hint in lowered for hint in ("edit", "write", "patch")):
+    if _is_edit_tool_token(lowered):
         return _RoutineFacts(False, "edit")
     if lowered in _TEST_TOOL_HINTS or any(hint in lowered for hint in ("test", "pytest", "check")):
         return _RoutineFacts(
@@ -580,6 +580,24 @@ def classify_observation(
     )
 
 
+def _is_edit_tool_token(lowered: str) -> bool:
+    return lowered in _EDIT_TOOL_HINTS or any(
+        hint in lowered for hint in ("edit", "write", "patch")
+    )
+
+
+def is_edit_tool_name(tool_name: CanonicalJsonValue) -> bool:
+    """Return whether a tool identity names a file edit under the shared hint rule."""
+
+    tool = _classification_token(tool_name)
+    if tool is None:
+        return False
+    lowered = tool.casefold()
+    if lowered in ROUTINE_READ_TOOLS or lowered in SHELL_TOOLS:
+        return False
+    return _is_edit_tool_token(lowered)
+
+
 def is_routine_read_candidate(payload: Mapping[str, CanonicalJsonValue]) -> bool:
     """Return the structural candidate bit without trusting outcome labels."""
 
@@ -625,5 +643,6 @@ __all__ = [
     "SHELL_TOOLS",
     "classify_observation",
     "envelope_outcome_state",
+    "is_edit_tool_name",
     "is_routine_read_candidate",
 ]

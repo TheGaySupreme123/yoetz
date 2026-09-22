@@ -444,18 +444,25 @@ def _cursor_identity_field(key: str, value: object, *, depth: int) -> JsonValue 
     """Copy one allowlisted identity field, dropping every other host value."""
 
     if key == "workspace_roots":
+        # A present root list the view cannot keep becomes ``null``, which the
+        # workspace resolver refuses. Dropping the key would let it fall back
+        # to a less trusted locator that a full-size body never reaches.
         if type(value) is not list:
-            return _IDENTITY_DROP
+            return None
         roots = cast(list[object], value)
         if len(roots) > _MAX_CURSOR_IDENTITY_ITEMS:
-            return _IDENTITY_DROP
+            return None
         kept_roots: list[JsonValue] = []
         for item in roots:
             text = _bounded_identity_string(item)
             if text is None:
-                return _IDENTITY_DROP
+                return None
             kept_roots.append(text)
         return kept_roots
+    if key == "error":
+        # Outcome parsing reads only whether ``error`` is set. Keep that bit,
+        # never the host's error text.
+        return True if value not in (None, False, "") else _IDENTITY_DROP
     if key == "model_params":
         if type(value) is not list:
             return _IDENTITY_DROP

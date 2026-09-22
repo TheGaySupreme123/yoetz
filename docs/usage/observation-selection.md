@@ -140,7 +140,7 @@ A single hook event is also bounded. Yoetz fully reads a host body of at most 25
 a large enough file can exceed that, because a host sends the whole new file content inside the
 event. Codex and Claude Code record that event as a `payload_too_large` coverage gap and do not
 keep a partial record. Cursor can keep the edit's identity when the complete event fits in 1 MiB:
-the session, tool, call, and a path commitment when a short path is present, with the file content
+the session, tool, call, and, for a completed edit with a short path, a path commitment, with the file content
 left out. That row is `payload_content_omitted`. A Cursor event over 1 MiB, or one that is not a
 complete valid document, is the same unparsed `payload_too_large` gap. Either way the rest of the
 session keeps ingesting, and a receipt cannot report the omitted or dropped bytes as captured work.

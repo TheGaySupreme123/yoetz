@@ -623,8 +623,11 @@ carries the whole file content, and the dogfood writes that opened this issue we
 When that body is a complete document at or under the 1 MiB skim cap (`MAX_HOOK_SKIM_BYTES`),
 Yoetz parses it with the same NUL, UTF-8, duplicate-key, and JSON checks as a normal event, then
 keeps a closed identity view. The structural row records the session, tool name, and tool-call id
-when those values are bounded tokens, plus a path commitment when a bounded path is present. File
-contents, edits, prompts, and command text are omitted. The row's content references stay empty,
+when those values are bounded tokens. A path commitment is kept only for `afterFileEdit` and for a
+`postToolUse` edit tool that did not fail or get denied; a read, a pending `preToolUse`, or a
+failed edit commits no changed path. Whether an `error` value was set is kept as a bit, never its
+text, and an unkeepable `workspace_roots` is refused as it is at full size. File contents, edits,
+prompts, and command text are omitted. The row's content references stay empty,
 including when native content capture is authorized. Coverage on that row is
 `payload_content_omitted`, and hook diagnostics record `cursor_payload_content_omitted`. A receipt
 can name the edit and must not treat the omitted bytes as captured.
@@ -632,7 +635,9 @@ can name the edit and must not treat the omitted bytes as captured.
 A body over the skim cap is refused before any parse. A complete oversized body that fails
 validation is also refused, and it records `cursor_payload_invalid` as well as the size gap. Both
 of those outcomes record `cursor_payload_too_large` and the workspace `payload_too_large` gap, and
-they mint no structural row. The pure `read_cursor_hook_payload` replay still refuses at 256 KiB,
+they mint no structural row. A parsed oversized body that finds no session or no resolvable
+workspace records the same gap. The ordinary profile's `afterMCPExecution` skip is deliberate at
+every size and records no gap. The pure `read_cursor_hook_payload` replay still refuses at 256 KiB,
 so a captured oversized body cannot be reparsed as a trusted full event.
 
 The caps are fixed; raising them is not an operator control. Codex and Claude Code do not skim:

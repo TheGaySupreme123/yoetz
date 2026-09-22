@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import io
 import json
+import sys
 from collections.abc import Mapping
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -1203,15 +1205,132 @@ def test_cursor_ordinary_oversize_write_pairs_pre_and_post_without_content(
         "toolu_write_interfaces"
     }
     assert {envelope.structural_payload["tool_name"] for envelope in envelopes} == {"Write"}
-    digests = {envelope.structural_payload["changed_paths_digest"] for envelope in envelopes}
-    assert len(digests) == 1
-    assert None not in digests
+    # Only the completed edit commits its path; the pending call changed nothing.
+    pre, post = envelopes
+    assert "changed_paths_digest" not in pre.structural_payload
+    assert post.structural_payload["changed_paths_digest"]
     for envelope in envelopes:
         assert ObservationGapCode.PAYLOAD_CONTENT_OMITTED.value in envelope.gap_codes
         assert envelope.content_object_refs == ()
         structural = _structural_text(envelope)
         assert "INTERFACES.md" not in structural
         assert "YYYYY" not in structural
+
+
+def _ordinary_oversize(tmp_path: Path, event: str, fields: bytes) -> None:
+    body = (
+        b'{"conversation_id":"cursor-skim","hook_event_name":"'
+        + event.encode()
+        + b'",'
+        + fields
+        + b',"pad":"'
+        + b"Z" * MAX_HOOK_STDIN_BYTES
+        + b'"}'
+    )
+    assert MAX_HOOK_STDIN_BYTES < len(body) <= MAX_HOOK_SKIM_BYTES
+    assert (
+        observe_hooks.handle_cursor_observe(
+            event_name=event,
+            stdin_bytes=body,
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+            observation_profile=CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
+        )
+        == 0
+    )
+
+
+def test_cursor_oversized_read_does_not_commit_a_changed_path(tmp_path: Path) -> None:
+    store, commitment = _consented_store(tmp_path)
+
+    _ordinary_oversize(
+        tmp_path,
+        "postToolUse",
+        b'"tool_name":"Read","tool_use_id":"toolu_read","tool_input":{"path":"README.md"}',
+    )
+
+    (envelope,) = store.list_envelopes(commitment)
+    assert ObservationGapCode.PAYLOAD_CONTENT_OMITTED.value in envelope.gap_codes
+    assert "changed_paths_digest" not in envelope.structural_payload
+
+
+def test_cursor_oversized_failed_edit_keeps_failure_without_error_text(tmp_path: Path) -> None:
+    store, commitment = _consented_store(tmp_path)
+
+    _ordinary_oversize(
+        tmp_path,
+        "postToolUse",
+        b'"tool_name":"Write","tool_use_id":"toolu_fail","tool_input":{"path":"a.md"},'
+        b'"tool_output":{"error":"ERROR_CANARY","success":true}',
+    )
+
+    (envelope,) = store.list_envelopes(commitment)
+    assert envelope.structural_payload["action"] == "cursor_tool_failure"
+    assert "changed_paths_digest" not in envelope.structural_payload
+    assert "ERROR_CANARY" not in _structural_text(envelope)
+
+
+def test_cursor_oversized_invalid_workspace_roots_is_refused_like_full_size(
+    tmp_path: Path,
+) -> None:
+    store, commitment = _consented_store(tmp_path)
+
+    _ordinary_oversize(
+        tmp_path,
+        "postToolUse",
+        b'"tool_name":"Write","tool_use_id":"toolu_roots","workspace_roots":[""]',
+    )
+
+    assert store.list_envelopes(commitment) == ()
+
+
+def test_cursor_oversized_skipped_mcp_execution_is_not_a_coverage_loss(
+    tmp_path: Path,
+) -> None:
+    store, commitment = _consented_store(tmp_path)
+
+    _ordinary_oversize(
+        tmp_path,
+        "afterMCPExecution",
+        b'"tool_name":"MCP:fixture_echo","tool_use_id":"toolu_mcp"',
+    )
+
+    assert store.list_envelopes(commitment) == ()
+    assert (
+        ObservationGapCode.PAYLOAD_TOO_LARGE.value
+        not in store.status(ObservationStatusQuery(commitment)).gaps
+    )
+
+
+def test_cursor_oversized_body_without_event_flag_keeps_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, commitment = _consented_store(tmp_path)
+    body = (
+        b'{"conversation_id":"cursor-stdin","hook_event_name":"postToolUse",'
+        b'"tool_name":"Write","tool_use_id":"toolu_stdin","tool_input":{"path":"a.md",'
+        b'"contents":"' + b"W" * MAX_HOOK_STDIN_BYTES + b'"}}'
+    )
+    assert MAX_HOOK_STDIN_BYTES < len(body) <= MAX_HOOK_SKIM_BYTES
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=io.BytesIO(body)))
+
+    assert (
+        observe_hooks.handle_cursor_observe(
+            event_name=None,
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+            observation_profile=CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
+        )
+        == 0
+    )
+
+    (envelope,) = store.list_envelopes(commitment)
+    assert envelope.structural_payload["tool_call_id"] == "toolu_stdin"
+    assert ObservationGapCode.PAYLOAD_CONTENT_OMITTED.value in envelope.gap_codes
 
 
 def test_cursor_body_over_skim_cap_stays_an_unparsed_gap(

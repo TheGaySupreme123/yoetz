@@ -476,8 +476,10 @@ free text from input. CLI exit classes (0/2/10/11/20/30/40/70/130) map from code
   `invalid_event_value_type`. Cursor observation (`read_cursor_hook_ingress`) may read a complete
   body up to `MAX_HOOK_SKIM_BYTES = 1_048_576` (1 MiB), the ordinary local-control frame cap. Inside
   that skim cap the same safety rules parse the document and the handler keeps a closed identity
-  view: session, tool, call id, bounded path text used only for a path commitment, and scalar
-  outcome fields. File contents, edits, prompts, and command text are not retained. A body over
+  view: session, tool, call id, bounded path text used only for a path commitment, scalar
+  outcome fields, and whether an `error` value was set (never its text). A `workspace_roots`
+  value the view cannot keep becomes `null`, so the workspace resolver refuses it exactly as it
+  does at full size. File contents, edits, prompts, and command text are not retained. A body over
   the skim cap raises `payload_too_large` before any parse. A complete oversized body that fails
   the NUL, UTF-8, duplicate-key, or JSON checks yields no identity view (issue #667).
 - Digests render as `sha256:<64 lowercase hex>`; commitments as `hmac-sha256:<64 lowercase hex>`.
@@ -3654,9 +3656,12 @@ Shared closed types:
   body exceeded `MAX_HOOK_STDIN_BYTES` and was not admitted as a structural row. Codex and Claude
   Code always stop there. Cursor stops there when the body does not fit `MAX_HOOK_SKIM_BYTES` or
   the skim cannot validate a complete document. It is not `truncated_payload`, which is an
-  admitted payload clipped after parsing. Nothing about such an event is knowable beyond the host
+  admitted payload clipped after parsing. Nothing about such an event is retained beyond the host
   that ran it and the hook name that host named on its own command line, so it mints no structural
-  row and binds to the workspace through the command-line locator alone.
+  row and binds to the workspace through the command-line locator alone. A Cursor body parsed
+  inside the skim cap that still yields no row (no session, no resolvable workspace, an ambiguous
+  session, or an unknown event) records the same gap; the ordinary profile's deliberate
+  `afterMCPExecution` skip does not, because its paired `postToolUse` owns the call.
   `payload_content_omitted` is the Cursor case that did validate: the structural row keeps the
   closed identity and an empty content-reference list, and coverage must not treat the omitted
   native bytes as captured. `session_superseded` is a mapped host session

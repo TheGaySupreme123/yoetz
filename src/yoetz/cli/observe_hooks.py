@@ -45,6 +45,7 @@ from yoetz.adapters.workspace_binding import canonical_workspace_locator, resolv
 from yoetz.cli import hook_io
 from yoetz.cli.hook_diagnostics import record_hook_diagnostic, record_hook_timing
 from yoetz.cli.hook_io import (
+    MAX_HOOK_SKIM_BYTES,
     MAX_HOOK_STDIN_BYTES,
     CursorOversizedPayloadError,
     read_cursor_hook_ingress,
@@ -91,6 +92,7 @@ from yoetz.domain.observation_selection import (
 from yoetz.domain.observation_selection import (
     ObservationClassification,
     classify_observation,
+    is_edit_tool_name,
     is_routine_read_candidate,
 )
 from yoetz.domain.values import (
@@ -270,6 +272,9 @@ _CURSOR_SESSION_PREFIX: Final = "cursor:"
 _CURSOR_ALIAS_FILE: Final = "cursor-session-aliases.json"
 _CURSOR_ALIAS_LOCK: Final = "cursor-session-aliases.lock"
 _MAX_CURSOR_ALIASES: Final = 64
+_CURSOR_NON_EDIT_ACTIONS: Final = frozenset(
+    {"cursor_tool_denied", "cursor_tool_failure", "routine_read"}
+)
 _CURSOR_UNTESTED_PROFILE_ID: Final = "untested"
 _CURSOR_VERSION_TO_PROFILE: Final = {
     "3.17.8": "cursor-ide-3.17.8",
@@ -2843,13 +2848,15 @@ def note_payload_too_large(
     workspace: str | None,
     _state: Path | None = None,
 ) -> None:
-    """Name one hook event refused at stdin ingress for exceeding the byte cap.
+    """Name one oversized hook event that produced no structural row.
 
-    The body was never parsed, so the only identity this pass can honestly
-    claim is the host that ran it, the hook name that host named on its own
-    command line, and the bound itself. Even the true size is unknown by
-    construction: the ingress reads at most cap-plus-one bytes and stops.
-    Nothing is inferred from the unread bytes, and no structural row is minted.
+    Usually the body was never parsed, so the only identity this pass can
+    honestly claim is the host that ran it, the hook name that host named on
+    its own command line, and the bound itself. Even the true size is unknown
+    by construction: the ingress reads at most cap-plus-one bytes and stops.
+    Cursor may parse a body up to its skim cap and still find no row to keep
+    (invalid, no session, or no resolvable workspace); that loss lands here too.
+    Nothing is inferred from unread bytes, and no structural row is minted.
 
     Two records, because there are two audiences. The bounded owner-only
     diagnostic tells an operator which host lost which event; the workspace
@@ -2858,16 +2865,16 @@ def note_payload_too_large(
     captured work (issue #667).
     """
 
-    prefix = (
-        "hook_cursor_observe_degraded"
+    # Cursor reaches this after its 1 MiB skim cap or a parsed body that kept
+    # no row, so it does not name the shared 256 KiB bound.
+    detail = (
+        "hook_cursor_observe_degraded: payload_too_large; host event over the hook ingress cap"
         if source is ObservationSource.CURSOR_HOOK
-        else "hook_observe_degraded"
+        else "hook_observe_degraded: payload_too_large; host event over the "
+        f"{MAX_HOOK_STDIN_BYTES}-byte hook ingress cap"
     )
     with contextlib.suppress(BaseException):
-        _stderr_line(
-            f"{prefix}: payload_too_large; host event over the "
-            f"{MAX_HOOK_STDIN_BYTES}-byte hook ingress cap; not observed; see observe status"
-        )
+        _stderr_line(f"{detail}; not observed; see observe status")
     with contextlib.suppress(BaseException):
         record_hook_diagnostic(
             _PAYLOAD_TOO_LARGE_REASONS.get(source, "codex_payload_too_large"),
@@ -5091,11 +5098,13 @@ def handle_cursor_observe(
 
     raw_event = event_name
     if event_name is None:
+        # Read the same bound the ingress reader applies, so an oversized body
+        # reaches it whole and can still keep its identity view (#667).
         stdin_bytes = (
-            sys.stdin.buffer.read(_MAX_CONTENT_CHUNK) if stdin_bytes is None else stdin_bytes
+            sys.stdin.buffer.read(MAX_HOOK_SKIM_BYTES + 1) if stdin_bytes is None else stdin_bytes
         )
         with contextlib.suppress(Exception):
-            candidate = read_cursor_hook_payload(stdin_bytes).get("hook_event_name")
+            candidate = read_cursor_hook_ingress(stdin_bytes)[0].get("hook_event_name")
             raw_event = candidate if isinstance(candidate, str) else None
     pre_tool = raw_event == "preToolUse"
     # PreToolUse has no advice delivery: buffer the internal observer's empty
@@ -5276,7 +5285,9 @@ def _handle_cursor_observe(
         _bind_cursor_start(payload, raw_event=raw_event, session=session, _state=_state)
         if ordinary_profile and raw_event == "afterMCPExecution":
             # No duplicate structural row, content capture, or advice delivery.
-            return finish_without_row()
+            # This skip is deliberate at every size: the paired postToolUse
+            # owns the call, so an oversized body here is not a coverage loss.
+            return 0 if hook_io.stdout_json({}, stdout) else 0
         cursor_version = _token_or_none(payload.get("cursor_version"))
         capability_profile_id = (
             CURSOR_ORDINARY_OBSERVATION_PROFILE_ID
@@ -5375,7 +5386,15 @@ def _handle_cursor_observe(
         elif ordinary_profile and raw_event == "preToolUse":
             structural["action"] = "cursor_tool_pending"
         path_value = payload.get("file_path") if raw_event == "afterFileEdit" else None
-        if content_omitted and not (type(path_value) is str and path_value):
+        if (
+            content_omitted
+            and not (type(path_value) is str and path_value)
+            and raw_event == "postToolUse"
+            and structural.get("action") not in _CURSOR_NON_EDIT_ACTIONS
+            and is_edit_tool_name(payload.get("tool_name"))
+        ):
+            # Only a completed edit tool commits its path. A read, a pending
+            # call, or a failed or denied edit changed nothing on disk.
             path_value = _cursor_nested_edit_path(payload)
         if (
             type(path_value) is str
