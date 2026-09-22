@@ -148,9 +148,7 @@ def test_readiness_contract_bounds_reason_and_fact_inventory() -> None:
     with pytest.raises(ValidationError):
         SetupReadiness.model_validate({**base, "reason": "caller-authored"})
     with pytest.raises(ValidationError):
-        SetupReadiness.model_validate(
-            {**base, "facts": {str(index): index for index in range(33)}}
-        )
+        SetupReadiness.model_validate({**base, "facts": {str(index): index for index in range(33)}})
 
 
 @pytest.mark.parametrize("host", ["codex", "claude", "cursor-cli", "cursor-ide"])

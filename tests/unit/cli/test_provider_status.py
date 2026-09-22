@@ -682,8 +682,7 @@ async def test_unresolvable_explicit_codex_path_has_a_bounded_selector_hint(
     assert route["binary_selection"] == "explicit_path_unresolved"
     blockers = cast(tuple[dict[str, object], ...], report["blockers"])
     assert any(
-        item.get("condition") == "codex_binary_selection"
-        and item.get("state") == "not_found"
+        item.get("condition") == "codex_binary_selection" and item.get("state") == "not_found"
         for item in blockers
     )
 

@@ -196,9 +196,7 @@ def test_expected_review_claim_cannot_consume_a_replacement(tmp_path: Path) -> N
 
     assert mismatch.value.reason == "pending_tampered"
     assert load_pending(_state=tmp_path) == replacement
-    assert not (
-        tmp_path / "elevated-bootstrap" / "elevated-bootstrap-reviewing.json"
-    ).exists()
+    assert not (tmp_path / "elevated-bootstrap" / "elevated-bootstrap-reviewing.json").exists()
 
 
 @pytest.mark.parametrize("outcome", ["denied", "cancelled", "failed"])

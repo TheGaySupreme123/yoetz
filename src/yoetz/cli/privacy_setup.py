@@ -72,6 +72,7 @@ class ProviderBindingRequiredError(ValueError):
     def __init__(self) -> None:
         super().__init__("privacy_setup_provider_binding_required")
 
+
 _SEMANTIC_CATEGORIES: Final = (
     DataCategory.BOUNDED_STRUCTURAL_METADATA,
     DataCategory.DECLARED_FILE_TYPE,
