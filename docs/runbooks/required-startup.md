@@ -92,6 +92,8 @@ closed reasons, never payloads.
 A user-prompt reset writes a new scope before clearing the prior invalidation marker. If that write
 fails, the marker makes ordinary readers fail closed; the next reset reads the old sidecar only while
 holding the reset lock, so its route and every pending request identity survive recovery. If the
+marker is present, tracked bootstrap writes receive `scope_reset_required` and teardown does not
+replace the sidecar, while status and operation recovery remain available. The
 marker itself cannot be created because the state directory is unavailable, Claude
 `UserPromptSubmit` returns its native `decision: block` result and Cursor `beforeSubmitPrompt`
 returns `continue: false`. Claude `SessionStart` and Cursor `sessionStart` are context-only events;

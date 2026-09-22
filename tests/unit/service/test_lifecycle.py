@@ -19,6 +19,7 @@ from yoetz.service.lifecycle import (
     SessionSecurityEvent,
     probe_singleton_holder,
     probe_singleton_holder_identity,
+    probe_singleton_holder_lock,
 )
 
 _INSTANCE_ID = "svc_00000000-0000-4000-8000-000000000001"
@@ -381,6 +382,7 @@ async def test_singleton_stamp_names_the_holder_installation_identity(tmp_path: 
     lifecycle = _lifecycle(_Clock(), singleton_lock_path=path)
     await lifecycle.acquire_singleton()
     try:
+        assert probe_singleton_holder_lock(path) is True
         holder = probe_singleton_holder_identity(path)
         assert holder is not None
         assert holder.pid == os.getpid()
@@ -390,6 +392,7 @@ async def test_singleton_stamp_names_the_holder_installation_identity(tmp_path: 
     finally:
         await lifecycle.transition(ServiceState.LOCKED)
         await lifecycle.close()
+    assert probe_singleton_holder_lock(path) is False
     assert probe_singleton_holder_identity(path) is None
 
 

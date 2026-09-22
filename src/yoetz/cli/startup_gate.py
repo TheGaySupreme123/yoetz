@@ -365,7 +365,11 @@ def handle_startup_gate(
                     else cursor_context_output(event, _NOTICE)
                 )
             elif event in {"SessionEnd", "sessionEnd"}:
-                store.write(GateScope.fresh(scope))
+                # A failed reset owns the invalidation marker. Do not let a
+                # teardown hook replace the old sidecar with a fresh empty
+                # scope while that marker is still present.
+                if not store.is_invalidated():
+                    store.write(GateScope.fresh(scope))
                 output = {}
             elif event in _PRE:
                 # An unqualified Cursor MCP name is checked by the separate
@@ -379,21 +383,33 @@ def handle_startup_gate(
                 if admitted:
                     admitted = True
                     if tool in {"start", "publish_work"} and not cursor_mcp:
-                        if scope is None:
-                            scope = GateScope.fresh()
-                        rid = None if request is None else request.get("request_id")
-                        if isinstance(rid, str) and is_valid_id(IdKind.REQUEST, rid):
-                            if len(scope.pending) >= 32 and rid not in scope.pending:
-                                # Preserve every ambiguous write identity. The
-                                # caller must retry one of those exact requests
-                                # before another pending ticket can be admitted.
-                                admitted = False
-                                reason = "pending_operation_capacity"
-                            else:
-                                scope.pending[rid] = tool
-                                scope.pending_generations.setdefault(rid, scope.generation)
-                                scope.pending_refs[rid] = proposed_obligations(request)
-                                store.write(scope)
+                        try:
+                            invalidated = store.is_invalidated()
+                        except Exception:
+                            invalidated = True
+                        if invalidated:
+                            # An invalidated sidecar is unreadable by design.
+                            # Never replace it with an empty scope from a
+                            # bootstrap write: that would discard ambiguous
+                            # request identities before the next reset.
+                            admitted = False
+                            reason = "scope_reset_required"
+                        else:
+                            if scope is None:
+                                scope = GateScope.fresh()
+                            rid = None if request is None else request.get("request_id")
+                            if isinstance(rid, str) and is_valid_id(IdKind.REQUEST, rid):
+                                if len(scope.pending) >= 32 and rid not in scope.pending:
+                                    # Preserve every ambiguous write identity. The
+                                    # caller must retry one of those exact requests
+                                    # before another pending ticket can be admitted.
+                                    admitted = False
+                                    reason = "pending_operation_capacity"
+                                else:
+                                    scope.pending[rid] = tool
+                                    scope.pending_generations.setdefault(rid, scope.generation)
+                                    scope.pending_refs[rid] = proposed_obligations(request)
+                                    store.write(scope)
                 elif scope is None or not scope.candidate:
                     reason = "current_plan_required"
                 else:

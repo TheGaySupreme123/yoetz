@@ -397,6 +397,21 @@ def test_successful_reset_after_failure_preserves_pending_request_identity(
     assert host.store.read() is None
     assert host.store.invalidation_path.exists()
 
+    blocked_request: dict[str, JsonValue] = {"request_id": new_id(IdKind.REQUEST)}
+    blocked = host.pre("start", blocked_request)
+    if host.host == "claude":
+        details = blocked.get("hookSpecificOutput")
+        assert isinstance(details, dict)
+        reason = details.get("permissionDecisionReason")
+        assert isinstance(reason, str) and "scope_reset_required" in reason
+    else:
+        assert blocked["permission"] == "deny"
+        assert blocked["user_message"] == "Yoetz startup: scope_reset_required."
+    with host.store.locked():
+        preserved = host.store.read_for_reset()
+    assert preserved is not None and request["request_id"] in preserved.pending
+    assert blocked_request["request_id"] not in preserved.pending
+
     monkeypatch.undo()
     host.boundary("prompt")
     after = host.store.read()

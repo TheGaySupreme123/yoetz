@@ -111,7 +111,7 @@ from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode
 
 if TYPE_CHECKING:
     from yoetz.cli import hooks as hooks_cli
-    from yoetz.ports.control import ControlClientKind
+    from yoetz.ports.control import ControlClientKind, WorkspaceLocator
 
 __all__ = [
     "ADVICE_SAFE_EVENTS",
@@ -188,7 +188,11 @@ _HOOK_CONNECT_PREFLIGHT_SECONDS: Final = 1.0
 # rows but never spends the extra attach retry budget.
 _AUTO_ATTACH_RETRY_EVENTS: Final = frozenset({"UserPromptSubmit", "Stop"})
 _AUTO_ATTACH_RETRY_BUDGET_SECONDS: Final = 1.0
+# The retry event has a one-second outer hook allowance. Leave room for its start RPC after the
+# on-demand connector has spawned or found a service; SessionStart keeps the larger cold-start arm.
+_AUTO_ATTACH_RETRY_SERVICE_START_BUDGET_SECONDS: Final = 0.4
 _AUTO_ATTACH_START_DEADLINE_MS: Final = 5_000
+_HOOK_SERVICE_START_BUDGET_SECONDS: Final = 1.0
 # End-to-end observability contract for one hook pass, process start included.
 # Never an abort point: the drain and preflight budgets own enforcement.
 # Derived from the enforced budgets nested inside one pass plus an allowance
@@ -198,6 +202,7 @@ _AUTO_ATTACH_START_DEADLINE_MS: Final = 5_000
 _HOOK_LOCAL_STAGE_ALLOWANCE_SECONDS: Final = 1.0
 _HOOK_TOTAL_BUDGET_SECONDS: Final = (
     _HOOK_CONNECT_PREFLIGHT_SECONDS
+    + _HOOK_SERVICE_START_BUDGET_SECONDS
     + _HOOK_DRAIN_BUDGET_SECONDS
     + _HOOK_LOCAL_STAGE_ALLOWANCE_SECONDS
 )
@@ -283,6 +288,35 @@ def _connect_service() -> object:
     return connect_service
 
 
+async def _connect_attachment_service(
+    kind: ControlClientKind,
+    *,
+    workspace_locator: WorkspaceLocator | None = None,
+    timeout_seconds: float | None = None,
+) -> object:
+    """Prime only the selected service, within the synchronous hook budget.
+
+    Ordinary drains remain connect-only. The fixed launcher inherits instance pinning;
+    this path never supersedes a holder or conveys vault/disclosure authority.
+    """
+
+    from yoetz.service.client import connect_service, connect_service_on_demand
+
+    override = globals().get("connect_service")
+    if override is not None and override is not connect_service:
+        return await cast(Callable[..., Awaitable[object]], override)(
+            kind, workspace_locator=workspace_locator
+        )
+    return await connect_service_on_demand(
+        kind,
+        workspace_locator=workspace_locator,
+        timeout_seconds=(
+            _HOOK_SERVICE_START_BUDGET_SECONDS if timeout_seconds is None else timeout_seconds
+        ),
+        supersede_incompatible=False,
+    )
+
+
 class _HookDrainClient(Protocol):
     async def observation_ingest(
         self, body: DomainJsonValue, *, deadline_ms: int | None = None
@@ -359,11 +393,39 @@ if set(_AUTO_ATTACH_ERROR_REASONS) != set(PublicErrorCode):
 # absent here (a future addition) fall back to `service_unavailable`.
 _AUTO_ATTACH_CONTROL_REASONS: Final[Mapping[str, str]] = MappingProxyType(
     {
+        "service_incompatible": "service_incompatible",
+        "protocol_mismatch": "service_incompatible",
         "vault_locked": "vault_locked",
         "request_timeout": "timeout",
         "privacy_projection_blocked": "privacy_authority_required",
     }
 )
+
+
+def _attachment_recovery_context(reason: str) -> str:
+    """Render only trusted classifications, never host/error payload text."""
+
+    if reason == "service_incompatible":
+        return (
+            "Yoetz attachment pending: service_incompatible. The selected service has an "
+            "incompatible holder; the hook did not replace it. Call start and follow its exact "
+            "service recovery continuation. "
+        )
+    if reason in {"service_unavailable", "timeout"}:
+        return (
+            "Yoetz attachment pending: service_unavailable. The bounded service connection "
+            "did not complete. Call start before material work to finish service startup and "
+            "attachment; later turn hooks also retry within their budget. "
+        )
+    if reason == "auto_attach_conflict":
+        return (
+            "Yoetz attachment refused: auto_attach_conflict. The service answered but task "
+            "admission conflicted. Use a held session selector or follow start's explicit "
+            "admission continuation; restarting the service does not select a task. "
+        )
+    # The local diagnostic retains the exact closed reason. The model-facing fallback stays
+    # reason-neutral because storage, consent, and authoring failures are not mapping failures.
+    return "Yoetz attachment incomplete: no mapping was produced. Follow the typed start result. "
 
 
 def _now() -> Timestamp:
@@ -1525,6 +1587,7 @@ async def _try_auto_start(
     workspace_locator: str | None,
     recovery_mapping: LifecycleMapping | None = None,
     connect: HookStartConnector | None = None,
+    service_start_timeout_seconds: float | None = None,
 ) -> AutoAttachOutcome:
     """Service `start` for consented SessionStart auto-attach, or a typed reason.
 
@@ -1607,10 +1670,11 @@ async def _try_auto_start(
 
     try:
         if connect is None:
-            connector = cast(Callable[..., Awaitable[_StartClient]], _connect_service())
+            connector = cast(Callable[..., Awaitable[_StartClient]], _connect_attachment_service)
             client = await connector(
                 ControlClientKind.CLI,
                 workspace_locator=WorkspaceLocator(workspace_locator),
+                timeout_seconds=service_start_timeout_seconds,
             )
         else:
             client = await connect(ControlClientKind.CLI)
@@ -2081,6 +2145,7 @@ async def _try_workspace_auto_start(
     _state: Path | None,
     connect: HookStartConnector | None,
     prune_surplus: bool = False,
+    service_start_timeout_seconds: float | None = None,
 ) -> AutoAttachOutcome:
     """Auto-start, holding every eligible predecessor stable through recovery.
 
@@ -2136,14 +2201,25 @@ async def _try_workspace_auto_start(
                         if candidates_owned and _recovery_scan_still_valid(
                             store, workspace_commitment, scan, _state=_state
                         ):
-                            outcome = await _try_auto_start(
-                                codex_session_id,
-                                _state=_state,
-                                harness_id=harness_id,
-                                workspace_locator=workspace_locator,
-                                recovery_mapping=recovery,
-                                connect=connect,
-                            )
+                            if service_start_timeout_seconds is None:
+                                outcome = await _try_auto_start(
+                                    codex_session_id,
+                                    _state=_state,
+                                    harness_id=harness_id,
+                                    workspace_locator=workspace_locator,
+                                    recovery_mapping=recovery,
+                                    connect=connect,
+                                )
+                            else:
+                                outcome = await _try_auto_start(
+                                    codex_session_id,
+                                    _state=_state,
+                                    harness_id=harness_id,
+                                    workspace_locator=workspace_locator,
+                                    recovery_mapping=recovery,
+                                    connect=connect,
+                                    service_start_timeout_seconds=service_start_timeout_seconds,
+                                )
                             if outcome.mapping is not None and outcome.recovered:
                                 with contextlib.suppress(Exception):
                                     consumed = _rewrite_ended_predecessor_mappings(
@@ -2171,12 +2247,21 @@ async def _try_workspace_auto_start(
     # A resumed predecessor or changed local state invalidates the capability.
     # Still run the ordinary request so the hook records the service's typed
     # conflict instead of inventing a local success or silently doing nothing.
+    if service_start_timeout_seconds is None:
+        return await _try_auto_start(
+            codex_session_id,
+            _state=_state,
+            harness_id=harness_id,
+            workspace_locator=workspace_locator,
+            connect=connect,
+        )
     return await _try_auto_start(
         codex_session_id,
         _state=_state,
         harness_id=harness_id,
         workspace_locator=workspace_locator,
         connect=connect,
+        service_start_timeout_seconds=service_start_timeout_seconds,
     )
 
 
@@ -3020,6 +3105,7 @@ def handle_observe(
         # skip_service so local-only callers (e.g. the setup readiness probe)
         # never create or attach real ledger tasks.
         additional = ""
+        attach_reason: str | None = None
         attach_advisory_only = False
         mapping: LifecycleMapping | None = load_mapping(codex_session_id, _state=_state)
         drain_started = _monotonic()
@@ -3070,8 +3156,10 @@ def handle_observe(
                                         prune_surplus=True,
                                     )
 
+                                attach_outcome = cast(AutoAttachOutcome, _resolve_runner()(_attach))
+                                attach_reason = attach_outcome.reason
                                 mapping = _record_auto_attach(
-                                    cast(AutoAttachOutcome, _resolve_runner()(_attach)),
+                                    attach_outcome,
                                     resolved_event,
                                     _state=_state,
                                 )
@@ -3085,6 +3173,10 @@ def handle_observe(
                                     "necessary bootstrap clarification, call start to attach a task "
                                     "before substantive material work. " + _STARTUP_RECOVERY_CONTEXT
                                 )
+                                if attach_reason is not None:
+                                    additional = (
+                                        _attachment_recovery_context(attach_reason) + additional
+                                    )
                                 attach_advisory_only = True
                             else:
                                 additional = _active_context(mapping, mapping.last_frontier)
@@ -3243,6 +3335,9 @@ def handle_observe(
                                 harness_id=harness_id,
                                 workspace_locator=workspace_locator,
                                 connect=cast(HookStartConnector | None, connect),
+                                service_start_timeout_seconds=(
+                                    _AUTO_ATTACH_RETRY_SERVICE_START_BUDGET_SECONDS
+                                ),
                             )
                             return await asyncio.wait_for(
                                 attach,

@@ -3714,3 +3714,207 @@ async def test_scoped_check_that_excludes_the_subject_resolves_nothing() -> None
         )
     )
     assert "receipt_findings_unresolved" in status.closure_readiness.blocking_conditions
+
+
+@pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))
+@pytest.mark.parametrize("overlap", (False, True))
+async def test_command_gap_partition_preserves_receipt_coverage(
+    ledger_backend: Literal["memory", "sqlite"], overlap: bool
+) -> None:
+    """682: real append, repair, recheck and receipts keep independent proof separate."""
+    app, runtime, _ = _build_app(ledger_backend=ledger_backend)
+    started = await app.start(start_request(62000, title="Command gap resolution"))
+    a, b = protocol_id("obl_", 62001), protocol_id("obl_", 62002)
+    aa, ab = protocol_id("act_", 62003), protocol_id("act_", 62004)
+    ra, rb = protocol_id("res_", 62005), protocol_id("res_", 62006)
+    serial = 62100
+    frontier = started.frontier
+
+    def base() -> dict[str, JsonValue]:
+        nonlocal serial
+        serial += 1
+        return {
+            **_request_base(protocol_id("req_", serial)),
+            "session_id": started.session_id,
+            "writer_id": started.writer_id,
+        }
+
+    def draft(name: str, payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        nonlocal serial
+        serial += 1
+        return {
+            "event_id": protocol_id("evt_", serial),
+            "schema": {"name": name, "version": "1.0.0"},
+            "occurred_at": "2026-07-19T12:00:00.000Z",
+            "causal_parents": [],
+            "artifact_refs": [],
+            "evidence_refs": [],
+            "payload": payload,
+        }
+
+    async def publish(drafts: list[dict[str, JsonValue]]) -> None:
+        nonlocal frontier
+        result = await app.publish_work(
+            PublishWorkRequest.model_validate(
+                {**base(), "expected_frontier": _frontier(frontier), "event_drafts": drafts}
+            )
+        )
+        assert type(result) is PublishWorkInternalResult
+        frontier = result.result_frontier
+
+    async def check() -> CheckCommitResult:
+        nonlocal frontier
+        result = await app.check(
+            CheckRequest.model_validate(
+                {
+                    **base(),
+                    "expected_frontier": _frontier(frontier),
+                    "mode": "deterministic_only",
+                    "max_findings": "10",
+                }
+            )
+        )
+        assert type(result) is CheckCommitResult
+        frontier = result.result_frontier
+        return result
+
+    oa: dict[str, JsonValue] = {
+        "obligation_id": a,
+        "description": "Edit A",
+        "evidence_expectation": "Result",
+        "status": "open",
+    }
+    ob: dict[str, JsonValue] = {
+        "obligation_id": b,
+        "description": "Work B",
+        "evidence_expectation": "Result",
+        "status": "open",
+    }
+    (oa if overlap else ob)["requested_items"] = [
+        {"item_kind": "command", "value": "pytest exact.py"}
+    ]
+    action_a: dict[str, JsonValue] = {
+        "action_id": aa,
+        "action_kind": "edit",
+        "description": "Edit",
+        "obligation_refs": [a],
+    }
+    action_b: dict[str, JsonValue] = {
+        "action_id": ab,
+        "action_kind": "review",
+        "description": "Other work",
+        "obligation_refs": [b],
+    }
+    (action_a if overlap else action_b)["attempted_items"] = ["pytest exact.py"]
+    await publish(
+        [
+            draft(
+                "plan_published", {"plan_version": 1, "summary": "Plan", "obligation_refs": [a, b]}
+            ),
+            draft("obligation_published", oa),
+            draft("obligation_published", ob),
+            draft("action_recorded", action_a),
+            draft("action_recorded", action_b),
+            draft("result_recorded", {"result_id": rb, "action_id": ab, "outcome": "success"}),
+            draft(
+                "obligation_published",
+                {**ob, "status": "resolved", "resolution_evidence_refs": [rb]},
+            ),
+        ]
+    )
+    first = await check()
+    target = next(f for f in first.findings if f.kind is FindingKind.ACTION_WITHOUT_RESULT)
+    assert target.coverage.known_gaps == ()
+    await publish(
+        [
+            draft("result_recorded", {"result_id": ra, "action_id": aa, "outcome": "success"}),
+            draft(
+                "obligation_published",
+                {**oa, "status": "resolved", "resolution_evidence_refs": [ra]},
+            ),
+        ]
+    )
+    second = await check()
+    assert not any(f.kind is FindingKind.ACTION_WITHOUT_RESULT for f in second.findings)
+    assert "command_attempt_uncorroborated" in second.coverage.known_gaps
+    status = await app.status(
+        StatusRequest.model_validate(
+            {**base(), "view": "findings", "limit": "100", "filter": {"include_resolved": True}}
+        )
+    )
+    assert isinstance(status.page, StatusFindingsPageModel)
+    current = next(row for row in status.page.items if row.finding_id == target.finding_id)
+    assert current.resolved is (not overlap)
+    if overlap:
+        assert "command_relation_overlaps_obligation:" + a in str(current.detail)
+    ledger, _ = next(iter(runtime.resources.values()))
+    records = tuple([row async for row in ledger.load_events(started.session_id)])
+    from yoetz.kernel.finding_resolution import finding_is_resolved
+    from yoetz.kernel.projections import projection_from_snapshot, projection_snapshot
+
+    rebuilt = replay(records)
+    assert finding_is_resolved(rebuilt, target.finding_id) is (not overlap)
+    assert finding_is_resolved(
+        projection_from_snapshot(projection_snapshot(rebuilt)), target.finding_id
+    ) is (not overlap)
+    for fmt in ("json", "markdown", "text"):
+        receipt = await app.receipt(
+            ReceiptRequest.model_validate(
+                {
+                    **base(),
+                    "task_id": started.task_id,
+                    "expected_frontier": _frontier(frontier),
+                    "format": fmt,
+                    "include": "standard",
+                    "redaction_profile": "full_local",
+                }
+            )
+        )
+        frontier = receipt.result_frontier
+        assert "command_attempt_uncorroborated" in receipt.coverage.known_gaps
+        assert receipt.conclusion == (
+            "unresolved_findings_remain" if overlap else "insufficient_coverage"
+        )
+        if fmt != "json":
+            assert receipt.human_text is not None
+            assert "command_attempt_uncorroborated" in receipt.human_text
+    response = await app.respond(
+        RespondRequest.model_validate(
+            {
+                **base(),
+                "expected_frontier": _frontier(frontier),
+                "finding_id": target.finding_id,
+                "finding_frontier": _frontier(first.result_frontier),
+                "disposition": "acknowledged",
+                "reason": "Historical finding remains in the record.",
+            }
+        )
+    )
+    frontier = response.result_frontier
+    receipt = await app.receipt(
+        ReceiptRequest.model_validate(
+            {
+                **base(),
+                "task_id": started.task_id,
+                "expected_frontier": _frontier(frontier),
+                "format": "json",
+                "include": "standard",
+                "redaction_profile": "full_local",
+            }
+        )
+    )
+    frontier = receipt.result_frontier
+    assert "check_not_applicable" in receipt.coverage.known_gaps
+    status = await app.status(
+        StatusRequest.model_validate(
+            {
+                **base(),
+                "view": "findings",
+                "limit": "100",
+                "filter": {"include_resolved": True},
+            }
+        )
+    )
+    assert isinstance(status.page, StatusFindingsPageModel)
+    final = next(row for row in status.page.items if row.finding_id == target.finding_id)
+    assert final.resolved is (not overlap)

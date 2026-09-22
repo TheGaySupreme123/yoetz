@@ -226,6 +226,11 @@ class GateStore:
         raw = _read_private(self.path)
         return None if raw is None else _decode(raw)
 
+    def is_invalidated(self) -> bool:
+        """Return whether ordinary writes must wait for a successful reset."""
+
+        return _read_private(self.invalidation_path) is not None
+
     def invalidate(self) -> bool:
         """Durably make this scope unreadable until a reset succeeds."""
 

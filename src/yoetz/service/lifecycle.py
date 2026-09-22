@@ -43,6 +43,7 @@ __all__ = [
     "SingletonHolder",
     "probe_singleton_holder",
     "probe_singleton_holder_identity",
+    "probe_singleton_holder_lock",
 ]
 
 LOCK_DRAIN_SECONDS: Final = 5
@@ -708,9 +709,9 @@ def probe_singleton_holder_identity(path: Path) -> SingletonHolder | None:
     start fail. An absent, oversized, malformed, or dead-pid stamp is simply no answer, and so is
     one that is a symlink, owned by another uid, or readable past the owner.
 
-    One residual is accepted rather than closed: the stamp may name a pid the OS has since reused
-    for an unrelated process, which ``kill(pid, 0)`` cannot tell apart. The stamp is never a fence
-    -- the flock is -- so the whole blast radius is a same-user stderr line naming the wrong pid.
+    A pid can be reused after the stamped process exits, which ``kill(pid, 0)`` cannot tell apart.
+    The stamp is never a fence -- the flock is -- and callers that use the stamp to make a
+    startup decision must corroborate it with a lock probe.
     """
 
     try:
@@ -760,6 +761,37 @@ def probe_singleton_holder_identity(path: Path) -> SingletonHolder | None:
         lifecycle if type(lifecycle) is str and lifecycle in _HOLDER_LIFECYCLES else None,
         source_ref if type(source_ref) is str and _HOLDER_SOURCE_REF.match(source_ref) else None,
     )
+
+
+def probe_singleton_holder_lock(path: Path) -> bool | None:
+    """Probe whether the owner-only singleton lock is held without changing its authority.
+
+    ``True`` means another process currently holds the exclusive flock, ``False`` means the
+    safely opened lock file was available, and ``None`` means the lock could not be inspected.
+    The probe never treats the stamp contents or a pid as proof of liveness.
+    """
+
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        facts = os.fstat(descriptor)
+        if not stat.S_ISREG(facts.st_mode) or facts.st_uid != os.geteuid() or facts.st_mode & 0o077:
+            return None
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        except OSError:
+            return None
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        except OSError:
+            return None
+        return False
+    finally:
+        os.close(descriptor)
 
 
 class _ServiceGenerationStore:
