@@ -18,10 +18,10 @@ inherit certification from executable discovery or unit tests.
 
 ## Linux and WSL
 
-Linux and WSL 2 use the Codex CLI installation path; OpenAI does not publish a Linux Codex Desktop
-application. The TUI therefore labels a Linux executable as `Codex CLI` and reserves `Codex Desktop`
-for an application bundle path, describing the installation shape rather than activation or
-session capability. The common setup flow, service, and project binding still require the same
+This integration uses the standalone Codex CLI installation path on Linux and WSL 2. This runbook
+does not configure or certify a Linux desktop application. The TUI labels a Linux executable as
+`Codex CLI` and reserves `Codex Desktop` for an application bundle path, describing the installation
+shape rather than activation or session capability. The common setup flow, service, and project binding still require the same
 explicit target and fresh-session evidence as macOS. Native Linux/WSL capability remains bounded
 by its recorded evidence; installation discovery and TUI labels do not imply a native-session
 capability. Shared facts are in the [Linux/WSL runbook](linux-and-wsl.md), and the installation
