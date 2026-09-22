@@ -39,6 +39,7 @@ from yoetz.domain.events import (
     EventSchema,
     EvidenceKind,
     EvidenceRecordedPayload,
+    LedgerRecord,
     ResultOutcome,
     ResultRecordedPayload,
     RuntimeProfile,
@@ -83,7 +84,15 @@ from yoetz.kernel.reducers import replay
 from yoetz.mcp.summaries import summary_for_status
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.importer import ImporterPort, ImportStatusSnapshot
-from yoetz.ports.ledger import AppendCommand, AppendEntry, CheckCommitResult, OperationKind
+from yoetz.ports.ledger import (
+    AppendCommand,
+    AppendEntry,
+    CheckCommitResult,
+    LedgerPort,
+    OperationKind,
+    ProjectionView,
+    StoredProjection,
+)
 from yoetz.ports.objects import (
     ObjectKind,
     ObjectMetadata,
@@ -3954,3 +3963,78 @@ async def test_completion_scope_difference_is_visible_and_repairable(
         )
         assert "outside a completion claim" in str(receipt.human_text)
         assert receipt.conclusion == "insufficient_coverage"
+
+
+@pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))
+async def test_publish_reuses_validated_projection_and_falls_back_for_stale_metadata(
+    ledger_backend: Literal["memory", "sqlite"], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Normal appends use the stored projection; invalid metadata keeps historical replay safe."""
+
+    app, workflow_runtime, _ = _build_app(ledger_backend=ledger_backend)
+    started, checked, _ = await _bootstrap_finding(app, seed=7000)
+    ledger, _objects = workflow_runtime.resources[started.task_id]
+    ledger_port = cast(LedgerPort, ledger)
+    original_load_events = ledger_port.load_events
+    event_loads: list[tuple[int, int | None]] = []
+
+    def observed_load_events(
+        loaded_session_id: str, *, after: int = 0, through: int | None = None
+    ) -> AsyncIterator[LedgerRecord]:
+        event_loads.append((after, through))
+        return original_load_events(loaded_session_id, after=after, through=through)
+
+    monkeypatch.setattr(ledger_port, "load_events", observed_load_events)
+    frontier = checked.result_frontier
+
+    async def publish_action(
+        request_tail: int, event_tail: int, action_tail: int
+    ) -> PublishWorkInternalResult:
+        nonlocal frontier
+        published = await app.publish_work(
+            PublishWorkRequest.model_validate(
+                {
+                    **_request_base(protocol_id("req_", request_tail)),
+                    "session_id": started.session_id,
+                    "writer_id": started.writer_id,
+                    "expected_frontier": _frontier(frontier),
+                    "event_drafts": (
+                        {
+                            "event_id": protocol_id("evt_", event_tail),
+                            "schema": {"name": "action_recorded", "version": "1.0.0"},
+                            "occurred_at": "2026-07-19T12:00:00.000Z",
+                            "causal_parents": (),
+                            "payload": {
+                                "action_id": protocol_id("act_", action_tail),
+                                "action_kind": "other",
+                                "description": "Exercise cached projection publication.",
+                            },
+                            "artifact_refs": (),
+                            "evidence_refs": (),
+                        },
+                    ),
+                }
+            )
+        )
+        assert type(published) is PublishWorkInternalResult
+        frontier = published.result_frontier
+        return published
+
+    await publish_action(7100, 7101, 7102)
+    assert event_loads
+    assert all(after > 0 for after, _through in event_loads)
+
+    original_load_projection = ledger_port.load_projection
+
+    async def stale_projection(
+        loaded_session_id: str, view: ProjectionView
+    ) -> StoredProjection | None:
+        stored = await original_load_projection(loaded_session_id, view)
+        if stored is not None and view is ProjectionView.CANDIDATE_FINDINGS:
+            return replace(stored, lag=1)
+        return stored
+
+    event_loads.clear()
+    monkeypatch.setattr(ledger_port, "load_projection", stale_projection)
+    await publish_action(7103, 7104, 7105)
+    assert any(after == 0 for after, _through in event_loads)

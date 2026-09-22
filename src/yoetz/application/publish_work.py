@@ -79,7 +79,7 @@ from yoetz.domain.values import (
     JsonValue as DomainJsonValue,
 )
 from yoetz.kernel.completion_scope import with_completion_scope_coverage
-from yoetz.kernel.projections import ProjectionState
+from yoetz.kernel.projections import PROJECTION_VERSION, ProjectionState
 from yoetz.kernel.reducers import replay
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.diagnostics import RuntimeCapability
@@ -930,12 +930,12 @@ async def _projection_at_result_frontier(
         and stored.frontier == result.result_frontier
         and stored.lag == 0
         and not stored.rebuild_required
-        and stored.projection_version == runtime.projection_version
+        and stored.projection_version == PROJECTION_VERSION
         and type(stored.state) is ProjectionState
         and stored.state.frontier == stored.frontier.sequence
         and stored.state.head_digest == stored.frontier.head_digest
     ):
-        return cast(ProjectionState, stored.state)
+        return stored.state
     prefix = tuple(
         [
             row
