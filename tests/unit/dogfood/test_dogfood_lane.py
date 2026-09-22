@@ -235,3 +235,55 @@ def test_ceremony_driver_reports_timeout_and_child_failure(tmp_path: Path) -> No
     ]
     failed = _CEREMONY.run_ceremony([sys.executable, str(child)], wrong, timeout=30.0)
     assert failed.exit_code == 3 and '{"state": "rejected"}' in failed.transcript
+
+
+def test_prompt_regexes_match_the_product_prompts_as_rendered() -> None:
+    """Lock every lane regex to the real prompt text, rendered the way the product renders it."""
+
+    import re
+
+    import typer
+    from typer.testing import CliRunner
+
+    from yoetz.cli import unlock
+
+    app = typer.Typer()
+
+    @app.command()
+    def render() -> None:
+        typer.confirm("Use this recommended privacy policy?", default=True)
+        typer.prompt("Choose a privacy option", default="3")
+        typer.confirm("Create this exact privacy proposal (Assisted review)?", default=False)
+
+    assert render is not None
+    rendered = CliRunner().invoke(app, [], input="n\n3\ny\n").output
+    for pattern in (
+        _LANE.PROMPT_PRIVACY_RECOMMENDED,
+        _LANE.PROMPT_PRIVACY_CHOICE,
+        _LANE.PROMPT_PRIVACY_CREATE,
+    ):
+        assert re.search(pattern, rendered), (pattern, rendered)
+
+    passphrase_prompt = cast(str, getattr(unlock, "_passphrase_prompt")("Passphrase"))
+    confirm_prompt = cast(str, getattr(unlock, "_passphrase_prompt")("Confirm passphrase"))
+    assert re.search(_LANE.PROMPT_PASSPHRASE, passphrase_prompt)
+    assert re.search(_LANE.PROMPT_CONFIRM_PASSPHRASE, confirm_prompt)
+    assert not re.search(_LANE.PROMPT_CONFIRM_PASSPHRASE, passphrase_prompt)
+
+    sources = {
+        "unlock": (Path(__file__).parents[3] / "src/yoetz/cli/unlock.py").read_text("utf-8"),
+        "privacy_control": (
+            Path(__file__).parents[3] / "src/yoetz/cli/privacy_control.py"
+        ).read_text("utf-8"),
+        "linux_presence": (
+            Path(__file__).parents[3] / "src/yoetz/adapters/integrations/linux_artifact_presence.py"
+        ).read_text("utf-8"),
+    }
+    assert '"Provider credential: "' in sources["unlock"]
+    assert re.search(_LANE.PROMPT_PROVIDER_CREDENTIAL, "Provider credential: ")
+    assert '"Decision [approve/deny]: "' in sources["unlock"]
+    assert '"Decision [approve/deny/edit]: "' in sources["privacy_control"]
+    assert re.search(_LANE.PROMPT_DECISION, "Decision [approve/deny]: ")
+    assert re.search(_LANE.PROMPT_DECISION, "Decision [approve/deny/edit]: ")
+    assert 'f"Password for {account}: "' in sources["linux_presence"]
+    assert re.search(_LANE.PROMPT_PAM_PASSWORD, "Password for runner: ")

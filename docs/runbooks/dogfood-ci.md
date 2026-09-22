@@ -1,7 +1,7 @@
 # Dogfood CI
 
 `.github/workflows/dogfood.yml` runs an unattended product dogfood on GitHub-hosted runners: every
-push to `main`, nightly, and on demand. It exists because a full manual dogfood (isolated
+push to `main`, nightly, on demand, and on a pull request that carries the `dogfood` label. It exists because a full manual dogfood (isolated
 instance, three hosts, three operating systems, evidence collection, cleanup) costs an afternoon,
 so it happened rarely and late. This workflow keeps the *mechanics* under continuous observation
 and leaves the judgment-heavy dogfood — new behaviour, influence, AI-powered review quality — to
@@ -11,13 +11,17 @@ the runbooks it links at the end.
 
 A green `dogfood-required` check means, for every (host, OS) cell: the candidate wheel built from
 the exact revision installed into a pinned disposable instance; its service started, the vault
-initialized, the Fireworks provider bound and its credential stored, a repository privacy grant
-was approved, the host connected, observation consent was granted; a deterministic ledger probe
-(start, publish, check, receipt) completed and — with a credential — the check reached a real
-AI-powered review attempt; hook carrier probes and the observation drain reached `drained` with
-nothing pending; the native agent session finished and left no service or storage failure in the
-hook diagnostics; the service restarted, was unlocked, and observation state survived; and the
-instance was disposed.
+initialized, the Fireworks provider bound, a repository privacy grant was approved, the host
+connected, observation consent was granted; a deterministic ledger probe (start, publish, check,
+receipt) completed; hook carrier probes and the observation drain reached `drained` with nothing
+pending; the service restarted, was unlocked, and observation state survived; and the instance
+was disposed. With `DOGFOOD_FIREWORKS_API_KEY` present it additionally means the credential was
+stored and the check reached a real AI-powered review attempt (any attempted status counts,
+including a provider that rejects the model; only a pre-dispatch refusal such as
+`not_configured` or `blocked_by_policy` is red). With the agent credential for that host present
+it also means the native session finished and left no service or storage failure in the hook
+diagnostics. Without those secrets the corresponding steps are recorded as skipped and the lane
+is an install-and-mechanics smoke, not the full path.
 
 It does **not** mean Yoetz is correct or useful. A native model that ignores the Yoetz tools,
 times out, or exits nonzero is recorded in the lane report (`agent_ok: false`) and the lane stays
@@ -126,6 +130,14 @@ back; it is a durable place to look when a later question needs the history.
 Reports contain no secrets by construction (redaction) but do contain the probe project's
 relative structure, command names, bounded reason tokens, and the native agent's text. Treat the
 bucket as private.
+
+## Running it before merge
+
+The workflow file must exist on `main` before `workflow_dispatch` can target any branch. To
+exercise a branch earlier, add the `dogfood` label to its pull request: the `pull_request`
+trigger then runs the full matrix on that head (and again on each push while the label stays).
+Pull requests without the label skip both lane matrices, and `dogfood-required` reports the skip
+without failing.
 
 ## Running a lane yourself
 

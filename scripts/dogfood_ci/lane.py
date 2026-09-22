@@ -75,6 +75,18 @@ _CLIENT: Final = {
     "integration": "cooperative_mcp",
 }
 _TAIL_BYTES: Final = 4000
+
+# Prompt contract: every regex below names a product prompt this lane answers. The unit test
+# renders the real prompts (typer/click and the trusted-console stems) and asserts each regex
+# still matches, so a product wording change fails the test instead of the first CI run.
+PROMPT_PASSPHRASE: Final = r"Passphrase \("
+PROMPT_CONFIRM_PASSPHRASE: Final = r"Confirm passphrase"
+PROMPT_PROVIDER_CREDENTIAL: Final = r"Provider credential: "
+PROMPT_DECISION: Final = r"Decision \[approve/deny(?:/edit)?\]: "
+PROMPT_PRIVACY_RECOMMENDED: Final = r"Use this recommended privacy policy\? \[Y/n\]: "
+PROMPT_PRIVACY_CHOICE: Final = r"Choose a privacy option \[\d\]: "
+PROMPT_PRIVACY_CREATE: Final = r"Create this exact privacy proposal .*\? \[y/N\]: "
+PROMPT_PAM_PASSWORD: Final = r"Password for .*: "
 _PROMPT_TEMPLATE: Final = (
     "You are a small integration probe. Use only the Yoetz MCP tools, whose names contain "
     "'{tool_hint}'. Do exactly these steps and nothing else. "
@@ -628,8 +640,8 @@ class Lane:
             phase,
             [str(self.launcher), "service", "initialize-passphrase", "--json"],
             [
-                Reply(r"Passphrase \(", self.passphrase),
-                Reply(r"Confirm passphrase", self.passphrase),
+                Reply(PROMPT_PASSPHRASE, self.passphrase),
+                Reply(PROMPT_CONFIRM_PASSPHRASE, self.passphrase),
             ],
             fatal=True,
         )
@@ -664,9 +676,9 @@ class Lane:
                 phase,
                 [str(self.launcher), "provider", "credential", "set", "--json"],
                 [
-                    Reply(r"Provider credential: ", self.fireworks_key),
-                    Reply(r"Passphrase \(", self.passphrase),
-                    Reply(r"Decision \[approve/deny\]: ", "approve", secret=False),
+                    Reply(PROMPT_PROVIDER_CREDENTIAL, self.fireworks_key),
+                    Reply(PROMPT_PASSPHRASE, self.passphrase),
+                    Reply(PROMPT_DECISION, "approve", secret=False),
                 ],
                 fatal=True,
             )
@@ -684,11 +696,11 @@ class Lane:
             phase,
             [str(self.launcher), "privacy", "setup"],
             [
-                Reply(r"Use this recommended privacy policy\? \[Y/n\]: ", "n", secret=False),
-                Reply(r"Choose a privacy option \[\d\]: ", recipe, secret=False),
-                Reply(r"Create this exact privacy proposal .*\? \[y/N\]: ", "y", secret=False),
-                Reply(r"Decision \[approve/deny(?:/edit)?\]: ", "approve", secret=False),
-                Reply(r"Passphrase \(", self.passphrase),
+                Reply(PROMPT_PRIVACY_RECOMMENDED, "n", secret=False),
+                Reply(PROMPT_PRIVACY_CHOICE, recipe, secret=False),
+                Reply(PROMPT_PRIVACY_CREATE, "y", secret=False),
+                Reply(PROMPT_DECISION, "approve", secret=False),
+                Reply(PROMPT_PASSPHRASE, self.passphrase),
             ],
             cwd=self.project,
             fatal=True,
@@ -825,7 +837,7 @@ class Lane:
                 "host_accept",
                 phase,
                 accept,
-                [Reply(r"Password for .*: ", self.os_password)],
+                [Reply(PROMPT_PAM_PASSWORD, self.os_password)],
                 fatal=True,
             )
         outcome = (report or {}).get("outcome")
@@ -1484,7 +1496,7 @@ class Lane:
                 "service_unlock",
                 phase,
                 [str(self.launcher), "service", "unlock", "--json"],
-                [Reply(r"Passphrase \(", self.passphrase)],
+                [Reply(PROMPT_PASSPHRASE, self.passphrase)],
                 fatal=True,
             )
             status = self._wait_for_service("service_status_after_unlock", phase)
