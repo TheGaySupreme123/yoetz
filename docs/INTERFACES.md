@@ -2065,7 +2065,12 @@ baseline; no MCP tool or advertised input-schema field is added by this repair.
   bytes only while the caller can prove that its reference has not been submitted to a durable
   owner; a byte mismatch fails closed and an abandoned stage cannot be finalized later. Both
   locations are attempted even when one fails, so a temp-path fault cannot strand the finalized
-  copy; the first failure is raised and the stage stays un-abandoned so a retry re-attempts both;
+  copy; the first failure is raised and the stage stays un-abandoned so a retry re-attempts both.
+  A local captured-content manifest row is a durable owner. The observation coordinator abandons a
+  just-finalized captured-content object through `abandon_preappend_objects` only after a lookup
+  proves that row does not name it (ADR-003, #571 / #550). A committed row forbids abandon. A
+  failed lookup is not that proof. Abandon failure is logged as `observation_object_abandon_failed`
+  and does not replace the caller's store error; generation-fenced GC remains the fallback;
 - `resolve_verified(object_id, envelope_digest) -> ObjectRef` — bounded exact finalized-object
   resolution for catalog-pinned START crash resume; deterministic verification failures raise
   `ValueError("object_verification_failed")`, while environmental I/O re-raises `OSError` for the
