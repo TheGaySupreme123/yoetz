@@ -46,7 +46,12 @@ on:
         type: string
         default: latest
       semantic_model:
-        description: Fireworks model for AI-powered review and for the Codex/Claude agent.
+        description: Fireworks model for Yoetz's AI-powered review (Responses API, structured judgment).
+        required: false
+        type: string
+        default: accounts/fireworks/models/qwen3-235b-a22b
+      agent_model:
+        description: Fireworks model for the Codex and Claude agent sessions.
         required: false
         type: string
         default: accounts/fireworks/models/glm-5p3-flash
@@ -71,7 +76,8 @@ env:
   UV_VERSION: "0.11.29"
   UV_NO_PROGRESS: "1"
   NODE_VERSION: "26.5.0"
-  DOGFOOD_SEMANTIC_MODEL: ${{ inputs.semantic_model || 'accounts/fireworks/models/glm-5p3-flash' }}
+  DOGFOOD_SEMANTIC_MODEL: ${{ inputs.semantic_model || 'accounts/fireworks/models/qwen3-235b-a22b' }}
+  DOGFOOD_AGENT_MODEL: ${{ inputs.agent_model || 'accounts/fireworks/models/glm-5p3-flash' }}
   DOGFOOD_CURSOR_MODEL: ${{ inputs.cursor_model || 'gpt-5.6-luna-low' }}
   DOGFOOD_STRICT_AGENT: ${{ inputs.strict_agent == true && '--strict-agent' || '' }}
   CODEX_VERSION: ${{ inputs.codex_version || 'latest' }}
@@ -167,6 +173,7 @@ jobs:
             --evidence "${RUNNER_TEMP}/evidence" \
             --host-path "${DOGFOOD_HOST_PATH}" \
             --semantic-model "${DOGFOOD_SEMANTIC_MODEL}" \
+            --agent-model "${DOGFOOD_AGENT_MODEL}" \
             --cursor-model "${DOGFOOD_CURSOR_MODEL}" \
             ${DOGFOOD_STRICT_AGENT}
 
@@ -318,7 +325,7 @@ jobs:
         env:
           FIREWORKS_API_KEY: ${{ secrets.DOGFOOD_FIREWORKS_API_KEY }}
           CURSOR_API_KEY: ${{ secrets.DOGFOOD_CURSOR_API_KEY }}
-          WSLENV: FIREWORKS_API_KEY:CURSOR_API_KEY:DOGFOOD_SEMANTIC_MODEL:DOGFOOD_CURSOR_MODEL:DOGFOOD_STRICT_AGENT
+          WSLENV: FIREWORKS_API_KEY:CURSOR_API_KEY:DOGFOOD_SEMANTIC_MODEL:DOGFOOD_AGENT_MODEL:DOGFOOD_CURSOR_MODEL:DOGFOOD_STRICT_AGENT
         run: |
           export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
           export DOGFOOD_VAULT_PASSPHRASE="$(openssl rand -hex 24)"
@@ -334,7 +341,8 @@ jobs:
             --host "${{ matrix.host }}" \
             --evidence "$HOME/evidence" \
             --host-path "${host_path}" \
-            --semantic-model "${DOGFOOD_SEMANTIC_MODEL:-accounts/fireworks/models/glm-5p3-flash}" \
+            --semantic-model "${DOGFOOD_SEMANTIC_MODEL:-accounts/fireworks/models/qwen3-235b-a22b}" \
+            --agent-model "${DOGFOOD_AGENT_MODEL:-accounts/fireworks/models/glm-5p3-flash}" \
             --cursor-model "${DOGFOOD_CURSOR_MODEL:-gpt-5.6-luna-low}" \
             ${DOGFOOD_STRICT_AGENT:-}
           status=$?

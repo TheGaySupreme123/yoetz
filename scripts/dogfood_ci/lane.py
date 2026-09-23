@@ -65,7 +65,8 @@ run_ceremony = _ceremony.run_ceremony
 
 HOSTS: Final = ("codex", "claude", "cursor")
 CONNECTION_MODES: Final = ("auto", "setup-run", "plugin-dir", "mcp-only", "none")
-SEMANTIC_MODEL_DEFAULT: Final = "accounts/fireworks/models/glm-5p3-flash"
+SEMANTIC_MODEL_DEFAULT: Final = "accounts/fireworks/models/qwen3-235b-a22b"
+AGENT_MODEL_DEFAULT: Final = "accounts/fireworks/models/glm-5p3-flash"
 CURSOR_MODEL_DEFAULT: Final = "gpt-5.6-luna-low"
 FIREWORKS_OPENAI_BASE: Final = "https://api.fireworks.ai/inference/v1"
 FIREWORKS_ANTHROPIC_BASE: Final = "https://api.fireworks.ai/inference"
@@ -238,6 +239,7 @@ class Lane:
         self.skip_restart: bool = args.skip_restart
         self.agent_timeout: float = args.agent_timeout
         self.semantic_model: str = args.semantic_model
+        self.agent_model: str = args.agent_model or AGENT_MODEL_DEFAULT
         self.cursor_model: str = args.cursor_model
         self.allow_dirty: bool = args.allow_dirty
         self.host_path: str | None = args.host_path
@@ -764,7 +766,7 @@ class Lane:
         if "[model_providers.fireworks]" in existing:
             return
         block = (
-            f'model = "{self.semantic_model}"\n'
+            f'model = "{self.agent_model}"\n'
             'model_provider = "fireworks"\n'
             'model_reasoning_effort = "low"\n'
             "\n"
@@ -1553,11 +1555,11 @@ class Lane:
                         "ANTHROPIC_BASE_URL": FIREWORKS_ANTHROPIC_BASE,
                         "ANTHROPIC_AUTH_TOKEN": self.fireworks_key,
                         "ANTHROPIC_CUSTOM_HEADERS": f"X-Fireworks-Api-Key: {self.fireworks_key}",
-                        "ANTHROPIC_MODEL": self.semantic_model,
-                        "ANTHROPIC_DEFAULT_SONNET_MODEL": self.semantic_model,
-                        "ANTHROPIC_DEFAULT_OPUS_MODEL": self.semantic_model,
-                        "ANTHROPIC_DEFAULT_HAIKU_MODEL": self.semantic_model,
-                        "ANTHROPIC_SMALL_FAST_MODEL": self.semantic_model,
+                        "ANTHROPIC_MODEL": self.agent_model,
+                        "ANTHROPIC_DEFAULT_SONNET_MODEL": self.agent_model,
+                        "ANTHROPIC_DEFAULT_OPUS_MODEL": self.agent_model,
+                        "ANTHROPIC_DEFAULT_HAIKU_MODEL": self.agent_model,
+                        "ANTHROPIC_SMALL_FAST_MODEL": self.agent_model,
                     }
                 )
             elif not os.environ.get("ANTHROPIC_API_KEY"):
@@ -1844,6 +1846,7 @@ class Lane:
             "os_cell": self.os_cell,
             "connection_mode": self.connection_mode,
             "semantic_model": self.semantic_model,
+            "agent_model": self.agent_model,
             "identity": self.identity,
             "semantic": self.semantic,
             "agent": self.agent,
@@ -1907,6 +1910,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--project", default=None, help="Probe workspace (created if missing).")
     parser.add_argument("--connection-mode", choices=CONNECTION_MODES, default="auto")
     parser.add_argument("--semantic-model", default=SEMANTIC_MODEL_DEFAULT)
+    parser.add_argument(
+        "--agent-model",
+        default=None,
+        help="Fireworks model for the Codex and Claude agent sessions (default: glm-5p3-flash).",
+    )
     parser.add_argument("--cursor-model", default=CURSOR_MODEL_DEFAULT)
     parser.add_argument("--agent-timeout", type=float, default=420.0)
     parser.add_argument("--strict-agent", action="store_true")
