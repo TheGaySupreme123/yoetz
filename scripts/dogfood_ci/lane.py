@@ -1869,8 +1869,12 @@ class Lane:
             "failed_steps": failed,
             "agent_ok": agent_ok,
             "strict_agent": self.strict_agent,
+            # Strict mode passes only a successful agent; --skip-agent excuses an agent that
+            # never ran, never one that ran and failed.
             "green": not catastrophic
-            and (not self.strict_agent or agent_ok is True or self.skip_agent),
+            and (
+                not self.strict_agent or agent_ok is True or (self.skip_agent and agent_ok is None)
+            ),
         }
         body = {
             "schema": "yoetz.dogfood-lane/1",
