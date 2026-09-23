@@ -494,34 +494,39 @@ zero `recent_count` after a session that ran Yoetz tools means the hooks never r
 or the runtime gate is disabled — not that they were dropped for binding.
 
 A consented `SessionStart` auto-attaches a ledger task without an explicit MCP `start`: the hook
-sends `start mode=create_or_attach` with the canonical project root as `workspace_ref` and
-`claude-session:<session_id>` as `external_ref` (both persisted only as HMAC commitments). Success
-shows as `mapping_present: true` in `observe status` and the session's queued rows drain in the
-same pass. If that new pair conflicts because the workspace already has a task, the shared hook
-path retries once with `mode=attach` only when it already holds a valid private mapping from an
-earlier Claude session whose `SessionEnd` was received, every other bound session is ended, and the
-candidate is bound only to this consented workspace. The catalog additionally requires one mapped
-task, the selector still active, no sibling task, the matching repository-privacy binding, and no
-start already pending for that route. This reuses an already-known session selector; the public
-conflict still discloses no task or session ID, and a hard crash without `SessionEnd` remains
-fail-closed rather than being guessed from age. A successful recovery also rewrites every ended
-same-host predecessor mapping for that task to the rotated session and writer. Recovery first takes a
+uses the canonical project root as `workspace_ref` and `claude-session:<session_id>` as
+`external_ref` (both persisted only as HMAC commitments). Before creating that new pair, the shared
+hook path checks its private local store for a unique valid mapping from an earlier Claude session
+whose `SessionEnd` was received, with every other bound session ended and every candidate limited to
+this consented workspace. A unique candidate is held under the workspace and predecessor session
+locks, revalidated, and sent as `mode=attach` with the existing Yoetz `session_id` plus the new pair.
+The catalog still requires the selector to be active, the canonical workspace root to contain
+exactly one non-quarantined root task, the matching repository-privacy binding, and no start already
+pending for that route. This explicit session-plus-new-pair path is the remaining sole-root-workspace
+fence. If eligible mappings name more than one task, the hook records
+`auto_attach_binding_ambiguous` with a bounded candidate count only; it does not create or choose
+among them, and a hard crash without `SessionEnd` remains fail-closed. With no usable predecessor,
+ordinary `create_or_attach` admits the new pair as independent work, even beside a dormant task.
+The successful recovery rewrites every ended same-host predecessor mapping for that task to the
+rotated session and writer, so pending rows drain on the successor route. Recovery first takes a
 nonblocking workspace reservation, then holds ordered locks for every eligible ended same-host session
-through full candidate revalidation, the service RPC, authorized rewrites, and pruning. The revalidation
-covers unmapped sessions, cross-workspace ownership, mapping identity, and mapping recency; a busy workspace reservation defers with `auto_attach_recovery_busy`, while candidate-lock
-contention or changed state falls back to the ordinary request.
+through full candidate revalidation, the service RPC, authorized rewrites, and pruning. The
+revalidation covers unmapped sessions, cross-workspace ownership, mapping identity, and mapping
+recency; a busy workspace reservation or candidate-lock/changed-snapshot boundary remains typed
+`auto_attach_recovery_busy` rather than guessing or silently creating.
 Pending predecessor rows then
 drain on that successor route (`session_superseded` is followed, not quarantined as
 `ledger_rejected`). A failed attempt records its cause as a
 payload-free `hook_diagnostics` reason
-(`auto_attach_workspace_unbound`, `auto_attach_request_invalid`, `auto_attach_conflict`,
+(`auto_attach_workspace_unbound`, `auto_attach_request_invalid`, `auto_attach_binding_ambiguous`, `auto_attach_conflict`,
 `auto_attach_refused`, `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`,
 `privacy_authority_required`, `service_unavailable`, `service_incompatible`, `vault_locked`, `timeout`, `storage_unsafe`,
 or `storage_corrupt`) and the session keeps an observation-only binding; `UserPromptSubmit` and
 `Stop` retry under the bounded budget, while teardown `SessionEnd` records its lifecycle intent and
 defers service delivery without spending an auto-attach retry. An explicit cooperative MCP `start`
-bound from its exact `PostToolUse` result remains the recovery path, not a substitute proof that
-natural auto-attach works. For
+bound from its exact `PostToolUse` result remains a recovery path, not a substitute proof that
+natural auto-attach works. An explicit `mode=create` collision remains `SESSION_CONFLICT` and is
+not a recovery selector. For
 `vault_locked` on a never-initialized install, that explicit `start` returns the typed
 `vault_initialization_required` continuation (see the proof checklist) rather than a dead end.
 
@@ -844,8 +849,8 @@ them from memory, `CLAUDE.md`, or the live store.
   bare `task_id` is not an attach selector.
 - **Same-pair fresh conversation.** With no held session, call `start mode=create_or_attach` using
   the exact canonical `${CLAUDE_PROJECT_DIR}` value and the same stable `external_ref` pair, with no
-  `session_id`. A remote URL is not a workspace identity, and a fresh Claude conversation does not
-  authorize an implicit second task.
+  `session_id`. The same pair resumes; a different complete pair is independent work, even in the
+  same workspace. A remote URL is not a workspace identity.
 - **Explicit sibling handoff.** Use `start mode=create` only after same-task pair/session recovery
   is exhausted, every earlier write has a known terminal outcome, the Claude binding is healthy and
   authorized, and the user has declared one bounded remaining or repaired verification scope. Keep
@@ -977,7 +982,10 @@ The native context distinguishes a service that is unavailable or still starting
 admission conflict (`auto_attach_conflict`). Missing mapping remains explicit. Call cooperative
 `start` before material work and follow its exact continuation; a conflict needs an authorized
 task selector or explicit admission decision, not a service restart. Successful hook exit alone
-does not establish attachment. Task admission and ended-session recovery selectors are unchanged.
+does not establish attachment. A unique ended predecessor is attached before a new pair is created;
+ambiguous predecessor tasks produce `auto_attach_binding_ambiguous` with a count only, and the
+explicit session-plus-new-pair recovery still requires one non-quarantined root task in the
+canonical workspace.
 
 Structural pre/post observations remain queued and keep their original identities across
 bootstrap. A later successful mapping permits their normal drain. Missing transient content
