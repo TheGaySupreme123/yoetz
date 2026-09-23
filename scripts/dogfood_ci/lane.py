@@ -705,6 +705,14 @@ class Lane:
                 reason="FIREWORKS_API_KEY_unset",
             )
 
+        if self.fireworks_key:
+            # The running service composed provider readiness when the vault became ready,
+            # before the endpoint and credential existed. Storing the credential verifies it
+            # live but neither that nor a lock/unlock refreshes the composition (observed:
+            # still not connected on the same generation); only a restart does. Restart before
+            # the privacy grant so the grant's authorization and the later check share one
+            # service generation and policy digest.
+            self._restart_and_unlock(phase, "_after_credential")
         recipe = "3" if self.fireworks_key else "1"
         self._ceremony_step(
             "privacy_setup",
@@ -721,13 +729,6 @@ class Lane:
             fatal=True,
         )
 
-        if self.fireworks_key:
-            # The running service composed provider readiness when the vault became ready,
-            # before the endpoint and credential existed; storing the credential verifies it
-            # live but does not refresh that composition. The product leaves that to the next
-            # unlock, so lock and unlock here (same service generation) and read readiness
-            # from the recomposed application. The lifecycle phase covers a full restart.
-            self._lock_and_unlock(phase, "_after_setup")
         _, provider_status = self._yoetz(
             "provider_status", phase, ["provider", "status", "--json"], expect_zero=False
         )
