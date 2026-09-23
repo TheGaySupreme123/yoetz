@@ -10,10 +10,13 @@ import pytest
 
 from yoetz.cli import hook_io as hook_io_module
 from yoetz.cli.hook_io import (
+    MAX_HOOK_SKIM_BYTES,
     MAX_HOOK_STDIN_BYTES,
+    CursorOversizedPayloadError,
     claude_context_output,
     context_output,
     cursor_context_output,
+    read_cursor_hook_ingress,
     read_cursor_hook_payload,
     read_hook_payload,
     stdout_json,
@@ -278,3 +281,71 @@ def test_hook_stdin_cap_is_one_shared_definition() -> None:
     # could drift on one side only.
     assert not hasattr(hooks, "_MAX_STDIN_BYTES")
     assert not hasattr(hook_io_module, "_MAX_STDIN_BYTES")
+    assert hook_io_module.MAX_HOOK_SKIM_BYTES == MAX_HOOK_SKIM_BYTES
+    assert MAX_HOOK_SKIM_BYTES == 1_048_576
+
+
+def test_cursor_ingress_skims_a_complete_oversize_body_and_drops_content() -> None:
+    admitted = _at_cap_payload()
+    parsed, omitted = read_cursor_hook_ingress(admitted)
+    assert omitted is False
+    assert parsed["hook_event_name"] == "PostToolUse"
+    assert "x" in str(parsed["pad"])
+
+    identity, omitted = read_cursor_hook_ingress(
+        b'{"hook_event_name":"preToolUse","tool_name":"Write","tool_use_id":"toolu_1",'
+        b'"tool_input":{"path":"docs/INTERFACES.md","contents":"'
+        + b"Y" * MAX_HOOK_STDIN_BYTES
+        + b'"},"user_email":"secret@example.com"}'
+    )
+    assert omitted is True
+    assert identity["hook_event_name"] == "preToolUse"
+    assert identity["tool_name"] == "Write"
+    assert identity["tool_use_id"] == "toolu_1"
+    assert identity["tool_input"] == {"path": "docs/INTERFACES.md"}
+    assert "user_email" not in identity
+    assert "YYYYY" not in str(identity)
+
+    with pytest.raises(ProtocolValueError) as over_skim:
+        read_cursor_hook_ingress(b"\x00" + b"x" * MAX_HOOK_SKIM_BYTES)
+    assert over_skim.value.reason_code == "payload_too_large"
+
+    with pytest.raises(CursorOversizedPayloadError) as malformed:
+        read_cursor_hook_ingress(
+            b'{"hook_event_name":"afterFileEdit","hook_event_name":"afterFileEdit","pad":"'
+            + b"x" * MAX_HOOK_STDIN_BYTES
+            + b'"}'
+        )
+    assert malformed.value.reason_code == "duplicate_object_key"
+
+    prefix = b'{"hook_event_name":"preToolUse","tool_name":"Write","pad":"'
+    suffix = b'"}'
+    exact = prefix + b"z" * (MAX_HOOK_SKIM_BYTES - len(prefix) - len(suffix)) + suffix
+    assert len(exact) == MAX_HOOK_SKIM_BYTES
+    at_skim, at_skim_omitted = read_cursor_hook_ingress(exact)
+    assert at_skim_omitted is True
+    assert at_skim["tool_name"] == "Write"
+    assert "pad" not in at_skim
+    with pytest.raises(ProtocolValueError) as one_past_skim:
+        read_cursor_hook_ingress(exact + b"z")
+    assert one_past_skim.value.reason_code == "payload_too_large"
+
+
+@pytest.mark.parametrize(
+    ("body", "reason"),
+    [
+        (b'{"hook_event_name":"afterFileEdit","pad":"\x00', "nul_byte_forbidden"),
+        (b'{"hook_event_name":"afterFileEdit","pad":"\xff', "invalid_utf8"),
+        (b'{"hook_event_name":"afterFileEdit","pad":"', "malformed_json"),
+    ],
+)
+def test_cursor_ingress_never_trusts_an_unsafe_oversize_body(body: bytes, reason: str) -> None:
+    # Each body is past the trusted cap and inside the skim cap. The last one
+    # is a truncated prefix: it must not become an identity view.
+    oversized = body + b"x" * MAX_HOOK_STDIN_BYTES + (b'"}' if reason != "malformed_json" else b"")
+    assert MAX_HOOK_STDIN_BYTES < len(oversized) <= MAX_HOOK_SKIM_BYTES
+
+    with pytest.raises(CursorOversizedPayloadError) as refused:
+        read_cursor_hook_ingress(oversized)
+
+    assert refused.value.reason_code == reason

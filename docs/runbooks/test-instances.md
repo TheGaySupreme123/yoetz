@@ -66,8 +66,11 @@ Verify before use:
 ```
 
 Expect `mode: isolated`, `binding: runtime_pin` (or `environment_and_pin`), the requested
-`lifecycle`, the exact `source_ref`, `runtime_provenance: matched`, and identity digests that
-differ from the everyday install's own `yoetz service isolation --json`. The report is
+`lifecycle`, the exact `source_ref`, `runtime_provenance: matched`, and `path_identity` digests
+that differ from the everyday install's own `yoetz service isolation --json`. Those are
+path-identity digests: they show which roots each runtime uses, not that any file's bytes are
+unchanged; add `--content-digests` to observe the selected config's bytes (SHA-256, size,
+existence, time; never content). The report is
 digest-only; only `create` echoes the exact root, once, for local review.
 
 ## Run the snapshot and tests against it

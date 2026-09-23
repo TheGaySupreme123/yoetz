@@ -1,9 +1,11 @@
-"""Executable classification locks for exact-worktree Codex dogfood parity (#464, #518)."""
+"""Executable classification locks for exact-worktree Codex dogfood parity (#464, #518, #567)."""
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 from typing import cast
 
@@ -43,7 +45,7 @@ def _gate(status: str = "pass") -> dict[str, object]:
 
 def _report() -> dict[str, object]:
     return {
-        "schema": "yoetz.codex-dogfood-parity/3",
+        "schema": "yoetz.codex-dogfood-parity/4",
         "identity": {
             "source_ref": "a" * 40,
             "package_digest": _DIGEST,
@@ -56,16 +58,16 @@ def _report() -> dict[str, object]:
             "yoetz_isolation": {
                 "mode": "isolated",
                 "normal_mode": "ambient",
-                "state_digest": _DIGEST,
-                "endpoint_digest": _DIGEST,
-                "storage_digest": _DIGEST,
-                "config_digest": _DIGEST,
-                "executable_digest": _DIGEST,
-                "normal_state_digest": _NORMAL_DIGEST,
-                "normal_endpoint_digest": _NORMAL_DIGEST,
-                "normal_storage_digest": _NORMAL_DIGEST,
-                "normal_config_digest": _NORMAL_DIGEST,
-                "normal_executable_digest": _NORMAL_DIGEST,
+                "state_path_digest": _DIGEST,
+                "endpoint_path_digest": _DIGEST,
+                "storage_path_digest": _DIGEST,
+                "config_path_digest": _DIGEST,
+                "executable_path_digest": _DIGEST,
+                "normal_state_path_digest": _NORMAL_DIGEST,
+                "normal_endpoint_path_digest": _NORMAL_DIGEST,
+                "normal_storage_path_digest": _NORMAL_DIGEST,
+                "normal_config_path_digest": _NORMAL_DIGEST,
+                "normal_executable_path_digest": _NORMAL_DIGEST,
             },
         },
         "scope": {
@@ -90,6 +92,7 @@ def _report() -> dict[str, object]:
             "hook_coverage": True,
             "stream_coverage": True,
         },
+        "normal_target": None,
         "facets": {name: _gate() for name in (*PREFLIGHT_FACETS, *POSTFLIGHT_FACETS)},
     }
 
@@ -214,7 +217,7 @@ def _isolation(report: dict[str, object]) -> dict[str, object]:
 
 def test_shared_yoetz_identity_cannot_pass_the_isolation_facet() -> None:
     report = _report()
-    _isolation(report)["state_digest"] = _NORMAL_DIGEST
+    _isolation(report)["state_path_digest"] = _NORMAL_DIGEST
 
     with pytest.raises(DogfoodGateError, match="service_isolation_identity_shared"):
         classify_codex_dogfood_report(report)
@@ -222,7 +225,7 @@ def test_shared_yoetz_identity_cannot_pass_the_isolation_facet() -> None:
 
 def test_shared_yoetz_executable_cannot_pass_the_isolation_facet() -> None:
     report = _report()
-    _isolation(report)["executable_digest"] = _NORMAL_DIGEST
+    _isolation(report)["executable_path_digest"] = _NORMAL_DIGEST
 
     with pytest.raises(DogfoodGateError, match="service_isolation_identity_shared"):
         classify_codex_dogfood_report(report)
@@ -405,3 +408,345 @@ def test_session_stream_scope_requires_exact_parser_proven_codex_version() -> No
     result = classify_codex_dogfood_report(report)
     assert result["full_outcome"] == "pass"
     assert result["unsupported_facets"] == ["session_stream"]
+
+
+# --- Normal-target byte-content lane (issue #567) --------------------------------------------
+
+_CONFIG_PATH = "sha256:" + ("c" * 64)
+_MOVED_PATH = "sha256:" + ("d" * 64)
+_BYTES_A = "sha256:" + ("e" * 64)
+_BYTES_B = "sha256:" + ("f" * 64)
+
+
+def _observation(
+    *,
+    path: str = _CONFIG_PATH,
+    presence: str = "present",
+    digest: str | None = _BYTES_A,
+    size: int | None = 42,
+    at: str = "2026-09-22T12:00:00.000Z",
+) -> dict[str, object]:
+    if presence != "present":
+        digest, size = None, None
+    return {
+        "path_digest": path,
+        "presence": presence,
+        "content_digest": digest,
+        "size_bytes": size,
+        "observed_at": at,
+    }
+
+
+def _with_lane(
+    before: dict[str, object], after: dict[str, object] | None, *, slot: str = "codex_config"
+) -> dict[str, object]:
+    report = _report()
+    report["normal_target"] = {"files": [{"slot": slot, "before": before, "after": after}]}
+    return report
+
+
+def _later(**overrides: object) -> dict[str, object]:
+    return _observation(at="2026-09-22T12:30:00.000Z", **overrides)  # type: ignore[arg-type]
+
+
+def _unchanged_fail(reason: str) -> dict[str, object]:
+    return {
+        "status": "fail",
+        "reason": reason,
+        "evidence_digest": _DIGEST,
+        "next_action": "complete_postflight",
+    }
+
+
+def test_unchanged_bytes_and_path_let_the_unchanged_facet_pass() -> None:
+    result = classify_codex_dogfood_report(_with_lane(_observation(), _later()))
+
+    assert result["full_outcome"] == "pass"
+
+
+def test_path_stable_byte_change_cannot_pass_normal_target_unchanged() -> None:
+    """The #567 regression: identical path identity no longer passes as an unchanged proof."""
+
+    report = _with_lane(_observation(), _later(digest=_BYTES_B, size=43))
+    with pytest.raises(DogfoodGateError, match="normal_target_unchanged_content_mismatch"):
+        classify_codex_dogfood_report(report)
+
+    # A generic drift token is not enough: the failure must name the derived cause.
+    _facets(report)["normal_target_unchanged"] = _unchanged_fail("normal_target_drift")
+    with pytest.raises(DogfoodGateError, match="normal_target_unchanged_content_mismatch"):
+        classify_codex_dogfood_report(report)
+
+    _facets(report)["normal_target_unchanged"] = _unchanged_fail("normal_target_content_changed")
+    result = classify_codex_dogfood_report(report)
+    assert result["full_outcome"] == "fail"
+    assert result["failed_facets"] == ["normal_target_unchanged"]
+
+
+def test_same_size_byte_change_is_still_a_content_change() -> None:
+    report = _with_lane(_observation(), _later(digest=_BYTES_B))
+    _facets(report)["normal_target_unchanged"] = _unchanged_fail("normal_target_content_changed")
+
+    assert classify_codex_dogfood_report(report)["failed_facets"] == ["normal_target_unchanged"]
+
+
+def test_path_move_with_identical_bytes_is_distinguishable_from_content_drift() -> None:
+    report = _with_lane(_observation(), _later(path=_MOVED_PATH))
+    _facets(report)["normal_target_unchanged"] = _unchanged_fail("normal_target_content_changed")
+    with pytest.raises(DogfoodGateError, match="normal_target_unchanged_content_mismatch"):
+        classify_codex_dogfood_report(report)
+
+    _facets(report)["normal_target_unchanged"] = _unchanged_fail("normal_target_path_moved")
+    assert classify_codex_dogfood_report(report)["failed_facets"] == ["normal_target_unchanged"]
+
+    both = _with_lane(_observation(), _later(path=_MOVED_PATH, digest=_BYTES_B))
+    _facets(both)["normal_target_unchanged"] = _unchanged_fail(
+        "normal_target_path_and_content_changed"
+    )
+    assert classify_codex_dogfood_report(both)["failed_facets"] == ["normal_target_unchanged"]
+
+
+def test_absent_file_that_stays_absent_is_unchanged_and_creation_is_drift() -> None:
+    absent = _observation(presence="absent")
+    assert (
+        classify_codex_dogfood_report(_with_lane(absent, _later(presence="absent")))["full_outcome"]
+        == "pass"
+    )
+
+    created = _with_lane(absent, _later())
+    with pytest.raises(DogfoodGateError, match="normal_target_unchanged_content_mismatch"):
+        classify_codex_dogfood_report(created)
+    _facets(created)["normal_target_unchanged"] = _unchanged_fail("normal_target_content_changed")
+    assert classify_codex_dogfood_report(created)["failed_facets"] == ["normal_target_unchanged"]
+
+    deleted = _with_lane(_observation(), _later(presence="absent"))
+    _facets(deleted)["normal_target_unchanged"] = _unchanged_fail("normal_target_content_changed")
+    assert classify_codex_dogfood_report(deleted)["failed_facets"] == ["normal_target_unchanged"]
+
+
+def test_missing_after_snapshot_cannot_pass_but_may_be_not_run() -> None:
+    report = _with_lane(_observation(), None)
+    with pytest.raises(DogfoodGateError, match="normal_target_after_snapshot_missing"):
+        classify_codex_dogfood_report(report)
+
+    _facets(report)["normal_target_unchanged"] = {
+        "status": "not_run",
+        "reason": "normal_target_after_snapshot_missing",
+        "evidence_digest": None,
+        "next_action": "complete_postflight",
+    }
+    assert classify_codex_dogfood_report(report)["full_outcome"] == "not_run"
+
+
+def test_unstable_or_unreadable_observation_is_a_specific_failure() -> None:
+    for presence in ("unstable", "unreadable", "not_regular", "oversized"):
+        report = _with_lane(_observation(), _later(presence=presence))
+        with pytest.raises(DogfoodGateError, match="normal_target_unchanged_content_mismatch"):
+            classify_codex_dogfood_report(report)
+        _facets(report)["normal_target_unchanged"] = _unchanged_fail(
+            "normal_target_content_unobservable"
+        )
+        assert classify_codex_dogfood_report(report)["failed_facets"] == ["normal_target_unchanged"]
+
+
+def test_snapshot_facet_cannot_pass_over_an_unobservable_before_snapshot() -> None:
+    report = _with_lane(_observation(presence="unstable"), _later())
+    _facets(report)["normal_target_unchanged"] = _unchanged_fail(
+        "normal_target_content_unobservable"
+    )
+    with pytest.raises(DogfoodGateError, match="normal_target_snapshot_unobservable"):
+        classify_codex_dogfood_report(report)
+
+
+def test_content_reason_is_refused_when_the_lane_shows_no_change() -> None:
+    report = _with_lane(_observation(), _later())
+    _facets(report)["normal_target_unchanged"] = _unchanged_fail("normal_target_content_changed")
+
+    with pytest.raises(DogfoodGateError, match="normal_target_unchanged_content_mismatch"):
+        classify_codex_dogfood_report(report)
+
+
+def test_strongest_change_across_slots_decides_the_reason() -> None:
+    report = _report()
+    report["normal_target"] = {
+        "files": [
+            {"slot": "codex_config", "before": _observation(), "after": _later(path=_MOVED_PATH)},
+            {
+                "slot": "codex_hooks",
+                "before": _observation(path=_MOVED_PATH),
+                "after": _later(path=_MOVED_PATH, digest=_BYTES_B),
+            },
+        ]
+    }
+    _facets(report)["normal_target_unchanged"] = _unchanged_fail("normal_target_content_changed")
+
+    assert classify_codex_dogfood_report(report)["failed_facets"] == ["normal_target_unchanged"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "reason"),
+    [
+        ("content", "plaintext", "normal_target_observation_fields_invalid"),
+        ("path_digest", "/Users/example/.codex", "normal_target_path_digest_invalid"),
+        ("presence", "maybe", "normal_target_presence_invalid"),
+        ("size_bytes", -1, "normal_target_size_invalid"),
+        ("observed_at", "yesterday", "normal_target_observed_at_invalid"),
+    ],
+)
+def test_content_observation_shape_is_closed(field: str, value: object, reason: str) -> None:
+    after = _later()
+    after[field] = value
+    with pytest.raises(DogfoodGateError, match=reason):
+        classify_codex_dogfood_report(_with_lane(_observation(), after))
+
+
+def test_absent_observation_cannot_carry_byte_evidence() -> None:
+    after = _later(presence="absent")
+    after["content_digest"] = _BYTES_A
+    with pytest.raises(DogfoodGateError, match="normal_target_absent_shape_invalid"):
+        classify_codex_dogfood_report(_with_lane(_observation(), after))
+
+
+def test_after_snapshot_cannot_predate_before_snapshot() -> None:
+    report = _with_lane(
+        _observation(at="2026-09-22T12:30:00.000Z"), _observation(at="2026-09-22T12:00:00.000Z")
+    )
+    with pytest.raises(DogfoodGateError, match="normal_target_observation_order_invalid"):
+        classify_codex_dogfood_report(report)
+
+
+def test_duplicate_or_malformed_slots_are_rejected() -> None:
+    report = _report()
+    entry = {"slot": "codex_config", "before": _observation(), "after": _later()}
+    report["normal_target"] = {"files": [entry, dict(entry)]}
+    with pytest.raises(DogfoodGateError, match="normal_target_slot_duplicate"):
+        classify_codex_dogfood_report(report)
+
+    with pytest.raises(DogfoodGateError, match="normal_target_slot_invalid"):
+        classify_codex_dogfood_report(_with_lane(_observation(), _later(), slot="Codex Config"))
+
+    report = _report()
+    report["normal_target"] = {"files": []}
+    with pytest.raises(DogfoodGateError, match="normal_target_files_invalid"):
+        classify_codex_dogfood_report(report)
+
+
+def test_version_three_reports_with_ambiguous_config_digest_are_refused() -> None:
+    report = _report()
+    report["schema"] = "yoetz.codex-dogfood-parity/3"
+    with pytest.raises(DogfoodGateError, match="report_fields_invalid"):
+        classify_codex_dogfood_report(report)
+
+    report = _report()
+    isolation = _isolation(report)
+    isolation["config_digest"] = isolation.pop("config_path_digest")
+    with pytest.raises(DogfoodGateError, match="yoetz_isolation_fields_invalid"):
+        classify_codex_dogfood_report(report)
+
+
+def _real_lane(
+    before: list[dict[str, object]], after: list[dict[str, object]]
+) -> dict[str, object]:
+    report = _report()
+    report["normal_target"] = {
+        "files": [
+            {"slot": f"slot_{index}", "before": first, "after": second}
+            for index, (first, second) in enumerate(zip(before, after, strict=True))
+        ]
+    }
+    return report
+
+
+def _classify_real(before: list[dict[str, object]], after: list[dict[str, object]]) -> str | None:
+    """Derived change reason for observations captured from real files."""
+
+    report = _real_lane(before, after)
+    try:
+        classify_codex_dogfood_report(report)
+    except DogfoodGateError as error:
+        assert str(error) == "normal_target_unchanged_content_mismatch"
+    else:
+        return None
+    for reason in _MODULE.NORMAL_TARGET_CONTENT_REASONS:
+        _facets(report)["normal_target_unchanged"] = _unchanged_fail(reason)
+        try:
+            classify_codex_dogfood_report(report)
+        except DogfoodGateError:
+            continue
+        return reason
+    raise AssertionError("no content reason accepted")
+
+
+def test_real_files_atomic_replacement_symlink_retarget_and_concurrent_change(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_bytes(b"model = 'a'\n")
+    before = _MODULE.observe_normal_target([config])
+
+    # Atomic replacement with identical bytes: unchanged.
+    staged = tmp_path / "config.toml.new"
+    staged.write_bytes(b"model = 'a'\n")
+    os.replace(staged, config)
+    assert _classify_real(before, _MODULE.observe_normal_target([config])) is None
+
+    # Atomic replacement with different bytes at the same path: content drift.
+    staged.write_bytes(b"model = 'b'\n")
+    os.replace(staged, config)
+    assert (
+        _classify_real(before, _MODULE.observe_normal_target([config]))
+        == "normal_target_content_changed"
+    )
+
+    # Symlink retargeted to another file with identical bytes: a path move, not drift.
+    first = tmp_path / "first.toml"
+    second = tmp_path / "second.toml"
+    first.write_bytes(b"x = 1\n")
+    second.write_bytes(b"x = 1\n")
+    link = tmp_path / "linked.toml"
+    link.symlink_to(first)
+    link_before = _MODULE.observe_normal_target([link])
+    link.unlink()
+    link.symlink_to(second)
+    assert (
+        _classify_real(link_before, _MODULE.observe_normal_target([link]))
+        == "normal_target_path_moved"
+    )
+
+    # A concurrent writer (for example desktop plugin materialization) changes the normal
+    # config between the before and after snapshots of a run.
+    watched = tmp_path / "watched.toml"
+    watched.write_bytes(b"[plugins]\n")
+    run_before = _MODULE.observe_normal_target([watched])
+    with watched.open("ab") as handle:
+        handle.write(b"materialized = true\n")
+    assert (
+        _classify_real(run_before, _MODULE.observe_normal_target([watched]))
+        == "normal_target_content_changed"
+    )
+
+    # Absent before and after: unchanged; nothing to digest.
+    missing = tmp_path / "never.toml"
+    assert (
+        _classify_real(
+            _MODULE.observe_normal_target([missing]), _MODULE.observe_normal_target([missing])
+        )
+        is None
+    )
+
+
+def test_observe_cli_prints_digest_only_rows(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_bytes(b"token = 'never-printed'\n")
+
+    assert _MODULE.main(["--observe", str(config), "--observe", str(tmp_path / "gone")]) == 0
+    output = capsys.readouterr().out
+    rows = json.loads(output)
+
+    assert [row["presence"] for row in rows] == ["present", "absent"]
+    assert rows[0]["content_digest"] == (
+        "sha256:" + hashlib.sha256(b"token = 'never-printed'\n").hexdigest()
+    )
+    assert "never-printed" not in output
+    assert str(tmp_path) not in output

@@ -193,3 +193,21 @@ or mutable ledger state in the worker. Cancellation joins the worker before retu
 results retain the same frontier, cursor, filtering, coverage and privacy contracts; small page
 limits do not require replaying the entire ledger on every call. Lineage views retain their
 existing recorded-fact semantics.
+
+## Amendment — unreferenced captured-content abandon (2026-09-22, #571 / #550)
+
+A captured-content object is finalized before its local manifest row commits.
+`observation_content_manifests` is that object's durable owner, separate from a ledger append.
+When `record_content_manifest` does not commit, or a post-finalize consent fence refuses the bind
+before the write, the coordinator abandons the object this attempt just finalized through
+`abandon_preappend_objects` (`observation_object_abandon_failed` if abandon itself fails). Abandon
+runs only when a follow-up lookup proves the manifest row does not name that object. An unknown
+lookup is not proof and leaves the object for the existing generation-fenced sweep. A committed
+manifest row is never abandoned, including a pre-existing weak row whose later upsert fails.
+`LIMIT_EXCEEDED` is a non-commit of the new row: the budget gap is still recorded and later parts
+of that ticket are not staged, and the unowned object is abandoned rather than retained. The
+24-hour orphan sweep remains the fallback. Ledger append, disclosure, and host surfaces are
+unchanged. The abandon diagnostic's request id derives from the random object id, never from the
+captured bytes. Residual: the lookup trusts the connection's post-rollback view, so an I/O failure
+inside the SQLite commit itself, whose WAL frame a later recovery replays, could leave a row naming
+an abandoned object. That row then fails verified resolution; it cannot return other bytes.

@@ -6480,6 +6480,18 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         lambda: __import__("yoetz.ports.control", fromlist=["ControlResult"]).ControlResult,
     ),
     _RegistryEntry(
+        "service/isolation-report-1.0.0.schema.json",
+        "isolation-report",
+        "1.0.0",
+        "request_result",
+        "service-status",
+        lambda: (
+            __import__(
+                "yoetz.protocol.isolation_report", fromlist=["IsolationReportContract"]
+            ).IsolationReportContract
+        ),
+    ),
+    _RegistryEntry(
         "service/service-status-1.0.0.schema.json",
         "service-status",
         "1.0.0",

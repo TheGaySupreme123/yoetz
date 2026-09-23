@@ -27,6 +27,12 @@ the machine on its own, authenticate the report author, or upgrade a digest into
   target's exact `yoetz service isolation --json` without the isolation variable; then run the
   candidate executable with the exact launch environment. Compare the two exact reports. Platform
   defaults are not a substitute because the normal target may relocate its config or storage.
+- The isolation report's `path_identity` digests (`*_path_digest`) bind which path a root or
+  file resolves to, not the file's bytes. An in-place or atomic edit of a config leaves its path
+  digest unchanged, so never read equal path digests as "the config did not change". Byte
+  evidence comes only from content observations: `yoetz service isolation --json
+  --content-digests` for the selected Yoetz config, and `--observe` (section 6) for normal-target
+  files. Each carries SHA-256, size, existence, and observation time — never content.
 - Rollback of Yoetz state is deleting the isolation root: every artifact of the isolated runtime
   lives beneath it. Stop only processes the runner started, then remove the root. An instance
   provisioned by `scripts/provision_test_instance.py` (ADR-028) is pinned to its root and disposed
@@ -49,8 +55,8 @@ the machine on its own, authenticate the report author, or upgrade a digest into
   the local `yoetz observe grant --workspace <exact-worktree>` continuation.
 - Activation decisions are exact-target and digest bound. Do not reuse an acceptance/decline from
   another executable/home or earlier cache state. `installed_not_activated` fails preflight.
-- Snapshot the normal Codex target before the run. Test-owned mutations must be reversible, and the
-  normal target must compare unchanged after rollback.
+- Snapshot the normal Codex target before the run (section 3). Test-owned mutations must be
+  reversible, and the normal target must compare unchanged after rollback.
 
 Do not place the report in the worktree or commit it. It is a run artifact. The report contains no
 absolute paths, usernames, credentials, prompts, transcripts, provider payloads, command output, or
@@ -69,7 +75,7 @@ Resolve and verify, rather than merely accept, these inputs:
 | `launcher_digest` | Exact launcher bytes that start the tested Codex process. |
 | `route_profile` | Registered `strict` or `policy` route actually observed for that isolated target. |
 | `worktree_digest` | SHA-256 over the canonical tested Git-root identity; do not publish the path. |
-| `yoetz_isolation` | `mode` and candidate identity digests from the exact launch report, plus `normal_mode` and the five `normal_*` digests copied from the exact normal-target report: state, endpoint, storage, config, and Yoetz executable. |
+| `yoetz_isolation` | `mode` and the five candidate `path_identity` digests from the exact launch report, plus `normal_mode` and the five `normal_*_path_digest` fields copied from the exact normal-target report: state, endpoint, storage, config, and Yoetz executable. They are path identities only. |
 
 The source ref, wheel digest, executable digest/version, and launcher digest must agree with the
 actual launch inputs. A clean working tree is not a substitute for the exact source ref, and an
@@ -80,8 +86,9 @@ installed package version is not a substitute for the wheel digest.
 Run each status command from the isolated runtime, with the exact selectors filled in:
 
 ```text
-<normal-yoetz> service isolation --json
+<normal-yoetz> service isolation --json --content-digests
 YOETZ_ISOLATED_ROOT=<exact-root> <candidate-yoetz> service isolation --json
+uv run python scripts/check_codex_dogfood_parity.py --observe <normal-codex-home>/config.toml [--observe <other-normal-target-file> ...]
 yoetz recommend list --codex-path <exact-executable> --codex-home <exact-home> --json
 yoetz integrate codex plugin status --project-root <exact-worktree> --codex-path <exact-executable> --codex-home <exact-home> --json
 CODEX_HOME=<exact-home> CODEX_TESTING_HOME=<exact-home> yoetz integrate codex mcp status --codex-path <exact-executable> --json
@@ -109,7 +116,14 @@ bounded reason token, an optional evidence digest, and a closed next action.
 | `plugin_rendered_bytes` | Host-rendered bytes match the selected Codex version. |
 | `plugin_cache` | The versioned cache matches the intended rendered digest. |
 | `plugin_activation` | Exact target state is `active`; presence or enablement alone is insufficient. |
-| `normal_target_snapshot` | A digest-only before-run snapshot exists. |
+| `normal_target_snapshot` | A digest-only before-run snapshot exists. When the report carries the `normal_target` lane, every `before` observation must be `present` or `absent`. |
+
+The `--observe` rows are the `before` observations of the report's optional `normal_target`
+lane. Give each observed file one stable `slot` token (for example `codex_config`); copy the
+normal Yoetz report's `config_content` into a slot too when the normal Yoetz config is part of the
+unchanged proof. The lane is optional (`normal_target: null`), but without it
+`normal_target_unchanged` rests on the operator's own comparison, and the gate cannot tell a
+path-stable byte change from an unchanged target.
 
 If isolation is not proven — the command fails, reports `ambient`, or any identity digest equals
 its normal-target counterpart — record the non-pass `service_isolation` row with the
@@ -200,6 +214,25 @@ Stop only processes the runner started. Reverse every test-owned activation/conf
 through its reviewed command, verify the isolated target's intended final state, and compare the
 normal-target snapshot. Record `rollback` and `normal_target_unchanged` independently.
 
+With the `normal_target` lane, re-run the same `--observe` commands after rollback and record
+each row as that slot's `after` observation (leave `after: null` only when it was not captured;
+the unchanged facet then cannot pass). The gate compares path identity and bytes separately and
+requires the unchanged facet to agree:
+
+| Derived change (strongest first) | Required `normal_target_unchanged` row |
+|---|---|
+| Any `after` missing | not `pass` |
+| A before/after observation is `not_regular`, `oversized`, `unreadable`, or `unstable` | `fail / normal_target_content_unobservable` |
+| Path digest and bytes both differ | `fail / normal_target_path_and_content_changed` |
+| Same path digest, different presence, size, or SHA-256 | `fail / normal_target_content_changed` |
+| Different path digest (moved file or retargeted symlink), identical bytes | `fail / normal_target_path_moved` |
+| Nothing differs (including absent before and after, or an atomic replacement with identical bytes) | may `pass`; a content reason is refused |
+
+Anything else is rejected as `normal_target_unchanged_content_mismatch`. A change made
+concurrently by another normal-target writer (for example desktop plugin materialization) fails
+the facet exactly like a test-owned change; the reason names the kind of change, and the
+timestamps bound when it happened, but attributing it remains an operator forensic step.
+
 Then run:
 
 ```text
@@ -216,9 +249,13 @@ invalidates the report.
 
 ## 7. Report shape and statuses
 
-The top-level keys are exactly `schema`, `identity`, `scope`, `observed`, and `facets`; the current
-schema is `yoetz.codex-dogfood-parity/3` (version 1 lacked Yoetz isolation identity; version 2
-lacked host-child binding proof; neither is accepted). `observed` retains only closed states/counts:
+The top-level keys are exactly `schema`, `identity`, `scope`, `observed`, `normal_target`, and
+`facets`; the current schema is `yoetz.codex-dogfood-parity/4` (version 1 lacked Yoetz isolation
+identity; version 2 lacked host-child binding proof; version 3 named path-identity digests
+ambiguously as `*_digest` and had no byte-content lane; none is accepted). `normal_target` is
+`null` or `{"files": [...]}` with 1–32 entries of exactly `slot`, `before`, and `after`; each
+observation has exactly `path_digest`, `presence`, `content_digest`, `size_bytes`, and
+`observed_at`, and only a `present` observation carries a digest and size. `observed` retains only closed states/counts:
 activation state, Yoetz isolation state (`isolated|shared|ambient|unknown`), MCP registration state,
 MCP isolation binding, MCP child state (`ready|failed|unknown`), exact/primary consent states,
 workspace-match boolean, mapping presence, accepted envelope count, undelivered count, drain

@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 from enum import Enum
 from typing import cast
 
+from yoetz.protocol.canonical import JsonValue
 from yoetz.protocol.errors import normalize_safe_details
 from yoetz.protocol.models import (
     CheckAwaitingHumanModel,
@@ -32,6 +33,9 @@ from yoetz.protocol.recovery import (
 __all__ = [
     "bounded_failure_line",
     "ceremony_refusal_line",
+    "error_recovery_json",
+    "local_recovery_json",
+    "recovery_directive_json",
     "render_error_recovery_lines",
     "render_human_awaiting_human",
     "render_human_check",
@@ -359,6 +363,47 @@ def ceremony_refusal_line(reason: str) -> str | None:
     return "\n".join([message, *render_local_recovery_lines(reason)])
 
 
+def _resolve_error_recovery(
+    safe_details: object,
+) -> tuple[tuple[str, str] | None, RecoveryDirective | None, list[str]]:
+    """Resolve the recovery facts of a public error from its gated safe details only.
+
+    Returns the claim-revision invariant and correction, the continuation directive, and the
+    carried frozen commands. Nothing is read from the error message, and a token the protocol
+    normalizer does not admit resolves to nothing. The human and JSON renderings both read this,
+    so they cannot disagree about what an error says to do.
+    """
+
+    if not isinstance(safe_details, Mapping):
+        return None, None, []
+    source = cast(Mapping[str, object], safe_details)
+    # A claim-revision rejection carries its correction on the invariant rather than a
+    # continuation token. The CLI rendered nothing for it before ADR-030 moved the corrective
+    # phrases into the shared registry, so the same rejection read as bare prose here while the
+    # MCP text channel explained it.
+    revision_pair: tuple[str, str] | None = None
+    revision = normalize_safe_details(
+        {"invariant": source.get("invariant"), "reason_code": source.get("reason_code")}
+    )
+    if revision.get("reason_code") == "claim_revision_mismatch":
+        correction = correction_for_invariant(revision.get("invariant"))
+        if correction is not None:
+            revision_pair = (str(revision["invariant"]), correction)
+    gated = normalize_safe_details({"continuation": source.get("continuation")})
+    directive = directive_for(gated.get("continuation"))
+    if directive is None:
+        return revision_pair, None, []
+    gated_commands = normalize_safe_details(
+        {key: source.get(key) for key in ("prepare_command", "review_command", "authorize_command")}
+    )
+    commands = [
+        str(gated_commands[key])
+        for key in ("prepare_command", "review_command", "authorize_command")
+        if type(gated_commands.get(key)) is str
+    ]
+    return revision_pair, directive, commands
+
+
 def render_error_recovery_lines(safe_details: object) -> list[str]:
     """Return the frozen recovery directive lines for a typed continuation, or an empty list.
 
@@ -368,36 +413,68 @@ def render_error_recovery_lines(safe_details: object) -> list[str]:
     whole directive, its guidance pointer, and its nudge on separate lines.
     """
 
-    if not isinstance(safe_details, Mapping):
-        return []
-    source = cast(Mapping[str, object], safe_details)
+    revision, directive, commands = _resolve_error_recovery(safe_details)
     lines: list[str] = []
-    # A claim-revision rejection carries its correction on the invariant rather than a
-    # continuation token. The CLI rendered nothing for it before ADR-030 moved the corrective
-    # phrases into the shared registry, so the same rejection read as bare prose here while the
-    # MCP text channel explained it.
-    revision = normalize_safe_details(
-        {"invariant": source.get("invariant"), "reason_code": source.get("reason_code")}
-    )
-    if revision.get("reason_code") == "claim_revision_mismatch":
-        correction = correction_for_invariant(revision.get("invariant"))
-        if correction is not None:
-            lines.append(f"Invariant: {revision['invariant']}")
-            lines.append(f"Correction: {correction}")
-    gated = normalize_safe_details({"continuation": source.get("continuation")})
-    directive = directive_for(gated.get("continuation"))
-    if directive is None:
-        return lines
-    gated_commands = normalize_safe_details(
-        {key: source.get(key) for key in ("prepare_command", "review_command", "authorize_command")}
-    )
-    commands = [
-        str(gated_commands[key])
-        for key in ("prepare_command", "review_command", "authorize_command")
-        if type(gated_commands.get(key)) is str
-    ]
-    lines.extend(render_recovery_directive_lines(directive, commands=commands))
+    if revision is not None:
+        lines.append(f"Invariant: {revision[0]}")
+        lines.append(f"Correction: {revision[1]}")
+    if directive is not None:
+        lines.extend(render_recovery_directive_lines(directive, commands=commands))
     return lines
+
+
+def recovery_directive_json(
+    directive: RecoveryDirective, *, commands: Sequence[str] = ()
+) -> dict[str, JsonValue]:
+    """Render one frozen directive as the ``recovery`` object of a CLI-owned JSON body.
+
+    The same facts, in the same order, as ``render_recovery_directive_lines`` (ADR-030, issue
+    #741). The text is resolved here, by this renderer, from the checked-in registry; it is never
+    read from the wire. ``continuation`` is the stable key a consumer should branch on; the prose
+    fields are advisory and may be reworded in any release without a schema change.
+    """
+
+    body: dict[str, JsonValue] = {
+        "continuation": directive.token,
+        "directive": directive.directive,
+    }
+    if commands:
+        body["commands"] = list(commands)
+    if directive.guidance_uri is not None:
+        body["guidance_uri"] = directive.guidance_uri
+    if directive.nudge is not None:
+        body["nudge"] = directive.nudge
+    return body
+
+
+def error_recovery_json(safe_details: object) -> dict[str, JsonValue] | None:
+    """Return the ``recovery`` object for a public error's safe details, or None.
+
+    The JSON twin of ``render_error_recovery_lines``: a claim-revision invariant and correction,
+    then the continuation directive with its carried commands, pointer, and nudge.
+    """
+
+    revision, directive, commands = _resolve_error_recovery(safe_details)
+    body: dict[str, JsonValue] = {}
+    if revision is not None:
+        body["invariant"] = revision[0]
+        body["correction"] = revision[1]
+    if directive is not None:
+        body.update(recovery_directive_json(directive, commands=commands))
+    return body or None
+
+
+def local_recovery_json(reason: object) -> dict[str, JsonValue] | None:
+    """Return the ``recovery`` object for a CLI lifecycle, instance, or ceremony reason, or None.
+
+    The JSON twin of ``render_local_recovery_lines``; the lookup is the local-reason vocabulary
+    only, so a protocol reason code resolves to nothing through it.
+    """
+
+    directive = directive_for(continuation_for_local_reason(reason))
+    if directive is None:
+        return None
+    return recovery_directive_json(directive)
 
 
 def render_human_error(error: PublicErrorModel) -> str:

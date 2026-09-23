@@ -615,24 +615,34 @@ remain separate requirements.
 
 ### Oversized hook payloads (issue #667)
 
-A Cursor hook body over the 256 KiB ingress cap (`MAX_HOOK_STDIN_BYTES`) is refused at stdin,
-before the NUL scan, the UTF-8 decode, and the vendor-decimal parse. An ordinary write to a
-large file reaches this bound: Cursor's native tool input carries the whole file content, and
-the dogfood writes that opened this issue were roughly 389,000 bytes each. The hook stays
-fail-open and Cursor continues. Yoetz records the bounded `cursor_payload_too_large` reason
-against that event in `yoetz observe status` hook diagnostics, and notes the
-`payload_too_large` coverage gap on the consented workspace so receipts and coverage wording
-carry the loss. Before this the same event recorded the generic `cursor_payload_invalid`, which
-reported a real coverage loss as a malformed vendor envelope.
-The cap is fixed and shared by every host; raising it is not an operator control. Each reader
-consumes at most cap-plus-one bytes, so the true size of a refused body is never measured and
-never recorded — the bound itself is the whole fact. Nothing about the event is parsed, so the
-hook name the host supplied on the command line is the only identity the record can carry: no
-tool name, session, or path. The refusal costs exactly that one event; the next ordinary event
-still ingests.
-Retaining a bounded structural envelope for the refused edit, with content explicitly omitted,
-is a separate design-gated change and is not implemented; today an oversized edit is an honest
-gap, not a partial observation.
+A Cursor hook body over the 256 KiB trusted parse cap (`MAX_HOOK_STDIN_BYTES`) is not admitted as
+a full event. An ordinary write to a large file reaches this bound: Cursor's native tool input
+carries the whole file content, and the dogfood writes that opened this issue were roughly
+389,000 bytes each. The hook stays fail-open and Cursor continues.
+
+When that body is a complete document at or under the 1 MiB skim cap (`MAX_HOOK_SKIM_BYTES`),
+Yoetz parses it with the same NUL, UTF-8, duplicate-key, and JSON checks as a normal event, then
+keeps a closed identity view. The structural row records the session, tool name, and tool-call id
+when those values are bounded tokens. A path commitment is kept only for `afterFileEdit` and for a
+`postToolUse` edit tool that did not fail or get denied; a read, a pending `preToolUse`, or a
+failed edit commits no changed path. Whether an `error` value was set is kept as a bit, never its
+text, and an unkeepable `workspace_roots` is refused as it is at full size. File contents, edits,
+prompts, and command text are omitted. The row's content references stay empty,
+including when native content capture is authorized. Coverage on that row is
+`payload_content_omitted`, and hook diagnostics record `cursor_payload_content_omitted`. A receipt
+can name the edit and must not treat the omitted bytes as captured.
+
+A body over the skim cap is refused before any parse. A complete oversized body that fails
+validation is also refused, and it records `cursor_payload_invalid` as well as the size gap. Both
+of those outcomes record `cursor_payload_too_large` and the workspace `payload_too_large` gap, and
+they mint no structural row. A parsed oversized body that finds no session or no resolvable
+workspace records the same gap. The ordinary profile's `afterMCPExecution` skip is deliberate at
+every size and records no gap. The pure `read_cursor_hook_payload` replay still refuses at 256 KiB,
+so a captured oversized body cannot be reparsed as a trusted full event.
+
+The caps are fixed; raising them is not an operator control. Codex and Claude Code do not skim:
+an oversized body on those hosts stays the no-row `payload_too_large` gap. The refusal or the
+omission costs exactly that one event; the next ordinary event still ingests.
 
 ### Smart observation selection (issue #687)
 
@@ -1255,6 +1265,13 @@ only its fenced lease was yielded. Replay the exact start body and request ID on
 inventing session or writer IDs. `start_pending_same_identity` instead means a live lease remains:
 wait up to 60 seconds before the one exact replay. If still busy or pending, retain the original
 request and report the unresolved start. These continuations do not authorize a new task.
+
+**CLI JSON (issue #741).** When an agent in this host runs `yoetz` in a shell with `--json`, a
+CLI-owned JSON error body carries a `recovery` object resolved from the same registry. A workflow
+command (`start`, `publish-work`, `check`, `respond`, `status`, `receipt`) also prints JSON when
+stdout is not a TTY; its failure keeps the exact wire body on stdout and writes the directive
+lines to stderr. This is CLI behavior shared by every host; no Cursor-specific behavior is
+configured.
 
 ## Cold service attachment and recovery (issue #670)
 
