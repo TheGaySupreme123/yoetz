@@ -63,8 +63,9 @@ Start identity is pair-scoped: an identical `workspace_ref` + `external_ref` res
 the same task, while a different complete pair on `mode=create_or_attach` creates independent work
 even beside a dormant task. A host hook may recover a unique ended same-host predecessor only after
 validating its local mapping and lifecycle state; it issues `mode=attach` with that held
-`session_id` before attempting a new pair. The explicit session-plus-new-pair path still requires
-the canonical workspace root to contain exactly one non-quarantined root task. Multiple candidate
+`session_id` before attempting a new pair. The explicit session-plus-new-pair path requires an active,
+non-quarantined selector with matching workspace and repository binding; other independent tasks
+in that workspace do not block it. A pair bound to a different task remains a conflict. Multiple candidate
 tasks fail closed with `auto_attach_binding_ambiguous` and a bounded count only. Never infer a
 selector from workspace membership or age, and treat an explicit `mode=create` collision as a
 `SESSION_CONFLICT` rather than a recovery signal.
