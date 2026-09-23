@@ -281,9 +281,10 @@ jobs:
       - name: Install uv, the pinned Python, and the selected host CLI (as dogfood)
         shell: wsl-bash {0}
         env:
-          WSLENV: CODEX_VERSION:CLAUDE_VERSION
+          WSLENV: CODEX_VERSION:CLAUDE_VERSION:UV_VERSION
         run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
+          # The repository pins uv (required-version), so install exactly that release.
+          curl -LsSf "https://astral.sh/uv/${UV_VERSION:-0.11.29}/install.sh" | sh
           export PATH="$HOME/.local/bin:$PATH"
           uv --version
           uv python install 3.14.6
