@@ -49,7 +49,7 @@ on:
         description: Fireworks model for Yoetz's AI-powered review (Responses API, structured judgment).
         required: false
         type: string
-        default: accounts/fireworks/models/qwen3-235b-a22b
+        default: accounts/fireworks/models/minimax-m3
       agent_model:
         description: Fireworks model for the Codex and Claude agent sessions.
         required: false
@@ -76,7 +76,7 @@ env:
   UV_VERSION: "0.11.29"
   UV_NO_PROGRESS: "1"
   NODE_VERSION: "26.5.0"
-  DOGFOOD_SEMANTIC_MODEL: ${{ inputs.semantic_model || 'accounts/fireworks/models/qwen3-235b-a22b' }}
+  DOGFOOD_SEMANTIC_MODEL: ${{ inputs.semantic_model || 'accounts/fireworks/models/minimax-m3' }}
   DOGFOOD_AGENT_MODEL: ${{ inputs.agent_model || 'accounts/fireworks/models/glm-5p3-flash' }}
   DOGFOOD_CURSOR_MODEL: ${{ inputs.cursor_model || 'gpt-5.6-luna-low' }}
   DOGFOOD_STRICT_AGENT: ${{ inputs.strict_agent == true && '--strict-agent' || '' }}
@@ -341,7 +341,7 @@ jobs:
             --host "${{ matrix.host }}" \
             --evidence "$HOME/evidence" \
             --host-path "${host_path}" \
-            --semantic-model "${DOGFOOD_SEMANTIC_MODEL:-accounts/fireworks/models/qwen3-235b-a22b}" \
+            --semantic-model "${DOGFOOD_SEMANTIC_MODEL:-accounts/fireworks/models/minimax-m3}" \
             --agent-model "${DOGFOOD_AGENT_MODEL:-accounts/fireworks/models/glm-5p3-flash}" \
             --cursor-model "${DOGFOOD_CURSOR_MODEL:-gpt-5.6-luna-low}" \
             ${DOGFOOD_STRICT_AGENT:-}

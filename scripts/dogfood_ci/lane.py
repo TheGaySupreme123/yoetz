@@ -65,7 +65,7 @@ run_ceremony = _ceremony.run_ceremony
 
 HOSTS: Final = ("codex", "claude", "cursor")
 CONNECTION_MODES: Final = ("auto", "setup-run", "plugin-dir", "mcp-only", "none")
-SEMANTIC_MODEL_DEFAULT: Final = "accounts/fireworks/models/qwen3-235b-a22b"
+SEMANTIC_MODEL_DEFAULT: Final = "accounts/fireworks/models/minimax-m3"
 AGENT_MODEL_DEFAULT: Final = "accounts/fireworks/models/glm-5p3-flash"
 CURSOR_MODEL_DEFAULT: Final = "gpt-5.6-luna-low"
 FIREWORKS_OPENAI_BASE: Final = "https://api.fireworks.ai/inference/v1"

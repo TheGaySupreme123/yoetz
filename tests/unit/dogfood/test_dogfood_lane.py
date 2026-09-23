@@ -47,7 +47,7 @@ def _namespace(tmp_path: Path, **overrides: object) -> argparse.Namespace:
         "host_config_root": None,
         "project": str(tmp_path / "project"),
         "connection_mode": "auto",
-        "semantic_model": "accounts/fireworks/models/qwen3-235b-a22b",
+        "semantic_model": "accounts/fireworks/models/minimax-m3",
         "agent_model": None,
         "cursor_model": "gpt-5.6-luna-low",
         "agent_timeout": 5.0,

@@ -59,8 +59,9 @@ input (default `gpt-5.6-luna-low`, the lowest reasoning tier the CLI lists for t
 The Codex and Claude sessions use the `agent_model` input (default
 `accounts/fireworks/models/glm-5p3-flash`). AI-powered review inside Yoetz uses the reviewed
 `fireworks-responses` profile with the `semantic_model` input (default
-`accounts/fireworks/models/qwen3-235b-a22b`, a catalog-suggested model; `glm-5p3-flash` reached
-Fireworks but its answers were rejected as `response_content_invalid` on every cell).
+`accounts/fireworks/models/minimax-m3`, a catalog-suggested model; `glm-5p3-flash` reached
+Fireworks but its answers were rejected as `response_content_invalid` on every cell, and
+`qwen3-235b-a22b` failed at the transport level three times per check).
 
 ## Lane phases
 
