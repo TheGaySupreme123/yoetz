@@ -3248,10 +3248,10 @@ def test_auto_start_without_a_workspace_locator_stops_before_any_service_call(
     ("harness_id", "session"),
     [("claude", "claude:next-1"), ("codex", "codex-next-1"), ("cursor", "cursor:next-1")],
 )
-def test_auto_start_workspace_conflict_reattaches_with_a_known_local_selector(
+def test_auto_start_recovers_before_create_with_a_known_local_selector(
     tmp_path: Path, harness_id: str, session: str
 ) -> None:
-    """#535: the shared helper recovers without disclosing a route in the public error."""
+    """#497: recovery uses the persisted selector before admission can create work."""
 
     prior = observe_hooks_module.mapping_from_start_ids(
         codex_session_id=f"{harness_id}:ended-1",
@@ -3282,14 +3282,11 @@ def test_auto_start_workspace_conflict_reattaches_with_a_known_local_selector(
     assert rewritten.yoetz_session_id == _SUCCESSOR_IDS["session_id"]
     assert rewritten.yoetz_writer_id == _SUCCESSOR_IDS["writer_id"]
     assert rewritten.last_frontier == prior.last_frontier
-    first, second = client.requests
-    assert first.mode == "create_or_attach"
-    assert first.workspace_ref == str(tmp_path.resolve())
-    assert first.external_ref == f"{harness_id}-session:{session.removeprefix(harness_id + ':')}"
-    assert second.mode == "attach"
-    assert second.session_id == _START_IDS["session_id"]
-    assert second.workspace_ref == str(tmp_path.resolve())
-    assert second.external_ref == first.external_ref
+    (request,) = client.requests
+    assert request.mode == "attach"
+    assert request.session_id == _START_IDS["session_id"]
+    assert request.workspace_ref == str(tmp_path.resolve())
+    assert request.external_ref == f"{harness_id}-session:{session.removeprefix(harness_id + ':')}"
 
 
 def test_workspace_conflict_recovery_never_selects_a_live_host_session(tmp_path: Path) -> None:
@@ -3327,8 +3324,8 @@ def test_workspace_conflict_recovery_never_selects_a_live_host_session(tmp_path:
     assert recovered.codex_session_id == previous
 
 
-def test_auto_start_does_not_recover_an_unclassified_session_conflict(tmp_path: Path) -> None:
-    """Only the exact workspace-occupied reason admits the ended-session recovery."""
+def test_auto_start_does_not_create_after_recovery_is_refused(tmp_path: Path) -> None:
+    """A refused attach never falls back to creating a replacement task."""
 
     prior = observe_hooks_module.mapping_from_start_ids(
         codex_session_id="codex-ended-1",
@@ -3484,8 +3481,8 @@ def test_recovery_rejects_cross_workspace_binding_during_revalidation_for_all_ho
     )
 
     assert outcome.mapping is None
-    assert outcome.reason == "auto_attach_conflict"
-    assert [request.mode for request in client.requests] == ["create_or_attach"]
+    assert outcome.reason == "auto_attach_recovery_busy"
+    assert client.requests == []
     assert store.codex_sessions_for_workspace(second_workspace) == (previous,)
 
 
@@ -3558,8 +3555,8 @@ def test_recovery_rejects_a_changed_nonselected_candidate_for_all_hosts(
     )
 
     assert outcome.mapping is None
-    assert outcome.reason == "auto_attach_conflict"
-    assert [request.mode for request in client.requests] == ["create_or_attach"]
+    assert outcome.reason == "auto_attach_recovery_busy"
+    assert client.requests == []
     changed = observe_hooks_module.load_mapping(newer, _state=tmp_path)
     assert changed is not None and changed.yoetz_task_id == other_task
 
@@ -3629,6 +3626,63 @@ def test_workspace_conflict_recovery_rejects_multiple_local_task_ids(tmp_path: P
     assert recovered is None
 
 
+def test_ambiguous_predecessors_refuse_without_a_fresh_start_or_selector_leak(
+    tmp_path: Path,
+) -> None:
+    """Distinct ended task bindings refuse recovery before any create RPC."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    locator = str(tmp_path.resolve())
+    workspace = store.workspace_commitment(locator)
+    store.grant_consent(workspace)
+    task_ids = (
+        _START_IDS["task_id"],
+        "tsk_4b4e28ba-2fa1-4d3b-8f0a-0c1d2e3f4a5b",
+    )
+    for index, task_id in enumerate(task_ids):
+        previous = f"codex-ended-{index}"
+        commitment = store.bind_codex_session(workspace, previous)
+        store.note_session_end(workspace, commitment)
+        observe_hooks_module.store_mapping(
+            observe_hooks_module.mapping_from_start_ids(
+                codex_session_id=previous,
+                yoetz_task_id=task_id,
+                yoetz_session_id=(
+                    _START_IDS["session_id"]
+                    if index == 0
+                    else "ses_4b4e28ba-2fa1-4d3b-8f0a-0c1d2e3f4a5c"
+                ),
+                yoetz_writer_id=(
+                    _START_IDS["writer_id"]
+                    if index == 0
+                    else "wri_4b4e28ba-2fa1-4d3b-8f0a-0c1d2e3f4a5d"
+                ),
+                last_frontier=None,
+            ),
+            _state=tmp_path,
+        )
+
+    client = _WorkspaceConflictThenAttachClient()
+    client.created = True
+    outcome = asyncio.run(
+        observe_hooks_module._try_workspace_auto_start(  # pyright: ignore[reportPrivateUsage]
+            "codex-next-1",
+            store=store,
+            workspace_commitment=workspace,
+            workspace_locator=locator,
+            harness_id="codex",
+            _state=tmp_path,
+            connect=cast(observe_hooks_module.HookStartConnector, _connector(client)),
+        )
+    )
+
+    assert outcome.mapping is None
+    assert outcome.reason == "auto_attach_binding_ambiguous"
+    assert outcome.candidate_count == 2
+    assert client.requests == []
+    assert observe_hooks_module.load_mapping("codex-next-1", _state=tmp_path) is None
+
+
 def test_workspace_recovery_does_not_attach_while_predecessor_lock_is_held(
     tmp_path: Path,
 ) -> None:
@@ -3669,8 +3723,8 @@ def test_workspace_recovery_does_not_attach_while_predecessor_lock_is_held(
         )
 
     assert outcome.mapping is None
-    assert outcome.reason == "auto_attach_conflict"
-    assert [request.mode for request in client.requests] == ["create_or_attach"]
+    assert outcome.reason == "auto_attach_recovery_busy"
+    assert client.requests == []
 
 
 @pytest.mark.parametrize(
@@ -3844,7 +3898,7 @@ def test_rewrite_skips_live_and_other_task_mappings(tmp_path: Path) -> None:
         assert untouched.yoetz_session_id == _START_IDS["session_id"]
 
 
-def test_create_or_attach_success_does_not_rewrite_predecessors(tmp_path: Path) -> None:
+def test_new_sibling_admission_does_not_rewrite_live_predecessors(tmp_path: Path) -> None:
     """Rewrite runs only after recovery attach of the same task, not a fresh create."""
 
     store = LocalObservationStore(_state=tmp_path)
@@ -3852,8 +3906,7 @@ def test_create_or_attach_success_does_not_rewrite_predecessors(tmp_path: Path) 
     workspace = store.workspace_commitment(locator)
     store.grant_consent(workspace)
     previous = "codex-ended-1"
-    commitment = store.bind_codex_session(workspace, previous)
-    store.note_session_end(workspace, commitment)
+    store.bind_codex_session(workspace, previous)
     observe_hooks_module.store_mapping(
         observe_hooks_module.mapping_from_start_ids(
             codex_session_id=previous,
@@ -3941,8 +3994,8 @@ def test_locked_nonselected_predecessor_blocks_recovery_until_its_state_is_stabl
         )
 
     assert outcome.mapping is None
-    assert outcome.reason == "auto_attach_conflict"
-    assert [request.mode for request in client.requests] == ["create_or_attach"]
+    assert outcome.reason == "auto_attach_recovery_busy"
+    assert client.requests == []
     for session_id in (older, newer):
         predecessor = observe_hooks_module.load_mapping(session_id, _state=tmp_path)
         assert predecessor is not None
@@ -4108,7 +4161,7 @@ def test_recovery_scan_is_not_repeated_while_the_predecessor_lock_is_held(
         outcome = _recover(store, workspace, locator, "codex-next-1", _state=tmp_path)
 
     assert outcome.mapping is None
-    assert outcome.reason == "auto_attach_conflict"
+    assert outcome.reason == "auto_attach_recovery_busy"
     assert sorted(loads) == sorted(predecessors)
     # Nothing was consumed, so nothing was pruned.
     assert store.codex_session_lifecycles_for_workspace(workspace) == tuple(
@@ -4520,11 +4573,7 @@ def test_fresh_session_reattaches_the_ended_workspace_task_and_drains_without_ma
     assert predecessor.yoetz_writer_id == _SUCCESSOR_IDS["writer_id"]
     assert store.list_pending_outbox_rows(workspace) == ()
     assert _START_IDS["task_id"] in rendered
-    assert [request.mode for request in client.requests] == [
-        "create_or_attach",
-        "create_or_attach",
-        "attach",
-    ]
+    assert [request.mode for request in client.requests] == ["create_or_attach", "attach"]
     diagnostics_path = tmp_path / "observation/hook-diagnostics.jsonl"
     if diagnostics_path.exists():
         diagnostics = diagnostics_path.read_text()

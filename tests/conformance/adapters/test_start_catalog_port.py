@@ -242,6 +242,72 @@ async def test_reserve_resume_complete_parity() -> None:
 
 
 @pytest.mark.anyio
+async def test_concurrent_same_pair_attaches_once_and_different_pairs_create_siblings() -> None:
+    """The catalog lock preserves pair identity while allowing workspace siblings."""
+
+    installation_id = _id(IdKind.INSTALLATION, 760)
+    now = datetime(2026, 7, 19, 9, 12, tzinfo=UTC)
+    memory, _ = _memory_catalog(installation_id, _Clock(now))
+    sqlite = _sqlite_catalog(installation_id, _Clock(now))
+
+    for catalog in (memory, sqlite):
+        same_pair = [
+            await _command(catalog, operation_id=_id(IdKind.REQUEST, 761)),
+            await _command(catalog, operation_id=_id(IdKind.REQUEST, 762)),
+        ]
+        same_results: list[object | None] = [None, None]
+
+        async def reserve_same(index: int) -> None:
+            same_results[index] = await catalog.reserve_or_resume(same_pair[index])
+
+        async with anyio.create_task_group() as tasks:
+            for index in range(len(same_pair)):
+                tasks.start_soon(reserve_same, index)
+
+        same_allocations: list[StartAllocation] = []
+        for result in same_results:
+            assert isinstance(result, StartAllocation)
+            same_allocations.append(result)
+        assert {allocation.route_action for allocation in same_allocations} == {
+            "created",
+            "attached",
+        }
+        same_task_ids = {allocation.task_id for allocation in same_allocations}
+        assert len(same_task_ids) == 1
+
+        different_pairs = [
+            await _command(
+                catalog,
+                operation_id=_id(IdKind.REQUEST, 763),
+                external_ref="external-B",
+            ),
+            await _command(
+                catalog,
+                operation_id=_id(IdKind.REQUEST, 764),
+                external_ref="external-C",
+            ),
+        ]
+        different_results: list[object | None] = [None, None]
+
+        async def reserve_different(index: int) -> None:
+            different_results[index] = await catalog.reserve_or_resume(different_pairs[index])
+
+        async with anyio.create_task_group() as tasks:
+            for index in range(len(different_pairs)):
+                tasks.start_soon(reserve_different, index)
+
+        different_allocations: list[StartAllocation] = []
+        for result in different_results:
+            assert isinstance(result, StartAllocation)
+            different_allocations.append(result)
+        assert {allocation.route_action for allocation in different_allocations} == {"created"}
+        assert len({allocation.task_id for allocation in different_allocations}) == 2
+        assert not same_task_ids.intersection(
+            allocation.task_id for allocation in different_allocations
+        )
+
+
+@pytest.mark.anyio
 async def test_historical_session_binding_and_reattach_parity() -> None:
     """Memory and SQLite preserve the same capability-bounded session recovery (#438)."""
 
@@ -482,8 +548,8 @@ async def test_workspace_rotation_rejects_wrong_workspace_and_sibling_ambiguity(
 
 
 @pytest.mark.anyio
-async def test_initializing_route_blocks_implicit_drift_but_not_explicit_sibling() -> None:
-    """A reclaimable initializing start stays occupied until quarantine or explicit intent."""
+async def test_initializing_route_preserves_its_pair_without_blocking_a_new_pair() -> None:
+    """An unfinished task is never selected solely because it shares the workspace."""
 
     installation_id = _id(IdKind.INSTALLATION, 735)
     now = datetime(2026, 7, 19, 9, 20, tzinfo=UTC)
@@ -498,27 +564,27 @@ async def test_initializing_route_blocks_implicit_drift_but_not_explicit_sibling
         assert route is not None
         assert route.state is TaskRouteState.INITIALIZING
 
-        with pytest.raises(PublicOperationError) as conflict:
-            await catalog.reserve_or_resume(
-                await _command(
-                    catalog,
-                    operation_id=_id(IdKind.REQUEST, 737),
-                    external_ref="external-B",
-                )
+        automatic = await catalog.reserve_or_resume(
+            await _command(
+                catalog,
+                operation_id=_id(IdKind.REQUEST, 737),
+                external_ref="external-B",
             )
-        assert conflict.value.code is PublicErrorCode.SESSION_CONFLICT
-        assert conflict.value.safe_details == {"reason_code": "workspace_task_exists"}
+        )
+        assert automatic.route_action == "created"
+        assert automatic.task_id != initializing.task_id
+        assert await catalog.resolve_route(initializing.session_id) == route
 
         sibling = await catalog.reserve_or_resume(
             await _command(
                 catalog,
                 operation_id=_id(IdKind.REQUEST, 738),
                 mode=StartMode.CREATE,
-                external_ref="external-B",
+                external_ref="external-C",
             )
         )
         assert sibling.route_action == "created"
-        assert sibling.task_id != initializing.task_id
+        assert len({sibling.task_id, automatic.task_id, initializing.task_id}) == 3
 
 
 @pytest.mark.anyio

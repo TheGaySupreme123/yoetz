@@ -1542,12 +1542,17 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "task. task_title and requested_view are required. Attach selectors are exactly one of: "
         "(1) session_id for the session you hold, or "
         "(2) workspace_ref + external_ref as a pair with no session_id — mode=create_or_attach "
-        "creates on first use and attaches on later conversations. task_id is not an accepted "
-        "field. workspace_ref is the canonical absolute repository root (never a remote URL; "
-        "the value hook observation auto-attaches with); external_ref is the stable task "
-        "identity within that project (branch, issue, or plan slug). When the session-start "
-        "context names a mapped task, use mode=attach with its session_id. Both refs are "
-        "redacted one-shot values; only HMAC commitments are persisted, "
+        "creates on first use and attaches on later conversations; a different complete pair "
+        "creates independent work even beside a dormant task. task_id is not an accepted field. "
+        "workspace_ref is the canonical absolute repository root (never a remote URL; the value "
+        "hook observation auto-attaches with); external_ref is the stable task identity within "
+        "that project (branch, issue, or plan slug). When the session-start context names a mapped "
+        "task, use mode=attach with its session_id. Hooks preflight a unique ended local "
+        "mapping and issue that attach with the new pair before creating; ambiguous candidates fail "
+        "closed with a bounded count only. Explicit session-plus-new-pair recovery still requires "
+        "one non-quarantined root task in the canonical workspace. An explicit mode=create collision "
+        "is SESSION_CONFLICT; older results may retain the workspace_task_exists compatibility "
+        "detail. Both refs are redacted one-shot values; only HMAC commitments are persisted, "
         "so do not self-censor into unstable refs. After resume or compaction, use status "
         "view=obligations to recover exact requested_items and unattempted_items rather than "
         "searching transcripts or source. Author the request from this input schema plus "
@@ -1783,7 +1788,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
     {
         "policy": MappingProxyType(
             {
-                "start": "sha256:674be421dff412ecf8ac0b7914c55f69a620d2990f143ca86b24228ecaf306d5",
+                "start": "sha256:6a42c3a22de1118122b495e8bf83b808dff83f7475febb9a430735e1e86c77cb",
                 "publish_work": "sha256:f4c4145eb92be5a2f57326138d1c0018b336a2d11cb7cc83f0c48dcde3bb4ec6",
                 "check": "sha256:60cc2a7b08cc694d563a45c72ed9e0afc2b255cf87e7a13ad22e7c994fbebae4",
                 "respond": "sha256:8b5dc94f431a411ef332021af01050a4b0c248a800e46d5b3bdb567f770d25a5",
@@ -1794,7 +1799,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         ),
         "strict": MappingProxyType(
             {
-                "start": "sha256:674be421dff412ecf8ac0b7914c55f69a620d2990f143ca86b24228ecaf306d5",
+                "start": "sha256:6a42c3a22de1118122b495e8bf83b808dff83f7475febb9a430735e1e86c77cb",
                 "publish_work": "sha256:f4c4145eb92be5a2f57326138d1c0018b336a2d11cb7cc83f0c48dcde3bb4ec6",
                 "check": "sha256:bd2cf70138107a82ee02e4b3dd89adc9a40bf91da0a3a6d55a6701fc46d474eb",
                 "respond": "sha256:8b5dc94f431a411ef332021af01050a4b0c248a800e46d5b3bdb567f770d25a5",
@@ -1807,8 +1812,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:cae0331be83ba8a17e646facfb8733311a40f17bd6c33054acce1bb9bbb78aeb",
-        "strict": "sha256:dedc76ee897207d9e84925b44f0dfdaa6a2ae1aa1490fd17c7a76f6092d0e900",
+        "policy": "sha256:54fc71c9026782765907f4229f62bdfcba5ddd04dced1784598f08f3e30ee6f0",
+        "strict": "sha256:9592dab8ef7278522b00d4ab2e8121f9042d82c0a656eeaca7c287fa0b82c5e9",
     }
 )
 

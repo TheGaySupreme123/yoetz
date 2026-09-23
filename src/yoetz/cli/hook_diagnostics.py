@@ -86,6 +86,7 @@ _REASONS: Final = frozenset(
         "auto_attach_result_invalid",
         "auto_attach_mapping_write_failed",
         "auto_attach_recovery_busy",
+        "auto_attach_binding_ambiguous",
         "privacy_authority_required",
         "runtime_gate_contended",
         "runtime_gate_unsafe",
@@ -218,18 +219,23 @@ def record_hook_diagnostic(
     reason: str,
     event: str,
     *,
+    candidate_count: int | None = None,
     _state: Path | None = None,
 ) -> None:
     """Append one bounded structural hook failure record, rotating one prior file."""
 
-    _append_row(
-        {
-            "event": _closed(event, _EVENTS, "unknown_event"),
-            "reason": _closed(reason, _REASONS, "unknown_reason"),
-            "ts": _timestamp(),
-        },
-        _state=_state,
-    )
+    row: dict[str, object] = {
+        "event": _closed(event, _EVENTS, "unknown_event"),
+        "reason": _closed(reason, _REASONS, "unknown_reason"),
+        "ts": _timestamp(),
+    }
+    if (
+        reason == "auto_attach_binding_ambiguous"
+        and type(candidate_count) is int
+        and 2 <= candidate_count <= 1_000_000
+    ):
+        row["candidate_count"] = candidate_count
+    _append_row(row, _state=_state)
 
 
 def record_drain_failure(
@@ -622,9 +628,18 @@ def _read_rows(
                     ):
                         timings.append((total, stamp, cast(str | None, path_value)))
                     continue
-                if set(row) != {"event", "reason", "ts"} or any(
-                    type(row.get(key)) is not str for key in ("event", "reason", "ts")
-                ):
+                keys = set(row)
+                if keys == {"event", "reason", "ts", "candidate_count"}:
+                    candidate_count = row["candidate_count"]
+                    if (
+                        row["reason"] != "auto_attach_binding_ambiguous"
+                        or type(candidate_count) is not int
+                        or not 2 <= candidate_count <= 1_000_000
+                    ):
+                        continue
+                elif keys != {"event", "reason", "ts"}:
+                    continue
+                if any(type(row.get(key)) is not str for key in ("event", "reason", "ts")):
                     continue
                 rows.append(
                     {

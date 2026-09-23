@@ -36,10 +36,12 @@ example under assignment is already sorted.
 
 Use `create_or_attach` with a stable workspace/work-item pair when first opening or resuming the
 same work; `workspace_ref` is the canonical absolute repository root (never a remote URL), the
-same value hook observation auto-attaches with. Alternatively, attach with a returned or
-host-context `session_id`; never use a bare `task_id` as an attach selector. A later identical-pair attach mints a new session: prefer the returned ids, and
-recover a prior `request_id` with `status view=operation` from the successor session. Intentional
-siblings use `mode=create` with a different `external_ref`.
+same value hook observation auto-attaches with. A different complete pair is independent work even
+when the workspace already has a dormant task. Alternatively, attach with a returned or
+host-context `session_id`; never use a bare `task_id` as an attach selector. A later identical-pair
+attach mints a new session: prefer the returned ids, and recover a prior `request_id` with
+`status view=operation` from the successor session. An explicit `mode=create` using an identical
+existing pair remains a `SESSION_CONFLICT`; do not use it to bypass an unknown write outcome.
 
 ```json
 {

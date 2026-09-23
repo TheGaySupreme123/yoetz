@@ -349,9 +349,16 @@ class AutoAttachOutcome:
     mapping: LifecycleMapping | None
     reason: str | None
     recovered: bool = False
+    candidate_count: int | None = None
 
     def __post_init__(self) -> None:
         if (self.mapping is None) == (self.reason is None):
+            raise ValueError("auto_attach_outcome_invalid")
+        if self.candidate_count is not None and (
+            self.reason != "auto_attach_binding_ambiguous"
+            or type(self.candidate_count) is not int
+            or not 2 <= self.candidate_count <= 1_000_000
+        ):
             raise ValueError("auto_attach_outcome_invalid")
 
 
@@ -1629,29 +1636,16 @@ async def _try_auto_start(
         "requested_view": "compact",
     }
     try:
-        request = StartRequest.model_validate(
-            {
-                **request_base,
-                "request_id": new_id(IdKind.REQUEST),
-                "mode": "create_or_attach",
-                "external_ref": external_ref,
-                "workspace_ref": workspace_locator,
-            }
-        )
-        recovery_request = (
-            None
-            if recovery_mapping is None
-            else StartRequest.model_validate(
-                {
-                    **request_base,
-                    "request_id": new_id(IdKind.REQUEST),
-                    "mode": "attach",
-                    "session_id": recovery_mapping.yoetz_session_id,
-                    "external_ref": external_ref,
-                    "workspace_ref": workspace_locator,
-                }
-            )
-        )
+        request_body = {
+            **request_base,
+            "request_id": new_id(IdKind.REQUEST),
+            "mode": "create_or_attach" if recovery_mapping is None else "attach",
+            "external_ref": external_ref,
+            "workspace_ref": workspace_locator,
+        }
+        if recovery_mapping is not None:
+            request_body["session_id"] = recovery_mapping.yoetz_session_id
+        request = StartRequest.model_validate(request_body)
     except ValidationError, ValueError, TypeError:
         # An authoring defect in this function, never a runtime condition: it
         # must be visible, not collapsed into an absent mapping.
@@ -1659,7 +1653,7 @@ async def _try_auto_start(
 
     client: _StartClient | None = None
     attempt_started = time.monotonic()
-    recovered_task_id: str | None = None
+    recovered_task_id = None if recovery_mapping is None else recovery_mapping.yoetz_task_id
 
     def _remaining_deadline_ms() -> int:
         elapsed_ms = int((time.monotonic() - attempt_started) * 1_000)
@@ -1679,32 +1673,8 @@ async def _try_auto_start(
         else:
             client = await connect(ControlClientKind.CLI)
         result = await client.start(request, deadline_ms=_remaining_deadline_ms())
-        branch = getattr(result, "root", result)
-        safe_details = (
-            getattr(branch.error, "safe_details", None)
-            if isinstance(branch, OperationFailureModel)
-            else None
-        )
-        reason_code = (
-            cast(Mapping[str, object], safe_details).get("reason_code")
-            if isinstance(safe_details, Mapping)
-            else None
-        )
-        if (
-            recovery_request is not None
-            and recovery_mapping is not None
-            and isinstance(branch, OperationFailureModel)
-            and branch.error.code is PublicErrorCode.SESSION_CONFLICT
-            and reason_code == "workspace_task_exists"
-        ):
-            # The public error intentionally discloses no task selector. Recovery is
-            # allowed only because the hook already holds a validated local selector
-            # from an ended host session in this exact consented workspace.
-            result = await client.start(
-                recovery_request,
-                deadline_ms=_remaining_deadline_ms(),
-            )
-            recovered_task_id = recovery_mapping.yoetz_task_id
+        # A validated local predecessor selects recovery before admission. An
+        # ordinary create attempt would now succeed and strand predecessor work.
     except ControlError as error:
         return AutoAttachOutcome(
             None, _AUTO_ATTACH_CONTROL_REASONS.get(error.reason, "service_unavailable")
@@ -1907,8 +1877,8 @@ def _acquire_recovery_session_locks(
     """Hold every scanned predecessor lock through validation and attach.
 
     Session locks are nonblocking by contract.  If another host event owns one
-    of the candidate locks, recovery yields ``False`` and the caller performs
-    the ordinary service request.  Acquiring in sorted order avoids a lock
+    of the candidate locks, recovery yields ``False`` and the caller reports
+    recovery busy without making a service request. Acquiring in sorted order avoids a lock
     hierarchy cycle between concurrent recovery attempts.
     """
 
@@ -2180,6 +2150,13 @@ async def _try_workspace_auto_start(
             lifecycles=lifecycles,
         )
         recovery = scan.mapping
+        candidate_count = len({candidate.mapping.yoetz_task_id for candidate in scan.candidates})
+        if candidate_count > 1:
+            # Several independently bound predecessors are ambiguous. New
+            # admission cannot turn that ambiguity into authority to resume.
+            return AutoAttachOutcome(
+                None, "auto_attach_binding_ambiguous", candidate_count=candidate_count
+            )
         if recovery is None:
             # Release the workspace reservation before the ordinary RPC.
             # A return expression containing ``await`` would evaluate while
@@ -2244,9 +2221,11 @@ async def _try_workspace_auto_start(
                                     )
                             return outcome
 
-    # A resumed predecessor or changed local state invalidates the capability.
-    # Still run the ordinary request so the hook records the service's typed
-    # conflict instead of inventing a local success or silently doing nothing.
+            # The recorded predecessor existed but could not be held stable.
+            # Retrying admission as new work here would strand that task.
+            return AutoAttachOutcome(None, "auto_attach_recovery_busy")
+
+    # No persisted recovery capability exists: admit independently as new work.
     if service_start_timeout_seconds is None:
         return await _try_auto_start(
             codex_session_id,
@@ -2276,9 +2255,17 @@ def _record_auto_attach(
     if outcome.mapping is not None:
         return outcome.mapping
     reason = outcome.reason if outcome.reason is not None else "service_unavailable"
-    _stderr_line(f"hook_auto_attach_failed: {reason}")
+    count_suffix = (
+        "" if outcome.candidate_count is None else f"; candidates: {outcome.candidate_count}"
+    )
+    _stderr_line(f"hook_auto_attach_failed: {reason}{count_suffix}")
     with contextlib.suppress(Exception):
-        record_hook_diagnostic(reason, event_name, _state=_state)
+        if outcome.candidate_count is None:
+            record_hook_diagnostic(reason, event_name, _state=_state)
+        else:
+            record_hook_diagnostic(
+                reason, event_name, candidate_count=outcome.candidate_count, _state=_state
+            )
     return None
 
 

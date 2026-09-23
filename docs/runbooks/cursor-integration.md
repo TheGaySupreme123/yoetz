@@ -698,24 +698,36 @@ ancestors for the nearest `.git` directory or worktree file, without running Git
 symlinked ancestors, root/home locators, unsafe markers, or unbounded/control-bearing values.
 `workspace_unresolvable` and `workspace_unconsented` remain distinct payload-free diagnostics
 (with `paused` for a paused grant), recorded by the shared ingress for every host. A consented
-`sessionStart` auto-attaches through the shared `start mode=create_or_attach` request, pairing the
-resolved workspace root as `workspace_ref` with `cursor-session:<session_id>` as `external_ref`;
-an exact `workspace_task_exists` conflict gets one `mode=attach` recovery only when the private
-local store already holds a valid mapping from an earlier Cursor session whose `sessionEnd` was
-received, every other bound session is ended, and the candidate is bound only to this consented
-workspace. The catalog also requires one mapped task, the selector still active, no sibling task,
-the matching repository-privacy binding, and no start already pending for that route. The conflict
-reveals no selector, and a hard crash without `sessionEnd` remains fail-closed rather than being
-guessed from age. A successful recovery also rewrites every ended same-host predecessor mapping for that task to
-the rotated session and writer so pending predecessor rows drain on the successor route
-(`session_superseded` is followed, not quarantined as `ledger_rejected`). Recovery first takes a nonblocking workspace reservation, then holds ordered locks for every eligible ended same-host session through full candidate revalidation, the service RPC, authorized rewrites, and pruning. The revalidation covers unmapped sessions, cross-workspace ownership, mapping identity, and mapping recency; a busy workspace reservation defers with `auto_attach_recovery_busy`, while candidate-lock contention or changed state falls back to the ordinary request. A failed attempt records its typed cause (`auto_attach_workspace_unbound`,
-`auto_attach_request_invalid`, `auto_attach_conflict`, `auto_attach_refused`,
+`sessionStart` auto-attaches through the shared paired `start` contract, using the resolved
+workspace root as `workspace_ref` and `cursor-session:<session_id>` as `external_ref`. Before
+creating that new pair, the hook checks its private local store for a unique valid mapping from an
+earlier Cursor session whose `sessionEnd` was received, every other bound session is ended, and each
+candidate belongs only to this consented workspace. A unique candidate is held under the workspace
+and predecessor session locks, revalidated, and sent as `mode=attach` with the existing Yoetz
+`session_id` plus the new pair. The catalog still requires the selector to be active, the canonical
+workspace root to contain exactly one non-quarantined root task, the matching repository-privacy
+binding, and no start already pending for that route. This explicit session-plus-new-pair path is the
+remaining sole-root-workspace fence. If eligible mappings name more than one task, the hook records
+`auto_attach_binding_ambiguous` with a bounded candidate count only; it does not create or choose
+among them, and a hard crash without `sessionEnd` remains fail-closed rather than being guessed from
+age. With no usable predecessor, ordinary `create_or_attach` admits the new pair as independent
+work, even beside a dormant task. A successful recovery rewrites every ended same-host predecessor
+mapping for that task to the rotated session and writer so pending predecessor rows drain on the
+successor route (`session_superseded` is followed, not quarantined as `ledger_rejected`). Recovery
+first takes a nonblocking workspace reservation, then holds ordered locks for every eligible ended
+same-host session through full candidate revalidation, the service RPC, authorized rewrites, and
+pruning. The revalidation covers unmapped sessions, cross-workspace ownership, mapping identity, and
+mapping recency; a busy workspace reservation or candidate-lock/changed-snapshot boundary remains
+typed `auto_attach_recovery_busy` rather than guessing or silently creating. A failed attempt records
+its typed cause (`auto_attach_workspace_unbound`, `auto_attach_request_invalid`,
+`auto_attach_binding_ambiguous`, `auto_attach_conflict`, `auto_attach_refused`,
 `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`,
-`service_unavailable`, `service_incompatible`, `vault_locked`, `timeout`, `storage_unsafe`, or `storage_corrupt`) in the
-same diagnostics file, and the session keeps an observation-only binding until a retry or an
-explicit `start` maps it. For `vault_locked` on a never-initialized install, that explicit
-`start` returns the typed `vault_initialization_required` continuation (see Troubleshooting)
-rather than a dead end.
+`service_unavailable`, `service_incompatible`, `vault_locked`, `timeout`, `storage_unsafe`, or
+`storage_corrupt`) in the same diagnostics file, and the session keeps an observation-only binding
+until a retry or an explicit `start` maps it. An explicit `mode=create` collision remains
+`SESSION_CONFLICT` and is not a recovery selector. For `vault_locked` on a never-initialized
+install, that explicit `start` returns the typed `vault_initialization_required` continuation (see
+Troubleshooting) rather than a dead end.
 
 Busy host lifecycle changes are durable local work. State schema `/11` adds bounded pending
 session-lifecycle intents, and a READY or hook drain reconciles them under the workspace and
@@ -761,7 +773,8 @@ observation handling (issue #661). The adapter transiently decodes `result_json`
 `afterMCPExecution`, or `tool_output` on an exactly server-scoped `postToolUse`, then passes the
 result to the existing lifecycle binder. Only validated task/session/writer IDs and an optional
 frontier token enter mapping storage. Task switching and same-task session replacement use those
-returned IDs; the workspace ambiguity guard is unchanged and never guesses a task.
+returned IDs; the binder never guesses a task. Automatic admission follows the shared
+ended-predecessor preflight, including the count-only ambiguity boundary described above.
 
 [Cursor's hooks reference](https://cursor.com/docs/hooks), checked 2026-09-08, documents
 `mcp_server_name` on `afterMCPExecution`. That hook admits bare `start` only for exact `yoetz` or
@@ -1012,8 +1025,8 @@ reconstruct them from memory, a remote URL, or the live store.
   `status`, and continue only from that binding. A bare `task_id` is not an attach selector.
 - **Same-pair fresh conversation.** With no held session, call `start mode=create_or_attach` using
   the exact canonical project root as `workspace_ref` and the same stable `external_ref` pair, with
-  no `session_id`. A remote URL is not a workspace identity, and a fresh Cursor conversation is
-  not an implicit second task.
+  no `session_id`. The same pair resumes; a different complete pair is independent work, even in
+  the same workspace. A remote URL is not a workspace identity.
 - **Explicit sibling handoff.** Use `start mode=create` only after same-task pair/session recovery
   is exhausted, every earlier write has a known terminal outcome, the Cursor binding is healthy and
   authorized, and the user has declared one bounded remaining or repaired verification scope. Keep
@@ -1167,7 +1180,10 @@ The native context distinguishes a service that is unavailable or still starting
 admission conflict (`auto_attach_conflict`). Missing mapping remains explicit. Call cooperative
 `start` before material work and follow its exact continuation; a conflict needs an authorized
 task selector or explicit admission decision, not a service restart. Successful hook exit alone
-does not establish attachment. Task admission and ended-session recovery selectors are unchanged.
+does not establish attachment. A unique ended predecessor is attached before a new pair is created;
+ambiguous predecessor tasks produce `auto_attach_binding_ambiguous` with a count only, and the
+explicit session-plus-new-pair recovery still requires one non-quarantined root task in the
+canonical workspace.
 
 Structural pre/post observations remain queued and keep their original identities across
 bootstrap. A later successful mapping permits their normal drain. Missing transient content

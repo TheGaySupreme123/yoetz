@@ -120,10 +120,14 @@ repository-fence message names missing context or the current closed identity ki
 (`git_common_root` or `directory`) and directs the operator to the original workspace. It exposes
 no path or commitment. Read-only operation status retains the same fence: when that workspace is
 unavailable, the task workflow cannot inspect the operation (issue #444). The separate
-`workspace_task_exists` conflict deliberately carries no task selector or count: possession of a
-workspace reference alone is not authority to discover or attach another task. A host hook may
-recover from that exact conflict only with a validated selector it already holds in the private
-local lifecycle store; the public error remains unchanged and reveals no binding. For MCP
+The legacy `workspace_task_exists` detail may appear in older results and recovery records; the
+limited admission path does not use a workspace-wide guard. An explicit `mode=create` colliding
+with an identical workspace/external pair remains a generic `SESSION_CONFLICT` with no task
+selector or count. Possession of a workspace reference alone is not authority to discover or attach
+another task. A host hook preflights a validated selector it already holds in the private local
+lifecycle store instead of waiting for an admission conflict; any attach still requires that
+selector, and the public error reveals no binding. Other `SESSION_CONFLICT` boundaries remain in
+force, including a repository-fence refusal and a conflicting session/pair selector. For MCP
 `INVALID_REQUEST` validation failures, `safe_details` may also carry parallel `fields` and
 `reasons` arrays: each entry is an allowlisted JSON pointer and a closed reason token for that
 location (same index order; at most eight locations). `reason_code` may co-occur with
@@ -1735,33 +1739,32 @@ low-entropy plaintext from leaking through an unkeyed structural request digest.
 is the caller-declared project identity and `external_ref` the stable task identity within that project;
 together they are the attach selector when `session_id` is absent (`mode=create_or_attach` or
 `attach` with the pair). The `workspace_ref_commitment` is a keyed HMAC of the exact caller
-string, so the single-task-per-workspace invariant below holds per spelling, not per repository:
-hook auto-attach on every host commits the canonical absolute repository root (a linked worktree
-is its own root), the packaged guidance and the `start` tool description tell agents to use that
-same root and never a remote URL, and the SessionStart context names the mapped `session_id` and
-`writer_id` so an agent attaches to the hook-mapped task by session selector instead of guessing
-the hook's pair. A differently spelled `workspace_ref` is a distinct workspace and creates a
-sibling without conflict (issue #580). An identical pair attaches and rotates to a fresh session/writer; the
-historical session remains a valid `mode=attach` selector even though ordinary task routing accepts
-only the active session, and a routed request on the retired session receives the typed current
-binding. If the pair is new but the workspace already owns a non-quarantined task,
-`create_or_attach` returns the typed `workspace_task_exists` conflict instead of silently splitting
-lineage. An `initializing` route counts as occupied: ignoring a still-reclaimable start would let a
-concurrent drifted pair split lineage. The conflict discloses no binding; the caller must attach
-with a previously held session selector or choose `mode=create` explicitly for a separate sibling
-task. The observation hook's bounded recovery is one such previously held-selector path: after the
-exact conflict, it may choose the most recently written valid local mapping among same-host
-sessions bound to that consented workspace and no other local workspace, but only after a received
-`SessionEnd` durably marked every other bound host session ended and every eligible mapping names
-one task. It then issues `mode=attach` with the known Yoetz session selector plus the new paired
-host identity. The catalog admits that otherwise-unresolved pair only when the selector is still
-the route's active session, the route is the workspace's sole non-quarantined task, the trusted
-repository-privacy binding matches, and no start for that route is already pending. The pair is a
-one-request workspace proof, not a stored alias. The hook accepts only a success for the same task
-ID before mapping the new host session. It never infers death from age, derives a selector from the
-conflict, chooses among sibling tasks, crosses host families, supersedes a still-live host session,
-or implements the multi-task workspace admission planned by #494/#497/#498. Raw refs never land in
-durable state — only the commitments do. This
+string, so selector identity is per spelling, not per repository: hook auto-attach on every host
+commits the canonical absolute repository root (a linked worktree is its own root), the packaged
+guidance and the `start` tool description tell agents to use that same root and never a remote URL,
+and the SessionStart context names the mapped `session_id` and `writer_id` so an agent attaches to
+the hook-mapped task by session selector instead of guessing the hook's pair. A differently spelled
+`workspace_ref` is a distinct selector and can create independent work. An identical pair attaches
+and rotates to a fresh session/writer; the historical session remains a valid `mode=attach` selector
+even though ordinary task routing accepts only the active session, and a routed request on the
+retired session receives the typed current binding. A new complete pair on `mode=create_or_attach`
+creates an independent task, including beside a dormant or initializing task. The limited 0.2
+reattachment path does not add lineage, project, parent, or new wire-schema fields: automatic host
+admission first checks the private local lifecycle store for a unique valid same-host mapping whose
+`SessionEnd` was received, every other bound host session is ended, and every eligible mapping
+names one task. It then holds the workspace and predecessor lifecycle locks, revalidates ownership
+and state, and issues `mode=attach` with the known Yoetz session selector plus the new paired host
+identity before any create attempt. The explicit session-plus-new-pair recovery remains admitted
+only when that selector is active, its canonical workspace root has exactly one non-quarantined
+root task, the trusted repository-privacy binding matches, and no start for that route is pending.
+If eligible mappings name more than one task, admission fails closed with the bounded
+`auto_attach_binding_ambiguous` reason and a candidate count only; it never guesses from workspace
+membership or age. With no usable persisted selector, ordinary `create_or_attach` admits the new
+pair as independent work. An explicit `mode=create` colliding with an identical pair remains a
+generic `SESSION_CONFLICT`; older results may retain the `workspace_task_exists` compatibility
+detail. Other `SESSION_CONFLICT` cases, including selector, repository-fence, and active-route
+conflicts, remain possible. Raw refs never land in durable state — only the
+commitments do. This
 model/agent-controlled `workspace_ref_commitment` is an attachment selector, not a
 repository-privacy commitment, and cannot select or inherit disclosure authority.
 
@@ -3778,31 +3781,36 @@ canonical workspace locator the hook already bound consent to as `workspace_ref`
 host-session identity as `external_ref`; the service persists only HMAC commitments of both, and a
 hook that reached consent through the legacy session→workspace map without a canonical locator never
 sends an unpaired request (issue #459). The request validates through the public `StartRequest`
-contract before dispatch. If the new pair receives the exact `workspace_task_exists` conflict, the
-shared Claude Code/Codex/Cursor hook path may retry once with `mode=attach` only when the private
-local store already holds a valid mapping from a received, durably recorded same-host `SessionEnd`,
-every other bound host session is ended, and the candidate session belongs to that consented
-workspace and no other local workspace. All eligible mappings must name one task; within it, the
-newest mapping-file write wins and the host session ID breaks timestamp ties. The attach carries
-that selector plus the new host pair, while the control handshake carries the canonical workspace
-for repository privacy. The catalog requires the selector to remain active, the task to be the
-workspace's sole non-quarantined route, and no start for that route to be pending. Both calls share
-one five-second deadline. The response must retain the candidate's task ID. Recovery first takes a
-nonblocking workspace reservation and then holds ordered locks for every eligible ended same-host
-session through full candidate revalidation, the service RPC, authorized rewrites, and pruning; no
-observation-store lock spans the RPC. The revalidation includes unmapped sessions, cross-workspace
-ownership, mapping identities, and mapping recency. A busy workspace reservation returns
-`auto_attach_recovery_busy` without a service request. A busy candidate session lock or a changed
-snapshot falls back to the ordinary create/attach request. A successful recovery records the new
+contract before dispatch. Before creating a new pair, the shared Claude Code/Codex/Cursor hook path
+checks the private local store for a unique valid same-host mapping from a received, durably recorded
+`SessionEnd`, with every other bound host session ended and every candidate bound only to the
+consented workspace. All eligible mappings must name one task; within that task, the newest
+mapping-file write wins and the host session ID breaks timestamp ties. A unique candidate is held
+under the workspace and predecessor lifecycle locks, revalidated, and sent as one `mode=attach`
+request carrying that selector plus the new host pair. The control handshake carries the canonical
+workspace for repository privacy. The catalog still requires the selector to remain active, its
+workspace to have exactly one non-quarantined root task, and no start for that route to be pending;
+this explicit session-plus-new-pair recovery is the remaining sole-root-workspace fence. The request
+uses one five-second deadline, and the response must retain the candidate's task ID. If eligible
+mappings name more than one task, the hook returns `auto_attach_binding_ambiguous` with only a
+bounded candidate count and does not create or choose among them. With no usable selector, ordinary
+`create_or_attach` admits the new pair as independent work. Recovery first takes a nonblocking
+workspace reservation and then holds ordered locks for every eligible ended same-host session through
+full candidate revalidation, the service RPC, authorized rewrites, and pruning; no observation-store
+lock spans the RPC. The revalidation includes unmapped sessions, cross-workspace ownership, mapping
+identities, and mapping recency. A busy workspace reservation returns `auto_attach_recovery_busy`
+without a service request; a busy candidate session lock or changed snapshot remains a typed
+recovery boundary rather than guessing or silently creating. A successful recovery records the new
 mapping, rewrites every ended same-host predecessor mapping for that task to the rotated session and
-writer, and drains pending rows without publishing the intermediate conflict as a diagnostic.
+writer, and drains pending rows without publishing an intermediate conflict as a diagnostic.
 Predecessor rows still pending at rotation follow the `session_superseded` binding on ingest (the
 current task session and the observation writer derived for it) so they are acknowledged on the
 successor route rather than quarantined. With no eligible local selector, or when that attach fails,
 the ordinary typed failure path remains. Every failed attempt records a closed hook-diagnostic
 reason instead of a silent absent mapping: `auto_attach_workspace_unbound`,
-`auto_attach_request_invalid`, `auto_attach_conflict` (session, idempotency, or request-identity
-conflict), `auto_attach_refused`, `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`,
+`auto_attach_request_invalid`, `auto_attach_binding_ambiguous` (candidate count only),
+`auto_attach_conflict` (session, idempotency, or request-identity conflict), `auto_attach_refused`,
+`auto_attach_result_invalid`, `auto_attach_mapping_write_failed`,
 `privacy_authority_required`, or the shared `service_unavailable`, `service_incompatible`, `vault_locked`, `timeout`,
 `storage_unsafe`, and `storage_corrupt` tokens. Turn-boundary hooks retry auto-attach under a
 bounded budget and record the same typed cause next to the `auto_attach_retry_failed` path marker

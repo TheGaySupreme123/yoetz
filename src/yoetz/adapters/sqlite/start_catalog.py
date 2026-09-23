@@ -172,17 +172,6 @@ def _error(
     )
 
 
-def _workspace_conflict() -> PublicOperationError:
-    return _error(
-        PublicErrorCode.SESSION_CONFLICT,
-        message=(
-            "A task already exists for this workspace. Attach with a previously returned "
-            "session_id, or retry with mode=create for an explicit separate sibling task."
-        ),
-        safe_details={"reason_code": "workspace_task_exists"},
-    )
-
-
 def _optional_text(value: object) -> str | None:
     if value is None:
         return None
@@ -841,15 +830,6 @@ class SqliteStartCatalog:
 
             created = route is None
             if created:
-                workspace = request.identity_commitments.workspace_ref_commitment
-                if request.mode is StartMode.CREATE_OR_ATTACH and workspace is not None:
-                    rows = self._rows(
-                        "SELECT 1 FROM task_routes "
-                        "WHERE workspace_ref_commitment = ? AND state != 'quarantined' LIMIT 1",
-                        (workspace,),
-                    )
-                    if rows:
-                        raise _workspace_conflict()
                 task_id = proposed[IdKind.TASK]
                 session_id = proposed[IdKind.SESSION]
                 bundle_relpath = f"tasks/{task_id}"
