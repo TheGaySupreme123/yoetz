@@ -77,6 +77,18 @@ _CLIENT: Final = {
     "integration": "cooperative_mcp",
 }
 _TAIL_BYTES: Final = 4000
+# Lane secrets a native agent process must never inherit; the agent gets only the credential
+# and settings its own command builder overlays.
+_LANE_SECRET_ENV: Final = (
+    "DOGFOOD_VAULT_PASSPHRASE",
+    "DOGFOOD_OS_PASSWORD",
+    "FIREWORKS_API_KEY",
+    "CURSOR_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CODEX_API_KEY",
+    "OPENAI_API_KEY",
+)
 
 # Prompt contract: every regex below names a product prompt this lane answers. The unit test
 # renders the real prompts (typer/click and the trusted-console stems) and asserts each regex
@@ -212,8 +224,10 @@ def _digest(text: str) -> str:
     return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _clean_env(extra: dict[str, str] | None = None) -> dict[str, str]:
-    env = {k: v for k, v in os.environ.items() if not k.startswith("YOETZ_")}
+def _clean_env(
+    extra: dict[str, str] | None = None, *, drop: tuple[str, ...] = ()
+) -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if not k.startswith("YOETZ_") and k not in drop}
     if extra:
         env.update(extra)
     return env
@@ -384,13 +398,14 @@ class Lane:
         env: dict[str, str] | None = None,
         stdin: str | None = None,
         timeout: float = 300.0,
+        drop: tuple[str, ...] = (),
     ) -> tuple[int, str, str, int]:
         started = time.monotonic()
         try:
             completed = subprocess.run(  # noqa: S603 - argv assembled from validated inputs
                 argv,
                 cwd=cwd,
-                env=_clean_env(env),
+                env=_clean_env(env, drop=drop),
                 input=stdin.encode("utf-8") if stdin is not None else None,
                 capture_output=True,
                 timeout=timeout,
@@ -616,13 +631,16 @@ class Lane:
         _, isolation = self._yoetz(
             "isolation", phase, ["service", "isolation", "--json"], fatal=True
         )
-        if isolation is not None and isolation.get("mode") != "isolated":
+        if isolation is None or isolation.get("mode") != "isolated":
             self._record(
                 "isolation_mode",
                 phase,
                 status="fail",
-                reason="not_isolated",
-                summary={"mode": isolation.get("mode"), "binding": isolation.get("binding")},
+                reason="isolation_unparseable" if isolation is None else "not_isolated",
+                summary={
+                    "mode": (isolation or {}).get("mode"),
+                    "binding": (isolation or {}).get("binding"),
+                },
                 fatal=True,
             )
         self._yoetz("instance_status", phase, ["instance", "status", "--json"], fatal=True)
@@ -749,6 +767,14 @@ class Lane:
                     summary={"blockers": self.semantic["blockers"]},
                     fatal=True,
                 )
+        elif self.fireworks_key:
+            self._record(
+                "semantic_ready",
+                phase,
+                status="fail",
+                reason="provider_status_unparseable",
+                fatal=True,
+            )
         _, setup_status = self._yoetz(
             "setup_status", phase, ["setup", "status", "--json"], expect_zero=False
         )
@@ -1614,7 +1640,9 @@ class Lane:
             self._record("agent_run", phase, status="skip", reason=reason)
             self.agent = {"ran": False, "reason": reason}
             return
-        rc, out, err, ms = self._run(argv, cwd=self.project, env=env, timeout=self.agent_timeout)
+        rc, out, err, ms = self._run(
+            argv, cwd=self.project, env=env, timeout=self.agent_timeout, drop=_LANE_SECRET_ENV
+        )
         output_file = self._save("agent-output", out or "", ".txt")
         stderr_file = self._save("agent-stderr", err or "", ".txt")
         done = "DONE" in out
@@ -1815,10 +1843,14 @@ class Lane:
                 proc.kill()
         if self.plugin_dir is not None and self.plugin_dir.exists():
             shutil.rmtree(self.plugin_dir, ignore_errors=True)
-        for path in logs.rglob("*"):
+        direct = [self.evidence / "service.log", self.evidence / "agent-last-message.md"]
+        for path in [*logs.rglob("*"), *direct]:
             if path.is_file():
                 try:
-                    path.write_text(self.redact(path.read_text(encoding="utf-8", errors="replace")))
+                    path.write_text(
+                        self.redact(path.read_text(encoding="utf-8", errors="replace")),
+                        encoding="utf-8",
+                    )
                 except OSError:
                     pass
 
@@ -1837,7 +1869,8 @@ class Lane:
             "failed_steps": failed,
             "agent_ok": agent_ok,
             "strict_agent": self.strict_agent,
-            "green": not catastrophic and (agent_ok is not False or not self.strict_agent),
+            "green": not catastrophic
+            and (not self.strict_agent or agent_ok is True or self.skip_agent),
         }
         body = {
             "schema": "yoetz.dogfood-lane/1",
@@ -1872,7 +1905,10 @@ class Lane:
             "| phase | step | status | reason |",
             "|---|---|---|---|",
         ]
-        lines += [f"| {s.phase} | {s.name} | {s.status} | {s.reason or ''} |" for s in self.steps]
+        lines += [
+            f"| {s.phase} | {s.name} | {s.status} | {self.redact(s.reason or '')} |"
+            for s in self.steps
+        ]
         text = "\n".join(lines) + "\n"
         (self.evidence / "lane-summary.md").write_text(text, encoding="utf-8")
         if summary_path:

@@ -150,6 +150,12 @@ def test_verdict_treats_agent_failure_as_non_catastrophic_unless_strict(tmp_path
     }
     lane.strict_agent = True
     assert lane.report()["verdict"]["green"] is False
+    unrun = _LANE.Lane(_namespace(tmp_path, strict_agent=True, skip_agent=False))
+    unrun._record("provision", "install", status="pass")
+    assert unrun.report()["verdict"]["green"] is False, "strict mode must not pass an unrun agent"
+    skipped = _LANE.Lane(_namespace(tmp_path, strict_agent=True, skip_agent=True))
+    skipped._record("provision", "install", status="pass")
+    assert skipped.report()["verdict"]["green"] is True
     lane._record("observe_drain_after_probe_verdict", "ledger", status="fail", reason="not_drained")
     strict_off = _LANE.Lane(_namespace(tmp_path))
     strict_off.steps = lane.steps
@@ -264,6 +270,16 @@ def test_prompt_regexes_match_the_product_prompts_as_rendered() -> None:
         _LANE.PROMPT_PRIVACY_CREATE,
     ):
         assert re.search(pattern, rendered), (pattern, rendered)
+
+    privacy_source = (Path(__file__).parents[3] / "src/yoetz/cli/privacy_setup.py").read_text(
+        "utf-8"
+    )
+    for literal in (
+        '"Use this recommended privacy policy?"',
+        '"Choose a privacy option"',
+        'f"Create this exact privacy proposal ({_RECIPE_LABELS[recipe]})?"',
+    ):
+        assert literal in privacy_source, literal
 
     passphrase_prompt = cast(str, getattr(unlock, "_passphrase_prompt")("Passphrase"))
     confirm_prompt = cast(str, getattr(unlock, "_passphrase_prompt")("Confirm passphrase"))
