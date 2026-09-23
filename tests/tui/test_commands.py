@@ -524,6 +524,10 @@ async def test_provider_exposes_codex_status_disconnect_and_rollback(
         assert runtime.subscription_actions == ["status"]
         assert "Codex subscription status" in text
         assert "Auth mode: chatgpt" in text
+        assert (
+            "Review budgets: routine effort=medium output_limit=4096 tokens; "
+            "final effort=high output_limit=8192 tokens"
+        ) in text
 
         await run_command(pilot, app, "/provider")
         view = app.open_view
@@ -563,7 +567,7 @@ async def test_provider_can_switch_the_codex_account(make_app: MakeApp) -> None:
         view.filter("switch")  # type: ignore[attr-defined]
         await pilot.press("enter")
         await pilot.pause()
-        for _ in range(4):
+        for _ in range(5):  # three entries, final and routine effort
             await pilot.press("enter")
             await pilot.pause()
         view = app.open_view
@@ -596,7 +600,7 @@ async def test_provider_switch_preserves_existing_subscription_model_when_omitte
         view.filter("switch")  # type: ignore[attr-defined]
         await pilot.press("enter")
         await pilot.pause()
-        for _ in range(4):
+        for _ in range(5):  # three entries, final and routine effort
             await pilot.press("enter")
             await pilot.pause()
         await pilot.press("up")
@@ -642,7 +646,7 @@ async def test_provider_discloses_and_reports_a_reused_codex_login(make_app: Mak
         view.filter("Codex with ChatGPT subscription")  # type: ignore[attr-defined]
         await pilot.press("enter")
         await pilot.pause()
-        for _ in range(4):
+        for _ in range(5):  # three entries, final and routine effort
             await pilot.press("enter")
             await pilot.pause()
         view = app.open_view
@@ -656,6 +660,7 @@ async def test_provider_discloses_and_reports_a_reused_codex_login(make_app: Mak
         await pilot.pause()
         assert runtime.subscription_actions == ["setup"]
         assert runtime.subscription_setups[0][2] == "gpt-5.6-luna"
+        assert runtime.subscription_routine_efforts == ["medium"]
         assert "reused the existing Codex login" in transcript(app)
 
 

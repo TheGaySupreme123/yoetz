@@ -1144,6 +1144,11 @@ def test_receipt_carries_applicable_semantic_provenance_and_usage() -> None:
         "AI-powered review attempt usage: input=100, cached_input=60, cache_write_input=5, "
         "output=20, reasoning_output=8, total=120 tokens."
     ) in version_section.body
+    # Issue #571: the exact per-check selection is named beside the usage it produced.
+    assert (
+        f"AI-powered review selection: model={provenance.model}, reasoning_effort=high, "
+        f"output_limit={provenance.sampling_params.max_output_tokens} tokens."
+    ) in version_section.body
     rendered = render_receipt_human(receipt, markdown=False)
     assert "input=100" in rendered
     assert "thread-1" not in rendered

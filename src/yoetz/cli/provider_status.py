@@ -81,6 +81,10 @@ def _emit(value: Mapping[str, JsonValue], *, json_output: bool) -> None:
             f"model={binding.get('model')} "
             f"profile={binding.get('endpoint_profile_id')}"
         )
+    for key in ("endpoint", "fallback_endpoint"):
+        budget_line = review_budget_human_line(value.get(key))
+        if budget_line is not None:
+            print(f"  {key} review budgets: {budget_line}")
     print(f"credential: {credential_human_display(value.get('credential_connected'))}")
     print(f"llm_inference_enabled: {value.get('llm_inference_enabled')}")
     print(f"repository_grant: {value.get('repository_grant_state')}")
@@ -137,6 +141,29 @@ def _emit(value: Mapping[str, JsonValue], *, json_output: bool) -> None:
             print(f"  - {step}")
 
 
+def review_budget_human_line(endpoint: object) -> str | None:
+    """Render the per-profile effort and output limit using closed tokens and integers only."""
+
+    if not isinstance(endpoint, Mapping):
+        return None
+    budgets = cast(Mapping[str, object], endpoint).get("review_budgets")
+    if not isinstance(budgets, Mapping):
+        return None
+    parts: list[str] = []
+    for name in ("routine", "final"):
+        row = cast(Mapping[str, object], budgets).get(name)
+        if not isinstance(row, Mapping):
+            return None
+        facts = cast(Mapping[str, object], row)
+        source = facts.get("effort_source")
+        suffix = " (legacy single effort)" if source == "legacy_single_effort" else ""
+        parts.append(
+            f"{name} effort={facts.get('reasoning_effort')}{suffix} "
+            f"output_limit={facts.get('output_limit')} tokens"
+        )
+    return "; ".join(parts)
+
+
 def _admission_state(value: object) -> str:
     if isinstance(value, Mapping):
         state = cast(Mapping[str, object], value).get("state")
@@ -175,6 +202,7 @@ def _endpoint_facts(
             "runtime_version": endpoint.runtime_version,
             "capability_profile": endpoint.capability_profile,
             "upstream_body_observability": "unavailable",
+            "review_budgets": cast(JsonValue, endpoint.review_budget_facts()),
         }
     return {
         "role": role,

@@ -962,8 +962,20 @@ class YoetzRuntime:
         executable = "" if not binaries else binaries[0].executable_path
         return executable, str(default_codex_home()), default_codex_subscription_model(), "high"
 
+    def codex_subscription_routine_default(self) -> str | None:
+        """Routine effort setup applies by default; ``None`` keeps a legacy single effort."""
+
+        from yoetz.cli.codex_subscription import default_codex_subscription_routine_effort
+
+        return default_codex_subscription_routine_effort()
+
     def preview_codex_subscription(
-        self, executable: str, codex_home: str, model: str, reasoning_effort: str
+        self,
+        executable: str,
+        codex_home: str,
+        model: str,
+        reasoning_effort: str,
+        routine_reasoning_effort: str | None = None,
     ) -> Mapping[str, object]:
         """Validate and render the exact subscription cell without logging in or writing state."""
 
@@ -975,6 +987,7 @@ class YoetzRuntime:
                 codex_home=Path(codex_home),
                 model=model,
                 reasoning_effort=reasoning_effort,
+                routine_reasoning_effort=routine_reasoning_effort,
             )
         except (OSError, ValueError) as error:
             from yoetz.cli.codex_subscription import subscription_failure_reason
@@ -992,6 +1005,7 @@ class YoetzRuntime:
         reasoning_effort: str,
         *,
         switch_account: bool = False,
+        routine_reasoning_effort: str | None = None,
     ) -> Mapping[str, object]:
         """Run Codex-owned login, then recompose the service around the exact binding."""
 
@@ -1007,6 +1021,7 @@ class YoetzRuntime:
                 codex_home=Path(codex_home),
                 model=model,
                 reasoning_effort=reasoning_effort,
+                routine_reasoning_effort=routine_reasoning_effort,
                 login_mode="browser",
                 open_browser=True,
                 switch_account=switch_account,

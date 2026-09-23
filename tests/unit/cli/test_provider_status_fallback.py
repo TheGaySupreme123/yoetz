@@ -130,6 +130,22 @@ async def test_an_api_primary_with_a_codex_fallback_reports_both_roles(
     assert fallback["credential_authority"] == "external_runtime_oauth"
     assert fallback["runtime_version"] == "0.150.1"
     assert fallback["upstream_body_observability"] == "unavailable"
+    # Issue #571: the Codex slot names each profile's exact effort and output limit; this
+    # legacy-shaped binding keeps its single effort for routine checks.
+    assert fallback["review_budgets"] == {
+        "routine": {
+            "reasoning_effort": "high",
+            "output_limit": 4096,
+            "effort_source": "legacy_single_effort",
+        },
+        "final": {"reasoning_effort": "high", "output_limit": 8192, "effort_source": "configured"},
+    }
+    assert "review_budgets" not in endpoint
+    assert module.review_budget_human_line(fallback) == (
+        "routine effort=high (legacy single effort) output_limit=4096 tokens; "
+        "final effort=high output_limit=8192 tokens"
+    )
+    assert module.review_budget_human_line(endpoint) is None
     assert report["credential_connected"] is True
     assert report["fallback_credential_connected"] is True
     assert report["blockers"] == ()

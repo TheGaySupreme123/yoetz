@@ -45,6 +45,7 @@ from yoetz.ports.semantic import (
     SemanticResultSuccess,
     SemanticResultUnavailable,
 )
+from yoetz.ports.semantic_budget import current_semantic_budget_profile
 from yoetz.ports.start_catalog import StartCatalogPort
 from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 from yoetz.protocol.models import SemanticReason, SemanticStatus
@@ -644,3 +645,61 @@ async def test_long_execution_budget_reaches_dispatch_without_five_minute_clamp(
     assert result.status is SemanticStatus.SUCCEEDED
     assert cast(int, getattr(privacy, "calls")) == 1
     assert _accounting(result).attempted_count == 1
+
+
+class _BudgetRecordingFallback(_WaitingFallback):
+    """Records the dispatch budget profile each physical attempt observes (issue #571)."""
+
+    def __init__(self, task_id: str, clock: _MovingClock) -> None:
+        super().__init__(task_id, clock)
+        self.profiles: list[str] = []
+
+    async def evaluate_semantic(self, candidate: object, deadline: object) -> object:
+        self.profiles.append(current_semantic_budget_profile())
+        return await super().evaluate_semantic(candidate, deadline)
+
+    async def resume(self, request_id: str, case_digest: str, deadline: object) -> object:
+        self.profiles.append(current_semantic_budget_profile())
+        return await super().resume(request_id, case_digest, deadline)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "adapter_factory", (memory_adapter, sqlite_adapter), ids=("memory", "sqlite")
+)
+async def test_budget_profile_is_frozen_with_the_job_and_scoped_to_every_attempt(
+    adapter_factory: Callable[[object], MemoryLedgerAdapter | SqliteLedger],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = adapter_factory(append_command())
+    clock = _MovingClock()
+    adapter._clock = clock  # pyright: ignore[reportPrivateUsage]
+    frozen, runtime = await _durable_semantic_case(adapter)
+    privacy = _BudgetRecordingFallback(runtime.task_id, clock)
+    selected: list[str] = ["routine"]
+
+    def select(_projection: object) -> str:
+        return selected[0]
+
+    monkeypatch.setattr(ready_composition_module, "select_semantic_budget_profile", select)
+
+    waiting = await _paired_evaluator(privacy, runtime, clock=clock)(frozen, (), runtime)
+
+    assert waiting.status is SemanticStatus.AWAITING_HUMAN
+    assert waiting.operation_lease is not None
+    # Two primary attempts and the fallback's disclosure wait all dispatch as routine.
+    assert privacy.profiles == ["routine", "routine", "routine"]
+    assert current_semantic_budget_profile() == "final"
+
+    # Replay after the owner's decision must not re-select from current state: the frozen
+    # execution snapshot, not today's selector, names the profile.
+    selected[0] = "final"
+    privacy.resume_terminal = (PrivacyOutcome.HUMAN_DENIED, PrivacyReason.HUMAN_DENIED)
+    resumed = await _paired_evaluator(privacy, runtime, clock=clock)(
+        FrozenCase(frozen.case, waiting.operation_lease), (), runtime
+    )
+
+    assert resumed.status is SemanticStatus.HUMAN_DENIED
+    assert privacy.resume_calls == 1
+    assert privacy.profiles[-1] == "routine"
+    assert current_semantic_budget_profile() == "final"

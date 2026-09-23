@@ -1073,6 +1073,13 @@ API provider serves a given attempt is a service-side dispatch decision recorded
 (`fallback_from`), with no Cursor-specific behaviour, plugin, or route input — the route ceiling
 applies to dispatch authority regardless of which endpoint serves.
 
+Routine/final Codex review budgets (issue #571 item A1) are host-independent too. The service
+selects the budget profile from the frozen case: `final` when the frontier carries a completion
+claim, `routine` otherwise. It then dispatches with that profile's configured effort and output
+limit and records them in provenance. Cursor gets no host-specific behavior, registration, route
+input, or per-request selector, so the decision for this host is "supported, unchanged".
+Recording a completion claim is the only way a check requests the final profile.
+
 
 ### Large tasks and AI-powered review failure recovery (#674–#676)
 

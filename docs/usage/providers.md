@@ -48,9 +48,19 @@ setup, the prompt-loop provider menu, `/provider`, or run:
 yoetz provider codex-subscription setup --executable /absolute/path/to/codex
 ```
 
-New setups preselect `gpt-5.6-luna` with reasoning effort `high`. When an existing subscription
-binding is targeted, omitting `--model` preserves its exact model, including during account
-switching. Pass `--model` to change it intentionally.
+New setups preselect `gpt-5.6-luna` with reasoning effort `high` for final reviews and `medium`
+for routine checkpoints. A check counts as final when your task has recorded a completion claim;
+every earlier check is a routine checkpoint, which can use a lower effort than final reviews. Use
+`--reasoning-effort` and `--routine-reasoning-effort` to choose each one. When an existing
+subscription binding is targeted, omitting `--model` preserves its exact model, and omitting
+`--routine-reasoning-effort` preserves its routine choice, including during account switching. A
+binding created before routine checkpoints existed keeps using its single effort for every check
+until you choose a routine effort. Pass `--model` to change the model intentionally.
+
+Each profile also has an output limit in tokens: 4096 for routine checkpoints and 8192 for final
+reviews, adjustable from 1 to 8192. A review whose answer exceeds its limit is stopped and
+reported as an invalid answer, and it is not retried. The check result and receipt name the
+exact model, reasoning effort, and output limit each review used.
 
 The selected executable can be an npm wrapper with the matching native package nested below that
 wrapper (`@openai/codex-darwin-arm64` on macOS arm64 or `@openai/codex-linux-x64` on Linux x86_64),
@@ -287,6 +297,10 @@ endpoint_profile_version = "1.0.0"
 credential_authority = "external_runtime_oauth"
 # exact executable/home paths, SHA-256 commitments, runtime/source/capability identities,
 # model, reasoning effort, timeout, and retry cap follow; no OAuth value is valid here
+# optional routine/final review budgets (output limits count tokens, 1-8192):
+# routine_reasoning_effort = "medium"
+# routine_output_limit = 4096
+# final_output_limit = 8192
 ```
 
 Primary/fallback pairing (issue #582): both tables above stay bound and a nonsecret selector names
