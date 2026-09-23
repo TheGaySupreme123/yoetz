@@ -249,9 +249,10 @@ jobs:
           password="$(openssl rand -hex 24)"
           echo "dogfood:${password}" | chpasswd
           account_home="$(getent passwd dogfood | cut -d: -f6)"
-          install -d -m 0700 -o dogfood -g dogfood "${account_home}/.config/dogfood"
-          printf '%s' "${password}" > "${account_home}/.config/dogfood/ospw"
-          chown dogfood:dogfood "${account_home}/.config/dogfood/ospw"
+          # Create the account's own directories as the account: a root-created ~/.config would
+          # later refuse the uv installer's shell-integration writes.
+          runuser -u dogfood -- install -d -m 0700 "${account_home}/.config" "${account_home}/.config/dogfood"
+          printf '%s' "${password}" | runuser -u dogfood -- tee "${account_home}/.config/dogfood/ospw" >/dev/null
           chmod 0600 "${account_home}/.config/dogfood/ospw"
           curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
           apt-get install -y nodejs
