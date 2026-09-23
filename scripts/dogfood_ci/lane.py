@@ -725,8 +725,9 @@ class Lane:
             # The running service composed provider readiness when the vault became ready,
             # before the endpoint and credential existed; storing the credential verifies it
             # live but does not refresh that composition. The product leaves that to the next
-            # unlock or restart, so do the restart here and read readiness from the new service.
-            self._restart_and_unlock(phase, "_after_setup")
+            # unlock, so lock and unlock here (same service generation) and read readiness
+            # from the recomposed application. The lifecycle phase covers a full restart.
+            self._lock_and_unlock(phase, "_after_setup")
         _, provider_status = self._yoetz(
             "provider_status", phase, ["provider", "status", "--json"], expect_zero=False
         )
@@ -1639,12 +1640,78 @@ class Lane:
             )
         return status
 
+    def _lock_and_unlock(self, phase: str, suffix: str) -> dict[str, Any]:
+        """Lock and unlock the vault; the unlock recomposes the application in place."""
+
+        assert self.launcher is not None
+        self._yoetz(f"service_lock{suffix}", phase, ["service", "lock", "--json"], fatal=True)
+        status = self._wait_for_service(f"service_status_after_lock{suffix}", phase)
+        if status.get("state") == "locked":
+            self._ceremony_step(
+                f"service_unlock{suffix}",
+                phase,
+                [str(self.launcher), "service", "unlock", "--json"],
+                [Reply(PROMPT_PASSPHRASE, self.passphrase)],
+                fatal=True,
+            )
+            status = self._wait_for_service(f"service_status_after_unlock{suffix}", phase)
+        if status.get("state") != "ready":
+            self._record(
+                f"service_ready_after_lock{suffix}",
+                phase,
+                status="fail",
+                reason=str(status.get("state_reason") or status.get("state")),
+                fatal=True,
+            )
+        return status
+
+    def _check_after_restart(self, phase: str) -> None:
+        """One more AI-review check on the probe session after a full restart (informational)."""
+
+        session_id = self.ledger.get("session_id")
+        writer_id = self.ledger.get("writer_id")
+        if not (self.fireworks_key and isinstance(session_id, str) and isinstance(writer_id, str)):
+            return
+        ids = {"session_id": session_id, "writer_id": writer_id}
+        _, status = self._yoetz(
+            "ledger_status_after_restart",
+            phase,
+            ["status", "--input", "-", "--json"],
+            stdin=self._request({**ids, "view": "compact", "limit": "10"}),
+            expect_zero=False,
+        )
+        frontier = _find_frontier(status)
+        if frontier is None:
+            return
+        _, checked = self._yoetz(
+            "ledger_check_after_restart",
+            phase,
+            ["check", "--input", "-", "--json"],
+            stdin=self._request(
+                {
+                    **ids,
+                    "expected_frontier": frontier,
+                    "max_findings": "10",
+                    "mode": "semantic_required",
+                }
+            ),
+            expect_zero=False,
+            timeout=420.0,
+        )
+        if checked is not None:
+            self.semantic["after_restart"] = {
+                "status": checked.get("semantic_status"),
+                "reason": checked.get("semantic_reason"),
+                "provenance_present": checked.get("semantic_provenance") is not None,
+            }
+
     def phase_lifecycle(self) -> None:
         phase = "lifecycle"
         if self.skip_restart:
             self._record("service_restart", phase, status="skip", reason="skip_restart")
             return
         self._restart_and_unlock(phase, "")
+        self._check_after_restart(phase)
         after = self._observe_status("observe_status_after_restart", phase)
         consent_retained = after is not None and after.get("mapping_present") is not None
         self._record(
