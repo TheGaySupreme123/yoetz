@@ -1307,26 +1307,75 @@ class Lane:
                     },
                     fatal=False,
                 )
-        self._yoetz(
+        # The AI-powered result is recorded after the check returns, so the frontier the check
+        # reported is usually stale by now; read the live one and honor one refresh continuation.
+        _, before_receipt = self._yoetz(
+            "ledger_status_before_receipt",
+            phase,
+            ["status", "--input", "-", "--json"],
+            cwd=self.project,
+            stdin=self._request({**ids, "view": "compact", "limit": "10"}),
+            expect_zero=False,
+        )
+        frontier = _find_frontier(before_receipt) or frontier
+        receipt_body = {
+            **ids,
+            "task_id": task_id,
+            "format": "markdown",
+            "include": "standard",
+            "redaction_profile": "default_local_export",
+        }
+        _, receipt = self._yoetz(
             "ledger_receipt",
             phase,
             ["receipt", "--input", "-", "--json"],
             cwd=self.project,
-            stdin=self._request(
-                {
-                    **ids,
-                    "task_id": task_id,
-                    "expected_frontier": frontier,
-                    "format": "markdown",
-                    "include": "standard",
-                    "redaction_profile": "default_local_export",
-                }
-            ),
-            fatal=True,
+            stdin=self._request({**receipt_body, "expected_frontier": frontier}),
+            expect_zero=False,
         )
+        refreshed = self._frontier_refresh(receipt)
+        if refreshed is not None:
+            _, receipt = self._yoetz(
+                "ledger_receipt_retry",
+                phase,
+                ["receipt", "--input", "-", "--json"],
+                cwd=self.project,
+                stdin=self._request({**receipt_body, "expected_frontier": refreshed}),
+                expect_zero=False,
+            )
+        if receipt is None or receipt.get("ok") is not True:
+            self._record(
+                "ledger_receipt_verdict",
+                phase,
+                status="fail",
+                reason=str(_find_key(receipt, "code") or "receipt_failed"),
+                fatal=True,
+            )
         self._hook_post_probe(phase)
         self._observe_drain("observe_drain_after_probe", phase, fatal=True)
         self._observe_status("observe_status_after_probe", phase)
+
+    @staticmethod
+    def _frontier_refresh(result: dict[str, Any] | None) -> dict[str, str] | None:
+        """Return the frontier a FRONTIER_CONFLICT continuation asks the caller to use."""
+
+        if result is None or result.get("ok") is not False:
+            return None
+        error = result.get("error")
+        if (
+            not isinstance(error, dict)
+            or cast(dict[str, Any], error).get("code") != "FRONTIER_CONFLICT"
+        ):
+            return None
+        details = cast(dict[str, Any], error).get("safe_details")
+        if not isinstance(details, dict):
+            return None
+        details_map = cast(dict[str, Any], details)
+        sequence = details_map.get("sequence")
+        head = details_map.get("head_digest")
+        if not isinstance(head, str) or sequence is None:
+            return None
+        return {"sequence": str(sequence), "head_digest": head}
 
     def _hook_payloads(self) -> tuple[list[str], list[tuple[str, dict[str, Any]]]]:
         session = f"dogfood-{self.host}-{self.stamp}"
