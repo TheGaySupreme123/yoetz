@@ -622,9 +622,11 @@ from eligible ended Claude sessions. Eligibility requires a received `SessionEnd
 session ended, and a candidate bound only to this consented workspace. A unique eligible mapping is
 selected before automatic new-pair admission: the hook holds the workspace and lifecycle locks,
 revalidates ownership and state, and sends one `mode=attach` request carrying that selector plus the
-new pair. The catalog requires one
-mapped task, the selector still active, no sibling task, the matching repository-privacy binding,
-and no start already pending for that route. Recovery revalidates unmapped sessions,
+new pair. The catalog requires the selected root task to be active and non-quarantined, its
+canonical workspace and repository-privacy binding to match, and no start already pending for that
+selected route. Other independent tasks in the same workspace do not block this recovery (#814); a
+pair already bound to another task remains a conflict. Delegated child routes require an
+authenticated attach handle or target selector. Recovery revalidates unmapped sessions,
 cross-workspace ownership, mapping identity, and mapping recency; a busy workspace reservation
 defers with `auto_attach_recovery_busy`, while candidate-lock contention or changed state returns
 the closed `auto_attach_recovery_busy` boundary rather than creating work from an unstable selector.

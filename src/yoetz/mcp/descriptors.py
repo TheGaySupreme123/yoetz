@@ -1681,7 +1681,11 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "field. workspace_ref is the canonical absolute repository root (never a remote URL; "
         "the value hook observation auto-attaches with); external_ref is the stable task "
         "identity within that project (branch, issue, or plan slug). When the session-start "
-        "context names a mapped task, use mode=attach with its session_id. Both refs are "
+        "context names a mapped task, use mode=attach with its session_id. A session-plus-new-pair "
+        "recovery requires an active, non-quarantined root-task selector with matching workspace "
+        "and repository binding; unrelated workspace tasks do not block it, while a pair bound to "
+        "another task remains a conflict. Delegated child routes require an attach_handle or "
+        "internal target selector. Both refs are "
         "redacted one-shot values; only HMAC commitments are persisted. mode=delegate takes the "
         "parent session_id and returns an attach_handle for the child; self-registration uses "
         "parent_session_id and remains pending until accepted. Do not self-censor into unstable "
@@ -1909,7 +1913,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
     {
         "policy": MappingProxyType(
             {
-                "start": "sha256:79fa0597c5437e964addcd39324b836f846e5ccbe4b1c2673921342e44854e37",
+                "start": "sha256:3a2186a2db53b91fcf7a8f3117cb8ff6a2b8bad6bc78e3e796e5e611e8598405",
                 "publish_work": "sha256:8e5261e9d30677fe5741284a653b530d62acb08f3367a506f243523b131bd117",
                 "check": "sha256:9befe13b257acf10535009c1dd69d9a933f3d94f5cd2aaac1655d4867596f89e",
                 "respond": "sha256:8b5dc94f431a411ef332021af01050a4b0c248a800e46d5b3bdb567f770d25a5",
@@ -1920,7 +1924,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         ),
         "strict": MappingProxyType(
             {
-                "start": "sha256:79fa0597c5437e964addcd39324b836f846e5ccbe4b1c2673921342e44854e37",
+                "start": "sha256:3a2186a2db53b91fcf7a8f3117cb8ff6a2b8bad6bc78e3e796e5e611e8598405",
                 "publish_work": "sha256:8e5261e9d30677fe5741284a653b530d62acb08f3367a506f243523b131bd117",
                 "check": "sha256:2bd9947abc7b60564474840a73d99a80bfa528b98af1a725d11fdfde5dac9795",
                 "respond": "sha256:8b5dc94f431a411ef332021af01050a4b0c248a800e46d5b3bdb567f770d25a5",
@@ -1933,8 +1937,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:f1fcb66f0573ed0709624355f46076dbed7da4684be963d00d77cd69dee9b066",
-        "strict": "sha256:6473f33f44ce8c77d205a728f667744f168b7286482fbff8b6299295614c97df",
+        "policy": "sha256:5db0bcfd445438e977869b3f5fd0e88c3d877f875b87cc8dfcaa1126b866cccf",
+        "strict": "sha256:b505bf514d57b00fd7ce1fa7b1c679f550bea5bebfe114c6d4a66423c3eec69d",
     }
 )
 
