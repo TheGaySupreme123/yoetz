@@ -32,6 +32,7 @@ def test_capacity_summary_names_non_dispatch_and_bounded_next_step() -> None:
         }
     )
     assert "Continuation: semantic_capacity_exceeded." in text
-    assert "new check" in text
+    assert "AI-powered review status/reason: failed/case_capacity_exceeded" in text
+    assert "sha256:" + "a" * 64 in text
     assert "No provider attempt" not in text
     assert len(text.encode("ascii")) <= 512
