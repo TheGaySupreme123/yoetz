@@ -47,6 +47,7 @@ __all__ = [
     "WRITE_OPERATIONS",
     "continuation_for_local_reason",
     "continuation_for_reason",
+    "continuation_for_semantic_outcome",
     "correction_for_invariant",
     "covered_reason_codes",
     "directive_for",
@@ -91,6 +92,9 @@ _WORKFLOW_ERRORS: Final = "yoetz://guidance/workflow.md#errors-and-continuations
 _WORKFLOW_RECOVERY: Final = "yoetz://guidance/workflow.md#recovery-decision-table-02"
 _TEMPLATES_SETUP: Final = "yoetz://guidance/request-templates.md#setup-and-consent"
 _PUBLICATION_SETS: Final = "yoetz://guidance/publication-policy.md#set-valued-reference-lists"
+_SEMANTIC_COVERAGE: Final = (
+    "yoetz://guidance/coverage-and-receipts.md#check-mode-and-ai-powered-review-coverage"
+)
 _PUBLICATION_RECOVERY: Final = (
     "yoetz://guidance/publication-policy.md#operation-specific-recovery-and-templates"
 )
@@ -387,6 +391,96 @@ _DIRECTIVES: Final = (
         ),
         guidance_uri=_TEMPLATES_SETUP,
         nudge="Yoetz stores the credential locally; never echo, log, or transmit it.",
+    ),
+    # --- provider / AI-powered review outcomes (issue #742) --------------------------------
+    RecoveryDirective(
+        token="semantic_response_invalid",
+        directive=(
+            "The provider answer was not a usable review. Do not resend this check expecting a "
+            "different shape. Run a local-only check, or change the bound provider through the "
+            "documented setup."
+        ),
+        guidance_uri=_SEMANTIC_COVERAGE,
+        nudge="A classified invalid answer is not a finding and carries no provider text.",
+    ),
+    RecoveryDirective(
+        token="semantic_response_truncated",
+        directive=(
+            "The provider cut the answer short or overran the admitted size. Narrow the claim or "
+            "obligation scope and run one new check under a NEW request_id. Do not resend the "
+            "same body."
+        ),
+        guidance_uri=_SEMANTIC_COVERAGE,
+        nudge="The in-job repair retry, if admitted, was already spent on this result.",
+    ),
+    RecoveryDirective(
+        token="semantic_credential_rejected",
+        directive=(
+            "The bound provider credential was rejected, so this job will not retry. Run the "
+            "documented provider credential ceremony, then run the check again under a NEW "
+            "request_id."
+        ),
+        guidance_uri=_TEMPLATES_SETUP,
+        nudge="Do not echo, log, or transmit the credential, and do not resend this check.",
+    ),
+    RecoveryDirective(
+        token="semantic_capacity_exceeded",
+        directive=(
+            "The review case or provider quota exceeded an admitted bound, so no usable review "
+            "ran. Narrow the claim or obligation scope, or wait for quota, then run one new "
+            "check."
+        ),
+        guidance_uri=_SEMANTIC_COVERAGE,
+        nudge="Do not resend the same case expecting a larger admitted bound.",
+    ),
+    RecoveryDirective(
+        token="semantic_timeout",
+        directive=(
+            "This review job already spent its timeout retry budget. Take this answer: disclose "
+            "the recorded semantic_status and semantic_reason. Do not start a second job to "
+            "confirm the same gap."
+        ),
+        guidance_uri=_SEMANTIC_COVERAGE,
+        nudge="A timeout is a coverage gap, not a retry problem.",
+    ),
+    RecoveryDirective(
+        token="semantic_refused",
+        directive=(
+            "The provider refused the review. Do not resend this check. For optional review, "
+            "continue with a local-only check and disclose the recorded semantic_status and "
+            "semantic_reason."
+        ),
+        guidance_uri=_SEMANTIC_COVERAGE,
+        nudge="A refusal is terminal inside the job; a fresh request is a fresh gamble.",
+    ),
+    RecoveryDirective(
+        token="semantic_rate_limited",
+        directive=(
+            "This review job already spent its rate-limit retry budget. Wait, then run one new "
+            "check under a NEW request_id, or continue with a local-only check and disclose the "
+            "gap."
+        ),
+        guidance_uri=_SEMANTIC_COVERAGE,
+        nudge="The recorded reason names the retry outcome, not a diagnosis of the work.",
+    ),
+    RecoveryDirective(
+        token="semantic_transport_retry",
+        directive=(
+            "The provider transport failed after this job spent its retry budget. Inspect the "
+            "local service, then run one new check under a NEW request_id or continue "
+            "local-only and disclose the gap."
+        ),
+        guidance_uri=_SEMANTIC_COVERAGE,
+        nudge="Do not treat a transport gap as proof the work under review is wrong.",
+    ),
+    RecoveryDirective(
+        token="semantic_coordinator_review",
+        directive=(
+            "A fault inside Yoetz stopped the review. Inspect service diagnostics for this "
+            "check request_id. Null provenance does not prove that no provider call occurred."
+        ),
+        guidance_uri=_SEMANTIC_COVERAGE,
+        nudge="This names a Yoetz fault, never a finding about the work under review.",
     ),
     RecoveryDirective(
         token="consent_outcome_unconfirmed",
@@ -850,6 +944,67 @@ def timeout_operation_kind(
     return "read"
 
 
+# Adapter-boundary failure classes that distinguish a rejected credential from a
+# generic transport gap. These tokens are resolved at render time from recorded
+# provenance; they are not public SemanticReason values and do not bump frozen
+# check-result schemas (issue #742).
+_FAILURE_CLASS_CONTINUATIONS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "authentication": "semantic_credential_rejected",
+        "authorization": "semantic_credential_rejected",
+    }
+)
+
+# Public SemanticReason values that reach an agent-facing check, receipt, or
+# status surface. Predispatch "not configured" reasons reuse provider_setup_required.
+_SEMANTIC_REASON_CONTINUATIONS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "response_schema_invalid": "semantic_response_invalid",
+        "semantic_judgment_rejected": "semantic_response_invalid",
+        "response_content_invalid": "semantic_response_truncated",
+        "case_capacity_exceeded": "semantic_capacity_exceeded",
+        "provider_quota_exhausted": "semantic_capacity_exceeded",
+        "provider_timeout": "semantic_timeout",
+        "provider_refused": "semantic_refused",
+        "provider_rate_limited": "semantic_rate_limited",
+        "transport_unavailable": "semantic_transport_retry",
+        "outcome_unknown": "semantic_transport_retry",
+        "coordinator_failure": "semantic_coordinator_review",
+        "credential_unavailable": "provider_setup_required",
+        "provider_not_configured": "provider_setup_required",
+        "local_model_not_configured": "provider_setup_required",
+    }
+)
+
+
+def continuation_for_semantic_outcome(
+    status: object = None,
+    reason: object = None,
+    *,
+    failure_class: object = None,
+) -> str | None:
+    """Return the recovery token for a recorded AI-powered review outcome.
+
+    Classification happens at the adapter boundary into closed failure-class
+    tokens; this lookup never reads provider or caller text. A rejected
+    credential is distinguished from transport failure by ``failure_class``,
+    not by finding count or raw provider output (issue #742).
+    """
+
+    del status  # Status is accepted for call-site symmetry; the reason pair is closed.
+    class_token = None
+    if failure_class is not None:
+        class_value = getattr(failure_class, "value", failure_class)
+        if type(class_value) is str:
+            class_token = _FAILURE_CLASS_CONTINUATIONS.get(class_value)
+    if class_token is not None:
+        return class_token
+    reason_value = getattr(reason, "value", reason)
+    if type(reason_value) is not str:
+        return None
+    return _SEMANTIC_REASON_CONTINUATIONS.get(reason_value)
+
+
 def continuation_for_reason(
     reason_code: object, *, operation_kind: TimeoutOperationKind | None = None
 ) -> str | None:
@@ -953,6 +1108,8 @@ def _check_registry() -> None:
         set(_REASON_CONTINUATIONS.values())
         | set(_LOCAL_REASON_CONTINUATIONS.values())
         | {token for _, token in LOCAL_REASON_CONTINUATION_PREFIXES}
+        | set(_SEMANTIC_REASON_CONTINUATIONS.values())
+        | set(_FAILURE_CLASS_CONTINUATIONS.values())
     )
     if mapped_tokens - CONTINUATION_TOKENS:
         raise RuntimeError("recovery_reason_maps_to_unregistered_token")

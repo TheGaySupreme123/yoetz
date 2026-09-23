@@ -1130,6 +1130,12 @@ stdout is not a TTY; its failure keeps the exact wire body on stdout and writes 
 lines to stderr. This is CLI behavior shared by every host; no Claude Code-specific behavior is
 configured.
 
+**Provider outcomes (issue #742).** A check whose AI-powered review failed carries a
+`continuation_for_semantic_outcome` token in the shared CLI and MCP check projections. Claude
+Code depends on the MCP text channel, so the token and, when the 512-byte budget allows, the
+directive appear there. Raw provider text never reaches that projection. No Claude-specific
+recovery wording is configured.
+
 ### Structural review progress (#571 A2)
 
 Decision: supported through the shared MCP `status` tool with no Claude Code-specific behavior,

@@ -5340,14 +5340,7 @@ class ObservationCoordinator:
                         in snapshot.confidence_coverage.known_gaps
                         else "unavailable"
                     ),
-                    semantic_state=(
-                        "ready"
-                        if any(
-                            item.origin == "semantic_model_derived"
-                            for item in snapshot.ranked_items
-                        )
-                        else "disabled"
-                    ),
+                    semantic_state=snapshot.semantic_attempt_state,
                     freshness=(
                         "current" if not snapshot.confidence_coverage.known_gaps else "partial"
                     ),

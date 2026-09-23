@@ -12,6 +12,7 @@ from typing import Final, Protocol, cast
 from yoetz.domain.findings import FINDING_KIND_TRAITS, FindingId, FindingKind, finding_id
 from yoetz.domain.observation import (
     AdviceItem,
+    AdviceSemanticState,
     AdviceSnapshot,
     ObservationEnvelope,
     ObservationLifecycle,
@@ -49,6 +50,7 @@ from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
 __all__ = [
     "ADVICE_SEMANTIC_PENDING_GAP",
     "ADVICE_SEMANTIC_UNAVAILABLE_GAP",
+    "semantic_state_from_addon",
     "SemanticAdviceScheduler",
     "STANDING_MACHINE_ACTIONS",
     "ObservationAdviceBuildInput",
@@ -142,6 +144,20 @@ class ObservationAdviceSemanticAddon:
     provider_identity: str | None = None
     attempt_receipt: str | None = None
     failure_reason: str | None = None
+
+
+def semantic_state_from_addon(
+    addon: ObservationAdviceSemanticAddon | None,
+) -> AdviceSemanticState:
+    """Project recorded attempt status, never finding count (issue #742)."""
+
+    if addon is None:
+        return "disabled"
+    if addon.failure_reason is None:
+        return "ready"
+    if addon.failure_reason == _ADVICE_SEMANTIC_PENDING_REASON:
+        return "unavailable"
+    return "failed"
 
 
 class SemanticAdvicePort(Protocol):
@@ -496,6 +512,8 @@ def should_reissue_advice(
         # Lower priority number is higher severity in FindingKind traits.
         return True
     if unresolved_after_work:
+        return True
+    if prior.semantic_attempt_state != candidate.semantic_attempt_state:
         return True
     return prior.ranked_finding_ids != candidate.ranked_finding_ids
 
@@ -861,7 +879,7 @@ def build_observation_advice_snapshot(
     basis = evidence_basis_digest(candidates, input_value.envelopes, extra=basis_extra)
     coverage = _coverage(
         observation_qualified=observation_qualified,
-        semantic=semantic is not None and bool(semantic_ids),
+        semantic=semantic is not None and semantic.failure_reason is None,
         gaps=input_value.gaps,
         additional_gaps=additional_gaps,
     )
@@ -900,7 +918,7 @@ def build_observation_advice_snapshot(
         frontier = _freshness_frontier(input_value.envelopes, basis)
         coverage = _coverage(
             observation_qualified=observation_qualified,
-            semantic=bool(semantic_ids),
+            semantic=semantic is not None and semantic.failure_reason is None,
             gaps=input_value.gaps,
             additional_gaps=additional_gaps,
         )
@@ -937,6 +955,7 @@ def build_observation_advice_snapshot(
         freshness_frontier=frontier,
         suppression_identity=suppression,
         ranked_items=tuple(items),
+        semantic_attempt_state=semantic_state_from_addon(semantic),
     )
     if not should_reissue_advice(input_value.prior_snapshot, snapshot):
         return input_value.prior_snapshot

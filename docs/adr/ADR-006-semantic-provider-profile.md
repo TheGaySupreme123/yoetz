@@ -1,6 +1,8 @@
 # ADR-006 — AI-powered review provider profiles behind the privacy gateway
 
-**Status:** Working decision revised 2026-08-30 (issue #404 external-runtime authority). Ratification requires the privacy/egress gates in
+**Status:** Working decision revised 2026-08-30 (issue #404 external-runtime authority). Amended
+2026-09-23 for issue #742 (adapter-boundary failure tokens, credential-retry exclusion, and
+attempt-status projection). Ratification requires the privacy/egress gates in
 ADR-009 plus recorded capability fixtures against every advertised provider/model/endpoint profile.
 **Implemented by:** `src/yoetz/ports/semantic.py`,
 `src/yoetz/ports/privacy.py`, `src/yoetz/application/egress.py`,
@@ -88,7 +90,10 @@ and AI-powered review/privacy capability and conformance tests.
    credential-handle identity, and no provider plaintext is retained. A second content-invalid
    answer is terminal and both attempts remain in accounting. `response_schema_invalid`,
    `semantic_judgment_rejected`, refusal, policy or human denial, invalid case, stale frontier,
-   quota exhaustion, secret or never-send detection, and exhausted authority are never retried.
+   quota exhaustion, secret or never-send detection, exhausted authority, and a rejected
+   credential (`failure_class=authentication` or `authorization`) are never retried. A rejected
+   credential may still surface as public reason `transport_unavailable` — the transport catch-all
+   — so retry consults the recorded `failure_class`, not the public reason alone (issue #742).
    One durable attempt and one
    privacy receipt, SDK client, custom transport, and credential handle are created per physical
    dispatch. For `confirm_every_request`, each physical retry also requires a fresh exact foreground
@@ -173,6 +178,18 @@ and AI-powered review/privacy capability and conformance tests.
     prove provider behavior. Unknown, known-broad, or stale status removes the recommendation badge
     and trips that guard; an informed user may explicitly turn the guard off through a custom policy,
     and a fork may change the rule without inheriting upstream privacy/support evidence.
+15. **Adapter classification and attempt-status projection (issue #742):** every provider
+    failure is classified at the adapter boundary into the closed `SemanticFailureClass` set.
+    Public `SemanticReason` values stay the existing closed pair vocabulary; renderers resolve
+    recovery through `continuation_for_semantic_outcome` from that pair plus `failure_class`.
+    A successful review with zero findings is `semantic_status=succeeded` /
+    `semantic_reason=semantic_completed` on the check path, and `semantic_state=ready` on
+    advice/status/history. That ready state is derived from the recorded attempt (an addon
+    whose `failure_reason` is absent), never from finding count. Absence of
+    `semantic_model_derived` advice items is not evidence that no attempt occurred.
+    `disabled` means no attempt was requested or configured; `unavailable` means a durable
+    attempt is still pending; `failed` means a terminal attempt finished without validated
+    output. Frozen check-result schemas are unchanged.
 
 ## Review packet and agent loop
 

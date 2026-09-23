@@ -1360,8 +1360,10 @@ corrected body once under a new `request_id`. The regression case is
 `tests/unit/mcp/test_recovery_directive_delivery.py`, which replays that exact body.
 
 Provider-side failures reaching Codex through the app-server path keep their existing stage-typed
-diagnostics (issue #529). Classifying those failures into typed recovery tokens is tracked
-separately on issue #742 and is not part of ADR-030's first implementation.
+diagnostics (issue #529). Those failures also resolve through the shared recovery registry
+(`continuation_for_semantic_outcome`, issue #742): the adapter's closed `failure_class` and the
+recorded `semantic_reason` select a frozen directive, and raw provider text never reaches it.
+No Codex-specific recovery wording is configured.
 
 ### Compatible newer transcript metadata (0.2.3)
 

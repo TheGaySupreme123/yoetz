@@ -474,6 +474,18 @@ ADMITTED_CONTINUATION_TOKENS: frozenset[str] = frozenset(
         "pending_decision_refresh",
         "provider_setup_required",
         "vault_unlock_required",
+        # Provider / AI-powered review outcomes (issue #742). Resolved at render
+        # time from recorded semantic_reason and adapter failure_class; not
+        # attached by reason-code map.
+        "semantic_capacity_exceeded",
+        "semantic_coordinator_review",
+        "semantic_credential_rejected",
+        "semantic_rate_limited",
+        "semantic_refused",
+        "semantic_response_invalid",
+        "semantic_response_truncated",
+        "semantic_timeout",
+        "semantic_transport_retry",
     }
 )
 

@@ -22,6 +22,7 @@ from yoetz.application.observation_advice import (
     minimized_semantic_evidence_packet,
     select_advice_item,
     select_standing_item,
+    semantic_state_from_addon,
     should_reissue_advice,
 )
 from yoetz.application.observation_coordinator import (
@@ -429,6 +430,68 @@ def test_semantic_text_clipping_is_an_explicit_coverage_gap() -> None:
             "semantic_evidence": "sha256:" + "a" * 64,
         },
     )
+
+
+def test_semantic_state_from_addon_uses_attempt_status_not_finding_count() -> None:
+    assert semantic_state_from_addon(None) == "disabled"
+    pending = ObservationAdviceSemanticAddon(
+        finding_ids=(),
+        evidence_digest=None,
+        failure_reason="pending",
+    )
+    failed = ObservationAdviceSemanticAddon(
+        finding_ids=(),
+        evidence_digest=None,
+        failure_reason="transport_unavailable",
+    )
+    succeeded_empty = ObservationAdviceSemanticAddon(
+        finding_ids=(),
+        evidence_digest="sha256:" + "b" * 64,
+        summaries=(),
+        details=(),
+    )
+    succeeded_with_findings = ObservationAdviceSemanticAddon(
+        finding_ids=(finding_id("fnd_00000000-0000-4000-8000-000000000009"),),
+        evidence_digest="sha256:" + "c" * 64,
+        summaries=("note",),
+        details=("detail",),
+    )
+    assert semantic_state_from_addon(pending) == "unavailable"
+    assert semantic_state_from_addon(failed) == "failed"
+    assert semantic_state_from_addon(succeeded_empty) == "ready"
+    assert semantic_state_from_addon(succeeded_with_findings) == "ready"
+
+
+def test_successful_empty_review_is_ready_not_disabled() -> None:
+    envelope = _envelope("hook:fail", {"tool_name": "shell", "exit_status": 2, "correlation_id": "x1"})
+    disabled = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=(envelope,),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            has_real_observation=True,
+        )
+    )
+    ready = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=(envelope,),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            has_real_observation=True,
+            semantic_addon=ObservationAdviceSemanticAddon(
+                finding_ids=(),
+                evidence_digest="sha256:" + "b" * 64,
+                summaries=(),
+                details=(),
+            ),
+        )
+    )
+    assert disabled is not None
+    assert ready is not None
+    assert disabled.semantic_attempt_state == "disabled"
+    assert ready.semantic_attempt_state == "ready"
+    assert not any(item.origin == "semantic_model_derived" for item in ready.ranked_items)
+    assert should_reissue_advice(disabled, ready)
 
 
 def test_empty_semantic_result_does_not_create_deterministic_fallback() -> None:

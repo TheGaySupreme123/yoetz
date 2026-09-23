@@ -27,6 +27,7 @@ from yoetz.protocol.models import (
 from yoetz.protocol.recovery import (
     RecoveryDirective,
     continuation_for_local_reason,
+    continuation_for_semantic_outcome,
     correction_for_invariant,
     directive_for,
 )
@@ -60,6 +61,31 @@ def _count(value: str | None) -> str:
     """Render an unknown readiness count as unknown, never as a bare ``None`` or a zero."""
 
     return "unavailable" if value is None else value
+
+
+def _failure_class_from_provenance(provenance: object) -> object | None:
+    if provenance is None:
+        return None
+    if isinstance(provenance, Mapping):
+        return provenance.get("failure_class")
+    return getattr(provenance, "failure_class", None)
+
+
+def _semantic_outcome_recovery_lines(
+    *,
+    status: object,
+    reason: object,
+    provenance: object = None,
+) -> list[str]:
+    token = continuation_for_semantic_outcome(
+        status=status,
+        reason=reason,
+        failure_class=_failure_class_from_provenance(provenance),
+    )
+    directive = directive_for(token)
+    if directive is None:
+        return []
+    return render_recovery_directive_lines(directive)
 
 
 def _projected_text(value: str | OmittedContentModel | None) -> str:
@@ -103,13 +129,13 @@ def render_human_check(result: CheckSuccessModel) -> str:
         f"AI-powered review: {_token(result.semantic_status)} ({_token(result.semantic_reason)})",
         render_human_findings(result.findings),
     ]
-    if _token(result.semantic_reason) == "case_capacity_exceeded":
-        lines.append("No provider attempt was made. Narrow claim/obligation scope for a new check.")
-    elif _token(result.semantic_reason) == "coordinator_failure":
-        lines.append(
-            f"Inspect yoetz service diagnostics --request-id {result.request_id}. "
-            "Null provenance does not prove that no provider call occurred."
-        )
+    recovery = _semantic_outcome_recovery_lines(
+        status=result.semantic_status,
+        reason=result.semantic_reason,
+        provenance=result.semantic_provenance,
+    )
+    if recovery:
+        lines.extend(recovery)
     suppressed = int(result.suppressed_count)
     if suppressed:
         lines.append(f"Suppressed findings: {suppressed}")
