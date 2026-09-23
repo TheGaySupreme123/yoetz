@@ -720,6 +720,12 @@ class Lane:
             fatal=True,
         )
 
+        if self.fireworks_key:
+            # The running service composed provider readiness when the vault became ready,
+            # before the endpoint and credential existed; storing the credential verifies it
+            # live but does not refresh that composition. The product leaves that to the next
+            # unlock or restart, so do the restart here and read readiness from the new service.
+            self._restart_and_unlock(phase, "_after_setup")
         _, provider_status = self._yoetz(
             "provider_status", phase, ["provider", "status", "--json"], expect_zero=False
         )
@@ -1495,33 +1501,43 @@ class Lane:
 
     # ---- lifecycle
 
-    def phase_lifecycle(self) -> None:
-        phase = "lifecycle"
+    def _restart_and_unlock(self, phase: str, suffix: str) -> dict[str, Any]:
+        """Restart the service and unlock it; the restarted service re-reads provider readiness."""
+
         assert self.launcher is not None
-        if self.skip_restart:
-            self._record("service_restart", phase, status="skip", reason="skip_restart")
-            return
         self._yoetz(
-            "service_restart", phase, ["service", "restart", "--json"], fatal=True, timeout=120.0
+            f"service_restart{suffix}",
+            phase,
+            ["service", "restart", "--json"],
+            fatal=True,
+            timeout=120.0,
         )
-        status = self._wait_for_service("service_status_after_restart", phase)
+        status = self._wait_for_service(f"service_status_after_restart{suffix}", phase)
         if status.get("state") == "locked":
             self._ceremony_step(
-                "service_unlock",
+                f"service_unlock{suffix}",
                 phase,
                 [str(self.launcher), "service", "unlock", "--json"],
                 [Reply(PROMPT_PASSPHRASE, self.passphrase)],
                 fatal=True,
             )
-            status = self._wait_for_service("service_status_after_unlock", phase)
+            status = self._wait_for_service(f"service_status_after_unlock{suffix}", phase)
         if status.get("state") != "ready":
             self._record(
-                "service_ready_after_restart",
+                f"service_ready_after_restart{suffix}",
                 phase,
                 status="fail",
                 reason=str(status.get("state_reason") or status.get("state")),
                 fatal=True,
             )
+        return status
+
+    def phase_lifecycle(self) -> None:
+        phase = "lifecycle"
+        if self.skip_restart:
+            self._record("service_restart", phase, status="skip", reason="skip_restart")
+            return
+        self._restart_and_unlock(phase, "")
         after = self._observe_status("observe_status_after_restart", phase)
         consent_retained = after is not None and after.get("mapping_present") is not None
         self._record(

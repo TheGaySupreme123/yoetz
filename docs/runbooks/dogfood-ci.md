@@ -68,7 +68,11 @@ trusted-console ceremonies from a pseudo-terminal. Phases, in order, each record
    runtime-pinned root), `service isolation`, `instance status`, `version`, `service run`,
    `service initialize-passphrase`, `provider endpoint --provider fireworks`,
    `provider credential set`, `privacy setup` (recipe 3, Assisted review, when a credential
-   exists; Private otherwise), `provider status`, `setup status`.
+   exists; Private otherwise), then — with a credential — `service restart` plus
+   `service unlock`, because the running service composes provider readiness only when the
+   vault becomes ready and a credential stored afterwards is verified live but not reflected
+   in `provider status` until the next unlock or restart; then `provider status`,
+   `setup status`.
 2. **connect** — the host connection per the table, then `observe grant --workspace <project>`
    and `observe status`.
 3. **ledger** — `start` (create), `publish-work` (dry run, then real: one plan and one
