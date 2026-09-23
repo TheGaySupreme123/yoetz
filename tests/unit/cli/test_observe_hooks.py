@@ -3481,8 +3481,8 @@ def test_recovery_rejects_cross_workspace_binding_during_revalidation_for_all_ho
     )
 
     assert outcome.mapping is None
-    assert outcome.reason == "auto_attach_conflict"
-    assert [request.mode for request in client.requests] == ["create_or_attach"]
+    assert outcome.reason == "auto_attach_recovery_busy"
+    assert client.requests == []
     assert store.codex_sessions_for_workspace(second_workspace) == (previous,)
 
 
@@ -3555,8 +3555,8 @@ def test_recovery_rejects_a_changed_nonselected_candidate_for_all_hosts(
     )
 
     assert outcome.mapping is None
-    assert outcome.reason == "auto_attach_conflict"
-    assert [request.mode for request in client.requests] == ["create_or_attach"]
+    assert outcome.reason == "auto_attach_recovery_busy"
+    assert client.requests == []
     changed = observe_hooks_module.load_mapping(newer, _state=tmp_path)
     assert changed is not None and changed.yoetz_task_id == other_task
 
@@ -3723,8 +3723,8 @@ def test_workspace_recovery_does_not_attach_while_predecessor_lock_is_held(
         )
 
     assert outcome.mapping is None
-    assert outcome.reason == "auto_attach_conflict"
-    assert [request.mode for request in client.requests] == ["create_or_attach"]
+    assert outcome.reason == "auto_attach_recovery_busy"
+    assert client.requests == []
 
 
 @pytest.mark.parametrize(
@@ -3994,8 +3994,8 @@ def test_locked_nonselected_predecessor_blocks_recovery_until_its_state_is_stabl
         )
 
     assert outcome.mapping is None
-    assert outcome.reason == "auto_attach_conflict"
-    assert [request.mode for request in client.requests] == ["create_or_attach"]
+    assert outcome.reason == "auto_attach_recovery_busy"
+    assert client.requests == []
     for session_id in (older, newer):
         predecessor = observe_hooks_module.load_mapping(session_id, _state=tmp_path)
         assert predecessor is not None
@@ -4161,7 +4161,7 @@ def test_recovery_scan_is_not_repeated_while_the_predecessor_lock_is_held(
         outcome = _recover(store, workspace, locator, "codex-next-1", _state=tmp_path)
 
     assert outcome.mapping is None
-    assert outcome.reason == "auto_attach_conflict"
+    assert outcome.reason == "auto_attach_recovery_busy"
     assert sorted(loads) == sorted(predecessors)
     # Nothing was consumed, so nothing was pruned.
     assert store.codex_session_lifecycles_for_workspace(workspace) == tuple(

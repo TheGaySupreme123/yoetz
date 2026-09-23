@@ -30,9 +30,7 @@ from yoetz.domain.observation import (
     ObservationSource,
     observation_ingest_result_to_json,
 )
-from yoetz.protocol.errors import PublicErrorCode
-from yoetz.protocol.ids import IdKind, new_id
-from yoetz.protocol.models import OperationFailureModel, StartRequest
+from yoetz.protocol.models import StartRequest
 
 _START_IDS = {
     "task_id": "tsk_1b4e28ba-2fa1-4d3b-8f0a-0c1d2e3f4a5b",
@@ -71,25 +69,10 @@ class _RecoveryBarrierClient:
         assert isinstance(request, StartRequest)
         self.requests.append(request)
         self._start_count += 1
-        if self._start_count == 1:
-            assert request.mode == "create_or_attach"
-            self.rpc_started.set()
-            await asyncio.to_thread(self.release.wait, 5)
-            return OperationFailureModel.model_validate(
-                {
-                    "protocol_version": "0.1",
-                    "schema_version": "1.0.0",
-                    "ok": False,
-                    "error": {
-                        "code": PublicErrorCode.SESSION_CONFLICT.value,
-                        "message": "workspace occupied",
-                        "retryable": False,
-                        "correlation_id": new_id(IdKind.CORRELATION),
-                        "safe_details": {"reason_code": "workspace_task_exists"},
-                    },
-                }
-            )
+        assert self._start_count == 1
         assert request.mode == "attach"
+        self.rpc_started.set()
+        await asyncio.to_thread(self.release.wait, 5)
         return SimpleNamespace(
             ok=True,
             frontier=SimpleNamespace(sequence="4", head_digest="sha256:" + "b" * 64),
