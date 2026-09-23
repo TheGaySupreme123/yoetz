@@ -420,8 +420,14 @@ class Lane:
         timeout: float = 300.0,
     ) -> tuple[Step, dict[str, Any] | None]:
         assert self.launcher is not None
+        # Repository-bound views (privacy grant, provider readiness, host admission) read the
+        # working directory, so every product command runs from the probe project unless a
+        # caller names another directory.
         rc, out, err, ms = self._run(
-            [str(self.launcher), *args], cwd=cwd, stdin=stdin, timeout=timeout
+            [str(self.launcher), *args],
+            cwd=self.project if cwd is None else cwd,
+            stdin=stdin,
+            timeout=timeout,
         )
         parsed = _parse_json(out)
         status = "pass" if (rc == 0 or not expect_zero) else "fail"
@@ -452,7 +458,13 @@ class Lane:
         timeout: float = 240.0,
     ) -> tuple[Step, dict[str, Any] | None]:
         started = time.monotonic()
-        result = run_ceremony(argv, replies, cwd=cwd, env=_clean_env(), timeout=timeout)
+        result = run_ceremony(
+            argv,
+            replies,
+            cwd=self.project if cwd is None else cwd,
+            env=_clean_env(),
+            timeout=timeout,
+        )
         ms = int((time.monotonic() - started) * 1000)
         parsed = _parse_json(result.transcript.replace("\r\n", "\n"))
         status = "pass" if result.exit_code == 0 else "fail"
@@ -482,7 +494,9 @@ class Lane:
         last_err = ""
         started = time.monotonic()
         while True:
-            rc, out, err, _ = self._run([str(self.launcher), "service", "status", "--json"])
+            rc, out, err, _ = self._run(
+                [str(self.launcher), "service", "status", "--json"], cwd=self.project
+            )
             parsed = _parse_json(out)
             if rc == 0 and parsed is not None:
                 self._record(
