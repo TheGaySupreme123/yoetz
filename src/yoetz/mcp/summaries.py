@@ -565,6 +565,12 @@ def summary_for_status(envelope: object) -> str:
         f"Status view: {view}; {_frontier_clause(source)}; freshness: {freshness}; "
         f"open obligations: {obligations}; "
     )
+    if view == "operation":
+        operation_clause = _operation_progress_clause(source)
+        if len((prefix + operation_clause).encode("ascii")) > _MAX_SUMMARY_BYTES - 128:
+            # Pathological counts cannot push the fixed suffix out of the bounded summary.
+            operation_clause = "semantic progress: see structured page; "
+        prefix += operation_clause
     suffix = (
         f"unanswered findings: {unanswered}; "
         f"receipt-blocking findings: {receipt_blocking}; reported gaps: {gaps}."
@@ -576,6 +582,35 @@ def summary_for_status(envelope: object) -> str:
         byte_budget=_MAX_SUMMARY_BYTES - len((prefix + suffix).encode("ascii")),
     )
     return _bounded(prefix + clause + suffix)
+
+
+def _operation_progress_clause(source: Mapping[str, JsonValue]) -> str:
+    """Name the operation state and structural review progress with allowlisted values only."""
+
+    page = source.get("page")
+    if not isinstance(page, Mapping):
+        return "operation: unavailable; "
+    typed = cast(Mapping[str, JsonValue], page)
+    clause = (
+        f"operation state: {_safe_token(typed.get('state'))}; "
+        f"kind: {_safe_token(typed.get('operation_kind'), fallback='none')}; "
+    )
+    progress = typed.get("semantic_progress")
+    if not isinstance(progress, Mapping):
+        return clause + "semantic progress: none; "
+    fields = cast(Mapping[str, JsonValue], progress)
+    clause += (
+        f"semantic phase: {_safe_token(fields.get('phase'))}; "
+        f"attempt: {_safe_count(fields.get('attempt_ordinal'))}; "
+        f"condition: {_safe_token(fields.get('condition'))}; "
+        f"elapsed ms: {_safe_count(fields.get('elapsed_ms'))}; "
+    )
+    if fields.get("condition") == "terminal":
+        return clause + (
+            f"outcome: {_safe_token(fields.get('terminal_outcome'))} "
+            f"({_safe_token(fields.get('terminal_reason'))}); "
+        )
+    return clause + f"remaining ms: {_safe_count(fields.get('remaining_ms'))}; "
 
 
 def _summary_for_multi_agent_status(source: Mapping[str, JsonValue], view: str) -> str:

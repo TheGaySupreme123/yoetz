@@ -1081,6 +1081,15 @@ input, or per-request selector, so the decision for this host is "supported, unc
 Recording a completion claim is the only way a check requests the final profile.
 
 
+### Structural review progress (#571 A2)
+
+Decision: supported through the shared MCP `status` tool with no Cursor-specific behavior,
+registration, or route input. Call `status` with `view: "operation"` and the check request ID while a long review runs; the Cursor route receives the exact canonical JSON copy of the result as text, so `semantic_progress` is visible even when Cursor drops structured content. The phase vocabulary, deadline, and terminal outcome are
+service facts, identical for every host; progress never includes provider text, tokens, reasoning,
+or account identity. A read from a different session or writer of the same task may return
+retryable `BUNDLE_BUSY` while the check runs. This is shared service behavior, not evidence of a
+fresh installed native Cursor dogfood run.
+
 ### Large tasks and AI-powered review failure recovery (#674–#676)
 
 This host uses the shared service status snapshot cache and bounded AI-powered review reference

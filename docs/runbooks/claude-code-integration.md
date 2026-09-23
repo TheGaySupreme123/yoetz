@@ -1130,6 +1130,15 @@ stdout is not a TTY; its failure keeps the exact wire body on stdout and writes 
 lines to stderr. This is CLI behavior shared by every host; no Claude Code-specific behavior is
 configured.
 
+### Structural review progress (#571 A2)
+
+Decision: supported through the shared MCP `status` tool with no Claude Code-specific behavior,
+registration, or route input. Call `status` with `view: "operation"` and the check request ID while a long review runs; Claude Code receives the privacy-minimized text summary, which names the operation state, phase, attempt, condition, elapsed and remaining milliseconds, and the structured page carries every field. The phase vocabulary, deadline, and terminal outcome are
+service facts, identical for every host; progress never includes provider text, tokens, reasoning,
+or account identity. A read from a different session or writer of the same task may return
+retryable `BUNDLE_BUSY` while the check runs. This is shared service behavior, not evidence of a
+fresh installed native Claude Code dogfood run.
+
 ## Cold service attachment and recovery (issue #670)
 
 Claude Code SessionStart returns its result through synchronous `additionalContext`, within

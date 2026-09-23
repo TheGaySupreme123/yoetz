@@ -154,6 +154,7 @@ from yoetz.ports.ledger import (
     SemanticAttemptRecord,
     SemanticDisclosureWait,
     SemanticJobRecord,
+    SemanticProgressRecord,
     StoredProjection,
 )
 from yoetz.ports.objects import (
@@ -182,10 +183,12 @@ from yoetz.protocol.coverage import (
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind
 from yoetz.protocol.models import (
+    SEMANTIC_PROGRESS_PHASE_RANK,
     CheckPolicyExecutionModel,
     CheckScopeModel,
     CoverageModel,
     FrontierModel,
+    SemanticProgressPhase,
     SemanticReason,
     SemanticStatus,
     StatusAssignmentItemModel,
@@ -362,6 +365,9 @@ class MemoryLedgerState:
     # Keyed by job_id: at most one disclosure wait per AI-powered review job.
     disclosure_waits: dict[str, SemanticDisclosureWait] = field(default_factory=lambda: {})
     object_refs: dict[str, ObjectRef] = field(default_factory=lambda: {})
+    # Keyed by job_id: the last non-terminal structural progress row (issue #571 A2). The
+    # terminal phase is derived from the job row itself, never stored here.
+    semantic_progress: dict[str, SemanticProgressRecord] = field(default_factory=lambda: {})
     # Transient freeze-acquisition holds: never persisted; a crash mid-freeze must drop them.
     check_reservations: dict[tuple[str, str], _CheckReservation] = field(default_factory=lambda: {})
 
@@ -2834,6 +2840,85 @@ class MemoryLedgerAdapter:
             resolved = replace(wait, state="resolved", resolved_at=_now(self._clock))
             self._state.disclosure_waits[job_id] = resolved
             return resolved
+
+    async def begin_semantic_progress(
+        self, job_id: str, queued_at: datetime, deadline_at: datetime
+    ) -> None:
+        progress = SemanticProgressRecord(
+            job_id, 0, SemanticProgressPhase.QUEUED, queued_at, queued_at, deadline_at
+        )
+        async with self._lock:
+            job = self._state.jobs.get(job_id)
+            if (
+                job is None
+                or job.state not in {"queued", "leased"}
+                or job_id in self._state.semantic_progress
+            ):
+                return
+            self._state.semantic_progress[job_id] = progress
+
+    async def advance_semantic_progress(
+        self,
+        handle: SemanticAttemptHandle,
+        phase: SemanticProgressPhase,
+        observed_at: datetime,
+    ) -> bool:
+        if (
+            type(handle) is not SemanticAttemptHandle
+            or type(phase) is not SemanticProgressPhase
+            or phase is SemanticProgressPhase.TERMINAL
+            or type(observed_at) is not datetime
+        ):
+            raise _error(PublicErrorCode.INVALID_REQUEST)
+        async with self._lock:
+            job = self._state.jobs.get(handle.job_id)
+            current = self._state.semantic_progress.get(handle.job_id)
+            if (
+                job is None
+                or current is None
+                or job.state != "leased"
+                or job.active_attempt_id != handle.attempt_id
+            ):
+                return False
+            rank = SEMANTIC_PROGRESS_PHASE_RANK
+            if (handle.attempt_ordinal, rank[phase]) <= (
+                current.attempt_ordinal,
+                rank[current.phase],
+            ):
+                return False
+            self._state.semantic_progress[handle.job_id] = replace(
+                current,
+                attempt_ordinal=handle.attempt_ordinal,
+                phase=phase,
+                phase_entered_at=max(observed_at, current.phase_entered_at),
+            )
+            return True
+
+    async def load_semantic_progress(
+        self, writer_id: str, operation_id: str
+    ) -> SemanticProgressRecord | None:
+        async with self._lock:
+            matches = tuple(
+                job
+                for job in self._state.jobs.values()
+                if job.writer_id == writer_id and job.operation_id == operation_id
+            )
+            if not matches:
+                return None
+            job = max(matches, key=lambda item: (item.attempt_count, item.job_id))
+            current = self._state.semantic_progress.get(job.job_id)
+            if current is None:
+                return None
+            if job.state in {"queued", "leased"}:
+                return current
+            assert job.terminal_at is not None
+            return replace(
+                current,
+                phase=SemanticProgressPhase.TERMINAL,
+                phase_entered_at=max(job.terminal_at, current.phase_entered_at),
+                terminal_outcome=cast(Literal["succeeded", "failed", "quarantined"], job.state),
+                terminal_reason=job.terminal_code,
+            )
 
     async def renew_leases(self, lease: OperationLease) -> OperationLease:
         async with self._lock:

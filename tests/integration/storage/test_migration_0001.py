@@ -141,11 +141,11 @@ def test_bundle_migration_0014_preserves_event_history_and_admits_current_famili
     bundle = apsw.Connection(":memory:")
     bundle.execute("PRAGMA foreign_keys = ON")
     bundle.execute("PRAGMA trusted_schema = OFF")
-    event_rebuild_version = current_schema_version(BUNDLE_MIGRATIONS)
+    target_version = current_schema_version(BUNDLE_MIGRATIONS)
     event_rebuild_index = next(
         index for index, migration in enumerate(BUNDLE_MIGRATIONS) if migration.version == "0014"
     )
-    main_frontier = event_rebuild_version - 1
+    main_frontier = int(BUNDLE_MIGRATIONS[event_rebuild_index].version) - 1
     with bundle:
         for migration in BUNDLE_MIGRATIONS[:9]:
             bundle.execute(migration.ddl.decode("utf-8"))
@@ -211,9 +211,12 @@ def test_bundle_migration_0014_preserves_event_history_and_admits_current_famili
     report = run_migrations(bundle, BUNDLE_MIGRATIONS, maintenance=None)  # type: ignore[arg-type]
 
     assert report.from_version == main_frontier
-    assert report.to_version == event_rebuild_version
-    assert report.applied_versions == ("0014",)
-    assert bundle.execute("PRAGMA user_version").fetchone() == (event_rebuild_version,)
+    assert report.to_version == target_version
+    assert report.applied_versions == tuple(
+        migration.version for migration in BUNDLE_MIGRATIONS[event_rebuild_index:]
+    )
+    assert report.applied_versions[0] == "0014"
+    assert bundle.execute("PRAGMA user_version").fetchone() == (target_version,)
     assert bundle.execute("PRAGMA foreign_keys").fetchone() == (1,)
     assert bundle.execute("PRAGMA legacy_alter_table").fetchone() == (0,)
     assert bundle.execute("PRAGMA foreign_key_check").fetchone() is None
@@ -227,7 +230,7 @@ def test_bundle_migration_0014_preserves_event_history_and_admits_current_famili
             "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?",
             (child,),
         ).fetchone()
-        assert child_sql is not None and f"events_v{event_rebuild_version}" not in child_sql[0]
+        assert child_sql is not None and "events_v14" not in child_sql[0]
     assert (
         bundle.execute(
             "SELECT canonical_entry, summary_code FROM events WHERE event_id = 'event-1'"

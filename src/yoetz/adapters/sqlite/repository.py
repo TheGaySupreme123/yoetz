@@ -93,6 +93,7 @@ from yoetz.ports.ledger import (
     SemanticAttemptRecord,
     SemanticDisclosureWait,
     SemanticJobRecord,
+    SemanticProgressRecord,
     StoredProjection,
 )
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef, ObjectStorePort
@@ -105,7 +106,13 @@ from yoetz.protocol.coverage import (
     coverage_to_json,
 )
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
-from yoetz.protocol.models import CheckScopeModel, SemanticReason, SemanticStatus
+from yoetz.protocol.models import (
+    SEMANTIC_PROGRESS_PHASE_RANK,
+    CheckScopeModel,
+    SemanticProgressPhase,
+    SemanticReason,
+    SemanticStatus,
+)
 
 __all__ = ["CheckpointReport", "SqliteLedger"]
 
@@ -2363,6 +2370,133 @@ class SqliteLedger:
         result = await self._oracle().resolve_disclosure_wait(job_id)
         await self._sync_after_mutation()
         return result
+
+    def _progress_write_locked(self, statement: str, parameters: tuple[str | int, ...]) -> int:
+        """Run one progress statement in its own owner-fenced write transaction."""
+
+        self._db.execute("BEGIN IMMEDIATE")
+        try:
+            self._verify_owner()
+            self._db.execute(statement, parameters)
+            changed = self._db.changes()
+            self._db.execute("COMMIT")
+        except BaseException:
+            if self._db.get_autocommit() is False:
+                self._db.execute("ROLLBACK")
+            raise
+        return changed
+
+    async def begin_semantic_progress(
+        self, job_id: str, queued_at: datetime, deadline_at: datetime
+    ) -> None:
+        # Validates identifiers and exact-millisecond UTC before any SQL runs.
+        SemanticProgressRecord(
+            job_id, 0, SemanticProgressPhase.QUEUED, queued_at, queued_at, deadline_at
+        )
+        await self._ensure_recovered()
+        queued = format_rfc3339_millis(queued_at)
+        async with self._lock:
+            # Progress rows are written directly rather than through the in-memory oracle: they
+            # are telemetry beside the job, and a completed operation's job is not reloaded into
+            # the oracle after restart, yet its terminal progress must stay readable.
+            self._progress_write_locked(
+                "INSERT INTO semantic_progress(job_id,attempt_ordinal,phase,phase_rank,"
+                "phase_entered_at,queued_at,deadline_at) "
+                "SELECT ?,0,'queued',1,?,?,? WHERE EXISTS ("
+                "SELECT 1 FROM semantic_jobs WHERE job_id=? AND state IN ('queued','leased')) "
+                "ON CONFLICT(job_id) DO NOTHING",
+                (job_id, queued, queued, format_rfc3339_millis(deadline_at), job_id),
+            )
+
+    async def advance_semantic_progress(
+        self,
+        handle: SemanticAttemptHandle,
+        phase: SemanticProgressPhase,
+        observed_at: datetime,
+    ) -> bool:
+        if (
+            type(handle) is not SemanticAttemptHandle
+            or type(phase) is not SemanticProgressPhase
+            or phase is SemanticProgressPhase.TERMINAL
+        ):
+            raise _public_error(PublicErrorCode.INVALID_REQUEST)
+        observed = format_rfc3339_millis(observed_at)
+        rank = SEMANTIC_PROGRESS_PHASE_RANK[phase]
+        await self._ensure_recovered()
+        async with self._lock:
+            changed = self._progress_write_locked(
+                "UPDATE semantic_progress SET attempt_ordinal=?,phase=?,phase_rank=?,"
+                "phase_entered_at=max(phase_entered_at,?) "
+                "WHERE job_id=? AND (attempt_ordinal<? OR (attempt_ordinal=? AND phase_rank<?)) "
+                "AND EXISTS (SELECT 1 FROM semantic_jobs WHERE job_id=? AND state='leased' "
+                "AND active_attempt_id=?)",
+                (
+                    handle.attempt_ordinal,
+                    phase.value,
+                    rank,
+                    observed,
+                    handle.job_id,
+                    handle.attempt_ordinal,
+                    handle.attempt_ordinal,
+                    rank,
+                    handle.job_id,
+                    handle.attempt_id,
+                ),
+            )
+        return changed == 1
+
+    async def load_semantic_progress(
+        self, writer_id: str, operation_id: str
+    ) -> SemanticProgressRecord | None:
+        await self._ensure_recovered()
+        async with self._lock:
+            row = self._db.execute(
+                "SELECT progress.job_id,progress.attempt_ordinal,progress.phase,"
+                "progress.phase_entered_at,progress.queued_at,progress.deadline_at,"
+                "jobs.state,jobs.terminal_code,jobs.terminal_at "
+                "FROM semantic_jobs AS jobs JOIN semantic_progress AS progress "
+                "ON progress.job_id=jobs.job_id "
+                "WHERE jobs.writer_id=? AND jobs.operation_id=? "
+                "ORDER BY jobs.attempt_count DESC, jobs.job_id DESC LIMIT 1",
+                (writer_id, operation_id),
+            ).fetchone()
+        if row is None:
+            return None
+        (
+            job_value,
+            ordinal,
+            phase_value,
+            entered,
+            queued,
+            deadline,
+            job_state,
+            terminal_code,
+            terminal_at,
+        ) = row
+        try:
+            entered_at = parse_rfc3339_millis(cast(str, entered))
+            if job_state in {"queued", "leased"}:
+                return SemanticProgressRecord(
+                    cast(str, job_value),
+                    cast(int, ordinal),
+                    SemanticProgressPhase(cast(str, phase_value)),
+                    entered_at,
+                    parse_rfc3339_millis(cast(str, queued)),
+                    parse_rfc3339_millis(cast(str, deadline)),
+                )
+            ended_at = parse_rfc3339_millis(cast(str, terminal_at))
+            return SemanticProgressRecord(
+                cast(str, job_value),
+                cast(int, ordinal),
+                SemanticProgressPhase.TERMINAL,
+                max(ended_at, entered_at),
+                parse_rfc3339_millis(cast(str, queued)),
+                parse_rfc3339_millis(cast(str, deadline)),
+                cast(Literal["succeeded", "failed", "quarantined"], job_state),
+                SemanticReason(cast(str, terminal_code)),
+            )
+        except (TypeError, ValueError) as exc:
+            raise _public_error(PublicErrorCode.STORAGE_CORRUPT) from exc
 
     async def renew_leases(self, lease: OperationLease) -> OperationLease:
         await self._ensure_recovered()

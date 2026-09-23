@@ -2358,3 +2358,88 @@ def test_factory_builds_the_evaluator_for_the_dispatch_budget_profile(
     assert routine.budget == CodexReviewBudget("routine", "low", 4096)
     assert type(outside) is CodexAppServerEvaluator
     assert outside.budget == CodexReviewBudget("final", "high", 8192)
+
+
+async def _evaluate_recording_progress(
+    monkeypatch: pytest.MonkeyPatch, runtime: _Runtime
+) -> tuple[object, list[object]]:
+    from yoetz.observability.semantic_context import semantic_progress_sink
+
+    recorded: list[object] = []
+
+    async def sink(phase: object) -> None:
+        recorded.append(phase)
+
+    token = semantic_progress_sink.set(sink)
+    try:
+        result = await _evaluate(monkeypatch, runtime)
+    finally:
+        semantic_progress_sink.reset(token)
+    return result, recorded
+
+
+async def test_runtime_reports_only_closed_structural_phases_in_execution_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #571 A2: tokens, reasoning, deltas, and account identity never reach progress."""
+
+    from yoetz.protocol.models import SemanticProgressPhase
+
+    sentinel = "SENTINEL-REASONING-DELTA-91c2"
+    runtime = _Runtime(_profile())
+    runtime.account = {"type": "chatgpt", "email": f"{sentinel}@example", "planType": "plus"}
+    runtime.events[0:0] = [
+        {"method": "item/agentMessage/delta", "params": {"delta": sentinel}},
+        {"method": "item/started", "params": {"item": {"type": "plan", "text": sentinel}}},
+        _token_usage_notice(total_input=100, total_cached=40, total_output=30),
+    ]
+
+    result, recorded = await _evaluate_recording_progress(monkeypatch, runtime)
+
+    assert type(result) is SemanticResultSuccess
+    assert recorded == [
+        SemanticProgressPhase.RUNTIME_STARTING,
+        SemanticProgressPhase.ACCOUNT_MODEL_VALIDATION,
+        SemanticProgressPhase.PROVIDER_SAMPLING,
+        SemanticProgressPhase.RESPONSE_VALIDATION,
+        SemanticProgressPhase.CLEANUP,
+    ]
+    assert all(type(phase) is SemanticProgressPhase for phase in recorded)
+    assert sentinel not in repr(recorded)
+
+
+async def test_runtime_failure_before_sampling_still_reports_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yoetz.protocol.models import SemanticProgressPhase
+
+    runtime = _Runtime(_profile(), model_available=False)
+
+    result, recorded = await _evaluate_recording_progress(monkeypatch, runtime)
+
+    assert type(result) is not SemanticResultSuccess
+    assert recorded == [
+        SemanticProgressPhase.RUNTIME_STARTING,
+        SemanticProgressPhase.ACCOUNT_MODEL_VALIDATION,
+        SemanticProgressPhase.CLEANUP,
+    ]
+
+
+async def test_progress_sink_failure_never_changes_the_review_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yoetz.observability.semantic_context import semantic_progress_sink
+
+    async def failing_sink(phase: object) -> None:
+        del phase
+        raise RuntimeError("progress store unavailable")
+
+    token = semantic_progress_sink.set(failing_sink)
+    try:
+        result = await _evaluate(monkeypatch, _Runtime(_profile()))
+    finally:
+        semantic_progress_sink.reset(token)
+
+    assert type(result) is SemanticResultSuccess
+    assert result.provenance.runtime_evidence is not None
+    assert result.provenance.runtime_evidence.process_cleanup == "terminated"

@@ -426,8 +426,8 @@ or mints a new provider request after authority was consumed.
 A client wait timeout or disconnect leaves an admitted semantic check running under service
 ownership. At most eight such checks can be retained; same-identity retries report pending, and a
 changed body conflicts. An explicit attached control cancellation or service shutdown cancels and
-joins the work. This does not introduce parallel semantic scheduling or phase-progress telemetry.
-
+joins the work. This does not introduce parallel semantic scheduling; structural phase progress
+was added later (see the amendment below).
 
 ### Phase-aware Codex review budgets (2026-09-22, #571 item A1)
 
@@ -490,3 +490,45 @@ licensing are unchanged. A per-request override is not part of this amendment; a
 request the final profile only by carrying a completion claim. API-provider endpoints keep
 their existing fixed output limit. The installed Luna latency, output-size, and validity
 comparison per profile needs a live provider and remains a separate #571 acceptance item.
+
+### Structural review progress (2026-09-22, #571 A2)
+
+A durable AI-powered review job exposes bounded structural progress through
+`status view=operation`, and through every surface that renders that page (CLI text and JSON, the
+MCP structured result and its text summary, and the terminal interface). The page's optional
+`semantic_progress` object appears only for a pending or complete check with recorded progress.
+
+The phase vocabulary is closed and ordered by actual execution: `queued`, `case_admitted`,
+`runtime_starting`, `account_model_validation`, `provider_sampling`, `response_validation`,
+`cleanup`, `terminal`. `case_admitted` is the privacy audit's consumption of the egress
+authorization (the point after which no failure restores authority); because that happens before
+a runtime-backed provider is launched, it precedes `runtime_starting`. Runtime-backed providers
+(the Codex subscription runtime) report launch, account/model validation, turn acknowledgement,
+turn completion, and process cleanup. Direct endpoints report `provider_sampling` immediately after
+admission. The service reports `queued` when an attempt is claimed and `response_validation` when
+a provider response returned for validation and recording. Phases a provider cannot observe are
+skipped, never invented.
+
+Progress is monotonic: within an attempt by that order and across retries by attempt ordinal, so
+a retry restarts at `queued` with a higher ordinal. A resumed attempt that repeats an earlier step
+does not move the phase backward; the stored phase stays at the furthest observed step until the
+attempt advances past it or ends. Only the job's active attempt can write, and nothing can follow
+the terminal state, which is derived from the terminal job row (outcome `succeeded`, `failed`, or
+`quarantined` with its closed `SemanticReason`). `queued_at` and `deadline_at` are fixed when the
+job's progress begins; `deadline_at` is the frozen total execution expiry, never a client wait, and
+no replay resets either. The service derives `elapsed_ms`, `remaining_ms`, and `condition`
+(`active`, `overdue`, or `terminal`) at one observation time so all renderings agree. `overdue`
+means the deadline passed without a terminal row: the owner is finishing cleanup, or the service
+restarted and a same-request replay will reclaim and terminalize the job.
+
+The progress record carries no prompt, case or response text, token or delta text, token counts,
+reasoning, credential, account identity, plan type, model output digest, or path. Provider code
+reaches the store only through a task-local sink that accepts a closed phase value, bound by the
+service to exactly one claimed attempt. Recording is advisory: a failed write is a bounded
+diagnostic and never changes the attempt's outcome, retry, fallback, or provider authority.
+
+A check holds the service's maintenance and observation gates for its whole lifetime. While a
+service-owned check holds them, only `status view=operation` reads are admitted beside it; the
+check closes that window and drains admitted readers before it releases the gates, so maintenance,
+recovery, and observation sweeps remain excluded. Every other read still waits as before. A read
+from a different session or writer of the same task can still receive retryable `BUNDLE_BUSY`.

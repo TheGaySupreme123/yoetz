@@ -27,6 +27,7 @@ from yoetz.tui.models import (
     ReadinessLayer,
     ReceiptSummary,
     StatusSnapshot,
+    TaskStatusPage,
     VaultPosture,
     WorkDetail,
     WorkItem,
@@ -153,6 +154,7 @@ class FakeRuntime:
     subscription_routine_efforts: list[str | None] = field(default_factory=lambda: [])
     checks: list[tuple[str, CheckMode]] = field(default_factory=lambda: [])
     opened: list[str] = field(default_factory=lambda: [])
+    progress_reads: list[str] = field(default_factory=lambda: [])
 
     def project_root(self) -> Path:
         return Path("/tmp/project")
@@ -482,6 +484,18 @@ class FakeRuntime:
     async def run_check(self, title: str, mode: CheckMode) -> tuple[str, tuple[str, ...]]:
         self.checks.append((title, mode))
         return "pass", ("Verdict: pass",)
+
+    async def check_progress(self, title: str) -> TaskStatusPage:
+        self.progress_reads.append(title)
+        return TaskStatusPage(
+            (
+                "Operation: req_00000000-0000-4000-8000-000000000571 (pending)",
+                "Semantic review phase: provider_sampling (attempt 1, active)",
+                "Semantic review elapsed: 42s; remaining 858s; deadline 2026-09-22T12:15:00.000Z",
+                "Gaps: none",
+            ),
+            None,
+        )
 
     async def build_receipt(self, title: str, output_format: str) -> ReceiptSummary:
         return ReceiptSummary(subject_id="task_01", verdict="no_unresolved_deterministic_findings")

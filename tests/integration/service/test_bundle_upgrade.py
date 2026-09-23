@@ -18,6 +18,7 @@ import yoetz.service.bundle_upgrade as bundle_upgrade_module
 from yoetz.adapters.sqlite.migrations import BUNDLE_MIGRATIONS, initialize_catalog
 from yoetz.domain.values import Frontier, task_id
 from yoetz.service.bundle_upgrade import (
+    BUNDLE_UPGRADE_TARGET_VERSION,
     BackupEvidence,
     BundleIntegrity,
     BundleUpgradeCoordinator,
@@ -235,7 +236,7 @@ def _coordinator(
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("source_version", [12, 13])
+@pytest.mark.parametrize("source_version", [12, 13, 14])
 async def test_supported_upgrade_is_backup_first_idempotent_and_fenced(
     source_version: int,
     tmp_path: Path,
@@ -259,14 +260,16 @@ async def test_supported_upgrade_is_backup_first_idempotent_and_fenced(
 
     assert len(report.migrated) == 1
     assert report.migrated[0].from_version == str(source_version)
-    assert report.migrated[0].to_version == "14"
+    assert report.migrated[0].to_version == str(BUNDLE_UPGRADE_TARGET_VERSION)
     assert report.already_current == ()
     assert len(effects.backups) == 1
     assert effects.replays == [effects.backups[0][1]]
     assert holder_calls == [(_TASK_ID,)]
     inspection = apsw.Connection(str(bundle), flags=apsw.SQLITE_OPEN_READONLY)
     try:
-        assert inspection.execute("PRAGMA user_version").fetchone() == (14,)
+        assert inspection.execute("PRAGMA user_version").fetchone() == (
+            BUNDLE_UPGRADE_TARGET_VERSION,
+        )
     finally:
         inspection.close()
     assert catalog.execute(
@@ -292,7 +295,7 @@ async def test_current_bundle_selection_uses_tail_probe_without_full_hashing(
 ) -> None:
     monkeypatch.setattr(connection_module, "verify_private_local_bundle", _allow_isolated_path)
     bundle = tmp_path / "current.sqlite3"
-    _build_bundle(bundle, version=14)
+    _build_bundle(bundle, version=BUNDLE_UPGRADE_TARGET_VERSION)
     catalog = _catalog(bundle)
     target = _target(bundle)
 
@@ -314,7 +317,7 @@ async def test_fresh_bundle_generation_zero_is_accepted(
 ) -> None:
     monkeypatch.setattr(connection_module, "verify_private_local_bundle", _allow_isolated_path)
     bundle = tmp_path / "fresh.sqlite3"
-    _build_bundle(bundle, version=14, owner_generation="0")
+    _build_bundle(bundle, version=BUNDLE_UPGRADE_TARGET_VERSION, owner_generation="0")
     catalog = _catalog(bundle, generation=3)
     target = _target(bundle, catalog_owner_generation=3)
 
@@ -335,7 +338,7 @@ async def test_invalid_bundle_generations_fail_closed(
 ) -> None:
     monkeypatch.setattr(connection_module, "verify_private_local_bundle", _allow_isolated_path)
     bundle = tmp_path / f"invalid-generation-{owner_generation}.sqlite3"
-    _build_bundle(bundle, version=14, owner_generation=owner_generation)
+    _build_bundle(bundle, version=BUNDLE_UPGRADE_TARGET_VERSION, owner_generation=owner_generation)
     catalog = _catalog(bundle, generation=3)
     target = _target(bundle, catalog_owner_generation=3)
 
@@ -525,7 +528,7 @@ async def test_retryable_backup_failure_keeps_pending_operation_retryable(
             "operation_lost",
         ),
         (
-            14,
+            BUNDLE_UPGRADE_TARGET_VERSION,
             BundleUpgradePhase.RESERVED,
             BundleUpgradeReason.ROLLBACK_REQUIRED,
             "rollback_required",

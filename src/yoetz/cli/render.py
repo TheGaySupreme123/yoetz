@@ -21,6 +21,7 @@ from yoetz.protocol.models import (
     StatusObligationsPageModel,
     StatusOperationPageModel,
     StatusProjectPageModel,
+    StatusSemanticProgressModel,
     StatusSuccessModel,
 )
 from yoetz.protocol.recovery import (
@@ -45,6 +46,7 @@ __all__ = [
     "render_human_status",
     "render_local_recovery_lines",
     "render_recovery_directive_lines",
+    "render_semantic_progress_lines",
 ]
 
 
@@ -152,6 +154,39 @@ def render_human_check(result: CheckSuccessModel) -> str:
     return "\n".join(lines)
 
 
+def render_semantic_progress_lines(progress: StatusSemanticProgressModel) -> tuple[str, ...]:
+    """Render structural AI-powered review progress exactly as the JSON page states it.
+
+    Only closed phase, outcome, and reason tokens plus service timestamps and derived whole
+    seconds appear. Progress is a service observation, not evidence that the review is correct.
+    """
+
+    if type(progress) is not StatusSemanticProgressModel:
+        raise TypeError("status_semantic_progress_invalid")
+    elapsed = int(progress.elapsed_ms) // 1000
+    lines = [
+        f"Semantic review phase: {_token(progress.phase)} "
+        f"(attempt {progress.attempt_ordinal}, {progress.condition})"
+    ]
+    if progress.condition == "terminal":
+        lines.append(
+            f"Semantic review outcome: {progress.terminal_outcome} "
+            f"({_token(progress.terminal_reason)}); elapsed {elapsed}s"
+        )
+        return tuple(lines)
+    remaining = int(progress.remaining_ms or "0") // 1000
+    lines.append(
+        f"Semantic review elapsed: {elapsed}s; remaining {remaining}s; "
+        f"deadline {progress.deadline_at}"
+    )
+    if progress.condition == "overdue":
+        lines.append(
+            "Semantic review deadline passed without a terminal record. Retry the same "
+            "request_id to recover the terminal result."
+        )
+    return tuple(lines)
+
+
 def render_human_status(result: StatusSuccessModel) -> str:
     """Render current structural status without dumping the ledger."""
 
@@ -177,6 +212,8 @@ def render_human_status(result: StatusSuccessModel) -> str:
                     f"Replay request ID: {result.page.continuation.replay_request_id}",
                 )
             )
+        if result.page.semantic_progress is not None:
+            lines.extend(render_semantic_progress_lines(result.page.semantic_progress))
     elif isinstance(result.page, StatusLineagePageModel):
         lines.extend(_render_lineage(result.page))
     elif isinstance(result.page, StatusAdvicePageModel):

@@ -28,6 +28,7 @@ from yoetz.ports.ledger import (
     ProjectionState,
     ProjectionView,
     SemanticDisclosureWait,
+    SemanticProgressRecord,
     StoredProjection,
 )
 from yoetz.ports.objects import ObjectRef, ObjectStorePort
@@ -330,6 +331,13 @@ class _ReadLedger:
         """Read the structural continuation for one suspended AI-powered review attempt."""
 
         return await self._value.load_disclosure_wait(writer_id, operation_id)
+
+    async def load_semantic_progress(
+        self, writer_id: str, operation_id: str
+    ) -> SemanticProgressRecord | None:
+        """Read the structural progress of one check's AI-powered review job (issue #571 A2)."""
+
+        return await self._value.load_semantic_progress(writer_id, operation_id)
 
 
 class _PayloadObjects:

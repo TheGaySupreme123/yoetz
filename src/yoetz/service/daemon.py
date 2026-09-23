@@ -131,9 +131,10 @@ from yoetz.protocol.models import (
     ReceiptResult,
     RespondResult,
     StartResult,
+    StatusRequest,
     StatusResult,
 )
-from yoetz.service.check_waits import EXPLICIT_CONTROL_CANCEL, CheckWaits
+from yoetz.service.check_waits import EXPLICIT_CONTROL_CANCEL, CheckReadWindow, CheckWaits
 from yoetz.service.confidential_protocol import (
     HUMAN_PROTOCOL_MAGIC,
     HUMAN_PROTOCOL_VERSION,
@@ -340,6 +341,16 @@ async def _acquire_dispatch_gate(gate: asyncio.Lock, deadline_ms: int | None) ->
         await asyncio.wait_for(gate.acquire(), deadline_ms / 1_000)
     except TimeoutError as exc:
         raise ControlError("request_timeout", retryable=True) from exc
+
+
+def _is_operation_status_read(request: ControlCallRequest) -> bool:
+    """Recognize the one read admitted beside a gate-holding semantic check."""
+
+    return (
+        request.method is ControlMethod.STATUS
+        and type(request.body) is StatusRequest
+        and request.body.view == "operation"
+    )
 
 
 def _is_valid_capture_only_observation(request: ControlCallRequest) -> bool:
@@ -678,6 +689,7 @@ class ServiceDaemon:
         self._close_lock = asyncio.Lock()
         self._connection_tasks: set[asyncio.Task[None]] = set()
         self._check_waits = CheckWaits()
+        self._check_read_window = CheckReadWindow()
         self._ready_maintenance_task: asyncio.Task[None] | None = None
 
     @property
@@ -1099,12 +1111,23 @@ class ServiceDaemon:
         # unbounded acquire would hang every ordinary call for as long as someone stares at a
         # confirmation prompt. The caller's own deadline decides how long it is willing to wait.
         maintenance_gate = self._composition.maintenance_gate
+        if _is_operation_status_read(request) and self._check_read_window.admits_readers:
+            # A detached check owns both gates and cannot release them until this read drains,
+            # so no maintenance or sweep can interleave (issue #571 A2 live progress).
+            self._check_read_window.enter()
+            try:
+                return await self._dispatch_ready_under_maintenance_gate(
+                    projection_context, request, repository_privacy_context
+                )
+            finally:
+                self._check_read_window.leave()
         # Real compositions always provide a distinct observation gate. The optional lookup
         # keeps the narrow gate unit tests' intentionally minimal composition doubles valid.
         observation_gate = getattr(self._composition, "observation_gate", None)
         capture_only = _is_valid_capture_only_observation(request)
         observation_acquired = False
         maintenance_acquired = False
+        window_opened = False
         if not capture_only and isinstance(observation_gate, asyncio.Lock):
             # Do not let a structural waiter hold maintenance while a sweeper owns the row gate:
             # a following native capture must still be able to stage its ticket.
@@ -1113,6 +1136,9 @@ class ServiceDaemon:
         try:
             await _acquire_dispatch_gate(maintenance_gate, request.deadline_ms)
             maintenance_acquired = True
+            if detached_check and observation_acquired:
+                self._check_read_window.open()
+                window_opened = True
             # Native capture-only handoffs have already been fully parsed and authenticated by the
             # control protocol and only stage a ticket/content blob. They may proceed while a
             # sweeper owns the per-row gate. Every other ordinary call takes both gates in the
@@ -1124,10 +1150,14 @@ class ServiceDaemon:
                 detached_check=detached_check,
             )
         finally:
-            if maintenance_acquired:
-                maintenance_gate.release()
-            if observation_acquired and isinstance(observation_gate, asyncio.Lock):
-                observation_gate.release()
+            try:
+                if window_opened:
+                    await self._check_read_window.close()
+            finally:
+                if maintenance_acquired:
+                    maintenance_gate.release()
+                if observation_acquired and isinstance(observation_gate, asyncio.Lock):
+                    observation_gate.release()
 
     async def _dispatch_ready_under_maintenance_gate(
         self,

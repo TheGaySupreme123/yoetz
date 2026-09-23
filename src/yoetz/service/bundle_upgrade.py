@@ -57,6 +57,7 @@ from yoetz.protocol.ids import IdKind, new_id, validate_id
 
 __all__ = [
     "BUNDLE_UPGRADE_SOURCE_VERSION",
+    "BUNDLE_UPGRADE_SOURCE_VERSIONS",
     "BUNDLE_UPGRADE_TARGET_VERSION",
     "BackupEvidence",
     "BundleIntegrity",
@@ -76,10 +77,11 @@ __all__ = [
 ]
 
 BUNDLE_UPGRADE_SOURCE_VERSION: Final = 12
-BUNDLE_UPGRADE_TARGET_VERSION: Final = 14
-BUNDLE_UPGRADE_SOURCE_VERSIONS: Final = (12, 13)
+BUNDLE_UPGRADE_TARGET_VERSION: Final = 15
+# 0.3 development bundles already at v14 take only 0015 (semantic progress, issue #571 A2).
+BUNDLE_UPGRADE_SOURCE_VERSIONS: Final = (12, 13, 14)
 _MAX_SAFE_INTEGER: Final = 2**53 - 1
-_REQUIRED_MIGRATION_IDS: Final[tuple[str, ...]] = ("0013", "0014")
+_REQUIRED_MIGRATION_IDS: Final[tuple[str, ...]] = ("0013", "0014", "0015")
 _LEASE_SECONDS: Final = 60
 _MIGRATION_PHASE_ORDER: Final[tuple[str, ...]] = (
     "reserved",
@@ -87,6 +89,8 @@ _MIGRATION_PHASE_ORDER: Final[tuple[str, ...]] = (
     "schema_applied",
     "replay_verified",
 )
+# Tables created by a migration inside the upgrade window (0015 semantic progress, #571 A2).
+_MIGRATION_CREATED_TABLES: Final[frozenset[str]] = frozenset({"semantic_progress"})
 _EPHEMERAL_PRESERVATION_TABLES: Final[frozenset[str]] = frozenset(
     {"bundle_meta", "maintenance_pins", "maintenance_operations"}
 )
@@ -331,8 +335,8 @@ class BundleUpgradeEffects(Protocol):
 
         ``before`` is ``None`` when a process restarted after the bundle DDL committed but before
         its phase CAS.  The implementation must then read the original integrity facts from the
-        machine-bound backup identified by ``backup``; comparing the live v14 bundle to itself is
-        not preservation evidence.
+        machine-bound backup identified by ``backup``; comparing the live target-version bundle to
+        itself is not preservation evidence.
         """
         ...
 
@@ -563,6 +567,10 @@ def capture_sqlite_integrity(db: apsw.Connection) -> BundleIntegrity:
                 table_digest, table_count = object_digest, object_count
             else:
                 table_digest, table_count = _stream_table_digest(db, table)
+            if table in _MIGRATION_CREATED_TABLES and table_count == 0:
+                # A table the upgrade itself creates starts empty; its absence before and its
+                # empty presence after are the same preserved content.
+                continue
             table_rows.append((table, table_digest, table_count))
         table_rows.sort(key=lambda item: item[0].encode("utf-8"))
         projection_rows: list[tuple[str, str, int]] = []
@@ -1271,7 +1279,15 @@ class BundleUpgradeCoordinator:
             identity = verify_schema_identity(db)
             if identity.user_version in {10, *BUNDLE_UPGRADE_SOURCE_VERSIONS}:
                 try:
-                    _validate_v10_bundle_layout(db, identity.user_version, (BUNDLE_MIGRATIONS[-1],))
+                    _validate_v10_bundle_layout(
+                        db,
+                        identity.user_version,
+                        tuple(
+                            migration
+                            for migration in BUNDLE_MIGRATIONS
+                            if int(migration.version) > identity.user_version
+                        ),
+                    )
                 except RuntimeError as exc:
                     if str(exc) == BundleUpgradeReason.SCHEMA_UPGRADE_PATH_UNKNOWN.value:
                         raise BundleUpgradeError(
@@ -1600,10 +1616,10 @@ class BundleUpgradeCoordinator:
                 raise BundleUpgradeError(
                     BundleUpgradeReason.VERIFICATION_FAILED, False, {"check": "schema"}
                 )
-            # A restart after DDL may observe v14 while the durable operation is still pending.
-            # In that case the original v12 facts live in the machine-bound backup; passing the
-            # live v14 snapshot as ``before`` would compare the target to itself and falsely prove
-            # preservation.  The effects backend must load and verify the original backup facts.
+            # A restart after DDL may observe the target version while the durable operation is
+            # still pending. The original source facts then live in the machine-bound backup;
+            # passing the live target snapshot as ``before`` would compare the target to itself
+            # and falsely prove preservation.  The effects backend must load and verify the original backup facts.
             preservation_before = (
                 before if current_version in BUNDLE_UPGRADE_SOURCE_VERSIONS else None
             )

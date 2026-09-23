@@ -1817,7 +1817,8 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "History pairs caller-asserted occurred_at beside the service-stamped "
         "accepted_at; forward-skew classification compares clocks, not truth, and order follows "
         "ingestion sequence. view=operation with filter.operation_request_id recovers the stored "
-        "outcome without resending the body. Before evidence publication or completion claims, "
+        "outcome without resending the body; for a running or finished check it adds structural "
+        "semantic_progress (phase, elapsed time, deadline). Before evidence publication or completion claims, "
         "paginate view=evidence at one frontier with the same limit and filter; match identity and "
         "state, then reuse suitable IDs in supporting_refs. Capture, selection and clipping limits "
         "are per item, not absence of all content. Obligations expose exact requested_items, "
@@ -1912,7 +1913,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
                 "publish_work": "sha256:8e5261e9d30677fe5741284a653b530d62acb08f3367a506f243523b131bd117",
                 "check": "sha256:9befe13b257acf10535009c1dd69d9a933f3d94f5cd2aaac1655d4867596f89e",
                 "respond": "sha256:8b5dc94f431a411ef332021af01050a4b0c248a800e46d5b3bdb567f770d25a5",
-                "status": "sha256:15ac0adcdc93936a13daef933f2201e7d349fa4214290ae3723ea389fb436f1f",
+                "status": "sha256:517eb05aa015834d98bd96ed59d4b647a95e6c42a13013803caf19b9b4b07875",
                 "receipt": "sha256:c7676e1ca9afd96d9d7e74503edd5b31a758a05d7e7e1cf0d62c763611ffcecb",
                 "read_guidance": "sha256:4198e5fd133f7b37cc25c0c1a63161657c5d4396a1718f1f4f1f3db7c302a13d",
             }
@@ -1923,7 +1924,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
                 "publish_work": "sha256:8e5261e9d30677fe5741284a653b530d62acb08f3367a506f243523b131bd117",
                 "check": "sha256:2bd9947abc7b60564474840a73d99a80bfa528b98af1a725d11fdfde5dac9795",
                 "respond": "sha256:8b5dc94f431a411ef332021af01050a4b0c248a800e46d5b3bdb567f770d25a5",
-                "status": "sha256:15ac0adcdc93936a13daef933f2201e7d349fa4214290ae3723ea389fb436f1f",
+                "status": "sha256:517eb05aa015834d98bd96ed59d4b647a95e6c42a13013803caf19b9b4b07875",
                 "receipt": "sha256:c7676e1ca9afd96d9d7e74503edd5b31a758a05d7e7e1cf0d62c763611ffcecb",
                 "read_guidance": "sha256:4198e5fd133f7b37cc25c0c1a63161657c5d4396a1718f1f4f1f3db7c302a13d",
             }
@@ -1932,8 +1933,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:0c95c9a3d50da032f4f5529291b00df19df8e426a34570e2c280c7c2e4493995",
-        "strict": "sha256:ddda86591ee92edc172ea8da341a13c7b54f9e1e878e5ec8be4b3f7a82494b24",
+        "policy": "sha256:f1fcb66f0573ed0709624355f46076dbed7da4684be963d00d77cd69dee9b066",
+        "strict": "sha256:6473f33f44ce8c77d205a728f667744f168b7286482fbff8b6299295614c97df",
     }
 )
 
