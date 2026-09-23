@@ -436,13 +436,22 @@ _AUTO_ATTACH_CONTROL_REASONS: Final[Mapping[str, str]] = MappingProxyType(
 def _attachment_recovery_context(reason: str) -> str:
     """Render only trusted classifications, never host/error payload text."""
 
+    from yoetz.cli.render import render_hook_recovery_suffix
+
     if reason == "service_incompatible":
         return (
             "Yoetz attachment pending: service_incompatible. The selected service has an "
             "incompatible holder; the hook did not replace it. Call start and follow its exact "
             "service recovery continuation. "
         )
-    if reason in {"service_unavailable", "timeout"}:
+    if reason == "timeout":
+        return (
+            "Yoetz attachment pending: service_unavailable. The bounded service connection "
+            "did not complete. Call start before material work to finish service startup and "
+            "attachment; later turn hooks also retry within their budget. "
+            + render_hook_recovery_suffix("request_timeout", operation_kind="read")
+        )
+    if reason == "service_unavailable":
         return (
             "Yoetz attachment pending: service_unavailable. The bounded service connection "
             "did not complete. Call start before material work to finish service startup and "

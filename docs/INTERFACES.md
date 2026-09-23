@@ -326,7 +326,10 @@ catch-all; truncated or overlong output maps to `semantic_response_truncated` fr
 are admitted continuation tokens and live in the same registry. They are not new public
 `SemanticReason` values and do not change frozen check-result schemas. CLI check rendering and the
 MCP check text summary project the resolved directive (the MCP channel drops the sentence when the
-512-byte budget cannot hold it, keeping the token). Advice and status `semantic_state` is the
+512-byte budget cannot hold it, keeping the token). Hooks append the same token after their
+host-specific prefix (`render_hook_recovery_suffix`); the TUI blocked report and receipt human
+text project the full directive lines from the registry. Compact receipt sentences stay frozen.
+Advice and status `semantic_state` is the
 recorded attempt status (`ready` / `disabled` / `unavailable` / `failed`), not finding presence:
 a successful review with zero findings is `ready`, and `disabled` means no attempt was requested
 or configured.

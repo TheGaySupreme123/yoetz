@@ -61,6 +61,7 @@ from yoetz.protocol.models import (
     SemanticStatus,
     validate_semantic_outcome,
 )
+from yoetz.protocol.recovery import continuation_for_semantic_outcome, directive_for
 
 __all__ = [
     "CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP",
@@ -1409,6 +1410,23 @@ _HUMAN_TEXT_TRUNCATION_MARKER: Final = (
 )
 
 
+def _semantic_recovery_lines(document: ReceiptDocument) -> list[str]:
+    """Reconstruct registry recovery from recorded provenance, never provider text."""
+
+    provenance = document.semantic_provenance
+    if provenance is None:
+        return []
+    token = continuation_for_semantic_outcome(
+        status=provenance.status,
+        reason=provenance.reason,
+        failure_class=provenance.failure_class,
+    )
+    directive = directive_for(token)
+    if directive is None:
+        return []
+    return [f"Continuation: {directive.token}", f"Next: {directive.directive}"]
+
+
 def render_receipt_human(document: ReceiptDocument, *, markdown: bool) -> str:
     """Project the canonical receipt sections into markdown or plain-text ``human_text``.
 
@@ -1460,6 +1478,10 @@ def render_receipt_human(document: ReceiptDocument, *, markdown: bool) -> str:
             f"{heading}\n{advisory_count} recorded coverage-limitation {noun} remain visible "
             "and do not by themselves select unresolved_findings_remain."
         )
+    recovery = _semantic_recovery_lines(document)
+    if recovery:
+        heading = "## Recovery" if markdown else "Recovery"
+        parts.append("\n".join((heading, *recovery)))
     text = "\n\n".join(parts) if parts else render_receipt_compact(document)
     if len(text) > _HUMAN_TEXT_MAX:
         text = text[: _HUMAN_TEXT_MAX - len(_HUMAN_TEXT_TRUNCATION_MARKER)]

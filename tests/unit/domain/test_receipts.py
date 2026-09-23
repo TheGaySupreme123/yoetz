@@ -2,13 +2,21 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from dataclasses import FrozenInstanceError, fields, is_dataclass
+from dataclasses import FrozenInstanceError, fields, is_dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
-from yoetz.domain.findings import CheckVerdict
+from yoetz.domain.findings import (
+    CheckVerdict,
+    CostFields,
+    SamplingParams,
+    SemanticDispatchKind,
+    SemanticFailureClass,
+    SemanticProvenance,
+    TokenUsage,
+)
 from yoetz.domain.receipts import (
     ReceiptConclusion,
     ReceiptDocument,
@@ -23,6 +31,7 @@ from yoetz.domain.receipts import (
 )
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 from yoetz.protocol.errors import ProtocolValueError
+from yoetz.protocol.models import SemanticReason, SemanticStatus
 
 _RECEIPT_FIXTURES = Path(__file__).parents[3] / "fixtures" / "receipts"
 
@@ -480,6 +489,53 @@ def test_registration_drift_compact_names_policy_recovery() -> None:
     assert "yoetz integrate codex mcp install --route-profile policy" in rendered
     assert "start a fresh Codex process" in rendered
     assert "No provider attempt or AI-powered finding was recorded." in rendered
+
+
+def test_render_receipt_human_projects_registry_recovery_from_provenance() -> None:
+    document = receipt_document_from_json(
+        _variant("deterministic-current.case.json", "current_complete")
+    )
+    digest = "sha256:" + "c" * 64
+    uuid = "00000000-0000-4000-8000-000000000001"
+    provenance = SemanticProvenance(
+        provider="openai",
+        endpoint_profile_id="review.default",
+        endpoint_profile_version="1.0.0",
+        model="gpt-5.4",
+        sdk_version="2.46.0",
+        prompt_digest=digest,
+        schema_digest=digest,
+        policy_digest=digest,
+        privacy_policy_digest=digest,
+        sampling_params=SamplingParams(
+            max_output_tokens=2_048,
+            temperature="0.20",
+            top_p="1.0",
+            seed=7,
+        ),
+        latency_ms=321,
+        semantic_attempt_id="att_" + uuid,
+        dispatch_kind=SemanticDispatchKind.EXTERNAL,
+        privacy_receipt_id="egr_" + "00000000-0000-4000-8000-000000000002",
+        status=SemanticStatus.UNAVAILABLE,
+        reason=SemanticReason.TRANSPORT_UNAVAILABLE,
+        provider_request_id="request:abc-123",
+        token_usage=TokenUsage(input_tokens=12, output_tokens=7, total_tokens=19),
+        cost_fields=CostFields(
+            currency="USD",
+            input_microunits=12,
+            output_microunits=14,
+            total_microunits=26,
+        ),
+        failure_class=SemanticFailureClass.AUTHENTICATION,
+        egress_authorization_id="aut_" + "00000000-0000-4000-8000-000000000003",
+        request_commitment="hmac-sha256:" + "d" * 64,
+    )
+    rendered = render_receipt_human(replace(document, semantic_provenance=provenance), markdown=True)
+    assert "## Recovery" in rendered
+    assert "Continuation: semantic_credential_rejected" in rendered
+    compact = render_receipt_compact(replace(document, semantic_provenance=provenance))
+    assert "Continuation:" not in compact
 
 
 def test_genuine_strict_ceiling_compact_keeps_terminal_wording() -> None:

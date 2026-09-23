@@ -1286,8 +1286,9 @@ configured.
 same registry (`continuation_for_semantic_outcome`). Cursor's native MCP profile repeats the
 canonical JSON body and does not use the bounded summary renderer, so the consumer still
 resolves the check's `semantic_reason` and optional `failure_class` through this section. CLI
-check output in this host shows the directive. No Cursor-specific recovery wording is
-configured.
+check output in this host shows the directive. SessionStart and observe-hook advisories append
+the same token after their host-specific prefix (issue #739). No Cursor-specific recovery
+wording is configured.
 
 ## Cold service attachment and recovery (issue #670)
 

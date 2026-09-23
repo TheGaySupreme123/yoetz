@@ -1133,8 +1133,9 @@ configured.
 **Provider outcomes (issue #742).** A check whose AI-powered review failed carries a
 `continuation_for_semantic_outcome` token in the shared CLI and MCP check projections. Claude
 Code depends on the MCP text channel, so the token and, when the 512-byte budget allows, the
-directive appear there. Raw provider text never reaches that projection. No Claude-specific
-recovery wording is configured.
+directive appear there. Raw provider text never reaches that projection. SessionStart and
+observe-hook advisories append the same token after their host-specific prefix (issue #739).
+No Claude-specific recovery wording is configured.
 
 ### Structural review progress (#571 A2)
 
