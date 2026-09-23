@@ -784,9 +784,10 @@ Before automatic new-pair admission, it checks private persisted mappings from e
 sessions. Eligibility requires a received `sessionEnd`, every other bound session ended, and a
 candidate bound only to this consented workspace. A unique eligible mapping is selected first: the
 hook holds the workspace and lifecycle locks, revalidates ownership and state, and sends one
-`mode=attach` request carrying that selector plus the new pair. The catalog requires one mapped
-task, the selector still active, no sibling task,
-the matching repository-privacy binding, and no start already pending for that route. Recovery
+`mode=attach` request carrying that selector plus the new pair. The catalog requires the selected
+mapped task to remain active and non-quarantined, the matching workspace and repository-privacy
+bindings, and no start already pending for that route; unrelated workspace tasks do not block this
+exact-selector recovery. Recovery
 revalidates unmapped sessions, cross-workspace ownership, mapping identity, and mapping recency; a
 busy workspace reservation defers with `auto_attach_recovery_busy`, while candidate-lock contention
 or changed state returns the closed `auto_attach_recovery_busy` boundary rather than creating work

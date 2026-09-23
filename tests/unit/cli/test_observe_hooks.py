@@ -4817,6 +4817,63 @@ def test_workspace_conflict_recovery_rejects_multiple_local_task_ids(tmp_path: P
     assert recovered is None
 
 
+def test_ambiguous_predecessors_refuse_without_a_fresh_start_or_selector_leak(
+    tmp_path: Path,
+) -> None:
+    """Distinct ended task bindings refuse recovery before any create RPC."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    locator = str(tmp_path.resolve())
+    workspace = store.workspace_commitment(locator)
+    store.grant_consent(workspace)
+    task_ids = (
+        _START_IDS["task_id"],
+        "tsk_4b4e28ba-2fa1-4d3b-8f0a-0c1d2e3f4a5b",
+    )
+    for index, task_id in enumerate(task_ids):
+        previous = f"codex-ended-{index}"
+        commitment = store.bind_codex_session(workspace, previous)
+        store.note_session_end(workspace, commitment)
+        observe_hooks_module.store_mapping(
+            observe_hooks_module.mapping_from_start_ids(
+                codex_session_id=previous,
+                yoetz_task_id=task_id,
+                yoetz_session_id=(
+                    _START_IDS["session_id"]
+                    if index == 0
+                    else "ses_4b4e28ba-2fa1-4d3b-8f0a-0c1d2e3f4a5c"
+                ),
+                yoetz_writer_id=(
+                    _START_IDS["writer_id"]
+                    if index == 0
+                    else "wri_4b4e28ba-2fa1-4d3b-8f0a-0c1d2e3f4a5d"
+                ),
+                last_frontier=None,
+            ),
+            _state=tmp_path,
+        )
+
+    client = _WorkspaceConflictThenAttachClient()
+    client.created = True
+    outcome = asyncio.run(
+        observe_hooks_module._try_workspace_auto_start(  # pyright: ignore[reportPrivateUsage]
+            "codex-next-1",
+            store=store,
+            workspace_commitment=workspace,
+            workspace_locator=locator,
+            harness_id="codex",
+            _state=tmp_path,
+            connect=cast(observe_hooks_module.HookStartConnector, _connector(client)),
+        )
+    )
+
+    assert outcome.mapping is None
+    assert outcome.reason == "auto_attach_binding_ambiguous"
+    assert outcome.candidate_count == 2
+    assert client.requests == []
+    assert observe_hooks_module.load_mapping("codex-next-1", _state=tmp_path) is None
+
+
 def test_workspace_recovery_does_not_attach_while_predecessor_lock_is_held(
     tmp_path: Path,
 ) -> None:
