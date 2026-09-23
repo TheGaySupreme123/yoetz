@@ -483,6 +483,111 @@ async def test_real_delegation_attach_publication_and_child_receipt_preserve_par
         assert child.rollup_state != "clean"
 
 
+async def test_generic_recovery_cannot_select_child_beside_root_siblings(
+    tmp_path: Path,
+) -> None:
+    """Root-session recovery may rotate a root while a child stays handle-selected only."""
+
+    workspace = _workspace(tmp_path / "workspace")
+    async with multi_agent_service(tmp_path / "state") as service:
+        app = service.app
+        parent = await app.start(
+            StartRequest.model_validate(
+                {
+                    **_identity(),
+                    "mode": "create",
+                    "task_title": "Recovery parent",
+                    "workspace_ref": str(workspace),
+                    "external_ref": "recovery-parent",
+                    "requested_view": "compact",
+                }
+            ),
+            repository_privacy_context=_REPOSITORY,
+        )
+        sibling = await app.start(
+            StartRequest.model_validate(
+                {
+                    **_identity(),
+                    "mode": "create",
+                    "task_title": "Recovery sibling",
+                    "workspace_ref": str(workspace),
+                    "external_ref": "recovery-sibling",
+                    "requested_view": "compact",
+                }
+            ),
+            repository_privacy_context=_REPOSITORY,
+        )
+        delegated = await app.start(
+            StartRequest.model_validate(
+                {
+                    **_identity(),
+                    "mode": "delegate",
+                    "task_title": "Recovery child",
+                    "session_id": parent.session_id,
+                    "workspace_ref": str(workspace),
+                    "external_ref": "recovery-child",
+                    "requested_view": "compact",
+                }
+            ),
+            repository_privacy_context=_REPOSITORY,
+        )
+        assert delegated.attach_handle is not None
+        attached = await app.start(
+            StartRequest.model_validate(
+                {
+                    **_identity(),
+                    "mode": "attach",
+                    "task_title": "Recovery child",
+                    "workspace_ref": str(workspace),
+                    "external_ref": "recovery-child",
+                    "attach_handle": delegated.as_wire()["attach_handle"],
+                    "requested_view": "compact",
+                }
+            ),
+            repository_privacy_context=_REPOSITORY,
+        )
+        child_route = await app.start_catalog.task_route(attached.task_id)
+        assert child_route is not None
+        assert child_route.parent_task_id == parent.task_id
+        assert attached.task_id not in {parent.task_id, sibling.task_id}
+
+        parent_recovered = await app.start(
+            StartRequest.model_validate(
+                {
+                    **_identity(),
+                    "mode": "attach",
+                    "task_title": "Recovery parent",
+                    "session_id": parent.session_id,
+                    "workspace_ref": str(workspace),
+                    "external_ref": "recovery-parent-next",
+                    "requested_view": "compact",
+                }
+            ),
+            repository_privacy_context=_REPOSITORY,
+        )
+        assert parent_recovered.task_id == parent.task_id
+        assert parent_recovered.session_id != parent.session_id
+
+        with pytest.raises(PublicOperationError) as child_recovery:
+            await app.start(
+                StartRequest.model_validate(
+                    {
+                        **_identity(),
+                        "mode": "attach",
+                        "task_title": "Recovery child",
+                        "session_id": attached.session_id,
+                        "workspace_ref": str(workspace),
+                        "external_ref": "recovery-child-next",
+                        "requested_view": "compact",
+                    }
+                ),
+                repository_privacy_context=_REPOSITORY,
+            )
+        assert child_recovery.value.code is PublicErrorCode.SESSION_CONFLICT
+        assert child_recovery.value.safe_details["reason_code"] == "selector_conflict"
+        assert await app.start_catalog.resolve_route(sibling.session_id) is not None
+
+
 async def test_codex_shared_host_child_alias_routes_observation_to_attached_child(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
