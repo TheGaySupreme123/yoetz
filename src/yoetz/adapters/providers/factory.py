@@ -145,7 +145,11 @@ class ChatCompletionsExternalFactory:
         request_commitment: object,
     ) -> SemanticEvaluatorPort:
         del request_commitment
-        if type(credential) is not ProviderCredentialHandle:
+        # `ProviderCredentialHandle` is a Protocol: an exact `type(...) is` comparison never holds
+        # for a real vault handle, which refused every API-provider dispatch after #480 (found by
+        # the dogfood lane, #802). The runtime-checkable Protocol admits any one-attempt handle
+        # and still excludes the vendor OAuth authority, which carries no `authorize_attempt`.
+        if not isinstance(credential, ProviderCredentialHandle):
             raise ValueError("chat_completions_credential_authority_invalid")
         rendered = self._last_rendered
         if rendered is None or binding.request_body_digest != rendered.body_sha256:
