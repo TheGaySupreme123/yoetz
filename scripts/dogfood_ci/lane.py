@@ -1222,15 +1222,31 @@ class Lane:
         check_body: dict[str, Any] = {**ids, "expected_frontier": frontier, "max_findings": "10"}
         if self.fireworks_key:
             check_body["mode"] = "semantic_required"
+        check_request = json.loads(self._request(check_body))
+        check_request_id = cast(str, check_request["request_id"])
         _, checked = self._yoetz(
             "ledger_check",
             phase,
             ["check", "--input", "-", "--json"],
             cwd=self.project,
-            stdin=self._request(check_body),
+            stdin=json.dumps(check_request),
             fatal=True,
             timeout=420.0,
         )
+        # Owner-only diagnostics explain a semantic outcome the public reason cannot name.
+        self._yoetz(
+            "service_diagnostics_for_check",
+            phase,
+            ["service", "diagnostics", "--request-id", check_request_id, "--json"],
+            expect_zero=False,
+        )
+        for correlation_id in self._diagnostic_correlation_ids():
+            self._yoetz(
+                f"service_diagnostics_{correlation_id[4:12]}",
+                phase,
+                ["service", "diagnostics", "--correlation-id", correlation_id, "--json"],
+                expect_zero=False,
+            )
         if checked is not None:
             provenance = checked.get("semantic_provenance")
             self.semantic.update(
@@ -1275,19 +1291,19 @@ class Lane:
                         "outcome_unknown",
                     }
                 )
+                # Red for the lane, but not an abort: the connection, native, and lifecycle
+                # phases still produce evidence that explains or narrows a dispatch refusal.
                 self._record(
                     "semantic_attempt",
                     phase,
                     status="pass" if attempted else "fail",
-                    reason=None
-                    if attempted
-                    else str(checked.get("semantic_reason") or checked.get("semantic_status")),
+                    reason=None if attempted else str(reason or status),
                     summary={
-                        "semantic_status": checked.get("semantic_status"),
-                        "semantic_reason": checked.get("semantic_reason"),
+                        "semantic_status": status,
+                        "semantic_reason": reason,
                         "provenance_present": provenance is not None,
                     },
-                    fatal=True,
+                    fatal=False,
                 )
         self._yoetz(
             "ledger_receipt",
@@ -1425,6 +1441,23 @@ class Lane:
             stdin=json.dumps(payload),
             fatal=False,
         )
+
+    def _diagnostic_correlation_ids(self) -> list[str]:
+        """Correlation ids from the instance's durable diagnostics ring, newest last."""
+
+        if self.root is None:
+            return []
+        found: list[str] = []
+        for path in self.root.rglob("service.diagnostics.jsonl"):
+            try:
+                lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                match = re.search(r'"correlation_id":"(err_[0-9a-f-]{36})"', line)
+                if match and match.group(1) not in found:
+                    found.append(match.group(1))
+        return found[-8:]
 
     # ---- native agent
 
