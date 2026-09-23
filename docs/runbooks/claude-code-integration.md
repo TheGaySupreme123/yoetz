@@ -718,10 +718,12 @@ require their own evidence.
 ### Oversized hook payloads (issue #667)
 
 A Claude Code hook body over the 256 KiB ingress cap (`MAX_HOOK_STDIN_BYTES`) is refused at
-stdin, before any parse. The hook stays fail-open and the host continues. Yoetz records the
+stdin, before any parse. Claude Code does not use Cursor's 1 MiB identity skim, so the oversized
+event stays an unparsed gap. The hook stays fail-open and the host continues. Yoetz records the
 bounded `claude_payload_too_large` reason against that event in `yoetz observe status` hook
-diagnostics, and notes the `payload_too_large` coverage gap on the consented workspace so
-receipts and coverage wording carry the loss. This host ingress previously swallowed every
+diagnostics, and notes the `payload_too_large` coverage gap on the consented workspace, where
+`yoetz observe status` shows it. That workspace gap does not yet reach task receipts: no row
+exists, so a receipt simply has no evidence for the dropped event rather than naming the loss. This host ingress previously swallowed every
 refusal into a bare `{}` with no record at all, so a dropped large edit left no trace.
 The cap is fixed and shared by every host; raising it is not an operator control. Each reader
 consumes at most cap-plus-one bytes, so the true size of a refused body is never measured and
@@ -940,6 +942,13 @@ API provider serves a given attempt is a service-side dispatch decision recorded
 (`fallback_from`), with no Claude-Code-specific behaviour, plugin, or route input — the route
 ceiling applies to dispatch authority regardless of which endpoint serves.
 
+Routine/final Codex review budgets (issue #571 item A1) are host-independent too. The service
+selects the budget profile from the frozen case: `final` when the frontier carries a completion
+claim, `routine` otherwise. It then dispatches with that profile's configured effort and output
+limit and records them in provenance. Claude Code gets no host-specific behavior, registration, route
+input, or per-request selector, so the decision for this host is "supported, unchanged".
+Recording a completion claim is the only way a check requests the final profile.
+
 
 ### Large tasks and AI-powered review failure recovery (#674–#676)
 
@@ -1113,6 +1122,13 @@ only its fenced lease was yielded. Replay the exact start body and request ID on
 inventing session or writer IDs. `start_pending_same_identity` instead means a live lease remains:
 wait up to 60 seconds before the one exact replay. If still busy or pending, retain the original
 request and report the unresolved start. These continuations do not authorize a new task.
+
+**CLI JSON (issue #741).** When an agent in this host runs `yoetz` in a shell with `--json`, a
+CLI-owned JSON error body carries a `recovery` object resolved from the same registry. A workflow
+command (`start`, `publish-work`, `check`, `respond`, `status`, `receipt`) also prints JSON when
+stdout is not a TTY; its failure keeps the exact wire body on stdout and writes the directive
+lines to stderr. This is CLI behavior shared by every host; no Claude Code-specific behavior is
+configured.
 
 ### Structural review progress (#571 A2)
 

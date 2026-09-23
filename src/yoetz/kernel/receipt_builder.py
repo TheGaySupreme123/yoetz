@@ -1059,19 +1059,30 @@ def _semantic_usage_sentence(provenance: SemanticProvenance | None) -> str:
     if provenance is None:
         return ""
     runtime = provenance.runtime_evidence
+    # Codex subscription attempts dispatch under a per-check effort and output limit (issue
+    # #571); name the exact selection beside the usage it produced.
+    selection = (
+        ""
+        if runtime is None
+        else (
+            " AI-powered review selection: "
+            f"model={provenance.model}, reasoning_effort={runtime.reasoning_effort}, "
+            f"output_limit={provenance.sampling_params.max_output_tokens} tokens."
+        )
+    )
     usage = None if runtime is None else runtime.token_usage
     if usage is not None:
         return (
-            " AI-powered review attempt usage: "
+            selection + " AI-powered review attempt usage: "
             f"input={usage.input_tokens}, cached_input={usage.cached_input_tokens}, "
             f"cache_write_input={usage.cache_write_input_tokens}, output={usage.output_tokens}, "
             f"reasoning_output={usage.reasoning_output_tokens}, total={usage.total_tokens} tokens."
         )
     aggregate = provenance.token_usage
     if aggregate is None:
-        return ""
+        return selection
     return (
-        " AI-powered review attempt usage: "
+        selection + " AI-powered review attempt usage: "
         f"input={aggregate.input_tokens}, output={aggregate.output_tokens}, "
         f"total={aggregate.total_tokens} tokens."
     )

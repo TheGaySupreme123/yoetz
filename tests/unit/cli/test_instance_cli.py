@@ -15,6 +15,7 @@ import time
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 import pytest
 from typer.testing import CliRunner
@@ -225,6 +226,15 @@ def test_status_reports_pinned_instance_digest_only(
     assert status["runtime_provenance"] == "matched"
     assert status["runtime_pin"] == "bound"
     assert status["service_holder"] is None
+    # Path-identity digests are named as such; the ambiguous 0.2 ``identity`` block is gone.
+    assert "identity" not in status
+    assert set(cast(dict[str, str], status["path_identity"])) == {
+        "state_path_digest",
+        "endpoint_path_digest",
+        "storage_path_digest",
+        "config_path_digest",
+        "executable_path_digest",
+    }
     assert str(root) not in json.dumps(status)
 
     expired = instance_status(now=_NOW + timedelta(hours=2))

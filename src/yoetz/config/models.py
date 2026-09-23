@@ -17,6 +17,10 @@ from yoetz.domain.privacy import ProviderDataUseProfile
 from yoetz.protocol.models import MAX_FINDINGS_LIMIT
 
 __all__ = [
+    "CODEX_FINAL_OUTPUT_LIMIT_DEFAULT",
+    "CODEX_OUTPUT_LIMIT_MAX",
+    "CODEX_ROUTINE_OUTPUT_LIMIT_DEFAULT",
+    "CODEX_ROUTINE_REASONING_EFFORT_DEFAULT",
     "CODEX_SUBSCRIPTION_ENDPOINT_PROFILE_ID",
     "CODEX_SUBSCRIPTION_PROVIDER_ID",
     "OFFICIAL_OPENAI_ENDPOINT_PROFILE_ID",
@@ -48,6 +52,12 @@ __all__ = [
 OFFICIAL_OPENAI_ENDPOINT_PROFILE_ID: Final = "openai-responses"
 CODEX_SUBSCRIPTION_ENDPOINT_PROFILE_ID: Final = "codex-chatgpt-subscription"
 CODEX_SUBSCRIPTION_PROVIDER_ID: Final = "openai-codex"
+# Phase-aware Codex review budgets (issue #571).  Output limits count output tokens and share
+# the provenance ``sampling_params.max_output_tokens`` bound.
+CODEX_OUTPUT_LIMIT_MAX: Final = 8_192
+CODEX_ROUTINE_OUTPUT_LIMIT_DEFAULT: Final = 4_096
+CODEX_FINAL_OUTPUT_LIMIT_DEFAULT: Final = 8_192
+CODEX_ROUTINE_REASONING_EFFORT_DEFAULT: Final = "medium"
 OWNER_DECLARED_ENDPOINT_PROFILE_ID: Final = "owner-declared-openai-responses"
 OWNER_DECLARED_PROVIDER_ID: Final = "openai-compatible"
 
@@ -451,9 +461,21 @@ class ExternalRuntimeProfileConfig(StrictConfigModel):
     capability_evidence_expires_at: Literal["2026-11-30T00:00:00Z"]
     codex_home: str
     model: str
+    # The final-profile effort (completion reviews).  Legacy bindings carry only this field, so
+    # it also serves the routine profile until ``routine_reasoning_effort`` is set explicitly.
     reasoning_effort: str
     timeout_seconds: int = Field(default=900, ge=1, le=3600)
     max_retries: int = Field(default=2, ge=0, le=2)
+    # Phase-aware review budgets (issue #571, ADR-006).  ``None`` preserves the legacy single
+    # effort for routine checks; new setups write the recommended bounded routine effort.
+    routine_reasoning_effort: str | None = None
+    # Output limits are counted in output tokens.  The names avoid the secret-key token scan.
+    routine_output_limit: int = Field(
+        default=CODEX_ROUTINE_OUTPUT_LIMIT_DEFAULT, ge=1, le=CODEX_OUTPUT_LIMIT_MAX
+    )
+    final_output_limit: int = Field(
+        default=CODEX_FINAL_OUTPUT_LIMIT_DEFAULT, ge=1, le=CODEX_OUTPUT_LIMIT_MAX
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -479,6 +501,9 @@ class ExternalRuntimeProfileConfig(StrictConfigModel):
                 "reasoning_effort",
                 "timeout_seconds",
                 "max_retries",
+                "routine_reasoning_effort",
+                "routine_output_limit",
+                "final_output_limit",
             }
         )
         _reject_unknown(value, allowed)
@@ -497,6 +522,8 @@ class ExternalRuntimeProfileConfig(StrictConfigModel):
         ):
             if key in source:
                 _validate_identifier(source[key])
+        if source.get("routine_reasoning_effort") is not None:
+            _validate_identifier(source["routine_reasoning_effort"])
         for key in (
             "executable_sha256",
             "app_server_schema_sha256",
@@ -514,6 +541,34 @@ class ExternalRuntimeProfileConfig(StrictConfigModel):
             if not path.is_absolute() or ".." in path.parts or str(path) != raw:
                 raise ConfigError("config_value_invalid", safe_name=key)
         return value
+
+    @property
+    def effective_routine_reasoning_effort(self) -> str:
+        """Routine effort in force: the explicit routine choice, else the legacy single effort."""
+
+        if self.routine_reasoning_effort is None:
+            return self.reasoning_effort
+        return self.routine_reasoning_effort
+
+    def review_budget_facts(self) -> dict[str, dict[str, str | int]]:
+        """Nonsecret per-profile effort and output limit shared by status surfaces."""
+
+        return {
+            "routine": {
+                "reasoning_effort": self.effective_routine_reasoning_effort,
+                "output_limit": self.routine_output_limit,
+                "effort_source": (
+                    "legacy_single_effort"
+                    if self.routine_reasoning_effort is None
+                    else "configured"
+                ),
+            },
+            "final": {
+                "reasoning_effort": self.reasoning_effort,
+                "output_limit": self.final_output_limit,
+                "effort_source": "configured",
+            },
+        }
 
 
 class SemanticFallbackConfig(StrictConfigModel):

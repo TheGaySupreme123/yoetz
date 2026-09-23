@@ -4,7 +4,9 @@
 including the four-tier classification, the evidence-driven subset plus ratchet, and the
 pointer-with-directive decision. Surface coverage beyond MCP and CLI remains a review decision on
 that issue. Amended for issue #741 (the CLI's own reason vocabulary ratchets too); the maintainer
-requested that scoped work. Surface coverage beyond MCP and CLI remains a review decision on #739.
+requested that scoped work. Amended again for issue #741 on 2026-09-22 (CLI-owned JSON carries the
+renderer-resolved directive); the maintainer requested the change and accepted this amendment.
+Surface coverage beyond MCP and CLI remains a review decision on #739.
 
 **Relates to:** ADR-002, ADR-009, ADR-015, ADR-018, and issues #739, #740, #669, #741, #742.
 
@@ -164,6 +166,37 @@ The two layers say different things and both are kept: the remedy names *which* 
 and the exact local command for it, the directive names the recovery rule that holds for the shape.
 Where they overlap, the CLI wording is the better-developed one and stays first on the line.
 
+### CLI-owned JSON carries the resolved directive (issue #741, 2026-09-22)
+
+The first cut of this ADR kept directive prose out of every JSON rendering, reading "the text does
+not travel" as "no JSON body holds the text". That reading was wider than the reason behind it. The
+decisive property above is that a *producer* cannot author text a *renderer* repeats: the token
+crosses the wire and the renderer supplies the words. The CLI is a renderer. When it resolves a
+token through the checked-in registry and prints the result in its own JSON output, the text still
+never crossed a wire and no producer wrote it. The property holds.
+
+Keeping the text out of JSON also had a real cost: an agent reading `--json` or non-TTY output had
+to hold the token table itself, while the same condition in a terminal came with its instruction.
+The JSON consumer was the one left without the directive.
+
+So:
+
+- A JSON error body the CLI **owns** (not a schema-locked wire result) carries a `recovery` object
+  when the error resolves to a directive. Its fields mirror the human lines one to one:
+  `continuation`, `directive`, then `commands`, `guidance_uri`, and `nudge` when present. For a
+  claim-revision rejection it carries `invariant` and `correction`. The observe verbs' typed failures
+  and the control-failure JSON payloads are the bodies this covers today.
+- `recovery.continuation` is the key a consumer branches on. The prose fields are advisory output:
+  they may be reworded in any release without a schema change, and a consumer must never send them
+  back as input or treat them as a stable identifier.
+- A **frozen wire result** is not extended. The workflow commands print the exact
+  `operation-result-1.0.0` failure body on stdout, and that schema admits no additional property.
+  Adding `recovery` there would be a wire version bump, shared with MCP, to carry text the consumer's
+  own renderer can supply. Instead, in JSON or non-TTY mode the CLI writes the same directive lines
+  a terminal would show to stderr. stdout stays byte-identical to the wire result.
+- Nothing changes on the wire: no new `safe_details` key and no schema version bump. Exit codes are
+  unchanged. This amendment changes what the CLI *says*, never what it *returns*.
+
 ### Coverage grows by ratchet
 
 Directives are populated for reason codes with demonstrated agent impact rather than by one
@@ -188,10 +221,11 @@ never sacrificed to fit advice.
   renderer, the bounded lifecycle line, the trusted-ceremony mapper, the interactive menu, the
   instance and path refusal line, the observe verbs, and the resource-integrity branch of
   `version`. A remedy visible on one of seven surfaces is the defect issue #741 reported.
-- JSON renderings carry the continuation token where they already carry `safe_details`, and gain no
-  directive prose. Issue #741 asked for the resolved directive in JSON output; that would make
-  directive text data, which the first decision above exists to prevent, so it is recorded as an
-  open question on that issue rather than implemented.
+- JSON renderings carry the continuation token where they already carry `safe_details`. CLI-owned
+  JSON error bodies also carry the renderer-resolved `recovery` object. A frozen wire result keeps
+  its exact shape on stdout and gets the directive lines on stderr (see the 2026-09-22 amendment
+  above). The human and JSON renderings share one resolver in `yoetz.cli.render`, so they cannot
+  disagree about what an error says to do.
 - Recovery rules now exist in two places — `guidance/*.md` and this registry — and must move
   together. The guidance-anchor test couples them; a directive that contradicts its own guidance
   section is a documentation bug, not a rendering one.

@@ -151,6 +151,7 @@ class FakeRuntime:
     bindings: list[tuple[str, str]] = field(default_factory=lambda: [])
     subscription_actions: list[str] = field(default_factory=lambda: [])
     subscription_setups: list[tuple[str, str, str, str, bool]] = field(default_factory=lambda: [])
+    subscription_routine_efforts: list[str | None] = field(default_factory=lambda: [])
     checks: list[tuple[str, CheckMode]] = field(default_factory=lambda: [])
     opened: list[str] = field(default_factory=lambda: [])
     progress_reads: list[str] = field(default_factory=lambda: [])
@@ -343,8 +344,18 @@ class FakeRuntime:
     def codex_subscription_defaults(self) -> tuple[str, str, str, str]:
         return "/opt/codex/codex", "/var/lib/yoetz/codex-home", "gpt-5.6-luna", "high"
 
+    subscription_routine_default: str | None = "medium"
+
+    def codex_subscription_routine_default(self) -> str | None:
+        return self.subscription_routine_default
+
     def preview_codex_subscription(
-        self, executable: str, codex_home: str, model: str, reasoning_effort: str
+        self,
+        executable: str,
+        codex_home: str,
+        model: str,
+        reasoning_effort: str,
+        routine_reasoning_effort: str | None = None,
     ) -> dict[str, object]:
         return {
             "executable_path": executable,
@@ -355,6 +366,7 @@ class FakeRuntime:
             "codex_home": codex_home,
             "model": model,
             "reasoning_effort": reasoning_effort,
+            "routine_reasoning_effort": routine_reasoning_effort,
         }
 
     subscription_login_reused: bool = False
@@ -367,8 +379,10 @@ class FakeRuntime:
         reasoning_effort: str,
         *,
         switch_account: bool = False,
+        routine_reasoning_effort: str | None = None,
     ) -> dict[str, object]:
         action = "switch" if switch_account else "setup"
+        self.subscription_routine_efforts.append(routine_reasoning_effort)
         self.subscription_actions.append(action)
         self.subscription_setups.append(
             (executable, codex_home, model, reasoning_effort, switch_account)
@@ -387,7 +401,20 @@ class FakeRuntime:
         return {
             "auth_mode": "chatgpt",
             "plan_type": "plus",
+            "model": "gpt-5.6-luna",
             "model_available": True,
+            "review_budgets": {
+                "routine": {
+                    "reasoning_effort": "medium",
+                    "output_limit": 4096,
+                    "effort_source": "configured",
+                },
+                "final": {
+                    "reasoning_effort": "high",
+                    "output_limit": 8192,
+                    "effort_source": "configured",
+                },
+            },
             "process_cleanup": "terminated",
         }
 

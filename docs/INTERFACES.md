@@ -273,12 +273,29 @@ instance, or ceremony refusal line whose local reason has a registered directive
 human-rendered CLI error path goes through one of `render_human_error`, `bounded_failure_line`, or
 `ceremony_refusal_line` in `yoetz.cli.render`, so the public-error renderer, the trusted-ceremony
 mapper, the interactive menu, the instance and path refusal line, the observe verbs, and the
-resource-integrity branch of `version` all render the same directive for the same reason. JSON
-renderings carry the continuation token where they already carry `safe_details` and gain no
-directive prose. Frozen command
+resource-integrity branch of `version` all render the same directive for the same reason. A
+coordination control refusal appends the directive its reason code maps to beneath its remedy line.
+Frozen command
 literals already allowlisted on `safe_details` (`prepare_command`, `review_command`,
 `authorize_command`) are rendered in that fixed order; which of them travel is decided upstream, so
 the clause reports what is present.
+
+JSON renderings carry the continuation token where they already carry `safe_details`. A JSON error
+body the CLI owns (the observe verbs' typed `error` object and the control-failure payload with
+`ok: false`) also carries a `recovery` object whenever the error resolves to a directive (ADR-030,
+issue #741). Its fields mirror the human lines one to one: `continuation`, `directive`, and, when
+present, `commands`, `guidance_uri`, and `nudge`. A claim-revision rejection carries `invariant` and
+`correction` instead of, or alongside, those fields. The CLI resolves the text itself from the
+checked-in registry, the same resolver its human lines use; nothing is read from the wire or from
+the error message. `recovery.continuation` is the stable key. The prose fields are advisory, may be
+reworded in any release without a schema change, and are never accepted back as input. A body with
+no resolvable directive has no `recovery` key.
+
+The workflow commands (`start`, `publish-work`, `check`, `respond`, `status`, `receipt`) print the
+frozen `operation-result-1.0.0` failure body on stdout in JSON or non-TTY mode. That schema admits no
+additional property, so stdout stays byte-identical to the wire result, and the CLI writes the same
+directive lines a terminal would show (`Continuation:`, `Next:`, …) to stderr. Exit codes are
+unchanged throughout.
 
 For `claim_revision_mismatch`, `safe_details` carries an allowlisted `invariant` naming the closed
 domain rule that rejected the draft, and both the MCP text projection and the CLI render an
@@ -469,13 +486,20 @@ free text from input. CLI exit classes (0/2/10/11/20/30/40/70/130) map from code
   `MAX_ORDINARY_CONTROL_FRAME_BYTES = 1_048_576` for every frame except the exact closed
   `import_codex_jsonl` call. That one branch may exceed the ordinary cap only when its canonical
   base64 decodes to at most `MAX_IMPORT_SOURCE_BYTES`; no other method inherits the larger bound.
-- Host hook ingress (`cli/hook_io.py`): `MAX_HOOK_STDIN_BYTES = 262_144` (256 KiB), the one cap
-  for every host's hook stdin body and shared by `cli/hooks.py`. Each reader consumes at most
-  cap-plus-one bytes, so an oversized body's true size is never measured and never recorded. A
-  body over the cap raises `payload_too_large` before the NUL scan, the UTF-8 decode, and the
-  JSON parse; an empty body still raises `invalid_event_value_type`. The two were one reason, so
-  an ordinary edit that outgrew the cap was indistinguishable from a malformed envelope
-  (issue #667).
+- Host hook ingress (`cli/hook_io.py`): `MAX_HOOK_STDIN_BYTES = 262_144` (256 KiB) is the trusted
+  full-parse cap for every host's hook stdin body and is shared by `cli/hooks.py`. A body at or
+  under that cap is parsed in full. Codex, Claude Code, and Cursor's pure
+  `read_cursor_hook_payload` replay raise `payload_too_large` before the NUL scan, the UTF-8
+  decode, and the JSON parse when the body is over that cap; an empty body still raises
+  `invalid_event_value_type`. Cursor observation (`read_cursor_hook_ingress`) may read a complete
+  body up to `MAX_HOOK_SKIM_BYTES = 1_048_576` (1 MiB), the ordinary local-control frame cap. Inside
+  that skim cap the same safety rules parse the document and the handler keeps a closed identity
+  view: session, tool, call id, bounded path text used only for a path commitment, scalar
+  outcome fields, and whether an `error` value was set (never its text). A `workspace_roots`
+  value the view cannot keep becomes `null`, so the workspace resolver refuses it exactly as it
+  does at full size. File contents, edits, prompts, and command text are not retained. A body over
+  the skim cap raises `payload_too_large` before any parse. A complete oversized body that fails
+  the NUL, UTF-8, duplicate-key, or JSON checks yields no identity view (issue #667).
 - Digests render as `sha256:<64 lowercase hex>`; commitments as `hmac-sha256:<64 lowercase hex>`.
 - Writer/ledger sequences and frontier sequences cross the wire as canonical base-10 integer
   strings (`"0" | [1-9][0-9]*`, with writer/ledger sequences positive). This is not a blanket
@@ -2059,7 +2083,12 @@ baseline; no MCP tool or advertised input-schema field is added by this repair.
   bytes only while the caller can prove that its reference has not been submitted to a durable
   owner; a byte mismatch fails closed and an abandoned stage cannot be finalized later. Both
   locations are attempted even when one fails, so a temp-path fault cannot strand the finalized
-  copy; the first failure is raised and the stage stays un-abandoned so a retry re-attempts both;
+  copy; the first failure is raised and the stage stays un-abandoned so a retry re-attempts both.
+  A local captured-content manifest row is a durable owner. The observation coordinator abandons a
+  just-finalized captured-content object through `abandon_preappend_objects` only after a lookup
+  proves that row does not name it (ADR-003, #571 / #550). A committed row forbids abandon. A
+  failed lookup is not that proof. Abandon failure is logged as `observation_object_abandon_failed`
+  and does not replace the caller's store error; generation-fenced GC remains the fallback;
 - `resolve_verified(object_id, envelope_digest) -> ObjectRef` — bounded exact finalized-object
   resolution for catalog-pinned START crash resume; deterministic verification failures raise
   `ValueError("object_verification_failed")`, while environmental I/O re-raises `OSError` for the
@@ -2964,8 +2993,8 @@ on the 0.2 line; the 0.3 line's `2.7.0` and `2.8.0` request and result envelopes
 decoded UTC receipt timestamps in canonical millisecond RFC3339 form (issues #731 and #732). The
 0.2.3 schema inventory is reported by version-manifest `2.2.1`, the 0.2.4 inventory by `2.2.2`,
 and the 0.2 line's setup-readiness and setup-status additions by `2.2.3` and `2.2.4`; the 0.3
-line reports its inventory, including both setup contracts, through `2.3.0`. Manifests carried
-from the 0.2 line retain their bytes.
+line reports its inventory, including both setup contracts and `isolation-report` `1.0.0`
+(issue #567), through `2.3.0`. Manifests carried from the 0.2 line retain their bytes.
 
 `PrivacyAuditPort.list_pending_disclosures(audience) -> PendingDisclosurePage` projects only
 `PendingDisclosureEntry(pending_id, task_id, expires_at)` for proposals in `awaiting_human` or
@@ -3223,9 +3252,12 @@ slice (`role`, identity, `attempted_count`, `terminal_reason_counts`, `last_term
 `codex-chatgpt-subscription@1` is the only v1 external-runtime profile. Its configuration is the
 closed `ExternalRuntimeProfileConfig`: exact absolute executable and dedicated-home paths;
 executable, app-server-schema, capability-cell, and isolated-config SHA-256 digests;
-runtime/source/capability identities; capability-evidence expiry; model; reasoning effort;
-timeout; and retry cap. It has no token, OAuth endpoint, generic provider URL, headers, or open
-options map. Expired capability evidence fails before child launch. `account/read`, model
+runtime/source/capability identities; capability-evidence expiry; model; reasoning effort
+(the final-profile effort); timeout; and retry cap. It also has the optional
+`routine_reasoning_effort` (absent means routine checks keep `reasoning_effort`) and
+`routine_output_limit`/`final_output_limit` (output tokens, 1–8192, defaults 4096/8192). The
+writer emits these three keys only when they carry an explicit choice. It has no token, OAuth
+endpoint, generic provider URL, headers, or open options map. Expired capability evidence fails before child launch. `account/read`, model
 discovery, login, and logout are structural app-server operations and never a task-content probe.
 
 `SemanticEvaluatorPort.evaluate(case: ApprovedProviderCase, deadline: Deadline) -> SemanticResult`
@@ -3340,6 +3372,26 @@ the literal `upstream_body_observability=unavailable`. Email, credential paths/b
 or workspace IDs, prompt/reasoning/event/stderr text, and an asserted upstream body digest are
 forbidden. `turn_acknowledged=true` plus ambiguous transport or cleanup maps to
 `unavailable/outcome_unknown` and is not retriable.
+
+**Semantic budget profile (issue #571, ADR-006 amendment).** `SemanticBudgetProfile` is the
+closed pair `routine | final` (`yoetz.ports.semantic_budget`).
+`select_semantic_budget_profile(projection)` returns `final` when the frozen projection holds an
+effective, readable `completion` claim, and `routine` otherwise. The selected value is frozen as
+`execution.budget_profile` in the `yoetz.semantic-case/2` snapshot. An absent key reads as
+`final`, and any other value is `semantic_execution_invalid`. It is exposed to the provider
+factory only for the duration of one physical dispatch, and dispatches outside a check see
+`final`. For `external_runtime_oauth`, the selected profile maps to the binding's configured
+effort and output limit:
+
+- `runtime_evidence.reasoning_effort` is the effort the attempt sent in `turn/start`.
+- `sampling_params.max_output_tokens` is the per-check output limit Yoetz enforced on the
+  runtime's visible output counters (`output_tokens − reasoning_output_tokens`).
+- `selection_sha256` is `canonical_digest({"budget_profile", "model", "output_limit",
+  "reasoning_effort"})`. Attempts recorded before #571 committed to
+  `{"model", "reasoning_effort"}`.
+
+A snapshot over the limit ends the turn as `output_oversize`. The provenance wire shape is
+unchanged.
 
 `semantic_required` means AI-powered review success is required for a complete verdict, not required
 for returning already-computed local truth. Missing approved external/local capability, privacy
@@ -3647,11 +3699,18 @@ Shared closed types:
   tree first and then redacts decoded string keys and values, preserving structural punctuation;
   any redaction-created duplicate key is rejected instead of silently merging fields.
 - `ObservationGapCode` — closed coverage tokens. `payload_too_large` is one host hook event whose
-  body exceeded `MAX_HOOK_STDIN_BYTES` and was therefore never parsed; it is not
-  `truncated_payload`, which is an admitted payload clipped after parsing. Nothing about such an
-  event is knowable beyond the host that ran it and the hook name that host named on its own
-  command line, so it mints no structural row and binds to the workspace through the
-  command-line locator alone. `session_superseded` is a mapped host session
+  body exceeded `MAX_HOOK_STDIN_BYTES` and was not admitted as a structural row. Codex and Claude
+  Code always stop there. Cursor stops there when the body does not fit `MAX_HOOK_SKIM_BYTES` or
+  the skim cannot validate a complete document. It is not `truncated_payload`, which is an
+  admitted payload clipped after parsing. Nothing about such an event is retained beyond the host
+  that ran it and the hook name that host named on its own command line, so it mints no structural
+  row and binds to the workspace through the command-line locator alone. A Cursor body parsed
+  inside the skim cap that still yields no row (no session, no resolvable workspace, an ambiguous
+  session, or an unknown event) records the same gap; the ordinary profile's deliberate
+  `afterMCPExecution` skip does not, because its paired `postToolUse` owns the call.
+  `payload_content_omitted` is the Cursor case that did validate: the structural row keeps the
+  closed identity and an empty content-reference list, and coverage must not treat the omitted
+  native bytes as captured. `session_superseded` is a mapped host session
   whose Yoetz route was retired and whose successor binding could not be followed; it is never
   `ledger_rejected` and never `mapping_missing` (issue #577). `unsupported_event` is an admitted profile with
   an unrecognized wrapper or nested item, or a known wrapper with an incompatible payload shape
@@ -4334,14 +4393,15 @@ repeating every minute. A hook whose own pre-flush still fails structurally reco
 
 A host body refused at stdin ingress for its size is accounted the same way, per host:
 `codex_payload_too_large`, `claude_payload_too_large`, and `cursor_payload_too_large` are the
-bounded hook reasons, recorded against the hook event name the host supplied on the command line —
-the only identity available, since the body was never parsed. Each also notes the
-`payload_too_large` coverage gap on the consented workspace, so `observe status` and receipt
-coverage wording carry the loss instead of an unexplained absence. The reason names the host
-because the reading process is the last place that still knows which one it was. Before these, an
-oversized Cursor write recorded the generic `cursor_payload_invalid`, an oversized Codex event
-degraded to the bare `observe` token, and an oversized Claude Code event recorded nothing at all
-(issue #667).
+bounded hook reasons, recorded against the hook event name the host supplied on the command line.
+Codex and Claude Code never parse that body, so the hook name is their only identity, and each
+notes the `payload_too_large` coverage gap on the consented workspace. Cursor notes that same
+no-row gap when the body exceeds `MAX_HOOK_SKIM_BYTES` or fails validation inside it. When Cursor
+does validate a complete body inside the skim cap, the reason is `cursor_payload_content_omitted`
+and the structural row carries `payload_content_omitted` instead of `payload_too_large`. Before
+these, an oversized Cursor write recorded the generic `cursor_payload_invalid`, an oversized Codex
+event degraded to the bare `observe` token, and an oversized Claude Code event recorded nothing at
+all (issue #667).
 
 `ObservationSelection` separates Focused/Detailed from the 512/2,048/8,192 count profiles.
 `ObservationSelectionSettings` resolves a live session override, then an explicit workspace
@@ -4803,6 +4863,10 @@ current-session repository binding's `repository_grant_state == "granted"`. `end
 service's `fallback_provider` capability), and a separate `fallback_provider_credential`
 blocker (`not_connected` with its own next command, or `unknown`); the fallback is never an
 input to `semantic_ready`, and a single-endpoint install omits the fallback fields entirely.
+A Codex-subscription endpoint (primary or fallback) adds `review_budgets`. It is shaped
+`{"routine"|"final": {"reasoning_effort", "output_limit", "effort_source"}}`, where
+`effort_source` is `configured` or `legacy_single_effort`. `yoetz provider codex-subscription
+status` (`yoetz.codex-subscription-status/1`) carries the same object.
 `repository_grant_state` and `repository_migration_state` expose the separate repository-authority
 inputs without inventing another readiness verdict. `agent_route_semantic_ready` is
 `semantic_ready` **and** one exclusive observed owner (`external|plugin`) with
@@ -5220,8 +5284,11 @@ duration, capability profile, and an installation-keyed HMAC changed-path commit
 boundary and truncated to the canonical integer `duration_ms`; the canonical parser remains
 float-free. Discarded vendor-field floats are replaced transiently, and malformed or unsafe Cursor
 envelopes remain fail-open while recording the payload-free `cursor_payload_invalid` diagnostic; a
-body over the shared 256 KiB hook ingress cap is separated from that vendor-shape refusal and
-records `cursor_payload_too_large` with the `payload_too_large` coverage gap instead.
+body over the shared 256 KiB hook ingress cap is separated from that vendor-shape refusal. A
+complete body that also fits the 1 MiB skim cap is admitted as a structural row with
+`payload_content_omitted` and `cursor_payload_content_omitted`. A larger body, or a complete
+oversized body that fails validation, records `cursor_payload_too_large` with the
+`payload_too_large` coverage gap and no structural row.
 The `model` spelling from execution/file-edit events normalizes to `model_id`; a valid `model_id`
 spelling wins when both are present. It discards
 prompt, reasoning, response text, paths, file contents/edits, MCP/tool inputs/results, transcripts,
@@ -5698,7 +5765,24 @@ facade and are never MCP tools.
   `storage.data_dir` alone are storage relocation, not isolation. The connection-free proof
   surface is `yoetz service isolation --json` (`cli/isolation_status.py`), digest-only; it also
   reports `binding` (`IsolationBinding` = `ambient|environment|runtime_pin|environment_and_pin`)
-  and `lifecycle` (`ReportedLifecycle` = `permanent|persistent|disposable|unlabeled`).
+  and `lifecycle` (`ReportedLifecycle` = `permanent|persistent|disposable|unlabeled`). Its JSON is
+  `yoetz.isolation-report/1` (`protocol/isolation_report.py` `IsolationReportContract`, wire
+  schema `service/isolation-report-1.0.0.schema.json`, golden vector
+  `fixtures/service/isolation-report.case.json`; issue #567), which names two digest kinds
+  apart. `path_identity` (`IsolationPathIdentity`) holds **path-identity digests** —
+  `state_path_digest`, `endpoint_path_digest`, `storage_path_digest`, `config_path_digest`,
+  `executable_path_digest`, each `path_identity_digest()` = SHA-256 over the canonical resolved
+  path — which prove which target a runtime uses and never bind bytes. `config_content` is `null`
+  unless `--content-digests` is passed; it is then one **byte-content observation**
+  (`ContentObservation` = `PresentContentObservation | AbsentContentObservation`, produced by
+  `observe_file_content()`): `path_digest`, `presence`
+  (`ContentPresence` = `present|absent|not_regular|oversized|unreadable|unstable`),
+  `content_digest` (SHA-256 of the bytes, `present` only), `size_bytes` (`present` only, at most
+  `CONTENT_OBSERVATION_BYTE_LIMIT` = 16 MiB), and `observed_at` (RFC 3339 ms) — never content.
+  Symlinks are followed, so `path_digest` is the target's identity; a read the file changes under
+  is retried (`_STABLE_ATTEMPTS` = 3) and otherwise reported `unstable` without a digest. The
+  untagged 0.2 output (an `identity` block whose `config_digest` was a path digest) is not a
+  schema version and is no longer emitted; consumers detect it by the absent `schema` key.
   The runtime pin (ADR-028, issue #604) is the second, executable-bound source of the same root:
   `read_runtime_pin()` reads `RUNTIME_PIN_NAME` = `yoetz-instance-pin.json`
   (`RUNTIME_PIN_SCHEMA` = `yoetz.runtime-instance-pin/1`: exact `isolated_root` plus
@@ -5729,7 +5813,7 @@ facade and are never MCP tools.
   creates one owner-only root (parent must exist; same path-safety gate; socket path bound
   `MAX_SOCKET_PATH_BYTES` = 100), seals the marker, and with `--bind-runtime` pins `sys.prefix`;
   it echoes the exact root once. `instance_status()` is connection-free and digest-only: mode,
-  binding, lifecycle, marker fields, `expired`, `runtime_provenance`
+  binding, lifecycle, the isolation report's `path_identity` block, marker fields, `expired`, `runtime_provenance`
   (`matched|drifted|unrecorded`), `runtime_pin` (`bound|none`), and the lock-stamped
   `service_holder`. `dispose_instance()` removes exactly one marked persistent/disposable root:
   flock probe, SIGTERM to the stamped holder only, bounded wait (`STOP_WAIT_SECONDS` = 35),

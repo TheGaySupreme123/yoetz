@@ -44,6 +44,7 @@ from yoetz.cli.project import project_app
 from yoetz.cli.render import (
     bounded_failure_line,
     ceremony_refusal_line,
+    render_error_recovery_lines,
     render_human_awaiting_human,
     render_human_check,
     render_human_error,
@@ -725,6 +726,12 @@ async def _call_workflow(
         branch = result.root
         if json_output or not sys.stdout.isatty():
             _stdout_json(wire)
+            if isinstance(branch, OperationFailureModel):
+                # stdout is the frozen wire failure result and admits no extra field, so the
+                # directive this renderer resolves from the token goes to stderr (ADR-030, #741).
+                recovery = render_error_recovery_lines(branch.error.safe_details)
+                if recovery:
+                    _stderr("\n".join(recovery))
         elif isinstance(branch, OperationFailureModel):
             _stderr(render_human_error(branch.error))
         elif isinstance(branch, CheckSuccessModel):
@@ -1721,10 +1728,24 @@ def service_run() -> None:
 
 
 @service_app.command("isolation")
-def service_isolation(json_output: _JSON = False) -> None:
+def service_isolation(
+    json_output: _JSON = False,
+    content_digests: Annotated[
+        bool,
+        typer.Option(
+            "--content-digests",
+            help=(
+                "Also observe the selected config file's bytes as SHA-256, size, existence, and "
+                "observation time (never its content)."
+            ),
+        ),
+    ] = False,
+) -> None:
     """Report the resolved identity roots and isolation mode without connecting to a service.
 
-    Digest-only output: each root is a digest over its canonical resolved path identity. The
+    Digest-only output (``yoetz.isolation-report/1``): each root is a path-identity digest over
+    its canonical resolved path, which does not change when the file's bytes change. With
+    ``--content-digests`` the selected config also gets a bounded byte-content observation. The
     dogfood parity preflight compares one report from the exact normal target with another from
     the isolated launch environment; platform defaults cannot stand in for a relocated target.
     """
@@ -1735,7 +1756,7 @@ def service_isolation(json_output: _JSON = False) -> None:
     from yoetz.config.paths import PathSafetyError
 
     try:
-        report = isolation_report()
+        report = isolation_report(content=content_digests)
     except PathSafetyError as error:
         _stderr(f"isolation_invalid: {error.reason_code}")
         _finish(2)
@@ -3528,8 +3549,22 @@ def provider_codex_subscription_setup(
         ),
     ] = None,
     reasoning_effort: Annotated[
-        str, typer.Option("--reasoning-effort", help="Exact reasoning effort.")
+        str,
+        typer.Option(
+            "--reasoning-effort",
+            help="Exact reasoning effort for final (completion) reviews.",
+        ),
     ] = "high",
+    routine_reasoning_effort: Annotated[
+        str | None,
+        typer.Option(
+            "--routine-reasoning-effort",
+            help=(
+                "Exact reasoning effort for routine checkpoint reviews. Defaults to medium for "
+                "a new binding and preserves an existing binding's routine choice when omitted."
+            ),
+        ),
+    ] = None,
     codex_home: Annotated[
         Path | None,
         typer.Option("--codex-home", help="Dedicated owner-private evaluator CODEX_HOME."),
@@ -3572,6 +3607,7 @@ def provider_codex_subscription_setup(
         codex_subscription_setup,
         default_codex_home,
         default_codex_subscription_model,
+        default_codex_subscription_routine_effort,
         resolve_supported_codex_executable,
     )
 
@@ -3585,6 +3621,11 @@ def provider_codex_subscription_setup(
             raise ValueError("codex_runtime_capability_unsupported")
         destination = default_codex_home() if codex_home is None else codex_home
         selected_model = default_codex_subscription_model() if model is None else model
+        selected_routine = (
+            default_codex_subscription_routine_effort()
+            if routine_reasoning_effort is None
+            else routine_reasoning_effort
+        )
         typer.echo("Codex with ChatGPT subscription")
         typer.echo(f"  runtime: {native}")
         typer.echo(f"  executable_sha256: {digest}")
@@ -3592,7 +3633,15 @@ def provider_codex_subscription_setup(
         typer.echo(f"  capability cell: {cell.capability_cell_sha256}")
         typer.echo(f"  cell evidence expires: {cell.capability_evidence_expires_at}")
         typer.echo(f"  dedicated CODEX_HOME: {destination}")
-        typer.echo(f"  model/reasoning: {selected_model} / {reasoning_effort}")
+        typer.echo(f"  model: {selected_model}")
+        typer.echo(
+            f"  reasoning: final {reasoning_effort} / routine "
+            + (
+                f"{reasoning_effort} (legacy single effort kept)"
+                if selected_routine is None
+                else selected_routine
+            )
+        )
         typer.echo("  destination: OpenAI through Codex-managed ChatGPT authentication")
         typer.echo("  data-use posture: unknown; your ChatGPT plan and terms apply")
         typer.echo("  Yoetz sends only a privacy-approved case; Codex owns the upstream body.")
@@ -3621,6 +3670,7 @@ def provider_codex_subscription_setup(
                     codex_home=destination,
                     model=selected_model,
                     reasoning_effort=reasoning_effort,
+                    routine_reasoning_effort=selected_routine,
                     login_mode="device_code" if device_code else "browser",
                     open_browser=open_browser,
                     switch_account=switch_account,

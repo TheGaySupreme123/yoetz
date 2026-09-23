@@ -429,6 +429,68 @@ changed body conflicts. An explicit attached control cancellation or service shu
 joins the work. This does not introduce parallel semantic scheduling; structural phase progress
 was added later (see the amendment below).
 
+### Phase-aware Codex review budgets (2026-09-22, #571 item A1)
+
+Each semantic check runs under exactly one closed **budget profile**. `final` applies when the
+frozen case carries an effective, readable completion claim (`claim_kind=completion`, not
+superseded by an ADR-025 correction); every other check is a `routine` checkpoint. The selection
+is a pure function of the frozen projection, so the same case always selects the same profile.
+It is frozen into the execution snapshot of the encrypted `SEMANTIC_CASE` object as the optional
+`execution.budget_profile` key when the job is created. Every physical attempt, including
+retries, disclosure-wait resume, and started-attempt recovery, dispatches under that frozen
+value; changed configuration or a later claim cannot re-select it. Snapshots written before
+this amendment lack the key and replay as `final`, which is the pre-amendment single-effort
+behavior. The `yoetz.semantic-case/2` reader ignores unknown execution keys, so no case-schema
+bump is needed. Dispatches outside a check (credential probes, observation advice) also use
+`final`.
+
+The Codex subscription binding (`[external_runtime]`) expresses the two profiles separately:
+
+- `reasoning_effort` (existing, required) is the final-profile effort.
+- `routine_reasoning_effort` (optional). New setups write the bounded recommendation `medium`.
+  When it is absent (every binding written before this amendment), routine checks keep the
+  single configured effort. A persisted choice is therefore never silently lowered. Re-running
+  setup keeps the existing binding's routine choice unless `--routine-reasoning-effort` is
+  given. An explicit flag or setup-screen selection always wins.
+- `routine_output_limit` and `final_output_limit` count output tokens. Both are bounded to
+  1–8192 and default to 4096 and 8192. They are carried over when setup is re-run.
+
+Readiness (`status`, setup) requires the exact model to list every configured profile effort. A
+single attempt requires only the effort its budget selected, and a missing effort still fails as
+`model_unavailable` before case disclosure.
+
+The pinned app-server v2 protocol has no per-turn output ceiling. Yoetz therefore enforces the
+selected output limit on the runtime's own cumulative `thread/tokenUsage/updated` counters.
+Only visible output counts (`output_tokens − reasoning_output_tokens`), because reasoning
+tokens are governed by the effort. The check is applied to each valid snapshot. A snapshot over
+the limit interrupts the turn and ends it as the existing closed `output_oversize` stage
+(`invalid/response_schema_invalid`). That outcome is content-shaped, like API-path
+`max_output_tokens` truncation: it is never retried and never engages the fallback. When the
+runtime reports no usage, the limit cannot be verified. The answer stays bounded by the
+constrained output schema and the 1 MiB message cap, and the absent `token_usage` in the
+evidence shows that the limit was not measured.
+
+Provenance records the exact selection per check without a wire change:
+
+- `semantic_provenance.model`
+- `runtime_evidence.reasoning_effort` (the selected effort, no longer the binding's single
+  value)
+- `sampling_params.max_output_tokens` (the selected output limit, replacing the constant 2048
+  that the Codex path previously copied from the API adapter and never enforced)
+
+`runtime_evidence.selection_sha256` now commits to
+`{"budget_profile","model","output_limit","reasoning_effort"}`. The profile name itself is
+recorded only in that commitment. Markdown and text receipts name the model, effort, and output
+limit beside the attempt usage. `yoetz provider status`, `yoetz provider codex-subscription
+status`, the setup preview, and the terminal interface show both profiles.
+
+The profile changes nothing else: deterministic checks, disclosure categories, the privacy
+gateway, retention, provider authority, deadlines (#746), retry eligibility, and fallback
+licensing are unchanged. A per-request override is not part of this amendment; a check can
+request the final profile only by carrying a completion claim. API-provider endpoints keep
+their existing fixed output limit. The installed Luna latency, output-size, and validity
+comparison per profile needs a live provider and remains a separate #571 acceptance item.
+
 ### Structural review progress (2026-09-22, #571 A2)
 
 A durable AI-powered review job exposes bounded structural progress through

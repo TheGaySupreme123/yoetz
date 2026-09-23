@@ -410,13 +410,17 @@ class ObservationGapCode(str, Enum):  # noqa: UP042 - exact durable wire enum
     # buffered lane, so its members were admitted individually instead of being
     # represented by a bounded summary account (issue #753).
     ROUTINE_SUMMARY_INVALID = "routine_summary_invalid"
-    # One host hook event whose body exceeded the fixed stdin ingress bound and
-    # was therefore never parsed. Distinct from ``truncated_payload``, which is
-    # a payload that was admitted and then clipped after parsing: nothing about
-    # this event is known beyond the hook name the host named on the command
-    # line, so no structural row, session, or path identity exists for it. The
-    # work itself still happened, and the gap is how coverage says so (#667).
+    # One host hook event whose body exceeded the trusted stdin cap and was not
+    # admitted as a structural row. Distinct from ``truncated_payload``, which is
+    # a payload that was admitted and then clipped after parsing. Codex and
+    # Claude Code always stop here. Cursor stops here when the body does not fit
+    # the skim cap or the skim cannot validate a complete document (#667).
     PAYLOAD_TOO_LARGE = "payload_too_large"
+    # One Cursor hook event whose complete body fit the skim cap. The structural
+    # row keeps closed identity and carries no native content. Distinct from
+    # ``payload_too_large``, which minted no row, and from ``truncated_payload``,
+    # which clipped an already-admitted body (#667).
+    PAYLOAD_CONTENT_OMITTED = "payload_content_omitted"
     SELECTION_ROUTE_CHANGED = "selection_route_changed"
     POLICY_UNTRUSTED = "policy_untrusted"
     VERIFICATION_STALE = "verification_stale"

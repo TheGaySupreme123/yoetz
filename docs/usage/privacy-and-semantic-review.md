@@ -295,6 +295,25 @@ Progress names phases only. It never shows prompt or response text, streamed tok
 token counts, your account, or credentials. A phase is not evidence that the review is correct.
 Checks started before this version show no progress.
 
+### Routine checkpoints and final reviews
+
+A Codex subscription review uses one of two budget profiles. A check made after your task
+records a completion claim is a **final** review. It uses the configured final reasoning effort
+(`high` by default) and an output limit of 8192 tokens. Every earlier check is a **routine**
+checkpoint, which uses the routine effort (`medium` for new setups) and an output limit of 4096
+tokens.
+
+- **Choosing values.** Choose the efforts during setup. The limits are the optional
+  `routine_output_limit` and `final_output_limit` keys in `[external_runtime]` (1–8192).
+- **Older subscriptions.** A subscription connected before routine checkpoints existed keeps its
+  single effort for every check until you choose a routine effort.
+- **What does not change.** The profile is fixed when the check starts, so retries and
+  recovery never switch it. It does not change what may be disclosed, how long the review may
+  run, or whether it retries.
+- **What is recorded.** Every check result and receipt names the exact model, reasoning effort,
+  and output limit used. A review whose visible answer exceeds its limit is stopped and reported
+  as an invalid answer.
+
 ### Cancelled background review
 
 A foreground session attachment may cancel optional background review. Once disclosure authority

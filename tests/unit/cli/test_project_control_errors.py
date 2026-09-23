@@ -5,8 +5,10 @@ from __future__ import annotations
 import pytest
 
 from yoetz.cli.app import control_failure
+from yoetz.cli.render import recovery_directive_json
 from yoetz.domain.coordination import CoordinationErrorCode
 from yoetz.ports.control import ControlError
+from yoetz.protocol.recovery import continuation_for_reason, directive_for
 
 
 def test_implicit_project_refusal_has_json_reason_and_invalid_request_exit(
@@ -17,6 +19,8 @@ def test_implicit_project_refusal_has_json_reason_and_invalid_request_exit(
 
     code = control_failure(ControlError("implicit_project_requires_opt_out"), json_output=True)
 
+    refresh = directive_for("lineage_state_refresh")
+    assert refresh is not None
     assert code == 2
     assert emitted == [
         {
@@ -24,6 +28,7 @@ def test_implicit_project_refusal_has_json_reason_and_invalid_request_exit(
             "public_code": "INVALID_REQUEST",
             "reason": "implicit_project_requires_opt_out",
             "retryable": False,
+            "recovery": recovery_directive_json(refresh),
         }
     ]
 
@@ -58,6 +63,25 @@ def test_every_project_reason_maps_to_invalid_request_json(
     assert payload["public_code"] == "INVALID_REQUEST"
     assert payload["reason"] == reason
     assert payload["retryable"] is False
+    directive = directive_for(continuation_for_reason(reason))
+    assert directive is not None
+    assert payload["recovery"] == recovery_directive_json(directive)
+
+
+@pytest.mark.parametrize("reason", tuple(code.value for code in CoordinationErrorCode))
+def test_every_project_reason_names_its_continuation_on_stderr(
+    reason: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The human line gains the same directive the JSON body carries (ADR-030, #741)."""
+
+    control_failure(ControlError(reason))
+
+    directive = directive_for(continuation_for_reason(reason))
+    assert directive is not None
+    error = capsys.readouterr().err
+    assert error.startswith(f"{reason}: ")
+    assert f"Continuation: {directive.token}" in error
+    assert f"Next: {directive.directive}" in error
 
 
 def test_source_policy_refusal_does_not_recommend_workspace_consent(

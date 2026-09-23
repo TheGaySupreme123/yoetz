@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from yoetz.domain.events import (
+    ClaimKind,
     ClaimRecordedPayload,
     ClaimRecordedPayloadV1_1,
 )
@@ -11,6 +12,7 @@ from yoetz.kernel.projections import ClaimProjectionRecord, ProjectionState
 
 __all__ = [
     "claim_discloses_result",
+    "completion_claim_present",
     "effective_claim_items",
     "effective_claim_ids",
     "result_is_relevant_to_claim",
@@ -43,6 +45,15 @@ def effective_claim_items(
 
     effective = effective_claim_ids(projection)
     return tuple((claim, projection.claims[claim]) for claim in sorted(effective, key=str.encode))
+
+
+def completion_claim_present(projection: ProjectionState) -> bool:
+    """Whether any effective, readable claim at this frontier is a completion claim."""
+
+    return any(
+        record.payload is not None and record.payload.claim_kind is ClaimKind.COMPLETION
+        for _, record in effective_claim_items(projection)
+    )
 
 
 def _scope(payload: ClaimPayload) -> frozenset[ObligationId]:

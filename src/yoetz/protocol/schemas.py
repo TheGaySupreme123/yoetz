@@ -56,7 +56,7 @@ __all__ = [
 SCHEMA_NAMESPACE: Final = "https://schemas.yoetz.dev/0.1/"
 SCHEMA_MANIFEST_SCHEMA: Final = "yoetz.schema-manifest/1.0.0"
 SCHEMA_MANIFEST_VERSION: Final = "1.0.0"
-SCHEMA_MEMBER_COUNT: Final = 200
+SCHEMA_MEMBER_COUNT: Final = 201
 
 _DRAFT_2020_12: Final = "https://json-schema.org/draft/2020-12/schema"
 _SCHEMA_MEDIA_TYPE: Final = "application/schema+json"
@@ -449,7 +449,7 @@ def _derive_role(path: str) -> SchemaArtifactRole:
             return SchemaArtifactRole.SETUP_CONTRACT
         _protocol_error("schema_artifact_role_mismatch")
     if directory == "service":
-        if filename.startswith("service-status-"):
+        if filename.startswith(("service-status-", "isolation-report-")):
             return SchemaArtifactRole.SERVICE_STATUS
         if filename.startswith(
             ("control-hello-", "control-hello-result-", "control-request-", "control-result-")
@@ -652,7 +652,7 @@ def _load_catalog_state() -> _CatalogState:
             key=lambda item: item.schema_name.replace("-", "_").encode("ascii"),
         )
     }
-    if len(request_versions_dict) != 49 or len(event_versions_dict) != 29:
+    if len(request_versions_dict) != 50 or len(event_versions_dict) != 29:
         _protocol_error("schema_catalog_incomplete")
 
     catalog = SchemaCatalog(

@@ -26,11 +26,14 @@ from yoetz.protocol.errors import ProtocolValueError
 __all__ = [
     "ADDITIONAL_CONTEXT_EVENTS",
     "CLAUDE_ADDITIONAL_CONTEXT_EVENTS",
+    "MAX_HOOK_SKIM_BYTES",
     "MAX_HOOK_STDIN_BYTES",
     "STOP_CONTROL_EVENTS",
+    "CursorOversizedPayloadError",
     "claude_context_output",
     "context_output",
     "cursor_context_output",
+    "read_cursor_hook_ingress",
     "read_cursor_hook_payload",
     "read_hook_payload",
     "stderr_line",
@@ -42,7 +45,86 @@ __all__ = [
 # silently, and both sides must move together for the documented 256 KiB cap to
 # stay a single fact (issue #667).
 MAX_HOOK_STDIN_BYTES: Final = 262_144
+# Complete-document skim for one Cursor hook body that outgrew the trusted parse.
+# Same byte cap as an ordinary local-control frame. A larger body is refused
+# unread; a complete body inside this cap is parsed and reduced to identity.
+MAX_HOOK_SKIM_BYTES: Final = 1_048_576
 _MAX_CONTEXT_CHARS: Final = 2_000
+_MAX_CURSOR_IDENTITY_STRING_BYTES: Final = 8_192
+_MAX_CURSOR_IDENTITY_DEPTH: Final = 6
+_MAX_CURSOR_IDENTITY_ITEMS: Final = 32
+_CURSOR_IDENTITY_STRINGS: Final = frozenset(
+    {
+        "action",
+        "claim_kind",
+        "conversation_id",
+        "cursor_version",
+        "decision",
+        "failure_type",
+        "filePath",
+        "file_path",
+        "generation_id",
+        "hook_event_name",
+        "id",
+        "mapping_hint",
+        "model",
+        "model_id",
+        "outcome",
+        "path",
+        "permission_decision",
+        "permission_kind",
+        "result_status",
+        "session_id",
+        "source",
+        "status",
+        "target_file",
+        "tool_call_id",
+        "tool_name",
+        "tool_use_id",
+        "value",
+    }
+)
+_CURSOR_IDENTITY_BOOLS: Final = frozenset(
+    {
+        "canceled",
+        "cancelled",
+        "denied",
+        "failed",
+        "interrupted",
+        "isCanceled",
+        "isError",
+        "isInterrupted",
+        "is_cancelled",
+        "is_denied",
+        "is_error",
+        "is_interrupt",
+        "is_interrupted",
+        "ok",
+        "permission_denied",
+        "success",
+    }
+)
+_CURSOR_IDENTITY_INTS: Final = frozenset(
+    {
+        "duration",
+        "exitCode",
+        "exitStatus",
+        "exit_code",
+        "exit_status",
+    }
+)
+_CURSOR_IDENTITY_OBJECTS: Final = frozenset(
+    {
+        "data",
+        "result",
+        "result_json",
+        "structuredContent",
+        "structured_content",
+        "tool_input",
+        "tool_output",
+        "tool_response",
+    }
+)
 _MAX_STDERR_CHARS: Final = 200
 _MAX_SAFE_INTEGER: Final = 2**53 - 1
 # Codex events whose output schema admits hookSpecificOutput.additionalContext.
@@ -273,26 +355,44 @@ def _normalize_cursor_value(value: object, *, key: str | None, depth: int) -> Js
     raise ProtocolValueError("unsupported_json_type")
 
 
-def read_cursor_hook_payload(raw: bytes | None = None) -> Mapping[str, JsonValue]:
-    """Read Cursor's bounded host JSON, normalizing its decimal duration field.
+class CursorOversizedPayloadError(Exception):
+    """A Cursor body above the trusted cap was not reduced to a structural identity.
 
-    Cursor reports MCP hook durations as fractional milliseconds. That vendor shape
-    is admitted only here; canonical ledger and all other host parsers remain
-    float-free. Unknown or nested numeric floats are replaced with ``null`` before
-    structural filtering, while all host-controlled values are still discarded
-    by the caller.
+    ``payload_too_large`` is reserved for the pure cap refusal. This error is the
+    skim path: the complete body fit the skim cap, and a safety check refused it.
+    The reason is the same protocol code the full parser would have raised.
     """
 
-    data = sys.stdin.buffer.read(MAX_HOOK_STDIN_BYTES + 1) if raw is None else raw
+    def __init__(self, reason_code: str) -> None:
+        if type(reason_code) is not str or not reason_code:
+            raise ValueError("unregistered_protocol_reason_code")
+        self.reason_code = reason_code
+        super().__init__(reason_code)
+
+
+class _IdentityDrop:
+    """Marker for a host value the identity view must not retain."""
+
+
+_IDENTITY_DROP: Final = _IdentityDrop()
+
+
+def _read_cursor_bytes(raw: bytes | None, limit: int) -> bytes:
+    data = sys.stdin.buffer.read(limit) if raw is None else raw
     if type(data) is bytearray:
         data = bytes(data)
     elif type(data) is not bytes:
         raise ProtocolValueError("input_not_bytes")
-    # Same split as the Codex reader, and for the same reason: this branch runs
-    # before the NUL scan, the UTF-8 decode, and the JSON parse, so without it
-    # every oversized Cursor write is reported as a malformed envelope (#667).
-    if len(data) > MAX_HOOK_STDIN_BYTES:
-        raise ProtocolValueError("payload_too_large")
+    return data
+
+
+def _parse_cursor_hook_document(data: bytes) -> Mapping[str, JsonValue]:
+    """Parse one complete Cursor hook body with the vendor-decimal rules.
+
+    Callers decide the byte cap before this runs. An empty body, a NUL, invalid
+    UTF-8, a duplicate key, or truncated JSON raises and returns nothing.
+    """
+
     if not data:
         raise ProtocolValueError("invalid_event_value_type")
     if b"\x00" in data:
@@ -330,3 +430,137 @@ def read_cursor_hook_payload(raw: bytes | None = None) -> Mapping[str, JsonValue
     if not isinstance(normalized, Mapping):
         raise ProtocolValueError("unsupported_json_type")
     return cast(Mapping[str, JsonValue], normalized)
+
+
+def _bounded_identity_string(value: object) -> str | None:
+    if type(value) is not str or not value:
+        return None
+    if len(value.encode("utf-8")) > _MAX_CURSOR_IDENTITY_STRING_BYTES:
+        return None
+    return value
+
+
+def _cursor_identity_field(key: str, value: object, *, depth: int) -> JsonValue | _IdentityDrop:
+    """Copy one allowlisted identity field, dropping every other host value."""
+
+    if key == "workspace_roots":
+        # A present root list the view cannot keep becomes ``null``, which the
+        # workspace resolver refuses. Dropping the key would let it fall back
+        # to a less trusted locator that a full-size body never reaches.
+        if type(value) is not list:
+            return None
+        roots = cast(list[object], value)
+        if len(roots) > _MAX_CURSOR_IDENTITY_ITEMS:
+            return None
+        kept_roots: list[JsonValue] = []
+        for item in roots:
+            text = _bounded_identity_string(item)
+            if text is None:
+                return None
+            kept_roots.append(text)
+        return kept_roots
+    if key == "error":
+        # Outcome parsing reads only whether ``error`` is set. Keep that bit,
+        # never the host's error text.
+        return True if value not in (None, False, "") else _IDENTITY_DROP
+    if key == "model_params":
+        if type(value) is not list:
+            return _IDENTITY_DROP
+        items = cast(list[object], value)
+        if len(items) > _MAX_CURSOR_IDENTITY_ITEMS:
+            return _IDENTITY_DROP
+        kept_items: list[JsonValue] = []
+        for item in items:
+            if type(item) is not dict or depth >= _MAX_CURSOR_IDENTITY_DEPTH:
+                continue
+            reduced = _cursor_identity_object(cast(dict[str, JsonValue], item), depth=depth + 1)
+            if reduced:
+                kept_items.append(reduced)
+        return kept_items
+    if key in _CURSOR_IDENTITY_OBJECTS and type(value) is dict:
+        if depth >= _MAX_CURSOR_IDENTITY_DEPTH:
+            return _IDENTITY_DROP
+        reduced = _cursor_identity_object(cast(dict[str, JsonValue], value), depth=depth + 1)
+        if not reduced:
+            return _IDENTITY_DROP
+        return reduced
+    if key in _CURSOR_IDENTITY_BOOLS and type(value) is bool:
+        return value
+    if key in _CURSOR_IDENTITY_INTS and type(value) is int and not isinstance(value, bool):
+        return value
+    if key in _CURSOR_IDENTITY_STRINGS:
+        text = _bounded_identity_string(value)
+        if text is None:
+            return _IDENTITY_DROP
+        return text
+    return _IDENTITY_DROP
+
+
+def _cursor_identity_object(value: Mapping[str, JsonValue], *, depth: int) -> dict[str, JsonValue]:
+    kept: dict[str, JsonValue] = {}
+    for key, item in value.items():
+        if type(key) is not str:
+            continue
+        copied = _cursor_identity_field(key, item, depth=depth)
+        if isinstance(copied, _IdentityDrop):
+            continue
+        kept[key] = copied
+    return kept
+
+
+def _cursor_identity_payload(parsed: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+    """Return the closed identity view of one oversized Cursor document.
+
+    File contents, edits, prompts, command text, and any other non-identity
+    value are absent from the result. A string over the locator bound is
+    omitted rather than clipped, so a path cannot be rewritten into a different
+    path.
+    """
+
+    return _cursor_identity_object(parsed, depth=0)
+
+
+def read_cursor_hook_payload(raw: bytes | None = None) -> Mapping[str, JsonValue]:
+    """Read Cursor's bounded host JSON, normalizing its decimal duration field.
+
+    Cursor reports MCP hook durations as fractional milliseconds. That vendor shape
+    is admitted only here; canonical ledger and all other host parsers remain
+    float-free. Unknown or nested numeric floats are replaced with ``null`` before
+    structural filtering, while all host-controlled values are still discarded
+    by the caller.
+
+    This pure parser refuses a body over ``MAX_HOOK_STDIN_BYTES`` before any
+    inspection. Replay of a captured oversized hook stays a size refusal.
+    """
+
+    data = _read_cursor_bytes(raw, MAX_HOOK_STDIN_BYTES + 1)
+    # Same split as the Codex reader, and for the same reason: this branch runs
+    # before the NUL scan, the UTF-8 decode, and the JSON parse, so without it
+    # every oversized Cursor write is reported as a malformed envelope (#667).
+    if len(data) > MAX_HOOK_STDIN_BYTES:
+        raise ProtocolValueError("payload_too_large")
+    return _parse_cursor_hook_document(data)
+
+
+def read_cursor_hook_ingress(raw: bytes | None = None) -> tuple[Mapping[str, JsonValue], bool]:
+    """Read one Cursor hook for observation, skimming a complete oversized body.
+
+    Returns ``(payload, content_omitted)``. A body at or under the trusted cap
+    is the full parse and ``content_omitted`` is false. A complete body above
+    that cap and at or under ``MAX_HOOK_SKIM_BYTES`` is parsed with the same
+    safety rules and returned as the identity view, with ``content_omitted``
+    true. A body over the skim cap raises ``payload_too_large`` before the NUL
+    scan, the decode, and the parse. A complete oversized body that fails those
+    checks raises ``CursorOversizedPayloadError`` and yields no payload.
+    """
+
+    data = _read_cursor_bytes(raw, MAX_HOOK_SKIM_BYTES + 1)
+    if len(data) > MAX_HOOK_SKIM_BYTES:
+        raise ProtocolValueError("payload_too_large")
+    if len(data) > MAX_HOOK_STDIN_BYTES:
+        try:
+            parsed = _parse_cursor_hook_document(data)
+        except ProtocolValueError as exc:
+            raise CursorOversizedPayloadError(exc.reason_code) from exc
+        return _cursor_identity_payload(parsed), True
+    return _parse_cursor_hook_document(data), False

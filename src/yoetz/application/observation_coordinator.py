@@ -4414,6 +4414,7 @@ class ObservationCoordinator:
                     }
                 )
             )
+            finalized_now: StagedObject | None = None
             if existing is None:
                 metadata = ObjectMetadata(
                     ObjectKind.CAPTURED_CONTENT,
@@ -4435,6 +4436,7 @@ class ObservationCoordinator:
                     await note_unavailable()
                     continue
                 ref = await runtime.objects.finalize(staged)
+                finalized_now = staged
             else:
                 loaded = store.load_content_manifest(existing)
                 if loaded is None or loaded.envelope_digest is None:
@@ -4461,11 +4463,23 @@ class ObservationCoordinator:
                         )
                     )
                     continue
-            # The object has crossed the durable boundary. Recheck the
-            # authority before binding its manifest to this phase; a revoke
-            # racing object finalization must leave only an unreferenced
-            # encrypted object, never captured evidence for the old fence.
+            content_digest = "sha256:" + hashlib.sha256(safe_content).hexdigest()
+            # The object may already be durable. Recheck authority before
+            # binding its manifest. A revoke that wins after finalization must
+            # not record captured evidence for the old fence. Only an object
+            # this attempt just finalized, and that no manifest row names, is
+            # abandoned. A row that already names an object is its owner.
             if not await capture_fence_current():
+                if finalized_now is not None:
+                    await self._abandon_captured_object_if_unowned(
+                        runtime,
+                        store,
+                        finalized_now,
+                        workspace=workspace,
+                        logical_identity=content_identity,
+                        chunk=stored_chunk,
+                        object_id=ref.object_id,
+                    )
                 any_unavailable = True
                 await note_unavailable()
                 continue
@@ -4475,24 +4489,33 @@ class ObservationCoordinator:
                     logical_identity=content_identity,
                     chunk=stored_chunk,
                     ref=ref,
-                    content_digest="sha256:" + hashlib.sha256(safe_content).hexdigest(),
+                    content_digest=content_digest,
                     content_bytes=len(safe_content),
                     recorded_at=timestamp_from_datetime(self.clock.now_utc()),
                 )
-            except PublicOperationError as exc:
-                if exc.code is not PublicErrorCode.LIMIT_EXCEEDED:
-                    raise
-                # The object may already be durable, but the manifest did not
-                # cross the ticket fence. Keep the structural row honest and
-                # let the caller revoke any staging ticket instead of leaving
-                # a permanently retrying handoff behind.
-                any_unavailable = True
-                self._capture_budget_exhausted = True
-                await note_budget_exhausted()
-                # The ticket reservation is for the complete request. Once
-                # one part cannot cross the durable budget fence, do not stage
-                # later parts that cannot become part of this ticket either.
-                break
+            except BaseException as exc:
+                # Store failures, including LIMIT_EXCEEDED, are raised inside
+                # the manifest transaction or before it. This call's row did
+                # not commit. Abandon only the object finalized here, and only
+                # when a lookup proves the row does not name it. An unknown
+                # lookup is not that proof. The budget fence still stops later
+                # parts; it no longer retains an unowned finalized object.
+                if finalized_now is not None:
+                    await self._abandon_captured_object_if_unowned(
+                        runtime,
+                        store,
+                        finalized_now,
+                        workspace=workspace,
+                        logical_identity=content_identity,
+                        chunk=stored_chunk,
+                        object_id=ref.object_id,
+                    )
+                if type(exc) is PublicOperationError and exc.code is PublicErrorCode.LIMIT_EXCEEDED:
+                    any_unavailable = True
+                    self._capture_budget_exhausted = True
+                    await note_budget_exhausted()
+                    break
+                raise
             if stored_chunk.content_kind is ObservationContentKind.WORKSPACE_LOCATOR:
                 store.bind_workspace_locator(
                     workspace=workspace,
@@ -5089,19 +5112,35 @@ class ObservationCoordinator:
                 }
             )
         )
-        ref = await self._encrypt_captured_content(runtime, manifest)
-        store.record_content_manifest(
-            workspace=workspace,
-            logical_identity=f"verification:{job.job_id}",
-            chunk=chunk,
-            ref=ref,
-            content_digest="sha256:" + hashlib.sha256(scan.content).hexdigest(),
-            content_bytes=len(scan.content),
-            recorded_at=timestamp_from_datetime(self.clock.now_utc()),
-        )
+        staged, ref = await self._stage_captured_content(runtime, manifest)
+        content_digest = "sha256:" + hashlib.sha256(scan.content).hexdigest()
+        logical_identity = f"verification:{job.job_id}"
+        try:
+            store.record_content_manifest(
+                workspace=workspace,
+                logical_identity=logical_identity,
+                chunk=chunk,
+                ref=ref,
+                content_digest=content_digest,
+                content_bytes=len(scan.content),
+                recorded_at=timestamp_from_datetime(self.clock.now_utc()),
+            )
+        except BaseException:
+            await self._abandon_captured_object_if_unowned(
+                runtime,
+                store,
+                staged,
+                workspace=workspace,
+                logical_identity=logical_identity,
+                chunk=chunk,
+                object_id=ref.object_id,
+            )
+            raise
         return ref.object_id
 
-    async def _encrypt_captured_content(self, runtime: TaskRuntime, content: bytes) -> ObjectRef:
+    async def _stage_captured_content(
+        self, runtime: TaskRuntime, content: bytes
+    ) -> tuple[StagedObject, ObjectRef]:
         metadata = ObjectMetadata(
             ObjectKind.CAPTURED_CONTENT,
             "application/vnd.yoetz.observation-content+json",
@@ -5111,7 +5150,77 @@ class ObservationCoordinator:
         staged = await runtime.objects.stage(
             ObjectSource(data=content, declared_size=len(content)), metadata
         )
-        return await runtime.objects.finalize(staged)
+        return staged, await runtime.objects.finalize(staged)
+
+    async def _encrypt_captured_content(self, runtime: TaskRuntime, content: bytes) -> ObjectRef:
+        _staged, ref = await self._stage_captured_content(runtime, content)
+        return ref
+
+    async def _abandon_captured_object_if_unowned(
+        self,
+        runtime: TaskRuntime,
+        store: TaskObservationPort,
+        staged: StagedObject,
+        *,
+        workspace: str,
+        logical_identity: str,
+        chunk: ObservationContentChunk,
+        object_id: str,
+    ) -> None:
+        """Abandon one captured object whose manifest reference did not commit.
+
+        ``abandon`` may remove finalized bytes only while the caller proves the
+        reference was not submitted to a durable owner. A manifest row that
+        names ``object_id`` is that owner. A lookup that fails is not proof, so
+        the object stays for generation-fenced GC. Abandon failure is logged as
+        ``observation_object_abandon_failed`` and does not replace the caller's
+        error. The log id derives from the random object id, never from the
+        captured bytes, so the diagnostic cannot fingerprint content.
+        """
+
+        if self._manifest_names_captured_object(
+            store,
+            workspace=workspace,
+            logical_identity=logical_identity,
+            chunk=chunk,
+            object_id=object_id,
+        ):
+            return
+        await abandon_preappend_objects(
+            runtime.objects,
+            (staged,),
+            component="application.observation_coordinator",
+            operation="observation_object_abandon_failed",
+            request_id=self._captured_abandon_request_id(object_id),
+        )
+
+    def _captured_abandon_request_id(self, object_id: str) -> str:
+        return self._stable_operation_id(
+            canonical_digest(
+                JsonObject({"operation": "observation_captured_abandon", "object_id": object_id})
+            )
+        )
+
+    def _manifest_names_captured_object(
+        self,
+        store: TaskObservationPort,
+        *,
+        workspace: str,
+        logical_identity: str,
+        chunk: ObservationContentChunk,
+        object_id: str,
+    ) -> bool:
+        """True when a committed row names this object, or the lookup is unknown."""
+
+        try:
+            named = store.content_manifest_object_id(
+                workspace=workspace,
+                logical_identity=logical_identity,
+                chunk=chunk,
+            )
+        except Exception:
+            return True
+        return named == object_id
 
     def _stable_operation_id(self, digest: str) -> str:
         # Derive a request-shaped id from the digest for idempotent appends.

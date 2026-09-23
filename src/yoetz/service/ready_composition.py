@@ -286,6 +286,15 @@ from yoetz.ports.semantic import (
     SemanticResultTimeout,
     SemanticResultUnavailable,
 )
+from yoetz.ports.semantic_budget import (
+    LEGACY_SEMANTIC_BUDGET_PROFILE,
+    SemanticBudgetProfile,
+    enter_semantic_budget_profile,
+    exit_semantic_budget_profile,
+    parse_semantic_budget_profile,
+    select_semantic_budget_profile,
+    semantic_budget_profile_scope,
+)
 from yoetz.ports.start_catalog import (
     WORKSPACE_REF_DOMAIN,
     StartCatalogPort,
@@ -3098,6 +3107,9 @@ class _SemanticExecution:
     primary_expires_at: datetime
     expires_at: datetime
     fallback_timeout_seconds: float
+    # Frozen per-check budget profile (issue #571). Snapshots written before profiles existed
+    # omit it and replay under the legacy single-effort selection.
+    budget_profile: SemanticBudgetProfile = LEGACY_SEMANTIC_BUDGET_PROFILE
 
 
 def _binding_json(binding: ProviderBinding) -> dict[str, CanonicalJsonValue]:
@@ -3141,6 +3153,7 @@ def _execution_json(execution: _SemanticExecution) -> dict[str, CanonicalJsonVal
         "primary_expires_at": format_rfc3339_millis(execution.primary_expires_at),
         "expires_at": format_rfc3339_millis(execution.expires_at),
         "fallback_timeout_seconds": int(execution.fallback_timeout_seconds),
+        "budget_profile": execution.budget_profile,
     }
 
 
@@ -3211,6 +3224,14 @@ def _execution_from_json(value: object) -> _SemanticExecution:
     fallback_timeout = source["fallback_timeout_seconds"]
     if type(fallback_timeout) is not int or not 1 <= fallback_timeout <= 3600:
         raise ValueError("semantic_execution_invalid")
+    try:
+        budget_profile = (
+            LEGACY_SEMANTIC_BUDGET_PROFILE
+            if "budget_profile" not in source
+            else parse_semantic_budget_profile(source["budget_profile"])
+        )
+    except ValueError:
+        raise ValueError("semantic_execution_invalid") from None
     return _SemanticExecution(
         provider,
         fallback,
@@ -3219,6 +3240,7 @@ def _execution_from_json(value: object) -> _SemanticExecution:
         primary_expires_at,
         expires_at,
         float(fallback_timeout),
+        budget_profile,
     )
 
 
@@ -4274,6 +4296,7 @@ def _privacy_gated_semantic_evaluator(
                         + (fallback_timeout if fallback_plan is not None else 0.0)
                     ),
                     fallback_timeout,
+                    select_semantic_budget_profile(frozen.case.projection),
                 )
 
             # UTC expiry is durable; monotonic time is reconstructed only from its remainder.
@@ -4294,7 +4317,8 @@ def _privacy_gated_semantic_evaluator(
                     scope=scope,
                     provider_binding=provider,
                 )
-                result = await privacy.evaluate_semantic(candidate, primary_deadline)
+                with semantic_budget_profile_scope(execution.budget_profile):
+                    result = await privacy.evaluate_semantic(candidate, primary_deadline)
                 # The mapper knows only the egress outcome; the truncation happened while
                 # composing the case, so it must be restated here or the probe path presents
                 # a shortened case as complete.
@@ -4430,6 +4454,9 @@ def _privacy_gated_semantic_evaluator(
                         _attempt_progress_sink(runtime, handle, clock)
                     )
                     stage = "privacy_admission"
+                    # Every physical attempt, including resume and recovery, dispatches under
+                    # the profile frozen with this job; configuration cannot re-select it.
+                    budget_token = enter_semantic_budget_profile(execution.budget_profile)
 
                     async def _mapped(result: object) -> FinalSemanticEvaluation:
                         final = _map_egress_to_final(
@@ -4512,6 +4539,7 @@ def _privacy_gated_semantic_evaluator(
                         )
                         raise
                     finally:
+                        exit_semantic_budget_profile(budget_token)
                         semantic_progress_sink.reset(progress_token)
                         semantic_check_request.reset(diagnostic_token)
 

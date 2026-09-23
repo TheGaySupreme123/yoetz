@@ -77,6 +77,7 @@ from yoetz.tui.widgets.views import (
 
 __all__ = ["YoetzTui"]
 
+_CODEX_EFFORTS: Final[tuple[str, ...]] = ("high", "low", "medium", "xhigh", "max", "ultra")
 _SHORTCUTS: Final[tuple[str, ...]] = (
     "Up / Down     move through options",
     "Enter         confirm or select",
@@ -1500,19 +1501,40 @@ class YoetzTui(App[int]):
         effort = await self.ask(
             SelectionView(
                 name="codex-subscription-reasoning",
-                title="Reasoning effort",
+                title="Final review reasoning effort",
                 options=[
-                    Option(value, value, "Exact selection bound into every attempt.")
-                    for value in ("high", "low", "medium", "xhigh", "max", "ultra")
+                    Option(value, value, "Used for completion reviews; recorded per check.")
+                    for value in _CODEX_EFFORTS
                 ],
             )
         )
         if effort is None:
             self.say(Level.OPTIONAL, "Codex subscription setup was cancelled.")
             return
+        # A new binding recommends a bounded routine effort; an existing binding's routine
+        # choice (or legacy single effort) is offered first so setup never silently lowers it.
+        routine_default = self.runtime.codex_subscription_routine_default() or effort
+        routine_effort = await self.ask(
+            SelectionView(
+                name="codex-subscription-routine-reasoning",
+                title="Routine checkpoint reasoning effort",
+                options=[
+                    Option(value, value, "Used for checks without a completion claim.")
+                    for value in (
+                        routine_default,
+                        *(item for item in _CODEX_EFFORTS if item != routine_default),
+                    )
+                ],
+            )
+        )
+        if routine_effort is None:
+            self.say(Level.OPTIONAL, "Codex subscription setup was cancelled.")
+            return
         executable, codex_home, model = values
         try:
-            preview = self.runtime.preview_codex_subscription(executable, codex_home, model, effort)
+            preview = self.runtime.preview_codex_subscription(
+                executable, codex_home, model, effort, routine_effort
+            )
         except RuntimeError_ as error:
             self._report(error)
             return
@@ -1523,7 +1545,8 @@ class YoetzTui(App[int]):
             f"Capability cell: {preview.get('capability_cell_sha256')}",
             f"Cell evidence expires: {preview.get('capability_evidence_expires_at')}",
             f"Dedicated CODEX_HOME: {preview.get('codex_home')}",
-            f"Model / reasoning: {model} / {effort}",
+            f"Model: {model}",
+            f"Reasoning: final {effort} / routine {routine_effort}",
             "Destination: OpenAI through Codex-managed ChatGPT authentication.",
             "Data-use posture: unknown; your ChatGPT plan and terms apply.",
             "Yoetz never receives the OAuth credential or the upstream OpenAI body.",
@@ -1556,7 +1579,12 @@ class YoetzTui(App[int]):
         try:
             status = await self.hand_over_terminal(
                 lambda: self.runtime.setup_codex_subscription(
-                    executable, codex_home, model, effort, switch_account=switch_account
+                    executable,
+                    codex_home,
+                    model,
+                    effort,
+                    switch_account=switch_account,
+                    routine_reasoning_effort=routine_effort,
                 )
             )
         except SuspendNotSupported:
@@ -1618,13 +1646,18 @@ class YoetzTui(App[int]):
         except RuntimeError_ as error:
             self._report(error)
             return
+        from yoetz.cli.provider_status import review_budget_human_line
+
+        budgets = review_budget_human_line(status)
         self.say(
             Level.ACTIVE,
             "Codex subscription status",
             (
                 f"Auth mode: {status.get('auth_mode') or 'not signed in'}",
                 f"Plan: {status.get('plan_type') or 'not reported'}",
+                f"Model: {status.get('model') or 'not reported'}",
                 f"Model available: {status.get('model_available')}",
+                *(() if budgets is None else (f"Review budgets: {budgets}",)),
                 f"Process cleanup: {status.get('process_cleanup')}",
             ),
         )

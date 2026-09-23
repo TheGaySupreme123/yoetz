@@ -28,6 +28,7 @@ from yoetz.adapters.providers.codex_app_server import (
     CodexAppServerEvaluator,
     CodexAppServerExternalFactory,
     CodexAppServerProfile,
+    CodexReviewBudget,
     CodexRuntimeStatus,
 )
 from yoetz.adapters.providers.data_use_catalog import data_use_record_for_endpoint
@@ -47,6 +48,7 @@ from yoetz.ports.semantic import (
     SemanticResultSuccess,
     SemanticResultUnavailable,
 )
+from yoetz.ports.semantic_budget import semantic_budget_profile_scope
 from yoetz.protocol.canonical import canonical_digest, canonical_encode
 
 pytestmark = pytest.mark.anyio
@@ -367,6 +369,8 @@ class _Runtime:
             else account
         )
         self.predisclosure_event = predisclosure_event
+        self.supported_efforts: tuple[str, ...] = ("high",)
+        self.params: dict[str, object] = {}
         self.sent: list[dict[str, object]] = []
         self.methods: list[str] = []
         self.events: list[dict[str, object]] = [
@@ -400,8 +404,9 @@ class _Runtime:
     async def request(
         self, request_id: int, method: str, params: object, timeout: float
     ) -> dict[str, object]:
-        del request_id, params, timeout
+        del request_id, timeout
         self.methods.append(method)
+        self.params[method] = params
         if method == "initialize":
             return {
                 "codexHome": str(self.profile.codex_home),
@@ -415,7 +420,9 @@ class _Runtime:
                     [
                         {
                             "id": self.profile.model,
-                            "supportedReasoningEfforts": [{"reasoningEffort": "high"}],
+                            "supportedReasoningEfforts": [
+                                {"reasoningEffort": effort} for effort in self.supported_efforts
+                            ],
                         }
                     ]
                     if self.model_available
@@ -557,6 +564,7 @@ async def _evaluate(
     runtime: _Runtime,
     *,
     cleanup_outcome: str = "terminated",
+    budget: CodexReviewBudget | None = None,
 ) -> SemanticResultSuccess | SemanticResultUnavailable | SemanticResultInvalid:
     async def launch(profile: CodexAppServerProfile) -> _Runtime:
         assert profile is runtime.profile
@@ -570,7 +578,7 @@ async def _evaluate(
     monkeypatch.setattr(module, "_cleanup", cleanup)
     case = _case()
     binding, authority = _attempt(case)
-    evaluator = CodexAppServerEvaluator(runtime.profile, binding, authority, _Clock())
+    evaluator = CodexAppServerEvaluator(runtime.profile, binding, authority, _Clock(), budget)
     return cast(
         SemanticResultSuccess | SemanticResultUnavailable | SemanticResultInvalid,
         await evaluator.evaluate(case, Deadline(_NOW + timedelta(seconds=30), 30.0)),
@@ -2160,6 +2168,196 @@ def test_explicit_long_review_budget_is_preserved_by_runtime_profile() -> None:
         assert replace(_profile(), timeout_seconds=seconds).timeout_seconds == seconds
     with pytest.raises(ValueError):
         replace(_profile(), timeout_seconds=3601)
+
+
+# --- issue #571: phase-aware effort and output budgets -------------------------------------------
+
+
+def _phased_profile(
+    *, routine: str | None = "medium", routine_limit: int = 4096, final_limit: int = 8192
+) -> CodexAppServerProfile:
+    return replace(
+        _profile(),
+        routine_reasoning_effort=routine,
+        routine_output_limit=routine_limit,
+        final_output_limit=final_limit,
+    )
+
+
+def test_review_budget_selects_exact_profile_effort_and_output_limit() -> None:
+    profile = _phased_profile(routine="low", routine_limit=1024, final_limit=6000)
+
+    assert profile.review_budget("routine") == CodexReviewBudget("routine", "low", 1024)
+    assert profile.review_budget("final") == CodexReviewBudget("final", "high", 6000)
+    assert profile.required_reasoning_efforts == ("high", "low")
+    with pytest.raises(ValueError, match="codex_budget_profile_invalid"):
+        profile.review_budget(cast(Literal["routine"], "checkpoint"))
+
+
+def test_legacy_binding_keeps_its_single_effort_for_routine_checks() -> None:
+    profile = _phased_profile(routine=None)
+
+    assert profile.review_budget("routine") == CodexReviewBudget("routine", "high", 4096)
+    assert profile.required_reasoning_efforts == ("high",)
+
+
+@pytest.mark.parametrize("limit", [0, 8193, True])
+def test_profile_rejects_unbounded_output_limits(limit: object) -> None:
+    with pytest.raises(ValueError, match="codex_runtime_output_limit_invalid"):
+        replace(_profile(), routine_output_limit=cast(int, limit))
+
+
+async def test_routine_attempt_dispatches_and_records_the_routine_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _phased_profile(routine="medium", routine_limit=2048)
+    runtime = _Runtime(profile)
+    runtime.supported_efforts = ("medium",)
+    budget = profile.review_budget("routine")
+
+    result = await _evaluate(monkeypatch, runtime, budget=budget)
+
+    assert type(result) is SemanticResultSuccess
+    turn = cast(Mapping[str, object], runtime.params["turn/start"])
+    assert turn["effort"] == "medium"
+    assert turn["model"] == "gpt-5.6-sol"
+    evidence = result.provenance.runtime_evidence
+    assert evidence is not None
+    assert evidence.reasoning_effort == "medium"
+    assert result.provenance.model == "gpt-5.6-sol"
+    assert result.provenance.sampling_params.max_output_tokens == 2048
+    assert evidence.selection_sha256 == canonical_digest(
+        {
+            "budget_profile": "routine",
+            "model": "gpt-5.6-sol",
+            "output_limit": 2048,
+            "reasoning_effort": "medium",
+        }
+    )
+
+
+async def test_final_attempt_uses_the_configured_high_effort_and_final_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _phased_profile(routine="low", final_limit=7000)
+    runtime = _Runtime(profile)
+
+    result = await _evaluate(monkeypatch, runtime, budget=profile.review_budget("final"))
+
+    assert type(result) is SemanticResultSuccess
+    assert cast(Mapping[str, object], runtime.params["turn/start"])["effort"] == "high"
+    assert result.provenance.sampling_params.max_output_tokens == 7000
+    evidence = result.provenance.runtime_evidence
+    assert evidence is not None and evidence.reasoning_effort == "high"
+
+
+async def test_evaluator_without_budget_keeps_the_legacy_final_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _Runtime(_profile())
+
+    result = await _evaluate(monkeypatch, runtime)
+
+    assert type(result) is SemanticResultSuccess
+    assert cast(Mapping[str, object], runtime.params["turn/start"])["effort"] == "high"
+    assert result.provenance.sampling_params.max_output_tokens == 8192
+
+
+async def test_selected_effort_missing_from_catalog_fails_before_case_disclosure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _phased_profile(routine="low")
+    runtime = _Runtime(profile)  # the catalog lists only ``high``
+
+    result = await _evaluate(monkeypatch, runtime, budget=profile.review_budget("routine"))
+
+    assert type(result) is SemanticResultUnavailable
+    evidence = result.provenance.runtime_evidence
+    assert evidence is not None
+    assert evidence.failure_stage == "model_unavailable"
+    assert evidence.case_disclosed is False
+    assert "turn/start" not in runtime.methods
+
+
+async def test_visible_output_over_the_selected_limit_interrupts_as_oversize(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _phased_profile(routine_limit=100)
+    runtime = _Runtime(profile)
+    runtime.supported_efforts = ("medium", "high")
+    # 400 output tokens of which 250 are reasoning: 150 visible judgment tokens > 100.
+    runtime.events[0:0] = [_token_usage_notice(total_output=400, total_reasoning=250)]
+    interrupted: list[tuple[str, str]] = []
+
+    async def interrupt(_runtime: object, thread_id: str, turn_id: str) -> None:
+        interrupted.append((thread_id, turn_id))
+
+    monkeypatch.setattr(module, "_interrupt", interrupt)
+
+    result = await _evaluate(monkeypatch, runtime, budget=profile.review_budget("routine"))
+
+    assert type(result) is SemanticResultInvalid
+    evidence = result.provenance.runtime_evidence
+    assert evidence is not None
+    assert evidence.failure_stage == "output_oversize"
+    assert evidence.token_usage is not None and evidence.token_usage.output_tokens == 400
+    assert result.provenance.failure_class is SemanticFailureClass.RESPONSE_SCHEMA
+    assert result.provenance.sampling_params.max_output_tokens == 100
+    assert interrupted == [(_THREAD_ID, _TURN_ID)]
+
+
+async def test_reasoning_tokens_do_not_count_against_the_judgment_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _phased_profile(routine_limit=100)
+    runtime = _Runtime(profile)
+    runtime.supported_efforts = ("medium",)
+    runtime.events[0:0] = [_token_usage_notice(total_output=5000, total_reasoning=4950)]
+
+    result = await _evaluate(monkeypatch, runtime, budget=profile.review_budget("routine"))
+
+    assert type(result) is SemanticResultSuccess
+
+
+async def test_readiness_probe_requires_every_configured_profile_effort() -> None:
+    profile = _phased_profile(routine="low")
+    runtime = _Runtime(profile)
+
+    with pytest.raises(ValueError, match="codex_reasoning_effort_unavailable"):
+        await module._require_model(  # pyright: ignore[reportPrivateUsage]
+            cast(module._CodexProcess, runtime),  # pyright: ignore[reportPrivateUsage]
+            profile,
+            5.0,
+        )
+    runtime.supported_efforts = ("high", "low")
+    await module._require_model(  # pyright: ignore[reportPrivateUsage]
+        cast(module._CodexProcess, runtime),  # pyright: ignore[reportPrivateUsage]
+        profile,
+        5.0,
+    )
+
+
+def test_factory_builds_the_evaluator_for_the_dispatch_budget_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def binding_is_valid(_profile: CodexAppServerProfile) -> None:
+        return None
+
+    monkeypatch.setattr(CodexAppServerProfile, "verify_local_binding", binding_is_valid)
+    case = _case()
+    binding, authority = _attempt(case)
+    factory = CodexAppServerExternalFactory(_phased_profile(routine="low"), _Clock())
+    factory.render(case)
+    commitment = RequestCommitment("hmac-sha256/yoetz-privacy-egress-request-v1", _COMMITMENT)
+
+    with semantic_budget_profile_scope("routine"):
+        routine = factory.build_evaluator(binding, authority, commitment)
+    outside = factory.build_evaluator(binding, authority, commitment)
+
+    assert type(routine) is CodexAppServerEvaluator
+    assert routine.budget == CodexReviewBudget("routine", "low", 4096)
+    assert type(outside) is CodexAppServerEvaluator
+    assert outside.budget == CodexReviewBudget("final", "high", 8192)
 
 
 async def _evaluate_recording_progress(
