@@ -185,6 +185,7 @@ jobs:
 
       - name: Copy lane evidence to R2 (skipped when the R2 secrets are absent)
         if: always()
+        continue-on-error: true
         env:
           R2_ACCOUNT_ID: ${{ secrets.DOGFOOD_R2_ACCOUNT_ID }}
           R2_BUCKET: ${{ secrets.DOGFOOD_R2_BUCKET }}
@@ -201,9 +202,19 @@ jobs:
             exit 0
           fi
           export RCLONE_CONFIG_R2_ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          # Diagnostics that never print secrets: the endpoint's HTTP answer and the bucket listing.
+          echo "endpoint HEAD status: $(curl -sS -o /dev/null -w '%{http_code}' -I "${RCLONE_CONFIG_R2_ENDPOINT}/" || echo unreachable)"
+          echo "account id length: ${#R2_ACCOUNT_ID}; bucket name length: ${#R2_BUCKET}"
+          if ! rclone lsd "r2:${R2_BUCKET}" --max-depth 1 >/dev/null; then
+            echo "::warning::R2 bucket listing failed; check DOGFOOD_R2_ACCOUNT_ID (32 hex chars), the bucket name, and the token's Object Read & Write scope"
+          fi
           prefix="dogfood/$(date -u +%Y-%m-%d)/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/${{ matrix.host }}-${{ matrix.os }}"
-          rclone copy --no-traverse "${RUNNER_TEMP}/evidence" "r2:${R2_BUCKET}/${prefix}"
-          echo "- evidence copied to r2:${R2_BUCKET}/${prefix}" >> "$GITHUB_STEP_SUMMARY"
+          if rclone copy --no-traverse "${RUNNER_TEMP}/evidence" "r2:${R2_BUCKET}/${prefix}"; then
+            echo "- evidence copied to r2:${R2_BUCKET}/${prefix}" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::R2 copy failed; evidence remains on the workflow artifact"
+            exit 1
+          fi
 
   # ---------------------------------------------------------------------------------------------
   # lane-wsl — Ubuntu 24.04 under WSL 2 on a Windows Server 2025 runner, one host per job.
@@ -353,6 +364,7 @@ jobs:
 
       - name: Copy lane evidence to R2 (skipped when the R2 secrets are absent)
         if: always()
+        continue-on-error: true
         env:
           R2_ACCOUNT_ID: ${{ secrets.DOGFOOD_R2_ACCOUNT_ID }}
           R2_BUCKET: ${{ secrets.DOGFOOD_R2_BUCKET }}
@@ -369,9 +381,19 @@ jobs:
             exit 0
           fi
           export RCLONE_CONFIG_R2_ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          # Diagnostics that never print secrets: the endpoint's HTTP answer and the bucket listing.
+          echo "endpoint HEAD status: $(curl -sS -o /dev/null -w '%{http_code}' -I "${RCLONE_CONFIG_R2_ENDPOINT}/" || echo unreachable)"
+          echo "account id length: ${#R2_ACCOUNT_ID}; bucket name length: ${#R2_BUCKET}"
+          if ! rclone lsd "r2:${R2_BUCKET}" --max-depth 1 >/dev/null; then
+            echo "::warning::R2 bucket listing failed; check DOGFOOD_R2_ACCOUNT_ID (32 hex chars), the bucket name, and the token's Object Read & Write scope"
+          fi
           prefix="dogfood/$(date -u +%Y-%m-%d)/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/${{ matrix.host }}-wsl2-ubuntu-24.04"
-          rclone copy --no-traverse /c/dogfood-evidence "r2:${R2_BUCKET}/${prefix}"
-          echo "- evidence copied to r2:${R2_BUCKET}/${prefix}" >> "$GITHUB_STEP_SUMMARY"
+          if rclone copy --no-traverse /c/dogfood-evidence "r2:${R2_BUCKET}/${prefix}"; then
+            echo "- evidence copied to r2:${R2_BUCKET}/${prefix}" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::R2 copy failed; evidence remains on the workflow artifact"
+            exit 1
+          fi
 
   # ---------------------------------------------------------------------------------------------
   # dogfood-required — one stable aggregate for the branch status.

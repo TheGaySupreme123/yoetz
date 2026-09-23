@@ -39,6 +39,7 @@ import importlib.util
 import json
 import os
 import platform
+import re
 import secrets as pysecrets
 import shutil
 import subprocess
@@ -886,20 +887,24 @@ class Lane:
                 mcp_status[4:4] = ["--codex-path", self.host_path]
             self._yoetz("codex_mcp_status", phase, mcp_status, expect_zero=False)
         elif self.host == "claude":
-            self._yoetz(
-                "claude_plugin_status",
-                phase,
-                [
-                    "integrate",
-                    "claude",
-                    "plugin",
-                    "status",
-                    "--claude-config-root",
-                    str(self.host_config_root),
-                    "--json",
-                ],
-                expect_zero=False,
-            )
+            status_argv = [
+                "integrate",
+                "claude",
+                "plugin",
+                "status",
+                "--claude-config-root",
+                str(self.host_config_root),
+                "--project-root",
+                str(self.project),
+            ]
+            for flag, key in (
+                ("--cache-root", "cache_root"),
+                ("--marketplace-root", "marketplace_root"),
+            ):
+                value = plan.get(key)
+                if isinstance(value, str):
+                    status_argv += [flag, value]
+            self._yoetz("claude_plugin_status", phase, [*status_argv, "--json"], expect_zero=False)
             self.mcp_tool_hint = "yoetz"
         else:
             self._yoetz(
@@ -1098,25 +1103,32 @@ class Lane:
     def phase_ledger_probe(self) -> None:
         phase = "ledger"
         assert self.launcher is not None
+        # The product's own order: the host's SessionStart hook auto-attaches (creating the
+        # workspace's task on first use) and hands the agent a session to attach to. A task
+        # created ahead of the hook makes the hook's create_or_attach refuse with
+        # workspace_task_exists, so the hook probe runs first and the CLI attaches to it.
+        mapped = self._hook_session_start_probe(phase)
+        if mapped is not None:
+            start_body: dict[str, Any] = {
+                "mode": "attach",
+                "task_title": "dogfood ci deterministic probe",
+                "session_id": mapped["session_id"],
+                "requested_view": "compact",
+            }
+        else:
+            start_body = {
+                "mode": "create",
+                "task_title": "dogfood ci deterministic probe",
+                "workspace_ref": str(self.project),
+                "external_ref": f"dogfood-ci-{self.host}-{self.stamp}",
+                "requested_view": "compact",
+            }
         _, started = self._yoetz(
             "ledger_start",
             phase,
-            [
-                "start",
-                "--input",
-                "-",
-                "--json",
-            ],
+            ["start", "--input", "-", "--json"],
             cwd=self.project,
-            stdin=self._request(
-                {
-                    "mode": "create",
-                    "task_title": "dogfood ci deterministic probe",
-                    "workspace_ref": str(self.project),
-                    "external_ref": f"dogfood-ci-{self.host}-{self.stamp}",
-                    "requested_view": "compact",
-                }
-            ),
+            stdin=self._request(start_body),
             fatal=True,
         )
         if started is None:
@@ -1234,16 +1246,35 @@ class Lane:
                 }
             )
             frontier = _find_frontier(checked) or frontier
+            # The egress receipt names why a case was or was not dispatched; keep it as evidence.
+            self._yoetz(
+                "privacy_receipts",
+                phase,
+                ["privacy", "receipts", "list", "--json"],
+                expect_zero=False,
+            )
             if self.fireworks_key:
-                attempted = checked.get("semantic_status") in {
+                # docs/runbooks/semantic-dogfood.md §3: these rows prove a provider attempt was
+                # made; every other status/reason pair is a pre-dispatch refusal or indeterminate.
+                status = checked.get("semantic_status")
+                reason = checked.get("semantic_reason")
+                attempted = status in {
                     "succeeded",
                     "refused",
                     "timeout",
                     "invalid",
                     "late",
                     "stale",
-                    "unavailable",
-                }
+                } or (
+                    status == "unavailable"
+                    and reason
+                    in {
+                        "transport_unavailable",
+                        "provider_rate_limited",
+                        "provider_quota_exhausted",
+                        "outcome_unknown",
+                    }
+                )
                 self._record(
                     "semantic_attempt",
                     phase,
@@ -1275,11 +1306,11 @@ class Lane:
             ),
             fatal=True,
         )
-        self._hook_carrier_probes(phase)
+        self._hook_post_probe(phase)
         self._observe_drain("observe_drain_after_probe", phase, fatal=True)
         self._observe_status("observe_status_after_probe", phase)
 
-    def _hook_carrier_probes(self, phase: str) -> None:
+    def _hook_payloads(self) -> tuple[list[str], list[tuple[str, dict[str, Any]]]]:
         session = f"dogfood-{self.host}-{self.stamp}"
         payloads: list[tuple[str, dict[str, Any]]]
         if self.host == "codex":
@@ -1342,15 +1373,58 @@ class Lane:
                     },
                 ),
             ]
-        for event, payload in payloads:
-            self._yoetz(
-                f"hook_probe_{event}",
-                phase,
-                [*carrier, "--event", event],
-                cwd=self.project,
-                stdin=json.dumps(payload),
-                fatal=False,
-            )
+        return carrier, payloads
+
+    def _hook_session_start_probe(self, phase: str) -> dict[str, str] | None:
+        """Fire the session-start carrier and return the mapped ledger ids when it attached."""
+
+        carrier, payloads = self._hook_payloads()
+        event, payload = payloads[0]
+        assert self.launcher is not None
+        rc, out, err, ms = self._run(
+            [str(self.launcher), *carrier, "--event", event],
+            cwd=self.project,
+            stdin=json.dumps(payload),
+        )
+        text = out + "\n" + err
+        match = re.search(
+            r"task (tsk_[0-9a-f-]{36}) is mapped .*? as session_id (ses_[0-9a-f-]{36}) and "
+            r"writer_id (wri_[0-9a-f-]{36})",
+            text,
+            re.DOTALL,
+        )
+        mapped = (
+            {"task_id": match.group(1), "session_id": match.group(2), "writer_id": match.group(3)}
+            if match
+            else None
+        )
+        self._record(
+            f"hook_probe_{event}",
+            phase,
+            status="pass" if rc == 0 else "fail",
+            exit_code=rc,
+            duration_ms=ms,
+            reason=None if rc == 0 else f"exit_{rc}",
+            summary={
+                "mapped": mapped is not None,
+                "auto_attach": "mapped" if mapped else _tail(err, 200),
+            },
+            stdout=out,
+            stderr=err,
+        )
+        return mapped
+
+    def _hook_post_probe(self, phase: str) -> None:
+        carrier, payloads = self._hook_payloads()
+        event, payload = payloads[1]
+        self._yoetz(
+            f"hook_probe_{event}",
+            phase,
+            [*carrier, "--event", event],
+            cwd=self.project,
+            stdin=json.dumps(payload),
+            fatal=False,
+        )
 
     # ---- native agent
 
