@@ -1219,21 +1219,14 @@ class SqliteStartCatalog:
         if by_session is not None and workspace is not None and by_commitment is None:
             # A host-session rotation may carry the new paired identity together
             # with a selector it already holds. Admit that narrow recovery only
-            # while the selector is still active and uniquely owns this workspace;
+            # while the selector is still active and carries the same workspace;
             # neither the pair nor workspace possession discovers a route.
-            workspace_rows = self._rows(
-                f"SELECT {self._route_columns} FROM task_routes "
-                "WHERE workspace_ref_commitment = ? AND state != 'quarantined' LIMIT 2",
-                (workspace,),
-            )
             if (
                 request.mode is not StartMode.ATTACH
                 or request.session_id != by_session.active_session_id
                 or by_session.state is TaskRouteState.QUARANTINED
                 or by_session.workspace_ref_commitment is None
                 or not hmac.compare_digest(by_session.workspace_ref_commitment, workspace)
-                or len(workspace_rows) != 1
-                or _route_from_row(workspace_rows[0]).task_id != by_session.task_id
             ):
                 raise _error(PublicErrorCode.SESSION_CONFLICT)
             pending = self._rows(

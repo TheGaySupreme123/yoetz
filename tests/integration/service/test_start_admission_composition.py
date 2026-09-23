@@ -7,7 +7,8 @@ replay together.  It does not provide native host acceptance evidence.
 
 from __future__ import annotations
 
-from typing import cast
+from pathlib import Path
+from typing import Literal, cast
 
 import pytest
 
@@ -19,11 +20,30 @@ from integration.service.test_start_contention_composition import (
     ready,  # noqa: F401  # pyright: ignore[reportUnusedImport]
     runtime_directory,  # noqa: F401  # pyright: ignore[reportUnusedImport]
 )
+from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.application.service import Application
+from yoetz.cli import observe_hooks
+from yoetz.ports.control import ControlClientKind, WorkspaceLocator
 from yoetz.ports.start_catalog import StartIdentityInput
 from yoetz.protocol.canonical import JsonValue
+from yoetz.protocol.models import StartRequest, StartSuccessModel
+from yoetz.service.client import ServiceClient, connect_service
 
 pytestmark = pytest.mark.anyio
+
+
+class _HookServiceClient:
+    """Adapt the hook's object protocol to the typed real control client."""
+
+    def __init__(self, client: ServiceClient) -> None:
+        self.client = client
+
+    async def start(self, request: object, *, deadline_ms: int | None = None) -> object:
+        assert isinstance(request, StartRequest)
+        return await self.client.start(request, deadline_ms=deadline_ms)
+
+    async def close(self) -> None:
+        await self.client.close()
 
 
 def _admission_body(
@@ -150,10 +170,10 @@ async def test_start_admission_rejects_cross_workspace_selector(
     )
 
 
-async def test_ambiguous_same_workspace_selector_stays_conflict_but_session_attach_recovers(
+async def test_exact_same_workspace_selector_recovers_beside_independent_task(
     ready: tuple[Application, bridge.BridgeRuntime],  # noqa: F811
 ) -> None:
-    """A second root keeps a new-pair selector ambiguous; the held session remains usable."""
+    """An exact session selects the task; another root is not selector ambiguity."""
 
     application, transport = ready
     workspace = "workspace-812"
@@ -201,9 +221,18 @@ async def test_ambiguous_same_workspace_selector_stays_conflict_but_session_atta
         mode="attach",
         session_id=cast(str, first["session_id"]),
     )
-    refused = _structured(await bridge.dispatch_start(third_pair, transport))
-    error = cast(dict[str, object], refused["error"])
-    assert error["code"] == "SESSION_CONFLICT"
+    sibling_route = await application.start_catalog.resolve_route(cast(str, sibling["session_id"]))
+    recovered = _structured(await bridge.dispatch_start(third_pair, transport))
+    assert recovered["ok"] is True
+    assert recovered["outcome"] == "attached"
+    assert recovered["task_id"] == first["task_id"]
+    assert recovered["session_id"] != first["session_id"]
+    replayed = _structured(await bridge.dispatch_start(third_pair, transport))
+    assert _logical_result(replayed) == _logical_result(recovered)
+    assert (
+        await application.start_catalog.resolve_route(cast(str, sibling["session_id"]))
+        == sibling_route
+    )
     assert (
         await application.start_catalog.list_workspace_task_ids(
             cast(str, identity.workspace_ref_commitment)
@@ -218,3 +247,77 @@ async def test_ambiguous_same_workspace_selector_stays_conflict_but_session_atta
     assert session_only["outcome"] == "attached"
     assert session_only["task_id"] == first["task_id"]
     assert session_only["session_id"] != first["session_id"]
+
+
+@pytest.mark.parametrize("harness", ["codex", "claude", "cursor"])
+async def test_ended_host_predecessor_automatically_recovers_with_unrelated_workspace_task(
+    ready: tuple[Application, bridge.BridgeRuntime],  # noqa: F811
+    tmp_path: Path,
+    harness: Literal["codex", "claude", "cursor"],
+) -> None:
+    """Exercise the native shared recovery selector against the real service/catalog.
+
+    Only one ended host mapping identifies a predecessor, even though the service
+    has two independent root tasks. No operator-supplied recovery selector or
+    scripted success replaces the hook's persisted mapping selection.
+    """
+
+    application, _transport = ready
+    workspace_directory = tmp_path / "workspace"
+    workspace_directory.mkdir(mode=0o700)
+    workspace = str(workspace_directory)
+
+    async def bound_connector(kind: ControlClientKind) -> _HookServiceClient:
+        return _HookServiceClient(
+            await connect_service(kind, workspace_locator=WorkspaceLocator(workspace))
+        )
+
+    state = tmp_path / "hook-state"
+    store = LocalObservationStore(_state=state)
+    commitment = store.workspace_commitment(workspace)
+    store.grant_consent(commitment)
+    prefix = "" if harness == "codex" else f"{harness}:"
+    predecessor = f"{prefix}predecessor-814"
+    successor = f"{prefix}successor-814"
+    first = await observe_hooks._try_auto_start(  # pyright: ignore[reportPrivateUsage]
+        predecessor,
+        _state=state,
+        harness_id=harness,
+        workspace_locator=workspace,
+        connect=bound_connector,
+    )
+    assert first.mapping is not None, first.reason
+    predecessor_commitment = store.bind_codex_session(commitment, predecessor)
+    store.note_session_end(commitment, predecessor_commitment)
+    sibling_client = await connect_service(
+        ControlClientKind.CLI, workspace_locator=WorkspaceLocator(workspace)
+    )
+    try:
+        sibling_result = await sibling_client.start(
+            StartRequest.model_validate(
+                _admission_body(8140, workspace_ref=workspace, external_ref="independent-work")
+            )
+        )
+    finally:
+        await sibling_client.close()
+    sibling = sibling_result.root
+    assert isinstance(sibling, StartSuccessModel)
+    assert sibling.task_id != first.mapping.yoetz_task_id
+    sibling_route = await application.start_catalog.resolve_route(sibling.session_id)
+    store.bind_codex_session(commitment, successor)
+
+    recovered = await observe_hooks._try_workspace_auto_start(  # pyright: ignore[reportPrivateUsage]
+        successor,
+        store=store,
+        workspace_commitment=commitment,
+        workspace_locator=workspace,
+        harness_id=harness,
+        _state=state,
+        connect=bound_connector,
+    )
+
+    assert recovered.mapping is not None, recovered.reason
+    assert recovered.recovered
+    assert recovered.mapping.yoetz_task_id == first.mapping.yoetz_task_id
+    assert recovered.mapping.yoetz_session_id != first.mapping.yoetz_session_id
+    assert await application.start_catalog.resolve_route(sibling.session_id) == sibling_route

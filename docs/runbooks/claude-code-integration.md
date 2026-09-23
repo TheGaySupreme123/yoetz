@@ -500,10 +500,10 @@ hook path checks its private local store for a unique valid mapping from an earl
 whose `SessionEnd` was received, with every other bound session ended and every candidate limited to
 this consented workspace. A unique candidate is held under the workspace and predecessor session
 locks, revalidated, and sent as `mode=attach` with the existing Yoetz `session_id` plus the new pair.
-The catalog still requires the selector to be active, the canonical workspace root to contain
-exactly one non-quarantined root task, the matching repository-privacy binding, and no start already
-pending for that route. This explicit session-plus-new-pair path is the remaining sole-root-workspace
-fence. If eligible mappings name more than one task, the hook records
+The catalog requires the selector to be active and non-quarantined, its canonical workspace and
+repository-privacy binding to match, and no start already pending for that selected route. Other
+independent tasks in the same workspace do not block this recovery (#814); a pair already bound
+to another task remains a conflict. If eligible mappings name more than one task, the hook records
 `auto_attach_binding_ambiguous` with a bounded candidate count only; it does not create or choose
 among them, and a hard crash without `SessionEnd` remains fail-closed. With no usable predecessor,
 ordinary `create_or_attach` admits the new pair as independent work, even beside a dormant task.
@@ -984,8 +984,9 @@ admission conflict (`auto_attach_conflict`). Missing mapping remains explicit. C
 task selector or explicit admission decision, not a service restart. Successful hook exit alone
 does not establish attachment. A unique ended predecessor is attached before a new pair is created;
 ambiguous predecessor tasks produce `auto_attach_binding_ambiguous` with a count only, and the
-explicit session-plus-new-pair recovery still requires one non-quarantined root task in the
-canonical workspace.
+explicit session-plus-new-pair recovery preserves the selected task even when unrelated tasks
+share the canonical workspace (#814). It still checks the active selector, workspace and repository
+binding, and pending operations for that task; no task interaction authority is added.
 
 Structural pre/post observations remain queued and keep their original identities across
 bootstrap. A later successful mapping permits their normal drain. Missing transient content

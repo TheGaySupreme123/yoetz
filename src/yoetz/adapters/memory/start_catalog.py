@@ -751,20 +751,12 @@ class MemoryStartCatalogAdapter:
                 raise _error(PublicErrorCode.SESSION_CONFLICT)
             return by_commitment
         if by_session is not None and workspace is not None and by_commitment is None:
-            workspace_routes = tuple(
-                route
-                for route in self._state.routes.values()
-                if route.workspace_ref_commitment == workspace
-                and route.state is not TaskRouteState.QUARANTINED
-            )
             if (
                 request.mode is not StartMode.ATTACH
                 or request.session_id != by_session.active_session_id
                 or by_session.state is TaskRouteState.QUARANTINED
                 or by_session.workspace_ref_commitment is None
                 or not hmac.compare_digest(by_session.workspace_ref_commitment, workspace)
-                or len(workspace_routes) != 1
-                or workspace_routes[0].task_id != by_session.task_id
             ):
                 raise _error(PublicErrorCode.SESSION_CONFLICT)
             if any(

@@ -1755,8 +1755,11 @@ admission first checks the private local lifecycle store for a unique valid same
 names one task. It then holds the workspace and predecessor lifecycle locks, revalidates ownership
 and state, and issues `mode=attach` with the known Yoetz session selector plus the new paired host
 identity before any create attempt. The explicit session-plus-new-pair recovery remains admitted
-only when that selector is active, its canonical workspace root has exactly one non-quarantined
-root task, the trusted repository-privacy binding matches, and no start for that route is pending.
+only when that selector is active and non-quarantined, its canonical workspace and trusted
+repository-privacy binding match, and no start for that selected route is pending. Other tasks in
+the workspace do not make a held selector ambiguous and are neither attached nor changed (#814).
+The new pair must not already select a different task. This permits independent tasks to coexist;
+it does not grant task interaction, delegation, lineage, or shared project authority.
 If eligible mappings name more than one task, admission fails closed with the bounded
 `auto_attach_binding_ambiguous` reason and a candidate count only; it never guesses from workspace
 membership or age. With no usable persisted selector, ordinary `create_or_attach` admits the new
@@ -3788,9 +3791,10 @@ consented workspace. All eligible mappings must name one task; within that task,
 mapping-file write wins and the host session ID breaks timestamp ties. A unique candidate is held
 under the workspace and predecessor lifecycle locks, revalidated, and sent as one `mode=attach`
 request carrying that selector plus the new host pair. The control handshake carries the canonical
-workspace for repository privacy. The catalog still requires the selector to remain active, its
-workspace to have exactly one non-quarantined root task, and no start for that route to be pending;
-this explicit session-plus-new-pair recovery is the remaining sole-root-workspace fence. The request
+workspace for repository privacy. The catalog still requires the selector to remain active and
+non-quarantined, its workspace and repository binding to match, and no start for that selected
+route to be pending. Unrelated workspace tasks, including their pending starts, do not block this
+exact-selector recovery (#814). A pair already bound to another task remains a conflict. The request
 uses one five-second deadline, and the response must retain the candidate's task ID. If eligible
 mappings name more than one task, the hook returns `auto_attach_binding_ambiguous` with only a
 bounded candidate count and does not create or choose among them. With no usable selector, ordinary
