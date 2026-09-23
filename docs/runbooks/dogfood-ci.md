@@ -67,26 +67,33 @@ trusted-console ceremonies from a pseudo-terminal. Phases, in order, each record
 1. **install** — `scripts/provision_test_instance.py create` (disposable, six-hour expiry,
    runtime-pinned root), `service isolation`, `instance status`, `version`, `service run`,
    `service initialize-passphrase`, `provider endpoint --provider fireworks`,
-   `provider credential set`, `privacy setup` (recipe 3, Assisted review, when a credential
-   exists; Private otherwise), then — with a credential — `service restart` plus
-   `service unlock`, because the running service composes provider readiness only when the
-   vault becomes ready and a credential stored afterwards is verified live but not reflected
-   in `provider status` until the next unlock or restart; then `provider status`,
-   `setup status`.
+   `provider credential set`, then — with a credential — `service restart` plus
+   `service unlock`, because the running service composes provider readiness only when it
+   starts and a credential stored afterwards is verified live but not reflected in
+   `provider status` until a restart (a lock/unlock does not refresh it either); then
+   `privacy setup` (recipe 3, Assisted review, when a credential exists; Private otherwise),
+   `provider status`, `setup status`.
 2. **connect** — the host connection per the table, then `observe grant --workspace <project>`
    and `observe status`.
-3. **ledger** — `start` (create), `publish-work` (dry run, then real: one plan and one
-   obligation), `status`, `check` (`semantic_required` with a credential), `receipt` (markdown),
-   two hook carrier probes through the host's ingress (`hooks observe`, `hooks claude-observe`,
-   or `hooks cursor-observe`), `observe drain` (must reach `terminal: drained`,
-   `pending_after: 0`), `observe status`.
+3. **ledger** — the host's session-start carrier first (`hooks observe`,
+   `hooks claude-observe`, or `hooks cursor-observe`), whose auto-attach creates the
+   workspace's task and names the session to attach to, exactly as a native host does; then
+   `start` (attach to that session), `publish-work` (dry run, then real: one plan and one
+   obligation), `status`, `check` (`semantic_required` with a credential),
+   `service diagnostics --request-id <check>` plus every correlation id in the instance's
+   diagnostics ring, `privacy receipts list`, `receipt` (markdown), the host's post-event
+   carrier, `observe drain` (must reach `terminal: drained`, `pending_after: 0`),
+   `observe status`. A task created before the carrier makes the carrier's
+   `create_or_attach` refuse with `workspace_task_exists`, which is the product's rule against
+   accidental sibling tasks, not a lane defect.
 4. **native** — one headless agent session in the probe project (`codex exec`, `claude -p`,
    `cursor-agent -p`) asked to call `start`, `publish_work`, and `receipt` and answer `DONE`;
    then `observe status`, `observe drain`, `observe status`, `service status`. A
    `service_unavailable`, `storage_*`, or `vault_locked` hook diagnostic after the agent is
    catastrophic; a non-zero agent exit is not.
 5. **lifecycle** — `service restart`, `service unlock` (headless runners have no keyring, so the
-   restarted service comes back `locked`), `observe status` again.
+   restarted service comes back `locked`), one more `semantic_required` check on the probe
+   session (informational, recorded as `semantic.after_restart`), `observe status` again.
 6. **teardown** — `scripts/provision_test_instance.py dispose --retain-logs`, always.
 
 Bounded waits poll `service status --json`; nothing sleeps to infer success.
