@@ -310,7 +310,9 @@ supervisor (launchd, systemd, a terminal). Interactive setup may use the bounded
 Related: `yoetz service status`, `lock`, `unlock`, `initialize-passphrase`,
 `rotate-passphrase`, `idle-relock`, `stop`; `restart` stops the running service — even one from
 another installation — and starts this one; `isolation` reports the resolved identity roots and
-isolation mode as digests, without connecting to a service; `diagnostics --correlation-id
+isolation mode as path digests, without connecting to a service (a path digest names which file
+is used, not its contents; add `--content-digests` to also fingerprint the selected config file's
+bytes without revealing them); `diagnostics --correlation-id
 <err_...>` resolves one durable owner-only diagnostic record by the correlation id printed with a
 public error. Two sub-trees sit beneath it: `yoetz service auto-unlock status|enable|repair`
 inspects or repairs restart-safe passphrase unlock after proving the current vault passphrase, and

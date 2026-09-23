@@ -203,6 +203,8 @@ def _write_pass(repo_root: Path) -> bool:
             "integrations/setup-readiness-1.0.0.schema.json",
             "--only",
             "integrations/setup-status-2.0.0.schema.json",
+            "--only",
+            "service/isolation-report-1.0.0.schema.json",
         ),
         ("sync_repository_authority_schemas.py", "--write"),
         ("sync_semantic_capacity_schemas.py",),

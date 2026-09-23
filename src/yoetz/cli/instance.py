@@ -196,7 +196,7 @@ def instance_status(*, now: datetime | None = None) -> dict[str, JsonValue]:
         "mode": report["mode"],
         "binding": report["binding"],
         "lifecycle": report["lifecycle"],
-        "identity": cast(JsonValue, dict(report["identity"])),
+        "path_identity": cast(JsonValue, dict(report["path_identity"])),
         "runtime_package_version": __version__,
         "runtime_prefix_digest": runtime_prefix_digest(Path(sys.prefix)),
         "runtime_pin": "bound" if runtime_pin_path().is_file() else "none",

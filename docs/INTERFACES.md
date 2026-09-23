@@ -2992,8 +2992,8 @@ on the 0.2 line; the 0.3 line's `2.7.0` and `2.8.0` request and result envelopes
 decoded UTC receipt timestamps in canonical millisecond RFC3339 form (issues #731 and #732). The
 0.2.3 schema inventory is reported by version-manifest `2.2.1`, the 0.2.4 inventory by `2.2.2`,
 and the 0.2 line's setup-readiness and setup-status additions by `2.2.3` and `2.2.4`; the 0.3
-line reports its inventory, including both setup contracts, through `2.3.0`. Manifests carried
-from the 0.2 line retain their bytes.
+line reports its inventory, including both setup contracts and `isolation-report` `1.0.0`
+(issue #567), through `2.3.0`. Manifests carried from the 0.2 line retain their bytes.
 
 `PrivacyAuditPort.list_pending_disclosures(audience) -> PendingDisclosurePage` projects only
 `PendingDisclosureEntry(pending_id, task_id, expires_at)` for proposals in `awaiting_human` or
@@ -5737,7 +5737,24 @@ facade and are never MCP tools.
   `storage.data_dir` alone are storage relocation, not isolation. The connection-free proof
   surface is `yoetz service isolation --json` (`cli/isolation_status.py`), digest-only; it also
   reports `binding` (`IsolationBinding` = `ambient|environment|runtime_pin|environment_and_pin`)
-  and `lifecycle` (`ReportedLifecycle` = `permanent|persistent|disposable|unlabeled`).
+  and `lifecycle` (`ReportedLifecycle` = `permanent|persistent|disposable|unlabeled`). Its JSON is
+  `yoetz.isolation-report/1` (`protocol/isolation_report.py` `IsolationReportContract`, wire
+  schema `service/isolation-report-1.0.0.schema.json`, golden vector
+  `fixtures/service/isolation-report.case.json`; issue #567), which names two digest kinds
+  apart. `path_identity` (`IsolationPathIdentity`) holds **path-identity digests** —
+  `state_path_digest`, `endpoint_path_digest`, `storage_path_digest`, `config_path_digest`,
+  `executable_path_digest`, each `path_identity_digest()` = SHA-256 over the canonical resolved
+  path — which prove which target a runtime uses and never bind bytes. `config_content` is `null`
+  unless `--content-digests` is passed; it is then one **byte-content observation**
+  (`ContentObservation` = `PresentContentObservation | AbsentContentObservation`, produced by
+  `observe_file_content()`): `path_digest`, `presence`
+  (`ContentPresence` = `present|absent|not_regular|oversized|unreadable|unstable`),
+  `content_digest` (SHA-256 of the bytes, `present` only), `size_bytes` (`present` only, at most
+  `CONTENT_OBSERVATION_BYTE_LIMIT` = 16 MiB), and `observed_at` (RFC 3339 ms) — never content.
+  Symlinks are followed, so `path_digest` is the target's identity; a read the file changes under
+  is retried (`_STABLE_ATTEMPTS` = 3) and otherwise reported `unstable` without a digest. The
+  untagged 0.2 output (an `identity` block whose `config_digest` was a path digest) is not a
+  schema version and is no longer emitted; consumers detect it by the absent `schema` key.
   The runtime pin (ADR-028, issue #604) is the second, executable-bound source of the same root:
   `read_runtime_pin()` reads `RUNTIME_PIN_NAME` = `yoetz-instance-pin.json`
   (`RUNTIME_PIN_SCHEMA` = `yoetz.runtime-instance-pin/1`: exact `isolated_root` plus
@@ -5768,7 +5785,7 @@ facade and are never MCP tools.
   creates one owner-only root (parent must exist; same path-safety gate; socket path bound
   `MAX_SOCKET_PATH_BYTES` = 100), seals the marker, and with `--bind-runtime` pins `sys.prefix`;
   it echoes the exact root once. `instance_status()` is connection-free and digest-only: mode,
-  binding, lifecycle, marker fields, `expired`, `runtime_provenance`
+  binding, lifecycle, the isolation report's `path_identity` block, marker fields, `expired`, `runtime_provenance`
   (`matched|drifted|unrecorded`), `runtime_pin` (`bound|none`), and the lock-stamped
   `service_holder`. `dispose_instance()` removes exactly one marked persistent/disposable root:
   flock probe, SIGTERM to the stamped holder only, bounded wait (`STOP_WAIT_SECONDS` = 35),
