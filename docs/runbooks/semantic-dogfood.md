@@ -260,3 +260,5 @@ authorized to make and stop there.
   observable boundary, negative controls, and packaged proof checklist.
 - [ADR-018](../adr/ADR-018-host-declared-mcp-route-egress-ceiling.md) — why the strict route is a
   process-local ceiling and not a privacy policy.
+- [Dogfood CI](dogfood-ci.md) — the unattended lane that records `semantic_status`, reason, and
+  provenance presence per (host, OS) cell without scoring usefulness.
