@@ -6,6 +6,17 @@ reverse-chronological released versions.
 
 ## Unreleased
 
+## 0.2.5 — 2026-09-23
+
+- Recover exact sessions and automatically reattach known tasks when independent tasks share a
+  workspace, while retaining task identity and admission boundaries (#811, #815).
+- Recover cold hook attachment within host budgets and report capture recovery, delivery loss,
+  and quarantine state explicitly (#790, #792).
+- Compare completion claims with the effective plan and keep unrelated command gaps from
+  invalidating repaired findings (#793, #794).
+- Preserve setup approvals, inspect the selected installation, and identify Linux Cursor IDE
+  installations without launching them (#795, #796).
+
 - Add opt-in required startup for native Claude Code and Cursor plugins, with scope-bound plan
   checks, owner controls, and same-task pending-operation recovery (#692). Native acceptance remains
   bounded as documented in the required-startup runbook.
@@ -17,6 +28,8 @@ reverse-chronological released versions.
   `start`, and how to load deferred Yoetz tool schemas by name.
 - `yoetz setup status --json` reports each Claude installation's MCP mode (plugin-managed or
   bare) and whether a session-start cue is installed; a bare registration has none (#789).
+
+See [release notes](docs/releases/v0.2.5.md) for verification scope and known limits.
 
 ## 0.2.4 — 2026-09-20
 
