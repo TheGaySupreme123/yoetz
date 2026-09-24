@@ -331,11 +331,16 @@ Predispatch configuration and policy outcomes (`not_configured`, `credential_una
 are admitted continuation tokens and live in the same registry. They are not new public
 `SemanticReason` values and do not change frozen check-result schemas. CLI check rendering and the
 MCP check text summary project the resolved directive (the MCP channel drops the sentence when the
-512-byte budget cannot hold it, keeping the token). Advice and status `semantic_state` is the
-recorded attempt status (`ready` / `disabled` / `unavailable` / `failed`), not finding presence:
-a successful review with zero findings is `ready`, and `disabled` means no attempt was requested
-or configured. The state does not widen coverage: only validated AI-powered finding ids add
-`semantic_model_derived` to advice coverage.
+512-byte budget cannot hold it, keeping the token). Hook advisories never carry a provider-outcome
+token: a hook token is resolved from the hook's own exact reason (`render_hook_recovery_suffix`),
+and today only SessionStart's vault-locked advisory has one (`vault_unlock_required`). Hook contexts
+shared by several reasons (the status-read retry class), the service's retryable `storage_unsafe`
+fault, and a timed-out attachment keep their own instruction without a token. The TUI blocked report
+and receipt human text project the full directive lines from the registry. Compact receipt sentences
+stay frozen. Advice and status `semantic_state` is the recorded attempt status (`ready` / `disabled`
+/ `unavailable` / `failed`), not finding presence: a successful review with zero findings is
+`ready`, and `disabled` means no attempt was requested or configured. The state does not widen
+coverage: only validated AI-powered finding ids add `semantic_model_derived` to advice coverage.
 
 Every MCP result also carries a bounded ASCII text projection (at most 512 bytes) for hosts that
 drop `structuredContent`. A successful projection includes the first valid returned frontier's

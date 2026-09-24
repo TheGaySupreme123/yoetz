@@ -26,7 +26,9 @@ from yoetz.protocol.models import (
 )
 from yoetz.protocol.recovery import (
     RecoveryDirective,
+    TimeoutOperationKind,
     continuation_for_local_reason,
+    continuation_for_reason,
     continuation_for_semantic_outcome,
     correction_for_invariant,
     directive_for,
@@ -39,6 +41,7 @@ __all__ = [
     "local_recovery_json",
     "recovery_directive_json",
     "render_error_recovery_lines",
+    "render_hook_recovery_suffix",
     "render_human_awaiting_human",
     "render_human_check",
     "render_human_error",
@@ -47,6 +50,7 @@ __all__ = [
     "render_human_status",
     "render_local_recovery_lines",
     "render_recovery_directive_lines",
+    "render_semantic_outcome_recovery_lines",
     "render_semantic_progress_lines",
 ]
 
@@ -71,12 +75,14 @@ def _failure_class_from_provenance(provenance: object) -> object | None:
     return getattr(provenance, "failure_class", None)
 
 
-def _semantic_outcome_recovery_lines(
+def render_semantic_outcome_recovery_lines(
     *,
     status: object,
     reason: object,
     provenance: object = None,
 ) -> list[str]:
+    """Resolve provider-review recovery from recorded status, never from findings."""
+
     token = continuation_for_semantic_outcome(
         status=status,
         reason=reason,
@@ -86,6 +92,42 @@ def _semantic_outcome_recovery_lines(
     if directive is None:
         return []
     return render_recovery_directive_lines(directive)
+
+
+def _semantic_outcome_recovery_lines(
+    *,
+    status: object,
+    reason: object,
+    provenance: object = None,
+) -> list[str]:
+    return render_semantic_outcome_recovery_lines(
+        status=status, reason=reason, provenance=provenance
+    )
+
+
+def render_hook_recovery_suffix(
+    reason: object,
+    *,
+    operation_kind: TimeoutOperationKind | None = None,
+) -> str:
+    """Return the hook-budget suffix for a typed reason, or an empty string.
+
+    Hook intake is bounded at 512 ASCII bytes. The suffix therefore carries the
+    continuation token only; each host hook keeps its own framing, and the
+    directive text is reconstructed from the same registry on CLI and MCP.
+
+    Pass one exact reason whose registry meaning matches the hook's own advice. A hook
+    context shared by several reasons, or a service ``PublicErrorCode`` that only shares a
+    spelling with a CLI-local reason (``storage_unsafe``), must not borrow a token: its
+    directive would contradict the hook text beside it (issue #739).
+    """
+
+    token = continuation_for_local_reason(reason)
+    if token is None:
+        token = continuation_for_reason(reason, operation_kind=operation_kind)
+    if token is None:
+        return ""
+    return f" Continuation: {token}."
 
 
 def _projected_text(value: str | OmittedContentModel | None) -> str:
@@ -354,6 +396,17 @@ def render_human_receipt(result: ReceiptSuccessModel) -> str:
         lines.append(_projected_text(result.human_text))
     limitations = tuple(result.coverage.known_gaps)
     lines.append("Limitations: " + (", ".join(limitations) if limitations else "none declared"))
+    document = result.document
+    if isinstance(document, Mapping):
+        provenance = document.get("semantic_provenance")
+        if isinstance(provenance, Mapping):
+            lines.extend(
+                render_semantic_outcome_recovery_lines(
+                    status=provenance.get("status"),
+                    reason=provenance.get("reason"),
+                    provenance=provenance,
+                )
+            )
     if result.suppressed_finding_count:
         lines.append(f"Suppressed findings: {result.suppressed_finding_count}")
     return "\n".join(lines)

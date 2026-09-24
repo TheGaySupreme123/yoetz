@@ -1363,7 +1363,9 @@ Provider-side failures reaching Codex through the app-server path keep their exi
 diagnostics (issue #529). Those failures also resolve through the shared recovery registry
 (`continuation_for_semantic_outcome`, issue #742): the adapter's closed `failure_class` and the
 recorded `semantic_reason` select a frozen directive, and raw provider text never reaches it.
-No Codex-specific recovery wording is configured.
+Hook advisories never carry that token; SessionStart's vault-locked advisory appends its own
+`vault_unlock_required` token after the host-specific prefix (issue #739). No Codex-specific
+recovery wording is configured.
 
 ### Compatible newer transcript metadata (0.2.3)
 

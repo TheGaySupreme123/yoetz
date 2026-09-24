@@ -381,10 +381,13 @@ class YoetzTui(App[int]):
             self._report(error)
 
     def _report(self, error: RuntimeError_) -> None:
+        from yoetz.cli.render import render_local_recovery_lines
+
+        extra = (f"Reason: {error.reason}", *render_local_recovery_lines(error.reason))
         self.say(
             Level.BLOCKED,
             error.message,
-            (f"Reason: {error.reason}",),
+            extra,
             details=error.details or (f"reason={error.reason}",),
         )
 
