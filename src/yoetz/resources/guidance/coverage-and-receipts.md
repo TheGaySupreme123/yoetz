@@ -366,8 +366,9 @@ AI-powered review or pending approval would be bypassed.
 ### Bounded recovery and fresh verification
 
 Use this decision table after the typed result and any operation-specific continuation. It preserves
-the 0.2 wire contract: a sibling is an explicit `start mode=create` choice, not an automatic
-lineage or admission mechanism.
+the 0.2 wire contract: a sibling has a separate task boundary, while a complete new pair on
+`create_or_attach` is admitted as independent work without adding lineage, project, or parent
+fields. An explicit `mode=create` collision remains a `SESSION_CONFLICT`.
 
 The operation view requires both `session_id` and `writer_id`. If a `start` response is lost before
 those ids are returned, do not invent them or issue a fabricated status query: replay the exact

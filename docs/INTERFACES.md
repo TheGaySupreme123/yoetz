@@ -314,6 +314,34 @@ recovered it by matching that whole sentence with a regex — so a reworded mess
 agent the correction. The clause is now independent of message wording, and the projector still
 never echoes the message.
 
+Provider and AI-powered review outcomes (issue #742) resolve through
+`continuation_for_semantic_outcome`. The adapter classifies the physical attempt into the closed
+`SemanticFailureClass` set and discards raw provider text there. Renderers look up a frozen
+directive from the recorded `(semantic_status, semantic_reason)` pair and, when present, that
+`failure_class`. A rejected credential (`authentication` / `authorization`) maps to
+`semantic_credential_rejected` even when the public reason remains the `transport_unavailable`
+catch-all; truncated or overlong output maps to `semantic_response_truncated` from
+`response_content_invalid`; schema-invalid and rejected-judgment answers map to
+`semantic_response_invalid`; capacity and quota map to `semantic_capacity_exceeded`; and
+`retry_budget_exhausted` and `outcome_unknown`, which name how a job ended rather than why, map to
+`semantic_no_judgment`. Every directive follows the check-mode coverage guidance: it never tells an
+agent to downgrade a required review, and it never offers a second job for a truncated answer.
+Predispatch configuration and policy outcomes (`not_configured`, `credential_unavailable`,
+`blocked_by_policy`, and the rest) carry no directive. These tokens
+are admitted continuation tokens and live in the same registry. They are not new public
+`SemanticReason` values and do not change frozen check-result schemas. CLI check rendering and the
+MCP check text summary project the resolved directive (the MCP channel drops the sentence when the
+512-byte budget cannot hold it, keeping the token). Hook advisories never carry a provider-outcome
+token: a hook token is resolved from the hook's own exact reason (`render_hook_recovery_suffix`),
+and today only SessionStart's vault-locked advisory has one (`vault_unlock_required`). Hook contexts
+shared by several reasons (the status-read retry class), the service's retryable `storage_unsafe`
+fault, and a timed-out attachment keep their own instruction without a token. The TUI blocked report
+and receipt human text project the full directive lines from the registry. Compact receipt sentences
+stay frozen. Advice and status `semantic_state` is the recorded attempt status (`ready` / `disabled`
+/ `unavailable` / `failed`), not finding presence: a successful review with zero findings is
+`ready`, and `disabled` means no attempt was requested or configured. The state does not widen
+coverage: only validated AI-powered finding ids add `semantic_model_derived` to advice coverage.
+
 Every MCP result also carries a bounded ASCII text projection (at most 512 bytes) for hosts that
 drop `structuredContent`. A successful projection includes the first valid returned frontier's
 `sequence` and canonical `head_digest` when both are present. Generic successful operations also
@@ -4237,8 +4265,9 @@ quarantined. When no eligible local selector exists, the ordinary `create_or_att
 new work; when recovery attach fails, the ordinary typed failure path remains. Every failed attempt records a
 closed hook-diagnostic
 reason instead of a silent absent mapping: `auto_attach_workspace_unbound`,
-`auto_attach_request_invalid`, `auto_attach_conflict` (session, idempotency, or request-identity
-conflict), `auto_attach_refused`, `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`,
+`auto_attach_request_invalid`, `auto_attach_binding_ambiguous` (candidate count only),
+`auto_attach_conflict` (session, idempotency, or request-identity conflict), `auto_attach_refused`,
+`auto_attach_result_invalid`, `auto_attach_mapping_write_failed`,
 `privacy_authority_required`, or the shared `service_unavailable`, `service_incompatible`, `vault_locked`, `timeout`,
 `storage_unsafe`, and `storage_corrupt` tokens. Turn-boundary hooks retry auto-attach under a
 bounded budget and record the same typed cause next to the `auto_attach_retry_failed` path marker

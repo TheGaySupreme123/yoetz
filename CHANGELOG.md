@@ -86,7 +86,35 @@ Prepared public-alpha release candidate; publication remains gated by #785. See
   complete capture recovery and loss reporting (#792), claim and plan scope differences in status
   and receipts (#793), unrelated command gaps partitioned from repair proof (#794), Linux Cursor
   IDE identification without launching it (#795), and approval-preserving setup that inspects the
-  selected installation (#796).
+  selected installation (#796), plus the remaining 0.2.5 repairs: exact-session recovery and
+  automatic reattachment beside independent tasks in the same workspace, with delegated children
+  still behind their authenticated attachment path (#811, #815, #816).
+
+## 0.2.5 — 2026-09-23
+
+- Recover exact sessions and automatically reattach known tasks when independent tasks share a
+  workspace, while retaining task identity and admission boundaries (#811, #815).
+- Recover cold hook attachment within host budgets and report capture recovery, delivery loss,
+  and quarantine state explicitly (#790, #792).
+- Compare completion claims with the effective plan and keep unrelated command gaps from
+  invalidating repaired findings (#793, #794).
+- Preserve setup approvals, inspect the selected installation, and identify Linux Cursor IDE
+  installations without launching them (#795, #796).
+
+- Add opt-in required startup for native Claude Code and Cursor plugins, with scope-bound plan
+  checks, owner controls, and same-task pending-operation recovery (#692). Native acceptance remains
+  bounded as documented in the required-startup runbook.
+- Deliver native startup guidance independently of observation consent and availability (#692).
+- Claude Code sessions receive a compact MCP initialize block that fits the host's observed
+  2,048-character rendering cap, with the "call `start` first" trigger and the late-start rule as
+  its first two sentences; other hosts keep the full document (#789).
+- Guidance, the Claude skill and `AGENTS.md` state what to do when material work began before
+  `start`, and how to load deferred Yoetz tool schemas by name.
+- `yoetz setup status --json` reports each Claude installation's MCP mode (plugin-managed or
+  bare) and whether a session-start cue is installed; a bare registration has none (#789).
+
+See [release notes](docs/releases/v0.2.5.md) for verification scope and known limits.
+
 ## 0.2.4 — 2026-09-20
 
 - One guided installation and connection lifecycle for Codex, Claude Code, Cursor IDE and

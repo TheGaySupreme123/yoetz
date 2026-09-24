@@ -244,6 +244,72 @@ async def test_reserve_resume_complete_parity() -> None:
 
 
 @pytest.mark.anyio
+async def test_concurrent_same_pair_attaches_once_and_different_pairs_create_siblings() -> None:
+    """The catalog lock preserves pair identity while allowing workspace siblings."""
+
+    installation_id = _id(IdKind.INSTALLATION, 760)
+    now = datetime(2026, 7, 19, 9, 12, tzinfo=UTC)
+    memory, _ = _memory_catalog(installation_id, _Clock(now))
+    sqlite = _sqlite_catalog(installation_id, _Clock(now))
+
+    for catalog in (memory, sqlite):
+        same_pair = [
+            await _command(catalog, operation_id=_id(IdKind.REQUEST, 761)),
+            await _command(catalog, operation_id=_id(IdKind.REQUEST, 762)),
+        ]
+        same_results: list[object | None] = [None, None]
+
+        async def reserve_same(index: int) -> None:
+            same_results[index] = await catalog.reserve_or_resume(same_pair[index])
+
+        async with anyio.create_task_group() as tasks:
+            for index in range(len(same_pair)):
+                tasks.start_soon(reserve_same, index)
+
+        same_allocations: list[StartAllocation] = []
+        for result in same_results:
+            assert isinstance(result, StartAllocation)
+            same_allocations.append(result)
+        assert {allocation.route_action for allocation in same_allocations} == {
+            "created",
+            "attached",
+        }
+        same_task_ids = {allocation.task_id for allocation in same_allocations}
+        assert len(same_task_ids) == 1
+
+        different_pairs = [
+            await _command(
+                catalog,
+                operation_id=_id(IdKind.REQUEST, 763),
+                external_ref="external-B",
+            ),
+            await _command(
+                catalog,
+                operation_id=_id(IdKind.REQUEST, 764),
+                external_ref="external-C",
+            ),
+        ]
+        different_results: list[object | None] = [None, None]
+
+        async def reserve_different(index: int) -> None:
+            different_results[index] = await catalog.reserve_or_resume(different_pairs[index])
+
+        async with anyio.create_task_group() as tasks:
+            for index in range(len(different_pairs)):
+                tasks.start_soon(reserve_different, index)
+
+        different_allocations: list[StartAllocation] = []
+        for result in different_results:
+            assert isinstance(result, StartAllocation)
+            different_allocations.append(result)
+        assert {allocation.route_action for allocation in different_allocations} == {"created"}
+        assert len({allocation.task_id for allocation in different_allocations}) == 2
+        assert not same_task_ids.intersection(
+            allocation.task_id for allocation in different_allocations
+        )
+
+
+@pytest.mark.anyio
 async def test_historical_session_binding_and_reattach_parity() -> None:
     """Memory and SQLite preserve the same capability-bounded session recovery (#438)."""
 

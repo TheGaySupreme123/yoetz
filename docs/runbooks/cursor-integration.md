@@ -803,11 +803,12 @@ ended. A failed attempt records its typed cause (`auto_attach_workspace_unbound`
 `auto_attach_request_invalid`, `auto_attach_binding_ambiguous`, `auto_attach_conflict`,
 `auto_attach_refused`,
 `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`,
-`service_unavailable`, `service_incompatible`, `vault_locked`, `timeout`, `storage_unsafe`, or `storage_corrupt`) in the
-same diagnostics file, and the session keeps an observation-only binding until a retry or an
-explicit `start` maps it. For `vault_locked` on a never-initialized install, that explicit
-`start` returns the typed `vault_initialization_required` continuation (see Troubleshooting)
-rather than a dead end.
+`service_unavailable`, `service_incompatible`, `vault_locked`, `timeout`, `storage_unsafe`, or
+`storage_corrupt`) in the same diagnostics file, and the session keeps an observation-only binding
+until a retry or an explicit `start` maps it. An explicit `mode=create` collision remains
+`SESSION_CONFLICT` and is not a recovery selector. For `vault_locked` on a never-initialized
+install, that explicit `start` returns the typed `vault_initialization_required` continuation (see
+Troubleshooting) rather than a dead end.
 
 Busy host lifecycle changes are durable local work. State schema `/11` adds bounded pending
 session-lifecycle intents, and a READY or hook drain reconciles them under the workspace and
@@ -853,7 +854,8 @@ observation handling (issue #661). The adapter transiently decodes `result_json`
 `afterMCPExecution`, or `tool_output` on an exactly server-scoped `postToolUse`, then passes the
 result to the existing lifecycle binder. Only validated task/session/writer IDs and an optional
 frontier token enter mapping storage. Task switching and same-task session replacement use those
-returned IDs; the workspace ambiguity guard is unchanged and never guesses a task.
+returned IDs; the binder never guesses a task. Automatic admission follows the shared
+ended-predecessor preflight, including the count-only ambiguity boundary described above.
 
 [Cursor's hooks reference](https://cursor.com/docs/hooks), checked 2026-09-08, documents
 `mcp_server_name` on `afterMCPExecution`. That hook admits bare `start` only for exact `yoetz` or
@@ -1142,8 +1144,8 @@ reconstruct them from memory, a remote URL, or the live store.
   `status`, and continue only from that binding. A bare `task_id` is not an attach selector.
 - **Same-pair fresh conversation.** With no held session, call `start mode=create_or_attach` using
   the exact canonical project root as `workspace_ref` and the same stable `external_ref` pair, with
-  no `session_id`. A remote URL is not a workspace identity, and a fresh Cursor conversation is
-  not an implicit second task.
+  no `session_id`. The same pair resumes; a different complete pair is independent work, even in
+  the same workspace. A remote URL is not a workspace identity.
 - **Explicit sibling handoff.** Use `start mode=create` only after same-task pair/session recovery
   is exhausted, every earlier write has a known terminal outcome, the Cursor binding is healthy and
   authorized, and the user has declared one bounded remaining or repaired verification scope. Keep
@@ -1285,6 +1287,14 @@ stdout is not a TTY; its failure keeps the exact wire body on stdout and writes 
 lines to stderr. This is CLI behavior shared by every host; no Cursor-specific behavior is
 configured.
 
+**Provider outcomes (issue #742).** A check whose AI-powered review failed resolves through the
+same registry (`continuation_for_semantic_outcome`). Cursor's native MCP profile repeats the
+canonical JSON body and does not use the bounded summary renderer, so the consumer still
+resolves the check's `semantic_reason` and optional `failure_class` through this section. CLI
+check output in this host shows the directive. Hook advisories never carry that token;
+SessionStart's vault-locked advisory appends its own `vault_unlock_required` token after the
+host-specific prefix (issue #739). No Cursor-specific recovery wording is configured.
+
 ## Cold service attachment and recovery (issue #670)
 
 Cursor sessionStart returns the shared result through Cursor's `additional_context` contract,
@@ -1305,7 +1315,12 @@ The native context distinguishes a service that is unavailable or still starting
 admission conflict (`auto_attach_conflict`). Missing mapping remains explicit. Call cooperative
 `start` before material work and follow its exact continuation; a conflict needs an authorized
 task selector or explicit admission decision, not a service restart. Successful hook exit alone
-does not establish attachment. Task admission and ended-session recovery selectors are unchanged.
+does not establish attachment. A unique ended predecessor is attached before a new pair is created;
+ambiguous predecessor tasks produce `auto_attach_binding_ambiguous` with a count only, and the
+explicit session-plus-new-pair recovery preserves the selected root task even when unrelated
+tasks share the canonical workspace (#814, #816). It still checks the active selector, workspace and
+repository binding, and pending operations for that task; delegated child routes keep their
+authenticated attachment path, and no task interaction authority is added.
 
 Structural pre/post observations remain queued and keep their original identities across
 bootstrap. A later successful mapping permits their normal drain. Missing transient content

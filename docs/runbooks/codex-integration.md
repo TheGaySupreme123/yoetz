@@ -1259,8 +1259,8 @@ them from memory or from the live store.
   `task_id` is not an attach selector.
 - **Same-pair fresh conversation.** With no held session, call `start mode=create_or_attach` using
   the same exact canonical `workspace_ref` and stable `external_ref` pair, with no `session_id`.
-  A remote URL is not the workspace identity, and a fresh Codex conversation is not an implicit
-  second task.
+  The same pair resumes; a different complete pair is independent work, even in the same workspace.
+  A remote URL is not the workspace identity.
 - **Explicit sibling handoff.** Use `start mode=create` only after same-task pair/session recovery
   is exhausted, every earlier write has a known terminal outcome, the binding is healthy and
   authorized, and the user has declared one bounded remaining or repaired verification scope. Keep
@@ -1360,8 +1360,12 @@ corrected body once under a new `request_id`. The regression case is
 `tests/unit/mcp/test_recovery_directive_delivery.py`, which replays that exact body.
 
 Provider-side failures reaching Codex through the app-server path keep their existing stage-typed
-diagnostics (issue #529). Classifying those failures into typed recovery tokens is tracked
-separately on issue #742 and is not part of ADR-030's first implementation.
+diagnostics (issue #529). Those failures also resolve through the shared recovery registry
+(`continuation_for_semantic_outcome`, issue #742): the adapter's closed `failure_class` and the
+recorded `semantic_reason` select a frozen directive, and raw provider text never reaches it.
+Hook advisories never carry that token; SessionStart's vault-locked advisory appends its own
+`vault_unlock_required` token after the host-specific prefix (issue #739). No Codex-specific
+recovery wording is configured.
 
 ### Compatible newer transcript metadata (0.2.3)
 
@@ -1406,7 +1410,12 @@ The native context distinguishes a service that is unavailable or still starting
 admission conflict (`auto_attach_conflict`). Missing mapping remains explicit. Call cooperative
 `start` before material work and follow its exact continuation; a conflict needs an authorized
 task selector or explicit admission decision, not a service restart. Successful hook exit alone
-does not establish attachment. Task admission and ended-session recovery selectors are unchanged.
+does not establish attachment. A unique ended predecessor is attached before a new pair is created;
+ambiguous predecessor tasks produce `auto_attach_binding_ambiguous` with a count only, and the
+explicit session-plus-new-pair recovery preserves the selected root task even when unrelated
+tasks share the canonical workspace (#814, #816). It still checks the active selector, workspace and
+repository binding, and pending operations for that task; delegated child routes keep their
+authenticated attachment path, and no task interaction authority is added.
 
 Structural pre/post observations remain queued and keep their original identities across
 bootstrap. A later successful mapping permits their normal drain. Missing transient content

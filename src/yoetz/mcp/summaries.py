@@ -13,7 +13,12 @@ from yoetz.mcp.errors import VALIDATION_REASON_TOKENS
 from yoetz.protocol.canonical import JsonValue, ensure_canonical_value
 from yoetz.protocol.errors import PublicErrorCode, normalize_safe_details
 from yoetz.protocol.ids import IdKind, is_valid_id
-from yoetz.protocol.recovery import RecoveryDirective, correction_for_invariant, directive_for
+from yoetz.protocol.recovery import (
+    RecoveryDirective,
+    continuation_for_semantic_outcome,
+    correction_for_invariant,
+    directive_for,
+)
 
 __all__ = [
     "render_safe_compact_summary",
@@ -42,6 +47,12 @@ _CORRELATION_ID: Final = re.compile(
 )
 # Closed shape for the frontier head: either the genesis sentinel or a canonical digest.
 _HEAD_DIGEST: Final = re.compile(r"^(?:genesis|sha256:[0-9a-f]{64})$", re.ASCII)
+
+
+def _failure_class_from_mapping(value: object) -> object | None:
+    if isinstance(value, Mapping):
+        return cast(Mapping[str, object], value).get("failure_class")
+    return None
 
 
 def _mapping(value: object) -> Mapping[str, JsonValue]:
@@ -479,10 +490,21 @@ def summary_for_check(envelope: object) -> str:
     if isinstance(notes, (list, tuple)) and notes:
         prefix += f"project advice (non-verdict): {len(notes)}; "
     suffix = f"AI-powered review status/reason: {status}/{reason}; {_frontier_clause(source)}."
-    if reason == "case_capacity_exceeded":
-        suffix += " No provider attempt; narrow claim/obligation scope for a new check."
-    elif reason == "coordinator_failure":
-        suffix += " Inspect service diagnostics by this check request ID; provider outcome may be unknown."
+    recovery = continuation_for_semantic_outcome(
+        status=status,
+        reason=reason,
+        failure_class=_failure_class_from_mapping(source.get("semantic_provenance")),
+    )
+    recovered = directive_for(recovery)
+    if recovered is not None:
+        extra = f" Continuation: {recovered.token}."
+        reserved = 80
+        used = len((prefix + suffix + extra).encode("ascii")) + reserved
+        leftover = _MAX_SUMMARY_BYTES - used
+        directive_text = recovered.directive
+        if leftover > 8 and len(directive_text.encode("ascii")) + 1 <= leftover:
+            extra += f" {directive_text}"
+        suffix += extra
     clause = _finding_identity_clause(
         source,
         byte_budget=_MAX_SUMMARY_BYTES - len((prefix + suffix).encode("ascii")),

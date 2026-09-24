@@ -442,6 +442,9 @@ def _attachment_recovery_context(reason: str) -> str:
             "incompatible holder; the hook did not replace it. Call start and follow its exact "
             "service recovery continuation. "
         )
+    # A timed-out attachment may have sent start under the hook's own request identity, which
+    # the agent never sees, so no timeout replay token applies: the agent's own start is the
+    # recovery (issue #739).
     if reason in {"service_unavailable", "timeout"}:
         return (
             "Yoetz attachment pending: service_unavailable. The bounded service connection "
@@ -2347,8 +2350,8 @@ def _acquire_recovery_session_locks(
     """Hold every scanned predecessor lock through validation and attach.
 
     Session locks are nonblocking by contract.  If another host event owns one
-    of the candidate locks, recovery yields ``False`` and the caller performs
-    the ordinary service request.  Acquiring in sorted order avoids a lock
+    of the candidate locks, recovery yields ``False`` and the caller reports
+    recovery busy without making a service request. Acquiring in sorted order avoids a lock
     hierarchy cycle between concurrent recovery attempts.
     """
 

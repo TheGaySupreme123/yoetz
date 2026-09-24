@@ -1380,9 +1380,7 @@ async def execute_status(
                         "coverage": coverage_to_json(item.coverage),
                         "freshness_frontier": item.freshness_frontier,
                         "verification_state": verification_state,
-                        "semantic_state": (
-                            "ready" if item.origin == "semantic_model_derived" else "disabled"
-                        ),
+                        "semantic_state": advice.semantic_attempt_state,
                         "recommended_next_action": item.recommended_next_action,
                     }
                     for item in advice.ranked_items[: int(request.limit)]
