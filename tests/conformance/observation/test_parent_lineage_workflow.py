@@ -561,6 +561,9 @@ async def test_parent_receipt_rolls_up_mixed_real_child_states_and_one_hop_grand
         assert parent_check.children.label == "recorded"
         preview = {item.child_task_id: item for item in parent_check.children.items}
         assert preview[actionable.task_id].rollup_state.value == "blocked"
+        # The informational finding is ledger_stale_or_incomplete from a missing plan reference.
+        # That reference is also a coverage gap, so this child stays open_gap independently of
+        # the kernel rule that an informational finding cannot hide a lifecycle blocker.
         assert preview[informational.task_id].rollup_state.value == "open_gap"
         assert preview[pending.task_id].rollup_state.value == "annotation"
         assert preview[live.task_id].rollup_state.value == "open_gap"
