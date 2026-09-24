@@ -480,6 +480,7 @@ ADMITTED_CONTINUATION_TOKENS: frozenset[str] = frozenset(
         "semantic_capacity_exceeded",
         "semantic_coordinator_review",
         "semantic_credential_rejected",
+        "semantic_no_judgment",
         "semantic_rate_limited",
         "semantic_refused",
         "semantic_response_invalid",

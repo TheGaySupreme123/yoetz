@@ -51,7 +51,7 @@ _HEAD_DIGEST: Final = re.compile(r"^(?:genesis|sha256:[0-9a-f]{64})$", re.ASCII)
 
 def _failure_class_from_mapping(value: object) -> object | None:
     if isinstance(value, Mapping):
-        return value.get("failure_class")
+        return cast(Mapping[str, object], value).get("failure_class")
     return None
 
 

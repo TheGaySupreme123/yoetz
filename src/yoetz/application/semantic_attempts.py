@@ -1435,9 +1435,7 @@ async def run_durable_semantic_attempts(
                 else None
             )
             failure_class = (
-                raw_failure_class
-                if type(raw_failure_class) is SemanticFailureClass
-                else None
+                raw_failure_class if type(raw_failure_class) is SemanticFailureClass else None
             )
             if fallback is None:
                 can_retry = should_retry_after(
@@ -1451,7 +1449,15 @@ async def run_durable_semantic_attempts(
                 )
             else:
                 walk_after = _walk_endpoints(codes_after, fallback)
-                switching = role == "primary" and walk_after.engaged
+                # A rejected credential is not a licensed transition either: the durable code may
+                # be the transport catch-all, but the adapter's class says the provider refused
+                # this binding, and the ``semantic_credential_rejected`` directive promises that
+                # the job stops. The veto only ever ends a job, so replay never needs the class.
+                switching = (
+                    role == "primary"
+                    and walk_after.engaged
+                    and failure_class not in _NON_RETRIABLE_FAILURE_CLASSES
+                )
                 if switching:
                     # The primary just crossed the closed engagement rule. The fallback's own
                     # budget is untouched, so the only thing that can refuse it is the deadline.

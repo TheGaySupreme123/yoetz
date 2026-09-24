@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from yoetz.domain.observation import (
@@ -209,7 +211,9 @@ def test_advice_snapshot_and_coverage_helper() -> None:
     assert advice.semantic_attempt_state == "disabled"
     encoded = advice_snapshot_to_json(advice)
     assert encoded["semantic_attempt_state"] == "disabled"
-    legacy = JsonObject({key: value for key, value in encoded.items() if key != "semantic_attempt_state"})
+    legacy = JsonObject(
+        {key: value for key, value in encoded.items() if key != "semantic_attempt_state"}
+    )
     assert advice_snapshot_from_json(legacy).semantic_attempt_state == "disabled"
     ready = AdviceSnapshot(
         ranked_finding_ids=(_FINDING,),
@@ -221,7 +225,21 @@ def test_advice_snapshot_and_coverage_helper() -> None:
         ranked_items=(item,),
         semantic_attempt_state="ready",
     )
-    assert advice_snapshot_from_json(advice_snapshot_to_json(ready)).semantic_attempt_state == "ready"
+    assert (
+        advice_snapshot_from_json(advice_snapshot_to_json(ready)).semantic_attempt_state == "ready"
+    )
+    # A pre-#742 snapshot holding AI-powered items records a review that succeeded.
+    semantic_item = replace(item, origin="semantic_model_derived")
+    legacy_semantic = JsonObject(
+        {
+            key: value
+            for key, value in advice_snapshot_to_json(
+                replace(advice, ranked_items=(semantic_item,))
+            ).items()
+            if key != "semantic_attempt_state"
+        }
+    )
+    assert advice_snapshot_from_json(legacy_semantic).semantic_attempt_state == "ready"
 
 
 def test_advice_item_rejects_non_string_condition_identity_from_json() -> None:

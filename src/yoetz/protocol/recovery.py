@@ -393,12 +393,15 @@ _DIRECTIVES: Final = (
         nudge="Yoetz stores the credential locally; never echo, log, or transmit it.",
     ),
     # --- provider / AI-powered review outcomes (issue #742) --------------------------------
+    # Each directive restates the coverage guidance for its outcome class: which outcomes were
+    # already retried in the job, whether one more job is allowed, and that a required review is
+    # reported as unmet rather than downgraded to local-only.
     RecoveryDirective(
         token="semantic_response_invalid",
         directive=(
-            "The provider answer was not a usable review. Do not resend this check expecting a "
-            "different shape. Run a local-only check, or change the bound provider through the "
-            "documented setup."
+            "The provider answered, but not with a usable review, and asking again will not "
+            "change that. For optional review, run a local-only check and disclose the gap. For "
+            "required review, report the requirement as unmet."
         ),
         guidance_uri=_SEMANTIC_COVERAGE,
         nudge="A classified invalid answer is not a finding and carries no provider text.",
@@ -406,19 +409,19 @@ _DIRECTIVES: Final = (
     RecoveryDirective(
         token="semantic_response_truncated",
         directive=(
-            "The provider cut the answer short or overran the admitted size. Narrow the claim or "
-            "obligation scope and run one new check under a NEW request_id. Do not resend the "
-            "same body."
+            "The provider answer was cut short or overlong, and the one in-job repair was spent "
+            "or not admitted. Do not spend a second job on it. For optional review, run a "
+            "local-only check; for required review, report it as unmet."
         ),
         guidance_uri=_SEMANTIC_COVERAGE,
-        nudge="The in-job repair retry, if admitted, was already spent on this result.",
+        nudge="Disclose the recorded semantic_status and semantic_reason as a gap, not a finding.",
     ),
     RecoveryDirective(
         token="semantic_credential_rejected",
         directive=(
-            "The bound provider credential was rejected, so this job will not retry. Run the "
-            "documented provider credential ceremony, then run the check again under a NEW "
-            "request_id."
+            "The provider rejected the bound credential, so this job neither retried nor switched "
+            "endpoints. Ask the owner to run the documented provider credential setup, then run "
+            "one new check under a NEW request_id."
         ),
         guidance_uri=_TEMPLATES_SETUP,
         nudge="Do not echo, log, or transmit the credential, and do not resend this check.",
@@ -426,9 +429,9 @@ _DIRECTIVES: Final = (
     RecoveryDirective(
         token="semantic_capacity_exceeded",
         directive=(
-            "The review case or provider quota exceeded an admitted bound, so no usable review "
-            "ran. Narrow the claim or obligation scope, or wait for quota, then run one new "
-            "check."
+            "No usable review ran. For case_capacity_exceeded no provider attempt was made: narrow "
+            "the claim or obligation scope. For provider_quota_exhausted, wait for quota. Then run "
+            "one new check under a NEW request_id."
         ),
         guidance_uri=_SEMANTIC_COVERAGE,
         nudge="Do not resend the same case expecting a larger admitted bound.",
@@ -436,19 +439,19 @@ _DIRECTIVES: Final = (
     RecoveryDirective(
         token="semantic_timeout",
         directive=(
-            "This review job already spent its timeout retry budget. Take this answer: disclose "
-            "the recorded semantic_status and semantic_reason. Do not start a second job to "
-            "confirm the same gap."
+            "The provider timed out and this job already spent its retry budget. For optional "
+            "review, run at most one new check under a NEW request_id, then go local-only and "
+            "disclose the gap. Report a required review as unmet."
         ),
         guidance_uri=_SEMANTIC_COVERAGE,
-        nudge="A timeout is a coverage gap, not a retry problem.",
+        nudge="A timeout is a coverage gap, not a diagnosis of the work under review.",
     ),
     RecoveryDirective(
         token="semantic_refused",
         directive=(
-            "The provider refused the review. Do not resend this check. For optional review, "
-            "continue with a local-only check and disclose the recorded semantic_status and "
-            "semantic_reason."
+            "The provider refused the review. Do not resend this check. For optional review, run "
+            "a local-only check and disclose the recorded semantic_status and semantic_reason. "
+            "For required review, report the requirement as unmet."
         ),
         guidance_uri=_SEMANTIC_COVERAGE,
         nudge="A refusal is terminal inside the job; a fresh request is a fresh gamble.",
@@ -456,9 +459,9 @@ _DIRECTIVES: Final = (
     RecoveryDirective(
         token="semantic_rate_limited",
         directive=(
-            "This review job already spent its rate-limit retry budget. Wait, then run one new "
-            "check under a NEW request_id, or continue with a local-only check and disclose the "
-            "gap."
+            "The provider rate-limited this job after it spent its retry budget. Wait; for "
+            "optional review, run at most one new check under a NEW request_id, then go "
+            "local-only and disclose the gap. Report a required review as unmet."
         ),
         guidance_uri=_SEMANTIC_COVERAGE,
         nudge="The recorded reason names the retry outcome, not a diagnosis of the work.",
@@ -466,12 +469,22 @@ _DIRECTIVES: Final = (
     RecoveryDirective(
         token="semantic_transport_retry",
         directive=(
-            "The provider transport failed after this job spent its retry budget. Inspect the "
-            "local service, then run one new check under a NEW request_id or continue "
-            "local-only and disclose the gap."
+            "The provider transport failed after this job spent its retry budget. For optional "
+            "review, run at most one new check under a NEW request_id, then go local-only and "
+            "disclose the gap. Report a required review as unmet."
         ),
         guidance_uri=_SEMANTIC_COVERAGE,
         nudge="Do not treat a transport gap as proof the work under review is wrong.",
+    ),
+    RecoveryDirective(
+        token="semantic_no_judgment",
+        directive=(
+            "This job ended without a judgment; the reason names how it ended, not why. For "
+            "optional review, run at most one new check under a NEW request_id, then go "
+            "local-only and disclose the gap. Report a required review as unmet."
+        ),
+        guidance_uri=_SEMANTIC_COVERAGE,
+        nudge="Never present retry_budget_exhausted or outcome_unknown as a diagnosis.",
     ),
     RecoveryDirective(
         token="semantic_coordinator_review",
@@ -958,7 +971,10 @@ _FAILURE_CLASS_CONTINUATIONS: Final[Mapping[str, str]] = MappingProxyType(
 )
 
 # Public SemanticReason values that reach an agent-facing check, receipt, or
-# status surface. Predispatch "not configured" reasons reuse provider_setup_required.
+# status surface after a provider outcome. Predispatch configuration and policy outcomes
+# (``not_configured``, ``credential_unavailable``, ``blocked_by_policy``, ...) carry no
+# directive: the coverage guidance says to take that first answer, and a setup prompt on
+# every check of an installation without a provider would be noise, not recovery.
 _SEMANTIC_REASON_CONTINUATIONS: Final[Mapping[str, str]] = MappingProxyType(
     {
         "response_schema_invalid": "semantic_response_invalid",
@@ -970,11 +986,9 @@ _SEMANTIC_REASON_CONTINUATIONS: Final[Mapping[str, str]] = MappingProxyType(
         "provider_refused": "semantic_refused",
         "provider_rate_limited": "semantic_rate_limited",
         "transport_unavailable": "semantic_transport_retry",
-        "outcome_unknown": "semantic_transport_retry",
+        "retry_budget_exhausted": "semantic_no_judgment",
+        "outcome_unknown": "semantic_no_judgment",
         "coordinator_failure": "semantic_coordinator_review",
-        "credential_unavailable": "provider_setup_required",
-        "provider_not_configured": "provider_setup_required",
-        "local_model_not_configured": "provider_setup_required",
     }
 )
 

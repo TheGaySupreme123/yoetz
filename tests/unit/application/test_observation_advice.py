@@ -463,7 +463,9 @@ def test_semantic_state_from_addon_uses_attempt_status_not_finding_count() -> No
 
 
 def test_successful_empty_review_is_ready_not_disabled() -> None:
-    envelope = _envelope("hook:fail", {"tool_name": "shell", "exit_status": 2, "correlation_id": "x1"})
+    envelope = _envelope(
+        "hook:fail", {"tool_name": "shell", "exit_status": 2, "correlation_id": "x1"}
+    )
     disabled = build_observation_advice_snapshot(
         ObservationAdviceBuildInput(
             envelopes=(envelope,),
@@ -491,7 +493,64 @@ def test_successful_empty_review_is_ready_not_disabled() -> None:
     assert disabled.semantic_attempt_state == "disabled"
     assert ready.semantic_attempt_state == "ready"
     assert not any(item.origin == "semantic_model_derived" for item in ready.ranked_items)
+    # The attempt state is not coverage: only validated finding ids add the AI-powered check type
+    # (docs/INTERFACES.md), so a zero-finding review stays an honest receipt, not a finding.
+    assert "semantic_model_derived" not in {
+        check.value for check in ready.confidence_coverage.check_types
+    }
     assert should_reissue_advice(disabled, ready)
+
+
+def test_attempt_state_change_reissues_even_with_unchanged_suppression_identity() -> None:
+    envelope = _envelope(
+        "hook:fail", {"tool_name": "shell", "exit_status": 2, "correlation_id": "x1"}
+    )
+    disabled = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=(envelope,),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            has_real_observation=True,
+        )
+    )
+    assert disabled is not None
+    # A review that completes with no findings and no evidence digest changes neither the basis
+    # nor the suppression identity; only the recorded attempt state moves.
+    ready = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=(envelope,),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            has_real_observation=True,
+            prior_snapshot=disabled,
+            semantic_addon=ObservationAdviceSemanticAddon(finding_ids=(), evidence_digest=None),
+        )
+    )
+    assert ready is not None
+    assert ready.suppression_identity == disabled.suppression_identity
+    assert ready.semantic_attempt_state == "ready"
+
+
+def test_invalid_semantic_only_output_is_a_failed_attempt_without_coverage() -> None:
+    snapshot = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=(),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            semantic_addon=ObservationAdviceSemanticAddon(
+                finding_ids=("invalid-finding-id",),  # type: ignore[arg-type]
+                evidence_digest="sha256:" + "f" * 64,
+                summaries=("Provider note",),
+                details=("Provider detail",),
+            ),
+        )
+    )
+    assert snapshot is not None
+    assert "advice_semantic_output_invalid" in snapshot.confidence_coverage.known_gaps
+    assert "semantic_model_derived" not in {
+        check.value for check in snapshot.confidence_coverage.check_types
+    }
+    assert snapshot.semantic_attempt_state == "failed"
 
 
 def test_empty_semantic_result_does_not_create_deterministic_fallback() -> None:
