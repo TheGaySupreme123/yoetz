@@ -531,7 +531,9 @@ def test_render_receipt_human_projects_registry_recovery_from_provenance() -> No
         egress_authorization_id="aut_" + "00000000-0000-4000-8000-000000000003",
         request_commitment="hmac-sha256:" + "d" * 64,
     )
-    rendered = render_receipt_human(replace(document, semantic_provenance=provenance), markdown=True)
+    rendered = render_receipt_human(
+        replace(document, semantic_provenance=provenance), markdown=True
+    )
     assert "## Recovery" in rendered
     assert "Continuation: semantic_credential_rejected" in rendered
     compact = render_receipt_compact(replace(document, semantic_provenance=provenance))

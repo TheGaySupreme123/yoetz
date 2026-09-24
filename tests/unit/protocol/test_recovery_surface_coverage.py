@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
-from yoetz.cli.hooks import _LOCKED_CONTEXT, _RETRY_CONTEXT, _STORAGE_UNSAFE_CONTEXT
-from yoetz.cli.observe_hooks import _attachment_recovery_context
+from yoetz.cli.hooks import (
+    _LOCKED_CONTEXT,  # pyright: ignore[reportPrivateUsage]
+    _RETRY_CONTEXT,  # pyright: ignore[reportPrivateUsage]
+    _STORAGE_UNSAFE_CONTEXT,  # pyright: ignore[reportPrivateUsage]
+)
+from yoetz.cli.observe_hooks import (
+    _attachment_recovery_context,  # pyright: ignore[reportPrivateUsage]
+)
 from yoetz.cli.render import (
     render_hook_recovery_suffix,
     render_local_recovery_lines,
@@ -42,13 +48,19 @@ def test_timeout_kinds_keep_distinct_replay_rules() -> None:
 
 def test_hook_and_tui_surfaces_resolve_registry_tokens() -> None:
     assert "Continuation: vault_unlock_required." in _LOCKED_CONTEXT
-    assert "Continuation: read_timeout_new_identity." in _RETRY_CONTEXT
-    assert "Continuation: local_state_repair." in _STORAGE_UNSAFE_CONTEXT
+    # The retry context covers busy, pending, draining, and projection reasons as well as
+    # timeouts, and the service's retryable storage_unsafe code is not the CLI's local-state
+    # repair: neither may borrow a single reason's token (issue #739).
+    assert "Continuation:" not in _RETRY_CONTEXT
+    assert "Continuation:" not in _STORAGE_UNSAFE_CONTEXT
     for context in (_LOCKED_CONTEXT, _RETRY_CONTEXT, _STORAGE_UNSAFE_CONTEXT):
         assert _CANARY not in context
         assert len(context.encode("ascii")) <= 512
+    # The hook's own start identity is invisible to the agent, so a timed-out attachment carries
+    # no read or start replay token; the agent's own start is the recovery.
     timeout_attach = _attachment_recovery_context("timeout")
-    assert "Continuation: read_timeout_new_identity." in timeout_attach
+    assert "Continuation:" not in timeout_attach
+    assert "Call start" in timeout_attach
     assert "service_incompatible" in _attachment_recovery_context("service_incompatible")
     assert "Continuation:" not in _attachment_recovery_context("service_incompatible")
     assert render_hook_recovery_suffix("vault_locked") == " Continuation: vault_unlock_required."

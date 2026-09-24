@@ -199,7 +199,6 @@ _WORKSPACE_MISMATCH_CONTEXT: Final = (
 _RETRY_CONTEXT: Final = (
     "Yoetz is busy and could not read status on this attempt; the service is reachable. "
     "Call status before promising a receipt."
-    + render_hook_recovery_suffix("request_timeout", operation_kind="read")
 )
 _PRIVACY_CONTEXT: Final = (
     "Yoetz cannot read this mapped session until repository privacy authority is "
@@ -212,7 +211,6 @@ _STORAGE_UNSAFE_CONTEXT: Final = (
     "Yoetz storage faulted while reading this mapped session (storage_unsafe): the "
     "service is reachable and the stored data is not known to be damaged. Retry status "
     "once before promising a receipt; if it repeats, report it to the operator."
-    + render_hook_recovery_suffix("storage_unsafe")
 )
 _STORAGE_CORRUPT_CONTEXT: Final = (
     "Yoetz stored data for this mapped session is invalid (storage_corrupt). Do not "

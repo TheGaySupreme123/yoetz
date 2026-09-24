@@ -224,12 +224,14 @@ never sacrificed to fit advice.
   renderer, the bounded lifecycle line, the trusted-ceremony mapper, the interactive menu, the
   instance and path refusal line, the observe verbs, and the resource-integrity branch of
   `version`. A remedy visible on one of seven surfaces is the defect issue #741 reported.
-  Hooks, the TUI blocked report, and receipt human text now use the same lookup. Hook intake
-  keeps its host-specific prefix and appends only the continuation token (512-byte cue). The
-  TUI appends the full directive lines. Receipt human text adds a Recovery section from
-  recorded `semantic_provenance`. Compact receipt sentences stay fixture-stable; they do not
-  gain prose. Workspace-fence, `service_unavailable`, `service_incompatible`,
-  `storage_corrupt`, and “review was not run” coverage gaps remain exempt or hook-specific.
+  Hooks, the TUI blocked report, and receipt human text now use the same lookup. Hook intake keeps
+  its host-specific prefix and appends only a continuation token (512-byte cue), resolved from the
+  hook's own exact reason, never from a check's provider outcome; a hook context that stands for
+  several reasons, or whose reason only shares a spelling with a CLI-local reason, appends none. The
+  TUI appends the full directive lines. Receipt human text adds a Recovery section from recorded
+  `semantic_provenance`. Compact receipt sentences stay fixture-stable; they do not gain prose.
+  Workspace-fence, `service_unavailable`, `service_incompatible`, `storage_corrupt`, and “review was
+  not run” coverage gaps remain exempt or hook-specific.
 - JSON renderings carry the continuation token where they already carry `safe_details`. CLI-owned
   JSON error bodies also carry the renderer-resolved `recovery` object. A frozen wire result keeps
   its exact shape on stdout and gets the directive lines on stderr (see the 2026-09-22 amendment

@@ -115,6 +115,11 @@ def render_hook_recovery_suffix(
     Hook intake is bounded at 512 ASCII bytes. The suffix therefore carries the
     continuation token only; each host hook keeps its own framing, and the
     directive text is reconstructed from the same registry on CLI and MCP.
+
+    Pass one exact reason whose registry meaning matches the hook's own advice. A hook
+    context shared by several reasons, or a service ``PublicErrorCode`` that only shares a
+    spelling with a CLI-local reason (``storage_unsafe``), must not borrow a token: its
+    directive would contradict the hook text beside it (issue #739).
     """
 
     token = continuation_for_local_reason(reason)
