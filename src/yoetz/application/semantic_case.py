@@ -97,6 +97,7 @@ from yoetz.protocol.coverage import LedgerFreshness, coverage_to_json
 from yoetz.protocol.models import (
     MAX_REVIEW_TEXT_BYTES,
     MAX_REVIEW_TIMELINE_ITEMS,
+    MAX_SEMANTIC_CASE_BYTES,
     MAX_SEMANTIC_ITEM_BYTES,
     DataCategory,
 )
@@ -470,8 +471,8 @@ class LineageSemanticCapacityExceeded(ValueError):
     """Recorded lineage cannot be carried as complete semantic items.
 
     One child or gap fact is larger than a single item, or the partitioned set would exceed the
-    timeline item budget. Callers map this to a pre-dispatch capacity outcome. Partial JSON is
-    never a substitute.
+    timeline item budget or the complete case byte budget, including retained parent content.
+    Callers map this to a pre-dispatch capacity outcome. Partial JSON is never a substitute.
     """
 
 
@@ -2122,6 +2123,13 @@ def build_semantic_case(
         )
         items = [item]
         timeline_ids = [item.item_id]
+
+    if lineage_items and sum(item.content_bytes for item in items) > MAX_SEMANTIC_CASE_BYTES:
+        # Every lineage part may fit individually while their sum, or their sum with
+        # selected parent content, exceeds SemanticCase's independent aggregate bound.
+        # Refuse with the same typed pre-dispatch outcome instead of leaking the
+        # constructor's generic semantic_case_invalid ValueError to the coordinator.
+        raise LineageSemanticCapacityExceeded("lineage_semantic_case_too_large")
 
     capture_gaps = tuple(sorted(capture_gap_set, key=str.encode))
     coverage = case_coverage(frozen_case, semantic=True)

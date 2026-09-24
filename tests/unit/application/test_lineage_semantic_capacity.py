@@ -4,20 +4,24 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from dataclasses import replace
 
 import pytest
 
-from builders.policy_cases import make_case
+from builders.policy_cases import make_case, obl, plan_record
 from yoetz.application.semantic_case import (
     MAX_SEMANTIC_ITEM_BYTES,
     LineageSemanticCapacityExceeded,
     build_semantic_case,
 )
 from yoetz.domain.coordination import LineageAcceptance, LineageOrigin, SessionHealth, WorkState
+from yoetz.domain.events import PlanPublishedPayload
+from yoetz.domain.findings import FINDING_KIND_TRAITS, FindingKind, FindingOrigin
 from yoetz.domain.privacy import ReviewContextProfile, ReviewSelectionPolicy
-from yoetz.domain.values import Frontier, event_id, receipt_id, task_id
+from yoetz.domain.values import Frontier, event_id, finding_id, receipt_id, task_id
 from yoetz.kernel.lineage import (
     ChildDependencySnapshot,
+    ChildFindingSnapshot,
     LineageEvaluation,
     LineageManifest,
     evaluate_lineage,
@@ -52,21 +56,43 @@ def _child(index: int) -> ChildDependencySnapshot:
     )
 
 
-def _evaluation(count: int) -> LineageEvaluation:
-    return evaluate_lineage(LineageManifest(tuple(_child(index) for index in range(1, count + 1))))
+def _evaluation(count: int, *, findings_per_child: int = 0) -> LineageEvaluation:
+    kind = FindingKind.COMPLETION_WITH_OPEN_OBLIGATIONS
+    children = tuple(
+        replace(
+            _child(index),
+            findings=tuple(
+                ChildFindingSnapshot(
+                    finding_id(f"fnd_00000000-0000-4000-8000-{index * 100 + number:012d}"),
+                    kind,
+                    FindingOrigin.DETERMINISTIC,
+                    FINDING_KIND_TRAITS[kind][0],
+                    False,
+                )
+                for number in range(findings_per_child)
+            ),
+        )
+        for index in range(1, count + 1)
+    )
+    return evaluate_lineage(LineageManifest(children))
 
 
-def _case(count: int) -> SemanticCase:
+def _case(count: int, *, findings_per_child: int = 0, parent_plan: bool = False) -> SemanticCase:
+    profile = ReviewContextProfile.GOAL_AWARE if parent_plan else ReviewContextProfile.STRUCTURAL
     return build_semantic_case(
         case_id="cas_10000000-0000-4000-8000-000000000001",
-        frozen_case=make_case(),
+        frozen_case=make_case(
+            plans={1: plan_record(PlanPublishedPayload(1, "Parent work", (obl(1),)), 1)}
+            if parent_plan
+            else None
+        ),
         dependency_digest="sha256:" + "b" * 64,
         findings=(),
-        review_context_profile=ReviewContextProfile.STRUCTURAL,
-        review_selection=ReviewSelectionPolicy.for_profile(ReviewContextProfile.STRUCTURAL),
+        review_context_profile=profile,
+        review_selection=ReviewSelectionPolicy.for_profile(profile),
         policy_id="pvy_10000000-0000-4000-8000-000000000001",
         policy_version="1",
-        lineage_evaluation=_evaluation(count),
+        lineage_evaluation=_evaluation(count, findings_per_child=findings_per_child),
     )
 
 
@@ -155,3 +181,19 @@ def test_eight_children_are_complete_json_not_a_four_kib_cut() -> None:
     assert items[0].content_bytes == 5990
     assert len(_child_ids(items)) == 8
     assert _body(items[0]).get("schema") == "yoetz.lineage-semantic-input/1"
+
+
+def test_finding_heavy_allowed_fanout_is_a_typed_total_capacity_error() -> None:
+    # Each child admits 100 findings and each part fits 16 KiB, but the complete
+    # set exceeds the independent 256 KiB case limit.
+    with pytest.raises(LineageSemanticCapacityExceeded, match="lineage_semantic_case_too_large"):
+        _case(32, findings_per_child=100)
+
+
+def test_total_capacity_includes_retained_parent_content(monkeypatch: pytest.MonkeyPatch) -> None:
+    child_only = _case(1)
+    boundary = sum(item.content_bytes for item in child_only.items)
+    monkeypatch.setattr("yoetz.application.semantic_case.MAX_SEMANTIC_CASE_BYTES", boundary)
+    assert _case(1) == child_only
+    with pytest.raises(LineageSemanticCapacityExceeded, match="lineage_semantic_case_too_large"):
+        _case(1, parent_plan=True)

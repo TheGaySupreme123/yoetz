@@ -3334,8 +3334,9 @@ coverage tokens, and finding identities. A document that fits in one 16 KiB item
 `yoetz.lineage-semantic-input/1` with item id `lineage`. A larger legal fan-out is split into
 complete `yoetz.lineage-semantic-input/2` parts (`lineage-00`, `lineage-01`, ...) that together
 retain every child and gap plus the shared manifest digest. The review-text helper does not cut
-these items at 4 KiB. A single fact that cannot fit, or a partition that would exceed the timeline
-item budget, raises before dispatch. Composition maps that to `failed/case_capacity_exceeded`
+these items at 4 KiB. A single fact that cannot fit, a partition that would exceed the timeline
+item budget, or lineage plus retained parent content exceeding the 256 KiB complete-case budget
+raises before dispatch. Composition maps that to `failed/case_capacity_exceeded`
 with diagnostic operation `semantic_not_dispatched_lineage_capacity`: no job, no provider call,
 and the local result unchanged.
 
