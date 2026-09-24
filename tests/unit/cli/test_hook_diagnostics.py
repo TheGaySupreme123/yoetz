@@ -30,6 +30,41 @@ def test_record_is_structural_and_owner_only(tmp_path: Path) -> None:
     assert path.parent.stat().st_mode & 0o777 == 0o700
 
 
+@pytest.mark.parametrize("candidate_count", [2, 1_000_000])
+def test_ambiguous_binding_diagnostic_exposes_only_bounded_count(
+    tmp_path: Path, candidate_count: int
+) -> None:
+    record_hook_diagnostic(
+        "auto_attach_binding_ambiguous",
+        "SessionStart",
+        candidate_count=candidate_count,
+        _state=tmp_path,
+    )
+    row = json.loads((tmp_path / "observation/hook-diagnostics.jsonl").read_text())
+    assert set(row) == {"event", "reason", "ts", "candidate_count"}
+    assert row["reason"] == "auto_attach_binding_ambiguous"
+    assert row["candidate_count"] == candidate_count
+    summary = hook_diagnostic_summary(_state=tmp_path)
+    assert summary["count"] == 1
+    assert summary["last_reason"] == "auto_attach_binding_ambiguous"
+    assert "auto_attach_binding_ambiguous" in cast(dict[str, object], summary["reasons"])
+
+
+@pytest.mark.parametrize("candidate_count", [None, True, 1, 1_000_001, "private-task"])
+def test_ambiguous_binding_diagnostic_drops_invalid_counts(
+    tmp_path: Path, candidate_count: object
+) -> None:
+    record_hook_diagnostic(
+        "auto_attach_binding_ambiguous",
+        "SessionStart",
+        candidate_count=cast(int | None, candidate_count),
+        _state=tmp_path,
+    )
+    row = json.loads((tmp_path / "observation/hook-diagnostics.jsonl").read_text())
+    assert set(row) == {"event", "reason", "ts"}
+    assert "private-task" not in json.dumps(row)
+
+
 def test_workspace_binding_reasons_are_distinct_closed_tokens(tmp_path: Path) -> None:
     for reason in ("workspace_unresolvable", "workspace_unconsented"):
         record_hook_diagnostic(reason, "SessionStart", _state=tmp_path)
@@ -44,6 +79,37 @@ def test_workspace_binding_reasons_are_distinct_closed_tokens(tmp_path: Path) ->
         "workspace_unresolvable",
         "workspace_unconsented",
     ]
+
+
+@pytest.mark.parametrize("candidate_count", [None, True, 1, 1_000_001, "private-task"])
+def test_summary_rejects_malformed_ambiguity_rows(tmp_path: Path, candidate_count: object) -> None:
+    _seed(
+        tmp_path / "observation",
+        [
+            {
+                "event": "SessionStart",
+                "reason": "auto_attach_binding_ambiguous",
+                "ts": "2026-09-23T00:00:00Z",
+                "candidate_count": candidate_count,
+            }
+        ],
+    )
+    assert hook_diagnostic_summary(_state=tmp_path)["count"] == 0
+
+
+def test_summary_rejects_counts_on_unrelated_reasons(tmp_path: Path) -> None:
+    _seed(
+        tmp_path / "observation",
+        [
+            {
+                "event": "SessionStart",
+                "reason": "service_unavailable",
+                "ts": "2026-09-23T00:00:00Z",
+                "candidate_count": 2,
+            }
+        ],
+    )
+    assert hook_diagnostic_summary(_state=tmp_path)["count"] == 0
 
 
 def test_invalid_plaintext_is_not_persisted(tmp_path: Path) -> None:

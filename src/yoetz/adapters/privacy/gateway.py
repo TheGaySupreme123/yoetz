@@ -66,6 +66,10 @@ from yoetz.domain.privacy import (
     RequestCommitment,
 )
 from yoetz.domain.values import validate_commitment, validate_sha256_digest
+from yoetz.observability.logging import (
+    record_bounded_event_without_raising,
+    record_classified_exception_without_raising,
+)
 from yoetz.observability.privacy import privacy_request_commitment
 from yoetz.observability.semantic_context import report_semantic_progress
 from yoetz.ports.clock import ClockPort
@@ -921,10 +925,25 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
             1,
             authorization_id=authorization_id,
         )
+        # Every pre-dispatch refusal returns the same public shape (`unavailable`, no receipt id,
+        # so the composition reports `receipt_persistence_unknown`). The exact closed reason is
+        # owner-only material; record it under the case's request id so `yoetz service
+        # diagnostics --request-id` can name why nothing was sent.
+        record_bounded_event_without_raising(
+            component="privacy_gateway",
+            operation="egress_preconsume",
+            reason=reason.value,
+            request_id=case.request_id,
+        )
         try:
             await self._audit.complete_decision(authorization.privacy_proposal_id, receipt)
-        except Exception:  # noqa: BLE001 - best-effort: the bounded result still returns
-            pass
+        except Exception as exc:  # noqa: BLE001 - best-effort: the bounded result still returns
+            record_classified_exception_without_raising(
+                exc,
+                component="privacy_gateway",
+                operation="egress_preconsume_receipt",
+                request_id=case.request_id,
+            )
         return _preconsume_result(case, reason)
 
     async def _park_attempt_reconciliation(self, dispatch_id: str, receipt: EgressReceipt) -> None:
