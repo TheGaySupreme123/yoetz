@@ -11,6 +11,7 @@ from yoetz.domain.observation import ObservationEnvelope, ObservationGapCode, Ob
 from yoetz.protocol.canonical import JsonValue, canonical_digest
 
 __all__ = [
+    "SEMANTIC_ATTENTION_TOKENS",
     "STANDING_MACHINE_ACTIONS",
     "OBSERVATION_ADVICE_FACT_CODES",
     "OBSERVATION_ADVICE_POLICY_ID",
@@ -26,7 +27,7 @@ __all__ = [
 ]
 
 OBSERVATION_ADVICE_POLICY_ID: Final = "observation-advice"
-OBSERVATION_ADVICE_POLICY_VERSION: Final = "0.1.4"
+OBSERVATION_ADVICE_POLICY_VERSION: Final = "0.1.5"
 
 OBSERVATION_ADVICE_FACT_CODES: Final = frozenset(
     {
@@ -38,7 +39,23 @@ OBSERVATION_ADVICE_FACT_CODES: Final = frozenset(
         "change_outside_plan",
         "observation_gap_or_stale",
         "provider_not_ready",
+        "semantic_sign_in_required",
+        "semantic_provider_attention",
         "semantic_claim_without_attempt",
+    }
+)
+
+# Closed, nonsecret reasons the last terminal AI-powered review attempt of a configured
+# provider stopped for a cause only the user can repair (#819). The service derives them from
+# the attempt's closed failure class and runtime failure stage, never from provider text.
+SEMANTIC_ATTENTION_TOKENS: Final = frozenset(
+    {
+        "sign_in_required",
+        "credential_rejected",
+        "access_denied",
+        "quota_exhausted",
+        "model_unavailable",
+        "runtime_update_required",
     }
 )
 
@@ -51,6 +68,9 @@ type AdviceNextAction = Literal[
     "revise_plan_scope",
     "refresh_observation",
     "connect_provider",
+    "renew_provider_sign_in",
+    "repair_semantic_provider",
+    "update_yoetz",
     "attempt_semantic_dispatch",
     "reground_status",
 ]
@@ -60,7 +80,9 @@ type AdviceNextAction = Literal[
 # redelivery trigger and they get a bounded cadence instead (#241).
 # refresh_observation is deliberately excluded: it reflects live coverage
 # degradation the agent should hear about once per distinct occurrence.
-STANDING_MACHINE_ACTIONS: Final = frozenset({"connect_provider"})
+STANDING_MACHINE_ACTIONS: Final = frozenset(
+    {"connect_provider", "renew_provider_sign_in", "repair_semantic_provider", "update_yoetz"}
+)
 
 _EDIT_TOOLS: Final = frozenset(
     {
@@ -166,6 +188,17 @@ class ObservationCompositionFact:
     semantic_ready: bool
     provider_factory_ids: tuple[str, ...]
     connected_provider_ids: tuple[str, ...]
+    # The last terminal attempt's user-repairable cause (SEMANTIC_ATTENTION_TOKENS) and the
+    # provider id it concerns. Structural readiness cannot see an expired Codex login or an
+    # exhausted plan; only a real attempt can, and a later successful attempt clears it (#819).
+    semantic_attention: str | None = None
+    semantic_attention_provider: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.semantic_attention is not None and (
+            self.semantic_attention not in SEMANTIC_ATTENTION_TOKENS
+        ):
+            raise ValueError("observation_advice_invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -680,6 +713,44 @@ def _provider_not_ready(
     ]
 
 
+_ATTENTION_NEXT_ACTIONS: Final[Mapping[str, AdviceNextAction]] = {
+    "sign_in_required": "renew_provider_sign_in",
+    "credential_rejected": "repair_semantic_provider",
+    "access_denied": "repair_semantic_provider",
+    "quota_exhausted": "repair_semantic_provider",
+    "model_unavailable": "repair_semantic_provider",
+    "runtime_update_required": "update_yoetz",
+}
+
+
+def _semantic_attention(
+    composition: ObservationCompositionFact | None,
+) -> list[ObservationAdviceCandidate]:
+    # A standing machine condition like provider_not_ready, but resting on the last real
+    # attempt instead of structure: the path is usable on paper, yet its last terminal attempt
+    # stopped for a cause only the user can repair (#819). A structurally unusable path is
+    # provider_not_ready's to report, so the two never compete for the same standing slot.
+    if composition is None or composition.semantic_attention is None:
+        return []
+    if not composition.semantic_configured or not composition.semantic_ready:
+        return []
+    token = composition.semantic_attention
+    refs = [f"semantic:{token}"]
+    if composition.semantic_attention_provider:
+        refs.append(composition.semantic_attention_provider)
+    return [
+        _candidate(
+            FindingKind.MATERIAL_LIMITATION_OMITTED,
+            "semantic_sign_in_required"
+            if token == "sign_in_required"
+            else "semantic_provider_attention",
+            _ATTENTION_NEXT_ACTIONS[token],
+            tuple(refs),
+            f"semantic-attention:{token}",
+        )
+    ]
+
+
 def _semantic_without_attempt(
     envelopes: Sequence[ObservationEnvelope],
 ) -> list[ObservationAdviceCandidate]:
@@ -726,6 +797,7 @@ def observation_advice_findings(
     collected.extend(_outside_plan(envelopes, context.inspect_fact, context.plan_path_digests))
     collected.extend(_observation_gaps(context.lifecycle, context.gaps, envelopes))
     collected.extend(_provider_not_ready(context.composition))
+    collected.extend(_semantic_attention(context.composition))
     collected.extend(_semantic_without_attempt(envelopes))
 
     # Deduplicate by rule_code + detail_token; keep first occurrence.

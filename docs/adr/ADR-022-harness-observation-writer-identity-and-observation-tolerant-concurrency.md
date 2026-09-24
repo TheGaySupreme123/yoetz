@@ -562,3 +562,20 @@ applies the condition-scoped identity to new materialization (`0.1.1` first intr
 for issue #265; `0.1.3` keeps the full evidence basis while bounding advice projection and requires
 an explicit authored completion claim). Historical duplicate findings remain append-only evidence;
 this change does not erase or rewrite an existing task ledger.
+
+## Attempt-derived provider attention (issue #819)
+
+Observation-advice policy `0.1.5` adds two standing machine rules beside `provider_not_ready`:
+`semantic_sign_in_required` (next action `renew_provider_sign_in`) and
+`semantic_provider_attention` (`repair_semantic_provider`, or `update_yoetz` when pinned runtime
+evidence expired). Their fact is a closed attention token (`sign_in_required`,
+`credential_rejected`, `access_denied`, `quota_exhausted`, `model_unavailable`,
+`runtime_update_required`) that the service derives from the last terminal attempt's closed failure
+class and runtime failure stage per configured binding. A provider answer clears it; transient,
+policy, and recovery outcomes leave it unchanged. The token is in-memory per READY generation, so
+recomposition after setup, sign-in, or restart starts clean, and it adds no durable field, schema,
+or egress. The rules fire only while the path is configured and structurally ready, are delivered
+at the #241 SessionStart/Stop cadence with #249 scoping, are never materialized as ledger findings
+(ADR-022 #231 amendment), and model-derived advice may not name their next actions. Hook text keeps
+the token and adds a plain instruction to tell the user and offer a subagent fix, leaving sign-in,
+credentials, and approvals to the user.

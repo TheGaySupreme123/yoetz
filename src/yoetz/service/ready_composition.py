@@ -328,6 +328,7 @@ from yoetz.service.bundle_upgrade import (
 from yoetz.service.bundle_upgrade_effects import BundleUpgradeFencedLedger
 from yoetz.service.import_publication_authority import ImportPublicationAuthority
 from yoetz.service.project_coordination_authority import ProjectCoordinationGrantAuthority
+from yoetz.service.semantic_attention import SemanticAttentionTracker
 from yoetz.service.vault import ProviderCredentialBinding, provider_credential_profile_binding
 from yoetz.version import build_version_manifest, version_manifest_json
 
@@ -3933,6 +3934,7 @@ def _privacy_gated_semantic_evaluator(
     configured_primary: ProviderBinding | None = None,
     lineage_source_gate: LineageSourceGate | None = None,
     local_observation: object | None = None,
+    attention: SemanticAttentionTracker | None = None,
 ):
     total_timeout = float(max(1, min(int(timeout_seconds), 3600)))
     # The fallback endpoint owns its own deadline share (#582): a primary that spends its whole
@@ -4319,6 +4321,8 @@ def _privacy_gated_semantic_evaluator(
                 )
                 with semantic_budget_profile_scope(execution.budget_profile):
                     result = await privacy.evaluate_semantic(candidate, primary_deadline)
+                if attention is not None:
+                    attention.record(provider, result)
                 # The mapper knows only the egress outcome; the truncation happened while
                 # composing the case, so it must be restated here or the probe path presents
                 # a shortened case as complete.
@@ -4459,6 +4463,10 @@ def _privacy_gated_semantic_evaluator(
                     budget_token = enter_semantic_budget_profile(execution.budget_profile)
 
                     async def _mapped(result: object) -> FinalSemanticEvaluation:
+                        if attention is not None:
+                            # Standing advice learns what only a real attempt can prove: an
+                            # expired sign-in, rejected credential, or exhausted plan (#819).
+                            attention.record(binding, result)
                         final = _map_egress_to_final(
                             result,
                             ids,
@@ -5035,6 +5043,9 @@ async def provide_service_ready_context(
     provider_credential_connected = await configured_provider_credential_present()
     fallback_credential_connected = await configured_fallback_credential_present()
     semantic_ready = False
+    # Per-generation memory of the last user-repairable attempt outcome (#819). Recomposition
+    # after setup, sign-in, or disconnect replaces it, so a repaired path starts clean.
+    semantic_attention = SemanticAttentionTracker((candidate_binding, fallback_candidate_binding))
 
     async def observation_composition_fact() -> ObservationCompositionFact | None:
         # Standing provider advice must rest on current machine facts, not this
@@ -5060,11 +5071,14 @@ async def provide_service_ready_context(
             )
         except Exception:
             return None
+        attention = semantic_attention.current(candidate_binding, fallback_candidate_binding)
         return ObservationCompositionFact(
             semantic_configured=semantic_configured,
             semantic_ready=structurally_usable,
             provider_factory_ids=provider_factory_ids,
             connected_provider_ids=connected_now,
+            semantic_attention=None if attention is None else attention[0],
+            semantic_attention_provider=None if attention is None else attention[1],
         )
 
     capabilities = {
@@ -5206,6 +5220,7 @@ async def provide_service_ready_context(
             configured_primary=candidate_binding,
             lineage_source_gate=lineage_semantic_gate,
             local_observation=local_observation,
+            attention=semantic_attention,
         )
 
     # attempt_id -> (physical request identity, provider identity) of the single in-flight

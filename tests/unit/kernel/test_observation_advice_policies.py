@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
 from yoetz.domain.findings import FindingKind
 from yoetz.domain.observation import (
     ObservationCursor,
@@ -14,6 +16,8 @@ from yoetz.domain.observation import (
 )
 from yoetz.domain.values import JsonObject, Timestamp
 from yoetz.kernel.policies.observation_advice import (
+    SEMANTIC_ATTENTION_TOKENS,
+    STANDING_MACHINE_ACTIONS,
     ObservationAdviceCandidate,
     ObservationAdviceContext,
     ObservationCheckFact,
@@ -793,6 +797,81 @@ def test_provider_not_ready_names_the_unusable_configured_provider() -> None:
     item = next(item for item in candidates if item.rule_code == "provider_not_ready")
     assert item.evidence_refs == ("fireworks",)
     assert item.next_action == "connect_provider"
+
+
+def _attention_context(
+    token: str | None, *, configured: bool = True, ready: bool = True
+) -> ObservationAdviceContext:
+    return ObservationAdviceContext(
+        envelopes=(),
+        lifecycle=ObservationLifecycle.ACTIVE,
+        gaps=(),
+        composition=ObservationCompositionFact(
+            semantic_configured=configured,
+            semantic_ready=ready,
+            provider_factory_ids=("openai-codex",),
+            connected_provider_ids=("openai-codex",),
+            semantic_attention=token,
+            semantic_attention_provider=None if token is None else "openai-codex",
+        ),
+    )
+
+
+def test_codex_sign_in_failure_is_standing_sign_in_advice() -> None:
+    """A structurally ready Codex path whose last attempt found no login (#819)."""
+
+    candidates = observation_advice_findings(_attention_context("sign_in_required"))
+    item = next(item for item in candidates if item.rule_code == "semantic_sign_in_required")
+    assert item.next_action == "renew_provider_sign_in"
+    assert item.next_action in STANDING_MACHINE_ACTIONS
+    assert item.kind is FindingKind.MATERIAL_LIMITATION_OMITTED
+    assert item.evidence_refs == ("openai-codex", "semantic:sign_in_required")
+    assert "provider_not_ready" not in {entry.rule_code for entry in candidates}
+
+
+@pytest.mark.parametrize(
+    ("token", "next_action"),
+    (
+        ("credential_rejected", "repair_semantic_provider"),
+        ("access_denied", "repair_semantic_provider"),
+        ("quota_exhausted", "repair_semantic_provider"),
+        ("model_unavailable", "repair_semantic_provider"),
+        ("runtime_update_required", "update_yoetz"),
+    ),
+)
+def test_other_repairable_causes_are_standing_provider_attention(
+    token: str, next_action: str
+) -> None:
+    candidates = observation_advice_findings(_attention_context(token))
+    item = next(item for item in candidates if item.rule_code == "semantic_provider_attention")
+    assert item.next_action == next_action
+    assert next_action in STANDING_MACHINE_ACTIONS
+    assert item.detail_token == f"semantic-attention:{token}"
+
+
+def test_every_attention_token_maps_to_a_rule() -> None:
+    for token in SEMANTIC_ATTENTION_TOKENS:
+        assert observation_advice_findings(_attention_context(token))
+
+
+def test_attention_needs_a_configured_structurally_ready_path() -> None:
+    """Disabled review has nothing to repair; an unusable path is provider_not_ready's."""
+
+    assert not observation_advice_findings(_attention_context(None))
+    assert not observation_advice_findings(_attention_context("quota_exhausted", configured=False))
+    rules = _rules(_attention_context("sign_in_required", ready=False))
+    assert rules == {"provider_not_ready"}
+
+
+def test_unknown_attention_token_is_rejected() -> None:
+    with pytest.raises(ValueError, match="observation_advice_invalid"):
+        ObservationCompositionFact(
+            semantic_configured=True,
+            semantic_ready=True,
+            provider_factory_ids=(),
+            connected_provider_ids=(),
+            semantic_attention="please sign in at evil.example",
+        )
 
 
 def test_semantic_claim_without_attempt() -> None:

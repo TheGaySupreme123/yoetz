@@ -145,10 +145,23 @@ observation-authored records do not invalidate the held `expected_frontier`; ord
 or imported work still does. On a real frontier conflict, re-read `status` rather than guessing.
 
 Hook observation advice may include a next-action token. Those tokens are English next-move names,
-not MCP tools and not `yoetz observe` verbs. The ten values are `resolve_failed_command`,
+not MCP tools and not `yoetz observe` verbs. The thirteen values are `resolve_failed_command`,
 `rerun_approved_check`, `provide_verification`, `disclose_limitation`,
 `address_subagent_finding`, `revise_plan_scope`, `refresh_observation`, `connect_provider`,
+`renew_provider_sign_in`, `repair_semantic_provider`, `update_yoetz`,
 `attempt_semantic_dispatch`, and `reground_status`.
+
+<a id="machine-conditions"></a>
+`connect_provider`, `renew_provider_sign_in`, `repair_semantic_provider`, and `update_yoetz` name
+installation repairs only the user can authorize. Tell the user in your next reply and offer a
+subagent fix that runs the named `yoetz` commands, reports results, and leaves sign-in, credentials,
+`--accept`, and approvals to the user; start it only after the user agrees.
+`renew_provider_sign_in`: rerun `yoetz provider codex-subscription setup --executable <path>
+--codex-home <home>` with values from its `status --json` (add `--device-code` without a local
+browser; relay the URL and code). `repair_semantic_provider` and `connect_provider`: follow
+`yoetz provider status`. `update_yoetz`: follow the upgrade flow in
+[Recommendations](request-templates.md#recommendations). Until a new check succeeds, required
+AI-powered review stays unmet.
 
 `refresh_observation` means observation coverage is incomplete or stale. Run
 `yoetz observe status` from the host shell and wait for drain to recover. If the gap remains at
