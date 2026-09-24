@@ -822,10 +822,6 @@ def _snapshot_rollup(
         state = LineageRollupState.UNAVAILABLE
     elif unresolved_actionable:
         state = LineageRollupState.BLOCKED
-    elif unresolved_informational and not blockers:
-        # Informational findings are visible in the receipt child row, but they do not select
-        # unresolved_findings_remain or otherwise block a clean completion claim.
-        state = LineageRollupState.ANNOTATION
     elif snapshot.session_health is SessionHealth.CONTACT_LOST or snapshot.work_state in {
         WorkState.ABANDONED,
         WorkState.CANCELLED,
@@ -861,7 +857,13 @@ def _snapshot_rollup(
         )
         state = LineageRollupState.OPEN_GAP
     elif blockers:
+        # Coverage and verification blockers stay ahead of an informational annotation.
         state = LineageRollupState.OPEN_GAP
+    elif unresolved_informational:
+        # Informational findings stay on the receipt child row. They annotate a fully
+        # verified terminal child and do not select unresolved_findings_remain. They never
+        # replace an accepted lifecycle gap, which is decided above.
+        state = LineageRollupState.ANNOTATION
     else:
         state = LineageRollupState.CLEAN
 

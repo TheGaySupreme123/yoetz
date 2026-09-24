@@ -219,6 +219,11 @@ than implementation notes.
    on an accepted child remains unavailable and does block. A rejected snapshot that still
    carries actionable findings is an impossible acceptance transition and stays blocking.
    An accepted live child is an open gap and an accepted abandoned child is an incomplete gap.
+   Lifecycle state is evaluated before informational annotation, so an informational finding
+   cannot hide an open or incomplete child. The only informational kind,
+   `ledger_stale_or_incomplete`, is produced from recorded ledger gaps; a public receipt child
+   that carries it also carries that coverage blocker, and the no-gap precedence is locked by
+   the kernel evaluator.
    Grandchildren are visible only through their direct parent. The clean-parent
    wording remains coverage-bounded and never says that Yoetz verified every child.
 
