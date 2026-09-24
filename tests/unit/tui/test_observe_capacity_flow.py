@@ -345,7 +345,10 @@ async def test_apply_sends_the_previewed_digest_and_shows_the_lower_and_pause_pa
     assert "Selected: 2,048 rows (larger), detail focused, this workspace" in body
     assert "capacity: selected 2,048 rows (larger); effective 2,048 rows (larger)" in body
     assert "closest limit: count; 1.56% used (156 bps)" in body
-    assert "Lower it later: /observe → Recommended." in body
+    assert any(
+        line.startswith("Lower it later with: yoetz observe selection-preview") for line in body
+    )
+    assert "--capacity standard --persist" in " ".join(body)
     assert "Pause new observation ingest with: yoetz observe pause --workspace <workspace>" in body
     assert "Resume with: yoetz observe resume --workspace <workspace>" in body
     # The project path is never echoed into a command.
@@ -354,6 +357,22 @@ async def test_apply_sends_the_previewed_digest_and_shows_the_lower_and_pause_pa
     assert re.search(r"\bsafe\b", harness.transcript, re.IGNORECASE) is None
     assert "not_validated" in harness.transcript
     assert "validated as" not in harness.transcript
+
+
+async def test_custom_increase_below_standard_restores_the_smaller_count() -> None:
+    runtime = _Runtime(current=ObservationCapacity(64))
+    harness = _Harness(runtime, ["custom", ("submit", "128"), "apply"])
+
+    await harness.run()
+
+    assert runtime.applies == [(CapacityRequest.for_capacity(ObservationCapacity(128)), _DIGEST)]
+    _, body = harness.titled("Local retention capacity applied")
+    assert any(
+        line.startswith("Lower it later with: yoetz observe selection-preview") for line in body
+    )
+    assert "--capacity custom --queue-count 64 --persist" in " ".join(body)
+    assert "Recommended" not in " ".join(body)
+    assert "--capacity standard" not in " ".join(body)
 
 
 async def test_no_cap_explains_the_ceiling_and_never_applies() -> None:

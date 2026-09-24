@@ -133,8 +133,10 @@ provider limits no longer apply.
 ### Lower or pause
 
 To lower a setting, preview and apply a smaller capacity at the same scope (the preview's
-"Lower it later" command restores the capacity you had before an increase), or revoke it (see
-below). To stop new observation ingest while keeping consent and evidence, run
+"Lower it later" command restores the capacity you had before an increase). At the minimum of
+64 rows, pause ingest if needed. Revoking an override restores the inherited or default setting
+and can increase capacity; check the resulting selection. To stop new observation ingest while
+keeping consent and evidence, run
 `yoetz observe pause --workspace /exact/project`; `yoetz observe resume --workspace
 /exact/project` restarts it.
 

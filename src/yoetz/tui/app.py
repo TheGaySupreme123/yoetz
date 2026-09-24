@@ -1466,7 +1466,8 @@ class YoetzTui(App[int]):
                 "this workspace",
                 *_effective_budget_lines(budget),
                 (
-                    "Lower it later: /observe → Recommended."
+                    "Lower it later with: "
+                    f"{_disclosure_command(disclosure, 'lower_command', _PAUSE_COMMAND)}"
                     if disclosure.get("change") == "increase"
                     else "Return to the default with: "
                     f"{_disclosure_command(disclosure, 'revoke_command', _REVOKE_COMMAND)}"

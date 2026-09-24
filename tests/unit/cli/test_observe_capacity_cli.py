@@ -316,6 +316,19 @@ def test_decrease_discloses_future_admission_only(env: Env) -> None:
     assert env.workspace_queue_count() == 128
 
 
+def test_lowering_after_a_custom_increase_restores_the_previous_count(env: Env) -> None:
+    env.preview_and_apply("--capacity", "custom", "--queue-count", "64", "--persist")
+    raised = env.preview_and_apply("--capacity", "custom", "--queue-count", "128", "--persist")
+    assert env.workspace_queue_count() == 128
+    assert "--capacity custom --queue-count 64 --persist" in raised["disclosure"]["lower_command"]
+    restore = env.preview("--capacity", "custom", "--queue-count", "64", "--persist")
+    assert restore["disclosure"]["change"] == "decrease"
+    env.apply(
+        "--capacity", "custom", "--queue-count", "64", "--persist", digest=restore["preview_digest"]
+    )
+    assert env.workspace_queue_count() == 64
+
+
 def _assert_no_cap_json(payload: Json, operation: str, alternative: str) -> None:
     assert set(payload) == {"error"}
     error = payload["error"]

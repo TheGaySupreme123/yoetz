@@ -442,7 +442,10 @@ yoetz observe selection-apply --workspace /exact/project \
 
 Explain how to lower or pause before and after applying. To lower it, preview and apply
 a smaller capacity at the same scope (the "Lower it later" command restores the previous
-capacity after an increase), or run `yoetz observe selection-revoke` at that scope.
+capacity after an increase). At the minimum of 64 rows, pause ingest if needed. To remove an
+override, run `yoetz observe selection-revoke` at that scope; this restores the inherited or
+default capacity and can increase it, so inspect the resulting selection instead of calling it
+a lowering operation.
 `yoetz observe pause --workspace /exact/project` pauses new observation ingest and
 `yoetz observe resume --workspace /exact/project` restarts it. Lowering affects future admission
 only; accepted records drain and are not deleted.
