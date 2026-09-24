@@ -1027,29 +1027,15 @@ def _membership_anchors(
     member: str,
     provenance: tuple[tuple[str, str | None, str | None], ...],
 ) -> set[tuple[str, str]]:
+    # A membership includes tasks at its declared scope, not their ancestors.
+    # Expanding a direct task or workspace to its repository would make two
+    # disjoint memberships conflict merely because they share that repository.
     anchors = {(kind.value, member)}
-    if kind is MemberKind.TASK:
-        for task_id, repository, workspace in provenance:
-            if task_id != member:
-                continue
-            if repository is not None:
-                anchors.add((MemberKind.REPOSITORY.value, repository))
-            if workspace is not None:
-                anchors.add((MemberKind.WORKSPACE.value, workspace))
-    elif kind is MemberKind.REPOSITORY:
-        for task_id, repository, workspace in provenance:
-            if repository != member:
-                continue
+    for task_id, repository, workspace in provenance:
+        if (kind is MemberKind.REPOSITORY and repository == member) or (
+            kind is MemberKind.WORKSPACE and workspace == member
+        ):
             anchors.add((MemberKind.TASK.value, task_id))
-            if workspace is not None:
-                anchors.add((MemberKind.WORKSPACE.value, workspace))
-    else:
-        for task_id, repository, workspace in provenance:
-            if workspace != member:
-                continue
-            anchors.add((MemberKind.TASK.value, task_id))
-            if repository is not None:
-                anchors.add((MemberKind.REPOSITORY.value, repository))
     return anchors
 
 

@@ -332,9 +332,11 @@ Automatic admission recovery and migration compatibility follow the storage and 
 Exact native-host capability evidence and limits are maintained in the host integration runbooks.
 Repository, workspace, and direct task memberships together place a task in at most one general
 project, plus its implicit repository project. A link or a later provenance binding that would
-add a second general project is refused and names no other project's contents. Memberships that
-already violate the rule are kept; project status reports `selector_conflict`, and the repair is
-to unlink one membership or dissolve one project.
+add a second general project is refused and names no other project's contents. Membership scope
+does not expand to a task's or workspace's repository: distinct tasks or workspaces in one
+repository may belong to different general projects when their included task sets do not overlap.
+Memberships that already violate the rule are kept; project status reports `selector_conflict`,
+and the repair is to unlink one membership or dissolve one project.
 
 ## Alternatives considered
 

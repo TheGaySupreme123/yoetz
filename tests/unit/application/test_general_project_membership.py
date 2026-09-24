@@ -7,19 +7,23 @@ from datetime import UTC, datetime
 
 import pytest
 
-from conformance.adapters.test_project_catalog_memberships import _sqlite_catalog_v4
+from conformance.adapters.test_project_catalog_memberships import (
+    _sqlite_catalog_v4,  # pyright: ignore[reportPrivateUsage]
+)
 from conformance.adapters.test_start_catalog_port import (
-    _Clock,
-    _command,
-    _id,
-    _memory_catalog,
+    _Clock,  # pyright: ignore[reportPrivateUsage]
+    _command,  # pyright: ignore[reportPrivateUsage]
+    _id,  # pyright: ignore[reportPrivateUsage]
+    _memory_catalog,  # pyright: ignore[reportPrivateUsage]
 )
 from yoetz.application.projects import (
     InMemoryProjectCatalog,
     ProjectApplication,
     ProjectCommandError,
 )
-from yoetz.cli.bootstrap import _COORDINATION_CONTROL_GUIDANCE
+from yoetz.cli.bootstrap import (
+    _COORDINATION_CONTROL_GUIDANCE,  # pyright: ignore[reportPrivateUsage]
+)
 from yoetz.domain.coordination import (
     CoordinationErrorCode,
     GrantState,
@@ -82,7 +86,7 @@ async def test_second_general_link_is_refused_for_repository_and_workspace(
         await app.link(project_id=second, member_kind=kind, member_commitment_or_id=member)
     assert refusal.value.code is CoordinationErrorCode.GENERAL_MEMBERSHIP_CONFLICT
     assert await catalog.list_task_project_ids(task_id) == (first,)
-    resolved = await app._resolve_project_for_task(task_id)
+    resolved = await app._resolve_project_for_task(task_id)  # pyright: ignore[reportPrivateUsage]
     assert resolved == first
 
 
@@ -147,7 +151,7 @@ async def test_same_project_replay_unbind_and_implicit_repository_project() -> N
     linked = await catalog.list_task_project_ids(task_id)
     assert repository_project.project_id in linked
     assert general in linked
-    assert await app._resolve_project_for_task(task_id) == general
+    assert await app._resolve_project_for_task(task_id) == general  # pyright: ignore[reportPrivateUsage]
     await app.unlink(
         project_id=general,
         member_kind=MemberKind.REPOSITORY,
@@ -159,7 +163,7 @@ async def test_same_project_replay_unbind_and_implicit_repository_project() -> N
         member_kind=MemberKind.REPOSITORY,
         member_commitment_or_id=repository,
     )
-    assert await app._resolve_project_for_task(task_id) == other
+    assert await app._resolve_project_for_task(task_id) == other  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.anyio
@@ -182,7 +186,7 @@ async def test_preexisting_duplicate_rows_stay_and_status_names_the_repair() -> 
         )
     app = ProjectApplication(catalog, ids=object())  # type: ignore[arg-type]
     with pytest.raises(ProjectCommandError) as conflict:
-        await app._resolve_project_for_task(task_id)
+        await app._resolve_project_for_task(task_id)  # pyright: ignore[reportPrivateUsage]
     assert conflict.value.code is CoordinationErrorCode.SELECTOR_CONFLICT
     assert await catalog.list_task_project_ids(task_id) == tuple(
         sorted((first.project_id, second.project_id))
@@ -302,3 +306,69 @@ async def test_concurrent_general_links_commit_only_one() -> None:
 
     results = await asyncio.gather(link(first), link(second))
     assert sorted(results) == ["committed", "general_project_membership_conflict"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("kind", "shared_workspace"),
+    [(MemberKind.TASK, False), (MemberKind.TASK, True), (MemberKind.WORKSPACE, False)],
+)
+async def test_application_allows_disjoint_members_in_one_repository(
+    kind: MemberKind, shared_workspace: bool
+) -> None:
+    catalog = InMemoryProjectCatalog()
+    repository = _commitment("a")
+    workspaces = (_commitment("b"), _commitment("b" if shared_workspace else "c"))
+    tasks = (new_id(IdKind.TASK), new_id(IdKind.TASK))
+    projects = (await _granted_general(catalog), await _granted_general(catalog))
+    for task, workspace in zip(tasks, workspaces, strict=True):
+        catalog.provenance[task] = _provenance(task, repository, workspace)
+    app = ProjectApplication(catalog, ids=object(), workspace_consent=lambda _workspace: True)  # type: ignore[arg-type]
+    members = tasks if kind is MemberKind.TASK else workspaces
+    for project, member, workspace in zip(projects, members, workspaces, strict=True):
+        await app.link(
+            project_id=project,
+            member_kind=kind,
+            member_commitment_or_id=member,
+            source_workspace_commitment=workspace,
+        )
+    for task, project in zip(tasks, projects, strict=True):
+        assert await catalog.list_task_project_ids(task) == (project,)
+        assert await app._resolve_project_for_task(task) == project  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("catalog_name", ["memory", "sqlite"])
+@pytest.mark.parametrize("kind", [MemberKind.TASK, MemberKind.WORKSPACE])
+async def test_catalogs_allow_disjoint_members_in_one_repository(
+    catalog_name: str, kind: MemberKind
+) -> None:
+    installation_id = _id(IdKind.INSTALLATION, 830)
+    clock = _Clock(datetime(2026, 9, 24, tzinfo=UTC))
+    if catalog_name == "memory":
+        catalog, _state = _memory_catalog(installation_id, clock)
+    else:
+        catalog = _sqlite_catalog_v4(installation_id, clock)
+    repository = _commitment("a")
+    for index in (1, 2):
+        started = await catalog.reserve_or_resume(
+            await _command(
+                catalog,
+                operation_id=_id(IdKind.REQUEST, 8300 + index),
+                workspace_ref=f"disjoint-workspace-{index}",
+                external_ref=f"disjoint-task-{index}",
+                repository_privacy_commitment=repository,
+            )
+        )
+        source = await catalog.task_source_provenance(started.task_id)
+        assert source is not None and source.workspace_ref_commitment is not None
+        project = _id(IdKind.PROJECT, 8300 + index)
+        await catalog.create_general_project(project)
+        await catalog.record_project_membership(
+            project,
+            member_kind=kind,
+            member_commitment_or_id=(
+                started.task_id if kind is MemberKind.TASK else source.workspace_ref_commitment
+            ),
+        )
+        assert await catalog.list_task_project_ids(started.task_id) == (project,)
