@@ -1973,7 +1973,11 @@ only reuses recorded manifests and never records or refreshes one (#500). The pa
 projects direct children one level: current actionable findings on accepted children block
 clean-completion wording, while the receipt is still produced and names the child and finding.
 Pending-acceptance children and informational findings annotate only; accepted live children are
-open gaps and accepted abandoned children are incomplete gaps. A grandchild is visible only through
+open gaps and accepted abandoned children are incomplete gaps. An unresolved informational
+finding stays on the child row and does not replace an accepted lifecycle gap or a coverage or
+verification blocker. The only informational kind, `ledger_stale_or_incomplete`, is emitted from
+recorded ledger gaps, so a public child that carries it also carries an independent coverage
+blocker. The no-gap lifecycle precedence is a kernel invariant. A grandchild is visible only through
 its parent. Only a new manifest and qualifying recheck can clear a live-child gap in a later receipt.
 
 **Lineage disclosure authority.** An accepted edge authorizes only (1) a service-side child read
