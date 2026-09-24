@@ -666,8 +666,34 @@ def _snapshot_rollup(
     gaps: list[LineageGap] = []
     read_gaps = set(snapshot.read_gap_reasons)
     restrictions = set(snapshot.provenance_restrictions)
+    unresolved_actionable = tuple(
+        finding for finding in snapshot.findings if not finding.resolved and finding.actionable
+    )
+    unresolved_informational = tuple(
+        finding for finding in snapshot.findings if not finding.resolved and not finding.actionable
+    )
+    finding_ids.update(finding.finding_id for finding in unresolved_actionable)
+    invalid_rejection = snapshot.acceptance is LineageAcceptance.REJECTED and bool(
+        unresolved_actionable
+    )
+    # Acceptance is decided before parent-blocking tokens are accumulated. Pending and
+    # ordinary rejected relationships are lifecycle annotations: their gaps stay on the
+    # child row, but they are not accepted dependencies. The service records
+    # NOT_AUTHORIZED because it refuses to open an unaccepted bundle, so every rejected
+    # child carries that read gap. Selecting UNAVAILABLE from it, as the original
+    # feature commit did, was not a documented fail-closed default: it contradicted the
+    # annotation rule and made rejection itself block the parent. An impossible rejected
+    # snapshot that still carries actionable work stays blocking on the branch below.
+    annotation_only = (
+        snapshot.acceptance is not LineageAcceptance.ACCEPTED and not invalid_rejection
+    )
+
+    def note_blocker(token: str) -> None:
+        if not annotation_only:
+            blockers.add(token)
+
     if read_gaps:
-        blockers.add("lineage_child_read_gap")
+        note_blocker("lineage_child_read_gap")
         gaps.append(
             LineageGap(
                 "lineage_child_unavailable",
@@ -677,7 +703,7 @@ def _snapshot_rollup(
             )
         )
     if restrictions:
-        blockers.add("lineage_child_provenance_restricted")
+        note_blocker("lineage_child_provenance_restricted")
         gaps.append(
             LineageGap(
                 "lineage_child_provenance_restricted",
@@ -687,7 +713,7 @@ def _snapshot_rollup(
             )
         )
     if snapshot.child_frontier is None:
-        blockers.add("lineage_child_frontier_unknown")
+        note_blocker("lineage_child_frontier_unknown")
         gaps.append(
             LineageGap(
                 "lineage_child_frontier_unknown",
@@ -696,15 +722,8 @@ def _snapshot_rollup(
             )
         )
 
-    unresolved_actionable = tuple(
-        finding for finding in snapshot.findings if not finding.resolved and finding.actionable
-    )
-    unresolved_informational = tuple(
-        finding for finding in snapshot.findings if not finding.resolved and not finding.actionable
-    )
-    finding_ids.update(finding.finding_id for finding in unresolved_actionable)
     if unresolved_actionable:
-        blockers.add("lineage_child_actionable_finding")
+        note_blocker("lineage_child_actionable_finding")
         gaps.append(
             LineageGap(
                 "lineage_child_actionable_finding",
@@ -713,15 +732,12 @@ def _snapshot_rollup(
                 snapshot.manifest_event_id,
             )
         )
-    invalid_rejection = snapshot.acceptance is LineageAcceptance.REJECTED and bool(
-        unresolved_actionable
-    )
     if invalid_rejection:
         # C4 permits pending -> rejected only.  A rejected snapshot carrying a later actionable
         # child finding is therefore evidence of an impossible accepted -> rejected transition;
         # retain the finding ids, but refuse to let the parent describe the dependency as a clean
         # annotation that escaped responsibility.
-        blockers.add("lineage_invalid_acceptance_transition")
+        note_blocker("lineage_invalid_acceptance_transition")
         gaps.append(
             LineageGap(
                 "lineage_invalid_acceptance_transition",
@@ -736,7 +752,7 @@ def _snapshot_rollup(
     # check to look clean merely because it has a receipt id.
     child_coverage_gaps = tuple(snapshot.coverage.known_gaps)
     if child_coverage_gaps:
-        blockers.add("lineage_child_coverage_gap")
+        note_blocker("lineage_child_coverage_gap")
         gaps.append(
             LineageGap(
                 "lineage_child_coverage_gap",
@@ -757,7 +773,7 @@ def _snapshot_rollup(
     missing_check = snapshot.child_check_id is None
     missing_receipt = snapshot.child_receipt_id is None
     if check_stale:
-        blockers.add("lineage_child_check_stale")
+        note_blocker("lineage_child_check_stale")
         gaps.append(
             LineageGap(
                 "lineage_child_check_stale",
@@ -766,7 +782,7 @@ def _snapshot_rollup(
             )
         )
     if check_frontier_unknown:
-        blockers.add("lineage_child_check_frontier_unknown")
+        note_blocker("lineage_child_check_frontier_unknown")
         gaps.append(
             LineageGap(
                 "lineage_child_check_frontier_unknown",
@@ -775,7 +791,7 @@ def _snapshot_rollup(
             )
         )
     if missing_check or missing_receipt:
-        blockers.add("lineage_child_verification_unknown")
+        note_blocker("lineage_child_verification_unknown")
         gaps.append(
             LineageGap(
                 "lineage_child_verification_unknown",
@@ -798,14 +814,10 @@ def _snapshot_rollup(
             if read_gaps or restrictions or snapshot.child_frontier is None
             else LineageRollupState.BLOCKED
         )
-    elif snapshot.acceptance is not LineageAcceptance.ACCEPTED:
-        # Pending/rejected lineage is visible but never an accepted dependency blocker.  Read
-        # and provenance gaps remain named in the child row while the state stays annotation-only.
-        state = (
-            LineageRollupState.UNAVAILABLE
-            if read_gaps and snapshot.acceptance is LineageAcceptance.REJECTED
-            else LineageRollupState.ANNOTATION
-        )
+    elif annotation_only:
+        # Read and provenance gaps remain named in the child gap row. They are not parent
+        # blocker tokens and they do not select UNAVAILABLE.
+        state = LineageRollupState.ANNOTATION
     elif read_gaps or restrictions or snapshot.child_frontier is None:
         state = LineageRollupState.UNAVAILABLE
     elif unresolved_actionable:
