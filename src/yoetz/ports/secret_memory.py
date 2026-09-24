@@ -8,7 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from threading import Lock
-from typing import Literal, Protocol, cast
+from typing import Literal, Protocol, cast, runtime_checkable
 
 from yoetz.domain.values import validate_sha256_digest
 from yoetz.protocol.canonical import JsonValue, canonical_digest
@@ -170,6 +170,7 @@ class ProviderAttemptAuthBinding:
             raise ValueError("provider_deadline_invalid")
 
 
+@runtime_checkable
 class ProviderCredentialHandle(Protocol):
     async def authorize_attempt[T](
         self,

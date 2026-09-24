@@ -100,6 +100,9 @@ a no-op, and an explicit route change keeps the same executable. A different ins
 or root, a symlink alias, or modified script is protected as foreign. Use the direct command in
 the preview, and still obtain real registered-child evidence before passing the parity gate.
 
+The unattended [dogfood CI](dogfood-ci.md) lane provisions one such snapshot per (host, OS) cell on
+a GitHub-hosted runner and disposes it at the end of the job.
+
 Ordinary source tests do not need an instance: `uv run pytest <path>` from the checkout uses the
 checkout's `.venv`, which is unpinned. Provision an instance when a test or dogfood must exercise
 an installed launcher, a real service, a host registration, or the upgrade path.

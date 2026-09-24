@@ -244,6 +244,72 @@ async def test_reserve_resume_complete_parity() -> None:
 
 
 @pytest.mark.anyio
+async def test_concurrent_same_pair_attaches_once_and_different_pairs_create_siblings() -> None:
+    """The catalog lock preserves pair identity while allowing workspace siblings."""
+
+    installation_id = _id(IdKind.INSTALLATION, 760)
+    now = datetime(2026, 7, 19, 9, 12, tzinfo=UTC)
+    memory, _ = _memory_catalog(installation_id, _Clock(now))
+    sqlite = _sqlite_catalog(installation_id, _Clock(now))
+
+    for catalog in (memory, sqlite):
+        same_pair = [
+            await _command(catalog, operation_id=_id(IdKind.REQUEST, 761)),
+            await _command(catalog, operation_id=_id(IdKind.REQUEST, 762)),
+        ]
+        same_results: list[object | None] = [None, None]
+
+        async def reserve_same(index: int) -> None:
+            same_results[index] = await catalog.reserve_or_resume(same_pair[index])
+
+        async with anyio.create_task_group() as tasks:
+            for index in range(len(same_pair)):
+                tasks.start_soon(reserve_same, index)
+
+        same_allocations: list[StartAllocation] = []
+        for result in same_results:
+            assert isinstance(result, StartAllocation)
+            same_allocations.append(result)
+        assert {allocation.route_action for allocation in same_allocations} == {
+            "created",
+            "attached",
+        }
+        same_task_ids = {allocation.task_id for allocation in same_allocations}
+        assert len(same_task_ids) == 1
+
+        different_pairs = [
+            await _command(
+                catalog,
+                operation_id=_id(IdKind.REQUEST, 763),
+                external_ref="external-B",
+            ),
+            await _command(
+                catalog,
+                operation_id=_id(IdKind.REQUEST, 764),
+                external_ref="external-C",
+            ),
+        ]
+        different_results: list[object | None] = [None, None]
+
+        async def reserve_different(index: int) -> None:
+            different_results[index] = await catalog.reserve_or_resume(different_pairs[index])
+
+        async with anyio.create_task_group() as tasks:
+            for index in range(len(different_pairs)):
+                tasks.start_soon(reserve_different, index)
+
+        different_allocations: list[StartAllocation] = []
+        for result in different_results:
+            assert isinstance(result, StartAllocation)
+            different_allocations.append(result)
+        assert {allocation.route_action for allocation in different_allocations} == {"created"}
+        assert len({allocation.task_id for allocation in different_allocations}) == 2
+        assert not same_task_ids.intersection(
+            allocation.task_id for allocation in different_allocations
+        )
+
+
+@pytest.mark.anyio
 async def test_historical_session_binding_and_reattach_parity() -> None:
     """Memory and SQLite preserve the same capability-bounded session recovery (#438)."""
 
@@ -421,17 +487,24 @@ async def test_abandoned_pending_start_never_wedges_the_ordinary_same_pair_attac
 
 
 @pytest.mark.anyio
-async def test_workspace_rotation_rejects_wrong_workspace_and_sibling_ambiguity() -> None:
-    """A held selector never discovers another workspace or chooses among siblings."""
+async def test_workspace_rotation_selects_active_route_among_siblings() -> None:
+    """A held selector chooses its route while sibling identity remains isolated."""
 
     installation_id = _id(IdKind.INSTALLATION, 745)
     now = datetime(2026, 7, 19, 9, 19, tzinfo=UTC)
     memory, _ = _memory_catalog(installation_id, _Clock(now))
     sqlite = _sqlite_catalog(installation_id, _Clock(now))
 
+    privacy = "hmac-sha256:" + "a" * 64
+    mismatched_privacy = "hmac-sha256:" + "b" * 64
+
     for catalog in (memory, sqlite):
         first = await catalog.reserve_or_resume(
-            await _command(catalog, operation_id=_id(IdKind.REQUEST, 746))
+            await _command(
+                catalog,
+                operation_id=_id(IdKind.REQUEST, 746),
+                repository_privacy_commitment=privacy,
+            )
         )
         await _finish(catalog, first)
 
@@ -454,9 +527,29 @@ async def test_workspace_rotation_rejects_wrong_workspace_and_sibling_ambiguity(
                 operation_id=_id(IdKind.REQUEST, 748),
                 mode=StartMode.CREATE,
                 external_ref="external-B",
+                repository_privacy_commitment=privacy,
             )
         )
         await _finish(catalog, sibling)
+        sibling_route = await catalog.resolve_route(sibling.session_id)
+        sibling_binding = await catalog.session_binding(sibling.session_id)
+        assert sibling_route is not None
+        assert sibling_binding is not None
+
+        second_sibling = await catalog.reserve_or_resume(
+            await _command(
+                catalog,
+                operation_id=_id(IdKind.REQUEST, 758),
+                mode=StartMode.CREATE,
+                external_ref="external-E",
+                repository_privacy_commitment=privacy,
+            )
+        )
+        await _finish(catalog, second_sibling)
+        second_sibling_route = await catalog.resolve_route(second_sibling.session_id)
+        second_sibling_binding = await catalog.session_binding(second_sibling.session_id)
+        assert second_sibling_route is not None
+        assert second_sibling_binding is not None
 
         with pytest.raises(PublicOperationError) as pair_conflict:
             await catalog.reserve_or_resume(
@@ -470,17 +563,120 @@ async def test_workspace_rotation_rejects_wrong_workspace_and_sibling_ambiguity(
             )
         assert pair_conflict.value.code is PublicErrorCode.SESSION_CONFLICT
 
-        with pytest.raises(PublicOperationError) as ambiguous:
+        with pytest.raises(PublicOperationError) as privacy_conflict:
             await catalog.reserve_or_resume(
                 await _command(
                     catalog,
                     operation_id=_id(IdKind.REQUEST, 750),
                     mode=StartMode.ATTACH,
-                    session_id=sibling.session_id,
-                    external_ref="external-C",
+                    session_id=first.session_id,
+                    external_ref="external-D",
+                    repository_privacy_commitment=mismatched_privacy,
                 )
             )
-        assert ambiguous.value.code is PublicErrorCode.SESSION_CONFLICT
+        assert privacy_conflict.value.code is PublicErrorCode.SESSION_CONFLICT
+
+        recovered = await catalog.reserve_or_resume(
+            await _command(
+                catalog,
+                operation_id=_id(IdKind.REQUEST, 751),
+                mode=StartMode.ATTACH,
+                session_id=first.session_id,
+                external_ref="external-C",
+                repository_privacy_commitment=privacy,
+            )
+        )
+        assert recovered.route_action == "attached"
+        assert recovered.task_id == first.task_id
+        assert recovered.task_id != sibling.task_id
+        assert await catalog.resolve_route(sibling.session_id) == sibling_route
+        assert await catalog.session_binding(sibling.session_id) == sibling_binding
+        assert await catalog.resolve_route(second_sibling.session_id) == second_sibling_route
+        assert await catalog.session_binding(second_sibling.session_id) == second_sibling_binding
+
+        await _finish(catalog, recovered)
+        assert await catalog.resolve_route(sibling.session_id) == sibling_route
+        assert await catalog.session_binding(sibling.session_id) == sibling_binding
+        assert await catalog.resolve_route(second_sibling.session_id) == second_sibling_route
+        assert await catalog.session_binding(second_sibling.session_id) == second_sibling_binding
+
+        with pytest.raises(PublicOperationError) as stale_selector:
+            await catalog.reserve_or_resume(
+                await _command(
+                    catalog,
+                    operation_id=_id(IdKind.REQUEST, 752),
+                    mode=StartMode.ATTACH,
+                    session_id=first.session_id,
+                    external_ref="external-D",
+                    repository_privacy_commitment=privacy,
+                )
+            )
+        assert stale_selector.value.code is PublicErrorCode.SESSION_CONFLICT
+
+
+@pytest.mark.anyio
+async def test_workspace_recovery_ignores_unrelated_pending_sibling() -> None:
+    """A pending sibling cannot block or mutate a selected route's recovery."""
+
+    installation_id = _id(IdKind.INSTALLATION, 753)
+    now = datetime(2026, 7, 19, 9, 21, tzinfo=UTC)
+    memory, _ = _memory_catalog(installation_id, _Clock(now))
+    sqlite = _sqlite_catalog(installation_id, _Clock(now))
+
+    for catalog in (memory, sqlite):
+        selected = await catalog.reserve_or_resume(
+            await _command(catalog, operation_id=_id(IdKind.REQUEST, 754))
+        )
+        await _finish(catalog, selected)
+        selected_route = await catalog.resolve_route(selected.session_id)
+        assert selected_route is not None
+
+        sibling_request = await _command(
+            catalog,
+            operation_id=_id(IdKind.REQUEST, 755),
+            mode=StartMode.CREATE,
+            external_ref="external-B",
+        )
+        sibling = await catalog.reserve_or_resume(sibling_request)
+        sibling_route = await catalog.resolve_route(sibling.session_id)
+        assert sibling_route is not None
+        assert sibling_route.state is TaskRouteState.INITIALIZING
+
+        recovered = await catalog.reserve_or_resume(
+            await _command(
+                catalog,
+                operation_id=_id(IdKind.REQUEST, 756),
+                mode=StartMode.ATTACH,
+                session_id=selected.session_id,
+                external_ref="external-C",
+            )
+        )
+        assert recovered.route_action == "attached"
+        assert recovered.task_id == selected.task_id
+        assert recovered.task_id != sibling.task_id
+        assert await catalog.resolve_route(selected.session_id) == selected_route
+        assert await catalog.resolve_route(sibling.session_id) == sibling_route
+
+        with pytest.raises(PublicOperationError) as selected_pending:
+            await catalog.reserve_or_resume(
+                await _command(
+                    catalog,
+                    operation_id=_id(IdKind.REQUEST, 757),
+                    mode=StartMode.ATTACH,
+                    session_id=selected.session_id,
+                    external_ref="external-D",
+                )
+            )
+        assert selected_pending.value.code is PublicErrorCode.OPERATION_PENDING
+        assert selected_pending.value.retryable is True
+
+        with pytest.raises(PublicOperationError) as sibling_pending:
+            await catalog.reserve_or_resume(sibling_request)
+        assert sibling_pending.value.code is PublicErrorCode.OPERATION_PENDING
+        assert sibling_pending.value.retryable is True
+
+        await _finish(catalog, recovered)
+        assert await catalog.resolve_route(sibling.session_id) == sibling_route
 
 
 @pytest.mark.anyio

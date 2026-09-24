@@ -1226,6 +1226,56 @@ def test_expired_deadline_is_rejected_before_dispatch() -> None:
     assert receipt.safe_failure_reason is PrivacyReason.DEADLINE_EXPIRED
 
 
+def test_preconsume_refusal_records_the_closed_reason_as_owner_diagnostic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-dispatch refusal is publicly `unavailable`; the owner diagnostic names the reason."""
+
+    import yoetz.adapters.privacy.gateway as gateway_module
+
+    recorded: list[dict[str, object]] = []
+
+    def capture(**kwargs: object) -> str:
+        recorded.append(dict(kwargs))
+        return "err_00000000-0000-4000-8000-000000000001"
+
+    monkeypatch.setattr(gateway_module, "record_bounded_event_without_raising", capture)
+    clock = _Clock()
+    audit = _FullPrivacyAudit()
+    factory = _FakeExternalFactory(_script_factory)
+    gateway = _gateway(audit=audit, clock=clock, external_factory=factory)
+    policy = _policy(external_enabled=True, local_enabled=False)
+    effective = EffectivePrivacyPolicy(policy, 1, policy.policy_digest)
+    human = _human_authority(available=False)
+
+    async def run() -> SemanticResult:
+        await _reconcile_repository(gateway, effective, human)
+        authorization = _authorization(
+            authorization_id="aut_60000000-0000-4000-8000-000000000060",
+            policy_digest=policy.policy_digest,
+            service_generation=human.service_generation,
+        )
+        audit.seed_authorized(authorization)
+        case = _case(
+            case_id="cas_60000000-0000-4000-8000-000000000061",
+            authorization=authorization,
+            payload=canonical_encode({"note": "hello"}),
+        )
+        return await gateway.dispatch_external_semantic(case, authorization, _deadline(clock))
+
+    result = asyncio.run(run())
+
+    assert type(result) is SemanticResultUnavailable
+    assert recorded == [
+        {
+            "component": "privacy_gateway",
+            "operation": "egress_preconsume",
+            "reason": PrivacyReason.CHANNEL_UNAVAILABLE.value,
+            "request_id": _REQUEST,
+        }
+    ]
+
+
 def test_human_authority_unavailable_empties_external_registry() -> None:
     clock = _Clock()
     audit = _FullPrivacyAudit()

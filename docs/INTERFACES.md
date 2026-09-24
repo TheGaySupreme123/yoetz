@@ -4215,9 +4215,15 @@ holds the workspace and predecessor lifecycle locks, revalidates ownership and s
 `mode=attach` request carrying that selector together with the new host pair. Every eligible mapping
 must name one task; within it, the newest mapping-file write wins and the host session ID breaks
 timestamp ties. The trusted control handshake carries the canonical workspace for repository privacy.
-The catalog requires the selector to remain active, the task to be the workspace's sole
-non-quarantined route, and no start for that route to be pending. Both calls share one five-second
-deadline. The response must retain the candidate task ID. Recovery first takes a nonblocking
+The catalog requires the selected root task to remain active and non-quarantined, its canonical
+workspace and trusted repository-privacy binding to match, and no start for that selected route to
+be pending.
+Other tasks in the workspace do not make a held selector ambiguous and are neither attached nor
+changed (#814). The new pair must not already select a different task. Delegated child routes
+remain authenticated-handle/target-selector paths and are never discovered by generic session
+recovery. This permits independent tasks to coexist; it does not grant task interaction, delegation,
+lineage, or shared project authority.
+Both calls share one five-second deadline. The response must retain the candidate task ID. Recovery first takes a nonblocking
 workspace reservation and then holds ordered locks for every eligible ended same-host session
 through full candidate revalidation, the service RPC, authorized rewrites, and pruning; no
 observation-store lock spans the RPC. Revalidation includes unmapped sessions, cross-workspace
@@ -4238,8 +4244,9 @@ quarantined. When no eligible local selector exists, the ordinary `create_or_att
 new work; when recovery attach fails, the ordinary typed failure path remains. Every failed attempt records a
 closed hook-diagnostic
 reason instead of a silent absent mapping: `auto_attach_workspace_unbound`,
-`auto_attach_request_invalid`, `auto_attach_conflict` (session, idempotency, or request-identity
-conflict), `auto_attach_refused`, `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`,
+`auto_attach_request_invalid`, `auto_attach_binding_ambiguous` (candidate count only),
+`auto_attach_conflict` (session, idempotency, or request-identity conflict), `auto_attach_refused`,
+`auto_attach_result_invalid`, `auto_attach_mapping_write_failed`,
 `privacy_authority_required`, or the shared `service_unavailable`, `service_incompatible`, `vault_locked`, `timeout`,
 `storage_unsafe`, and `storage_corrupt` tokens. Turn-boundary hooks retry auto-attach under a
 bounded budget and record the same typed cause next to the `auto_attach_retry_failed` path marker
