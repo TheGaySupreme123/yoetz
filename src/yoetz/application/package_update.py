@@ -193,7 +193,8 @@ def advisory_tip_lines(advisory: PackageUpdateAdvisory) -> tuple[str, ...]:
         f"A newer Yoetz package is available "
         f"({advisory.installed_version} → {advisory.latest_version}).",
         f"Upgrade with: {advisory.upgrade_command}",
-        "Use yoetz upgrade to plan host refresh and any migration; then use a fresh launcher.",
+        "Use yoetz upgrade to plan host refresh and any migration. Nothing needs to be stopped: "
+        "open sessions keep working and switch to the new version when reopened.",
     )
 
 

@@ -31,6 +31,10 @@ Prepared public-alpha release candidate; publication remains gated by #785. See
 
 ### Changed
 
+- Updating Yoetz no longer requires quitting agent apps or stopping the service. `yoetz upgrade
+  --accept` runs from inside an open session, which keeps working on the previous version; the
+  first Yoetz call of the next session switches to the new version and retires the previous
+  service. Upgrading from 0.2 still follows 0.2's stop-first procedure once (#820).
 - Updating from 0.2 preserves existing tasks, settings, permissions, and host registrations.
   On ordinary service startup after unlock, supported task ledgers receive a verified backup
   and automatic schema upgrade before new work is admitted. Interrupted upgrades resume from

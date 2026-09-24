@@ -111,6 +111,7 @@ from yoetz.service.client import (
     accepted_but_unresponsive,
     connect_service,
     connect_service_on_demand,
+    holder_version_order,
     service_holder_identity,
 )
 
@@ -155,6 +156,16 @@ _GUIDANCE_BY_URI: Final = MappingProxyType(
 # answered by the live service and reconnecting around it drops the session for nothing, so both
 # projection reasons are handled in place and surfaced with their own remedy.
 _RECONNECT_REASONS: Final = frozenset({"service_unavailable", "service_generation_changed"})
+# Modules the bridge only imports inside functions. An open session's bridge outlives an in-place
+# ``yoetz upgrade --accept``, so they are loaded at startup; a module first imported after the
+# package was replaced would be the next release's code inside this bridge (#820).
+_BRIDGE_LAZY_MODULES: Final = (
+    "packaging.version",
+    "yoetz.application.applied_mcp_route",
+    "yoetz.cli.hook_diagnostics",
+    "yoetz.observability.diagnostics",
+    "yoetz.service.lifecycle",
+)
 _DISCARD_CLIENT_REASONS: Final = _RECONNECT_REASONS | {"vault_locked"}
 # Availability failures describe the host binding (this bridge process, its endpoint, and the
 # service holder), not one request. Once one call has reported such a failure, later calls under
@@ -1475,6 +1486,14 @@ def _control_error_result(
             operation,
             code=PublicErrorCode.SERVICE_UNAVAILABLE,
             message=(
+                "Yoetz was updated while this session was open, and a newer session already "
+                "switched the local service to the new version, which this session's older "
+                "bridge cannot use. Ask the user to reopen this session (or restart the agent "
+                "app); the new version then attaches automatically. Retry this operation with "
+                "the same request_id after that. Do not run service lifecycle commands for this."
+            )
+            if _holder_is_newer_than_bridge()
+            else (
                 "The running local Yoetz service belongs to a different Yoetz installation than "
                 "this bridge (control schema-manifest or protocol mismatch), and the bridge could "
                 "not replace it within its startup budget. On a local terminal run "
@@ -1652,6 +1671,16 @@ def _mutable_json(value: object) -> object:
         source_sequence = cast(tuple[object, ...] | list[object], value)
         return [_mutable_json(item) for item in source_sequence]
     return value
+
+
+def _holder_is_newer_than_bridge() -> bool:
+    """True when the stamped holder runs a newer package: this bridge predates an update."""
+
+    try:
+        holder = service_holder_identity()
+    except Exception:
+        return False
+    return holder is not None and holder_version_order(holder.service_version) == "newer"
 
 
 def _holder_snapshot() -> tuple[int, str | None, str | None, str | None] | None:
@@ -2744,7 +2773,20 @@ def main(
         isolation_root=registration_isolation_root,
     )
     record_startup_route_drift(runtime.route_profile, host_profile=runtime.host_profile)
+    _load_bridge_code()
     anyio.run(
         run_stdio,
         runtime,
     )
+
+
+def _load_bridge_code() -> None:
+    """Load the bridge's lazily imported modules now; one that cannot load stays lazy."""
+
+    import importlib
+
+    for name in _BRIDGE_LAZY_MODULES:
+        try:
+            importlib.import_module(name)
+        except Exception:
+            continue

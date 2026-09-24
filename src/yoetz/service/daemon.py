@@ -258,6 +258,22 @@ _SOFT_LOCK_AUTO_READY_REASONS: Final = frozenset(
 # blip demoted a succeeded re-ready into a permanent LOCKED that nothing ever reconsidered
 # (#276). Credential-shaped failures are unaffected: they never reach this classification.
 _SOFT_REREADY_ACTIVATION_RETRY_LIMIT: Final = 3
+# ``uv tool upgrade`` replaces the installed package in place while sessions keep running. A
+# module this process first imported after that would be the next release's code inside this
+# release's service, so everything the service can reach is loaded shortly after startup. The
+# open sessions then finish on one consistent release; the next session retires this process.
+_SERVICE_CODE_PACKAGES: Final = (
+    "yoetz.adapters",
+    "yoetz.application",
+    "yoetz.config",
+    "yoetz.domain",
+    "yoetz.kernel",
+    "yoetz.observability",
+    "yoetz.ports",
+    "yoetz.protocol",
+    "yoetz.service",
+)
+_SERVICE_CODE_MODULES: Final = ("yoetz.cli.observe_hooks",)
 # Response-frame send must complete within this wall-clock window. A stalled peer that stops
 # reading cannot retain an in-flight entry in ``calls`` (and thus the inactive-session exemption)
 # indefinitely via write backpressure on sock_sendall.
@@ -309,6 +325,36 @@ _READ_ONLY_METHODS: Final[frozenset[ControlMethod]] = frozenset(
         ControlMethod.PRIVACY_RECEIPTS_GET,
     }
 )
+
+
+async def _load_service_code() -> None:
+    """Import every module the service may reach, one per event-loop turn, and never fail.
+
+    A module that cannot load on this platform is left to its lazy caller, as before.
+    """
+
+    import importlib
+    import pkgutil
+
+    names: list[str] = []
+    for package_name in _SERVICE_CODE_PACKAGES:
+        try:
+            package = importlib.import_module(package_name)
+            names.extend(
+                info.name
+                for info in pkgutil.walk_packages(
+                    package.__path__, f"{package_name}.", onerror=lambda _name: None
+                )
+            )
+        except Exception:
+            continue
+    names.extend(_SERVICE_CODE_MODULES)
+    for name in names:
+        await asyncio.sleep(0)
+        try:
+            importlib.import_module(name)
+        except Exception:
+            continue
 
 
 def _request_is_read_only(request: ControlCallRequest) -> bool:
@@ -884,6 +930,7 @@ class ServiceDaemon:
         watchdog = ControlPlaneWatchdog(connections_in_flight=lambda: len(self._connection_tasks))
         watchdog.start_thread()
         heartbeat = asyncio.create_task(watchdog.run())
+        preload = asyncio.create_task(_load_service_code())
         stop_wait = asyncio.create_task(self._stop_event.wait())
         stop_reason = "shutdown_requested"
         try:
@@ -898,10 +945,10 @@ class ServiceDaemon:
                 await self.stop(stop_reason)
             finally:
                 watchdog.close()
-                for task in (idle, control, human, stop_wait, heartbeat):
+                for task in (idle, control, human, stop_wait, heartbeat, preload):
                     if task is not None:
                         task.cancel()
-                for task in (idle, control, human, stop_wait, heartbeat):
+                for task in (idle, control, human, stop_wait, heartbeat, preload):
                     if task is not None:
                         await asyncio.gather(task, return_exceptions=True)
 

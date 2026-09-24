@@ -117,6 +117,7 @@ __all__ = [
     "accepted_but_unresponsive",
     "connect_service",
     "connect_service_on_demand",
+    "holder_version_order",
     "prepare_project_request",
     "service_holder_identity",
     "supersede_incompatible_service",
@@ -1446,16 +1447,41 @@ async def wait_for_singleton_release(pid: int, *, deadline: float) -> bool:
         await asyncio.sleep(min(_SERVICE_START_POLL_SECONDS, remaining))
 
 
-async def supersede_incompatible_service(*, deadline: float) -> bool:
+def holder_version_order(holder_version: str | None) -> Literal["older", "same", "newer"] | None:
+    """Order a running service's stamped package version against this installation's.
+
+    ``None`` means the holder predates the stamp or either version does not parse; callers then
+    keep their version-agnostic behavior instead of guessing an upgrade direction.
+    """
+
+    if holder_version is None:
+        return None
+    from packaging.version import InvalidVersion, Version
+
+    try:
+        holder = Version(holder_version)
+        own = Version(__version__)
+    except InvalidVersion:
+        return None
+    if holder < own:
+        return "older"
+    return "newer" if holder > own else "same"
+
+
+async def supersede_incompatible_service(*, deadline: float, replace_newer: bool = False) -> bool:
     """Ask the live same-user singleton holder to stop and wait for it to release the endpoint.
 
-    Called only after a listening service rejected this client's hello. The holder is identified
-    through the owner-only singleton stamp (never guessed from process listings), receives the
-    daemon's ordinary bounded-shutdown signal, and is polled until it releases the lock. Returns
-    ``True`` once the endpoint is free, ``False`` when no supersede candidate can be identified
-    (no live stamped holder, an identical-identity holder that rejected us anyway, or a platform
-    without POSIX signals), and raises ``service_incompatible`` when the holder outlives the
-    deadline. A durable diagnostic names every attempt.
+    Called after a listening service rejected this client's hello, or when a new host session
+    retires an older installation's service. The holder is identified through the owner-only
+    singleton stamp (never guessed from process listings), receives the daemon's ordinary
+    bounded-shutdown signal, and is polled until it releases the lock. Returns ``True`` once the
+    endpoint is free, ``False`` when no supersede candidate can be identified (no live stamped
+    holder, an identical-identity holder that rejected us anyway, a holder stamped by a newer
+    package than this one, or a platform without POSIX signals), and raises
+    ``service_incompatible`` when the holder outlives the deadline. Only an explicit human
+    ``yoetz service restart`` passes ``replace_newer``: an upgrade moves forward, so a process
+    left over from before an in-place package upgrade never replaces its successor. A durable
+    diagnostic names every attempt.
     """
 
     if os.name == "nt":
@@ -1473,6 +1499,10 @@ async def supersede_incompatible_service(*, deadline: float) -> bool:
         # Same installation identity yet it rejected the hello: this is not an upgrade, and
         # stopping it would not change the outcome. Report instead of restarting.
         return False
+    if not replace_newer and holder_version_order(holder.service_version) == "newer":
+        # This process predates an in-place upgrade (an open session's bridge, typically). The
+        # newer service is the one to keep; the session switches when its host reopens it.
+        return False
     correlation_id = record_public_error_without_raising(
         component="service.client",
         operation="service_supersede",
@@ -1489,6 +1519,11 @@ async def supersede_incompatible_service(*, deadline: float) -> bool:
     if await wait_for_singleton_release(holder.pid, deadline=deadline):
         return True
     raise ControlError("service_incompatible", retryable=True, correlation_id=correlation_id)
+
+
+def _serves_older_package(client: ServiceClient) -> bool:
+    status = client.hello_service_status
+    return status is not None and holder_version_order(status.service_version) == "older"
 
 
 def _manifest_digest_for_client() -> str:
@@ -1514,8 +1549,14 @@ async def connect_service_on_demand(
     (a stale process from another installation holding the one per-user endpoint after an
     upgrade), the holder is asked to stop through its ordinary bounded shutdown and a successor
     of this installation is spawned inside the same budget. The one endpoint then belongs to
-    the installation that is actually being used; bridges of the stale installation reconnect
-    and are refused in turn, which is the correct outcome of an upgrade.
+    the installation that is actually being used. A holder stamped by a newer package is never
+    replaced here: a process that predates an in-place upgrade reports ``service_incompatible``
+    instead of undoing it.
+
+    The MCP bridge a host starts for a session also retires a *compatible* service whose package
+    is older than its own: sessions opened before an in-place upgrade keep that service, and the
+    first session opened afterwards replaces it so the new package actually runs. When no holder
+    can be identified the compatible service keeps serving.
     """
 
     if type(client_kind) is not ControlClientKind:
@@ -1539,7 +1580,7 @@ async def connect_service_on_demand(
         )
 
     try:
-        return await connect_with_remaining_budget()
+        connected = await connect_with_remaining_budget()
     except _AcceptedServiceUnresponsive:
         # A process already owns and accepted the fixed endpoint. Starting a successor cannot
         # repair that process and only creates a singleton race, so fail this bounded attempt.
@@ -1550,6 +1591,32 @@ async def connect_service_on_demand(
                 raise
         elif exc.reason != "service_unavailable":
             raise
+    else:
+        if not (
+            client_kind is ControlClientKind.MCP_BRIDGE
+            and supersede_incompatible
+            and _serves_older_package(connected)
+        ):
+            return connected
+        await connected.close()
+        try:
+            retired = await supersede_incompatible_service(deadline=deadline)
+        except ControlError as exc:
+            # The older service was asked to stop and is still draining calls of sessions opened
+            # before the upgrade. A retry reaches whichever service holds the endpoint next.
+            raise ControlError(
+                "service_unavailable", retryable=True, correlation_id=exc.correlation_id
+            ) from exc
+        if not retired:
+            # Nothing identifiable to retire (or a concurrent bridge already did): use whatever
+            # holds the endpoint now, starting this installation's service only if none does.
+            try:
+                return await connect_with_remaining_budget()
+            except _AcceptedServiceUnresponsive:
+                raise
+            except ControlError as exc:
+                if exc.reason != "service_unavailable":
+                    raise
     if time.monotonic() >= deadline:
         raise ControlError("service_unavailable", retryable=True)
     # A consented hook may prime an absent service, but cannot replace a holder.

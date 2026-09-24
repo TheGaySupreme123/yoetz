@@ -12,11 +12,11 @@ anything. Select only your existing hosts with repeated `--host codex`, `--host 
 `--host cursor`. Supply the existing target values shown by your host registration when the guide
 requests them. It never guesses a home, installs another host, or chooses a new privacy recipe.
 
-For an ordinary installation managed by `uv tool`, first stop the old hosts/hooks and the Yoetz
-service through their supported lifecycle. Once those writers are stopped, the package step is:
+For an ordinary installation managed by `uv tool`, you do not need to quit your agent app or stop
+anything first. The package step is:
 
 ```text
-yoetz upgrade --accept --writers-stopped
+yoetz upgrade --accept
 ```
 
 This runs `uv tool upgrade yoetz`. It refuses source checkouts, pinned test instances, and isolated
@@ -24,17 +24,29 @@ runtimes so it cannot accidentally replace another installation. For a different
 use that manager's upgrade procedure and then return to the guide. A failed or timed-out package
 command is reported without claiming success; inspect the installed version before retrying.
 
-Start the fresh launcher and run `yoetz upgrade` again, with the same host target options. Do not
+Your agent can run it from inside the session you are using. That session, and any other session
+that is already open, keeps working on the previous version. When you next reopen your agent app
+or start a new session, its first Yoetz call retires the previous Yoetz service and starts the new
+one. You do not need to stop or restart anything to make that happen; `yoetz service restart`
+switches immediately if you do not want to wait. A process from before the update never replaces
+the newer service. If a still-open older session later reports that Yoetz was updated, reopen that
+session.
+
+Upgrading **from 0.2.x** is the exception: 0.2's own upgrade command still asks you to stop hosts,
+hooks, and the service first, because 0.2 cannot safely share the newer local observation state.
+Follow that procedure once; later updates do not need it.
+
+Run `yoetz upgrade` again with the same host target options to continue with host refresh. Do not
 repeat `--accept` just to continue. Package replacement does not itself refresh host files. When
-the package and the existing data are a supported pair, the first controlled service startup
-performs the backup-first data upgrade before the service becomes ready. It preserves existing
-tasks, settings, permissions, host integrations, observation consent, and recorded history; there
-is no per-task migration ceremony:
+the package and the existing data are a supported pair, the first controlled startup of the new
+service performs the backup-first data upgrade before the service becomes ready. It preserves
+existing tasks, settings, permissions, host integrations, observation consent, and recorded
+history; there is no per-task migration ceremony:
 
 - **Codex:** refresh the existing skill and inspect the exact plugin activation and MCP target.
   Apply only the fresh preview supplied by those surfaces, preserving its route and home.
 - **Claude Code:** use the native plugin update preview and its authorization procedure, apply
-  with the same request and digest, then reload or start a fresh session.
+  with the same request and digest, then reload or start a fresh session when convenient.
 - **Cursor:** use the native replacement preview and install procedure, then fully relaunch when
   runtime status requires it. Portable/development carriers use their original install procedure.
 - **Existing data:** the service handles a compatible 0.2-to-0.3 bundle upgrade during startup and

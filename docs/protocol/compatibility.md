@@ -221,21 +221,24 @@ claimed to consume Agent Plugins 1.0.0.
 Local-control schema `2.7.0` is the current append-only service-control wire. It retains the
 `2.6.0` method bodies and adds the project support method. Retained schema bytes establish
 historical decoding support, not interoperability between running package generations. Peers must
-match the schema-manifest digest; no source is inferred across versions. Because every resource
+match the schema-manifest digest; no source is inferred across versions. Because every schema
 change moves that digest, an upgraded installation cannot talk to the previous installation's
 still-running service, and an older CLI cannot talk to a newer still-running service: a
 decodable hello with a foreign digest is answered with this installation's hello-result and then
 refused as `service_incompatible`, and on-demand startup
-(the MCP bridge) or the explicit `yoetz service restart` replaces the stale holder with a service
-of the current installation through its ordinary bounded shutdown. Stale bridges are then refused
-in turn until their host restarts them. The 2026-08-27 Claude dogfood hit the newer-client /
+(the MCP bridge) or the explicit `yoetz service restart` replaces an older stale holder with a
+service of the current installation through its ordinary bounded shutdown. On-demand startup never
+replaces a holder stamped with a newer package; only an explicit restart may. Stale bridges are
+then refused in turn until their host session is reopened. A package-version change that leaves the
+digest unchanged is still decodable, and a new session's bridge retires that older service too
+(ADR-007, 2026-09-24 amendment). The 2026-08-27 Claude dogfood hit the newer-client /
 older-service direction and saw an opaque `INTERNAL_ERROR`; that is now a bounded
 `SERVICE_UNAVAILABLE` naming the repair. The 2026-08-28 dogfood hit the older-CLI / newer-service
 direction as an opaque `invalid_request` with no correlation id; the service now answers the
 hello-result so current CLIs name `service_incompatible` with holder identity and a diagnostic id.
 An older CLI whose closed method enum cannot decode the new project method can instead report
-`frame_invalid`. Use the updated launcher and restart existing host bridges as part of the package
-update; a frozen older wire is not widened to authorize newer methods.
+`frame_invalid`. Use the updated launcher; existing host bridges switch when their sessions are
+reopened. A frozen older wire is not widened to authorize newer methods.
 
 ## Change and deprecation process
 

@@ -90,27 +90,67 @@ manifests, the packaging/capability suites, and the release workflows under `.gi
 ## Amendment — package update and compatible data upgrade (2026-09-12)
 
 Package replacement and data migration are separate lifecycle stages. The supported `uv tool`
-carrier executes only `uv tool upgrade yoetz` from `yoetz upgrade --accept --writers-stopped`; the
-command refuses source checkouts, pinned test instances, and isolated runtimes. Other carriers
-follow their own package procedure. A successful carrier command is therefore not a host,
-service, or data-upgrade result.
+carrier executes only `uv tool upgrade yoetz` from `yoetz upgrade --accept` (the 2026-09-24
+amendment below removed the `--writers-stopped` attestation); the command refuses source checkouts,
+pinned test instances, and isolated runtimes. Other carriers follow their own package procedure. A
+successful carrier command is therefore not a host, service, or data-upgrade result.
 
-After old hosts, hooks, and the service have been quiesced, the fresh service generation runs the
-storage-owned `BundleUpgradeCoordinator.run_before_ready` phase after catalog migration and before
-publishing READY. It uses the existing catalog `maintenance_operations` row (`kind = 'migration'`,
+When the new package's service starts (after quiescence here; on reopen under the 2026-09-24
+amendment), the fresh service generation runs the storage-owned
+`BundleUpgradeCoordinator.run_before_ready` phase after catalog migration and before publishing
+READY. It uses the existing catalog `maintenance_operations` row (`kind = 'migration'`,
 `requested_target_version = '13'`) to resume one `package_upgrade_migration` operation, creates a
 verified machine-bound backup before applying bundle migration `0013` from schema 12 to 13, and
 reopens the bundle through the normal writer before projection replay verification. Existing task
 bundles, settings, permissions, host routes/integrations, consent, event history, objects, and
-frontiers are carried forward. A response loss or service restart reuses the recorded operation
-and backup identity; an unsupported or ambiguous path fails closed and keeps the installation out
-of READY until the documented recovery procedure succeeds.
+frontiers are carried forward. A response loss or service restart reuses the recorded operation and
+backup identity; an unsupported or ambiguous path fails closed and keeps the installation out of
+READY until the documented recovery procedure succeeds.
 
 Host refresh, plugin activation, reload, and fresh-session checks remain separate proof facets. An
 upgrade does not select new hosts, roots, ownership, observation profiles, privacy recipes,
 providers, or Expanded review. Release acceptance still requires artifact-bound package evidence,
 the controlled startup migration result where applicable, and independent per-host activation and
 runtime evidence.
+
+## Amendment — live package update, switch on reopen (2026-09-24, #820)
+
+This amendment supersedes the quiescence requirement above for upgrades that start from 0.3.0 or
+later. `yoetz upgrade --accept` runs `uv tool upgrade yoetz` while hosts, hooks, and the service
+keep running; `--writers-stopped` is still accepted, hidden, and ignored. The command keeps its
+carrier refusals (source checkouts, pinned test instances, isolated runtimes).
+
+1. **Open sessions finish on the previous release.** Their bridges stay connected to the service
+   that was running when the package was replaced. Because `uv tool upgrade` replaces the package
+   in place, the service loads every module it can reach shortly after startup
+   (`yoetz.{adapters,application,config,domain,kernel,observability,ports,protocol,service}` and
+   the hook handler it replays spools with), so a module first needed after the replacement is not
+   the next release's code inside the older process. Migrations are already loaded at import and
+   the schema catalog on first handshake. The MCP bridge loads the few modules it imports lazily
+   before it serves, for the same reason. Processes started by a release before this amendment do
+   not preload.
+2. **The next session switches.** When the MCP bridge a host starts for a session connects
+   on demand and the service's hello reports an older package version than the bridge's own, the
+   bridge retires that service through the same stamped-holder bounded-shutdown path used for an
+   incompatible holder, then spawns and connects to this installation's service. An incompatible
+   older holder is superseded as before. When no holder can be identified (no stamp, Windows), the
+   compatible older service keeps serving until its idle stop. Hooks and ordinary CLI commands
+   still never supersede.
+3. **Upgrades only move forward.** On-demand startup never signals a holder whose stamped
+   `service_version` is newer than the caller's: a bridge that predates the in-place upgrade (or an
+   older second installation) reports `service_incompatible`, and the bridge asks the user to reopen
+   the session instead of replacing its successor. Unparsable or absent stamped versions keep the
+   previous version-agnostic behavior. Only an explicit human `yoetz service restart` may replace a
+   newer holder, which keeps rollback possible.
+4. **Coexistence is a release obligation.** Every release must keep its local state readable and
+   degrade-safe while the previous release's service is still writing it, as observation-local `/11`
+   and later do. A release that cannot meet that must say so in its release notes and ship its own
+   guard; it may not silently rely on quiescence. Upgrading from 0.2.x still follows 0.2's quiesced
+   procedure, which its shipped command enforces, because `/10` writers cannot share `/11` state.
+
+The first controlled startup of the new service runs the data upgrade described above. No live
+upgrade over running native host sessions is claimed as release evidence; source and unit tests
+cover the ordering, retirement, and command behavior.
 
 ## Implementation-lock identities
 

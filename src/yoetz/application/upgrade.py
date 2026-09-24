@@ -74,21 +74,22 @@ def build_upgrade_plan(
     steps = [
         UpgradeStep(
             "Before package replacement",
-            "Keep current settings and read the target release's migration notes. When old/new "
-            "writers cannot coexist, quit the affected hosts and stop the service through its "
-            "supported lifecycle before replacing the package. Never kill processes by pattern.",
+            "Keep current settings and read the target release's notes. Nothing needs to be "
+            "stopped: hosts, hooks and the service keep running. Never kill processes by pattern.",
             ((launcher, "version", "--json"), (launcher, "service", "status", "--json")),
         ),
         UpgradeStep(
             "Replace the package",
-            "Run yoetz upgrade --accept --writers-stopped only for this uv-tool installation. A successful package "
-            "command still requires a fresh launcher, host refresh, and any required migration.",
+            "Run yoetz upgrade --accept only for this uv-tool installation, even from inside an "
+            "open agent session. Open sessions keep working on the previous version; a successful "
+            "package command still leaves host refresh and the switch to the new version below.",
             (PACKAGE_UPGRADE_ARGV,),
         ),
         UpgradeStep(
             "Data and service",
-            "Use the fresh launcher. An incompatible holder can be superseded by the ordinary "
-            "service handshake; use service restart only when its status/repair asks for it. "
+            "The next session opened after the upgrade (reopen the agent app or start a new "
+            "session) retires the previous service on its first Yoetz call and starts the new "
+            "one; use service restart only to switch sooner or when status/repair asks for it. "
             "On unlock, supported existing task ledgers upgrade automatically with a verified "
             "backup before new writes are admitted. Existing tasks, settings and permissions "
             "are retained. If interrupted, retry the ordinary service startup; it resumes the "
@@ -184,8 +185,9 @@ def build_upgrade_plan(
     steps.append(
         UpgradeStep(
             "Activate and verify",
-            "Reload/start a fresh Claude session; fully quit/relaunch Codex or Cursor when runtime "
-            "status requires it. Verify the fresh package version, service identity, each selected "
+            "Reopen the agent app or start a fresh session when convenient; nothing has to be "
+            "quit first. Relaunch Codex or Cursor fully only when runtime status requires it for "
+            "a refreshed host artifact. Verify the fresh package version, service identity, each selected "
             "host's artifact/runtime status and the service's completed data upgrade before reporting completion. "
             "Offer new settings separately; upgrading never opts into Expanded review or new disclosure.",
             ((launcher, "version", "--json"), (launcher, "service", "status", "--json")),

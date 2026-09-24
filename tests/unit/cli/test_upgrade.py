@@ -27,14 +27,40 @@ def test_plan_does_not_execute_package_or_infer_host_roots(monkeypatch: pytest.M
     assert "Expanded review" in result.output
 
 
-def test_acceptance_requires_quiescence_before_invocation(monkeypatch: pytest.MonkeyPatch) -> None:
-    def unexpected() -> str:
-        raise AssertionError("execution before quiescence")
+@pytest.mark.parametrize("legacy_flag", [False, True])
+def test_acceptance_runs_while_sessions_keep_working(
+    monkeypatch: pytest.MonkeyPatch, legacy_flag: bool
+) -> None:
+    """Nothing has to be stopped first; open sessions switch when they are reopened (#820)."""
 
-    monkeypatch.setattr("yoetz.cli.upgrade.execute_package_upgrade", unexpected)
-    result = _RUNNER.invoke(app, ["upgrade", "--accept"])
-    assert result.exit_code == 2
-    assert "upgrade_writers_must_be_stopped" in result.output
+    calls: list[bool] = []
+
+    def execute() -> str:
+        calls.append(True)
+        return "package_command_succeeded"
+
+    monkeypatch.setattr("yoetz.cli.upgrade.execute_package_upgrade", execute)
+    argv = ["upgrade", "--accept"] + (["--writers-stopped"] if legacy_flag else [])
+    result = _RUNNER.invoke(app, argv)
+    assert result.exit_code == 0, result.output
+    assert calls == [True]
+    assert "upgrade_writers_must_be_stopped" not in result.output
+    assert "Open sessions keep working on the previous version" in result.output
+    assert "retires the previous service automatically" in result.output
+
+
+def test_plan_never_asks_to_stop_hosts_or_service() -> None:
+    steps = upgrade.build_upgrade_plan(["codex"], {})
+    text = "\n".join(step.detail for step in steps)
+    assert "Nothing needs to be stopped" in text
+    assert "--writers-stopped" not in text
+    assert "stop the service" not in text
+    replace = next(step for step in steps if step.title == "Replace the package")
+    assert replace.commands == (upgrade.PACKAGE_UPGRADE_ARGV,)
+    assert "yoetz upgrade --accept only" in replace.detail
+    help_result = _RUNNER.invoke(app, ["upgrade", "--help"])
+    assert help_result.exit_code == 0
+    assert "--writers-stopped" not in help_result.output
 
 
 @pytest.mark.parametrize(
@@ -51,7 +77,7 @@ def test_package_result_never_claims_host_or_data_upgrade(
         return outcome
 
     monkeypatch.setattr("yoetz.cli.upgrade.execute_package_upgrade", execute)
-    result = _RUNNER.invoke(app, ["upgrade", "--accept", "--writers-stopped"])
+    result = _RUNNER.invoke(app, ["upgrade", "--accept"])
     assert result.exit_code == code
     assert calls == [True]
     assert outcome in result.output

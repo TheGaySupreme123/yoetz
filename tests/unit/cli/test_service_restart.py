@@ -42,8 +42,9 @@ def test_restart_supersedes_an_incompatible_holder_then_starts_this_installation
     async def refused(**_kwargs: Any) -> Any:
         raise ControlError("service_incompatible", retryable=True)
 
-    async def supersede(*, deadline: float) -> bool:
-        events.append("supersede")
+    async def supersede(*, deadline: float, replace_newer: bool = False) -> bool:
+        # An explicit human restart is the one path that may replace a newer holder (#820).
+        events.append(f"supersede:{replace_newer}")
         return True
 
     async def released(pid: int, *, deadline: float) -> bool:
@@ -63,7 +64,7 @@ def test_restart_supersedes_an_incompatible_holder_then_starts_this_installation
     result = CliRunner().invoke(module.app, ["service", "restart", "--json"])
 
     assert result.exit_code == 0, result.output
-    assert events == ["supersede", "released:4242", "spawn:False"]
+    assert events == ["supersede:True", "released:4242", "spawn:False"]
     assert '"state":"locked"' in result.output
 
 
@@ -73,7 +74,7 @@ def test_restart_reports_an_incompatible_holder_it_cannot_identify(
     async def refused(**_kwargs: Any) -> Any:
         raise ControlError("service_incompatible", retryable=True)
 
-    async def no_candidate(*, deadline: float) -> bool:
+    async def no_candidate(*, deadline: float, replace_newer: bool = False) -> bool:
         return False
 
     async def must_not_spawn(kind: Any, **kwargs: Any) -> Any:

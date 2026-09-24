@@ -2268,9 +2268,16 @@ and `yoetz service restart` — treats an incompatible holder as an upgrade to c
 `service_supersede` diagnostic, sends the holder its ordinary bounded-shutdown signal, waits for the
 lock to be released inside the same 30-second budget, then spawns and connects to a successor of
 this installation. It never signals a process it cannot identify through the owner-only stamp, a
-holder whose stamped identity equals this installation's, or anything on Windows; those cases and a
-holder that outlives the budget surface as `service_incompatible` whose bridge message names
-`yoetz service restart`. Plain `connect_service` (ordinary CLI commands and hook drains) never starts or supersedes.
+holder whose stamped identity equals this installation's, a holder whose stamped `service_version`
+is newer than this installation's (only the explicit `yoetz service restart` may replace one), or
+anything on Windows; those cases and a holder that outlives the budget surface as
+`service_incompatible`. The bridge message names `yoetz service restart`, except for a newer holder,
+where it asks the user to reopen the session. The MCP bridge also retires a *compatible* holder
+whose hello reports an older package version than the bridge's, through the same stamped
+bounded-shutdown path, so the first session opened after an in-place `yoetz upgrade --accept`
+switches to the new package while already-open sessions keep the service they had (ADR-007,
+2026-09-24 amendment). When no holder can be identified it keeps using the compatible service.
+Plain `connect_service` (ordinary CLI commands and hook drains) never starts or supersedes.
 Consented hook auto-attachment uses the same fixed on-demand launcher with
 `supersede_incompatible=False` and a one-second connection/startup budget. It reuses an
 already-stamped compatible starting holder only while an owner-only nonblocking flock probe
@@ -2286,8 +2293,11 @@ queued structural rows pending. SessionStart context distinguishes `service_unav
 material work, then its exact typed continuation. Hook exit zero is graceful degradation, not
 proof of service readiness or a mapped task. No transient content is reconstructed from queued
 structural envelopes. This path conveys no initialization, unlock, privacy, or takeover authority.
-Bridges of the stale installation reconnect and are refused in turn, which is the correct outcome
-of an upgrade: the one per-user endpoint belongs to the installation actually in use. The MCP bridge supplies a
+Bridges of the stale installation reconnect and are refused in turn until their session is
+reopened, and never replace the newer service: the one per-user endpoint belongs to the newest
+installation in use. The service imports every module it can reach shortly after startup, and the
+bridge its lazily imported modules before serving, so an in-place package replacement does not mix
+the next release's code into either. The MCP bridge supplies a
 **30-second** call deadline for `start`, `publish_work`, `respond`, `status`, and `receipt`, and a
 **300-second** deadline for `check`; these use the existing private `deadline_ms` envelope field and
 do not change the public workflow-tool schemas. A timed-out write has an unknown outcome: the bridge

@@ -1202,8 +1202,12 @@ do not execute an upgrade unless the user separately instructs you to do so.
 
 For an explicit upgrade request, run `yoetz upgrade` to read the staged workflow. Select only the
 existing hosts and preserve their exact roots, ownership, route, observation profile and settings.
-Quiesce old writers before accepting package replacement. Use the fresh launcher for the carried
-host preview/authorization/apply/status steps. After package replacement, a compatible 0.2-to-0.3
+Package replacement does not require stopping hosts, hooks, or the service: `yoetz upgrade
+--accept` can run from inside the current session, which keeps working on the previous version.
+The first Yoetz call of the next session the user opens (reopening the agent app or starting a new
+session) retires the previous service and starts the new one; do not stop or restart anything to
+force the switch unless the user asks. Use the updated launcher for the carried host
+preview/authorization/apply/status steps. When the new service starts, a compatible 0.2-to-0.3
 bundle schema migration runs automatically during controlled service startup, backup-first and
 before READY; it preserves existing task data and needs no per-task ceremony. Never report the
 whole upgrade complete from the package command alone. If startup reports an unsupported layout,

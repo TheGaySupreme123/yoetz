@@ -348,14 +348,17 @@ def upgrade_cmd(
     accept: Annotated[
         bool,
         typer.Option(
-            "--accept", help="Run only the fixed uv package upgrade; other stages stay explicit."
+            "--accept",
+            help="Run only the fixed uv package upgrade now; open sessions keep working and "
+            "switch to the new version when they are reopened.",
         ),
     ] = False,
     writers_stopped: Annotated[
         bool,
         typer.Option(
             "--writers-stopped",
-            help="Confirm old hosts/hooks and service have been quiesced before package replacement.",
+            hidden=True,
+            help="Accepted for compatibility; stopping hosts and the service is no longer required.",
         ),
     ] = False,
     project_root: Annotated[
@@ -407,6 +410,7 @@ def upgrade_cmd(
     ] = None,
 ) -> None:
     """Plan a complete upgrade while preserving settings; optionally replace this uv tool."""
+    del writers_stopped  # Older guidance passed it; the package step no longer needs quiescence.
     module = importlib.import_module("yoetz.cli.upgrade")
     operation = cast(Callable[..., int], module.run_upgrade)
     options = {
@@ -427,7 +431,6 @@ def upgrade_cmd(
             hosts=host,
             options={key: value for key, value in options.items() if value is not None},
             accept=accept,
-            writers_stopped=writers_stopped,
         )
     )
 
@@ -1651,7 +1654,8 @@ async def _service_restart(json_output: bool) -> int:
             client = await build_service_client(workspace_locator=None)
         except ControlError as error:
             if error.reason in {"service_incompatible", "protocol_mismatch"}:
-                if not await supersede_incompatible_service(deadline=deadline):
+                # An explicit human restart may also replace a newer holder (a rollback).
+                if not await supersede_incompatible_service(deadline=deadline, replace_newer=True):
                     return _control_failure(error, json_output=json_output)
             elif error.reason != "service_unavailable":
                 return _control_failure(error, json_output=json_output)
