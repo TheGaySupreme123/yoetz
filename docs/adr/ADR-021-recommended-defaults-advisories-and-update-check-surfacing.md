@@ -195,3 +195,14 @@ most recent package decision under the store lock. An older response, including 
 the older installation up to date, cannot regress that known release or resurrect dismissed older
 advice. Once the installed version catches up, the pending update clears. The READY refresh
 deadline includes both gate acquisition and evaluation, preserving gate order and cancellation.
+
+## Update-notice delivery amendment (issue #819)
+
+The maintainer requested this scoped change. At SessionStart the cached recommendation is now
+appended after existing task or observation advice when both fit the bounded context, instead of
+being withheld whenever other advice is present; task advice still comes first and is never
+truncated for it. A package-update notice additionally asks the agent to tell the user now, offer
+a subagent that follows `yoetz upgrade` once the user agrees, and state that the new version takes
+effect only after the user restarts Codex, Claude Code, or Cursor. Accept/decline commands,
+release scoping, the PyPI-only source (no npm check), and the rule that the hook performs no
+network request are unchanged.
