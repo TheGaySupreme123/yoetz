@@ -162,8 +162,16 @@ def capacity_change_disclosure(
     else:
         change = "unchanged"
     fair_share_limits = BudgetLimits.for_capacity(current if target is None else target)
+    # "Lower it later" must undo an increase, so it restores the current
+    # capacity; every other change points back at the recommended default.
+    restore = current if change == "increase" else STANDARD_CAPACITY
+    restore_arguments = (
+        f"--capacity {restore.label}"
+        if restore.profile is not None
+        else f"--capacity custom --queue-count {restore.queue_count}"
+    )
     selection_arguments = (
-        f"--workspace {workspace} --detail {mode.value} --capacity {STANDARD_CAPACITY.label} {flag}"
+        f"--workspace {workspace} --detail {mode.value} {restore_arguments} {flag}"
     )
     lower_command = (
         f"yoetz observe selection-preview {selection_arguments} then "

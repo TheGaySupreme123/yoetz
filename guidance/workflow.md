@@ -441,7 +441,8 @@ yoetz observe selection-apply --workspace /exact/project \
 ```
 
 Explain how to lower or pause before and after applying. To lower it, preview and apply
-`--capacity standard` at the same scope, or run `yoetz observe selection-revoke` at that scope.
+a smaller capacity at the same scope (the "Lower it later" command restores the previous
+capacity after an increase), or run `yoetz observe selection-revoke` at that scope.
 `yoetz observe pause --workspace /exact/project` pauses new observation ingest and
 `yoetz observe resume --workspace /exact/project` restarts it. Lowering affects future admission
 only; accepted records drain and are not deleted.

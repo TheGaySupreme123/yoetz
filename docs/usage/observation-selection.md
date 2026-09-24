@@ -132,7 +132,8 @@ provider limits no longer apply.
 
 ### Lower or pause
 
-To lower a setting, preview and apply `--capacity standard` at the same scope, or revoke it (see
+To lower a setting, preview and apply a smaller capacity at the same scope (the preview's
+"Lower it later" command restores the capacity you had before an increase), or revoke it (see
 below). To stop new observation ingest while keeping consent and evidence, run
 `yoetz observe pause --workspace /exact/project`; `yoetz observe resume --workspace
 /exact/project` restarts it.

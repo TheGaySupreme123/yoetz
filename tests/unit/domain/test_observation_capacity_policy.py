@@ -146,6 +146,25 @@ def test_decrease_lines_say_accepted_records_drain() -> None:
     assert "disk use" not in " ".join(lines)
 
 
+def test_lower_command_restores_the_current_capacity_after_an_increase() -> None:
+    # A custom 64-row session raising to 128 must be able to come back to 64,
+    # not be pointed at the 512 default, which would raise it further.
+    record = _disclosure(ObservationCapacity(64), "custom", queue_count=128)
+    assert record["change"] == "increase"
+    lower = str(record["lower_command"])
+    assert "--capacity custom --queue-count 64 --persist" in lower
+    assert "--capacity standard" not in lower
+    assert "Lower it later with: yoetz observe selection-preview" in " ".join(
+        render_capacity_disclosure_lines(record)
+    )
+    # A named profile is restored by its label.
+    from_larger = _disclosure(LARGER_CAPACITY, "largest")
+    assert "--capacity larger --persist" in str(from_larger["lower_command"])
+    # Every other change keeps pointing at the recommended default.
+    decrease = _disclosure(LARGEST_CAPACITY, "custom", queue_count=700)
+    assert "--capacity standard --persist" in str(decrease["lower_command"])
+
+
 def test_unchanged_request_has_no_consequences() -> None:
     record = _disclosure(LARGER_CAPACITY, "2048")
     assert record["change"] == "unchanged"

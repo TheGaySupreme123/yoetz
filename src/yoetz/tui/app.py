@@ -146,6 +146,9 @@ _CAPACITY_WORDS: Final[dict[str, str]] = {
 }
 _PAUSE_COMMAND: Final = f"yoetz observe pause --workspace {WORKSPACE_PLACEHOLDER}"
 _RESUME_COMMAND: Final = f"yoetz observe resume --workspace {WORKSPACE_PLACEHOLDER}"
+_REVOKE_COMMAND: Final = (
+    f"yoetz observe selection-revoke --workspace {WORKSPACE_PLACEHOLDER} --persist"
+)
 _MIB: Final = 1024 * 1024
 
 
@@ -1462,7 +1465,12 @@ class YoetzTui(App[int]):
                 f"detail {_closed_token(selection.get('detail'), _DETAILS)}, "
                 "this workspace",
                 *_effective_budget_lines(budget),
-                "Lower it later: /observe → Recommended.",
+                (
+                    "Lower it later: /observe → Recommended."
+                    if disclosure.get("change") == "increase"
+                    else "Return to the default with: "
+                    f"{_disclosure_command(disclosure, 'revoke_command', _REVOKE_COMMAND)}"
+                ),
                 "Pause new observation ingest with: "
                 f"{_disclosure_command(disclosure, 'pause_command', _PAUSE_COMMAND)}",
                 "Resume with: "

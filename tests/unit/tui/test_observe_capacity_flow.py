@@ -112,8 +112,15 @@ def _selection(capacity: ObservationCapacity) -> dict[str, object]:
 class _Runtime:
     """Only what ``/observe`` asks: status, preview, apply, and the project root."""
 
-    def __init__(self, *, budget: bool = True, preview_error: RuntimeError_ | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        budget: bool = True,
+        preview_error: RuntimeError_ | None = None,
+        current: ObservationCapacity = STANDARD_CAPACITY,
+    ) -> None:
         self._status = _status(budget=budget)
+        self._current = current
         self._preview_error = preview_error
         self.previews: list[CapacityRequest] = []
         self.applies: list[tuple[CapacityRequest, str]] = []
@@ -126,7 +133,7 @@ class _Runtime:
 
     def _disclosure(self, capacity: CapacityRequest) -> Mapping[str, object]:
         return capacity_change_disclosure(
-            current=STANDARD_CAPACITY,
+            current=self._current,
             current_origin="default",
             requested=capacity,
             scope="workspace",
@@ -305,6 +312,23 @@ async def test_custom_preview_discloses_the_change_and_cancel_leaves_it_unchange
     # Cancel is the default on the apply question.
     assert approval.options[approval.cursor].key == "cancel"
     assert "Capacity was left unchanged." in harness.transcript
+
+
+async def test_applying_a_decrease_points_back_at_the_default_instead_of_lowering() -> None:
+    # After lowering to Recommended, "lower it later -> Recommended" would be
+    # circular; after a custom count below 512 it would raise the capacity.
+    runtime = _Runtime(current=ObservationCapacity(2_048))
+    harness = _Harness(runtime, ["recommended", "apply"])
+
+    await harness.run()
+
+    assert runtime.applies == [(CapacityRequest.for_capacity(STANDARD_CAPACITY), _DIGEST)]
+    _, body = harness.titled("Local retention capacity applied")
+    assert "Lower it later: /observe → Recommended." not in body
+    assert (
+        "Return to the default with: yoetz observe selection-revoke --workspace <workspace> "
+        "--persist" in body
+    )
 
 
 async def test_apply_sends_the_previewed_digest_and_shows_the_lower_and_pause_path() -> None:
