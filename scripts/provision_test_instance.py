@@ -310,6 +310,30 @@ def command_dispose(args: argparse.Namespace) -> dict[str, object]:
         sys.stderr.write(result.stderr.decode("utf-8", errors="replace"))
         raise _fail("instance_dispose_failed: the root was left in place")
     outcome = json.loads(result.stdout)
+    retained_root = layout["runtime"].parent / f".{layout['runtime'].name}-releases"
+    if retained_root.exists():
+        # Newer installed processes keep read-only runtime copies. The instance's service is
+        # already stopped above; use the runtime's own lease-aware cleanup before removal.
+        cleaned = _run(
+            [
+                str(layout["runtime"] / "bin" / "python"),
+                "-I",
+                "-c",
+                "import json,sys; from pathlib import Path; "
+                "from yoetz.adapters.release_runtime import prune_release_runtimes; "
+                "print(json.dumps(prune_release_runtimes(Path(sys.prefix))))",
+            ],
+            env=_clean_env(),
+            timeout=60,
+        )
+        if cleaned.returncode != 0:
+            raise _fail("runtime_cleanup_failed: retained runtimes were left in place")
+        counts = json.loads(cleaned.stdout)
+        if not isinstance(counts, list):
+            raise _fail("runtime_cleanup_failed: retained runtimes were left in place")
+        values = cast(list[object], counts)
+        if len(values) != 2 or type(values[1]) is not int or values[1] != 0:
+            raise _fail("runtime_in_use: close this instance's host sessions and retry disposal")
     shutil.rmtree(layout["root"])
     return {"tag": args.tag, "state": "removed", "disposed": True, "instance": outcome}
 

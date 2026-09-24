@@ -170,7 +170,7 @@ _MACHINE_ACTION_HOOK_NEXT: Final[Mapping[str, str]] = {
     ),
     "update_yoetz": (
         "Tell the user now. Offer a subagent that follows `yoetz upgrade`, then tell the user "
-        "to restart Codex, Claude Code, or Cursor so the new version takes effect."
+        "to start a fresh session; restart Codex, Claude Code, or Cursor only if activation requires it."
     ),
 }
 

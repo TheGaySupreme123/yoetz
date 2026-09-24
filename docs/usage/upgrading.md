@@ -19,12 +19,15 @@ anything first. The package step is:
 yoetz upgrade --accept
 ```
 
-This runs `uv tool upgrade yoetz`. It refuses source checkouts, pinned test instances, and isolated
-runtimes so it cannot accidentally replace another installation. For a different package manager,
+This installs the newest eligible version through uv, replacing an old version pin and keeping
+supported extras. It confirms the result using a fresh launcher; an unchanged version is reported
+as unchanged. Source checkouts, pinned test instances, isolated runtimes and custom uv resolution
+settings are refused so their installation choices cannot be silently replaced. For a different package manager,
 use that manager's upgrade procedure and then return to the guide. A failed or timed-out package
 command is reported without claiming success; inspect the installed version before retrying.
 
-Your agent can run it from inside the session you are using. That session, and any other session
+Your agent can run it from inside the session you are using. Running processes keep their own
+release files while the installed package changes. That session, and any other session
 that is already open, keeps working on the previous version. When you next reopen your agent app
 or start a new session, its first Yoetz call retires the previous Yoetz service and starts the new
 one. You do not need to stop or restart anything to make that happen; `yoetz service restart`
@@ -35,6 +38,10 @@ session.
 Upgrading **from 0.2.x** is the exception: 0.2's own upgrade command still asks you to stop hosts,
 hooks, and the service first, because 0.2 cannot safely share the newer local observation state.
 Follow that procedure once; later updates do not need it.
+
+Unused old runtime copies are cleaned up automatically when a new process starts. For explicit
+cleanup, `yoetz upgrade --prune-runtimes` removes only copies no process is using. It does not stop
+sessions or remove settings, task data or credentials.
 
 Run `yoetz upgrade` again with the same host target options to continue with host refresh. Do not
 repeat `--accept` just to continue. Package replacement does not itself refresh host files. When

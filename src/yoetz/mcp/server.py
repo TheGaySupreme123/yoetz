@@ -156,16 +156,6 @@ _GUIDANCE_BY_URI: Final = MappingProxyType(
 # answered by the live service and reconnecting around it drops the session for nothing, so both
 # projection reasons are handled in place and surfaced with their own remedy.
 _RECONNECT_REASONS: Final = frozenset({"service_unavailable", "service_generation_changed"})
-# Modules the bridge only imports inside functions. An open session's bridge outlives an in-place
-# ``yoetz upgrade --accept``, so they are loaded at startup; a module first imported after the
-# package was replaced would be the next release's code inside this bridge (#820).
-_BRIDGE_LAZY_MODULES: Final = (
-    "packaging.version",
-    "yoetz.application.applied_mcp_route",
-    "yoetz.cli.hook_diagnostics",
-    "yoetz.observability.diagnostics",
-    "yoetz.service.lifecycle",
-)
 _DISCARD_CLIENT_REASONS: Final = _RECONNECT_REASONS | {"vault_locked"}
 # Availability failures describe the host binding (this bridge process, its endpoint, and the
 # service holder), not one request. Once one call has reported such a failure, later calls under
@@ -380,6 +370,12 @@ def _runtime_launcher_from_argv() -> tuple[str, ...] | None:
     if serve_index is None or not argv[:serve_index]:
         return None
     prefix = argv[:serve_index]
+    from yoetz.adapters.release_runtime import original_module_launcher
+
+    original = original_module_launcher(Path(prefix[0]))
+    if original is not None:
+        prefix = (*original, *prefix[1:])
+        return prefix if _valid_runtime_launcher(prefix) else None
     try:
         package_main = (Path(__file__).resolve().parents[1] / "__main__.py").resolve(strict=True)
         first = Path(prefix[0]).resolve(strict=True)
@@ -2773,20 +2769,7 @@ def main(
         isolation_root=registration_isolation_root,
     )
     record_startup_route_drift(runtime.route_profile, host_profile=runtime.host_profile)
-    _load_bridge_code()
     anyio.run(
         run_stdio,
         runtime,
     )
-
-
-def _load_bridge_code() -> None:
-    """Load the bridge's lazily imported modules now; one that cannot load stays lazy."""
-
-    import importlib
-
-    for name in _BRIDGE_LAZY_MODULES:
-        try:
-            importlib.import_module(name)
-        except Exception:
-            continue

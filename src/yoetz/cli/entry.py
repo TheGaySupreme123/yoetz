@@ -298,6 +298,33 @@ def main() -> None:
 
     argv = sys.argv[1:]
     if (
+        os.name != "nt"
+        and (
+            argv[:2] in (["mcp", "serve"], ["service", "run"])
+            or argv[:1] in (["hooks"], ["upgrade"])
+        )
+        and not any(token in {"--help", "-h"} for token in argv)
+        and "--prune-runtimes" not in argv
+    ):
+        from yoetz.adapters.release_runtime import ReleaseRuntimeError, enter_release_runtime
+
+        try:
+            enter_release_runtime(argv)
+        except ReleaseRuntimeError as error:
+            message = {
+                "release_runtime_busy": "A package update is running. Retry after it finishes.",
+                "release_runtime_changed_retry": "The package changed during startup. Retry from the installed launcher.",
+                "release_runtime_external_link": "This runtime links to editable or external package files. Use a regular installed Yoetz package.",
+            }.get(
+                str(error),
+                "The retained runtime could not be verified. Repair this Yoetz installation.",
+            )
+            sys.stderr.write(f"release_runtime_unavailable: {message}\n")
+            raise SystemExit(20) from None
+        except OSError:
+            sys.stderr.write("release_runtime_unavailable: retry from the installed launcher.\n")
+            raise SystemExit(20) from None
+    if (
         len(argv) == 6
         and argv[:3] == ["hooks", "startup-gate", "--host"]
         and argv[3] in {"claude", "cursor"}

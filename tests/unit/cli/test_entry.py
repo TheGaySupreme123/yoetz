@@ -426,3 +426,35 @@ def test_main_falls_through_to_the_full_cli_on_posix(monkeypatch: pytest.MonkeyP
     entry.main()
 
     assert calls == ["cli"]
+
+
+def test_runtime_isolation_failure_does_not_emit_a_hook_allow(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from yoetz.adapters import release_runtime
+
+    def refuse(_arguments: list[str]) -> None:
+        raise release_runtime.ReleaseRuntimeError("release_runtime_busy")
+
+    monkeypatch.setattr(release_runtime, "enter_release_runtime", refuse)
+    monkeypatch.setattr(sys, "argv", ["yoetz", "hooks", "cursor-observe", "--event", "preToolUse"])
+    with pytest.raises(SystemExit) as error:
+        entry.main()
+    assert error.value.code == 20
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "package update is running" in captured.err
+
+
+def test_runtime_cleanup_does_not_take_its_own_serving_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yoetz.adapters import release_runtime
+
+    def unexpected(_arguments: list[str]) -> None:
+        raise AssertionError("cleanup must not lease its own generation")
+
+    monkeypatch.setattr(release_runtime, "enter_release_runtime", unexpected)
+    monkeypatch.setattr(entry, "_run_full_cli", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["yoetz", "upgrade", "--prune-runtimes"])
+    entry.main()

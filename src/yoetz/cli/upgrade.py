@@ -8,10 +8,31 @@ from collections.abc import Mapping, Sequence
 import typer
 
 from yoetz.adapters.package_upgrade import execute_package_upgrade
+from yoetz.adapters.release_runtime import installation_prefix, prune_release_runtimes
 from yoetz.application.upgrade import HOSTS, build_upgrade_plan
 
 
-def run_upgrade(*, hosts: Sequence[str] | None, options: Mapping[str, str], accept: bool) -> int:
+def run_upgrade(
+    *,
+    hosts: Sequence[str] | None,
+    options: Mapping[str, str],
+    accept: bool,
+    prune_runtimes: bool = False,
+) -> int:
+    if prune_runtimes:
+        if accept:
+            typer.echo("Choose either --accept or --prune-runtimes.", err=True)
+            return 2
+        try:
+            removed, retained = prune_release_runtimes(installation_prefix())
+        except OSError, ValueError:
+            typer.echo(
+                "Runtime cleanup could not safely complete; running sessions were not stopped.",
+                err=True,
+            )
+            return 2
+        typer.echo(f"Removed {removed} unused runtime copies; kept {retained} in use.")
+        return 0
     try:
         steps = build_upgrade_plan(hosts or HOSTS, options)
     except ValueError as exc:
@@ -37,6 +58,15 @@ def run_upgrade(*, hosts: Sequence[str] | None, options: Mapping[str, str], acce
     except OSError, ValueError:
         outcome = "runtime_identity_unavailable"
     typer.echo(f"\nPackage step: {outcome}")
+    if outcome == "package_already_current":
+        typer.echo("The fresh launcher reports the same version. No newer version was installed.")
+        return 0
+    if outcome == "refused_custom_uv_installation":
+        typer.echo(
+            "This installation has custom package sources, dependencies, or options. "
+            "Update it through its original installation procedure to preserve those choices."
+        )
+        return 2
     if outcome != "package_command_succeeded":
         typer.echo("No full upgrade is claimed. Resolve the package step before continuing.")
         return 2

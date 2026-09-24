@@ -134,7 +134,10 @@ uv run python scripts/provision_test_instance.py dispose --base ~/.yz-instances 
 The snapshot's own launcher runs `yoetz instance dispose --root <base>/<tag>/state`: it probes
 the root's singleton lock, sends the stamped holder (and nothing else) a bounded stop, waits up to
 the drain window, optionally copies the log files to `<retain>/<installation_id>/`, removes the
-root, and removes the pin that named it. The script then removes the runtime and wheel. Repeating
+root, and removes the pin that named it. The script then prunes unused retained release runtimes and removes the runtime and wheel.
+If a host still holds a retained-runtime lease, it reports `runtime_in_use` and keeps those
+runtime files; close that instance's host sessions and retry. It never kills a bridge to remove
+a copy. Repeating
 `dispose` reports `absent` and exits 0. `dispose` refuses roots without a persistent or
 disposable marker (`instance_not_disposable`): it cannot remove the everyday install or an
 unlabeled ADR-026 root. If a holder does not release within the window

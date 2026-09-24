@@ -179,11 +179,12 @@ schemas still fail closed.
 `yoetz upgrade` is a connection-free human-readable plan for the package, existing host targets,
 data migration, activation and verification. It emits only inspection/preview commands for host
 steps, requiring explicit existing roots and configuration rather than inferring ambient defaults.
-`--accept` invokes only the fixed `uv tool upgrade yoetz` command after checking that this is the
+`--accept` invokes the ADR-007 pin-aware uv install/upgrade action after checking that this is the
 ambient uv tool installation; since the ADR-007 2026-09-24 amendment it needs no quiescence, and the
 old `--writers-stopped` attestation is accepted and ignored. Source checkouts and isolated/pinned
 runtimes refuse. Package-manager output is not copied into structural diagnostics. A timeout leaves
-the package outcome unknown. A successful command still reports host refresh and activation as
+the package outcome unknown. The fresh launcher must confirm a version change; exit zero alone is not an installed update.
+A successful package step still reports host refresh and activation as
 unverified; a fresh invocation is required to continue from the new package. Compatible bundle
 migration is owned by that fresh service startup and runs backup-first before READY, without a
 per-task ceremony; unsupported or ambiguous migration remains a typed recovery boundary. The
@@ -203,6 +204,7 @@ appended after existing task or observation advice when both fit the bounded con
 being withheld whenever other advice is present; task advice still comes first and is never
 truncated for it. A package-update notice additionally asks the agent to tell the user now, offer
 a subagent that follows `yoetz upgrade` once the user agrees, and state that the new version takes
-effect only after the user restarts Codex, Claude Code, or Cursor. Accept/decline commands,
+effect for a fresh session after the host reloads its bridge; a full host restart is needed only
+when its activation status requires it. Accept/decline commands,
 release scoping, the PyPI-only source (no npm check), and the rule that the hook performs no
 network request are unchanged.

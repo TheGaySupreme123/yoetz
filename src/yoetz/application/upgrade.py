@@ -10,8 +10,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from yoetz.adapters.package_upgrade import PACKAGE_UPGRADE_ARGV
-
 HOSTS: Final = ("codex", "claude", "cursor")
 _PATH_OPTIONS: Final = frozenset(
     {
@@ -83,7 +81,7 @@ def build_upgrade_plan(
             "Run yoetz upgrade --accept only for this uv-tool installation, even from inside an "
             "open agent session. Open sessions keep working on the previous version; a successful "
             "package command still leaves host refresh and the switch to the new version below.",
-            (PACKAGE_UPGRADE_ARGV,),
+            ((launcher, "upgrade", "--accept"),),
         ),
         UpgradeStep(
             "Data and service",

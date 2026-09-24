@@ -86,7 +86,10 @@ For an explicit user-requested update, run `yoetz upgrade` and preserve the exis
 ownership, route, observation profile, settings, permissions, and integrations. Nothing needs to
 be stopped before accepting package replacement: the current session keeps working on the previous
 version, and the first Yoetz call of the next session the user opens retires the previous service
-and starts the new one. The package command is only the package step. On that controlled service
+and starts the new one. Running processes retain their code, dependencies and resources; their
+settings, permissions, vault and task data stay in the existing installation. The fresh launcher
+must confirm the installed version; exit zero or an unchanged version is not a completed update.
+The package command is only the package step. On that controlled service
 startup, a compatible 0.2-to-0.3 bundle migration runs backup-first before READY and preserves
 existing task data; the user does not perform a per-task migration ceremony.
 

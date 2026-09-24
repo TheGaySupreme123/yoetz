@@ -353,6 +353,13 @@ def upgrade_cmd(
             "switch to the new version when they are reopened.",
         ),
     ] = False,
+    prune_runtimes: Annotated[
+        bool,
+        typer.Option(
+            "--prune-runtimes",
+            help="Remove unused retained runtimes without stopping active sessions.",
+        ),
+    ] = False,
     writers_stopped: Annotated[
         bool,
         typer.Option(
@@ -431,6 +438,7 @@ def upgrade_cmd(
             hosts=host,
             options={key: value for key, value in options.items() if value is not None},
             accept=accept,
+            prune_runtimes=prune_runtimes,
         )
     )
 

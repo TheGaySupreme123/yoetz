@@ -162,7 +162,7 @@ def test_package_accept_prints_pypi_upgrade_command_only(
     result = _RUNNER.invoke(app, ["recommend", "accept", "package-update"])
 
     assert result.exit_code == 0, result.output
-    assert "uv tool upgrade yoetz" in result.stdout
+    assert "yoetz upgrade" in result.stdout
     assert "npm" not in result.stdout
 
 
@@ -786,7 +786,7 @@ def test_package_update_pending_survives_policyless_list_and_accepts(
 
     assert accepted.exit_code == 0, accepted.output
     assert "recommendation_not_pending" not in accepted.output
-    assert "uv tool upgrade yoetz" in accepted.stdout
+    assert "yoetz upgrade" in accepted.stdout
     state = load_recommendation_state(root=tmp_path)
     assert state.decisions["package-update"].decision == "accepted"
     assert "package-update" not in state.pending

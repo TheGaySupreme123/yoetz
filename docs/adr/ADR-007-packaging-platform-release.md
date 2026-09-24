@@ -90,7 +90,7 @@ manifests, the packaging/capability suites, and the release workflows under `.gi
 ## Amendment — package update and compatible data upgrade (2026-09-12)
 
 Package replacement and data migration are separate lifecycle stages. The supported `uv tool`
-carrier executes only `uv tool upgrade yoetz` from `yoetz upgrade --accept` (the 2026-09-24
+carrier uses the guarded package action from `yoetz upgrade --accept` (the 2026-09-24
 amendment below removed the `--writers-stopped` attestation); the command refuses source checkouts,
 pinned test instances, and isolated runtimes. Other carriers follow their own package procedure. A
 successful carrier command is therefore not a host, service, or data-upgrade result.
@@ -113,44 +113,68 @@ providers, or Expanded review. Release acceptance still requires artifact-bound 
 the controlled startup migration result where applicable, and independent per-host activation and
 runtime evidence.
 
-## Amendment — live package update, switch on reopen (2026-09-24, #820)
+## Amendment — retained release runtimes, switch on reopen (2026-09-24, #820)
 
-This amendment supersedes the quiescence requirement above for upgrades that start from 0.3.0 or
-later. `yoetz upgrade --accept` runs `uv tool upgrade yoetz` while hosts, hooks, and the service
-keep running; `--writers-stopped` is still accepted, hidden, and ignored. The command keeps its
-carrier refusals (source checkouts, pinned test instances, isolated runtimes).
+The maintainer explicitly expanded #820/#822 to isolate running releases after review reproduced
+that eager imports still read replacement resources from disk. This supersedes the original
+no-side-by-side-runtime non-goal and the quiescence requirement for upgrades starting at 0.3.0.
 
-1. **Open sessions finish on the previous release.** Their bridges stay connected to the service
-   that was running when the package was replaced. Because `uv tool upgrade` replaces the package
-   in place, the service loads every module it can reach shortly after startup
-   (`yoetz.{adapters,application,config,domain,kernel,observability,ports,protocol,service}` and
-   the hook handler it replays spools with), so a module first needed after the replacement is not
-   the next release's code inside the older process. Migrations are already loaded at import and
-   the schema catalog on first handshake. The MCP bridge loads the few modules it imports lazily
-   before it serves, for the same reason. Processes started by a release before this amendment do
-   not preload.
-2. **The next session switches.** When the MCP bridge a host starts for a session connects
-   on demand and the service's hello reports an older package version than the bridge's own, the
-   bridge retires that service through the same stamped-holder bounded-shutdown path used for an
-   incompatible holder, then spawns and connects to this installation's service. An incompatible
-   older holder is superseded as before. When no holder can be identified (no stamp, Windows), the
-   compatible older service keeps serving until its idle stop. Hooks and ordinary CLI commands
-   still never supersede.
-3. **Upgrades only move forward.** On-demand startup never signals a holder whose stamped
-   `service_version` is newer than the caller's: a bridge that predates the in-place upgrade (or an
-   older second installation) reports `service_incompatible`, and the bridge asks the user to reopen
-   the session instead of replacing its successor. Unparsable or absent stamped versions keep the
-   previous version-agnostic behavior. Only an explicit human `yoetz service restart` may replace a
-   newer holder, which keeps rollback possible.
-4. **Coexistence is a release obligation.** Every release must keep its local state readable and
-   degrade-safe while the previous release's service is still writing it, as observation-local `/11`
-   and later do. A release that cannot meet that must say so in its release notes and ship its own
-   guard; it may not silently rely on quiescence. Upgrading from 0.2.x still follows 0.2's quiesced
-   procedure, which its shipped command enforces, because `/10` writers cannot share `/11` state.
+1. **Running processes retain their release.** Before an installed MCP bridge, service, hook or
+   upgrade command loads its command graph, the console/module entrypoint copies its virtual
+   environment's code, dependencies, resources and instance pin into an
+   owner-private sibling generation. Files are independent copies, never hardlinks into uv's
+   cache. Completed payloads are read-only. Installed RECORD contents, `pyvenv.cfg` and any pin
+   select the generation; package version alone never aliases different artifacts. A fixed
+   `-I` bootstrap re-execs its interpreter and retains the original invocation for host binding.
+   Python links point directly to the existing base interpreter, preserving its dynamic-library
+   loading rules; its standard library remains at the `pyvenv.cfg` location. The supported package
+   action does not replace that base interpreter installation. Removing/upgrading the base Python
+   itself while processes run is outside this package-update contract.
+2. **Partial copies never serve.** The manager's owner-only lock serializes generation creation,
+   supported package replacement and pruning. A marked copy abandoned by a crashed constructor
+   is reclaimed under that lock; unrecognized directories are preserved. A copy is renamed into
+   place only after comparing
+   source file identity/size/mtime and installed RECORDs before and after copying. External
+   package symlinks and editable/path-linked dependencies are refused. No environment variable
+   selects a runtime or bypasses validation. Source checkouts remain development runtimes and
+   cannot execute the installed upgrade. Failed startup is explicit, including on hooks; it
+   does not manufacture an allow decision or a successful observation.
+3. **State and host identity stay put.** Only runtime files are copied, never settings, consent,
+   catalog, ledgers, objects or vault contents. An instance pin is preserved byte-for-byte, so
+   dropping an environment variable cannot reach the ambient installation. Host registrations
+   keep their existing absolute launcher. The retained service spawns through its retained
+   interpreter, and a process lease travels across the initial exec without a pruning gap.
+4. **The next session switches.** A fresh MCP bridge retires a stamped older package's service,
+   including a protocol-compatible one, through the existing bounded shutdown and restart path.
+   A bridge from an older release never signals a newer holder. Explicit `yoetz service restart`
+   retains rollback authority. An absent/unparseable version retains the prior bounded identity
+   rules. Hooks and ordinary CLI connections never supersede an existing service. Reopening a
+   host can interrupt an older session if the new service is incompatible; the old bridge then
+   asks to reopen, never to replace its newer successor.
+5. **Package success is observed.** `yoetz upgrade --accept` uses `uv tool install --upgrade`
+   with a Yoetz requirement bounded below by the invoking version. This replaces an old exact
+   version pin without permitting a downgrade and retains supported compatibility extras and
+   the recorded Python selection.
+   Custom uv resolution options, additional requirements, non-registry sources, source checkouts
+   and isolated/pinned instances are refused instead of silently losing their configuration.
+   The fresh original launcher must report its version after the carrier exits. An unchanged
+   version is reported as unchanged; timeout or unreadable output is not upgrade success.
+   `--writers-stopped` remains accepted and ignored for compatibility.
+6. **Cleanup cannot stop work.** Every serving generation holds a shared process lease. New
+   starts reclaim unused older copies under the manager lock; `yoetz upgrade --prune-runtimes`
+   explicitly removes unused completed copies and reports how many remain in use. It never
+   signals a process, follows a linked generation, or removes an unrecognized directory.
+7. **Coexistence remains a release obligation.** Later releases must keep shared local state
+   readable and degrade-safe for still-running earlier writers, or ship a specific guarded
+   transition. Retaining runtime bytes is not storage-format compatibility. Upgrading from
+   0.2.x still follows its shipped quiesced procedure once because `/10` writers cannot share
+   `/11` observation-local state. Compatible task migrations remain backup-first before READY.
 
-The first controlled startup of the new service runs the data upgrade described above. No live
-upgrade over running native host sessions is claimed as release evidence; source and unit tests
-cover the ordering, retirement, and command behavior.
+Verification includes real installed MCP processes across a local wheel replacement, resource
+identity, preserved instance binding, active-generation cleanup refusal, and real-daemon switching
+and downgrade prevention. It does not certify native Codex/Claude/Cursor sessions or every future
+release's storage coexistence. Package, service, migration and host activation remain separate
+reported facts.
 
 ## Implementation-lock identities
 

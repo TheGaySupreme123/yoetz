@@ -1484,8 +1484,8 @@ def _cached_recommendation_context(*, _state: Path | None) -> str:
         # upgrade steps, and make the restart that activates the new version explicit (#819).
         text += (
             " Tell the user now. If they approve, offer a subagent that follows "
-            "'yoetz upgrade' and reports each step; the user stops and restarts Codex, "
-            "Claude Code, or Cursor afterwards so the new version takes effect."
+            "'yoetz upgrade' and reports each step. Existing sessions keep their version; "
+            "start a fresh session afterwards. Fully restart the host only if activation requires it."
         )
     return text[:_MAX_ADVICE_CONTEXT]
 
