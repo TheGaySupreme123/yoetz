@@ -650,9 +650,18 @@ def _read_rows(
                     ):
                         timings.append((total, stamp, cast(str | None, path_value)))
                     continue
-                if set(row) != {"event", "reason", "ts"} or any(
-                    type(row.get(key)) is not str for key in ("event", "reason", "ts")
-                ):
+                keys = set(row)
+                if keys == {"event", "reason", "ts", "candidate_count"}:
+                    candidate_count = row["candidate_count"]
+                    if (
+                        row["reason"] != "auto_attach_binding_ambiguous"
+                        or type(candidate_count) is not int
+                        or not 2 <= candidate_count <= 1_000_000
+                    ):
+                        continue
+                elif keys != {"event", "reason", "ts"}:
+                    continue
+                if any(type(row.get(key)) is not str for key in ("event", "reason", "ts")):
                     continue
                 rows.append(
                     {

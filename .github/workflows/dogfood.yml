@@ -1,0 +1,437 @@
+# .github/workflows/dogfood.yml — unattended product dogfood on GitHub-hosted runners.
+#
+# Authority: docs/runbooks/dogfood-ci.md; ADR-026 and ADR-028 (isolated, runtime-pinned disposable
+# instances); docs/runbooks/test-instances.md.
+#
+# One lane per (host, OS) cell builds the candidate wheel from this exact revision, provisions a
+# disposable instance, walks the product's own setup path (service, vault, Fireworks provider,
+# privacy grant, host connection, observation consent), runs a deterministic ledger probe with one
+# AI-powered review dispatch, runs one tiny native agent session (Codex CLI, Claude Code, or Cursor
+# Agent CLI) against the same instance, drains observation, restarts and unlocks the service, and
+# disposes. Every step lands as bounded, redacted JSON evidence that is uploaded as a workflow
+# artifact and, when the R2 secrets exist, copied to the bucket for later analysis.
+#
+# Green means "installed and the main paths did not break on this runner". It is not evidence of
+# correctness or usefulness; a native model that ignores Yoetz is recorded, not treated as red,
+# unless the strict_agent input is set. Secrets are used only inside the lane process, never
+# written to config, argv, artifacts, or logs (the lane redacts every saved file).
+
+name: Dogfood
+
+on:
+  schedule:
+    # One documented off-peak UTC time, after the nightly fault run.
+    - cron: "17 5 * * *"
+  push:
+    branches: [main]
+  pull_request:
+    # Opt-in per PR: add the `dogfood` label to run the full matrix against the branch before it
+    # reaches main. Fork PRs have no secrets, so their lanes run the credential-free subset.
+    types: [labeled, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      strict_agent:
+        description: Treat a native agent that fails or never maps a task as a red lane.
+        required: false
+        type: boolean
+        default: false
+      codex_version:
+        description: npm version of @openai/codex to install.
+        required: false
+        type: string
+        default: latest
+      claude_version:
+        description: npm version of @anthropic-ai/claude-code to install.
+        required: false
+        type: string
+        default: latest
+      semantic_model:
+        description: Fireworks model for Yoetz's AI-powered review (Responses API, structured judgment).
+        required: false
+        type: string
+        default: accounts/fireworks/models/minimax-m3
+      agent_model:
+        description: Fireworks model for the Codex and Claude agent sessions.
+        required: false
+        type: string
+        default: accounts/fireworks/models/glm-5p3-flash
+      cursor_model:
+        description: Cursor Agent CLI model id (Cursor cannot use a custom provider).
+        required: false
+        type: string
+        default: gpt-5.6-luna-low
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dogfood-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  TZ: UTC
+  LANG: C.UTF-8
+  LC_ALL: C.UTF-8
+  PYTHONUTF8: "1"
+  UV_VERSION: "0.11.29"
+  UV_NO_PROGRESS: "1"
+  NODE_VERSION: "26.5.0"
+  DOGFOOD_SEMANTIC_MODEL: ${{ inputs.semantic_model || 'accounts/fireworks/models/minimax-m3' }}
+  DOGFOOD_AGENT_MODEL: ${{ inputs.agent_model || 'accounts/fireworks/models/glm-5p3-flash' }}
+  DOGFOOD_CURSOR_MODEL: ${{ inputs.cursor_model || 'gpt-5.6-luna-low' }}
+  DOGFOOD_STRICT_AGENT: ${{ inputs.strict_agent == true && '--strict-agent' || '' }}
+  CODEX_VERSION: ${{ inputs.codex_version || 'latest' }}
+  CLAUDE_VERSION: ${{ inputs.claude_version || 'latest' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # ---------------------------------------------------------------------------------------------
+  # lane — Linux x86-64 and macOS arm64, one host per job.
+  # ---------------------------------------------------------------------------------------------
+  lane:
+    name: dogfood (${{ matrix.host }}, ${{ matrix.os }})
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'dogfood')
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+        host: [codex, claude, cursor]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    environment: dogfood
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (no persisted credentials)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+          lfs: false
+
+      - name: Install uv and the pinned Python
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          python-version: "3.14.6"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Install Node for the npm-distributed host CLIs
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "26.5.0"
+          package-manager-cache: false
+
+      - name: Install the selected host CLI and record its version
+        run: |
+          set -euo pipefail
+          case "${{ matrix.host }}" in
+            codex)
+              npm install -g "@openai/codex@${CODEX_VERSION}"
+              echo "DOGFOOD_HOST_PATH=$(command -v codex)" >> "$GITHUB_ENV"
+              echo "- codex: $(codex --version)" >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            claude)
+              npm install -g "@anthropic-ai/claude-code@${CLAUDE_VERSION}"
+              echo "DOGFOOD_HOST_PATH=$(command -v claude)" >> "$GITHUB_ENV"
+              echo "- claude: $(claude --version)" >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            cursor)
+              curl -fsS https://cursor.com/install | bash
+              echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+              exe="$HOME/.local/bin/cursor-agent"
+              [ -x "$exe" ] || exe="$HOME/.local/bin/agent"
+              echo "DOGFOOD_HOST_PATH=$exe" >> "$GITHUB_ENV"
+              echo "- cursor-agent: $("$exe" --version)" >> "$GITHUB_STEP_SUMMARY"
+              ;;
+          esac
+
+      - name: Give the runner account a run-scoped password for the PAM artifact review (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          password="$(openssl rand -hex 24)"
+          echo "::add-mask::${password}"
+          echo "$(id -un):${password}" | sudo chpasswd
+          echo "DOGFOOD_OS_PASSWORD=${password}" >> "$GITHUB_ENV"
+
+      - name: Run the dogfood lane
+        env:
+          FIREWORKS_API_KEY: ${{ secrets.DOGFOOD_FIREWORKS_API_KEY }}
+          CURSOR_API_KEY: ${{ secrets.DOGFOOD_CURSOR_API_KEY }}
+        run: |
+          set -euo pipefail
+          export DOGFOOD_VAULT_PASSPHRASE="$(openssl rand -hex 24)"
+          echo "::add-mask::${DOGFOOD_VAULT_PASSPHRASE}"
+          uv run --no-project --python 3.14.6 python scripts/dogfood_ci/lane.py \
+            --host "${{ matrix.host }}" \
+            --evidence "${RUNNER_TEMP}/evidence" \
+            --host-path "${DOGFOOD_HOST_PATH}" \
+            --semantic-model "${DOGFOOD_SEMANTIC_MODEL}" \
+            --agent-model "${DOGFOOD_AGENT_MODEL}" \
+            --cursor-model "${DOGFOOD_CURSOR_MODEL}" \
+            ${DOGFOOD_STRICT_AGENT}
+
+      - name: Upload lane evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dogfood-${{ matrix.host }}-${{ matrix.os }}
+          path: ${{ runner.temp }}/evidence
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Install rclone for the R2 copy
+        if: always()
+        uses: AnimMouse/setup-rclone@26ef2133e09fd383329a1d4c1fbe6a71db1976c9 # v1.12.0
+
+      - name: Copy lane evidence to R2 (skipped when the R2 secrets are absent)
+        if: always()
+        continue-on-error: true
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.DOGFOOD_R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.DOGFOOD_R2_BUCKET }}
+          RCLONE_CONFIG_R2_TYPE: s3
+          RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+          RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.DOGFOOD_R2_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.DOGFOOD_R2_SECRET_ACCESS_KEY }}
+          RCLONE_CONFIG_R2_NO_CHECK_BUCKET: "true"
+          RCLONE_CONFIG_R2_ACL: private
+        run: |
+          set -euo pipefail
+          if [ -z "${R2_ACCOUNT_ID}" ] || [ -z "${R2_BUCKET}" ]; then
+            echo "R2 secrets absent; evidence stays on the workflow artifact only."
+            exit 0
+          fi
+          export RCLONE_CONFIG_R2_ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          # Diagnostics that never print secrets: the endpoint's HTTP answer and the bucket listing.
+          echo "endpoint HEAD status: $(curl -sS -o /dev/null -w '%{http_code}' -I "${RCLONE_CONFIG_R2_ENDPOINT}/" || echo unreachable)"
+          echo "account id length: ${#R2_ACCOUNT_ID}; bucket name length: ${#R2_BUCKET}"
+          if ! rclone lsd "r2:${R2_BUCKET}" --max-depth 1 >/dev/null; then
+            echo "::warning::R2 bucket listing failed; check DOGFOOD_R2_ACCOUNT_ID (32 hex chars), the bucket name, and the token's Object Read & Write scope"
+          fi
+          prefix="dogfood/$(date -u +%Y-%m-%d)/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/${{ matrix.host }}-${{ matrix.os }}"
+          if rclone copy --no-traverse "${RUNNER_TEMP}/evidence" "r2:${R2_BUCKET}/${prefix}"; then
+            echo "- evidence copied to r2:${R2_BUCKET}/${prefix}" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::R2 copy failed; evidence remains on the workflow artifact"
+            exit 1
+          fi
+
+  # ---------------------------------------------------------------------------------------------
+  # lane-wsl — Ubuntu 24.04 under WSL 2 on a Windows Server 2025 runner, one host per job.
+  # Everything Yoetz-related runs inside the distribution as an unprivileged user with a
+  # run-scoped password; Windows only hosts the runner and uploads the evidence.
+  # ---------------------------------------------------------------------------------------------
+  lane-wsl:
+    name: dogfood (${{ matrix.host }}, wsl2-ubuntu-24.04)
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'dogfood')
+    strategy:
+      fail-fast: false
+      matrix:
+        host: [codex, claude, cursor]
+    runs-on: windows-2025
+    timeout-minutes: 75
+    environment: dogfood
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (no persisted credentials)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+          lfs: false
+
+      - name: Install Ubuntu 24.04 under WSL 2
+        uses: Vampire/setup-wsl@d1da7f2c0322a5ee4f24975344f67fc0f5baf364 # v7.0.0
+        with:
+          distribution: Ubuntu-24.04
+          wsl-version: 2
+          use-cache: "true"
+          set-as-default: "true"
+          update: "true"
+          additional-packages: git curl ca-certificates sudo python3 libpam0g libpam-modules bubblewrap openssl
+          wsl-shell-command: bash --noprofile --norc -euo pipefail
+
+      - name: Prepare the distribution (root) — unprivileged user with a run-scoped password, Node
+        shell: wsl-bash {0}
+        run: |
+          useradd -m -s /bin/bash dogfood
+          password="$(openssl rand -hex 24)"
+          echo "dogfood:${password}" | chpasswd
+          account_home="$(getent passwd dogfood | cut -d: -f6)"
+          # Create the account's own directories as the account: a root-created ~/.config would
+          # later refuse the uv installer's shell-integration writes.
+          runuser -u dogfood -- install -d -m 0700 "${account_home}/.config" "${account_home}/.config/dogfood"
+          printf '%s' "${password}" | runuser -u dogfood -- tee "${account_home}/.config/dogfood/ospw" >/dev/null
+          chmod 0600 "${account_home}/.config/dogfood/ospw"
+          curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
+          apt-get install -y nodejs
+          node --version
+
+      - name: Switch the WSL shell to the unprivileged user
+        uses: Vampire/setup-wsl@d1da7f2c0322a5ee4f24975344f67fc0f5baf364 # v7.0.0
+        with:
+          distribution: Ubuntu-24.04
+          wsl-version: 2
+          use-cache: "true"
+          wsl-shell-user: dogfood
+          wsl-shell-command: bash --noprofile --norc -euo pipefail
+
+      - name: Install uv, the pinned Python, and the selected host CLI (as dogfood)
+        shell: wsl-bash {0}
+        env:
+          WSLENV: CODEX_VERSION:CLAUDE_VERSION:UV_VERSION
+        run: |
+          # The repository pins uv (required-version), so install exactly that release.
+          curl -LsSf "https://astral.sh/uv/${UV_VERSION:-0.11.29}/install.sh" | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          uv --version
+          uv python install 3.14.6
+          mkdir -p "$HOME/.npm-global"
+          npm config set prefix "$HOME/.npm-global"
+          export PATH="$HOME/.npm-global/bin:$PATH"
+          case "${{ matrix.host }}" in
+            codex)
+              npm install -g "@openai/codex@${CODEX_VERSION:-latest}"
+              codex --version
+              ;;
+            claude)
+              npm install -g "@anthropic-ai/claude-code@${CLAUDE_VERSION:-latest}"
+              claude --version
+              ;;
+            cursor)
+              curl -fsS https://cursor.com/install | bash
+              "$HOME/.local/bin/cursor-agent" --version || "$HOME/.local/bin/agent" --version
+              ;;
+          esac
+
+      - name: Clone the checkout onto the distribution's own disk (as dogfood)
+        shell: wsl-bash {0}
+        run: |
+          git config --global --add safe.directory '*'
+          git clone -q "$(wslpath -u '${{ github.workspace }}')" "$HOME/src"
+          git -C "$HOME/src" rev-parse HEAD
+
+      - name: Run the dogfood lane (as dogfood, inside WSL 2)
+        shell: wsl-bash {0}
+        env:
+          FIREWORKS_API_KEY: ${{ secrets.DOGFOOD_FIREWORKS_API_KEY }}
+          CURSOR_API_KEY: ${{ secrets.DOGFOOD_CURSOR_API_KEY }}
+          WSLENV: FIREWORKS_API_KEY:CURSOR_API_KEY:DOGFOOD_SEMANTIC_MODEL:DOGFOOD_AGENT_MODEL:DOGFOOD_CURSOR_MODEL:DOGFOOD_STRICT_AGENT
+        run: |
+          export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+          export DOGFOOD_VAULT_PASSPHRASE="$(openssl rand -hex 24)"
+          export DOGFOOD_OS_PASSWORD="$(cat "$HOME/.config/dogfood/ospw")"
+          case "${{ matrix.host }}" in
+            codex) host_path="$(command -v codex)" ;;
+            claude) host_path="$(command -v claude)" ;;
+            cursor) host_path="$(command -v cursor-agent || command -v agent)" ;;
+          esac
+          cd "$HOME/src"
+          set +e
+          uv run --no-project --python 3.14.6 python scripts/dogfood_ci/lane.py \
+            --host "${{ matrix.host }}" \
+            --evidence "$HOME/evidence" \
+            --host-path "${host_path}" \
+            --semantic-model "${DOGFOOD_SEMANTIC_MODEL:-accounts/fireworks/models/minimax-m3}" \
+            --agent-model "${DOGFOOD_AGENT_MODEL:-accounts/fireworks/models/glm-5p3-flash}" \
+            --cursor-model "${DOGFOOD_CURSOR_MODEL:-gpt-5.6-luna-low}" \
+            ${DOGFOOD_STRICT_AGENT:-}
+          status=$?
+          set -e
+          mkdir -p /mnt/c/dogfood-evidence
+          cp -r "$HOME/evidence/." /mnt/c/dogfood-evidence/
+          exit "${status}"
+
+      - name: Append the lane summary
+        if: always()
+        run: |
+          if [ -f /c/dogfood-evidence/lane-summary.md ]; then
+            cat /c/dogfood-evidence/lane-summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload lane evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dogfood-${{ matrix.host }}-wsl2-ubuntu-24.04
+          path: C:\dogfood-evidence
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Install rclone for the R2 copy
+        if: always()
+        uses: AnimMouse/setup-rclone@26ef2133e09fd383329a1d4c1fbe6a71db1976c9 # v1.12.0
+
+      - name: Copy lane evidence to R2 (skipped when the R2 secrets are absent)
+        if: always()
+        continue-on-error: true
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.DOGFOOD_R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.DOGFOOD_R2_BUCKET }}
+          RCLONE_CONFIG_R2_TYPE: s3
+          RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+          RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.DOGFOOD_R2_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.DOGFOOD_R2_SECRET_ACCESS_KEY }}
+          RCLONE_CONFIG_R2_NO_CHECK_BUCKET: "true"
+          RCLONE_CONFIG_R2_ACL: private
+        run: |
+          set -euo pipefail
+          if [ -z "${R2_ACCOUNT_ID}" ] || [ -z "${R2_BUCKET}" ]; then
+            echo "R2 secrets absent; evidence stays on the workflow artifact only."
+            exit 0
+          fi
+          export RCLONE_CONFIG_R2_ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          # Diagnostics that never print secrets: the endpoint's HTTP answer and the bucket listing.
+          echo "endpoint HEAD status: $(curl -sS -o /dev/null -w '%{http_code}' -I "${RCLONE_CONFIG_R2_ENDPOINT}/" || echo unreachable)"
+          echo "account id length: ${#R2_ACCOUNT_ID}; bucket name length: ${#R2_BUCKET}"
+          if ! rclone lsd "r2:${R2_BUCKET}" --max-depth 1 >/dev/null; then
+            echo "::warning::R2 bucket listing failed; check DOGFOOD_R2_ACCOUNT_ID (32 hex chars), the bucket name, and the token's Object Read & Write scope"
+          fi
+          prefix="dogfood/$(date -u +%Y-%m-%d)/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/${{ matrix.host }}-wsl2-ubuntu-24.04"
+          if rclone copy --no-traverse /c/dogfood-evidence "r2:${R2_BUCKET}/${prefix}"; then
+            echo "- evidence copied to r2:${R2_BUCKET}/${prefix}" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::R2 copy failed; evidence remains on the workflow artifact"
+            exit 1
+          fi
+
+  # ---------------------------------------------------------------------------------------------
+  # dogfood-required — one stable aggregate for the branch status.
+  # ---------------------------------------------------------------------------------------------
+  dogfood-required:
+    name: dogfood-required
+    needs: [lane, lane-wsl]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    if: always()
+    steps:
+      - name: Verify every lane finished green
+        run: |
+          set -euo pipefail
+          echo "## Dogfood lane outcomes" >> "$GITHUB_STEP_SUMMARY"
+          echo "commit: ${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- lane (linux/macos matrix): ${{ needs.lane.result }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- lane-wsl (windows-2025 + WSL 2 matrix): ${{ needs.lane-wsl.result }}" >> "$GITHUB_STEP_SUMMARY"
+          failed=0
+          for outcome in "${{ needs.lane.result }}" "${{ needs.lane-wsl.result }}"; do
+            case "$outcome" in
+              success) ;;
+              skipped) echo "- a lane matrix was skipped (unlabeled pull request)" >> "$GITHUB_STEP_SUMMARY" ;;
+              *) failed=1 ;;
+            esac
+          done
+          if [ "$failed" = "1" ]; then
+            echo "::error::at least one dogfood lane was not green; read that lane's lane-report.json"
+          fi
+          exit "$failed"

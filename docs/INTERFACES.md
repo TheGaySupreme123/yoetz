@@ -4227,8 +4227,9 @@ quarantined. When no eligible local selector exists, the ordinary `create_or_att
 new work; when recovery attach fails, the ordinary typed failure path remains. Every failed attempt records a
 closed hook-diagnostic
 reason instead of a silent absent mapping: `auto_attach_workspace_unbound`,
-`auto_attach_request_invalid`, `auto_attach_conflict` (session, idempotency, or request-identity
-conflict), `auto_attach_refused`, `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`,
+`auto_attach_request_invalid`, `auto_attach_binding_ambiguous` (candidate count only),
+`auto_attach_conflict` (session, idempotency, or request-identity conflict), `auto_attach_refused`,
+`auto_attach_result_invalid`, `auto_attach_mapping_write_failed`,
 `privacy_authority_required`, or the shared `service_unavailable`, `service_incompatible`, `vault_locked`, `timeout`,
 `storage_unsafe`, and `storage_corrupt` tokens. Turn-boundary hooks retry auto-attach under a
 bounded budget and record the same typed cause next to the `auto_attach_retry_failed` path marker
