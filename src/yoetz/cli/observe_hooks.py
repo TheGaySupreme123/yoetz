@@ -1471,11 +1471,20 @@ def _cached_recommendation_context(*, _state: Path | None) -> str:
         return ""
     item = pending[0]
     suffix = f" --release-version {item.release_version}" if item.release_version else ""
-    return (
+    text = (
         f"Yoetz recommends: {item.title}. {item.summary} Explain this to the user and ask "
         f"for approval; if approved run 'yoetz recommend accept {item.id}{suffix}', "
         f"otherwise 'yoetz recommend decline {item.id}{suffix}'."
-    )[:_MAX_ADVICE_CONTEXT]
+    )
+    if item.kind == "package_update":
+        # The agent is the messenger (ADR-021): tell the user now, offer to do the mechanical
+        # upgrade steps, and make the restart that activates the new version explicit (#819).
+        text += (
+            " Tell the user now. If they approve, offer a subagent that follows "
+            "'yoetz upgrade' and reports each step; the user stops and restarts Codex, "
+            "Claude Code, or Cursor afterwards so the new version takes effect."
+        )
+    return text[:_MAX_ADVICE_CONTEXT]
 
 
 def _frontier_motion_context(notice: FrontierMotionNotice) -> str:
@@ -4225,10 +4234,11 @@ def handle_observe(
                     pending_delivery = delivery
 
             # Release recommendations are read from one bounded local cache only.
-            # Existing task/receipt advice always wins this shared context channel.
+            # Existing task/receipt advice keeps its place first on this shared context
+            # channel; the recommendation follows it only when both fit the bound, so an
+            # update notice is no longer starved by every session that has task context (#819).
             if (
-                not additional
-                and resolved_event == "SessionStart"
+                resolved_event == "SessionStart"
                 and not skip_advice_loop
                 and (
                     source is not ObservationSource.CURSOR_HOOK
@@ -4236,7 +4246,14 @@ def handle_observe(
                 )
             ):
                 with contextlib.suppress(Exception):
-                    additional = _cached_recommendation_context(_state=_state)
+                    recommendation = _cached_recommendation_context(_state=_state)
+                    if recommendation and not additional:
+                        additional = recommendation
+                    elif (
+                        recommendation
+                        and len(additional) + 1 + len(recommendation) <= _MAX_ADVICE_CONTEXT
+                    ):
+                        additional = f"{additional} {recommendation}"
 
             rendered_output = _render_context(additional) if additional else {}
             host_consumable = bool(rendered_output)

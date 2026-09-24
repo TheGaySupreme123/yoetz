@@ -1222,3 +1222,119 @@ def test_secret_like_command_output_absent_from_advice_surfaces(tmp_path: Path) 
     assert "AWS_SECRET" not in encoded
     assert "hunter2" not in encoded
     assert "password" not in encoded
+
+
+def _attention_snapshot(token: str) -> AdviceSnapshot:
+    snapshot = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=(_envelope("hook:one", {"tool_name": "shell"}),),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            composition=ObservationCompositionFact(
+                semantic_configured=True,
+                semantic_ready=True,
+                provider_factory_ids=("openai-codex",),
+                connected_provider_ids=("openai-codex",),
+                semantic_attention=token,
+                semantic_attention_provider="openai-codex",
+            ),
+            has_real_observation=True,
+        )
+    )
+    assert snapshot is not None
+    return snapshot
+
+
+def test_codex_sign_in_attention_tells_the_agent_to_involve_the_user() -> None:
+    """An expired Codex login reaches the agent as actionable standing advice (#819)."""
+
+    snapshot = _attention_snapshot("sign_in_required")
+    item = select_standing_item(snapshot)
+    assert item is not None
+    assert item.rule_code == "semantic_sign_in_required"
+    assert item.recommended_next_action == "renew_provider_sign_in"
+    # Standing machine conditions never ride the per-tool channel or the task ledger.
+    assert select_advice_item(snapshot, allow_standing=False) is not item
+    assert item not in _materialized_advice_items(snapshot.ranked_items)
+
+    text = hook_advice_context(snapshot, item=item)
+    assert len(text) <= 512
+    assert text.startswith("Yoetz: AI-powered review needs the user to sign in to Codex again.")
+    assert "Next: renew_provider_sign_in. Tell the user now." in text
+    assert "subagent" in text
+    assert "`yoetz provider codex-subscription setup`" in text
+    assert "`--device-code`" in text
+    assert "the user completes sign-in" in text
+    assert text.endswith("Evidence: openai-codex.")
+
+
+def test_each_repairable_cause_renders_its_own_reason_and_repair() -> None:
+    expectations = {
+        "credential_rejected": ("stored credential", "`yoetz provider status`"),
+        "access_denied": ("account or plan", "`yoetz provider status`"),
+        "quota_exhausted": ("usage quota exhausted", "`yoetz provider status`"),
+        "model_unavailable": ("no longer offered", "`yoetz provider status`"),
+        "runtime_update_required": (
+            "newer Yoetz release",
+            "restart Codex, Claude Code, or Cursor",
+        ),
+    }
+    texts: set[str] = set()
+    for token, (reason, repair) in expectations.items():
+        snapshot = _attention_snapshot(token)
+        item = select_standing_item(snapshot)
+        assert item is not None and item.rule_code == "semantic_provider_attention"
+        text = hook_advice_context(snapshot, item=item)
+        assert len(text) <= 512
+        assert reason in item.detail
+        assert repair in text
+        assert "Tell the user now." in text
+        texts.add(advice_delivery_identity(snapshot, item=item))
+    # A changed cause is a changed condition, so it is delivered again rather than suppressed.
+    assert len(texts) == len(expectations)
+
+
+def test_connect_provider_keeps_its_token_and_gains_a_user_facing_repair() -> None:
+    snapshot = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=(),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            composition=ObservationCompositionFact(
+                semantic_configured=True,
+                semantic_ready=False,
+                provider_factory_ids=("fireworks",),
+                connected_provider_ids=(),
+            ),
+        )
+    )
+    assert snapshot is not None
+    text = hook_advice_context(snapshot, item=select_standing_item(snapshot))
+    assert "Next: connect_provider. Tell the user now." in text
+    assert "`yoetz provider status`" in text
+
+
+def test_model_derived_advice_cannot_claim_an_attempt_derived_repair() -> None:
+    """Only the service's own attempt outcomes may tell the user to sign in or update."""
+
+    finding = finding_id("fnd_00000000-0000-4000-8000-000000000819")
+    snapshot = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=(),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            semantic_addon=ObservationAdviceSemanticAddon(
+                finding_ids=(finding,),
+                evidence_digest="sha256:" + "e" * 64,
+                next_action="renew_provider_sign_in",
+                summaries=("Provider note",),
+                details=("Provider detail",),
+            ),
+        )
+    )
+    assert snapshot is not None
+    assert snapshot.recommended_next_action == "reground_status"
+    assert all(
+        item.recommended_next_action != "renew_provider_sign_in" for item in snapshot.ranked_items
+    )
+    assert "advice_semantic_output_invalid" in snapshot.confidence_coverage.known_gaps

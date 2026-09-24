@@ -1198,7 +1198,11 @@ another participant, earlier history, silence, or a generic request is never app
 configuration or activate a plugin directly in response to the advisory: `accept` re-evaluates the
 current state and applies the recommendation's reviewed preview/confirmation ceremony. For a
 package-update recommendation, `accept` only prints the upgrade entrypoint and package command;
-do not execute an upgrade unless the user separately instructs you to do so.
+do not execute an upgrade unless the user separately instructs you to do so. Tell the user about a
+package-update notice in your next reply and offer to perform the upgrade through a subagent that
+follows `yoetz upgrade` and reports each step; if they agree, that is the instruction. Always tell
+the user that the new version takes effect only after they fully quit and restart Codex, Claude
+Code, or Cursor and begin a new session.
 
 For an explicit upgrade request, run `yoetz upgrade` to read the staged workflow. Select only the
 existing hosts and preserve their exact roots, ownership, route, observation profile and settings.
@@ -1206,7 +1210,8 @@ Quiesce old writers before accepting package replacement. Use the fresh launcher
 host preview/authorization/apply/status steps. After package replacement, a compatible 0.2-to-0.3
 bundle schema migration runs automatically during controlled service startup, backup-first and
 before READY; it preserves existing task data and needs no per-task ceremony. Never report the
-whole upgrade complete from the package command alone. If startup reports an unsupported layout,
+whole upgrade complete from the package command alone, and remind the user to restart the host
+apps so they load the new version. If startup reports an unsupported layout,
 ambiguous migration, or rollback-required continuation, retain the exact operation and follow its
 supported recovery procedure; do not start a second migration or hand-edit storage. Explicit
 backup, restore, or ad-hoc migration remains its own reviewed action. New defaults, including

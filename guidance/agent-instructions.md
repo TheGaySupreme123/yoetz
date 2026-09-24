@@ -111,7 +111,7 @@ For provider credentials, grant repository privacy first, then prepare the crede
 
 # Recommended defaults remain user decisions
 
-At SessionStart, Yoetz may provide one bounded cached recommendation with an exact recommendation id and `yoetz recommend accept <id>` / `yoetz recommend decline <id>` commands. Explain its trade-off and ask the user. Run either command only after explicit approval or decline of that exact recommendation in the current chat; do not edit configuration or activate a plugin directly. Codex activation decisions bind executable, home, preview, and cache digests; acceptance does not prove activation.
+At SessionStart, Yoetz may provide one bounded cached recommendation with an exact recommendation id and `yoetz recommend accept <id>` / `yoetz recommend decline <id>` commands. Explain its trade-off and ask the user. Run either command only after explicit approval or decline of that exact recommendation in the current chat; do not edit configuration or activate a plugin directly. Codex activation decisions bind executable, home, preview, and cache digests; acceptance does not prove activation. On update or provider-repair notices, tell the user and offer a subagent fix.
 
 # Read more
 

@@ -167,6 +167,16 @@ home and never the per-run host home — and `disconnect` remains the way to log
 reused home outlives the isolation root, its full teardown is `disconnect` followed by the
 operator deleting that directory; deleting the isolation root does not remove it (ADR-026).
 
+### Expired or missing sign-in notice (#819)
+
+When an attempt fails at `login_required` (or Codex rejects the ChatGPT token), the service
+remembers `sign_in_required` for the binding until a later attempt gets an answer or the service is
+recomposed. Codex, Claude Code, and Cursor then receive standing hook advice at session start or
+the end of a turn (Cursor: `sessionStart` only) naming `renew_provider_sign_in`: the agent tells
+the user and offers to rerun `setup` with the executable and home from `status --json`. The user
+completes the browser or device-code sign-in. Nothing probes the login outside an attempt or
+`status`, so after a restart the notice returns only when the next attempt fails.
+
 ## Selected executable resolution
 
 Pass one absolute selected path. The supported npm layouts are:
