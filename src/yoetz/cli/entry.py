@@ -297,6 +297,16 @@ def main() -> None:
     """Installed console entry point."""
 
     argv = sys.argv[1:]
+    # The static cue has its own bounded resource fallback and must survive unavailable state
+    # or installation runtime setup. It never serves work, asserts readiness or decides access.
+    if (
+        len(argv) == 4
+        and argv[:3] == ["hooks", "startup-context", "--host"]
+        and argv[3] in {"claude", "cursor"}
+    ):
+        from yoetz.cli.startup_context import handle_startup_context
+
+        raise SystemExit(handle_startup_context(host="claude" if argv[3] == "claude" else "cursor"))
     if (
         os.name != "nt"
         and (
@@ -335,14 +345,6 @@ def main() -> None:
         raise SystemExit(
             handle_startup_gate(host="claude" if argv[3] == "claude" else "cursor", event=argv[5])
         )
-    if (
-        len(argv) == 4
-        and argv[:3] == ["hooks", "startup-context", "--host"]
-        and argv[3] in {"claude", "cursor"}
-    ):
-        from yoetz.cli.startup_context import handle_startup_context
-
-        raise SystemExit(handle_startup_context(host="claude" if argv[3] == "claude" else "cursor"))
     if len(argv) >= 2 and argv[0] == "hooks" and argv[1] == "observe":
         code = _observe_fast_path(argv[2:])
         if code is not None:

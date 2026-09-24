@@ -119,8 +119,8 @@ The maintainer explicitly expanded #820/#822 to isolate running releases after r
 that eager imports still read replacement resources from disk. This supersedes the original
 no-side-by-side-runtime non-goal and the quiescence requirement for upgrades starting at 0.3.0.
 
-1. **Running processes retain their release.** Before an installed MCP bridge, service, hook or
-   upgrade command loads its command graph, the console/module entrypoint copies its virtual
+1. **Running processes retain their release.** Before an installed MCP bridge, service, stateful
+   hook or upgrade command loads its command graph, the console/module entrypoint copies its virtual
    environment's code, dependencies, resources and instance pin into an
    owner-private sibling generation. Files are independent copies, never hardlinks into uv's
    cache. Completed payloads are read-only. Installed RECORD contents, `pyvenv.cfg` and any pin
@@ -137,8 +137,10 @@ no-side-by-side-runtime non-goal and the quiescence requirement for upgrades sta
    source file identity/size/mtime and installed RECORDs before and after copying. External
    package symlinks and editable/path-linked dependencies are refused. No environment variable
    selects a runtime or bypasses validation. Source checkouts remain development runtimes and
-   cannot execute the installed upgrade. Failed startup is explicit, including on hooks; it
-   does not manufacture an allow decision or a successful observation.
+   cannot execute the installed upgrade. The stateless startup-context cue retains its independent
+   fast path and bounded missing-resource fallback; it makes no readiness or access decision.
+   Failed serving startup is explicit, including on stateful hooks; it does not manufacture an
+   allow decision or a successful observation.
 3. **State and host identity stay put.** Only runtime files are copied, never settings, consent,
    catalog, ledgers, objects or vault contents. An instance pin is preserved byte-for-byte, so
    dropping an environment variable cannot reach the ambient installation. Host registrations
