@@ -44,6 +44,7 @@ from yoetz.protocol.ids import IdKind, validate_id
 
 __all__ = [
     "AdviceItem",
+    "AdviceSemanticState",
     "AdviceSnapshot",
     "OBSERVATION_BACKPRESSURE_REASON",
     "OBSERVATION_CONTENT_CAPTURE_PENDING_REASON",
@@ -1774,6 +1775,12 @@ def _ranked_advice_items(value: object) -> tuple[AdviceItem, ...]:
     return tuple(result)
 
 
+type AdviceSemanticState = Literal["ready", "disabled", "unavailable", "failed"]
+_ADVICE_SEMANTIC_STATES: Final[frozenset[str]] = frozenset(
+    {"ready", "disabled", "unavailable", "failed"}
+)
+
+
 @dataclass(frozen=True, slots=True)
 class AdviceSnapshot:
     ranked_finding_ids: tuple[FindingId, ...]
@@ -1783,6 +1790,9 @@ class AdviceSnapshot:
     freshness_frontier: str
     suppression_identity: str
     ranked_items: tuple[AdviceItem, ...] = ()
+    # Recorded AI-powered review attempt status for this snapshot (issue #742).
+    # Derived from the durable attempt row, never from finding count.
+    semantic_attempt_state: AdviceSemanticState = "disabled"
 
     def __post_init__(self) -> None:
         items = _ranked_advice_items(self.ranked_items)
@@ -1803,6 +1813,9 @@ class AdviceSnapshot:
         object.__setattr__(self, "recommended_next_action", _token(self.recommended_next_action))
         object.__setattr__(self, "freshness_frontier", _token(self.freshness_frontier))
         object.__setattr__(self, "suppression_identity", _token(self.suppression_identity))
+        if self.semantic_attempt_state not in _ADVICE_SEMANTIC_STATES:
+            raise _invalid()
+        object.__setattr__(self, "semantic_attempt_state", self.semantic_attempt_state)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2125,6 +2138,7 @@ def advice_snapshot_to_json(value: AdviceSnapshot) -> JsonObject:
             "recommended_next_action": value.recommended_next_action,
             "freshness_frontier": value.freshness_frontier,
             "suppression_identity": value.suppression_identity,
+            "semantic_attempt_state": value.semantic_attempt_state,
         }
     )
 
@@ -2141,7 +2155,7 @@ def advice_snapshot_from_json(value: JsonValue) -> AdviceSnapshot:
         "freshness_frontier",
         "suppression_identity",
     }
-    optional = {"ranked_items"}
+    optional = {"ranked_items", "semantic_attempt_state"}
     if not required.issubset(set(source)) or set(source) - required - optional:
         raise _invalid()
     items_raw = source.get("ranked_items", ())
@@ -2149,6 +2163,14 @@ def advice_snapshot_from_json(value: JsonValue) -> AdviceSnapshot:
         raise _invalid()
     ids_raw = source["ranked_finding_ids"]
     items = tuple(advice_item_from_json(item) for item in cast(tuple[JsonValue, ...], items_raw))
+    # A snapshot stored before issue #742 has no recorded attempt state. AI-powered items exist
+    # only after a succeeded review, so they are the one fact such a snapshot still carries.
+    legacy_state = (
+        "ready" if any(item.origin == "semantic_model_derived" for item in items) else "disabled"
+    )
+    attempt_state = source.get("semantic_attempt_state", legacy_state)
+    if type(attempt_state) is not str or attempt_state not in _ADVICE_SEMANTIC_STATES:
+        raise _invalid()
     return AdviceSnapshot(
         ranked_finding_ids=_ranked_finding_ids(ids_raw),
         evidence_basis_digest=cast(str, source["evidence_basis_digest"]),
@@ -2157,6 +2179,7 @@ def advice_snapshot_from_json(value: JsonValue) -> AdviceSnapshot:
         freshness_frontier=cast(str, source["freshness_frontier"]),
         suppression_identity=cast(str, source["suppression_identity"]),
         ranked_items=items,
+        semantic_attempt_state=cast(AdviceSemanticState, attempt_state),
     )
 
 

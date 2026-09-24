@@ -12,6 +12,7 @@ from typing import Final, Protocol, cast
 from yoetz.domain.findings import FINDING_KIND_TRAITS, FindingId, FindingKind, finding_id
 from yoetz.domain.observation import (
     AdviceItem,
+    AdviceSemanticState,
     AdviceSnapshot,
     ObservationEnvelope,
     ObservationLifecycle,
@@ -49,6 +50,7 @@ from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
 __all__ = [
     "ADVICE_SEMANTIC_PENDING_GAP",
     "ADVICE_SEMANTIC_UNAVAILABLE_GAP",
+    "semantic_state_from_addon",
     "SemanticAdviceScheduler",
     "STANDING_MACHINE_ACTIONS",
     "ObservationAdviceBuildInput",
@@ -185,6 +187,27 @@ class ObservationAdviceSemanticAddon:
     provider_identity: str | None = None
     attempt_receipt: str | None = None
     failure_reason: str | None = None
+
+
+def semantic_state_from_addon(
+    addon: ObservationAdviceSemanticAddon | None,
+    *,
+    output_usable: bool = True,
+) -> AdviceSemanticState:
+    """Project recorded attempt status, never finding count (issue #742).
+
+    ``output_usable`` is False when a succeeded attempt's output failed advice-side structural
+    validation and left no usable finding; ADR-006 records that as ``failed`` (a terminal attempt
+    without validated output), not ``ready``.
+    """
+
+    if addon is None:
+        return "disabled"
+    if addon.failure_reason is None:
+        return "ready" if output_usable else "failed"
+    if addon.failure_reason == _ADVICE_SEMANTIC_PENDING_REASON:
+        return "unavailable"
+    return "failed"
 
 
 class SemanticAdvicePort(Protocol):
@@ -526,6 +549,11 @@ def should_reissue_advice(
     """Reissue when evidence changes, severity increases, or work left prior advice open."""
 
     if prior is None:
+        return True
+    # The attempt state is not part of the suppression identity or the evidence basis: a review
+    # that completes with no findings and no evidence digest leaves both unchanged, and the stale
+    # state would otherwise survive in the stored snapshot.
+    if prior.semantic_attempt_state != candidate.semantic_attempt_state:
         return True
     if prior.suppression_identity == candidate.suppression_identity:
         return unresolved_after_work
@@ -988,6 +1016,9 @@ def build_observation_advice_snapshot(
         freshness_frontier=frontier,
         suppression_identity=suppression,
         ranked_items=tuple(items),
+        semantic_attempt_state=semantic_state_from_addon(
+            semantic, output_usable=bool(semantic_ids) or not semantic_invalid
+        ),
     )
     if not should_reissue_advice(input_value.prior_snapshot, snapshot):
         return input_value.prior_snapshot

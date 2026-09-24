@@ -40,6 +40,7 @@ from yoetz.cli.hook_io import (
 from yoetz.cli.hook_io import (
     stdout_json as _stdout_json,
 )
+from yoetz.cli.render import render_hook_recovery_suffix
 from yoetz.ports.control import ControlClientKind, ControlError, WorkspaceLocator
 from yoetz.protocol.canonical import JsonValue, strict_json_parse
 from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode
@@ -151,6 +152,7 @@ _UNAVAILABLE_CONTEXT: Final = (
 )
 _LOCKED_CONTEXT: Final = (
     "Yoetz vault is locked for this mapped session; no live receipt can be promised."
+    + render_hook_recovery_suffix("vault_locked")
 )
 
 

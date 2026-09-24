@@ -23,7 +23,7 @@ from yoetz.application.semantic_attempts import (
     run_durable_semantic_attempts,
     should_retry_after,
 )
-from yoetz.domain.findings import RuntimeTokenUsage
+from yoetz.domain.findings import RuntimeTokenUsage, SemanticFailureClass
 from yoetz.domain.values import Frontier
 from yoetz.ports.ledger import (
     AttemptOutcome,
@@ -131,6 +131,21 @@ def test_retry_matrix_admits_only_approved_transient_classes() -> None:
         SemanticStatus.UNAVAILABLE, SemanticReason.PROVIDER_QUOTA_EXHAUSTED
     )
     assert not is_retriable_semantic_outcome(SemanticStatus.STALE, SemanticReason.FRONTIER_CHANGED)
+    assert not is_retriable_semantic_outcome(
+        SemanticStatus.UNAVAILABLE,
+        SemanticReason.TRANSPORT_UNAVAILABLE,
+        failure_class=SemanticFailureClass.AUTHENTICATION,
+    )
+    assert not is_retriable_semantic_outcome(
+        SemanticStatus.UNAVAILABLE,
+        SemanticReason.TRANSPORT_UNAVAILABLE,
+        failure_class=SemanticFailureClass.AUTHORIZATION,
+    )
+    assert is_retriable_semantic_outcome(
+        SemanticStatus.UNAVAILABLE,
+        SemanticReason.TRANSPORT_UNAVAILABLE,
+        failure_class=SemanticFailureClass.TRANSPORT,
+    )
 
 
 def test_should_retry_respects_budget_and_deadline() -> None:
@@ -161,6 +176,14 @@ def test_should_retry_respects_budget_and_deadline() -> None:
         attempts_completed=1,
         max_retries=2,
         deadline_expired=True,
+    )
+    assert not should_retry_after(
+        status=SemanticStatus.UNAVAILABLE,
+        reason=SemanticReason.TRANSPORT_UNAVAILABLE,
+        attempts_completed=1,
+        max_retries=2,
+        deadline_expired=False,
+        failure_class=SemanticFailureClass.AUTHENTICATION,
     )
 
 

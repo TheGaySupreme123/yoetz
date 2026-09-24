@@ -442,6 +442,9 @@ def _attachment_recovery_context(reason: str) -> str:
             "incompatible holder; the hook did not replace it. Call start and follow its exact "
             "service recovery continuation. "
         )
+    # A timed-out attachment may have sent start under the hook's own request identity, which
+    # the agent never sees, so no timeout replay token applies: the agent's own start is the
+    # recovery (issue #739).
     if reason in {"service_unavailable", "timeout"}:
         return (
             "Yoetz attachment pending: service_unavailable. The bounded service connection "

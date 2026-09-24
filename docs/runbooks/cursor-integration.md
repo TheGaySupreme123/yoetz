@@ -1286,6 +1286,14 @@ stdout is not a TTY; its failure keeps the exact wire body on stdout and writes 
 lines to stderr. This is CLI behavior shared by every host; no Cursor-specific behavior is
 configured.
 
+**Provider outcomes (issue #742).** A check whose AI-powered review failed resolves through the
+same registry (`continuation_for_semantic_outcome`). Cursor's native MCP profile repeats the
+canonical JSON body and does not use the bounded summary renderer, so the consumer still
+resolves the check's `semantic_reason` and optional `failure_class` through this section. CLI
+check output in this host shows the directive. Hook advisories never carry that token;
+SessionStart's vault-locked advisory appends its own `vault_unlock_required` token after the
+host-specific prefix (issue #739). No Cursor-specific recovery wording is configured.
+
 ## Cold service attachment and recovery (issue #670)
 
 Cursor sessionStart returns the shared result through Cursor's `additional_context` contract,

@@ -6,7 +6,10 @@ pointer-with-directive decision. Surface coverage beyond MCP and CLI remains a r
 that issue. Amended for issue #741 (the CLI's own reason vocabulary ratchets too); the maintainer
 requested that scoped work. Amended again for issue #741 on 2026-09-22 (CLI-owned JSON carries the
 renderer-resolved directive); the maintainer requested the change and accepted this amendment.
-Surface coverage beyond MCP and CLI remains a review decision on #739.
+Amended for issue #742 on 2026-09-23 (provider and AI-powered review outcomes resolve through
+`continuation_for_semantic_outcome`; no new public SemanticReason values). Amended for issue
+#739 on 2026-09-23 (hooks, TUI, and receipt human renderers resolve through the same registry;
+compact receipt fixtures stay frozen). Remaining exemptions stay recorded on the issue.
 
 **Relates to:** ADR-002, ADR-009, ADR-015, ADR-018, and issues #739, #740, #669, #741, #742.
 
@@ -221,6 +224,14 @@ never sacrificed to fit advice.
   renderer, the bounded lifecycle line, the trusted-ceremony mapper, the interactive menu, the
   instance and path refusal line, the observe verbs, and the resource-integrity branch of
   `version`. A remedy visible on one of seven surfaces is the defect issue #741 reported.
+  Hooks, the TUI blocked report, and receipt human text now use the same lookup. Hook intake keeps
+  its host-specific prefix and appends only a continuation token (512-byte cue), resolved from the
+  hook's own exact reason, never from a check's provider outcome; a hook context that stands for
+  several reasons, or whose reason only shares a spelling with a CLI-local reason, appends none. The
+  TUI appends the full directive lines. Receipt human text adds a Recovery section from recorded
+  `semantic_provenance`. Compact receipt sentences stay fixture-stable; they do not gain prose.
+  Workspace-fence, `service_unavailable`, `service_incompatible`, `storage_corrupt`, and “review was
+  not run” coverage gaps remain exempt or hook-specific.
 - JSON renderings carry the continuation token where they already carry `safe_details`. CLI-owned
   JSON error bodies also carry the renderer-resolved `recovery` object. A frozen wire result keeps
   its exact shape on stdout and gets the directive lines on stderr (see the 2026-09-22 amendment
@@ -234,9 +245,14 @@ never sacrificed to fit advice.
   producer's own message directs an idempotent retry under that same id. A directive that told the
   agent to mint a new `request_id` would have contradicted the message beside it.
 - Provider and AI-powered review failures gain typed failure tokens (issue #742) rather than an
-  exemption from the Tier-4 rule. Some diagnostic nuance is genuinely lost at the agent-facing
-  boundary and remains recoverable locally through the `correlation_id`, which never crosses the
-  wire. That is the intended trade.
+  exemption from the Tier-4 rule. Classification happens at the adapter boundary into the closed
+  `SemanticFailureClass` set. Renderers resolve frozen directives through
+  `continuation_for_semantic_outcome` from the recorded `(semantic_status, semantic_reason)` pair
+  and, when present, `failure_class`. A rejected credential is distinguished from transport
+  failure by that class, not by public-reason expansion of frozen check-result schemas. Raw
+  provider and model text is discarded at the adapter and never reaches a directive. Some
+  diagnostic nuance is genuinely lost at the agent-facing boundary and remains recoverable
+  locally through the `correlation_id`, which never crosses the wire. That is the intended trade.
 - `_claim_revision_clause` is retired. `ClaimRevisionMismatch` already carried a closed-set
   `invariant`, which the builder placed only inside the message, so the MCP projector matched that
   whole sentence with a regex to recover it and validated the result against a second copy of the
