@@ -6,7 +6,7 @@ import json
 import re
 from collections.abc import Iterator, Sequence
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Final, cast
 
 import pytest
 from typer.testing import CliRunner, Result
@@ -110,8 +110,14 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Env]:
     yield Env(tmp_path, monkeypatch)
 
 
+_ANSI: Final = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+
 def _flat(text: str) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"[│╭╮╰╯─]", " ", text))
+    # Rich colors the help on a color-capable CI runner, splitting option names
+    # across escape sequences; strip them before matching the words.
+    plain = _ANSI.sub("", text)
+    return re.sub(r"\s+", " ", re.sub(r"[│╭╮╰╯─]", " ", plain))
 
 
 def test_capacity_help_lists_every_choice_and_queue_count() -> None:
