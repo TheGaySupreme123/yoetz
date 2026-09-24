@@ -228,6 +228,18 @@ def _with_holder_identity(line: str) -> str:
     return f"{line} (holder pid {holder.pid}, service version {version}, schema manifest {digest})"
 
 
+def _holder_predates_this_package() -> bool:
+    """True when the stamped holder runs an older package: an in-place update awaiting reopen."""
+
+    try:
+        from yoetz.service.client import holder_version_order, service_holder_identity
+
+        holder = service_holder_identity()
+        return holder is not None and holder_version_order(holder.service_version) == "older"
+    except Exception:
+        return False
+
+
 def _with_correlation(line: str, error: ControlError) -> str:
     if error.correlation_id is None:
         return line
@@ -329,15 +341,21 @@ def control_failure(
             stdout_writer(payload)
         return exit_code_for(code)
     if error.reason in {"service_incompatible", "protocol_mismatch"}:
-        guidance = _with_correlation(
-            _with_holder_identity(
+        if _holder_predates_this_package():
+            summary = (
+                f"{error.reason}: Yoetz was updated, and the running local service is still the "
+                "previous version, serving sessions opened before the update. Reopen your agent "
+                "app or start a new session to switch automatically, or run "
+                "'yoetz service restart' on a local terminal to switch now, then retry"
+            )
+        else:
+            summary = (
                 f"{error.reason}: the running local service was started by a different Yoetz "
                 "installation than this command and rejected its handshake. Run "
                 "'yoetz service restart' on a local terminal to replace it with this "
                 "installation's service, then retry"
-            ),
-            error,
-        )
+            )
+        guidance = _with_correlation(_with_holder_identity(summary), error)
         stderr_writer(guidance)
         if json_output:
             payload = {

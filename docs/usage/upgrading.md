@@ -12,29 +12,50 @@ anything. Select only your existing hosts with repeated `--host codex`, `--host 
 `--host cursor`. Supply the existing target values shown by your host registration when the guide
 requests them. It never guesses a home, installs another host, or chooses a new privacy recipe.
 
-For an ordinary installation managed by `uv tool`, first stop the old hosts/hooks and the Yoetz
-service through their supported lifecycle. Once those writers are stopped, the package step is:
+For an ordinary installation managed by `uv tool`, you do not need to quit your agent app or stop
+anything first. The package step is:
 
 ```text
-yoetz upgrade --accept --writers-stopped
+yoetz upgrade --accept
 ```
 
-This runs `uv tool upgrade yoetz`. It refuses source checkouts, pinned test instances, and isolated
-runtimes so it cannot accidentally replace another installation. For a different package manager,
+This installs the newest eligible version through uv, replacing an old version pin and keeping
+supported extras. It confirms the result using a fresh launcher; an unchanged version is reported
+as unchanged. Source checkouts, pinned test instances, isolated runtimes and custom uv resolution
+settings are refused so their installation choices cannot be silently replaced. For a different package manager,
 use that manager's upgrade procedure and then return to the guide. A failed or timed-out package
 command is reported without claiming success; inspect the installed version before retrying.
 
-Start the fresh launcher and run `yoetz upgrade` again, with the same host target options. Do not
+Your agent can run it from inside the session you are using. Running processes keep their own
+release files while the installed package changes. That session, and any other session
+that is already open, keeps working on the previous version. When you next reopen your agent app
+or start a new session, its first Yoetz call retires the previous Yoetz service and starts the new
+one. You do not need to stop or restart anything to make that happen; `yoetz service restart`
+switches immediately if you do not want to wait. A process from before the update never replaces
+the newer service. If a still-open older session later reports that Yoetz was updated, reopen that
+session.
+
+Upgrading **from 0.2.x** is the exception: 0.2's own upgrade command still asks you to stop hosts,
+hooks, and the service first, because 0.2 cannot safely share the newer local observation state.
+Follow that procedure once; later updates do not need it.
+
+Unused old runtime copies are cleaned up automatically when a new process starts. For explicit
+cleanup, `yoetz upgrade --prune-runtimes` removes only copies no process is using. It does not stop
+sessions or remove settings, task data or credentials. Before uninstalling Yoetz, close its host
+sessions, stop its service through the supported lifecycle, and run this cleanup so unused release
+copies do not remain after the package manager removes the launcher.
+
+Run `yoetz upgrade` again with the same host target options to continue with host refresh. Do not
 repeat `--accept` just to continue. Package replacement does not itself refresh host files. When
-the package and the existing data are a supported pair, the first controlled service startup
-performs the backup-first data upgrade before the service becomes ready. It preserves existing
-tasks, settings, permissions, host integrations, observation consent, and recorded history; there
-is no per-task migration ceremony:
+the package and the existing data are a supported pair, the first controlled startup of the new
+service performs the backup-first data upgrade before the service becomes ready. It preserves
+existing tasks, settings, permissions, host integrations, observation consent, and recorded
+history; there is no per-task migration ceremony:
 
 - **Codex:** refresh the existing skill and inspect the exact plugin activation and MCP target.
   Apply only the fresh preview supplied by those surfaces, preserving its route and home.
 - **Claude Code:** use the native plugin update preview and its authorization procedure, apply
-  with the same request and digest, then reload or start a fresh session.
+  with the same request and digest, then reload or start a fresh session when convenient.
 - **Cursor:** use the native replacement preview and install procedure, then fully relaunch when
   runtime status requires it. Portable/development carriers use their original install procedure.
 - **Existing data:** the service handles a compatible 0.2-to-0.3 bundle upgrade during startup and

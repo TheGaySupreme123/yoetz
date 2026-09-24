@@ -83,11 +83,15 @@ boundary. It does not mean creating tasks until a receipt looks clean.
 ## Upgrade and schema continuity
 
 For an explicit user-requested update, run `yoetz upgrade` and preserve the existing host roots,
-ownership, route, observation profile, settings, permissions, and integrations. Stop old hosts,
-hooks, and the service through their supported lifecycle before accepting package replacement. The
-package command is only the package step. On the next controlled service startup, a compatible
-0.2-to-0.3 bundle migration runs backup-first before READY and preserves existing task data; the
-user does not perform a per-task migration ceremony.
+ownership, route, observation profile, settings, permissions, and integrations. Nothing needs to
+be stopped before accepting package replacement: the current session keeps working on the previous
+version, and the first Yoetz call of the next session the user opens retires the previous service
+and starts the new one. Running processes retain their code, dependencies and resources; their
+settings, permissions, vault and task data stay in the existing installation. The fresh launcher
+must confirm the installed version; exit zero or an unchanged version is not a completed update.
+The package command is only the package step. On that controlled service
+startup, a compatible 0.2-to-0.3 bundle migration runs backup-first before READY and preserves
+existing task data; the user does not perform a per-task migration ceremony.
 
 Treat a startup migration refusal, unsupported layout, holder conflict, or rollback-required result
 as a typed boundary. Keep the same operation and backup identity, follow the returned supported

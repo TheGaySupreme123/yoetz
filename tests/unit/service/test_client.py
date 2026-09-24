@@ -11,6 +11,7 @@ from collections.abc import Buffer, Generator
 from contextlib import contextmanager
 from inspect import signature
 from pathlib import Path
+from types import SimpleNamespace
 from typing import BinaryIO, cast
 
 import pytest
@@ -1308,6 +1309,219 @@ async def test_supersede_signals_only_a_live_foreign_identity_holder(
         if holder.poll() is None:
             holder.kill()
             holder.wait(timeout=5)
+
+
+def test_holder_version_order_orders_packages_and_never_guesses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yoetz.service.client as client_module
+
+    monkeypatch.setattr(client_module, "__version__", "0.3.1")
+    order = client_module.holder_version_order
+    assert order("0.3.0") == "older"
+    assert order("0.3.1") == "same"
+    assert order("0.3.2") == "newer"
+    assert order("0.10.0") == "newer"
+    # A legacy stamp or an unparsable version keeps the version-agnostic behavior.
+    assert order(None) is None
+    assert order("not-a-version") is None
+
+
+@pytest.mark.anyio
+async def test_supersede_never_replaces_a_newer_holder_unless_explicitly_restarted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A process from before an in-place upgrade must not undo it (#820)."""
+
+    import subprocess
+    import sys
+    import threading
+
+    import yoetz.observability.logging as logging_module
+    import yoetz.service.client as client_module
+    from yoetz.protocol.canonical import canonical_encode
+
+    lock = tmp_path / "service.lock"
+    monkeypatch.setattr(client_module, "_singleton_lock_path", lambda: lock)
+    monkeypatch.setattr(client_module, "__version__", "0.3.1")
+    recorded: list[str] = []
+
+    def record(
+        *, component: str, operation: str, reason: str, request_id: str | None = None
+    ) -> str:
+        del component, reason, request_id
+        recorded.append(operation)
+        return _CORRELATION_FOR_TEST
+
+    monkeypatch.setattr(logging_module, "record_public_error_without_raising", record)
+
+    def sleeper() -> tuple[subprocess.Popen[bytes], threading.Thread]:
+        process = subprocess.Popen(  # noqa: S603 - fixed interpreter
+            (sys.executable, "-c", "import time; time.sleep(30)"),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        reaper = threading.Thread(target=process.wait, daemon=True)
+        reaper.start()
+        return process, reaper
+
+    def stamp(pid: int, version: str) -> None:
+        body = {
+            "instance_id": "svc_test",
+            "pid": pid,
+            "schema_manifest_digest": "sha256:" + "0" * 64,
+            "service_version": version,
+        }
+        lock.write_bytes(canonical_encode(body) + b"\n")  # type: ignore[arg-type]
+        lock.chmod(0o600)
+
+    deadline = time.monotonic() + 5.0
+    newer, newer_reaper = sleeper()
+    older, older_reaper = sleeper()
+    try:
+        stamp(newer.pid, "0.4.0")
+        assert await client_module.supersede_incompatible_service(deadline=deadline) is False
+        assert newer.poll() is None
+        assert recorded == []
+        # An explicit human restart may still roll back.
+        assert (
+            await client_module.supersede_incompatible_service(
+                deadline=deadline, replace_newer=True
+            )
+            is True
+        )
+        newer_reaper.join(timeout=5)
+        assert newer.returncode is not None
+        assert recorded == ["service_supersede"]
+        # The upgrade direction is unchanged: an older holder is replaced.
+        stamp(older.pid, "0.3.0")
+        assert await client_module.supersede_incompatible_service(deadline=deadline) is True
+        older_reaper.join(timeout=5)
+        assert older.returncode is not None
+        assert recorded == ["service_supersede", "service_supersede"]
+    finally:
+        for process in (newer, older):
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+
+
+class _HelloClient:
+    """A connected client whose hello reported ``service_version``."""
+
+    def __init__(self, service_version: str) -> None:
+        self.hello_service_status = SimpleNamespace(service_version=service_version)
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+def _script_on_demand(
+    monkeypatch: pytest.MonkeyPatch,
+    connections: list[object],
+    *,
+    supersede_result: bool | ControlError = True,
+) -> dict[str, int]:
+    import yoetz.service.client as client_module
+
+    counts = {"connect": 0, "supersede": 0, "spawn": 0}
+
+    async def scripted_connect(_kind: ControlClientKind, **_kwargs: object) -> object:
+        counts["connect"] += 1
+        item = connections.pop(0)
+        if isinstance(item, ControlError):
+            raise item
+        return item
+
+    async def supersede(*, deadline: float, replace_newer: bool = False) -> bool:
+        assert replace_newer is False
+        counts["supersede"] += 1
+        if isinstance(supersede_result, ControlError):
+            raise supersede_result
+        return supersede_result
+
+    def spawn() -> None:
+        counts["spawn"] += 1
+
+    monkeypatch.setattr(client_module, "__version__", "0.3.1")
+    monkeypatch.setattr(client_module, "_connect_service_attempt", scripted_connect)
+    monkeypatch.setattr(client_module, "supersede_incompatible_service", supersede)
+    monkeypatch.setattr(client_module, "_spawn_service_process", spawn)
+    monkeypatch.setattr(client_module, "_SERVICE_START_POLL_SECONDS", 0.01)
+    return counts
+
+
+@pytest.mark.anyio
+async def test_new_session_bridge_retires_an_older_compatible_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first session opened after an in-place upgrade switches to the new package (#820)."""
+
+    stale = _HelloClient("0.3.0")
+    successor = _HelloClient("0.3.1")
+    counts = _script_on_demand(
+        monkeypatch,
+        [stale, ControlError("service_unavailable", retryable=True), successor],
+    )
+    connected = await connect_service_on_demand(ControlClientKind.MCP_BRIDGE, timeout_seconds=0.5)
+    assert connected is successor
+    assert stale.closed is True
+    assert counts == {"connect": 3, "supersede": 1, "spawn": 1}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("kind", "version"),
+    [
+        # Open sessions' hooks and ordinary CLI commands keep the service they found.
+        (ControlClientKind.CLI, "0.3.0"),
+        # Same or newer packages are never retired by a bridge.
+        (ControlClientKind.MCP_BRIDGE, "0.3.1"),
+        (ControlClientKind.MCP_BRIDGE, "0.4.0"),
+    ],
+)
+async def test_only_a_bridge_retires_and_only_an_older_service(
+    monkeypatch: pytest.MonkeyPatch, kind: ControlClientKind, version: str
+) -> None:
+    running = _HelloClient(version)
+    counts = _script_on_demand(monkeypatch, [running])
+    connected = await connect_service_on_demand(kind, timeout_seconds=0.5)
+    assert connected is running
+    assert running.closed is False
+    assert counts == {"connect": 1, "supersede": 0, "spawn": 0}
+
+
+@pytest.mark.anyio
+async def test_bridge_keeps_the_compatible_service_when_nothing_can_be_retired(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stale = _HelloClient("0.3.0")
+    again = _HelloClient("0.3.0")
+    counts = _script_on_demand(monkeypatch, [stale, again], supersede_result=False)
+    connected = await connect_service_on_demand(ControlClientKind.MCP_BRIDGE, timeout_seconds=0.5)
+    assert connected is again
+    assert counts == {"connect": 2, "supersede": 1, "spawn": 0}
+
+
+@pytest.mark.anyio
+async def test_bridge_reports_a_retryable_outage_while_the_older_service_drains(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    counts = _script_on_demand(
+        monkeypatch,
+        [_HelloClient("0.3.0")],
+        supersede_result=ControlError(
+            "service_incompatible", retryable=True, correlation_id=_CORRELATION_FOR_TEST
+        ),
+    )
+    with pytest.raises(ControlError) as outage:
+        await connect_service_on_demand(ControlClientKind.MCP_BRIDGE, timeout_seconds=0.5)
+    assert outage.value.reason == "service_unavailable"
+    assert outage.value.retryable is True
+    assert outage.value.correlation_id == _CORRELATION_FOR_TEST
+    assert counts == {"connect": 1, "supersede": 1, "spawn": 0}
 
 
 @pytest.mark.anyio

@@ -1002,11 +1002,12 @@ Upgrade is a whole-directory previewed replacement. The preview binds the curren
 future inventory, format, MCP owner/route, target identity, artifact digest, and request identity.
 Do not mutate Cursor caches to force selection. Reload and re-prove source after replacement.
 
-When the `yoetz` runtime itself is upgraded, stop the running Yoetz service with the old runtime
-before replacing it, then let the installed bridge start the matching successor. A service that
-survives a schema-manifest-changing upgrade must fail the new client handshake; restart that exact
-service through the user-selected supervisor before retrying Cursor. Runtime replacement, service
-restart, and Cursor/plugin activation are separate proof facets.
+When the `yoetz` runtime itself is upgraded (0.3.0 or later), nothing has to be stopped first. Open
+Cursor sessions keep the running service; the bridge of the next session Cursor starts retires an
+older service and starts the matching successor (ADR-007, 2026-09-24 amendment). A bridge that
+predates the upgrade and finds a newer service reports that the session must be reopened instead of
+replacing it. Runtime replacement, service switch, and Cursor/plugin activation are separate proof
+facets.
 
 Removal moves only an exact marker-verified managed tree and deletes it after the directory swap is
 durable. Modified plugin bytes or recovery residue, including an isolated-root drift, are preserved
