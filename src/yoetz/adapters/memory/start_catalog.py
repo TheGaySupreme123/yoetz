@@ -1812,8 +1812,7 @@ class MemoryStartCatalogAdapter:
                 or by_session.state is TaskRouteState.QUARANTINED
                 or by_session.workspace_ref_commitment is None
                 or not hmac.compare_digest(by_session.workspace_ref_commitment, workspace)
-                or len(workspace_routes) != 1
-                or workspace_routes[0].task_id != by_session.task_id
+                or not any(route.task_id == by_session.task_id for route in workspace_routes)
             ):
                 raise _error(
                     PublicErrorCode.SESSION_CONFLICT,

@@ -2163,7 +2163,12 @@ def advice_snapshot_from_json(value: JsonValue) -> AdviceSnapshot:
         raise _invalid()
     ids_raw = source["ranked_finding_ids"]
     items = tuple(advice_item_from_json(item) for item in cast(tuple[JsonValue, ...], items_raw))
-    attempt_state = source.get("semantic_attempt_state", "disabled")
+    # A snapshot stored before issue #742 has no recorded attempt state. AI-powered items exist
+    # only after a succeeded review, so they are the one fact such a snapshot still carries.
+    legacy_state = (
+        "ready" if any(item.origin == "semantic_model_derived" for item in items) else "disabled"
+    )
+    attempt_state = source.get("semantic_attempt_state", legacy_state)
     if type(attempt_state) is not str or attempt_state not in _ADVICE_SEMANTIC_STATES:
         raise _invalid()
     return AdviceSnapshot(

@@ -322,7 +322,12 @@ directive from the recorded `(semantic_status, semantic_reason)` pair and, when 
 `semantic_credential_rejected` even when the public reason remains the `transport_unavailable`
 catch-all; truncated or overlong output maps to `semantic_response_truncated` from
 `response_content_invalid`; schema-invalid and rejected-judgment answers map to
-`semantic_response_invalid`; capacity and quota map to `semantic_capacity_exceeded`. These tokens
+`semantic_response_invalid`; capacity and quota map to `semantic_capacity_exceeded`; and
+`retry_budget_exhausted` and `outcome_unknown`, which name how a job ended rather than why, map to
+`semantic_no_judgment`. Every directive follows the check-mode coverage guidance: it never tells an
+agent to downgrade a required review, and it never offers a second job for a truncated answer.
+Predispatch configuration and policy outcomes (`not_configured`, `credential_unavailable`,
+`blocked_by_policy`, and the rest) carry no directive. These tokens
 are admitted continuation tokens and live in the same registry. They are not new public
 `SemanticReason` values and do not change frozen check-result schemas. CLI check rendering and the
 MCP check text summary project the resolved directive (the MCP channel drops the sentence when the
@@ -332,7 +337,8 @@ text project the full directive lines from the registry. Compact receipt sentenc
 Advice and status `semantic_state` is the
 recorded attempt status (`ready` / `disabled` / `unavailable` / `failed`), not finding presence:
 a successful review with zero findings is `ready`, and `disabled` means no attempt was requested
-or configured.
+or configured. The state does not widen coverage: only validated AI-powered finding ids add
+`semantic_model_derived` to advice coverage.
 
 Every MCP result also carries a bounded ASCII text projection (at most 512 bytes) for hosts that
 drop `structuredContent`. A successful projection includes the first valid returned frontier's
@@ -4218,9 +4224,15 @@ holds the workspace and predecessor lifecycle locks, revalidates ownership and s
 `mode=attach` request carrying that selector together with the new host pair. Every eligible mapping
 must name one task; within it, the newest mapping-file write wins and the host session ID breaks
 timestamp ties. The trusted control handshake carries the canonical workspace for repository privacy.
-The catalog requires the selector to remain active, the task to be the workspace's sole
-non-quarantined route, and no start for that route to be pending. Both calls share one five-second
-deadline. The response must retain the candidate task ID. Recovery first takes a nonblocking
+The catalog requires the selected root task to remain active and non-quarantined, its canonical
+workspace and trusted repository-privacy binding to match, and no start for that selected route to
+be pending.
+Other tasks in the workspace do not make a held selector ambiguous and are neither attached nor
+changed (#814). The new pair must not already select a different task. Delegated child routes
+remain authenticated-handle/target-selector paths and are never discovered by generic session
+recovery. This permits independent tasks to coexist; it does not grant task interaction, delegation,
+lineage, or shared project authority.
+Both calls share one five-second deadline. The response must retain the candidate task ID. Recovery first takes a nonblocking
 workspace reservation and then holds ordered locks for every eligible ended same-host session
 through full candidate revalidation, the service RPC, authorized rewrites, and pruning; no
 observation-store lock spans the RPC. Revalidation includes unmapped sessions, cross-workspace
@@ -4241,8 +4253,9 @@ quarantined. When no eligible local selector exists, the ordinary `create_or_att
 new work; when recovery attach fails, the ordinary typed failure path remains. Every failed attempt records a
 closed hook-diagnostic
 reason instead of a silent absent mapping: `auto_attach_workspace_unbound`,
-`auto_attach_request_invalid`, `auto_attach_conflict` (session, idempotency, or request-identity
-conflict), `auto_attach_refused`, `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`,
+`auto_attach_request_invalid`, `auto_attach_binding_ambiguous` (candidate count only),
+`auto_attach_conflict` (session, idempotency, or request-identity conflict), `auto_attach_refused`,
+`auto_attach_result_invalid`, `auto_attach_mapping_write_failed`,
 `privacy_authority_required`, or the shared `service_unavailable`, `service_incompatible`, `vault_locked`, `timeout`,
 `storage_unsafe`, and `storage_corrupt` tokens. Turn-boundary hooks retry auto-attach under a
 bounded budget and record the same typed cause next to the `auto_attach_retry_failed` path marker

@@ -148,13 +148,20 @@ class ObservationAdviceSemanticAddon:
 
 def semantic_state_from_addon(
     addon: ObservationAdviceSemanticAddon | None,
+    *,
+    output_usable: bool = True,
 ) -> AdviceSemanticState:
-    """Project recorded attempt status, never finding count (issue #742)."""
+    """Project recorded attempt status, never finding count (issue #742).
+
+    ``output_usable`` is False when a succeeded attempt's output failed advice-side structural
+    validation and left no usable finding; ADR-006 records that as ``failed`` (a terminal attempt
+    without validated output), not ``ready``.
+    """
 
     if addon is None:
         return "disabled"
     if addon.failure_reason is None:
-        return "ready"
+        return "ready" if output_usable else "failed"
     if addon.failure_reason == _ADVICE_SEMANTIC_PENDING_REASON:
         return "unavailable"
     return "failed"
@@ -500,6 +507,11 @@ def should_reissue_advice(
 
     if prior is None:
         return True
+    # The attempt state is not part of the suppression identity or the evidence basis: a review
+    # that completes with no findings and no evidence digest leaves both unchanged, and the stale
+    # state would otherwise survive in the stored snapshot.
+    if prior.semantic_attempt_state != candidate.semantic_attempt_state:
+        return True
     if prior.suppression_identity == candidate.suppression_identity:
         return unresolved_after_work
     if prior.evidence_basis_digest != candidate.evidence_basis_digest:
@@ -512,8 +524,6 @@ def should_reissue_advice(
         # Lower priority number is higher severity in FindingKind traits.
         return True
     if unresolved_after_work:
-        return True
-    if prior.semantic_attempt_state != candidate.semantic_attempt_state:
         return True
     return prior.ranked_finding_ids != candidate.ranked_finding_ids
 
@@ -879,7 +889,7 @@ def build_observation_advice_snapshot(
     basis = evidence_basis_digest(candidates, input_value.envelopes, extra=basis_extra)
     coverage = _coverage(
         observation_qualified=observation_qualified,
-        semantic=semantic is not None and semantic.failure_reason is None,
+        semantic=semantic is not None and bool(semantic_ids),
         gaps=input_value.gaps,
         additional_gaps=additional_gaps,
     )
@@ -918,7 +928,7 @@ def build_observation_advice_snapshot(
         frontier = _freshness_frontier(input_value.envelopes, basis)
         coverage = _coverage(
             observation_qualified=observation_qualified,
-            semantic=semantic is not None and semantic.failure_reason is None,
+            semantic=bool(semantic_ids),
             gaps=input_value.gaps,
             additional_gaps=additional_gaps,
         )
@@ -955,7 +965,9 @@ def build_observation_advice_snapshot(
         freshness_frontier=frontier,
         suppression_identity=suppression,
         ranked_items=tuple(items),
-        semantic_attempt_state=semantic_state_from_addon(semantic),
+        semantic_attempt_state=semantic_state_from_addon(
+            semantic, output_usable=bool(semantic_ids) or not semantic_invalid
+        ),
     )
     if not should_reissue_advice(input_value.prior_snapshot, snapshot):
         return input_value.prior_snapshot

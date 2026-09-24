@@ -71,7 +71,7 @@ def _failure_class_from_provenance(provenance: object) -> object | None:
     if provenance is None:
         return None
     if isinstance(provenance, Mapping):
-        return provenance.get("failure_class")
+        return cast(Mapping[str, object], provenance).get("failure_class")
     return getattr(provenance, "failure_class", None)
 
 

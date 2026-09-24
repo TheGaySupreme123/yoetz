@@ -2356,8 +2356,8 @@ def _acquire_recovery_session_locks(
     """Hold every scanned predecessor lock through validation and attach.
 
     Session locks are nonblocking by contract.  If another host event owns one
-    of the candidate locks, recovery yields ``False`` and the caller performs
-    the ordinary service request.  Acquiring in sorted order avoids a lock
+    of the candidate locks, recovery yields ``False`` and the caller reports
+    recovery busy without making a service request. Acquiring in sorted order avoids a lock
     hierarchy cycle between concurrent recovery attempts.
     """
 

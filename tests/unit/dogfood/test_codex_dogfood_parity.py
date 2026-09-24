@@ -586,7 +586,7 @@ def test_strongest_change_across_slots_decides_the_reason() -> None:
     ("field", "value", "reason"),
     [
         ("content", "plaintext", "normal_target_observation_fields_invalid"),
-        ("path_digest", "/Users/example/.codex", "normal_target_path_digest_invalid"),
+        ("path_digest", "/synthetic/codex-home", "normal_target_path_digest_invalid"),
         ("presence", "maybe", "normal_target_presence_invalid"),
         ("size_bytes", -1, "normal_target_size_invalid"),
         ("observed_at", "yesterday", "normal_target_observed_at_invalid"),

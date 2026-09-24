@@ -622,9 +622,11 @@ from eligible ended Claude sessions. Eligibility requires a received `SessionEnd
 session ended, and a candidate bound only to this consented workspace. A unique eligible mapping is
 selected before automatic new-pair admission: the hook holds the workspace and lifecycle locks,
 revalidates ownership and state, and sends one `mode=attach` request carrying that selector plus the
-new pair. The catalog requires one
-mapped task, the selector still active, no sibling task, the matching repository-privacy binding,
-and no start already pending for that route. Recovery revalidates unmapped sessions,
+new pair. The catalog requires the selected root task to be active and non-quarantined, its
+canonical workspace and repository-privacy binding to match, and no start already pending for that
+selected route. Other independent tasks in the same workspace do not block this recovery (#814); a
+pair already bound to another task remains a conflict. Delegated child routes require an
+authenticated attach handle or target selector. Recovery revalidates unmapped sessions,
 cross-workspace ownership, mapping identity, and mapping recency; a busy workspace reservation
 defers with `auto_attach_recovery_busy`, while candidate-lock contention or changed state returns
 the closed `auto_attach_recovery_busy` boundary rather than creating work from an unstable selector.
@@ -643,8 +645,9 @@ payload-free `hook_diagnostics` reason
 or `storage_corrupt`) and the session keeps an observation-only binding; `UserPromptSubmit` and
 `Stop` retry under the bounded budget, while teardown `SessionEnd` records its lifecycle intent and
 defers service delivery without spending an auto-attach retry. An explicit cooperative MCP `start`
-bound from its exact `PostToolUse` result remains the recovery path, not a substitute proof that
-natural auto-attach works. For
+bound from its exact `PostToolUse` result remains a recovery path, not a substitute proof that
+natural auto-attach works. An explicit `mode=create` collision remains `SESSION_CONFLICT` and is
+not a recovery selector. For
 `vault_locked` on a never-initialized install, that explicit `start` returns the typed
 `vault_initialization_required` continuation (see the proof checklist) rather than a dead end.
 
@@ -999,8 +1002,8 @@ them from memory, `CLAUDE.md`, or the live store.
   bare `task_id` is not an attach selector.
 - **Same-pair fresh conversation.** With no held session, call `start mode=create_or_attach` using
   the exact canonical `${CLAUDE_PROJECT_DIR}` value and the same stable `external_ref` pair, with no
-  `session_id`. A remote URL is not a workspace identity, and a fresh Claude conversation does not
-  authorize an implicit second task.
+  `session_id`. The same pair resumes; a different complete pair is independent work, even in the
+  same workspace. A remote URL is not a workspace identity.
 - **Explicit sibling handoff.** Use `start mode=create` only after same-task pair/session recovery
   is exhausted, every earlier write has a known terminal outcome, the Claude binding is healthy and
   authorized, and the user has declared one bounded remaining or repaired verification scope. Keep
@@ -1166,7 +1169,12 @@ The native context distinguishes a service that is unavailable or still starting
 admission conflict (`auto_attach_conflict`). Missing mapping remains explicit. Call cooperative
 `start` before material work and follow its exact continuation; a conflict needs an authorized
 task selector or explicit admission decision, not a service restart. Successful hook exit alone
-does not establish attachment. Task admission and ended-session recovery selectors are unchanged.
+does not establish attachment. A unique ended predecessor is attached before a new pair is created;
+ambiguous predecessor tasks produce `auto_attach_binding_ambiguous` with a count only, and the
+explicit session-plus-new-pair recovery preserves the selected root task even when unrelated
+tasks share the canonical workspace (#814, #816). It still checks the active selector, workspace and
+repository binding, and pending operations for that task; delegated child routes keep their
+authenticated attachment path, and no task interaction authority is added.
 
 Structural pre/post observations remain queued and keep their original identities across
 bootstrap. A later successful mapping permits their normal drain. Missing transient content

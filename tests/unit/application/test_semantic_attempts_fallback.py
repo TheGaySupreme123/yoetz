@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -38,6 +39,7 @@ from yoetz.application.semantic_attempts import (
     endpoint_role_for_ordinal,
     run_durable_semantic_attempts,
 )
+from yoetz.domain.findings import SemanticFailureClass
 from yoetz.ports.ledger import AttemptOutcome, SemanticAttemptHandle, SemanticAttemptRecord
 from yoetz.ports.semantic import Deadline
 from yoetz.protocol.models import SemanticReason, SemanticStatus
@@ -261,6 +263,44 @@ async def test_outcome_unknown_never_engages_the_fallback() -> None:
         (_ATT1, AttemptOutcome.FAILED, SemanticReason.OUTCOME_UNKNOWN),
     ]
     assert ledger.job.terminal_code is SemanticReason.OUTCOME_UNKNOWN
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "failure_class",
+    (SemanticFailureClass.AUTHENTICATION, SemanticFailureClass.AUTHORIZATION),
+)
+@pytest.mark.parametrize("primary_retries", (0, 2), ids=("no_retry_budget", "retry_budget"))
+async def test_a_rejected_primary_credential_never_engages_the_fallback(
+    failure_class: SemanticFailureClass, primary_retries: int
+) -> None:
+    # Issue #742: the public reason is the transport catch-all, which licenses the fallback, but
+    # the adapter's class says the provider refused this binding. With no retry budget the walk
+    # engages on the first licensing failure, so only the class veto keeps the case on one
+    # endpoint; with a budget, the retry veto must end the job the same way.
+    rejected = _Eval(
+        SemanticStatus.UNAVAILABLE,
+        SemanticReason.TRANSPORT_UNAVAILABLE,
+        provenance=SimpleNamespace(failure_class=failure_class),
+    )
+    ledger = _FakeLedger(_queued_job(), _lease())
+    outcome = await _run_paired(
+        ledger, [rejected], [_SUCCESS], plan=_plan(primary_retries=primary_retries)
+    )
+
+    assert outcome.primary == (_ATT1,)
+    assert outcome.fallback == ()
+    assert (outcome.status, outcome.reason) == (
+        SemanticStatus.UNAVAILABLE,
+        SemanticReason.TRANSPORT_UNAVAILABLE,
+    )
+    assert ledger.outcomes == [
+        (_ATT1, AttemptOutcome.FAILED, SemanticReason.TRANSPORT_UNAVAILABLE),
+    ]
+    assert ledger.job.state == "failed"
+    fallback = outcome.accounting.endpoint("fallback")
+    assert fallback is not None
+    assert fallback.attempted_count == 0
 
 
 @pytest.mark.anyio
