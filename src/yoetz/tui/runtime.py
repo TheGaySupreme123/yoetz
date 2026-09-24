@@ -49,10 +49,18 @@ from yoetz.tui.models import (
 )
 
 if TYPE_CHECKING:  # Runtime imports stay lazy; annotations still type-check.
+    from yoetz.adapters.integrations.observation_local import LocalObservationStore
+    from yoetz.domain.observation_budget import CapacityRequest
+    from yoetz.domain.observation_settings import ObservationDetailProfile
     from yoetz.ports.harness_mcp import HarnessBinary
     from yoetz.service.confidential_protocol import ProviderCredentialTarget
 
-__all__ = ["RuntimeError_", "YoetzRuntime", "project_detection"]
+__all__ = [
+    "ObservationCapacityUnavailable",
+    "RuntimeError_",
+    "YoetzRuntime",
+    "project_detection",
+]
 
 _MCP_SERVER_NAME: Final = "yoetz"
 _HARNESS: Final = "codex"
@@ -126,6 +134,23 @@ class RuntimeError_(Exception):
         self.reason = reason
         self.message = message
         self.details = tuple(details)
+
+
+class ObservationCapacityUnavailable(RuntimeError_):
+    """A requested capacity the structural queue cannot support; nothing was changed.
+
+    ``lines`` is the owning explanation (the one human wording shared with the command
+    line) and ``alternative_command`` the largest supported finite choice.
+    """
+
+    def __init__(self, lines: Sequence[str], alternative_command: str) -> None:
+        super().__init__(
+            "capacity_no_cap_unsupported",
+            "No Yoetz cap is not available for this queue",
+            details=tuple(lines),
+        )
+        self.lines = tuple(lines)
+        self.alternative_command = alternative_command
 
 
 # ---------------------------------------------------------------------------
@@ -776,13 +801,141 @@ class YoetzRuntime:
 
         try:
             store = LocalObservationStore()
-            commitment = store.workspace_commitment(str(self.project_root()))
+            commitment = store.workspace_commitment(self._selection_workspace_locator())
             raw = selection_status_payload(store, commitment)
             return cast(Mapping[str, object], raw)
         except (OSError, ValueError, RuntimeError) as error:
             raise RuntimeError_(
                 "observation_status_unavailable", "observation status is unavailable"
             ) from error
+
+    def _selection_workspace_locator(self) -> str:
+        """Return the workspace locator the command line would resolve for this project.
+
+        Selection reads and writes use the same canonicalization as
+        ``yoetz observe --workspace`` (the nearest safe Git root hooks use), so
+        the terminal interface and the command line address one workspace.
+        """
+
+        from yoetz.adapters.workspace_binding import canonical_workspace_locator
+
+        locator = canonical_workspace_locator(str(self.project_root()))
+        if locator is None:
+            raise ValueError("workspace_locator_invalid")
+        return locator
+
+    def _workspace_selection_inputs(
+        self,
+    ) -> tuple[LocalObservationStore, str, ObservationDetailProfile]:
+        """Open the local store and resolve the workspace selection's current detail.
+
+        The terminal interface has no host session, so a capacity change here is the
+        persisted workspace selection.  The current workspace detail is carried forward
+        unchanged: this surface changes capacity only.
+        """
+
+        from yoetz.adapters.integrations.observation_local import LocalObservationStore
+        from yoetz.domain.observation_settings import resolve_observation_selection
+
+        store = LocalObservationStore()
+        commitment = store.workspace_commitment(self._selection_workspace_locator())
+        resolution = resolve_observation_selection(store.selection_settings_for(commitment))
+        return store, commitment, resolution.selection.detail
+
+    async def preview_observation_selection(
+        self, capacity: CapacityRequest
+    ) -> Mapping[str, object]:
+        """Preview a workspace capacity change without changing local state.
+
+        A request for no Yoetz cap raises :class:`ObservationCapacityUnavailable`
+        carrying the owning explanation; nothing is changed in that case either.
+        """
+
+        try:
+            from yoetz.cli.observe import CapacityNoCapUnsupported, build_selection_preview
+        except ImportError as error:
+            raise RuntimeError_(
+                "observation_selection_unavailable",
+                "capacity changes are unavailable in this installation",
+            ) from error
+        from yoetz.protocol.errors import PublicOperationError
+
+        try:
+            store, commitment, detail = self._workspace_selection_inputs()
+            raw = build_selection_preview(
+                store,
+                commitment,
+                detail=detail,
+                capacity=capacity,
+                scope="workspace",
+                session_commitment=None,
+                expires_at=None,
+            )
+        except CapacityNoCapUnsupported as error:
+            raise ObservationCapacityUnavailable(
+                tuple(error.lines), error.alternative_command
+            ) from error
+        except PublicOperationError as error:
+            raise RuntimeError_(
+                "observation_selection_preview_failed",
+                "the capacity preview could not be built",
+                details=(error.message,),
+            ) from error
+        except (OSError, ValueError, RuntimeError) as error:
+            raise RuntimeError_(
+                "observation_selection_preview_failed",
+                "the capacity preview could not be built",
+            ) from error
+        return cast(Mapping[str, object], raw)
+
+    async def apply_observation_selection(
+        self, capacity: CapacityRequest, preview_digest: str
+    ) -> Mapping[str, object]:
+        """Apply exactly the previewed workspace capacity change.
+
+        The owning path re-derives the preview and refuses a digest that no longer
+        matches, so a setting changed elsewhere since the preview is never
+        overwritten silently.
+        """
+
+        try:
+            from yoetz.cli.observe import CapacityNoCapUnsupported, apply_selection_preview
+        except ImportError as error:
+            raise RuntimeError_(
+                "observation_selection_unavailable",
+                "capacity changes are unavailable in this installation",
+            ) from error
+        from yoetz.protocol.errors import PublicOperationError
+
+        try:
+            store, commitment, detail = self._workspace_selection_inputs()
+            raw = apply_selection_preview(
+                store,
+                commitment,
+                detail=detail,
+                capacity=capacity,
+                scope="workspace",
+                session_commitment=None,
+                expires_at=None,
+                preview_digest=preview_digest,
+                accept=True,
+            )
+        except CapacityNoCapUnsupported as error:
+            raise ObservationCapacityUnavailable(
+                tuple(error.lines), error.alternative_command
+            ) from error
+        except PublicOperationError as error:
+            raise RuntimeError_(
+                "observation_selection_apply_failed",
+                "the capacity change was not applied",
+                details=(error.message,),
+            ) from error
+        except (OSError, ValueError, RuntimeError) as error:
+            raise RuntimeError_(
+                "observation_selection_apply_failed",
+                "the capacity change was not applied",
+            ) from error
+        return cast(Mapping[str, object], raw)
 
     # -- service --------------------------------------------------------
 

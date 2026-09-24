@@ -28,6 +28,18 @@ Prepared public-alpha release candidate; publication remains gated by #785. See
   remains bounded as documented in the required-startup runbook.
 - `yoetz setup status --json` reports each Claude installation's MCP mode (plugin-managed or
   bare) and whether a session-start cue is installed; a bare registration has none (#789).
+- Observation capacity can be set to a custom queue count from 64 to 8,192 rows with
+  `--capacity custom --queue-count N`, in addition to standard (512), larger (2,048) and largest
+  (8,192). Every capacity preview discloses the scope, current and requested limits, possible
+  disk, memory and CPU cost, the limits that still apply, and how to lower, pause and resume, in
+  the CLI, the terminal interface's `/observe`, and agent guidance. Sessions in a workspace share
+  one queue sized by the largest active selection, so an increase says it raises that queue for
+  every session; a smaller session count limits only that session. Status reports the effective
+  budget and its limiting dimension (#828).
+- Requesting No Yoetz cap (`--capacity none`) returns `capacity_no_cap_unsupported` and changes
+  nothing: the local observation state has a 16 MiB safety ceiling, so the largest supported
+  capacity is 8,192 rows. With `--json` the facts are under `error.capacity` beside the standard
+  `error.recovery` (#828).
 
 ### Changed
 
@@ -55,6 +67,11 @@ Prepared public-alpha release candidate; publication remains gated by #785. See
   late-start rule as its first two sentences; other hosts keep the full document (#789).
 - Guidance, the Claude skill and `AGENTS.md` state what to do when material work began before
   `start`, and how to load deferred Yoetz tool schemas by name (#789).
+- Local control schema 2.9.0 carries custom capacity counts, capacity labels and the effective
+  budget; both client and service must run it. Defaults are unchanged (Focused, 512), and a
+  saved custom count reads as the default on an older version. Agent guidance and the skills
+  say that a larger or uncapped capacity needs a disclosed, owner-accepted preview and is never
+  chosen for an ordinary task (#828).
 
 ### Fixed
 

@@ -63,13 +63,18 @@ from yoetz.domain.observation import (
 from yoetz.domain.observation_budget import (
     BUDGET_POLICY_VERSION,
     BUDGET_VALIDATION_STATUS,
+    LARGEST_SUPPORTED_QUEUE_COUNT,
+    STATE_DOCUMENT_CEILING_BYTES,
     BudgetLimits,
     BudgetUsage,
+    CapacityProfile,
+    ObservationCapacity,
     ObservationMode,
     PressureEvaluation,
     PressureSnapshot,
     PressureState,
     evaluate_pressure,
+    no_cap_support,
 )
 from yoetz.domain.observation_loss import ObservationSelectionLoss
 from yoetz.domain.observation_profiles import (
@@ -89,7 +94,7 @@ from yoetz.domain.observation_read_protection import (
 from yoetz.domain.observation_selection import ROUTINE_READ_TOOLS, SHELL_TOOLS
 from yoetz.domain.observation_settings import (
     DEFAULT_OBSERVATION_SELECTION,
-    ObservationCapacityProfile,
+    EFFECTIVE_BUDGET_SCHEMA,
     ObservationSelection,
     ObservationSelectionResolution,
     ObservationSelectionRuntimeStatus,
@@ -166,8 +171,10 @@ _MAX_UNPAIRED_SCOPES: Final = 256
 _MAX_OUTBOX: Final = 512
 # The largest selected profile is the hard local JSON ceiling.  Profile
 # specific limits come from the pure budget policy below; the standard value
-# continues to derive from the long-standing compatibility constant.
-_MAX_EXPANDED_STATE_BYTES: Final = 16 * 1_048_576
+# continues to derive from the long-standing compatibility constant.  The
+# ceiling itself is owned by the budget policy so disclosures and the store
+# cannot drift (#828).
+_MAX_EXPANDED_STATE_BYTES: Final = STATE_DOCUMENT_CEILING_BYTES
 _MAX_PENDING_LIFECYCLES: Final = 256
 _MAX_PENDING_CONSENT_PROJECTS: Final = 256
 _MAX_QUARANTINE: Final = 512
@@ -4669,8 +4676,8 @@ class LocalObservationStore:
         capacity = settings.aggregate_capacity(now=stamp)
         return (
             _MAX_OUTBOX
-            if capacity is ObservationCapacityProfile.STANDARD
-            else BudgetLimits.for_profile(int(capacity)).queue_count
+            if capacity.profile is CapacityProfile.STANDARD
+            else BudgetLimits.for_capacity(capacity).queue_count
         )
 
     def _state_byte_limit(self, workspace_commitment: str, state: _WorkspaceState) -> int:
@@ -4688,8 +4695,8 @@ class LocalObservationStore:
         capacity = settings.aggregate_capacity(now=self._wall_timestamp())
         selected = (
             _MAX_STATE_BYTES
-            if capacity is ObservationCapacityProfile.STANDARD
-            else BudgetLimits.for_profile(int(capacity)).state_bytes
+            if capacity.profile is CapacityProfile.STANDARD
+            else BudgetLimits.for_capacity(capacity).state_bytes
         )
         path = self._workspace_path(workspace_commitment)
         current_size = 0
@@ -4722,8 +4729,10 @@ class LocalObservationStore:
         now = self._wall_timestamp()
         settings = state.selection_settings or ObservationSelectionSettings()
         aggregate_capacity = settings.aggregate_capacity(now=now)
-        limits = BudgetLimits.for_profile(
-            int(ObservationCapacityProfile.LARGEST if accepted_transfer else aggregate_capacity)
+        limits = BudgetLimits.for_capacity(
+            ObservationCapacity(LARGEST_SUPPORTED_QUEUE_COUNT)
+            if accepted_transfer
+            else aggregate_capacity
         )
         aggregate_limit = (
             limits.queue_count
@@ -4737,7 +4746,7 @@ class LocalObservationStore:
             now=now,
         )
         session_limit = resolved.selection.queue_count
-        session_limits = BudgetLimits.for_profile(int(resolved.selection.capacity))
+        session_limits = BudgetLimits.for_capacity(resolved.selection.capacity)
         usage = self._selection_pressure_usage(
             workspace,
             state,
@@ -5253,7 +5262,7 @@ class LocalObservationStore:
         if incoming is not None:
             now = self._wall_timestamp()
             settings = state.selection_settings or ObservationSelectionSettings()
-            limits = BudgetLimits.for_profile(int(settings.aggregate_capacity(now=now)))
+            limits = BudgetLimits.for_capacity(settings.aggregate_capacity(now=now))
             resolved = resolve_observation_selection(
                 settings, session_commitment=incoming.session_commitment, now=now
             )
@@ -6379,7 +6388,7 @@ class LocalObservationStore:
                 session_commitment=session_commitment,
                 now=now,
             )
-            limits = BudgetLimits.for_profile(int(settings.aggregate_capacity(now=now)))
+            limits = BudgetLimits.for_capacity(settings.aggregate_capacity(now=now))
             mode = ObservationMode.from_value(resolved.selection.detail.value)
             usage = self._selection_pressure_usage(
                 workspace,
@@ -6442,7 +6451,7 @@ class LocalObservationStore:
                 now=now,
             )
             aggregate = settings.aggregate_capacity(now=now)
-            limits = BudgetLimits.for_profile(int(aggregate))
+            limits = BudgetLimits.for_capacity(aggregate)
             path = self._workspace_path(workspace)
             stat_key = self._stat_key(path)
             usage = self._selection_pressure_usage(
@@ -6537,14 +6546,52 @@ class LocalObservationStore:
             else:
                 effective_mode = evaluation.effective_mode
             capture = self.capture_backlog(workspace)
+            selected_capacity = resolved.selection.capacity
+            effective_budget = JsonObject(
+                {
+                    "schema": EFFECTIVE_BUDGET_SCHEMA,
+                    "budget_policy_version": BUDGET_POLICY_VERSION,
+                    "validation_status": BUDGET_VALIDATION_STATUS,
+                    "scope": "workspace" if session_commitment is None else "session",
+                    "selected_queue_count": selected_capacity.queue_count,
+                    "selected_capacity_label": selected_capacity.label,
+                    "effective_queue_count": aggregate.queue_count,
+                    "effective_capacity_label": aggregate.label,
+                    # The shared queue follows the largest active selection
+                    # in the workspace, which may be a sibling's.
+                    "effective_reason": (
+                        "selected" if aggregate == selected_capacity else "workspace_aggregate"
+                    ),
+                    "limits": {
+                        "queue_count": limits.queue_count,
+                        "queue_bytes": limits.queue_bytes,
+                        "state_bytes": limits.state_bytes,
+                        "pending_attempts": limits.pending_attempts,
+                        "capture_tickets": limits.capture_tickets,
+                        "capture_bytes": limits.capture_bytes,
+                        "protected_count": limits.protected_count,
+                        "protected_bytes": limits.protected_bytes,
+                        "session_fair_share": limits.session_fair_share,
+                        "session_fair_share_bytes": limits.session_fair_share_bytes,
+                        "max_pending_age_ms": limits.max_pending_age_ms,
+                        "state_document_ceiling_bytes": STATE_DOCUMENT_CEILING_BYTES,
+                    },
+                    "limiting_dimension": evaluation.dimension.value,
+                    "utilization_bps": evaluation.utilization_bps,
+                    "no_cap": no_cap_support(),
+                }
+            )
             return JsonObject(
                 {
                     "policy_version": BUDGET_POLICY_VERSION,
                     "validation_status": BUDGET_VALIDATION_STATUS,
                     "selected_mode": selected_mode.value,
                     "effective_mode": effective_mode.value,
-                    "selected_capacity": resolved.selection.capacity.value,
-                    "effective_capacity": aggregate.value,
+                    "selected_capacity": selected_capacity.queue_count,
+                    "effective_capacity": aggregate.queue_count,
+                    "selected_capacity_label": selected_capacity.label,
+                    "effective_capacity_label": aggregate.label,
+                    "effective_budget": effective_budget,
                     "selection_origin": resolved.origin,
                     "selection_expires_at": (
                         None if resolved.expires_at is None else resolved.expires_at.wire

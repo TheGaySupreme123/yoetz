@@ -774,6 +774,19 @@ ten-second session, or three-second teardown budgets, or change content, privacy
 network authority. Under pressure, a selected Detailed session can be effectively Focused while
 the owner setting remains Detailed.
 
+**Configurable capacity (issue #828) — Claude Code decision.** Claude Code uses the same local
+capacity path as every other host: `yoetz observe selection-preview` with `--capacity
+standard|larger|largest`, `--capacity custom --queue-count <64..8192>`, or `--capacity none`, then
+`selection-apply --accept --preview-digest`, or the terminal interface's `/observe`. There is no
+Claude Code-specific capacity control, and repository or plugin configuration cannot raise capacity.
+An agent may relay a change only after the owner accepts the displayed preview's scope, values,
+local-hardware consequences, remaining limits, and lower/pause/resume path; ordinary task permission
+never authorizes an increase. `--capacity none` returns `capacity_no_cap_unsupported` because the
+local state document has a 16 MiB safety ceiling, and changes nothing; the largest supported
+capacity is 8,192 rows. MCP `status` stays read-only for capacity. Hook body caps and Claude's hook
+budgets are unchanged. Custom counts need control schema `2.9.0` on both the client and the service;
+an older revision drops a saved custom count to the default.
+
 Use `protect-read` before an upcoming read when a later claim needs its individual identity. The
 reference must be an `obl_`, `clm_`, or `fnd_` identifier; at most 32 logical reads are outstanding,
 and the protection expires after ten minutes by default (an explicit expiry cannot exceed that

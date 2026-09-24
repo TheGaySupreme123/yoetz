@@ -95,6 +95,13 @@ If Cursor asks for MCP approval, preserve the exact proposed request and request
 held. Do not retry with a new request, switch to local-only, or use `--approve-mcps` as a
 workaround. Do not change Cursor privacy, auto-run, or MCP settings without the user's decision.
 
+Capacity and cost changes need a disclosed choice: never choose a larger or uncapped local
+observation capacity for an ordinary task. When the user asks, run `yoetz observe
+selection-preview`, relay its scope, current and requested values, local-hardware consequences,
+remaining limits, and lower/pause/resume path, and apply only after the user accepts that preview.
+A no-cap request returns `capacity_no_cap_unsupported`; relay it with the largest supported
+alternative. See "Change local retention capacity" in [workflow.md](references/workflow.md).
+
 ## Cursor activation recovery
 
 Use this branch only after a plugin replacement when `yoetz integrate cursor plugin status` reports

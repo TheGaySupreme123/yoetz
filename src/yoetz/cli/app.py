@@ -1100,6 +1100,13 @@ def observe_content_status_cmd(
     )
 
 
+_CAPACITY_HELP = (
+    "standard (recommended, 512), larger (2048), largest (8192), custom (with --queue-count "
+    "64..8192), or none (no Yoetz cap; reports why it is unavailable)"
+)
+_QUEUE_COUNT_HELP = "Custom queue count from 64 to 8192 rows; only with --capacity custom."
+
+
 @observe_app.command("selection-status")
 def observe_selection_status_cmd(
     workspace: Annotated[str, typer.Option("--workspace")],
@@ -1132,8 +1139,12 @@ def observe_selection_preview_cmd(
     ],
     capacity: Annotated[
         str,
-        typer.Option("--capacity", help="standard, larger, or largest (512/2048/8192)"),
+        typer.Option("--capacity", help=_CAPACITY_HELP),
     ],
+    queue_count: Annotated[
+        int | None,
+        typer.Option("--queue-count", help=_QUEUE_COUNT_HELP),
+    ] = None,
     session_id: Annotated[str | None, typer.Option("--session-id")] = None,
     persist: Annotated[
         bool,
@@ -1155,6 +1166,7 @@ def observe_selection_preview_cmd(
             workspace=workspace,
             detail=detail,
             capacity=capacity,
+            queue_count=queue_count,
             session_id=session_id,
             persist=persist,
             expires_at=expires_at,
@@ -1169,8 +1181,12 @@ def observe_selection_apply_cmd(
     detail: Annotated[str, typer.Option("--detail", help="focused or detailed")],
     capacity: Annotated[
         str,
-        typer.Option("--capacity", help="standard, larger, or largest (512/2048/8192)"),
+        typer.Option("--capacity", help=_CAPACITY_HELP),
     ],
+    queue_count: Annotated[
+        int | None,
+        typer.Option("--queue-count", help=_QUEUE_COUNT_HELP),
+    ] = None,
     session_id: Annotated[str | None, typer.Option("--session-id")] = None,
     persist: Annotated[
         bool,
@@ -1203,6 +1219,7 @@ def observe_selection_apply_cmd(
             workspace=workspace,
             detail=detail,
             capacity=capacity,
+            queue_count=queue_count,
             session_id=session_id,
             persist=persist,
             expires_at=expires_at,

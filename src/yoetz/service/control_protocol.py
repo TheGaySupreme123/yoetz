@@ -84,9 +84,9 @@ MAX_CONTROL_FRAME_BYTES: Final = 6_291_456
 MAX_ORDINARY_CONTROL_FRAME_BYTES: Final = 1_048_576
 MAX_ACTIVE_REQUESTS_PER_SESSION: Final = 32
 
-_CONTROL_SCHEMA_VERSION: Final = "2.8.0"
+_CONTROL_SCHEMA_VERSION: Final = "2.9.0"
 # The 0.2.3 line split request/result (2.6.1) from hello (2.6.0); the 0.3 line carries
-# every 2.6.1 addition inside its single live 2.8.0 contract, so all three agree.
+# every 2.6.1 addition inside its single live 2.9.0 contract, so all three agree.
 _CONTROL_RESULT_SCHEMA_VERSION: Final = _CONTROL_SCHEMA_VERSION
 _CONTROL_REQUEST_SCHEMA_VERSION: Final = _CONTROL_SCHEMA_VERSION
 _SCHEMA_VERSION: Final = "1.0.0"

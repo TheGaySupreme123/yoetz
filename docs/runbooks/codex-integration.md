@@ -851,6 +851,19 @@ affects future optional admission; accepted observations continue to drain and a
 to fit the new target. Selection does not change Codex hook deadlines, session-stream admission,
 content consent, repository privacy, provider, or network authority.
 
+**Configurable capacity (issue #828) — Codex decision.** Codex uses the same local capacity path as
+every other host: `yoetz observe selection-preview` with `--capacity standard|larger|largest`,
+`--capacity custom --queue-count <64..8192>`, or `--capacity none`, then `selection-apply --accept
+--preview-digest`, or the terminal interface's `/observe`. There is no Codex-specific capacity
+control, and repository or plugin configuration cannot raise capacity. An agent may relay a change
+only after the owner accepts the displayed preview's scope, values, local-hardware consequences,
+remaining limits, and lower/pause/resume path; ordinary task permission never authorizes an
+increase. `--capacity none` returns `capacity_no_cap_unsupported` because the local state document
+has a 16 MiB safety ceiling, and changes nothing; the largest supported capacity is 8,192 rows. MCP
+`status` stays read-only for capacity. Hook body caps and Codex hook deadlines are unchanged. Custom
+counts need control schema `2.9.0` on both the client and the service; an older revision drops a
+saved custom count to the default.
+
 To keep an upcoming read individually linked to a later claim, use the bounded narrowing control
 with an active consent and the exact current Codex session:
 

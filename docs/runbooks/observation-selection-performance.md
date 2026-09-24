@@ -114,6 +114,22 @@ attempts, replayable rejection accounting, and the same timing and serialized
 byte fields. Do not fill this baseline table with those results until they are
 actually measured at a pinned revision.
 
+## Custom capacity (#828)
+
+Issue #828 adds owner-selected custom queue counts from 64 to 8,192 rows on the
+same byte ladder as the profiles: 1 KiB of queue bytes per row, a state document
+of `max(1 MiB, 2 × queue bytes)`, and the 16 MiB state-document safety ceiling.
+No custom count has been measured with this harness or any other, and no result
+in this runbook applies to one. Status and every capacity preview report
+`validation_status: not_validated` until measured evidence exists.
+
+The benchmark phase above still owns the defaults: Focused/512 stays the only
+default, and #828 does not change it. When that phase runs, include at least
+one custom count between the profiles (for example 1,024) and the 8,192 ceiling
+case, and record the same serialized-byte, write-count and latency fields. A
+No Yoetz cap row cannot be measured because the structural queue has no
+uncapped mode; the 16 MiB state document is the reason it is unsupported.
+
 ## Coverage limits
 
 This baseline exercises the Codex shaped local hook spool and local observation

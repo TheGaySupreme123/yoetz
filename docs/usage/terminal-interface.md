@@ -118,6 +118,7 @@ Type `/` to open the filtered command list.
 | `/privacy` | choose what may leave this computer |
 | `/provider` | configure optional deeper review |
 | `/service` | manage the protected local service |
+| `/observe` | show observation selection and change local retention capacity |
 | `/doctor` | diagnose installation problems |
 | `/help` | show what Yoetz can do here |
 | `/quit` | leave Yoetz |
@@ -269,6 +270,25 @@ next steps. When policy permits package update checks and a newer release is
 known, the package line is optional with remediation `uv tool upgrade yoetz`; when the check is
 allowed but fails, the line is unproven with "could not check for updates." **It never changes
 anything.**
+
+### `/observe`
+
+`/observe` shows the selected and effective observation detail and capacity for the current
+workspace, the effective budget (which limit is closest to full), and whether No Yoetz cap is
+available. It then asks **Change local retention capacity?** with the cursor on keeping the
+current setting. The other options are recommended (512), larger (2,048), largest (8,192), custom
+(type a queue count from 64 to 8,192), and No Yoetz cap. A choice changes the workspace default and
+keeps the current detail mode.
+
+Before anything changes, `/observe` shows the current and proposed values, the scope, the possible
+disk, memory, and CPU cost, what stays limited, and how to lower it, pause new observation ingest,
+and resume it, then asks you to apply or cancel. An increase also says that the shared workspace
+queue follows the largest active selection, so it can raise the queue and state-document bounds for
+every session in the workspace. The commands it shows use `<workspace>` and `<session-id>`
+placeholders rather than your typed path. Cancelling or `Esc` changes nothing and says so. No Yoetz
+cap is not available for this queue: choosing it explains the 16 MiB state-document ceiling, names
+the largest supported capacity, and changes nothing. See [Observation
+selection](observation-selection.md) for the limits and the equivalent `yoetz observe` commands.
 
 ## Secrets
 

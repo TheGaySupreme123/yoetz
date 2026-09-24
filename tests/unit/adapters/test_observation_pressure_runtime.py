@@ -16,9 +16,15 @@ from yoetz.domain.observation import (
     ObservationSource,
     ObservationStatusQuery,
 )
-from yoetz.domain.observation_budget import ObservationMode, PressureState
+from yoetz.domain.observation_budget import (
+    LARGEST_CAPACITY,
+    STANDARD_CAPACITY,
+    ObservationCapacity,
+    ObservationMode,
+    PressureState,
+    no_cap_support,
+)
 from yoetz.domain.observation_settings import (
-    ObservationCapacityProfile,
     ObservationDetailProfile,
     ObservationSelection,
 )
@@ -49,7 +55,7 @@ def _select_detailed(store: LocalObservationStore, workspace: str) -> None:
         _SESSION,
         ObservationSelection(
             detail=ObservationDetailProfile.DETAILED,
-            capacity=ObservationCapacityProfile.STANDARD,
+            capacity=STANDARD_CAPACITY,
         ),
         set_at=_NOW,
     )
@@ -109,7 +115,7 @@ def test_workspace_runtime_status_aggregates_active_child_pressure(tmp_path: Pat
         workspace,
         ObservationSelection(
             detail=ObservationDetailProfile.DETAILED,
-            capacity=ObservationCapacityProfile.STANDARD,
+            capacity=STANDARD_CAPACITY,
         ),
         set_at=_NOW,
     )
@@ -337,3 +343,193 @@ def test_buffer_only_plan_checks_aggregate_bytes_before_mutation(
     assert store.selection_accounting(workspace)["buffered_input_count"] == 0
     assert store.selection_accounting(workspace)["unrecoverable_input_count"] == 0
     assert store.list_pending_outbox_rows(workspace) == ()
+
+
+# --- #828: custom capacity reaches the store's aggregate and state ladders ---
+
+
+def _select_workspace_capacity(
+    store: LocalObservationStore, workspace: str, capacity: ObservationCapacity
+) -> None:
+    store.set_workspace_selection(
+        workspace,
+        ObservationSelection(detail=ObservationDetailProfile.FOCUSED, capacity=capacity),
+        set_at=_NOW,
+    )
+
+
+def _aggregate_outbox_limit(store: LocalObservationStore, workspace: str) -> int:
+    with store._lock:  # pyright: ignore[reportPrivateUsage]
+        state = store._load(workspace)  # pyright: ignore[reportPrivateUsage]
+        return store._aggregate_outbox_limit(state)  # pyright: ignore[reportPrivateUsage]
+
+
+def _state_byte_limit(store: LocalObservationStore, workspace: str) -> int:
+    with store._lock:  # pyright: ignore[reportPrivateUsage]
+        state = store._load(workspace)  # pyright: ignore[reportPrivateUsage]
+        return store._state_byte_limit(workspace, state)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_state_ceiling_is_owned_by_the_budget_policy() -> None:
+    assert local_mod._MAX_EXPANDED_STATE_BYTES == 16 * 1_048_576  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize(
+    ("capacity", "outbox_limit"),
+    [
+        (ObservationCapacity(64), 64),
+        (ObservationCapacity(1_024), 1_024),
+        (LARGEST_CAPACITY, 8_192),
+    ],
+)
+def test_custom_capacity_sets_the_aggregate_outbox_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capacity: ObservationCapacity,
+    outbox_limit: int,
+) -> None:
+    # The standard compatibility seam must not leak into a non-standard
+    # selection, while the standard selection still honors it.
+    monkeypatch.setattr(local_mod, "_MAX_OUTBOX", 3)
+    store, workspace = _store(tmp_path, [0.0])
+    assert _aggregate_outbox_limit(store, workspace) == 3
+    _select_workspace_capacity(store, workspace, capacity)
+    assert _aggregate_outbox_limit(store, workspace) == outbox_limit
+    _select_workspace_capacity(store, workspace, STANDARD_CAPACITY)
+    assert _aggregate_outbox_limit(store, workspace) == 3
+
+
+@pytest.mark.parametrize(
+    ("capacity", "state_limit"),
+    [
+        (ObservationCapacity(64), 1_048_576),
+        (ObservationCapacity(1_024), 2 * 1_048_576),
+        (ObservationCapacity(3_000), 6_000 * 1_024),
+        (LARGEST_CAPACITY, 16 * 1_048_576),
+    ],
+)
+def test_custom_capacity_follows_the_state_byte_ladder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capacity: ObservationCapacity,
+    state_limit: int,
+) -> None:
+    monkeypatch.setattr(local_mod, "_MAX_STATE_BYTES", 12_345)
+    store, workspace = _store(tmp_path, [0.0])
+    assert _state_byte_limit(store, workspace) == 12_345
+    _select_workspace_capacity(store, workspace, capacity)
+    assert _state_byte_limit(store, workspace) == state_limit
+
+
+def test_small_custom_capacity_admits_structural_rows(tmp_path: Path) -> None:
+    store, workspace = _store(tmp_path, [0.0])
+    _select_workspace_capacity(store, workspace, ObservationCapacity(64))
+    envelope = _pending_envelope(session=_SESSION, receipt_time=_NOW)
+    assert store.enqueue_outbox(workspace, "codex-session", envelope) is None
+    assert len(store.list_pending_outbox_rows(workspace)) == 1
+
+
+def test_runtime_status_reports_effective_budget_and_labels(tmp_path: Path) -> None:
+    store, workspace = _store(tmp_path, [0.0])
+    _select_workspace_capacity(store, workspace, STANDARD_CAPACITY)
+    store.set_session_selection(
+        workspace,
+        _SESSION,
+        ObservationSelection(
+            detail=ObservationDetailProfile.FOCUSED, capacity=ObservationCapacity(1_024)
+        ),
+        set_at=_NOW,
+    )
+
+    session_status = store.selection_runtime_status(workspace, _SESSION)
+    assert session_status["selected_capacity"] == 1_024
+    assert session_status["effective_capacity"] == 1_024
+    assert session_status["selected_capacity_label"] == "custom"
+    assert session_status["effective_capacity_label"] == "custom"
+    budget = cast(Mapping[str, object], session_status["effective_budget"])
+    assert budget["schema"] == "yoetz.observation-effective-budget/1"
+    assert budget["budget_policy_version"] == "observation-budget-v2-provisional"
+    assert budget["validation_status"] == "not_validated"
+    assert budget["scope"] == "session"
+    assert budget["selected_queue_count"] == 1_024
+    assert budget["effective_reason"] == "selected"
+    assert budget["limiting_dimension"] in {"count", "bytes", "oldest_age", "capture_backlog"}
+    assert type(budget["utilization_bps"]) is int
+    assert budget["no_cap"] == no_cap_support()
+    assert budget["limits"] == {
+        "queue_count": 1_024,
+        "queue_bytes": 1_048_576,
+        "state_bytes": 2_097_152,
+        "pending_attempts": 256,
+        "capture_tickets": 512,
+        "capture_bytes": 134_217_728,
+        "protected_count": 256,
+        "protected_bytes": 262_144,
+        "session_fair_share": 256,
+        "session_fair_share_bytes": 262_144,
+        "max_pending_age_ms": 60_000,
+        "state_document_ceiling_bytes": 16_777_216,
+    }
+
+    workspace_status = store.selection_runtime_status(workspace)
+    assert workspace_status["selected_capacity_label"] == "standard"
+    assert workspace_status["effective_capacity_label"] == "custom"
+    workspace_budget = cast(Mapping[str, object], workspace_status["effective_budget"])
+    assert workspace_budget["scope"] == "workspace"
+    assert workspace_budget["selected_queue_count"] == 512
+    assert workspace_budget["effective_queue_count"] == 1_024
+    assert workspace_budget["effective_reason"] == "workspace_aggregate"
+
+    typed = store.status(ObservationStatusQuery(workspace)).selection_runtime
+    assert typed is not None
+    assert typed.effective_capacity == ObservationCapacity(1_024)
+    assert typed.effective_budget["scope"] == "workspace"
+
+
+def _numbered_envelope(*, session: str, index: int) -> ObservationEnvelope:
+    envelope = _pending_envelope(session=session, receipt_time=_NOW)
+    return replace(
+        envelope,
+        source_identity=f"pending:sibling-{index}",
+        cursor=replace(envelope.cursor, event_position=index + 1),
+    )
+
+
+def test_small_session_capacity_does_not_shrink_sibling_admission(tmp_path: Path) -> None:
+    # A session-scoped count below the standard baseline lowers only that
+    # session's own admission; the shared workspace queue stays at 512.
+    store, workspace = _store(tmp_path, [0.0])
+    sibling = "hmac-sha256:" + "2" * 64
+    store.set_session_selection(
+        workspace,
+        _SESSION,
+        ObservationSelection(
+            detail=ObservationDetailProfile.FOCUSED, capacity=ObservationCapacity(64)
+        ),
+        set_at=_NOW,
+    )
+    assert _aggregate_outbox_limit(store, workspace) == 512
+
+    sibling_results = [
+        store.enqueue_outbox(
+            workspace, "codex-sibling", _numbered_envelope(session=sibling, index=index)
+        )
+        for index in range(300)
+    ]
+    assert sibling_results == [None] * 300
+
+    small_results = [
+        store.enqueue_outbox(
+            workspace, "codex-small", _numbered_envelope(session=_SESSION, index=1_000 + index)
+        )
+        for index in range(70)
+    ]
+    assert small_results[:64] == [None] * 64
+    assert all(result is not None for result in small_results[64:])
+
+    sibling_status = store.selection_runtime_status(workspace, sibling)
+    assert sibling_status["selected_capacity"] == 512
+    assert sibling_status["effective_capacity"] == 512
+    small_status = store.selection_runtime_status(workspace, _SESSION)
+    assert small_status["selected_capacity"] == 64
+    assert small_status["effective_capacity"] == 512
