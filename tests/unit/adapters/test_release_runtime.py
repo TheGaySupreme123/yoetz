@@ -190,3 +190,22 @@ def test_retry_reclaims_only_marked_abandoned_copies(prefix: Path) -> None:
     runtimes.prepare_release_runtime(prefix)
     assert not abandoned.exists()
     assert (unknown / "user-file").read_text() == "keep"
+
+
+def test_disposal_waits_for_the_observed_process_lease_to_close(
+    prefix: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = runtimes.prepare_release_runtime(prefix)
+    observed: list[float] = []
+    with (target / ".in-use").open("rb") as lease:
+        fcntl.flock(lease, fcntl.LOCK_SH)
+
+        def finish_shutdown(delay: float) -> None:
+            # Advance only after cleanup actually observes the still-held process lease.
+            observed.append(delay)
+            fcntl.flock(lease, fcntl.LOCK_UN)
+
+        monkeypatch.setattr(runtimes.time, "sleep", finish_shutdown)
+        assert runtimes.prune_release_runtimes(prefix, wait_seconds=1.0) == (1, 0)
+    assert len(observed) == 1
+    assert not target.exists()

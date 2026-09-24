@@ -321,7 +321,7 @@ def command_dispose(args: argparse.Namespace) -> dict[str, object]:
                 "-c",
                 "import json,sys; from pathlib import Path; "
                 "from yoetz.adapters.release_runtime import prune_release_runtimes; "
-                "print(json.dumps(prune_release_runtimes(Path(sys.prefix))))",
+                "print(json.dumps(prune_release_runtimes(Path(sys.prefix), wait_seconds=5.0)))",
             ],
             env=_clean_env(),
             timeout=60,

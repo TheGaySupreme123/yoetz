@@ -41,7 +41,9 @@ Follow that procedure once; later updates do not need it.
 
 Unused old runtime copies are cleaned up automatically when a new process starts. For explicit
 cleanup, `yoetz upgrade --prune-runtimes` removes only copies no process is using. It does not stop
-sessions or remove settings, task data or credentials.
+sessions or remove settings, task data or credentials. Before uninstalling Yoetz, close its host
+sessions, stop its service through the supported lifecycle, and run this cleanup so unused release
+copies do not remain after the package manager removes the launcher.
 
 Run `yoetz upgrade` again with the same host target options to continue with host refresh. Do not
 repeat `--accept` just to continue. Package replacement does not itself refresh host files. When

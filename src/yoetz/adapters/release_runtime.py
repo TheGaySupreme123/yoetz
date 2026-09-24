@@ -283,16 +283,19 @@ def _discard_abandoned_copies(root: Path) -> None:
         _remove_copy(path)
 
 
-def prune_release_runtimes(prefix: Path) -> tuple[int, int]:
+def prune_release_runtimes(prefix: Path, *, wait_seconds: float = 0.0) -> tuple[int, int]:
     """Remove only our unused completed generations; never signal a running process."""
 
     with release_update_lock(prefix) as root:
-        return _prune_locked(root)
+        return _prune_locked(root, wait_seconds=wait_seconds)
 
 
-def _prune_locked(root: Path, *, keep: Path | None = None) -> tuple[int, int]:
+def _prune_locked(
+    root: Path, *, keep: Path | None = None, wait_seconds: float = 0.0
+) -> tuple[int, int]:
     _discard_abandoned_copies(root)
     removed = retained = 0
+    deadline = time.monotonic() + max(0.0, wait_seconds)
     for path in sorted(root.iterdir()):
         if not _KEY.fullmatch(path.name) or path == keep:
             continue
@@ -301,13 +304,21 @@ def _prune_locked(root: Path, *, keep: Path | None = None) -> tuple[int, int]:
             raise ReleaseRuntimeError("release_runtime_invalid")
         fd = _open_lock(path / _LEASE)
         try:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                retained += 1
-                continue
-            _remove_copy(path)
-            removed += 1
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        retained += 1
+                        break
+                    # Disposal observes the lease, not a guessed shutdown delay: a daemon can
+                    # release its singleton just before interpreter teardown closes its lease.
+                    time.sleep(min(0.025, remaining))
+                    continue
+                _remove_copy(path)
+                removed += 1
+                break
         finally:
             os.close(fd)
     return removed, retained
