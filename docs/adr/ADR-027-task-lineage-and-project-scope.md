@@ -330,6 +330,11 @@ task attachment, task resume, content disclosure, or external semantic dispatch.
 cancelled, or written-off child remains an explicit parent gap according to its recorded state.
 Automatic admission recovery and migration compatibility follow the storage and recovery contracts.
 Exact native-host capability evidence and limits are maintained in the host integration runbooks.
+Repository, workspace, and direct task memberships together place a task in at most one general
+project, plus its implicit repository project. A link or a later provenance binding that would
+add a second general project is refused and names no other project's contents. Memberships that
+already violate the rule are kept; project status reports `selector_conflict`, and the repair is
+to unlink one membership or dissolve one project.
 
 ## Alternatives considered
 

@@ -965,6 +965,94 @@ def coordination_generation_is_current(
         return False
 
 
+def general_link_conflicts(
+    *,
+    target_project_id: str,
+    member_kind: MemberKind,
+    member: str,
+    other_memberships: Iterable[tuple[str, MemberKind, str]],
+    provenance: Iterable[tuple[str, str | None, str | None]],
+) -> bool:
+    """Return whether a general-project link would give one task two general projects.
+
+    ``other_memberships`` are active memberships of other active general projects.  Provenance
+    rows are ``(task_id, repository_commitment, workspace_commitment)``.  The implicit repository
+    project is not represented here.  The result carries no project titles or sibling contents.
+    """
+
+    if type(member_kind) is not MemberKind or type(member) is not str or not member:
+        raise _invalid()
+    rows = tuple(provenance)
+    candidate = _membership_anchors(member_kind, member, rows)
+    by_project: dict[str, set[tuple[str, str]]] = {}
+    for project_id, kind, identity in other_memberships:
+        if project_id == target_project_id or type(kind) is not MemberKind:
+            continue
+        by_project.setdefault(project_id, set()).update(_membership_anchors(kind, identity, rows))
+    return any(candidate & anchors for anchors in by_project.values())
+
+
+def provenance_spans_general_projects(
+    *,
+    task_id: str,
+    repository_commitment: str | None,
+    workspace_commitment: str | None,
+    memberships: Iterable[tuple[str, MemberKind, str]],
+) -> bool:
+    """Return whether this task provenance matches more than one active general project."""
+
+    if type(task_id) is not str or not task_id:
+        raise _invalid()
+    matched: set[str] = set()
+    for project_id, kind, identity in memberships:
+        if kind is MemberKind.TASK and identity == task_id:
+            matched.add(project_id)
+        elif (
+            kind is MemberKind.REPOSITORY
+            and repository_commitment is not None
+            and identity == repository_commitment
+        ):
+            matched.add(project_id)
+        elif (
+            kind is MemberKind.WORKSPACE
+            and workspace_commitment is not None
+            and identity == workspace_commitment
+        ):
+            matched.add(project_id)
+    return len(matched) > 1
+
+
+def _membership_anchors(
+    kind: MemberKind,
+    member: str,
+    provenance: tuple[tuple[str, str | None, str | None], ...],
+) -> set[tuple[str, str]]:
+    anchors = {(kind.value, member)}
+    if kind is MemberKind.TASK:
+        for task_id, repository, workspace in provenance:
+            if task_id != member:
+                continue
+            if repository is not None:
+                anchors.add((MemberKind.REPOSITORY.value, repository))
+            if workspace is not None:
+                anchors.add((MemberKind.WORKSPACE.value, workspace))
+    elif kind is MemberKind.REPOSITORY:
+        for task_id, repository, workspace in provenance:
+            if repository != member:
+                continue
+            anchors.add((MemberKind.TASK.value, task_id))
+            if workspace is not None:
+                anchors.add((MemberKind.WORKSPACE.value, workspace))
+    else:
+        for task_id, repository, workspace in provenance:
+            if workspace != member:
+                continue
+            anchors.add((MemberKind.TASK.value, task_id))
+            if repository is not None:
+                anchors.add((MemberKind.REPOSITORY.value, repository))
+    return anchors
+
+
 def project_structural_digest(
     value: ProjectDescriptor | ProjectMembership | CoordinationGrant,
 ) -> str:

@@ -35,6 +35,8 @@ from yoetz.domain.coordination import (
     ProjectTextRef,
     SessionHealth,
     WorkState,
+    general_link_conflicts,
+    provenance_spans_general_projects,
 )
 from yoetz.domain.privacy import AuthorizationScope, AuthorizationScopeKind, LocalDisclosureSink
 from yoetz.domain.values import (
@@ -1690,6 +1692,66 @@ class SqliteStartCatalog:
         validate_commitment(member_commitment_or_id)
         return member_kind, member_commitment_or_id
 
+    def _active_general_memberships(self) -> list[tuple[str, MemberKind, str]]:
+        rows = self._rows(
+            "SELECT memberships.project_id, memberships.member_kind, "
+            "memberships.member_commitment_or_id "
+            "FROM project_memberships AS memberships "
+            "JOIN projects ON projects.project_id = memberships.project_id "
+            "WHERE projects.kind = 'general' AND projects.dissolved_at IS NULL "
+            "AND memberships.unbound_at IS NULL",
+            (),
+        )
+        facts: list[tuple[str, MemberKind, str]] = []
+        for row in rows:
+            if len(row) != 3 or type(row[0]) is not str or type(row[2]) is not str:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT)
+            try:
+                kind = MemberKind(row[1])
+            except ValueError as exc:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
+            facts.append((row[0], kind, row[2]))
+        return facts
+
+    def _route_provenance(self) -> list[tuple[str, str | None, str | None]]:
+        rows = self._rows(
+            "SELECT task_id, repository_privacy_commitment, workspace_ref_commitment "
+            "FROM task_routes WHERE state != 'quarantined'",
+            (),
+        )
+        provenance: list[tuple[str, str | None, str | None]] = []
+        for row in rows:
+            if len(row) != 3 or type(row[0]) is not str:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT)
+            repository = row[1] if type(row[1]) is str else None
+            workspace = row[2] if type(row[2]) is str else None
+            provenance.append((row[0], repository, workspace))
+        return provenance
+
+    def _general_link_conflicts(self, project: str, kind: MemberKind, member: str) -> bool:
+        return general_link_conflicts(
+            target_project_id=project,
+            member_kind=kind,
+            member=member,
+            other_memberships=[
+                item for item in self._active_general_memberships() if item[0] != project
+            ],
+            provenance=self._route_provenance(),
+        )
+
+    def _provenance_spans_general_projects(
+        self,
+        task_id: str,
+        repository_commitment: str | None,
+        workspace_commitment: str | None,
+    ) -> bool:
+        return provenance_spans_general_projects(
+            task_id=task_id,
+            repository_commitment=repository_commitment,
+            workspace_commitment=workspace_commitment,
+            memberships=self._active_general_memberships(),
+        )
+
     async def record_project_membership(
         self,
         project_id: str,
@@ -1717,18 +1779,6 @@ class SqliteStartCatalog:
             descriptor = _project_from_row(project_rows[0])
             if descriptor.dissolved_at is not None:
                 raise _error(PublicErrorCode.SESSION_CONFLICT)
-            if kind is MemberKind.TASK and descriptor.kind is ProjectKind.GENERAL:
-                general_rows = self._rows(
-                    "SELECT memberships.project_id FROM project_memberships AS memberships "
-                    "JOIN projects ON projects.project_id = memberships.project_id "
-                    "WHERE memberships.member_kind = 'task' "
-                    "AND memberships.member_commitment_or_id = ? "
-                    "AND memberships.unbound_at IS NULL AND projects.kind = 'general' "
-                    "AND memberships.project_id != ? LIMIT 2",
-                    (member, project),
-                )
-                if general_rows:
-                    raise _error(PublicErrorCode.SESSION_CONFLICT)
             existing_rows = self._rows(
                 "SELECT project_id, membership_generation, member_kind, member_commitment_or_id, "
                 "bound_at, unbound_at FROM project_memberships WHERE project_id = ? "
@@ -1739,6 +1789,13 @@ class SqliteStartCatalog:
                 raise _error(PublicErrorCode.STORAGE_CORRUPT)
             if existing_rows:
                 return _membership_from_row(existing_rows[0])
+            if descriptor.kind is ProjectKind.GENERAL and self._general_link_conflicts(
+                project, kind, member
+            ):
+                raise _error(
+                    PublicErrorCode.SESSION_CONFLICT,
+                    safe_details={"reason_code": "general_project_membership_conflict"},
+                )
             generation_rows = self._rows(
                 "SELECT MAX(membership_generation) FROM project_memberships WHERE project_id = ?",
                 (project,),
@@ -2265,6 +2322,15 @@ class SqliteStartCatalog:
                         policy, generation_row[0], "seed", None
                     )
 
+        if self._provenance_spans_general_projects(
+            route.task_id,
+            repository_privacy_commitment,
+            route.workspace_ref_commitment,
+        ):
+            raise _error(
+                PublicErrorCode.SESSION_CONFLICT,
+                safe_details={"reason_code": "general_project_membership_conflict"},
+            )
         self._db.execute(
             "UPDATE task_routes SET repository_privacy_commitment = ?, updated_at = ? "
             "WHERE task_id = ? AND active_route_identity_digest = ? "
