@@ -131,6 +131,7 @@ from yoetz.application.semantic_attempts import (
 from yoetz.application.semantic_case import (
     MAX_CAPTURED_SEMANTIC_CONTENT_PARTS,
     MAX_CAPTURED_SEMANTIC_INPUT_BYTES,
+    LineageSemanticCapacityExceeded,
     SemanticCaseTooLarge,
     build_semantic_case,
     semantic_case_to_candidate_context,
@@ -4235,20 +4236,37 @@ def _privacy_gated_semantic_evaluator(
                         )
                         captured_content_gaps = ("content_capture_unavailable",)
                         captured_local_fence_required = False
-            semantic_case = build_semantic_case(
-                case_id=recovered_case_id or ids.new(IdKind.OUTBOUND_CASE),
-                frozen_case=frozen.case,
-                dependency_digest=frozen.lease.dependency_digest,
-                findings=typed_findings,
-                review_context_profile=review_profile,
-                review_selection=review_selection,
-                policy_id=policy_id,
-                policy_version=policy_version,
-                lineage_evaluation=lineage_evaluation,
-                captured_content=captured_content,
-                captured_content_scope=captured_content_scope,
-                captured_content_gaps=captured_content_gaps,
-            )
+            try:
+                semantic_case = build_semantic_case(
+                    case_id=recovered_case_id or ids.new(IdKind.OUTBOUND_CASE),
+                    frozen_case=frozen.case,
+                    dependency_digest=frozen.lease.dependency_digest,
+                    findings=typed_findings,
+                    review_context_profile=review_profile,
+                    review_selection=review_selection,
+                    policy_id=policy_id,
+                    policy_version=policy_version,
+                    lineage_evaluation=lineage_evaluation,
+                    captured_content=captured_content,
+                    captured_content_scope=captured_content_scope,
+                    captured_content_gaps=captured_content_gaps,
+                )
+            except LineageSemanticCapacityExceeded:
+                # Same pre-dispatch contract as an envelope that cannot be reduced: local
+                # findings stay recorded, no job is created, and the caller sees a capacity
+                # reason instead of a generic coordinator failure.
+                record_bounded_event_without_raising(
+                    component="semantic_composition",
+                    operation="semantic_not_dispatched_lineage_capacity",
+                    reason=SemanticReason.CASE_CAPACITY_EXCEEDED.value,
+                    request_id=frozen.lease.operation_id,
+                )
+                return FinalSemanticEvaluation(
+                    SemanticStatus.FAILED,
+                    SemanticReason.CASE_CAPACITY_EXCEEDED,
+                    operation_lease=current_lease[0],
+                    withheld_review_categories=withheld,
+                )
             if captured_local_fence_required and captured_content_scope is not None:
                 # A resolver may authenticate a group that the active excerpt selection then
                 # omits. Keep the final disclosure fence only when retained bytes actually became
