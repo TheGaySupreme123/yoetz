@@ -314,6 +314,29 @@ recovered it by matching that whole sentence with a regex — so a reworded mess
 agent the correction. The clause is now independent of message wording, and the projector still
 never echoes the message.
 
+Provider and AI-powered review outcomes (issue #742) resolve through
+`continuation_for_semantic_outcome`. The adapter classifies the physical attempt into the closed
+`SemanticFailureClass` set and discards raw provider text there. Renderers look up a frozen
+directive from the recorded `(semantic_status, semantic_reason)` pair and, when present, that
+`failure_class`. A rejected credential (`authentication` / `authorization`) maps to
+`semantic_credential_rejected` even when the public reason remains the `transport_unavailable`
+catch-all; truncated or overlong output maps to `semantic_response_truncated` from
+`response_content_invalid`; schema-invalid and rejected-judgment answers map to
+`semantic_response_invalid`; capacity and quota map to `semantic_capacity_exceeded`; and
+`retry_budget_exhausted` and `outcome_unknown`, which name how a job ended rather than why, map to
+`semantic_no_judgment`. Every directive follows the check-mode coverage guidance: it never tells an
+agent to downgrade a required review, and it never offers a second job for a truncated answer.
+Predispatch configuration and policy outcomes (`not_configured`, `credential_unavailable`,
+`blocked_by_policy`, and the rest) carry no directive. These tokens
+are admitted continuation tokens and live in the same registry. They are not new public
+`SemanticReason` values and do not change frozen check-result schemas. CLI check rendering and the
+MCP check text summary project the resolved directive (the MCP channel drops the sentence when the
+512-byte budget cannot hold it, keeping the token). Advice and status `semantic_state` is the
+recorded attempt status (`ready` / `disabled` / `unavailable` / `failed`), not finding presence:
+a successful review with zero findings is `ready`, and `disabled` means no attempt was requested
+or configured. The state does not widen coverage: only validated AI-powered finding ids add
+`semantic_model_derived` to advice coverage.
+
 Every MCP result also carries a bounded ASCII text projection (at most 512 bytes) for hosts that
 drop `structuredContent`. A successful projection includes the first valid returned frontier's
 `sequence` and canonical `head_digest` when both are present. Generic successful operations also
