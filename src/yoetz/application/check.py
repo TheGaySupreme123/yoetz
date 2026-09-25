@@ -1459,6 +1459,54 @@ def run_deterministic_policies(
     return assessments, tuple(executions)
 
 
+type _SupersededCoordinationRetirer = Callable[..., object]
+
+
+def _superseded_coordination_retirer(
+    app: Application, packs: tuple[str, ...]
+) -> _SupersededCoordinationRetirer | None:
+    """Return the composed superseded-context reconciler when this check runs coordination."""
+
+    if _COORDINATION_PACK not in packs:
+        return None
+    project_application = getattr(app, "project_application", None)
+    coordinator = getattr(project_application, "coordination_runtime", None)
+    retire = getattr(coordinator, "retire_superseded_contexts", None)
+    return retire if callable(retire) else None
+
+
+async def _retire_superseded_coordination(
+    retire: _SupersededCoordinationRetirer,
+    runtime: TaskRuntime,
+    request_id: str,
+) -> None:
+    """Record superseded-generation closures before a new check freezes its case (#842).
+
+    A project generation change fences coordination authority immediately, but a context and
+    declaration already in this task's ledger would keep deriving an actionable finding that no
+    disposition can address.  The coordination runtime appends a service-stamped ``revoked``
+    context for each such declared delivery.  That append is observation-authored, so the check
+    tolerates it after the caller's frontier and freezes it into the case it evaluates.
+
+    This is a secondary reconciliation of an already fenced state.  A failure leaves the ledger
+    unchanged, so the check proceeds with the prior frozen facts and the next check retries.
+    """
+
+    try:
+        # The check's own lease reads the task projection; only a needed closure opens the
+        # observation writer route.
+        pending = retire(runtime.task_id, runtime=runtime)
+        if inspect.isawaitable(pending):
+            await pending
+    except Exception as exc:
+        record_unexpected_exception_without_raising(
+            exc,
+            component="check",
+            operation="coordination_supersession_reconcile",
+            request_id=request_id,
+        )
+
+
 async def _coordination_assessments_for_frozen_case(
     app: Application,
     runtime: TaskRuntime,
@@ -2032,10 +2080,18 @@ async def execute_check_commit(
             )
         digest = _request_digest(request, scope, packs, route_profile=route_profile)
         reconcile_losses = getattr(app, "reconcile_observation_losses", None)
-        if callable(reconcile_losses):
+        retire_superseded = _superseded_coordination_retirer(app, packs)
+        if callable(reconcile_losses) or retire_superseded is not None:
+            # Pre-freeze reconciliation belongs to a new check only; a completed or frozen
+            # request replays its recorded result without new ledger motion.
             existing = await runtime.ledger.lookup_operation(request.writer_id, request.request_id)
             if existing is None:
-                await cast(Callable[[TaskRuntime], Awaitable[None]], reconcile_losses)(runtime)
+                if callable(reconcile_losses):
+                    await cast(Callable[[TaskRuntime], Awaitable[None]], reconcile_losses)(runtime)
+                if retire_superseded is not None:
+                    await _retire_superseded_coordination(
+                        retire_superseded, runtime, request.request_id
+                    )
 
         try:
             frozen_or_replay = await runtime.ledger.freeze_case(

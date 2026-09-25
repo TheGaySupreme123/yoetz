@@ -20,6 +20,7 @@ from collections.abc import MutableMapping
 from dataclasses import replace
 from typing import Final
 
+from yoetz.domain.coordination import CoordinationGapCode
 from yoetz.domain.events import CheckRecordedPayload, ClaimKind, LedgerRecord, RequestedItemKind
 from yoetz.domain.findings import Finding, FindingKind, FindingOrigin, ResponseDisposition
 from yoetz.domain.receipts import (
@@ -408,6 +409,61 @@ def _historical_proof_state(
     return proof_state
 
 
+def _superseded_coordination_context(
+    state: ProjectionState, finding: Finding
+) -> tuple[int, int] | None:
+    """Return ``(generation, marker frontier)`` when a revoked context closes this finding.
+
+    A coordination finding's subject is the delivered context event it was derived from.  The
+    coordination runtime records a service-stamped ``revoked`` context for the same delivery when
+    that project generation is superseded (#842); this is the replay-derived fact that lets a
+    receipt say *why* a later check stopped returning the finding.
+    """
+
+    if finding.kind is not FindingKind.COORDINATION_OVERLAP:
+        return None
+    for ref in finding.subject_refs:
+        subject = state.coordination_contexts.get(EventId(ref))
+        if subject is None or subject.payload is None:
+            continue
+        delivered = subject.payload
+        identity = (
+            delivered.detection_id,
+            delivered.project_id,
+            delivered.membership_generation,
+            delivered.recipient_task_id,
+            delivered.counterpart_task_id,
+        )
+        markers = tuple(
+            record.source_frontier
+            for record in state.coordination_contexts.values()
+            if record.payload is not None
+            and CoordinationGapCode.REVOKED in record.payload.gap_codes
+            and (
+                record.payload.detection_id,
+                record.payload.project_id,
+                record.payload.membership_generation,
+                record.payload.recipient_task_id,
+                record.payload.counterpart_task_id,
+            )
+            == identity
+        )
+        if markers:
+            return delivered.membership_generation, min(markers)
+    return None
+
+
+def _check_subject_sequence(
+    records: tuple[LedgerRecord, ...], check_event_id: EventId | None
+) -> int | None:
+    if check_event_id is None:
+        return None
+    for row in records:
+        if row.event_id == check_event_id and isinstance(row.payload, CheckRecordedPayload):
+            return row.payload.subject_frontier.sequence
+    return None
+
+
 def finding_resolution_explanation(
     state: ProjectionState,
     finding_id: FindingId,
@@ -420,8 +476,21 @@ def finding_resolution_explanation(
     finding_record = state.findings.get(finding_id)
     if finding_record is None or finding_record.payload is None:
         return "Resolution explanation unavailable: original finding is unreadable."
+    superseded = _superseded_coordination_context(state, finding_record.payload)
     if finding_is_resolved(state, finding_id):
-        return f"Resolved by qualifying check {finding_record.resolved_by_check_event_id}; retained as history."
+        resolving = finding_record.resolved_by_check_event_id
+        resolving_sequence = _check_subject_sequence(records, resolving)
+        if (
+            superseded is not None
+            and resolving_sequence is not None
+            and superseded[1] <= resolving_sequence
+        ):
+            return (
+                f"Resolved by qualifying check {resolving} after project coordination generation "
+                f"{superseded[0]} was superseded; the context is retained as history, not as a "
+                "current coordination obligation."
+            )
+        return f"Resolved by qualifying check {resolving}; retained as history."
     candidate = next(
         (
             row
@@ -431,6 +500,16 @@ def finding_resolution_explanation(
         ),
         None,
     )
+    if superseded is not None:
+        candidate_sequence = (
+            None if candidate is None else _check_subject_sequence(records, candidate.event_id)
+        )
+        if candidate_sequence is None or candidate_sequence < superseded[1]:
+            return (
+                f"Unresolved: project coordination generation {superseded[0]} was superseded, so "
+                "this is historical context rather than a current coordination obligation; the "
+                "later qualifying coordination check can resolve it."
+            )
     if candidate is None:
         return "Unresolved: no later recorded check is available for an absence proof."
     check = candidate.payload

@@ -322,6 +322,9 @@ Publish a `coordination_disposition_recorded` event linking that same obligation
 evidence for `shared_work`, `sequencing`, or `scope_revision`. That addresses the obligation;
 a later qualifying `coordination/0.1.0` check resolves a finding. A bare `respond` acknowledgement
 does neither. An agreed shared-work disposition may leave the resource overlap in place.
+After opt-out, opt-in, a revoke, unlink, link, or dissolve, an older generation cannot be approved
+again. `coordination_generation_superseded` means run `check`: it records that context as history
+and can resolve the old finding. Declare against the current detection if the overlap still applies.
 ### Protect an evidence-sensitive read
 
 If a later claim, obligation, or finding may depend on a read, protect the next read before the

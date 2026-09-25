@@ -15,7 +15,7 @@ import inspect
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import Literal, Protocol, cast
+from typing import TYPE_CHECKING, Literal, Protocol, cast
 
 from yoetz.application.observation_materialize import (
     observation_author,
@@ -34,6 +34,7 @@ from yoetz.domain.coordination import (
     CoordinationGapCode,
     CoordinationObligationState,
     OverlapKind,
+    ProjectDescriptor,
     ProjectTextRef,
     canonical_resource_identity,
     coordination_detection_identity,
@@ -74,13 +75,16 @@ from yoetz.domain.values import (
 )
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.diagnostics import RuntimeCapability
-from yoetz.ports.ledger import AppendCommand, AppendEntry, OperationKind
+from yoetz.ports.ledger import AppendCommand, AppendEntry, OperationKind, ProjectionView
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef, ObjectSource, ObjectStorePort
 from yoetz.ports.runtime import BundleRuntimePort, RouteAccess, RouteCommand, TaskRuntime
 from yoetz.ports.start_catalog import TaskRoute, TaskRouteState
 from yoetz.protocol.canonical import canonical_digest, canonical_encode, strict_json_parse
 from yoetz.protocol.coverage import PublicationChannel, coverage_for_channel
 from yoetz.protocol.ids import IdKind, validate_id
+
+if TYPE_CHECKING:
+    from yoetz.kernel.projections import ProjectionState
 
 __all__ = [
     "CoordinationAdvice",
@@ -105,6 +109,7 @@ __all__ = [
     "build_coordination_detector",
     "build_coordination_input_provider",
     "build_coordination_runtime",
+    "coordination_generation_superseded",
 ]
 
 
@@ -160,6 +165,62 @@ def _awaitable[T](value: _AwaitableValue[T]) -> Awaitable[T]:
         return value
 
     return immediate()
+
+
+def _context_identity(
+    payload: CoordinationContextRecordedPayload,
+) -> tuple[str, str, int, str, str]:
+    """The exact delivered context a superseded marker closes."""
+
+    return (
+        str(payload.detection_id),
+        payload.project_id,
+        payload.membership_generation,
+        str(payload.recipient_task_id),
+        str(payload.counterpart_task_id),
+    )
+
+
+async def _coordination_projection(runtime: TaskRuntime) -> ProjectionState | None:
+    """Read the task's materialized projection; a stale or missing one closes nothing."""
+
+    from yoetz.kernel.projections import ProjectionState
+
+    stored = await runtime.ledger.load_projection(
+        runtime.session_id, ProjectionView.CANDIDATE_FINDINGS
+    )
+    if (
+        stored is None
+        or type(stored.state) is not ProjectionState
+        or stored.lag != 0
+        or stored.rebuild_required
+    ):
+        return None
+    return stored.state
+
+
+async def coordination_generation_superseded(
+    projects: ProjectApplication, project_id_value: str, membership_generation: int
+) -> bool:
+    """Whether a project generation can never be current again.
+
+    Dissolution and every generation advance (link, unlink, grant revocation, source-consent
+    revocation, opt-out, and opt-in) retire the older generation for good.  A missing project
+    proves nothing, and neither does a catalog without project state, so neither is treated as
+    superseded: the caller keeps its ordinary refusal and closes nothing.
+    """
+
+    project_state = getattr(projects.catalog, "project_state", None)
+    if not callable(project_state):
+        return False
+    descriptor = await cast(Callable[[str], Awaitable[ProjectDescriptor | None]], project_state)(
+        _project(project_id_value)
+    )
+    if descriptor is None:
+        return False
+    return descriptor.dissolved_at is not None or descriptor.membership_generation > _positive(
+        membership_generation
+    )
 
 
 def _is_mapping(value: object) -> bool:
@@ -643,90 +704,228 @@ class RoutedCoordinationContextWriter:
                 gap_codes=gap_codes,
                 recorded_authority_revision=authority_revision,
             )
-            event_id_value = stable_observation_id(
-                kind=IdKind.EVENT,
-                task_id=recipient.task_id,
-                source_identity=f"{detection.detection_id}:{source.task_id}:{context_digest}",
-                mapping_version="coordination-context/1.0.0",
-                role="context",
-            )
-            operation_id = stable_observation_id(
-                kind=IdKind.REQUEST,
-                task_id=recipient.task_id,
-                source_identity=f"{detection.detection_id}:{source.task_id}:{context_digest}",
-                mapping_version="coordination-context/1.0.0",
-                role="append",
-            )
-            draft = EventDraft(
-                event_id(event_id_value),
-                EventSchema("coordination_context_recorded", COORDINATION_EVENT_SCHEMA_VERSION),
-                timestamp_from_datetime(
-                    self.clock.now_utc() if self.clock is not None else datetime.now(UTC)
-                ),
-                () if prior is None else (prior.event_id,),
-                payload,
-                (),
-                (),
-            )
-            payload_bytes = canonical_encode(encode_payload(payload))
-            metadata = ObjectMetadata(
-                ObjectKind.EVENT_PAYLOAD,
-                media_type_for("coordination_context_recorded"),
-                recipient.task_id,
-                self.clock.now_utc() if self.clock is not None else datetime.now(UTC),
-            )
-            staged = await task_runtime.objects.stage(
-                ObjectSource(data=payload_bytes, declared_size=len(payload_bytes)),
-                metadata,
-            )
-            try:
-                reference = await task_runtime.objects.finalize(staged)
-            except BaseException:
-                await task_runtime.objects.abandon(staged)
-                raise
-            coverage = coverage_for_channel(PublicationChannel.ENGINE_DERIVED)
-            entry = AppendEntry(
-                draft,
-                observation_author(),
-                reference,
-                reference.commitment,
-                metadata.media_type,
-                reference.plaintext_size,
-                PublicationChannel.ENGINE_DERIVED,
-                coverage,
-                "projected",
-            )
-            request_digest_value = canonical_digest(
-                {
-                    "domain": "yoetz/coordination-context-append/v1",
-                    "task_id": recipient.task_id,
-                    "detection_id": detection.detection_id,
-                    "source_task_id": source.task_id,
-                    "context_digest": context_digest,
-                }
-            )
-            command = AppendCommand(
-                recipient.task_id,
-                route.session_id,
-                writer,
-                operation_id,
-                OperationKind.PUBLISH_WORK,
-                request_digest_value,
-                None if prior is None else prior.ledger.ingestion_sequence,
-                (entry,),
-            )
-            prepared = PreparedMutation(
-                command.writer_id,
-                command.operation_id,
-                command.request_digest,
-                command.expected_frontier,
-                (reference,),
-                command,
-            )
-            await run_prepared_append(task_runtime.ledger, prepared)
-            return event_id_value
+            return await self._append_context(task_runtime, route, writer, prior, payload)
         finally:
             await self.runtime.release(task_runtime)
+
+    async def record_superseded_context(
+        self, context: CoordinationContextRecordedPayload
+    ) -> str | None:
+        """Close one recipient context whose project generation has been superseded.
+
+        The marker is the durable closure fact for an already delivered context: the same
+        detection, recipient, counterpart, and generation, with the closed ``revoked`` gap code, no
+        resource identities, and no detail pointer.  It is written only into the recipient's own
+        ledger, so it discloses nothing the recipient did not already hold, and it never calls
+        project admission: a superseded generation must stay refused, and this path can only
+        narrow what the ledger claims.  ``None`` means there is nothing to close here, because
+        the generation is still current or the recipient has no active route.
+        """
+
+        if type(context) is not CoordinationContextRecordedPayload:
+            raise CoordinationError(CoordinationErrorCode.INVALID)
+        if CoordinationGapCode.REVOKED in context.gap_codes:
+            raise CoordinationError(CoordinationErrorCode.INVALID)
+        # Membership generations only move forward, so a generation observed as superseded here
+        # stays superseded; a later read cannot make the marker premature.
+        if not await coordination_generation_superseded(
+            self.projects, context.project_id, context.membership_generation
+        ):
+            return None
+        recipient_task = str(context.recipient_task_id)
+        route = await self.projects.catalog.task_route(recipient_task)
+        if (
+            type(route) is not TaskRoute
+            or route.task_id != recipient_task
+            or route.state is not TaskRouteState.ACTIVE
+        ):
+            return None
+        writer = observation_writer_id(recipient_task, route.session_id)
+        task_runtime = await self.runtime.route(
+            RouteCommand(
+                route.session_id,
+                writer,
+                RouteAccess.WRITE,
+                frozenset({RuntimeCapability.WRITE, RuntimeCapability.PAYLOAD_READ}),
+            )
+        )
+        if type(task_runtime) is not TaskRuntime or task_runtime.task_id != recipient_task:
+            if type(task_runtime) is TaskRuntime:
+                await self.runtime.release(task_runtime)
+            raise CoordinationError(CoordinationErrorCode.INVALID)
+        try:
+            records: list[LedgerRecord] = []
+            delivered = False
+            async for record in task_runtime.ledger.load_events(task_runtime.session_id):
+                if type(record) not in {AcceptedEvent, UnknownEvent}:
+                    continue
+                records.append(record)
+                existing = record.payload
+                if type(existing) is not CoordinationContextRecordedPayload or _context_identity(
+                    existing
+                ) != _context_identity(context):
+                    continue
+                if CoordinationGapCode.REVOKED in existing.gap_codes:
+                    # Another reconciliation already closed this context.
+                    return record.event_id
+                delivered = True
+            if not delivered:
+                # Only a context this recipient ledger actually holds can be closed.
+                return None
+            prior = records[-1] if records else None
+            gap_codes = (CoordinationGapCode.REVOKED,)
+            context_material: JsonObject = JsonObject(
+                {
+                    "detection_id": context.detection_id,
+                    "project_id": context.project_id,
+                    "membership_generation": str(context.membership_generation),
+                    "recipient_task_id": context.recipient_task_id,
+                    "counterpart_task_id": context.counterpart_task_id,
+                    "source_task_id": context.source_task_id,
+                    "overlap_kind": context.overlap_kind.value,
+                    "resource_identities": [],
+                    "source_repository_commitment": context.source_repository_commitment,
+                    "source_workspace_commitment": context.source_workspace_commitment,
+                    "source_route_generation": str(context.source_route_generation),
+                    "source_attributable_paths": False,
+                    "gap_codes": [item.value for item in gap_codes],
+                }
+            )
+            authority_revision = canonical_digest(
+                {
+                    "project_id": context.project_id,
+                    "membership_generation": str(context.membership_generation),
+                    "recipient_task_id": context.recipient_task_id,
+                    "source_task_id": context.source_task_id,
+                    "source_route_generation": str(context.source_route_generation),
+                    "authority": "superseded",
+                }
+            )
+            payload = CoordinationContextRecordedPayload(
+                detection_id=context.detection_id,
+                project_id=context.project_id,
+                membership_generation=context.membership_generation,
+                left_task_id=context.left_task_id,
+                right_task_id=context.right_task_id,
+                recipient_task_id=context.recipient_task_id,
+                counterpart_task_id=context.counterpart_task_id,
+                source_task_id=context.source_task_id,
+                overlap_kind=context.overlap_kind,
+                resource_identities=(),
+                resource_count=0,
+                source_repository_commitment=context.source_repository_commitment,
+                source_workspace_commitment=context.source_workspace_commitment,
+                source_route_generation=context.source_route_generation,
+                source_attributable_paths=False,
+                context_digest=canonical_digest(context_material),
+                detail_ref=None,
+                gap_codes=gap_codes,
+                recorded_authority_revision=authority_revision,
+            )
+            return await self._append_context(task_runtime, route, writer, prior, payload)
+        finally:
+            await self.runtime.release(task_runtime)
+
+    async def _append_context(
+        self,
+        task_runtime: TaskRuntime,
+        route: TaskRoute,
+        writer: str,
+        prior: LedgerRecord | None,
+        payload: CoordinationContextRecordedPayload,
+    ) -> str:
+        """Append one service-stamped context through the recipient's own observation writer.
+
+        Event and operation identities derive from the detection, source, and context digest, so
+        a retry of the same context replays its operation instead of adding a second event.
+        """
+
+        recipient_task = str(payload.recipient_task_id)
+        source_task = str(payload.source_task_id)
+        detection = str(payload.detection_id)
+        context_digest = payload.context_digest
+        event_id_value = stable_observation_id(
+            kind=IdKind.EVENT,
+            task_id=recipient_task,
+            source_identity=f"{detection}:{source_task}:{context_digest}",
+            mapping_version="coordination-context/1.0.0",
+            role="context",
+        )
+        operation_id = stable_observation_id(
+            kind=IdKind.REQUEST,
+            task_id=recipient_task,
+            source_identity=f"{detection}:{source_task}:{context_digest}",
+            mapping_version="coordination-context/1.0.0",
+            role="append",
+        )
+        draft = EventDraft(
+            event_id(event_id_value),
+            EventSchema("coordination_context_recorded", COORDINATION_EVENT_SCHEMA_VERSION),
+            timestamp_from_datetime(
+                self.clock.now_utc() if self.clock is not None else datetime.now(UTC)
+            ),
+            () if prior is None else (prior.event_id,),
+            payload,
+            (),
+            (),
+        )
+        payload_bytes = canonical_encode(encode_payload(payload))
+        metadata = ObjectMetadata(
+            ObjectKind.EVENT_PAYLOAD,
+            media_type_for("coordination_context_recorded"),
+            recipient_task,
+            self.clock.now_utc() if self.clock is not None else datetime.now(UTC),
+        )
+        staged = await task_runtime.objects.stage(
+            ObjectSource(data=payload_bytes, declared_size=len(payload_bytes)),
+            metadata,
+        )
+        try:
+            reference = await task_runtime.objects.finalize(staged)
+        except BaseException:
+            await task_runtime.objects.abandon(staged)
+            raise
+        coverage = coverage_for_channel(PublicationChannel.ENGINE_DERIVED)
+        entry = AppendEntry(
+            draft,
+            observation_author(),
+            reference,
+            reference.commitment,
+            metadata.media_type,
+            reference.plaintext_size,
+            PublicationChannel.ENGINE_DERIVED,
+            coverage,
+            "projected",
+        )
+        request_digest_value = canonical_digest(
+            {
+                "domain": "yoetz/coordination-context-append/v1",
+                "task_id": recipient_task,
+                "detection_id": detection,
+                "source_task_id": source_task,
+                "context_digest": context_digest,
+            }
+        )
+        command = AppendCommand(
+            recipient_task,
+            route.session_id,
+            writer,
+            operation_id,
+            OperationKind.PUBLISH_WORK,
+            request_digest_value,
+            None if prior is None else prior.ledger.ingestion_sequence,
+            (entry,),
+        )
+        prepared = PreparedMutation(
+            command.writer_id,
+            command.operation_id,
+            command.request_digest,
+            command.expected_frontier,
+            (reference,),
+            command,
+        )
+        await run_prepared_append(task_runtime.ledger, prepared)
+        return event_id_value
 
 
 class EncryptedCoordinationDetailStore:
@@ -1533,6 +1732,121 @@ class CoordinationRuntime:
             if inspect.isawaitable(result):
                 await result
 
+    async def retire_superseded_contexts(
+        self,
+        task_id_value: str,
+        *,
+        runtime: TaskRuntime | None = None,
+    ) -> tuple[str, ...]:
+        """Close each declared recipient context whose project generation was superseded.
+
+        Opt-out, opt-in, grant revocation, source-consent revocation, unlink, link, and dissolve
+        advance a project's membership generation, which immediately fences admission and
+        delivery.  A context this task already holds, together with the declaration that bound
+        it, would otherwise keep deriving an actionable finding that no disposition can address,
+        because a disposition must be admitted at that exact old generation.
+
+        This reconciliation records the durable historical outcome instead: one
+        ``revoked``-coded context per superseded declared detection in the task's own ledger, so
+        a frozen check can tell the historical context from a current obligation.  It never
+        admits the old generation, never writes to another task, and never creates a successor
+        detection.  The detector row is also marked generation-invalid so it cannot be
+        redelivered.  Only an explicitly declared context needs closing; advice-only context
+        never derives a finding.
+
+        The materialized task projection is read, not the event stream, so a task that never
+        declared coordination pays one in-memory projection read.  A caller that already holds
+        this task's runtime (a check) passes it to avoid a second route lease.
+        """
+
+        task = _task(task_id_value)
+        writer = self.detector.context_writer
+        record_superseded = getattr(writer, "record_superseded_context", None)
+        if not callable(record_superseded):
+            return ()
+        if runtime is not None:
+            if type(runtime) is not TaskRuntime or runtime.task_id != task:
+                raise CoordinationError(CoordinationErrorCode.INVALID)
+            projection = await _coordination_projection(runtime)
+        else:
+            route = await self.projects.catalog.task_route(task)
+            if (
+                type(route) is not TaskRoute
+                or route.task_id != task
+                or route.state is not TaskRouteState.ACTIVE
+            ):
+                return ()
+            # The projection carries payloads, and a payload read also opens a task no route
+            # has touched since the service started.
+            opened = await self.inputs.runtime.route(
+                RouteCommand(
+                    route.session_id,
+                    None,
+                    RouteAccess.PAYLOAD_READ,
+                    frozenset({RuntimeCapability.STRUCTURAL_READ, RuntimeCapability.PAYLOAD_READ}),
+                )
+            )
+            try:
+                if type(opened) is not TaskRuntime or opened.task_id != task:
+                    raise CoordinationError(CoordinationErrorCode.INVALID)
+                projection = await _coordination_projection(opened)
+            finally:
+                if type(opened) is TaskRuntime:
+                    await self.inputs.runtime.release(opened)
+        if projection is None:
+            return ()
+        declared = {
+            (
+                str(item.payload.detection_id),
+                item.payload.project_id,
+                item.payload.membership_generation,
+                str(item.payload.recipient_task_id),
+            )
+            for item in projection.coordination_declarations.values()
+            if item.payload is not None and item.payload.recipient_task_id == task
+        }
+        if not declared:
+            return ()
+        latest: dict[tuple[str, str, int, str, str], CoordinationContextRecordedPayload] = {}
+        closed: set[tuple[str, str, int, str, str]] = set()
+        for item in sorted(
+            projection.coordination_contexts.values(), key=lambda value: value.source_frontier
+        ):
+            payload = item.payload
+            if payload is None or payload.recipient_task_id != task:
+                continue
+            identity = _context_identity(payload)
+            if CoordinationGapCode.REVOKED in payload.gap_codes:
+                closed.add(identity)
+            else:
+                latest[identity] = payload
+        superseded_generations: dict[tuple[str, int], bool] = {}
+        recorded: list[str] = []
+        for identity in sorted(latest, key=lambda item: (item[0].encode(), item[4].encode())):
+            detection, project, generation, recipient, _counterpart = identity
+            if identity in closed or (detection, project, generation, recipient) not in declared:
+                continue
+            key = (project, generation)
+            if key not in superseded_generations:
+                superseded_generations[key] = await coordination_generation_superseded(
+                    self.projects, project, generation
+                )
+            if not superseded_generations[key]:
+                continue
+            marker = await _awaitable(
+                cast(
+                    Callable[[CoordinationContextRecordedPayload], _AwaitableValue[str | None]],
+                    record_superseded,
+                )(latest[identity])
+            )
+            if marker is None:
+                continue
+            recorded.append(marker)
+            stored = await self.detector.store.get_detection(detection)
+            if stored is not None and stored.generation_valid:
+                await self.detector.store.replace_detection(replace(stored, generation_valid=False))
+        return tuple(recorded)
+
     async def detect(
         self,
         project_id_value: str,
@@ -1675,7 +1989,9 @@ class CoordinationRuntime:
         case, live catalog state cannot add or remove a finding.  Context events are durable
         advice facts for both recipients; only a matching typed declaration binding can purchase
         finding eligibility, and a typed disposition with admissible evidence suppresses the next
-        finding so the normal check reducer resolves the prior one.
+        finding so the normal check reducer resolves the prior one.  A recorded ``revoked``
+        context for the same delivery does the same for a superseded project generation: the
+        context remains in the frozen case as history, but it no longer purchases a finding.
         """
 
         from yoetz.domain.events import ObligationStatus
@@ -1712,11 +2028,24 @@ class CoordinationRuntime:
         )
         dispositions = tuple(projection.coordination_dispositions.values())
         declarations = tuple(projection.coordination_declarations.values())
+        # A service-stamped ``revoked`` context closes the delivered context it names: its project
+        # generation was superseded, so it is historical context rather than a current
+        # coordination obligation.  Generations never return, so the closure holds whatever the
+        # record order or check scope, and the earlier finding resolves through the ordinary
+        # qualifying-check reducer instead of waiting on a disposition nobody can admit.
+        superseded = frozenset(
+            _context_identity(record.payload)
+            for record in contexts
+            if record.payload is not None
+            and CoordinationGapCode.REVOKED in record.payload.gap_codes
+        )
         output: list[object] = []
         seen: set[tuple[str, str]] = set()
         for record in contexts:
             payload = record.payload
             if payload is None or payload.recipient_task_id != task_id:
+                continue
+            if _context_identity(payload) in superseded:
                 continue
             if not whole_case and not (
                 str(record.source_event_id) in scope_roots

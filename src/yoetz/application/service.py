@@ -13,7 +13,10 @@ from typing import Literal, Protocol, cast
 
 from pydantic import BaseModel
 
-from yoetz.application.coordination import CoordinationParticipant
+from yoetz.application.coordination import (
+    CoordinationParticipant,
+    coordination_generation_superseded,
+)
 from yoetz.application.egress import PrivacyCoordinator
 from yoetz.application.lineage import LineageCoordinator, LineageSnapshot, LineageStatus
 from yoetz.application.lineage_recovery import append_abandonment, lineage_recovery_runtime
@@ -211,6 +214,36 @@ def _lineage_publication_payloads(request: PublishWorkRequest) -> tuple[object, 
                 safe_details={"reason_code": "lineage_event_invalid"},
             ) from exc
     return tuple(payloads)
+
+
+async def _refuse_superseded_coordination(
+    projects: ProjectApplication,
+    project_id_value: str,
+    membership_generation: int,
+    message: str,
+) -> None:
+    """Refuse a coordination binding whose project generation can never be current again.
+
+    Opt-out, opt-in, revoke, consent revocation, link, unlink, and dissolve each retire the old
+    generation.  Reauthorizing it is impossible by design, so ``coordination_admission_required``
+    would send the caller after authority that cannot exist.  This refusal names the stale
+    generation instead; its directive points at a check, which records the delivered context as
+    history, and at the current successor detection when the overlap still applies.
+    """
+
+    try:
+        superseded = await coordination_generation_superseded(
+            projects, project_id_value, membership_generation
+        )
+    except CoordinationError, ValueError:
+        return
+    if superseded:
+        raise PublicOperationError(
+            PublicErrorCode.INVALID_REQUEST,
+            message,
+            False,
+            safe_details={"reason_code": "coordination_generation_superseded"},
+        )
 
 
 def _coordination_publication_payloads(
@@ -1798,6 +1831,15 @@ class Application:
                     False,
                     safe_details={"reason_code": "coordination_obligation_mismatch"},
                 )
+            # A superseded generation can never be admitted again.  Say so precisely instead of
+            # asking for authority review: the available action is a check, which records the
+            # context as history, or a declaration against a current successor detection (#842).
+            await _refuse_superseded_coordination(
+                projects,
+                str(payload.project_id),
+                payload.membership_generation,
+                "The coordination disposition names a superseded project generation.",
+            )
             provenance = await projects.catalog.task_source_provenance(route.task_id)
             if provenance is None or provenance.workspace_ref_commitment is None:
                 raise PublicOperationError(
@@ -1814,6 +1856,14 @@ class Application:
                     expected_generation=payload.membership_generation,
                 )
             except (CoordinationError, ValueError) as exc:
+                # The generation may have advanced after the check above; recheck so a race
+                # still reports the reason the caller can act on.
+                await _refuse_superseded_coordination(
+                    projects,
+                    str(payload.project_id),
+                    payload.membership_generation,
+                    "The coordination disposition names a superseded project generation.",
+                )
                 raise PublicOperationError(
                     PublicErrorCode.INVALID_REQUEST,
                     "The coordination disposition is unavailable.",
@@ -2046,6 +2096,12 @@ class Application:
                     safe_details={"reason_code": "coordination_participants_unavailable"},
                 )
             counterpart = by_task[counterpart_id]
+            await _refuse_superseded_coordination(
+                projects,
+                str(payload.project_id),
+                payload.membership_generation,
+                "The coordination declaration names a superseded project generation.",
+            )
             recipient_workspace = recipient.workspace_commitment
             counterpart_workspace = counterpart.workspace_commitment
             recipient_repository = recipient.repository_commitment
@@ -2076,6 +2132,12 @@ class Application:
                 ):
                     raise CoordinationError(CoordinationErrorCode.GENERATION_MISMATCH)
             except (CoordinationError, ValueError) as exc:
+                await _refuse_superseded_coordination(
+                    projects,
+                    str(payload.project_id),
+                    payload.membership_generation,
+                    "The coordination declaration names a superseded project generation.",
+                )
                 raise PublicOperationError(
                     PublicErrorCode.INVALID_REQUEST,
                     "The coordination declaration is unavailable.",

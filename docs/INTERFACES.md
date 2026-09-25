@@ -2049,6 +2049,26 @@ semantic dispatch bundling content from two repositories is outside this series.
 repository projects use `project opt-out` and `project opt-in`; attempting to dissolve one returns
 `implicit_project_requires_opt_out` before any membership or generation changes.
 
+**Superseded coordination context (#842).** A generation is superseded once the project records any
+later membership generation or is dissolved. Before a new check that selects `coordination/0.1.0`,
+the service closes each declared recipient context whose generation is superseded. It appends to
+that recipient's own ledger one observation-authored, engine-derived
+`coordination_context_recorded/1.0.0` for the same `detection_id`, `project_id`,
+`membership_generation`, `recipient_task_id`, and `counterpart_task_id`. It carries
+`gap_codes=["revoked"]`, empty `resource_identities`, `resource_count="0"`,
+`source_attributable_paths=false`, and no `detail_ref`. Its event and operation identities follow
+the ordinary context rule, so a retry replays. A replayed check operation skips this reconciliation,
+and a reconciliation failure leaves the ledger unchanged for the next check. The closure performs no
+project admission, disclosure, or delivery, and needs no current consent, grant, or membership. The
+retired detector row becomes `generation_valid=false`. In a frozen check, a delivery with a
+`revoked` closure derives no `coordination_overlap` finding in any scope. The earlier finding
+resolves under the ordinary qualifying-check rule, and its status and receipt resolution explanation
+names the superseded generation instead of a disposition. A `coordination_obligation_declared` or
+`coordination_disposition_recorded` publication naming a superseded generation is refused with
+`INVALID_REQUEST` and `reason_code=coordination_generation_superseded`, continuation
+`coordination_superseded_recheck`. The refusal appends nothing; `coordination_admission_required`
+remains for a current generation that fails admission.
+
 When an admitted task has no revealable attributable path, coordination records one bounded
 per-task coverage row with `coverage=unobservable` and `gap_code=not_observable`. The row carries
 only the task, project generation, and closed gap vocabulary. It is not a detection or delivery,
