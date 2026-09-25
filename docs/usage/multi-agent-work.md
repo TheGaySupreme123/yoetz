@@ -99,6 +99,11 @@ make an older detection eligible again.
 Overlap detection uses declared resource scopes and structured requested items. The same relative
 path in two worktrees of one repository is an integration overlap; the same spelling in unrelated
 repositories is not. Hosts without attributable resource information report that coverage limit.
+Detection reads each consented sibling's recorded scopes the same way whether that task is
+active, idle, or was last used before a service restart or vault relock. If Yoetz confirms a
+sibling's consent but cannot read its recorded scopes during an update, that sibling reports the
+same coverage limit. Overlaps among the other tasks are still detected, and the next update
+retries. A sibling whose consent is revoked or cannot be confirmed contributes nothing to detection.
 Detections normally produce advice. A finding requires an explicitly declared coordination
 obligation that remains unaddressed; a recorded disposition addresses it, and a later qualifying
 check can resolve the finding.

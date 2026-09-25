@@ -2055,6 +2055,19 @@ only the task, project generation, and closed gap vocabulary. It is not a detect
 and it contains no counterpart or resource identity; an unconsented, stale, dissolved, or
 out-of-project task produces no row.
 
+Coordination inputs are typed payload fields: file and source requested items, attempted edit
+items, obligation identities, and coordination declarations. `LedgerCoordinationInputProvider`
+admits the source under the same consent, source-policy, membership, and grant checks as delivery
+before it reads them. It then reads them through one `payload_read` lease, so a cold runtime entry
+yields the same input as a warm one. A task that is not currently admitted contributes no input
+and no row, and it does not abort the sweep for admitted tasks. This includes a task whose runtime
+cannot be opened to confirm its consent. If an admitted task's input read fails during a sweep,
+that task is kept out of pair detection and receives the same bounded coverage row. One
+diagnostic, `application.coordination`/`coordination_input_unavailable`, records only the
+exception-class token and a correlation ID. The other pairs are still detected, and the next
+sweep retries. A post-publish sweep that fails as a whole never fails the committed publication;
+it records `application.service`/`project_coordination_sweep` with the request ID.
+
 Optional project notes on a check use the same authority boundary. Missing consent, a missing or
 revoked grant, a changed generation, or a retired membership suppresses that project's notes without
 an internal-failure diagnostic or a fallback disclosure attempt. Independently admitted projects
@@ -3550,6 +3563,14 @@ and task-scoped
 `LedgerPort`, `ObjectStorePort`, and `ImporterPort` handles—never a path, SQLite connection, or raw
 key. Exact catalog routing and owner-generation fencing are mandatory; cwd/fuzzy/path fallback is
 forbidden.
+
+A `structural_read` lease carries no payload authority. A cold structural open loads no bundle
+keys, and the ready composition's object opener refuses it. A lease on a warm entry that was opened
+for payload or write access exposes only record envelopes, with `payload` absent, and the
+frontier; it exposes no object read and no payload-derived projection read. Code that reads a typed
+payload field routes `payload_read`. This includes coordination inputs, obligation ownership, and
+project advisory finding reads of an admitted sibling. It keeps a warm and a cold cache entry
+behaviorally identical (#839).
 
 `RuntimeCachePolicy` makes multiplicity bounds explicit: `max_open_bundle_tasks` covers warm
 entries plus in-flight openings, `max_opening_tasks` bounds concurrent open work, and

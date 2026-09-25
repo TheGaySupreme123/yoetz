@@ -75,6 +75,7 @@ from yoetz.domain.values import (
     JsonValue as DomainJsonValue,
 )
 from yoetz.kernel.lineage import LineageEvaluation
+from yoetz.observability.logging import record_classified_exception_without_raising
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.control import (
     ControlClientKind,
@@ -1712,7 +1713,10 @@ class Application:
         Coordination is a secondary, idempotent projection of the already durable ledger append.
         A detector/runtime failure therefore cannot turn a successful ``publish_work`` into a
         false write failure; the next public publish or explicit maintenance sweep retries the
-        same generation-bound pair delivery through the durable store.
+        same generation-bound pair delivery through the durable store.  The failure is still
+        recorded as one bounded diagnostic (exception-class token and correlation id only), so a
+        sweep that stops producing detections is visible to an operator instead of silent.
+        Per-task input failures are isolated inside the sweep itself and become coverage rows.
         """
 
         if not isinstance(result, PublishWorkInternalResult):
@@ -1729,10 +1733,16 @@ class Application:
             pending = sweep(task_id=result.task_id)
             if inspect.isawaitable(pending):
                 await pending
-        except Exception:
+        except Exception as exc:
             # The ledger result is already committed.  Delivery rows and the next sweep provide
             # crash/restart recovery; no user-controlled content is attached to this diagnostic
             # boundary.
+            record_classified_exception_without_raising(
+                exc,
+                component="application.service",
+                operation="project_coordination_sweep",
+                request_id=result.request_id,
+            )
             return
 
     async def _validate_coordination_publications(

@@ -253,6 +253,15 @@ than implementation notes.
    generation and stop queued flow at admission/delivery. External semantic dispatch that bundles
    content from two repositories is outside this series.
 
+   Detector input consists of typed fields of a member's encrypted accepted payloads. The input
+   provider proves the member's current admission first, then reads those fields through one
+   payload-read task lease. An evicted, restarted, or relocked task runtime therefore yields the
+   same input as a warm one. A member that is not admitted contributes no input and does not stop
+   the sweep for the admitted members. An admitted member whose input read fails is kept out of
+   pair detection. It receives the same bounded `unobservable` coverage row as a member with no
+   attributable paths, and the failure is recorded as one bounded diagnostic; the next sweep
+   retries it (#839).
+
 8. **Only shared-mutable state moves out of task bundles.** The #498 inventory records each table
    and cache by owner, key, provenance, object root, retention, and concurrency rule. The candidate's
    catalog migration `0004` moves only the shared-mutable workspace-to-session routing and the

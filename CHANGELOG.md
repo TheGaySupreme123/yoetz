@@ -94,6 +94,12 @@ Prepared public-alpha release candidate; publication remains gated by #785. See
 - The npm release verifier checks both the persistent install and subsequent delegation
   (#777). The parent/worker capture test observes outbox drain between writes to avoid
   counting runner-load overflow as a product regression (#775).
+- Project overlap advice no longer disappears when a sibling task was idle, evicted, or last used
+  before a service restart or vault relock. Coordination reads each consented sibling's recorded
+  scopes with payload access, exactly as it does for an active task. A consented sibling whose
+  scopes cannot be read is reported as a coverage limit while the other pairs are still detected,
+  and a sibling that is not admitted no longer stops detection for the others. A failed
+  post-publish sweep now leaves a bounded diagnostic instead of failing silently (#839).
 - The release carries every 0.2.2 install fix, including the review follow-ups ported in #774,
   and every 0.2.3 and 0.2.4 repair: Codex home-aware setup, Cursor exact-path and Agent CLI
   project binding, fractional Codex metadata, selected observations and routine summaries across
