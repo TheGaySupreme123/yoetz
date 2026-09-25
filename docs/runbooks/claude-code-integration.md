@@ -787,6 +787,16 @@ capacity is 8,192 rows. MCP `status` stays read-only for capacity. Hook body cap
 budgets are unchanged. Custom counts need control schema `2.9.0` on both the client and the service;
 an older revision drops a saved custom count to the default.
 
+**Lowering above the fallback byte bound (issue #843) — Claude Code decision.** Claude Code uses
+the shared store path with no Claude-specific behavior. Lowering, revoking, expiring, or ending a
+larger selection can leave more accepted rows than the new target holds. Those rows still drain,
+and the store keeps finite room, tied only to them, for refused-input loss, delivery attempts, and
+session ends. A refused hook reports `hook_observe_degraded: outbox_overflow; loss accounted`
+only after the loss is durable. If a `SessionEnd` hook cannot persist its local end, it stays
+fail-open within its three-second budget. It prints
+`hook_observe_degraded: session_end_unrecorded` and records that reason in
+`hook_diagnostics.reasons`.
+
 Use `protect-read` before an upcoming read when a later claim needs its individual identity. The
 reference must be an `obl_`, `clm_`, or `fnd_` identifier; at most 32 logical reads are outstanding,
 and the protection expires after ten minutes by default (an explicit expiry cannot exceed that

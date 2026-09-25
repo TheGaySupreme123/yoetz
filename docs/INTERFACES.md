@@ -4452,6 +4452,14 @@ repeating every minute. A hook whose own pre-flush still fails structurally reco
 `admission_flush_invalid` reason, and a hook that observed a refusal records
 `routine_summary_invalid`; neither degrades to the bare `observe` token.
 
+A `SessionEnd` hook whose local session end cannot persist stays fail-open for the host. It
+prints `hook_observe_degraded: session_end_unrecorded` and records the bounded
+`session_end_unrecorded` reason, because the session and any temporary selection override stay
+active until a later end or expiry (#843). The end is saved with the hook's capture batch. If
+that batch fails to commit, the hook reports the reason beside the generic `observe` reason. A
+fault after the batch committed does not report it. Before this reason, a failed end was either
+discarded or reported only as `observe`.
+
 A host body refused at stdin ingress for its size is accounted the same way, per host:
 `codex_payload_too_large`, `claude_payload_too_large`, and `cursor_payload_too_large` are the
 bounded hook reasons, recorded against the hook event name the host supplied on the command line.
@@ -4534,8 +4542,16 @@ the `yoetz.observation-effective-budget/1` record: scope, selected and effective
 labels, `effective_reason` (`selected` or `workspace_aggregate`), every finite limit including
 `state_document_ceiling_bytes`, the limiting dimension, utilization in basis points, and the
 closed `no_cap` availability object. `effective_budget.limits.state_bytes` is the ladder value
-for the effective count; while a lowered selection drains, the store keeps the existing state
-document's size as the enforced bound until the drain completes. Local control schema `2.9.0`
+for the effective count. While a lowered selection drains, the store never enforces less than the
+existing state document's size. While accepted rows still exceed the lowered selection (row count
+above its queue count, or admission bytes above its queue bytes), a write that does not fit that
+occupancy bound may use the finite over-target bound (ADR-029, #843 amendment): the selected state
+bytes, plus the persisted bytes of accepted pending and buffered rows above the selected queue
+bytes, plus a fixed 128 KiB accounting reserve, never above `STATE_DOCUMENT_CEILING_BYTES`. That
+keeps refused-input accounting, delivery attempts and session ends writable. The bound follows
+only the accepted rows, shrinks as they drain, and is unused outside an over-target transition.
+The status record does not report this bound; the transition shows as over-100% utilization with
+`pressure_state: hard_limit`. Local control schema `2.9.0`
 carries custom counts, the
 labels and that record. A client and service with different manifests are rejected at the
 authenticated handshake, so both peers must run the `2.9.0` manifest to exchange them; there is

@@ -18,9 +18,18 @@ from integration.application.test_native_capture_pipeline import (
 )
 from integration.service.test_capture_inventory_recovery import (  # pyright: ignore[reportPrivateUsage]
     _native_failed_command,  # pyright: ignore[reportPrivateUsage]
+    _World,  # pyright: ignore[reportPrivateUsage]
     _world,  # pyright: ignore[reportPrivateUsage]
 )
-from yoetz.adapters.integrations.observation_local import LocalObservationStore
+from yoetz.adapters.integrations.observation_local import (
+    LocalObservationStore,
+    ObservationOutboxRow,
+)
+from yoetz.application.observation_drain import ObservationOutboxSweeper
+from yoetz.domain.observation import ObservationCursor, ObservationEnvelope, ObservationSource
+from yoetz.domain.observation_budget import LARGEST_CAPACITY
+from yoetz.domain.observation_settings import ObservationDetailProfile, ObservationSelection
+from yoetz.domain.values import JsonObject, Timestamp
 from yoetz.ports.ledger import FrozenCase
 from yoetz.protocol.ids import IdKind
 
@@ -425,3 +434,167 @@ async def test_loss_reporting_does_not_require_retained_host_mapping(
         assert (await world.runtime.ledger.load_frontier()).sequence > 0
     finally:
         world.coordinator.close()
+
+
+# --- #843: a refusal after lowering above the 1 MiB fallback stays visible ---
+
+_HOST_SOURCES = {
+    "claude": ObservationSource.CLAUDE_HOOK,
+    "cursor": ObservationSource.CURSOR_HOOK,
+    "codex": ObservationSource.CODEX_HOOK,
+}
+
+
+def _lower_after_accepting_backlog(world: _World, host: str, count: int = 1_700) -> None:
+    """Accept host rows under Largest in one save, then revoke to the fallback."""
+
+    local = world.local
+    local.set_workspace_selection(
+        world.workspace,
+        ObservationSelection(detail=ObservationDetailProfile.FOCUSED, capacity=LARGEST_CAPACITY),
+    )
+    with local._lock:  # pyright: ignore[reportPrivateUsage]
+        state = local._load(world.workspace)  # pyright: ignore[reportPrivateUsage]
+        assert state.pending_outbox is not None
+        state.pending_outbox.extend(
+            ObservationOutboxRow(
+                codex_session_id=world.host_session,
+                envelope=ObservationEnvelope(
+                    session_commitment=world.session,
+                    event_kind="PostToolUse",
+                    source_identity=f"backlog:{index}",
+                    source=_HOST_SOURCES[host],
+                    cursor=ObservationCursor(
+                        source_generation=1,
+                        byte_position=0,
+                        event_position=10_000 + index,
+                        last_source_commitment="hmac-sha256:" + "a" * 64,
+                        mapping_version="codex-obs-hook/1.0.0",
+                    ),
+                    receipt_time=Timestamp("2026-09-10T00:01:00.000Z"),
+                    structural_payload=JsonObject({"tool_name": "shell", "exit_status": 1}),
+                    content_object_refs=(),
+                    gap_codes=(),
+                ),
+            )
+            for index in range(count)
+        )
+        local._save(world.workspace, state)  # pyright: ignore[reportPrivateUsage]
+    path = local._workspace_path(world.workspace)  # pyright: ignore[reportPrivateUsage]
+    assert path.stat().st_size > 1_048_576
+    local.clear_workspace_selection(world.workspace)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("host", ("claude", "cursor", "codex"))
+async def test_refusal_after_lowering_above_the_byte_ceiling_reaches_check_and_receipt(
+    tmp_path: Path, host: str
+) -> None:
+    world = await _world(tmp_path, host=host)
+    sweeper = world.sweep()
+    try:
+        # Recover capture inventory first so only the lowered capacity refuses.
+        assert (await sweeper.sweep()).reasons == (("capture_inventory_recovered", 1),)
+        _lower_after_accepting_backlog(world, host)
+
+        assert (
+            await asyncio.to_thread(_native_failed_command, world, host, "over-target", "refused")
+            == 0
+        )
+        accounting = world.local.selection_accounting(world.workspace)
+        assert accounting["unrecoverable_input_count"] == 1
+        assert world.local.pending_selection_losses(world.workspace)
+        backlog = world.local.pending_outbox_count(world.workspace)
+        assert backlog == 1_700
+
+        # A bounded real drain at the byte boundary: deliveries acknowledge and
+        # the loss reaches task history without any new host event.
+        drain = ObservationOutboxSweeper(
+            world.local,
+            world.coordinator,
+            capture_recovery=world.coordinator.recover_capture_inventory,
+            limit=2,
+        )
+        try:
+            await drain.sweep()
+        finally:
+            drain.close()
+        assert world.local.pending_outbox_count(world.workspace) == backlog - 2
+        assert not world.local.pending_selection_losses(world.workspace)
+        history = world.observation.list_envelopes_for_session(world.workspace, world.session)
+        assert [item.gap_codes for item in history if item.event_kind == "observation_gap"] == [
+            ("observation_input_loss",)
+        ]
+        assert sum(item.event_kind == "PostToolUse" for item in history) == 2
+
+        # The frozen check input and the receipt carry the loss.
+        frontier = await world.runtime.ledger.load_frontier()
+        frozen = await world.runtime.ledger.freeze_case(
+            world.runtime.session_id,
+            cast(str, world.runtime.writer_id),
+            frontier.sequence,
+            _ids(IdKind.REQUEST, 9401),
+            "sha256:" + "0" * 64,
+        )
+        assert isinstance(frozen, FrozenCase)
+        assert any(
+            "observation_input_loss" in coverage.known_gaps
+            for coverage in frozen.case.coverage_by_ref.values()
+        )
+        check_gaps, receipt_gaps = await _check_and_receipt_known_gaps(world, seed=9402)
+        assert "observation_input_loss" in check_gaps
+        assert "observation_input_loss" in receipt_gaps
+    finally:
+        sweeper.close()
+        world.coordinator.close()
+
+
+async def _check_and_receipt_known_gaps(
+    world: _World, *, seed: int
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Run the real check commit and receipt against the world's task route."""
+
+    from dataclasses import replace
+
+    from integration.application.test_respond_status_receipt import (  # pyright: ignore[reportPrivateUsage]
+        _build_app,  # pyright: ignore[reportPrivateUsage]
+        _IdleImporter,  # pyright: ignore[reportPrivateUsage]
+        _receipt_wire,  # pyright: ignore[reportPrivateUsage]
+    )
+    from yoetz.application.receipt import execute_receipt
+    from yoetz.ports.importer import ImporterPort
+    from yoetz.ports.runtime import BundleRuntimePort
+    from yoetz.protocol.models import ReceiptRequest
+
+    app = _App()
+    app.runtime = cast(object, world.routes)  # pyright: ignore[reportAttributeAccessIssue]
+    setattr(app, "reconcile_observation_losses", world.coordinator.reconcile_task_selection_losses)
+    frontier = await world.runtime.ledger.load_frontier()
+    request = _request().model_copy(
+        update={
+            "session_id": world.runtime.session_id,
+            "writer_id": world.runtime.writer_id,
+            "request_id": _ids(IdKind.REQUEST, seed),
+            "expected_frontier": _request().expected_frontier.model_copy(
+                update={"sequence": str(frontier.sequence), "head_digest": frontier.head_digest}
+            ),
+        }
+    )
+    checked = await execute_check_commit(app, request)
+    current = replace(world.runtime, importer=cast(ImporterPort, _IdleImporter()))
+    world.routes.runtimes[current.session_id] = current
+    receipt_app, _, _ = _build_app()
+    receipt_app = replace(receipt_app, runtime=cast(BundleRuntimePort, world.routes))
+    receipt = await execute_receipt(
+        receipt_app,  # pyright: ignore[reportArgumentType]
+        ReceiptRequest.model_validate(
+            _receipt_wire(
+                seed + 1,
+                task_id=current.task_id,
+                session=current.session_id,
+                writer=cast(str, current.writer_id),
+                frontier=checked.result_frontier,
+            )
+        ),
+    )
+    return tuple(checked.coverage.known_gaps), tuple(receipt.coverage.known_gaps)

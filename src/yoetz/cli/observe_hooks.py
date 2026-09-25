@@ -2927,6 +2927,15 @@ def _session_start_source(payload: Mapping[str, JsonValue]) -> str | None:
     return None
 
 
+def _report_session_end_unrecorded(event: str, *, _state: Path | None) -> None:
+    """Name a teardown whose local session end did not persist (#843)."""
+
+    _stderr_line(
+        "hook_observe_degraded: session_end_unrecorded; session end not recorded; see observe status"
+    )
+    record_hook_diagnostic("session_end_unrecorded", event, _state=_state)
+
+
 def handle_observe(
     *,
     event_name: str | None,
@@ -2986,6 +2995,9 @@ def handle_observe(
         with contextlib.suppress(BaseException):
             lease.__exit__(None, None, None)
 
+    # True from a SessionEnd's local end until its capture batch commits. The
+    # end is saved with that batch, so a failed batch loses it (#843).
+    session_end_uncommitted = False
     try:
         if source is ObservationSource.CODEX_HOOK:
             # Cold imports are pure preparation. Importing this runtime inside
@@ -3724,12 +3736,18 @@ def handle_observe(
             # Persist session end so lifecycle can report STOPPED once every bound
             # session has ended.
             if resolved_event == "SessionEnd" and binding_owned:
-                with contextlib.suppress(Exception):
+                try:
                     store.note_session_end(
                         workspace_commitment,
                         session_commitment,
                         generation=source_generation,
                     )
+                    session_end_uncommitted = True
+                except Exception:
+                    # Teardown stays fail-open, but an end that did not persist
+                    # leaves the session and any temporary override active. Name
+                    # it instead of letting the lifecycle write vanish (#843).
+                    _report_session_end_unrecorded(resolved_event, _state=_state)
 
             # Cursor transcripts are outside its structural observation contract.
             # Only the Codex hook source may reconcile the secondary JSONL stream.
@@ -3759,6 +3777,7 @@ def handle_observe(
                             locator=locator,
                             hook_provided_path=hook_path_token,
                         )
+        session_end_uncommitted = False
 
         stages["store"] = _elapsed_ms(store_started, _monotonic())
 
@@ -4316,6 +4335,9 @@ def handle_observe(
             _stderr_line("hook_observe_degraded: observe; observation durability unknown")
         with contextlib.suppress(BaseException):
             record_hook_diagnostic("observe", event_name or "observe", _state=_state)
+        if session_end_uncommitted:
+            with contextlib.suppress(BaseException):
+                _report_session_end_unrecorded("SessionEnd", _state=_state)
         emitted = False
         with contextlib.suppress(BaseException):
             emitted = hook_io.stdout_json({}, stdout)
