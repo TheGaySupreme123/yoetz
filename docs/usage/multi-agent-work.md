@@ -53,9 +53,11 @@ after the check, the receipt names the uncovered dependency and requires a new c
 conclusion.
 
 Accepted children with unresolved actionable findings prevent clean completion wording. Pending
-children and informational findings annotate the receipt. Live children, lost contact, missing
-data, and abandoned or written-off work appear as gaps. Yoetz can produce an honest incomplete
-receipt while children are still working; an earlier receipt remains unchanged after they finish.
+children, rejected children, and informational findings annotate the receipt. Rejecting a child
+that was never accepted does not by itself make the parent receipt incomplete. Live children,
+lost contact, missing data, and abandoned or written-off work appear as gaps. Yoetz can produce
+an honest incomplete receipt while children are still working; an earlier receipt remains
+unchanged after they finish.
 
 The parent's own obligations must still cover incorporating child work and testing the combined
 result. A clean child receipt does not establish that integration happened.

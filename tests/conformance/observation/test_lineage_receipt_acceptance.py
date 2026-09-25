@@ -3,8 +3,8 @@
 The neighboring parent-lineage scenario intentionally exercises a mixed, incomplete matrix.  This
 module keeps the remaining acceptance rows small and explicit: a genuinely clean child, invalid
 acceptance transition, abandoned or cancelled work with late evidence, source-read gaps,
-qualifying rechecks, and replay from either the parent's recorded operation or a standalone copied
-parent ledger.
+a rejected unaccepted child, qualifying rechecks, and replay from either the parent's recorded
+operation or a standalone copied parent ledger.
 """
 
 from __future__ import annotations
@@ -1072,3 +1072,83 @@ async def test_parent_receipt_reconstructs_from_copied_parent_bundle_without_chi
             reconstructed_wire = cast(JsonValue, receipt_document_to_json(reconstructed_document))
             assert canonical_encode(reconstructed_wire) == canonical_encode(original_wire)
             assert canonical_digest(reconstructed_wire) == original.receipt_digest
+
+
+async def test_rejected_unaccepted_child_annotates_parent_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rejecting a pending self-registered child must not make the parent receipt unavailable.
+
+    The sweep records NOT_AUTHORIZED because the service does not open an unaccepted bundle.
+    That gap stays off parent coverage. An accepted child's source-read gaps are covered by
+    ``test_parent_receipt_names_child_source_read_gaps``.
+    """
+
+    workspace = _workspace(tmp_path / "workspace")
+    async with multi_agent_service(  # pragma: allowlist secret
+        tmp_path / "state", config=_clean_config()
+    ) as service:
+        monkeypatch.setattr(type(service.app), "evaluate_semantic_check", _evaluate_semantic_check)
+        parent = await service.app.start(
+            StartRequest.model_validate(
+                {
+                    **_identity(),
+                    "mode": "create",
+                    "task_title": "Rejection parent",
+                    "workspace_ref": str(workspace),
+                    "external_ref": "rejection-parent",
+                    "requested_view": "compact",
+                }
+            ),
+            repository_privacy_context=_REPOSITORY,
+        )
+        await _publish_clean_work(service, parent)
+        child = await service.app.start(
+            StartRequest.model_validate(
+                {
+                    **_identity(),
+                    "mode": "create",
+                    "task_title": "Pending child",
+                    "workspace_ref": str(workspace),
+                    "external_ref": "rejection-child",
+                    "parent_session_id": parent.session_id,
+                    "requested_view": "compact",
+                }
+            ),
+            repository_privacy_context=_REPOSITORY,
+        )
+        assert child.acceptance == "pending"
+        await _drain_lineage(service)
+        pending_check = await _check(service, parent, mode="semantic_if_configured")
+        pending_receipt = await _receipt(service, parent, pending_check)
+        assert pending_receipt.conclusion == "no_unresolved_deterministic_findings"
+        assert pending_receipt.document is not None
+        pending_document = cast(Mapping[str, object], pending_receipt.document)
+        pending_row = next(
+            item for item in _children(pending_document) if item["child_task_id"] == child.task_id
+        )
+        assert pending_row["outcome"] == "annotated"
+
+        await _publish(
+            service,
+            parent,
+            (_event("child_rejected", {"child_task_id": child.task_id}),),
+        )
+        await _drain_lineage(service)
+        checked = await _check(service, parent, mode="semantic_if_configured")
+        assert checked.children is not None
+        (preview,) = checked.children.items
+        assert preview.child_task_id == child.task_id
+        assert preview.acceptance.value == "rejected"
+        assert preview.rollup_state.value == "annotation"
+        assert preview.blocking_conditions == ()
+        receipt = await _receipt(service, parent, checked)
+        assert receipt.conclusion == "no_unresolved_deterministic_findings"
+        assert receipt.document is not None
+        document = cast(Mapping[str, object], receipt.document)
+        row = next(item for item in _children(document) if item["child_task_id"] == child.task_id)
+        assert row["outcome"] == "annotated"
+        coverage = cast(Mapping[str, object], document["coverage"])
+        known_gaps = cast(Sequence[object], coverage["known_gaps"])
+        assert "lineage_child_unavailable" not in known_gaps
+        assert "lineage_child_read_gap" not in known_gaps

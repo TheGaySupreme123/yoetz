@@ -213,12 +213,18 @@ than implementation notes.
 4. **Parent rollup is one level and severity-dependent.** A parent receipt projects only direct
    children from the frozen manifest. Current actionable findings on accepted children block
    clean-completion wording; the receipt is still produced and names the child and finding.
-   Pending-acceptance children and informational findings annotate only. An accepted live child
-   is an open gap and an accepted abandoned child is an incomplete gap. Lifecycle state is
-   evaluated before informational annotation, so an informational finding cannot hide an open or
-   incomplete child. The only informational kind, `ledger_stale_or_incomplete`, is produced from
-   recorded ledger gaps; a public receipt child that carries it also carries that coverage
-   blocker, and the no-gap precedence is locked by the kernel evaluator. Grandchildren are visible only through their direct parent. The clean-parent
+   Pending-acceptance children, rejected children, and informational findings annotate only.
+   A read or provenance gap on a pending or rejected child stays visible on that child's row
+   and does not block parent clean-completion wording or parent coverage. The same read gap
+   on an accepted child remains unavailable and does block. A rejected snapshot that still
+   carries actionable findings is an impossible acceptance transition and stays blocking.
+   An accepted live child is an open gap and an accepted abandoned child is an incomplete gap.
+   Lifecycle state is evaluated before informational annotation, so an informational finding
+   cannot hide an open or incomplete child. The only informational kind,
+   `ledger_stale_or_incomplete`, is produced from recorded ledger gaps; a public receipt child
+   that carries it also carries that coverage blocker, and the no-gap precedence is locked by
+   the kernel evaluator.
+   Grandchildren are visible only through their direct parent. The clean-parent
    wording remains coverage-bounded and never says that Yoetz verified every child.
 
 5. **A project is a grouping object, not an egress scope.** `IdKind.project` uses server-generated

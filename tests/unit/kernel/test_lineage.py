@@ -368,6 +368,7 @@ def test_pending_child_gaps_are_annotation_only() -> None:
     evaluation = evaluate_lineage(LineageManifest((child,)))
     assert evaluation.children[0].state is LineageRollupState.ANNOTATION
     assert evaluation.children[0].freshness == "unknown"
+    assert evaluation.children[0].blockers == ()
     assert evaluation.blocks_clean_completion is False
     assert evaluation.coverage.known_gaps == ()
     assert {gap.code for gap in evaluation.gaps} == {
@@ -375,6 +376,58 @@ def test_pending_child_gaps_are_annotation_only() -> None:
         "lineage_child_frontier_unknown",
         "lineage_child_verification_unknown",
     }
+
+
+def test_rejected_child_not_authorized_gap_is_annotation_only() -> None:
+    """A rejected child's NOT_AUTHORIZED gap stays visible and does not block the parent."""
+
+    child = _child(
+        acceptance=LineageAcceptance.REJECTED,
+        frontier=None,
+        check=False,
+        receipt=False,
+        read_gaps=("not_authorized",),
+    )
+    evaluation = evaluate_lineage(LineageManifest((child,)))
+    row = evaluation.children[0]
+    unavailable = tuple(gap for gap in evaluation.gaps if gap.code == "lineage_child_unavailable")
+    assert row.state is LineageRollupState.ANNOTATION
+    assert row.blocks_clean_completion is False
+    assert row.blockers == ()
+    assert evaluation.blocks_clean_completion is False
+    assert evaluation.coverage.known_gaps == ()
+    assert len(unavailable) == 1
+    assert unavailable[0].detail == "not_authorized"
+    assert unavailable[0].child_task_id == child.child_task_id
+
+
+def test_rejected_child_provenance_restriction_is_annotation_only() -> None:
+    child = replace(
+        _child(acceptance=LineageAcceptance.REJECTED),
+        provenance_restrictions=("authorization_missing",),
+    )
+    evaluation = evaluate_lineage(LineageManifest((child,)))
+    row = evaluation.children[0]
+    assert row.state is LineageRollupState.ANNOTATION
+    assert row.blockers == ()
+    assert evaluation.blocks_clean_completion is False
+    assert evaluation.coverage.known_gaps == ()
+    assert "lineage_child_provenance_restricted" in {gap.code for gap in evaluation.gaps}
+
+
+def test_accepted_child_not_authorized_read_gap_still_blocks() -> None:
+    child = _child(
+        frontier=None,
+        check=False,
+        receipt=False,
+        read_gaps=("not_authorized",),
+    )
+    evaluation = evaluate_lineage(LineageManifest((child,)))
+    row = evaluation.children[0]
+    assert row.state is LineageRollupState.UNAVAILABLE
+    assert row.blocks_clean_completion is True
+    assert "lineage_child_read_gap" in row.blockers
+    assert "lineage_child_unavailable" in evaluation.coverage.known_gaps
 
 
 def test_rejected_child_with_actionable_finding_cannot_escape_blocking_rollup() -> None:
@@ -387,3 +440,28 @@ def test_rejected_child_with_actionable_finding_cannot_escape_blocking_rollup() 
     assert evaluation.blocks_clean_completion is True
     assert evaluation.actionable_finding_ids == (_FINDING,)
     assert "lineage_invalid_acceptance_transition" in evaluation.coverage.known_gaps
+
+
+def test_rejected_child_with_actionable_finding_and_read_gap_stays_blocking() -> None:
+    """An impossible rejected snapshot still blocks when the bundle also could not be read."""
+
+    child = _child(
+        acceptance=LineageAcceptance.REJECTED,
+        frontier=None,
+        check=False,
+        receipt=False,
+        read_gaps=("not_authorized",),
+        findings=(_finding(FindingKind.COMPLETION_WITH_OPEN_OBLIGATIONS),),
+    )
+    evaluation = evaluate_lineage(LineageManifest((child,)))
+    row = evaluation.children[0]
+    # UNAVAILABLE is the existing fail-closed state for an unreadable impossible
+    # transition. Actionable ids are reported from BLOCKED rows; this row still
+    # carries the finding and blocks clean completion through coverage.
+    assert row.state is LineageRollupState.UNAVAILABLE
+    assert row.blocks_clean_completion is True
+    assert row.finding_ids == (_FINDING,)
+    assert "lineage_invalid_acceptance_transition" in row.blockers
+    assert evaluation.blocks_clean_completion is True
+    assert "lineage_invalid_acceptance_transition" in evaluation.coverage.known_gaps
+    assert "lineage_child_unavailable" in evaluation.coverage.known_gaps
