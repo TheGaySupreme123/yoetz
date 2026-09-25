@@ -87,7 +87,12 @@ unsupported claims and unbounded duplicate findings.
    standing-repository-grant suspension (`suspension_kind=repository_grant`) is not an active
    barrier: no provider job exists, the lease is expired, and the ceremony may never complete.
    Observation appends proceed; same-request replay re-installs the barrier when it reclaims the
-   lease. Commit keeps the frozen subject frontier — the verdict is never retargeted to a frontier
+   lease. The same holds for any pending check whose lease is no longer live under the current
+   owner generation: its invocation went away (or a previous service generation died holding it),
+   nothing renews it, and it may never be replayed. A frozen case is therefore an active barrier
+   only while its lease is live. Before issue #838 an abandoned check deferred the structural
+   delivery of its task's capture handoffs forever, and decision 22's barrier then refused every
+   new check on the task: two retryable waits that could only ever release each other. Commit keeps the frozen subject frontier — the verdict is never retargeted to a frontier
    it did not inspect — and tolerates an observation-authored suffix after that frontier the same
    way acquisition and `append_batch` do, appending check events at the live head. Cooperative or
    importer motion still conflicts.
@@ -494,10 +499,21 @@ limits remain in the host integration runbooks.
     predecessor work. Completed same-request replay remains independent of newer handoffs.
     When a new CHECK encounters the barrier, READY performs that inspection as a bounded,
     exact-task preflight before one freeze retry, so a ticket left by a direct capture-only request
-    is reconciled even when no structural outbox row remains. Only current local authority can keep
-    a ticket pending; inactive, revoked, runtime-disabled, profile-unselected, or stale-generation
-    tickets are tombstoned without changing encrypted objects or retained observation history. A
+    is reconciled even when no structural outbox row remains. A ticket stays pending only while
+    current local authority holds it and a pending structural outbox row can still consume it.
+    Inactive, revoked, runtime-disabled, profile-unselected, or stale-generation tickets are
+    tombstoned; so is a ticket older than a 120-second grace window with no pending row left in its
+    workspace (issue #838), since a handoff is minted only for a row already queued and that row
+    leaves only once delivered or quarantined. An unreadable outbox or unknown clock keeps the
+    ticket. Tombstoning never changes encrypted objects or retained observation history. A
     completed same-request replay returns before inspecting newer tickets.
+
+    The refusal names its stage: `reason_code: check_admission_capture_pending` with
+    `retry_after_ms` and the `check_admission_same_identity` continuation (ADR-030), and `status
+    view=operation` reports the stage on the still-`absent` page. The refused check held both
+    dispatch gates, which is exactly what kept the handoff's structural delivery from running, so
+    the daemon wakes the observation sweep as the refusal leaves; the delivery then runs before the
+    caller's bounded replay instead of an idle sweep interval later (issue #838).
 
     At most 512 `staging` or `pending` tickets are outstanding per workspace. Revoked tickets are
     excluded from that quota but retained as metadata-only tombstones to prevent reuse after an

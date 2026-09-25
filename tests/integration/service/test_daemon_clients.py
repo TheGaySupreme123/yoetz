@@ -53,12 +53,14 @@ from yoetz.ports.control import (
     RepositoryPrivacyContext,
     ServiceState,
 )
+from yoetz.ports.ledger import CheckAdmissionStage, check_admission_refused
 from yoetz.protocol.canonical import canonical_digest
 from yoetz.protocol.coverage import PublicationChannel, coverage_for_channel
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.models import (
     CheckRequest,
+    CheckResult,
     PublishWorkAcceptedEventModel,
     PublishWorkAcceptedProjectionUnavailableModel,
     PublishWorkRequest,
@@ -3564,3 +3566,72 @@ async def test_operation_status_still_waits_behind_recovery_maintenance() -> Non
     finally:
         effects._release_recovery_maintenance("recovery-gate")  # pyright: ignore[reportPrivateUsage]
         await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_capture_refused_check_wakes_the_observation_sweep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A check refused behind a capture handoff wakes the sweep that delivers it (issue #838).
+
+    The check held both dispatch gates, so the handoff's structural delivery could not run
+    during it. Without the wake the next sweep waits a full idle interval, longer than the
+    caller's bounded replay; other refusals leave the cadence alone.
+    """
+
+    import yoetz.observability.diagnostics as diagnostics
+
+    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
+    daemon, application, _vault, _listener = _daemon()
+    sweeps = 0
+    second_sweep = asyncio.Event()
+
+    async def sweep() -> ObservationDrainSummary:
+        nonlocal sweeps
+        sweeps += 1
+        if sweeps >= 2:
+            second_sweep.set()
+        return ObservationDrainSummary(
+            attempted=0, acknowledged=0, retry_pending=0, quarantined=0, reasons=()
+        )
+
+    refusal = CheckAdmissionStage.ACQUIRING
+
+    async def refuse(request: object, **_kwargs: object) -> JsonObject:
+        del request
+        raise check_admission_refused(refusal)
+
+    application.observation_sweep = sweep  # pyright: ignore[reportAttributeAccessIssue]
+    application.check = refuse  # type: ignore[method-assign]
+    await daemon.start()
+    wake = daemon._observation_sweep_wake  # pyright: ignore[reportPrivateUsage]
+
+    acquiring = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.CHECK, _check_body()),
+    )
+    assert isinstance(acquiring.body, CheckResult)
+    assert acquiring.body.root.ok is False
+    assert not wake.is_set()
+
+    refusal = CheckAdmissionStage.CAPTURE_HANDOFF_PENDING
+    refused = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.CHECK, _check_body()),
+    )
+    assert isinstance(refused.body, CheckResult)
+    assert refused.body.root.ok is False
+    error = refused.body.root.error
+    assert error.code is PublicErrorCode.OPERATION_PENDING
+    assert error.retryable is True
+    assert error.safe_details == {
+        "continuation": "check_admission_same_identity",
+        "reason_code": "check_admission_capture_pending",
+        "retry_after_ms": 5000,
+    }
+    # The typed stage reaches the durable diagnostic, so the correlation id names the stage.
+    records = lookup_diagnostic_records(error.correlation_id, root=tmp_path)
+    assert [record.get("reason_code") for record in records] == ["check_admission_capture_pending"]
+    # The idle interval is 60 s; only the wake can bring the second sweep this soon.
+    await asyncio.wait_for(second_sweep.wait(), timeout=5)
+    await daemon.close()

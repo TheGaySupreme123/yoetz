@@ -77,6 +77,7 @@ from yoetz.ports.control import McpHostProfile
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.ids import IdPort
 from yoetz.ports.ledger import (
+    CheckAdmissionStage,
     CheckAdvisoryNote,
     CheckAwaitingHuman,
     CheckChildPreviewItem,
@@ -89,6 +90,7 @@ from yoetz.ports.ledger import (
     OperationLease,
     OperationRecord,
     OperationState,
+    check_admission_stage,
 )
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef, ObjectSource
 from yoetz.ports.runtime import BundleRuntimePort, RouteAccess, RouteCommand, TaskRuntime
@@ -2048,15 +2050,23 @@ async def execute_check_commit(
         except PublicOperationError as exc:
             # A completed same-request replay must return before consulting newer capture state:
             # a corrupt or unrelated ticket cannot turn an idempotent result into STORAGE_CORRUPT.
-            # A new CHECK that hit the capture barrier gets one task-local authority reconciliation
-            # and one retry; active tickets remain pending and every other error keeps its original
-            # disposition.
+            # A new CHECK that hit the capture barrier gets one task-local reconciliation (stale
+            # authority and orphaned handoffs) and one retry; live tickets remain pending. A lost
+            # acquisition race staged nothing durable, so it retries once directly. Every other
+            # refusal, including a same-request acquisition still in flight, keeps its original
+            # typed disposition for the caller's exact replay (issue #838).
             if exc.code is not PublicErrorCode.OPERATION_PENDING or not exc.retryable:
                 raise
-            reconcile_capture = getattr(app, "reconcile_observation_capture", None)
-            if not callable(reconcile_capture):
+            stage = check_admission_stage(exc)
+            if stage is CheckAdmissionStage.ACQUISITION_CONTENDED:
+                pass
+            elif stage is CheckAdmissionStage.CAPTURE_HANDOFF_PENDING or stage is None:
+                reconcile_capture = getattr(app, "reconcile_observation_capture", None)
+                if not callable(reconcile_capture):
+                    raise
+                await cast(Callable[[TaskRuntime], Awaitable[None]], reconcile_capture)(runtime)
+            else:
                 raise
-            await cast(Callable[[TaskRuntime], Awaitable[None]], reconcile_capture)(runtime)
             frozen_or_replay = await runtime.ledger.freeze_case(
                 request.session_id,
                 request.writer_id,

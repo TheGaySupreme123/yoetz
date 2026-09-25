@@ -106,6 +106,13 @@ Prepared public-alpha release candidate; publication remains gated by #785. See
   selected installation (#796), plus the remaining 0.2.5 repairs: exact-session recovery and
   automatic reattachment beside independent tasks in the same workspace, with delegated children
   still behind their authenticated attachment path (#811, #815, #816).
+- A check refused before admission no longer strands its caller behind an `OPERATION_PENDING`
+  whose operation reads `absent`. A pending check whose lease has lapsed no longer defers the
+  observation delivery that later checks wait on; a capture handoff no structural row can consume
+  is retired; a refused check wakes the delivery sweep; and SQLite admission survives unrelated
+  lifecycle writes. Every remaining pre-admission refusal names its stage with a same-identity
+  replay directive and `retry_after_ms`, and `status view=operation` reports that stage on the
+  `absent` page (issue #838).
 
 ## 0.2.5 — 2026-09-23
 

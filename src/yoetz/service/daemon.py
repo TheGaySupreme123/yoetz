@@ -106,6 +106,7 @@ from yoetz.ports.control import (
 )
 from yoetz.ports.diagnostics import StartupCheckResult
 from yoetz.ports.keys import KeyStorePort, MacKeyPurpose
+from yoetz.ports.ledger import CheckAdmissionStage, check_admission_stage
 from yoetz.ports.secret_memory import (
     HumanAuthorizationProof,
     SecretHandle,
@@ -690,6 +691,10 @@ class ServiceDaemon:
         self._connection_tasks: set[asyncio.Task[None]] = set()
         self._check_waits = CheckWaits()
         self._check_read_window = CheckReadWindow()
+        # Set when a check was refused behind an outstanding native capture handoff. The check
+        # held both dispatch gates, so the handoff's structural delivery could not run; waking the
+        # sweeper drains it as soon as those gates are free instead of an idle interval later.
+        self._observation_sweep_wake = asyncio.Event()
         self._ready_maintenance_task: asyncio.Task[None] | None = None
 
     @property
@@ -1082,22 +1087,35 @@ class ServiceDaemon:
         repository_privacy_context: RepositoryPrivacyContext | None,
     ) -> object:
         body = request.body
-        if (
-            request.method is ControlMethod.CHECK
-            and type(body) is CheckRequest
-            and body.mode != "deterministic_only"
-        ):
-            return await self._check_waits.run(
-                (body.writer_id, body.request_id),
-                hashlib.sha256(canonical_encode(body.model_dump(mode="json"))).hexdigest(),
-                lambda: self._dispatch_ready_once(
-                    projection_context, request, repository_privacy_context, detached_check=True
-                ),
-                request.deadline_ms,
+        try:
+            if (
+                request.method is ControlMethod.CHECK
+                and type(body) is CheckRequest
+                and body.mode != "deterministic_only"
+            ):
+                return await self._check_waits.run(
+                    (body.writer_id, body.request_id),
+                    hashlib.sha256(canonical_encode(body.model_dump(mode="json"))).hexdigest(),
+                    lambda: self._dispatch_ready_once(
+                        projection_context,
+                        request,
+                        repository_privacy_context,
+                        detached_check=True,
+                    ),
+                    request.deadline_ms,
+                )
+            return await self._dispatch_ready_once(
+                projection_context, request, repository_privacy_context
             )
-        return await self._dispatch_ready_once(
-            projection_context, request, repository_privacy_context
-        )
+        except PublicOperationError as exc:
+            if (
+                request.method is ControlMethod.CHECK
+                and check_admission_stage(exc) is CheckAdmissionStage.CAPTURE_HANDOFF_PENDING
+            ):
+                # Both dispatch gates were released on the way out, so the next sweep can
+                # deliver the handoff before the caller's exact replay (issue #838).
+                self._observation_sweep_wake.set()
+            raise
 
     async def _dispatch_ready_once(
         self,
@@ -1809,7 +1827,7 @@ class ServiceDaemon:
                     # rows. Progress is the sole licence to skip the interval — a full-limit pass
                     # that resolved nothing would otherwise spin this loop with no delay at all.
                     resolved = 0 if summary is None else summary.acknowledged + summary.quarantined
-                    await asyncio.sleep(
+                    await self._await_observation_sweep_turn(
                         _OBSERVATION_SWEEP_INTERVAL_SECONDS
                         if resolved == 0
                         else _OBSERVATION_SWEEP_PROGRESS_DELAY_SECONDS
@@ -1829,6 +1847,21 @@ class ServiceDaemon:
                     await self._bounded_coordination_sweep(coordination_sweep)
         except asyncio.CancelledError:
             raise
+
+    async def _await_observation_sweep_turn(self, delay: float) -> None:
+        """Wait for the next sweep: the idle or progress delay, or an earlier admission wake.
+
+        A wake only moves the next bounded pass forward; it never adds a pass or skips the gates
+        the sweep takes per row.
+        """
+
+        wake = self._observation_sweep_wake
+        if not wake.is_set():
+            try:
+                await asyncio.wait_for(wake.wait(), timeout=delay)
+            except TimeoutError:
+                pass
+        wake.clear()
 
     async def _refresh_ready_recommendations(
         self, recommendation_refresh: Callable[[], Awaitable[object]]

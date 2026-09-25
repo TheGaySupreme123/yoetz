@@ -107,6 +107,7 @@ from yoetz.application.observation_drain import (
     ObservationDrainSummary,
     ObservationOutboxSweeper,
 )
+from yoetz.application.observation_materialize import observation_content_identity
 from yoetz.application.observation_verification import ObservationVerificationSupervisor
 from yoetz.application.privacy_control import build_privacy_support_handlers
 from yoetz.application.privacy_policy import PrivacyPolicyApplication
@@ -175,6 +176,7 @@ from yoetz.domain.host_lineage import HostLineageHost
 from yoetz.domain.observation import (
     ObservationCaptureBacklog,
     ObservationCaptureTicket,
+    ObservationEnvelope,
     observation_capture_ticket_id,
 )
 from yoetz.domain.privacy import (
@@ -3812,12 +3814,94 @@ async def _bootstrap_capture_reservations(
         return False
 
 
+# A native handoff is minted only for a structural row already in the workspace outbox, and that
+# row leaves the outbox only once it is delivered or quarantined. A ticket past this age with no
+# pending row left to consume it can never drain; it is retired rather than blocking every new
+# check on its task forever (issue #838). The window only guards unforeseen interleavings.
+_ORPHANED_CAPTURE_TICKET_GRACE: Final = timedelta(seconds=120)
+
+
+class _PendingStructuralRows:
+    """One workspace's pending structural outbox rows, read once per check preflight.
+
+    Source identities answer almost every ticket; captured-content identities are hashed only
+    when an old ticket's source identity is absent, so a large backlog costs one pass at most.
+    """
+
+    def __init__(self, envelopes: tuple[ObservationEnvelope, ...]) -> None:
+        self._envelopes = envelopes
+        self._sources = frozenset(envelope.source_identity for envelope in envelopes)
+        self._contents: frozenset[str] | None = None
+
+    def can_consume(self, ticket: ObservationCaptureTicket) -> bool:
+        if ticket.source_identity in self._sources:
+            return True
+        if self._contents is None:
+            self._contents = frozenset(
+                observation_content_identity(envelope) for envelope in self._envelopes
+            )
+        return ticket.logical_identity in self._contents
+
+
+def _pending_structural_rows(
+    local_observation: LocalObservationStore, workspace: str
+) -> _PendingStructuralRows | None:
+    """The workspace's pending structural rows, or ``None`` when they cannot be read."""
+
+    list_rows = getattr(local_observation, "list_pending_outbox_rows", None)
+    if not callable(list_rows):
+        return None
+    try:
+        rows: object = list_rows(workspace)
+        if type(rows) is not tuple:
+            return None
+        envelopes: list[ObservationEnvelope] = []
+        for row in cast(tuple[object, ...], rows):
+            envelope = getattr(row, "envelope", None)
+            if type(envelope) is not ObservationEnvelope:
+                return None
+            envelopes.append(envelope)
+    except Exception:
+        return None
+    return _PendingStructuralRows(tuple(envelopes))
+
+
+def _capture_ticket_orphaned(
+    ticket: ObservationCaptureTicket,
+    rows: _PendingStructuralRows | None,
+    now: datetime | None,
+) -> bool:
+    """True only when no pending structural row can still consume this handoff.
+
+    An unreadable outbox, an unknown clock, or a young ticket keeps the barrier: retiring a live
+    handoff costs its captured content, while keeping an orphan only delays the check.
+    """
+
+    if rows is None or now is None:
+        return False
+    try:
+        captured_at = ticket.captured_at.as_datetime()
+    except Exception:
+        return False
+    if now - captured_at < _ORPHANED_CAPTURE_TICKET_GRACE:
+        return False
+    try:
+        return not rows.can_consume(ticket)
+    except Exception:
+        return False
+
+
 async def _reconcile_observation_capture(
     runtime: TaskRuntime,
     local_observation: LocalObservationStore,
     clock: ClockPort | None = None,
 ) -> None:
-    """Retire stale native handoffs and publish the task backlog to local pressure state."""
+    """Retire stale or orphaned native handoffs and publish the task backlog to pressure state.
+
+    A ticket stays pending only while current local authority holds it and a pending structural
+    outbox row can still consume it; everything else is tombstoned without touching encrypted
+    objects or retained observation history.
+    """
 
     store = runtime.observation
     if store is None:
@@ -3841,7 +3925,14 @@ async def _reconcile_observation_capture(
             retryable=False,
         )
     authorities: dict[str, LocalContentCaptureAuthority | None] = {}
+    structural: dict[str, _PendingStructuralRows | None] = {}
     retired_ids: set[str] = set()
+    orphan_now: datetime | None = None
+    if clock is not None:
+        with contextlib.suppress(Exception):
+            raw_now = cast(object, clock.now_utc())
+            if type(raw_now) is datetime:
+                orphan_now = raw_now
     for ticket in cast(tuple[ObservationCaptureTicket, ...], tickets):
         if ticket.task_id != runtime.task_id:
             raise PublicOperationError(
@@ -3864,6 +3955,14 @@ async def _reconcile_observation_capture(
                 and ticket.content_capture_profile not in authority.profiles
             )
         ):
+            tombstone(ticket)
+            retired_ids.add(observation_capture_ticket_id(ticket))
+            continue
+        if ticket.workspace_commitment not in structural:
+            structural[ticket.workspace_commitment] = _pending_structural_rows(
+                local_observation, ticket.workspace_commitment
+            )
+        if _capture_ticket_orphaned(ticket, structural[ticket.workspace_commitment], orphan_now):
             tombstone(ticket)
             retired_ids.add(observation_capture_ticket_id(ticket))
     reader = getattr(store, "capture_backlog", None)

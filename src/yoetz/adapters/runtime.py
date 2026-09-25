@@ -20,6 +20,7 @@ from yoetz.ports.importer import ImporterPort, ImportStatusSnapshot
 from yoetz.ports.keys import BundleKeys, KeyStoreError, KeyStoreReason
 from yoetz.ports.ledger import (
     CaseAvailabilityFacts,
+    CheckAdmissionRecord,
     LedgerPort,
     LedgerRecord,
     OperationRecord,
@@ -338,6 +339,17 @@ class _ReadLedger:
         """Read the structural progress of one check's AI-powered review job (issue #571 A2)."""
 
         return await self._value.load_semantic_progress(writer_id, operation_id)
+
+    async def lookup_check_admission(
+        self, writer_id: str, operation_id: str
+    ) -> CheckAdmissionRecord | None:
+        """Read why a check request id has no operation record yet (issue #838).
+
+        Operation recovery reads through this facade, and a pre-admission refusal leaves nothing
+        else to read: without it an agent told to replay sees only a bare ``absent`` page.
+        """
+
+        return await self._value.lookup_check_admission(writer_id, operation_id)
 
 
 class _PayloadObjects:

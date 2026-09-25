@@ -150,7 +150,7 @@ _RESULT_OPTIONAL_NON_NULL: tuple[tuple[type[BaseModel], frozenset[str]], ...] = 
         ),
     ),
     (StatusProjectDetectionModel, frozenset({"resource_paths"})),
-    (StatusOperationPageModel, frozenset({"semantic_progress"})),
+    (StatusOperationPageModel, frozenset({"semantic_progress", "admission"})),
     (
         StatusSemanticProgressModel,
         frozenset({"remaining_ms", "terminal_outcome", "terminal_reason"}),
@@ -1027,6 +1027,10 @@ def test_every_result_optional_non_null_field_has_an_unset_projection_case() -> 
         # Issue #571 A2: tests/integration/application/test_status_pending_operation_projection.py
         ("StatusOperationPageModel", "semantic_progress"): (
             "test_pending_check_operation_page_projects_to_the_client"
+        ),
+        # Issue #838: tests/integration/application/test_status_check_admission.py
+        ("StatusOperationPageModel", "admission"): (
+            "test_absent_operation_page_omits_admission_when_nothing_is_known"
         ),
     }
     for field in ("remaining_ms", "terminal_outcome", "terminal_reason"):

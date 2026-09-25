@@ -116,12 +116,14 @@ writable ledger.
    writes remain serialized and bounded.
 
    When a new CHECK encounters the capture barrier, READY reconciles a bounded listing for the
-   exact routed task against current local content authority before one freeze retry. It tombstones
-   only tickets whose authority is absent, inactive, revoked, runtime-disabled, profile-unselected,
-   or from an old authority generation, so a direct capture-only request with no structural outbox
-   row cannot leave a permanent barrier. Matching active tickets remain retryable; a completed
-   same-request replay returns without inspecting newer tickets, and encrypted objects and
-   captured history are unchanged.
+   exact routed task against current local content authority and the workspace's pending
+   structural outbox before one freeze retry. It tombstones tickets whose authority is absent,
+   inactive, revoked, runtime-disabled, profile-unselected, or from an old authority generation,
+   and tickets past a 120-second grace window that no pending structural row can consume (issue
+   #838), so neither a direct capture-only request nor a delivered or quarantined row can leave a
+   permanent barrier. Matching active tickets with a pending row remain retryable, refused as
+   `check_admission_capture_pending`; a completed same-request replay returns without inspecting
+   newer tickets, and encrypted objects and captured history are unchanged.
 
    This handoff is a local durability boundary, not an offline guarantee. It contains no
    plaintext spool. A host kill or service failure before authenticated staging completes may

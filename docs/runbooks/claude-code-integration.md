@@ -1007,6 +1007,12 @@ them from memory, `CLAUDE.md`, or the live store.
   replay only `absent`; use stored `complete`; follow an exact typed continuation and required
   approval before replaying `pending`. Retain and report pending without a continuation,
   `quarantined`, or unknown. Never invent session/writer IDs or create a task to escape a write.
+- **Refused check admission.** A check `OPERATION_PENDING` carrying the
+  `check_admission_same_identity` continuation recorded nothing: its `reason_code` names the stage
+  (`check_admission_capture_pending`, `…_in_progress`, `…_contended`, or `…_import_pending`) and
+  `status view=operation` reads `absent` with the same `admission` stage. Replay the exact check
+  body and request ID after `retry_after_ms`, at most three times, then report the check as not
+  admitted. The service is host-agnostic here; this host needs no extra step (issue #838).
 - **Exact-session attach.** When the `SessionStart` context provides a held `session_id`, use that
   exact value as the `mode=attach` selector. `${CLAUDE_PROJECT_DIR}` is the canonical workspace
   fence supplied by the host context; if the request carries identity refs, include the canonical
