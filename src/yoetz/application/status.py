@@ -15,6 +15,13 @@ from pydantic import BaseModel
 from yoetz.application.check import CheckScope, run_deterministic_policies
 from yoetz.application.coordination import CoordinationAdvice
 from yoetz.application.projects import ProjectApplication, ProjectCommandError
+from yoetz.application.status_faults import (
+    StatusFault,
+    StatusFaultStage,
+    classify_status_fault,
+    fault_source,
+    status_stage,
+)
 from yoetz.application.task_views import LineageStatusSnapshot, ProjectStatusSnapshot
 from yoetz.domain.findings import FINDING_KIND_TRAITS, FindingOrigin
 from yoetz.domain.observation import AdviceSnapshot
@@ -904,8 +911,9 @@ async def _candidate_page(
         projection = replay(records)
     except ValueError as exc:
         # Replay is genesis-anchored; a chain it rejects is a storage fact, not an engine bug, so
-        # it leaves here as a bounded public error rather than an unbounded internal one.
-        raise _error(PublicErrorCode.STORAGE_CORRUPT, "The task ledger is unreadable.") from exc
+        # it leaves here as a bounded public error rather than an unbounded internal one. The
+        # status boundary records its class and origin under the public correlation id.
+        raise StatusFault(StatusFaultStage.REPLAY, "The task ledger is unreadable.") from exc
     if Frontier(projection.frontier, projection.head_digest) != frontier:
         raise _error(PublicErrorCode.STORAGE_CORRUPT, "The status frontier is inconsistent.")
     availability = await runtime.ledger.load_case_availability(
@@ -915,10 +923,7 @@ async def _candidate_page(
         case = build_deterministic_case(projection, records, availability)
     except ValueError as exc:
         if str(exc) == "deterministic_case_invalid":
-            raise _error(
-                PublicErrorCode.STORAGE_CORRUPT,
-                "The status case is unreadable.",
-            ) from exc
+            raise StatusFault(StatusFaultStage.REPLAY, "The status case is unreadable.") from exc
         raise
     assessments, _ = run_deterministic_policies(case, CheckScope((), ()), _PACKS)
     indexed = tuple(enumerate(assessments))
@@ -931,24 +936,25 @@ async def _candidate_page(
     )
     limit = int(request.limit)
     selected = ordered[offset : offset + limit]
-    items = tuple(
-        StatusCandidateFindingItemModel.model_validate(
-            {
-                "kind": item.candidate.kind.value,
-                "origin": "deterministic",
-                "priority": item.candidate.priority,
-                "summary": item.candidate.summary,
-                "detail": item.candidate.detail,
-                "subject_refs": item.candidate.subject_refs,
-                "policy_id": item.candidate.policy_id,
-                "policy_version": item.candidate.policy_version,
-                "subject_frontier": dict(item.candidate.subject_frontier.as_wire().items()),
-                "coverage": coverage_to_json(item.candidate.coverage),
-                "basis": finding_basis_to_status_json(item),
-            }
+    with status_stage(StatusFaultStage.MODEL):
+        items = tuple(
+            StatusCandidateFindingItemModel.model_validate(
+                {
+                    "kind": item.candidate.kind.value,
+                    "origin": "deterministic",
+                    "priority": item.candidate.priority,
+                    "summary": item.candidate.summary,
+                    "detail": item.candidate.detail,
+                    "subject_refs": item.candidate.subject_refs,
+                    "policy_id": item.candidate.policy_id,
+                    "policy_version": item.candidate.policy_version,
+                    "subject_frontier": dict(item.candidate.subject_frontier.as_wire().items()),
+                    "coverage": coverage_to_json(item.candidate.coverage),
+                    "basis": finding_basis_to_status_json(item),
+                }
+            )
+            for item in selected
         )
-        for item in selected
-    )
     next_offset = offset + len(selected)
     next_cursor = (
         _encode_cursor(app, request, frontier, runtime.projection_version, next_offset)
@@ -1168,9 +1174,10 @@ async def _lineage_readiness_gaps(
         )
     except Exception as exc:
         # A secondary read must neither strand operation recovery nor turn an unreadable
-        # dependency inventory into an apparently clean parent.
+        # dependency inventory into an apparently clean parent. Record the original under any
+        # stage marker so the class and origin still name the defect.
         record_unexpected_exception_without_raising(
-            exc,
+            fault_source(exc),
             component="application.status",
             operation="status_lineage_readiness_unavailable",
             request_id=request_id,
@@ -1246,8 +1253,8 @@ async def execute_status(
                     semantic_progress,
                 )
             except (AttributeError, TypeError, ValueError) as exc:
-                raise _error(
-                    PublicErrorCode.STORAGE_CORRUPT, "The stored operation result is invalid."
+                raise StatusFault(
+                    StatusFaultStage.REPLAY, "The stored operation result is invalid."
                 ) from exc
             # Operation recovery is structural: the operation page is authoritative. Compact
             # projection only enriches coverage/closure/frontiers and must not fail recovery
@@ -1445,10 +1452,12 @@ async def execute_status(
                     project_id=request.project_id,
                     host_lineage_registry=app.host_lineage_registry,
                     correlation_id=request.correlation_id,
+                    request_id=request.request_id,
                 )
             if isinstance(full_page, LineageStatusSnapshot):
                 result_view = "lineage"
-            snapshot_identity = canonical_digest(cast(JsonValue, full_page.as_wire()))
+            with status_stage(StatusFaultStage.DIGEST):
+                snapshot_identity = canonical_digest(cast(JsonValue, full_page.as_wire()))
             if expected_version is not None and expected_version != snapshot_identity:
                 raise _error(PublicErrorCode.INVALID_REQUEST, "The task view cursor is stale.")
             offset = position or 0
@@ -1459,7 +1468,8 @@ async def execute_status(
                 if next_offset < _task_snapshot_size(full_page)
                 else None
             )
-            page = _task_snapshot_page(full_page, offset, limit, next_cursor)
+            with status_stage(StatusFaultStage.MODEL):
+                page = _task_snapshot_page(full_page, offset, limit, next_cursor)
             effective = frontier
             lag = 0
             projection_version = runtime.projection_version
@@ -1487,15 +1497,22 @@ async def execute_status(
         else:
             if type(position) is int:
                 raise _error(PublicErrorCode.INVALID_REQUEST, "The status cursor is invalid.")
-            query = ProjectionQuery(
-                runtime.session_id,
-                request.view,
-                _port_filter(request.filter),
-                frontier,
-                int(request.limit),
-                cast(ProjectionPosition | None, position),
-                expected_version,
-            )
+            try:
+                query = ProjectionQuery(
+                    runtime.session_id,
+                    request.view,
+                    _port_filter(request.filter),
+                    frontier,
+                    int(request.limit),
+                    cast(ProjectionPosition | None, position),
+                    expected_version,
+                )
+            except (TypeError, ValueError) as exc:
+                # The one remaining caller-shape stage: this view, filter, and cursor position do
+                # not form a projection query. Every later failure is service-owned.
+                raise _error(
+                    PublicErrorCode.INVALID_REQUEST, "The status request is invalid."
+                ) from exc
             raw_page = await runtime.ledger.query_projection(query)
             if request.view == "compact":
                 compact_page = raw_page
@@ -1510,7 +1527,8 @@ async def execute_status(
                     raw_page.next_position,
                 )
             )
-            page = _page_model(raw_page, next_cursor)
+            with status_stage(StatusFaultStage.MODEL):
+                page = _page_model(raw_page, next_cursor)
             if route_profile is not None and type(page) is StatusVersionsPageModel:
                 page = StatusVersionsPageModel(
                     items=tuple(
@@ -1568,9 +1586,11 @@ async def execute_status(
             import_status,
             closure_readiness,
         )
-    except (TypeError, ValueError) as exc:
-        if isinstance(exc, PublicOperationError):
-            raise
-        raise _error(PublicErrorCode.INVALID_REQUEST, "The status request is invalid.") from exc
+    except (StatusFault, TypeError, ValueError) as exc:
+        # The request passed schema validation and every caller-shape rejection above is explicit,
+        # so a fault reaching here is stored state or the service's own projection. Reporting it
+        # as INVALID_REQUEST sent agents to repair a valid request and discarded the evidence
+        # (issue #840); classify it and join the public correlation id to the bounded origin.
+        raise classify_status_fault(exc, view=request.view, request_id=request.request_id) from exc
     finally:
         await app.runtime.release(runtime)

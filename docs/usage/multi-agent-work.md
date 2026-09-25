@@ -75,6 +75,13 @@ General projects have `create`, `link`, `unlink`, `amend`, and `dissolve` comman
 `opt-out` and `opt-in` control automatic grouping. Dissolving a project or opting out preserves
 accepted delegations, obligations, and existing receipts.
 
+The project view lists each member's latest receipt. If one member's records cannot be read, the
+view still answers for every other member and reports `project_member_unavailable` among its gaps.
+A project view that fails for a reason unrelated to your request returns `STORAGE_CORRUPT` (stored
+records could not be read) or `INTERNAL_ERROR`, never `INVALID_REQUEST`. Do not change or guess
+selectors to work around it: report the error's correlation id, which
+`yoetz service diagnostics --correlation-id err_…` resolves to where the read failed.
+
 Coordination requires workspace-level observation consent from each source workspace. Consent for
 one worktree does not cover another. General or cross-repository coordination also requires approval
 for the exact membership generation. Unlinking, dissolving, opting out, or revoking consent

@@ -75,6 +75,11 @@ Prepared public-alpha release candidate; publication remains gated by #785. See
 
 ### Fixed
 
+- `status view=project` answers again after any project member records a receipt; previously every
+  member's project view failed as `INVALID_REQUEST`. Status faults in stored state or in Yoetz's
+  own projection now return `STORAGE_CORRUPT` or `INTERNAL_ERROR` with a correlation id that
+  resolves to the failing stage and source location, and one unreadable member is reported as a
+  `project_member_unavailable` gap instead of failing the whole view (#840).
 - Busy starts recover their recorded route, and review-case construction resolves authenticated
   captured evidence instead of substituting its description (#745).
 - Long AI-powered reviews retain execution leases and durable responses through client
