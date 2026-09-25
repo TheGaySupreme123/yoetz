@@ -1745,6 +1745,10 @@ class SqliteStartCatalog:
         repository_commitment: str | None,
         workspace_commitment: str | None,
     ) -> bool:
+        # Repository binding also serves v3 catalogs, before projects exist.
+        # Missing v4 tables on a v4 catalog must still fail rather than skip the guard.
+        if self._catalog_schema_version < 4:
+            return False
         return provenance_spans_general_projects(
             task_id=task_id,
             repository_commitment=repository_commitment,
