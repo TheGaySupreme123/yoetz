@@ -40,6 +40,9 @@ the local runtime gate is enabled. Retaining plaintext additionally requires tha
 the mapped task's consent grant. Local status does not establish that task-level permission; without
 it, ingress drops content chunks. Pausing observation or disabling the runtime gate preserves the
 configured choice but empties locally effective capture. Disabling a profile removes that choice.
+Connecting another host to the same repository, or confirming observation consent again, keeps the
+content capture you enabled. Only disabling the profile or revoking observation consent turns it
+off; after a revoke, enable it again if you still want it.
 
 Native content capture and AI-powered review have separate authority. Enabling a host profile does
 not authorize external review, choose a provider, or permit any content to leave the computer.

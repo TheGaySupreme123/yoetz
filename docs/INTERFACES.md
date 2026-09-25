@@ -4012,6 +4012,19 @@ content fence combines a durable per-workspace epoch with a persisted runtime-ga
 consent or runtime transition advances it, including pause/resume and off/on ABA cycles, and legacy
 state receives a fresh epoch before authority is accepted. Pause, disable, and revoke must fence
 retained native content reads and subsequent AI-powered review disclosure as well as future capture.
+A structural grant (`LocalObservationStore.grant_consent` with no explicit profile set: Codex setup,
+the host-connection and terminal-interface Codex apply, and `yoetz observe grant`) over a live,
+unrevoked consent continues that consent. It keeps the original `granted_at` and every approved
+ordinary profile, and leaves selection and capacity settings untouched. Repeating an effective grant
+is not a transition: it neither advances the epoch nor invalidates an in-flight content fence,
+read-protection scope, or selection preview (issue #835). A structural grant over paused consent
+resumes it exactly as `resume` does. With no prior consent, or after revocation completes its project
+fence, a grant starts fresh with no ordinary profile; while that fence is pending, the grant is refused.
+Only an explicit profile set, `content-disable`, or revoke removes an arm. The call returns a
+`LocalConsentGrant` (`transition`: `granted`, `resumed`, `updated`, or `unchanged`, plus the
+resulting consent). The setup report's `observation_consent` block adds that `transition` and the
+retained `content_capture_profiles` beside the existing `outcome: granted`. `observe grant` prints
+`observation_content_capture_kept:<profiles>` when it kept an arm.
 A task-store snapshot is not independent authority after a local consent change. Selection into an
 AI-powered review case additionally requires authenticated captured-object provenance, case
 membership, source/session/phase binding, and the effective privacy selection. Captured bytes remain

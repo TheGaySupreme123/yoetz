@@ -680,7 +680,12 @@ def _confirm_project_setup(
 
 
 def _grant_observation_consent(workspace: Path | None = None) -> dict[str, JsonValue]:
-    """Record observation consent via private workspace commitment (never log raw path)."""
+    """Record observation consent via private workspace commitment (never log raw path).
+
+    Structural setup never names a content-profile set, so another host's already-approved
+    native content arm and the unchanged content fence survive this step (issue #835). The
+    report lists the arms left in force; only explicit content-disable or revoke removes one.
+    """
 
     try:
         from yoetz.adapters.integrations.observation_local import LocalObservationStore
@@ -688,8 +693,13 @@ def _grant_observation_consent(workspace: Path | None = None) -> dict[str, JsonV
         store = LocalObservationStore()
         root = _canonical_setup_workspace(workspace)
         commitment = store.workspace_commitment(str(root))
-        store.grant_consent(commitment)
-        return {"outcome": "granted", "workspace_commitment": commitment}
+        grant = store.grant_consent(commitment)
+        return {
+            "outcome": "granted",
+            "transition": grant.transition.value,
+            "workspace_commitment": commitment,
+            "content_capture_profiles": list(grant.consent.content_capture_profiles),
+        }
     except Exception as error:
         return {
             "outcome": "failed",
@@ -2982,6 +2992,12 @@ def _emit_human_report(report: dict[str, JsonValue]) -> None:
                     "  Observation consent: granted "
                     "(structural events only; coverage requires real evidence)"
                 )
+                kept = observation.get("content_capture_profiles")
+                if isinstance(kept, list) and kept:
+                    typer.echo(
+                        "  Native content profiles kept: "
+                        + ", ".join(str(profile) for profile in cast(list[JsonValue], kept))
+                    )
             elif outcome is not None:
                 typer.echo(f"  Observation consent: {outcome}")
         check_policy = registration.get("check_policy")

@@ -75,6 +75,12 @@ Prepared public-alpha release candidate; publication remains gated by #785. See
 
 ### Fixed
 
+- Connecting Codex, rerunning setup, or repeating `yoetz observe grant` no longer turns off
+  native content capture you enabled for Claude Code or Cursor. Repeating consent that is
+  already in effect changes nothing, so content capture already in progress keeps its
+  authorization. Your observation detail and capacity settings are also kept. Only
+  `observe content-disable` or `observe revoke` removes a host's content capture, and granting
+  again after a revoke starts with none (#835).
 - Busy starts recover their recorded route, and review-case construction resolves authenticated
   captured evidence instead of substituting its description (#745).
 - Long AI-powered reviews retain execution leases and durable responses through client
