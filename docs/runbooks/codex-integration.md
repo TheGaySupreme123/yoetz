@@ -624,10 +624,18 @@ IMP-015 and the registry bridge, not against a native v2 run. `0.153.4` remains 
 structural compatibility profile: it earns no exact rollout profile and no certified host cell from
 this evidence, so its admission stays `partially_understood`.
 
-Fresh accepted native activity on the current mapped session renews its lease. Delayed delivery
-older than 60 seconds, stream history, duplicate replay, predecessor sessions, and terminal host
-events do not. A silent child still enters contact loss and the configured recovery window;
-source edits by themselves cannot prove continuing contact when observation is unavailable.
+Admitted native hook activity on the current mapped session is contact evidence at its own
+receipt time (#837). A row the hook drain, sweeper, or legacy spool delivers late still counts from
+when it was received. A duplicate replay re-offers the same evidence without extending it, and
+`Stop` counts as contact while `SessionEnd` ends it. Stream history and predecessor sessions do not
+renew. Codex registers no subagent lifecycle hook for the parent, so no in-flight hold applies. A
+parent's own `PreToolUse` and `PostToolUse` still count, but one `wait` or other tool call that
+runs past the lease plus the recovery window, with no other parent event, loses contact and
+abandons the work after `lineage.contact_lost_recovery_seconds`. That is the recorded Codex gap,
+and raising the window is the supported mitigation. A silent child still enters contact loss and
+the configured recovery window; source edits by themselves cannot prove continuing contact when
+observation is unavailable. Terminal parents are refused new child work with
+`lineage_parent_work_terminal` and continue through a successor task (`lineage_successor_task`).
 
 The isolated native cell below exercises the parent-minted path for the reviewed legacy
 `codex-cli 0.150.1` profile. Broader host profiles need their own execution evidence; host hooks

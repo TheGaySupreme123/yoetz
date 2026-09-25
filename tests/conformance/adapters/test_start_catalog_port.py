@@ -18,6 +18,7 @@ from yoetz.adapters.memory.start_catalog import (
     MemoryStartCatalogState,
 )
 from yoetz.adapters.sqlite.start_catalog import SqliteStartCatalog
+from yoetz.domain.coordination import WorkState
 from yoetz.domain.values import Frontier
 from yoetz.ports.runtime import StartCompletionEvidence, StartMilestone
 from yoetz.ports.start_catalog import (
@@ -831,6 +832,59 @@ async def test_quarantined_pair_refuses_before_new_reservation(mode: StartMode) 
         replayed = await catalog.reserve_or_resume(original)
         assert replayed.outcome == "replayed"
         assert replayed.replayed_result is not None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("state", [WorkState.ABANDONED, WorkState.CLOSED])
+@pytest.mark.parametrize("mode", [StartMode.ATTACH, StartMode.CREATE_OR_ATTACH])
+async def test_terminal_work_refuses_resume_before_new_reservation(
+    mode: StartMode, state: WorkState
+) -> None:
+    """Terminal work cannot be resumed, so no session is reserved or rotated (#837)."""
+
+    installation = _id(IdKind.INSTALLATION, 760)
+    clock = _Clock(datetime(2026, 7, 19, 11, 0, tzinfo=UTC))
+    memory, memory_state = _memory_catalog(installation, clock)
+    sqlite = _sqlite_catalog(installation, clock, schema_version=5)
+    for catalog in (memory, sqlite):
+        original = await _command(catalog, operation_id=_id(IdKind.REQUEST, 761))
+        allocation, _result_ref = await _finish(catalog, await catalog.reserve_or_resume(original))
+        assert type(allocation) is StartAllocation
+        await catalog.set_task_work_state(allocation.task_id, state)
+        route = await catalog.task_route(allocation.task_id)
+        sessions = await catalog.task_session_states(allocation.task_id)
+        resume = await _command(
+            catalog,
+            operation_id=_id(IdKind.REQUEST, 762),
+            mode=mode,
+            session_id=allocation.session_id if mode is StartMode.ATTACH else None,
+        )
+        with pytest.raises(PublicOperationError) as error:
+            await catalog.reserve_or_resume(resume)
+        assert error.value.code is PublicErrorCode.SESSION_CONFLICT
+        assert error.value.safe_details["reason_code"] == "lineage_resume_work_terminal"
+        assert error.value.safe_details["continuation"] == "lineage_successor_task"
+        assert await catalog.task_route(allocation.task_id) == route
+        assert await catalog.task_session_states(allocation.task_id) == sessions
+        if isinstance(catalog, MemoryStartCatalogAdapter):
+            assert len(memory_state.operations) == 1
+        else:
+            assert catalog._db.execute(  # pyright: ignore[reportPrivateUsage]
+                "SELECT COUNT(*) FROM start_operations"
+            ).fetchone() == (1,)
+        # The completed original start still replays its recorded result.
+        replayed = await catalog.reserve_or_resume(original)
+        assert replayed.outcome == "replayed"
+        # A deliberate new identity pair remains an ordinary successor task.
+        successor = await catalog.reserve_or_resume(
+            await _command(
+                catalog,
+                operation_id=_id(IdKind.REQUEST, 763),
+                mode=StartMode.CREATE,
+                external_ref="external-successor",
+            )
+        )
+        assert successor.task_id != allocation.task_id
 
 
 @pytest.mark.anyio

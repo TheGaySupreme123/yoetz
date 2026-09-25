@@ -8,7 +8,7 @@ import hashlib
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 from functools import partial
 from pathlib import Path
 from types import MappingProxyType
@@ -695,8 +695,11 @@ class ObservationCoordinator:
     # Host observations are recorded in the service-owned catalog after local ingest accepts the
     # envelope. The registry is optional for pre-migration/test compositions.
     host_lineage_registry: HostLineageRegistryPort | None = None
-    observed_activity_hook: Callable[[str, str, str], Awaitable[None]] | None = None
-    observed_activity_max_age_seconds: int = 60
+    # Receives ``(task_id, session_id, writer_id, observed_at)``; lineage decides what the
+    # evidence proves at ``observed_at``.  The age bound only drops evidence too old to postpone
+    # any recorded contact loss: the session lease plus the longest configurable recovery window.
+    observed_activity_hook: Callable[[str, str, str, datetime], Awaitable[None]] | None = None
+    observed_activity_max_age_seconds: int = 86_400 + 60
     _advice_event_ref_cache: dict[tuple[str, str], tuple[str, ...]] = field(
         default_factory=_empty_advice_event_ref_cache, init=False, repr=False
     )
@@ -2991,19 +2994,30 @@ class ObservationCoordinator:
         predecessor_session_id: str,
         predecessor_writer_id: str,
     ) -> None:
-        """Fresh native activity renews only its unchanged, currently admitted session."""
+        """Offer admitted native activity as contact evidence for its unchanged session.
+
+        The evidence is the envelope's own receipt time, not the time this ingest delivered it:
+        queued, swept, and retried rows routinely arrive after the session lease they prove, and
+        judging them by delivery age discarded exactly the evidence a slow drain produces (#837).
+        A duplicate delivery re-offers the same evidence; lineage applies it idempotently, so a
+        retry whose first ingest committed before a later step failed can still count.
+        ``Stop`` and ``SubagentStop`` prove the host was alive when they fired; only
+        ``SessionEnd`` ends contact.  Future receipt times and evidence older than
+        ``observed_activity_max_age_seconds`` are never offered.
+        """
 
         hook = self.observed_activity_hook
         if (
             hook is None
-            or disposition is not ObservationIngestDisposition.ACCEPTED
+            or disposition
+            not in {ObservationIngestDisposition.ACCEPTED, ObservationIngestDisposition.DUPLICATE}
             or envelope.source
             not in {
                 ObservationSource.CODEX_HOOK,
                 ObservationSource.CLAUDE_HOOK,
                 ObservationSource.CURSOR_HOOK,
             }
-            or envelope.event_kind in {"SessionEnd", "Stop", "SubagentStop"}
+            or envelope.event_kind == "SessionEnd"
             or runtime.session_id != predecessor_session_id
             or runtime.writer_id
             not in {
@@ -3012,10 +3026,11 @@ class ObservationCoordinator:
             }
         ):
             return
-        age = (self.clock.now_utc() - envelope.receipt_time.as_datetime()).total_seconds()
+        observed_at = envelope.receipt_time.as_datetime()
+        age = (self.clock.now_utc() - observed_at).total_seconds()
         if not 0 <= age <= self.observed_activity_max_age_seconds:
             return
-        await hook(runtime.task_id, predecessor_session_id, predecessor_writer_id)
+        await hook(runtime.task_id, predecessor_session_id, predecessor_writer_id, observed_at)
 
     async def _sweep_lineage(self, task_id: str) -> None:
         """Reconcile the task and its parent after observation materialization."""

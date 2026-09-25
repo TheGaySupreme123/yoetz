@@ -496,3 +496,62 @@ async def test_bound_child_only_row_cannot_absorb_later_strong_call() -> None:
         assert await restarted.find_host_lineage_observation(parent, strong) == bound
     finally:
         db.close(force=True)
+
+
+async def test_latest_open_host_operation_counts_only_unstopped_starts_in_bound() -> None:
+    """The in-flight contact hold reads started, not yet stopped children per parent (#837)."""
+
+    from datetime import timedelta
+
+    from yoetz.domain.values import timestamp_from_datetime
+
+    db = apsw.Connection(":memory:")
+    _schema(db)
+    parent, other, child = _task(), _task(), _task()
+    for task in (parent, other):
+        db.execute("INSERT INTO task_routes(task_id, parent_task_id) VALUES (?, NULL)", (task,))
+    db.execute("INSERT INTO task_routes(task_id, parent_task_id) VALUES (?, ?)", (child, parent))
+    clock = _Clock()
+    registry = _registry(db, clock)
+    start = timestamp_from_datetime(clock.now_utc())
+    try:
+        assert await registry.latest_open_host_operation(parent, not_before=start) is None
+        await registry.record_host_lineage_observation(
+            parent,
+            _observation("SubagentStart", "finished", parent_tool_call_id="call-1"),
+            observed_session_commitment=_SESSION,
+            source=ObservationSource.CODEX_HOOK,
+        )
+        clock.value += timedelta(minutes=5)
+        await registry.record_host_lineage_observation(
+            parent,
+            _observation("SubagentStop", "finished"),
+            observed_session_commitment=_SESSION,
+            source=ObservationSource.CODEX_HOOK,
+        )
+        assert await registry.latest_open_host_operation(parent, not_before=start) is None
+
+        running_at = timestamp_from_datetime(clock.now_utc())
+        running = await registry.record_host_lineage_observation(
+            parent,
+            _observation("SubagentStart", "running", parent_tool_call_id="call-2"),
+            observed_session_commitment=_SESSION,
+            source=ObservationSource.CODEX_HOOK,
+        )
+        # A later stop-only observation of an unrelated child is not an open operation.
+        await registry.record_host_lineage_observation(
+            parent,
+            _observation("SubagentStop", "stop-only"),
+            observed_session_commitment=_SESSION,
+            source=ObservationSource.CODEX_HOOK,
+        )
+        assert await registry.latest_open_host_operation(parent, not_before=start) == running_at
+        assert await registry.latest_open_host_operation(other, not_before=start) is None
+        # Binding a Yoetz child does not end the host operation under the parent session.
+        await registry.bind_provisional_annotation(parent, running.correlation_id, child)
+        assert await registry.latest_open_host_operation(parent, not_before=start) == running_at
+        # Starts older than the bound are ignored.
+        later = timestamp_from_datetime(clock.now_utc() + timedelta(milliseconds=1))
+        assert await registry.latest_open_host_operation(parent, not_before=later) is None
+    finally:
+        db.close(force=True)

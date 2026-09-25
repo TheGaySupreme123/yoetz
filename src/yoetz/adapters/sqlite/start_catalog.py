@@ -24,6 +24,7 @@ from yoetz.adapters.privacy.catalog import (
 )
 from yoetz.adapters.sqlite.connection import open_read_only
 from yoetz.domain.coordination import (
+    SESSION_LEASE_SECONDS,
     CoordinationGrant,
     GrantState,
     LineageAcceptance,
@@ -88,7 +89,9 @@ __all__ = [
 ]
 
 CATALOG_SCHEMA_VERSION: Final = 4
+# Start-operation leases fence one start attempt; session leases are the shared contact lease.
 _LEASE_SECONDS: Final = 60
+_SESSION_LEASE_SECONDS: Final = SESSION_LEASE_SECONDS
 _PHASE_SUCCESSOR: Final = {
     StartPhase.ROUTE_RESERVED: StartPhase.BUNDLE_READY,
     StartPhase.BUNDLE_READY: StartPhase.LIFECYCLE_COMMITTED,
@@ -1400,7 +1403,7 @@ class SqliteStartCatalog:
             else:
                 lease_wire = None
             if health is SessionHealth.ACTIVE and lease_expires_at is None:
-                lease_expires_at = changed_at + timedelta(seconds=_LEASE_SECONDS)
+                lease_expires_at = changed_at + timedelta(seconds=_SESSION_LEASE_SECONDS)
                 lease_wire = format_rfc3339_millis(lease_expires_at)
             if actor_id is not None:
                 validate_actor_id(actor_id)
@@ -2479,6 +2482,15 @@ class SqliteStartCatalog:
                 )
             if request.mode is StartMode.ATTACH and route is None:
                 raise _error(PublicErrorCode.SESSION_NOT_FOUND)
+            if route is not None and route.work_state is not WorkState.OPEN:
+                # Terminal work has no transition back to open, so a resume can only fail later
+                # at the lineage binding.  Refuse inside this transaction instead: no session is
+                # reserved and the route is not rotated, so a session the caller still holds
+                # keeps reading and publishing its recorded history (#837).
+                raise _error(
+                    PublicErrorCode.SESSION_CONFLICT,
+                    safe_details={"reason_code": "lineage_resume_work_terminal"},
+                )
             if route is not None:
                 self._require_no_exclusive_maintenance(route.task_id)
                 expected = route.repository_privacy_commitment
@@ -2536,7 +2548,7 @@ class SqliteStartCatalog:
                             task_id,
                             now_wire,
                             now_wire,
-                            format_rfc3339_millis(now + timedelta(seconds=_LEASE_SECONDS)),
+                            format_rfc3339_millis(now + timedelta(seconds=_SESSION_LEASE_SECONDS)),
                         ),
                     )
                 else:
@@ -2593,7 +2605,7 @@ class SqliteStartCatalog:
                             route.task_id,
                             now_wire,
                             now_wire,
-                            format_rfc3339_millis(now + timedelta(seconds=_LEASE_SECONDS)),
+                            format_rfc3339_millis(now + timedelta(seconds=_SESSION_LEASE_SECONDS)),
                         ),
                     )
 
@@ -2778,7 +2790,7 @@ class SqliteStartCatalog:
                     "lease_expires_at = ? WHERE task_id = ? AND session_id = ?",
                     (
                         now_wire,
-                        format_rfc3339_millis(now + timedelta(seconds=_LEASE_SECONDS)),
+                        format_rfc3339_millis(now + timedelta(seconds=_SESSION_LEASE_SECONDS)),
                         row.task_id,
                         row.session_id,
                     ),

@@ -90,6 +90,7 @@ from yoetz.application.lineage_coordinator import (
     PrivacyLineageSourceGate,
     authorize_recorded_lineage,
 )
+from yoetz.application.lineage_recovery import observed_activity_renewal
 from yoetz.application.observation_advice import (
     ObservationAdviceContextBuilder,
     stable_advice_finding_id,
@@ -159,7 +160,6 @@ from yoetz.domain.coordination import (
     LineageOrigin,
     ProjectTextRef,
     ProjectTextStore,
-    SessionHealth,
     WorkState,
 )
 from yoetz.domain.events import RuntimeProfile, SessionOpenedPayload
@@ -5898,28 +5898,6 @@ async def provide_service_ready_context(
     # observation RPCs; malformed/unsafe markers fail closed in hook processes.
     local_observation.set_runtime_enabled(config.observation.enabled)
 
-    async def renew_observed_activity(task_id: str, session_id: str, writer_id: str) -> None:
-        binding = await catalog.session_binding(session_id)
-        if (
-            binding is None
-            or binding.task_id != task_id
-            or binding.session_id != session_id
-            or binding.writer_id != writer_id
-        ):
-            return
-
-        async def renew_lease() -> None:
-            await catalog.record_session_state(
-                task_id,
-                session_id,
-                health=SessionHealth.ACTIVE,
-                changed_at=clock.now_utc(),
-            )
-
-        await lineage.renew_observed_activity(
-            task_id=task_id, session_id=session_id, renew_lease=renew_lease
-        )
-
     observation_coordinator = ObservationCoordinator(
         runtime=runtime,
         local=local_observation,
@@ -5938,7 +5916,7 @@ async def provide_service_ready_context(
         observation_enabled=config.observation.enabled,
         lineage_coordinator=lineage_manifest_coordinator,
         host_lineage_registry=host_lineage_registry,
-        observed_activity_hook=renew_observed_activity,
+        observed_activity_hook=observed_activity_renewal(catalog, lineage, clock),
         capture_budget_bootstrap=bootstrap_capture_reservations,
     )
     observation_sweeper = ObservationOutboxSweeper(

@@ -637,6 +637,28 @@ class SqliteHostLineageRegistry(HostLineageRegistryPort):
         )
         return tuple(self._annotation_from_row(row) for row in rows)
 
+    async def latest_open_host_operation(
+        self,
+        parent_task_id: str,
+        *,
+        not_before: Timestamp,
+    ) -> Timestamp | None:
+        parent = _id(IdKind.TASK, parent_task_id)
+        if type(not_before) is not Timestamp:
+            raise ValueError("host_lineage_timestamp_invalid")
+        # ``phase_mask = 1`` is a start without its stop.  Wire timestamps share one fixed-width
+        # UTC millisecond form, so text order is time order.
+        rows = self._rows(
+            "SELECT MAX(first_observed_at) FROM host_lineage_annotations "
+            "WHERE installation_id = ? AND parent_task_id = ? AND phase_mask = ? "
+            "AND first_observed_at >= ?",
+            (self._installation_id, parent, _PHASE_BITS["start"], not_before.wire),
+        )
+        if len(rows) != 1 or len(rows[0]) != 1:
+            raise HostLineageRegistryError(HostLineageRegistryReason.STORAGE_CORRUPT)
+        value = rows[0][0]
+        return None if value is None else _timestamp(value)
+
     def _child_belongs_to_parent(self, parent_task_id: str, child_task_id: str) -> bool:
         rows = self._rows(
             "SELECT parent_task_id FROM task_routes WHERE task_id = ? LIMIT 2", (child_task_id,)

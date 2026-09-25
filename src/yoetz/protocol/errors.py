@@ -232,10 +232,12 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "lineage_operation_quarantined",
     "lineage_parent_not_found",
     "lineage_parent_session_invalid",
+    "lineage_parent_work_terminal",
     "lineage_phase_transition",
     "lineage_repository_mismatch",
     "lineage_request_identity_conflict",
     "lineage_reservation_conflict",
+    "lineage_resume_work_terminal",
     "lineage_root_conflict",
     "lineage_root_dependency",
     "lineage_service_unavailable",
@@ -348,7 +350,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
 )
 
 _REASON_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
-assert len(_PROTOCOL_REASON_CODE_VALUES) == 291
+assert len(_PROTOCOL_REASON_CODE_VALUES) == 293
 assert len(_PROTOCOL_REASON_CODE_VALUES) == len(set(_PROTOCOL_REASON_CODE_VALUES))
 assert _PROTOCOL_REASON_CODE_VALUES == tuple(sorted(_PROTOCOL_REASON_CODE_VALUES, key=str.encode))
 assert all(_REASON_CODE_PATTERN.fullmatch(value) for value in _PROTOCOL_REASON_CODE_VALUES)
@@ -455,6 +457,7 @@ ADMITTED_CONTINUATION_TOKENS: frozenset[str] = frozenset(
         "lineage_operation_recovery",
         "lineage_service_review",
         "lineage_state_refresh",
+        "lineage_successor_task",
         "lineage_terminal_review",
         # Local CLI lifecycle, instance, and ceremony continuations (issue #741). These are
         # reached through ``continuation_for_local_reason`` rather than a reason code, so no
@@ -590,11 +593,14 @@ REASON_CODE_CONTINUATIONS: Mapping[str, str] = MappingProxyType(
         "lineage_operation_phase": "lineage_integrity_review",
         "lineage_operation_quarantined": "lineage_terminal_review",
         "lineage_parent_not_found": "lineage_state_refresh",
-        "lineage_parent_session_invalid": "lineage_attach_review",
+        # The parent's own session is not current; the parent, not a child, reconciles it.
+        "lineage_parent_session_invalid": "lineage_state_refresh",
+        "lineage_parent_work_terminal": "lineage_successor_task",
         "lineage_phase_transition": "lineage_integrity_review",
         "lineage_repository_mismatch": "lineage_state_refresh",
         "lineage_request_identity_conflict": "lineage_operation_recovery",
         "lineage_reservation_conflict": "lineage_operation_recovery",
+        "lineage_resume_work_terminal": "lineage_successor_task",
         "lineage_root_conflict": "lineage_state_refresh",
         "lineage_root_dependency": "lineage_state_refresh",
         "lineage_service_unavailable": "lineage_service_review",

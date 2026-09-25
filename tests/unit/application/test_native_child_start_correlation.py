@@ -210,15 +210,24 @@ def test_only_successful_owned_start_response_supplies_bridge_facts() -> None:
     [
         ("accepted", 0, False, "PostToolUse", True),
         ("accepted", 60, False, "PostToolUse", True),
-        ("duplicate", 0, False, "PostToolUse", False),
-        ("accepted", 61, False, "PostToolUse", False),
+        # A retry whose first ingest committed re-offers the same evidence; lineage applies it
+        # idempotently at its own time, so the duplicate is no longer lost as contact (#837).
+        ("duplicate", 0, False, "PostToolUse", True),
+        # Swept or queued rows arrive after the lease they prove; they are offered with their
+        # receipt time rather than dropped by delivery age.
+        ("accepted", 61, False, "PostToolUse", True),
+        ("accepted", 86_460, False, "PostToolUse", True),
+        ("accepted", 86_461, False, "PostToolUse", False),
         ("accepted", -1, False, "PostToolUse", False),
+        ("rejected", 0, False, "PostToolUse", False),
         ("accepted", 0, True, "PostToolUse", False),
         ("accepted", 0, False, "SessionEnd", False),
-        ("accepted", 0, False, "SubagentStop", False),
+        # End of a turn or of a native child proves the host was alive when it fired.
+        ("accepted", 0, False, "SubagentStop", True),
+        ("accepted", 0, False, "Stop", True),
     ],
 )
-async def test_only_fresh_current_native_activity_renews_lease(
+async def test_current_native_activity_is_offered_with_its_own_time(
     disposition: str, age: int, rotated: bool, event_kind: str, expected: bool
 ) -> None:
     from dataclasses import replace
@@ -234,7 +243,7 @@ async def test_only_fresh_current_native_activity_renews_lease(
         ObservationCoordinator,
         SimpleNamespace(
             observed_activity_hook=hook,
-            observed_activity_max_age_seconds=60,
+            observed_activity_max_age_seconds=ObservationCoordinator.observed_activity_max_age_seconds,
             clock=SimpleNamespace(
                 now_utc=lambda: envelope.receipt_time.as_datetime() + timedelta(seconds=age)
             ),
@@ -257,6 +266,13 @@ async def test_only_fresh_current_native_activity_renews_lease(
         predecessor_writer_id=ids["writer_id"],
     )
     assert hook.await_count == int(expected)
+    if expected:
+        hook.assert_awaited_once_with(
+            ids["task_id"],
+            ids["session_id"],
+            ids["writer_id"],
+            envelope.receipt_time.as_datetime(),
+        )
 
 
 @pytest.mark.parametrize("parent_alias", ["call-b", {"not": "a-token"}])

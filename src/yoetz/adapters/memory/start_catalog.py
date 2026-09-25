@@ -1567,6 +1567,12 @@ class MemoryStartCatalogAdapter:
                 )
             if request.mode is StartMode.ATTACH and route is None:
                 raise _error(PublicErrorCode.SESSION_NOT_FOUND)
+            if route is not None and route.work_state is not WorkState.OPEN:
+                # Mirrors the SQLite catalog: terminal work is refused before any reservation.
+                raise _error(
+                    PublicErrorCode.SESSION_CONFLICT,
+                    safe_details={"reason_code": "lineage_resume_work_terminal"},
+                )
             if route is not None:
                 expected = route.repository_privacy_commitment
                 actual = request.repository_privacy_commitment

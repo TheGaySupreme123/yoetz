@@ -298,6 +298,12 @@ _DIRECTIVES: Final = (
         guidance_uri=_WORKFLOW_ERRORS,
     ),
     RecoveryDirective(
+        token="lineage_successor_task",
+        directive="This task's work is terminal: it cannot be resumed or delegate. Keep a held session for its status, checks, and receipts. For new work, start one successor with mode=create, a new external_ref, and a handoff naming the predecessor.",
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge="The predecessor keeps its history and receipts; never report them as completed work.",
+    ),
+    RecoveryDirective(
         token="lineage_terminal_review",
         directive="The task, project, or operation is terminal or quarantined. Stop this mutation and present the recorded state for maintainer review. Do not reopen, replace, or clear durable state to bypass the refusal.",
         guidance_uri=_WORKFLOW_ERRORS,

@@ -16,7 +16,11 @@ from pydantic import BaseModel
 from yoetz.application.coordination import CoordinationParticipant
 from yoetz.application.egress import PrivacyCoordinator
 from yoetz.application.lineage import LineageCoordinator, LineageSnapshot, LineageStatus
-from yoetz.application.lineage_recovery import append_abandonment, lineage_recovery_runtime
+from yoetz.application.lineage_recovery import (
+    append_abandonment,
+    extend_session_lease,
+    lineage_recovery_runtime,
+)
 from yoetz.application.observation_advice_semantic import ObservationAdviceSemanticSupervisor
 from yoetz.application.observation_verification import ObservationVerificationSupervisor
 from yoetz.application.projects import ProjectApplication
@@ -1183,6 +1187,22 @@ class Application:
         # evidence before expiring leases so a restart cannot strand a catalog projection merely
         # because the session stopped heartbeating while the process was down.
         await self.reconcile_lineage_publications()
+        # A parent waiting on a host-declared child operation emits no host event of its own for
+        # the whole run.  Hold those sessions before expiring leases, so a native subagent that
+        # outlasts the lease and recovery window cannot abandon the parent it reports back to.
+        clock = self.clock
+        catalog = self.start_catalog
+
+        async def hold_lease(task_id: str, session_id: str, lease_until: datetime) -> None:
+            await extend_session_lease(
+                catalog,
+                clock,
+                task_id=task_id,
+                session_id=session_id,
+                lease_until=lease_until,
+            )
+
+        await self.lineage.hold_in_flight_contact(hold_lease)
         store = self.lineage.store
         expired: tuple[SessionState, ...] = ()
         expire = getattr(store, "expire_session_leases", None)

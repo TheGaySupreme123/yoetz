@@ -2448,6 +2448,94 @@ async def test_ready_maintenance_recovers_lineage_before_and_during_observation(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("backlog_drains", [True, False])
+async def test_ready_maintenance_judges_contact_after_delivering_queued_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backlog_drains: bool
+) -> None:
+    """Queued host events are contact evidence, so ordinary recovery follows their delivery (#837).
+
+    While consecutive passes still resolve rows, a due recovery waits for the next pass; an
+    endless stream still yields to recovery once it is one interval overdue.
+    """
+
+    events: list[str] = []
+    recovered_after_turn = asyncio.Event()
+    resolving_passes = 3
+
+    class Application(_Application):
+        observation_sweep: object
+
+        async def recover_lineage(self) -> object:
+            events.append("recovery")
+            if events.count("recovery") >= 2:
+                recovered_after_turn.set()
+            return (), ()
+
+    application = Application()
+
+    async def sweep() -> ObservationDrainSummary:
+        ordinary = events.count("sweep") + events.count("sweep:resolved")
+        # The first (startup) pass is dry; later passes drain a backlog of queued rows.
+        resolving = ordinary >= 1 and (not backlog_drains or ordinary <= resolving_passes)
+        events.append("sweep:resolved" if resolving else "sweep")
+        return ObservationDrainSummary(
+            attempted=int(resolving),
+            acknowledged=int(resolving),
+            retry_pending=0,
+            quarantined=0,
+            reasons=(),
+        )
+
+    application.observation_sweep = sweep
+    vault = _Vault()
+    vault.ready = False
+    lifecycle = ServiceLifecycle(
+        _Clock(),
+        generation_store=_GenerationStore(),
+        process_start_identity_commitment="sha256:" + "2" * 64,
+        instance_id=_INSTANCE_ID,
+        singleton_lock_path=tmp_path / "service.lock",
+    )
+
+    async def factory(_service_generation: int, _vault_generation: int) -> _Application:
+        return application
+
+    daemon = ServiceDaemon(
+        _composition=ServiceComposition(
+            lifecycle=lifecycle,
+            control_listener=_Listener(),  # pyright: ignore[reportArgumentType]
+            secret_ingress_listener=None,
+            human_control_listener=None,
+            human_control_service=None,
+            session_monitor=None,
+            vault=vault,
+            ready_application_factory=factory,
+        )
+    )
+    # Three immediate passes fit well inside one interval; the endless stream outlasts it.
+    monkeypatch.setattr(daemon_module, "_OBSERVATION_SWEEP_INTERVAL_SECONDS", 0.2)
+    monkeypatch.setattr(daemon_module, "_OBSERVATION_SWEEP_PROGRESS_DELAY_SECONDS", 0.0)
+    await daemon.start()
+    await daemon.composition.lifecycle.transition(ServiceState.UNLOCKING)
+    vault.ready = True
+    await daemon.activate_ready_application(7, 3)
+
+    await asyncio.wait_for(recovered_after_turn.wait(), timeout=5)
+    await daemon.lock()
+    await daemon.close()
+    assert events[:2] == ["recovery", "sweep"]
+    second = events.index("recovery", 1)
+    # Recovery never precedes the pass of its own turn.
+    assert events[second - 1].startswith("sweep")
+    if backlog_drains:
+        # It waited out the backlog and ran right after the first dry pass.
+        assert events[1:second] == ["sweep", *(["sweep:resolved"] * resolving_passes), "sweep"]
+    else:
+        # A stream that never runs dry still cannot starve recovery.
+        assert events[second - 1] == "sweep:resolved"
+
+
+@pytest.mark.anyio
 async def test_sweep_resolved_rows_defer_idle_relock_until_the_spool_runs_dry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
