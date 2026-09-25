@@ -162,6 +162,106 @@ def test_rollup_acceptance_matrix(
     )
 
 
+@pytest.mark.parametrize(
+    ("work_state", "session_health", "state", "blocker"),
+    (
+        (WorkState.OPEN, SessionHealth.ACTIVE, LineageRollupState.OPEN_GAP, "lineage_child_open"),
+        (
+            WorkState.OPEN,
+            SessionHealth.CONTACT_LOST,
+            LineageRollupState.INCOMPLETE,
+            "lineage_child_incomplete",
+        ),
+        (
+            WorkState.CLOSED,
+            SessionHealth.CONTACT_LOST,
+            LineageRollupState.INCOMPLETE,
+            "lineage_child_incomplete",
+        ),
+        (
+            WorkState.OPEN,
+            SessionHealth.ENDED,
+            LineageRollupState.INCOMPLETE,
+            "lineage_child_incomplete",
+        ),
+        (
+            WorkState.ABANDONED,
+            SessionHealth.ENDED,
+            LineageRollupState.INCOMPLETE,
+            "lineage_child_incomplete",
+        ),
+        (
+            WorkState.CANCELLED,
+            SessionHealth.ENDED,
+            LineageRollupState.INCOMPLETE,
+            "lineage_child_incomplete",
+        ),
+        (
+            WorkState.WRITTEN_OFF,
+            SessionHealth.ENDED,
+            LineageRollupState.INCOMPLETE,
+            "lineage_child_incomplete",
+        ),
+    ),
+)
+def test_informational_finding_does_not_hide_lifecycle_gap(
+    work_state: WorkState,
+    session_health: SessionHealth,
+    state: LineageRollupState,
+    blocker: str,
+) -> None:
+    """An informational finding annotates; it does not replace a lifecycle blocker.
+
+    ``ledger_stale_or_incomplete`` is the only non-actionable finding kind, and the public
+    check emits it from recorded ledger gaps. Those gaps are an independent coverage blocker,
+    so the public conformance child stays ``open_gap`` for that reason and cannot isolate this
+    precedence. This kernel case is the no-gap invariant.
+    """
+
+    finding = _finding(FindingKind.LEDGER_STALE_OR_INCOMPLETE)
+    evaluation = evaluate_lineage(
+        LineageManifest(
+            (_child(work_state=work_state, session_health=session_health, findings=(finding,)),)
+        )
+    )
+    child = evaluation.children[0]
+    assert child.state is state
+    assert child.blocks_clean_completion is True
+    assert blocker in child.blockers
+    assert child.finding_ids == ()
+    assert evaluation.actionable_finding_ids == ()
+    assert evaluation.snapshots[0].findings[0].finding_id == _FINDING
+    assert blocker in evaluation.coverage.known_gaps
+
+
+def test_informational_finding_annotates_verified_terminal_child() -> None:
+    finding = _finding(FindingKind.LEDGER_STALE_OR_INCOMPLETE)
+    evaluation = evaluate_lineage(LineageManifest((_child(findings=(finding,)),)))
+    child = evaluation.children[0]
+    assert child.state is LineageRollupState.ANNOTATION
+    assert child.blocks_clean_completion is False
+    assert child.blockers == ()
+    assert evaluation.snapshots[0].findings[0].finding_id == _FINDING
+    assert "lineage_child_open" not in evaluation.coverage.known_gaps
+    assert "lineage_child_incomplete" not in evaluation.coverage.known_gaps
+
+
+def test_coverage_blocker_precedes_informational_annotation() -> None:
+    finding = _finding(FindingKind.LEDGER_STALE_OR_INCOMPLETE)
+    child = replace(
+        _child(findings=(finding,)),
+        coverage=replace(
+            coverage_for_channel(PublicationChannel.ENGINE_DERIVED),
+            known_gaps=("child_partial",),
+        ),
+    )
+    evaluation = evaluate_lineage(LineageManifest((child,)))
+    assert evaluation.children[0].state is LineageRollupState.OPEN_GAP
+    assert evaluation.children[0].blocks_clean_completion is True
+    assert "lineage_child_coverage_gap" in evaluation.children[0].blockers
+    assert evaluation.snapshots[0].findings[0].finding_id == _FINDING
+
+
 def test_recorded_aggregate_replaces_removed_child_and_never_reads_live_state() -> None:
     first = _record(_MANIFEST_1, 1, (_child(),))
     second = _record(_MANIFEST_2, 2, ())

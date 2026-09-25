@@ -1307,3 +1307,43 @@ async def test_dispatch_and_mapping_failures_keep_original_check_join(
     assert all(row["request_id"] == _REQUEST for row in rows)
     assert "PRIVATE_SENTINEL" not in repr(rows)
     assert semantic_check_request.get() is None
+
+
+@pytest.mark.anyio
+async def test_lineage_capacity_refuses_before_job_and_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yoetz.application.semantic_case import LineageSemanticCapacityExceeded
+
+    monkeypatch.setattr(diagnostics_module, "log_dir", lambda: tmp_path)
+
+    def refuse(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise LineageSemanticCapacityExceeded("lineage_semantic_input_too_large")
+
+    monkeypatch.setattr(ready_composition_module, "build_semantic_case", refuse)
+    adapter = memory_adapter(append_command())
+    frozen, runtime = await _durable_semantic_case(adapter)
+    privacy = _Privacy(task_id=runtime.task_id)
+    evaluator = cast(
+        _DurableSemanticEvaluator,
+        _evaluator(
+            privacy,
+            lambda: _PROVIDER,
+            _route_for(runtime.task_id, runtime.session_id),
+        ),
+    )
+    result = await evaluator(frozen, (), runtime)
+    assert (result.status, result.reason) == (
+        SemanticStatus.FAILED,
+        SemanticReason.CASE_CAPACITY_EXCEEDED,
+    )
+    assert result.provenance is None
+    assert result.attempt_accounting is None
+    assert privacy.calls == privacy.resume_calls == 0
+    assert await adapter.load_semantic_job(runtime.writer_id or "", _REQUEST) is None
+    _assert_record(
+        tmp_path,
+        "semantic_not_dispatched_lineage_capacity",
+        SemanticReason.CASE_CAPACITY_EXCEEDED,
+    )

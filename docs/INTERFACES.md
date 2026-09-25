@@ -1973,7 +1973,11 @@ only reuses recorded manifests and never records or refreshes one (#500). The pa
 projects direct children one level: current actionable findings on accepted children block
 clean-completion wording, while the receipt is still produced and names the child and finding.
 Pending-acceptance children and informational findings annotate only; accepted live children are
-open gaps and accepted abandoned children are incomplete gaps. A grandchild is visible only through
+open gaps and accepted abandoned children are incomplete gaps. An unresolved informational
+finding stays on the child row and does not replace an accepted lifecycle gap or a coverage or
+verification blocker. The only informational kind, `ledger_stale_or_incomplete`, is emitted from
+recorded ledger gaps, so a public child that carries it also carries an independent coverage
+blocker. The no-gap lifecycle precedence is a kernel invariant. A grandchild is visible only through
 its parent. Only a new manifest and qualifying recheck can clear a live-child gap in a later receipt.
 
 **Lineage disclosure authority.** An accepted edge authorizes only (1) a service-side child read
@@ -3328,6 +3332,17 @@ envelope and assembled packet. `semantic_reference_scope_reduced` marks the pack
 and receipt coverage as partial; selection grants no additional content/disclosure authority.
 Captured prose is not scanned to invent structural dependencies. The complete local-check case and
 its integrity checks remain unchanged.
+
+Recorded parent lineage enters the case as structural items only: identities, lifecycle, freshness,
+coverage tokens, and finding identities. A document that fits in one 16 KiB item stays
+`yoetz.lineage-semantic-input/1` with item id `lineage`. A larger legal fan-out is split into
+complete `yoetz.lineage-semantic-input/2` parts (`lineage-00`, `lineage-01`, ...) that together
+retain every child and gap plus the shared manifest digest. The review-text helper does not cut
+these items at 4 KiB. A single fact that cannot fit, a partition that would exceed the timeline
+item budget, or lineage plus retained parent content exceeding the 256 KiB complete-case budget
+raises before dispatch. Composition maps that to `failed/case_capacity_exceeded`
+with diagnostic operation `semantic_not_dispatched_lineage_capacity`: no job, no provider call,
+and the local result unchanged.
 
 If the retained required structure still exceeds 131,072 bytes, AI-powered review composition
 returns `failed/case_capacity_exceeded` before creating an AI-powered review job or invoking a
