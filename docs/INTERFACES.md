@@ -3333,6 +3333,17 @@ and receipt coverage as partial; selection grants no additional content/disclosu
 Captured prose is not scanned to invent structural dependencies. The complete local-check case and
 its integrity checks remain unchanged.
 
+Recorded parent lineage enters the case as structural items only: identities, lifecycle, freshness,
+coverage tokens, and finding identities. A document that fits in one 16 KiB item stays
+`yoetz.lineage-semantic-input/1` with item id `lineage`. A larger legal fan-out is split into
+complete `yoetz.lineage-semantic-input/2` parts (`lineage-00`, `lineage-01`, ...) that together
+retain every child and gap plus the shared manifest digest. The review-text helper does not cut
+these items at 4 KiB. A single fact that cannot fit, a partition that would exceed the timeline
+item budget, or lineage plus retained parent content exceeding the 256 KiB complete-case budget
+raises before dispatch. Composition maps that to `failed/case_capacity_exceeded`
+with diagnostic operation `semantic_not_dispatched_lineage_capacity`: no job, no provider call,
+and the local result unchanged.
+
 If the retained required structure still exceeds 131,072 bytes, AI-powered review composition
 returns `failed/case_capacity_exceeded` before creating an AI-powered review job or invoking a
 provider. This additive reason belongs to the current 1.1 check/provenance schemas; released 1.0
