@@ -10,7 +10,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Final, cast
+from typing import Final, Literal, cast
 
 from yoetz.adapters.importers.codex_jsonl import (
     CodexCapabilityProfile,
@@ -56,13 +56,17 @@ from yoetz.protocol.errors import ProtocolValueError
 
 __all__ = [
     "STREAM_ADMISSION_STATES",
+    "CodexChildRolloutHeader",
+    "CodexChildRolloutHeaderResult",
     "CodexSessionStreamLocator",
     "PERIODIC_RECONCILE_SECONDS",
     "SessionStreamAdvance",
     "SessionStreamReader",
     "default_stream_profile",
     "envelope_from_stream_record",
+    "read_codex_child_rollout_header",
     "reconcile_session_stream",
+    "reconcile_session_stream_path",
     "resolve_codex_home",
     "should_trigger_stream_reconcile",
     "stream_admission",
@@ -465,6 +469,69 @@ class CodexSessionStreamLocator:
             return None
         return compressed_matches[0]
 
+    def resolve_child_rollout(
+        self,
+        hook_provided_path: str | None,
+        *,
+        child_thread_id: str | None = None,
+    ) -> tuple[Path | None, CodexChildRolloutHeaderResult]:
+        """Resolve a delegated child's own v2 rollout and read its header.
+
+        Codex multi-agent v2 gives every thread of one delegation tree the root ``session_id``,
+        so a child's callback names a rollout that the session-id filename rule above can never
+        select. The child's own thread id is the rollout filename token instead: a path selects a
+        child rollout only when it is a safe owner-private ``.jsonl`` beneath this home's
+        ``sessions`` root, its first line is a delegated-child header, and its filename carries
+        that header's child thread. ``child_thread_id``, when supplied, must be that thread; with
+        no path it selects the unique rollout named by it. The path stays local-only.
+        """
+
+        expected = None if child_thread_id is None else _token(child_thread_id)
+        if child_thread_id is not None and expected is None:
+            return None, _CHILD_HEADER_UNREADABLE
+        home = self._validated_home()
+        if home is None:
+            return None, _CHILD_HEADER_UNREADABLE
+        if hook_provided_path is not None:
+            candidate = self._validate_location(Path(hook_provided_path), home=home)
+        elif expected is not None:
+            candidate = self._exact_session_match(home=home, session_id=expected)
+        else:
+            candidate = None
+        if candidate is None or candidate.name.lower().endswith(".jsonl.zst"):
+            return None, _CHILD_HEADER_UNREADABLE
+        result = read_codex_child_rollout_header(candidate)
+        header = result.header
+        if header is None:
+            return None, result
+        if header.child_thread_id not in candidate.name or (
+            expected is not None and header.child_thread_id != expected
+        ):
+            # A header copied under another thread's filename, or a different child than the
+            # caller named, proves nothing about the rollout that was asked for.
+            return None, _CHILD_HEADER_UNREADABLE
+        return candidate, result
+
+    def _validate_location(self, candidate: Path, *, home: Path) -> Path | None:
+        """Return a safe owner-private regular file beneath this home's ``sessions`` root."""
+
+        try:
+            if candidate.is_symlink() or not candidate.is_file():
+                return None
+            resolved = candidate.resolve(strict=True)
+        except OSError:
+            return None
+        if not self._is_beneath(resolved, home / "sessions"):
+            return None
+        if not self._is_beneath(resolved, home):
+            return None
+        if not self._owner_safe(resolved):
+            return None
+        lower_name = resolved.name.lower()
+        if not any(lower_name.endswith(suffix) for suffix in _JSONL_SUFFIXES):
+            return None
+        return resolved
+
     def _validate_candidate(self, candidate: Path, *, home: Path, session_id: str) -> Path | None:
         try:
             if candidate.is_symlink() or not candidate.is_file():
@@ -556,6 +623,41 @@ def _spawn_parent_thread(payload: JsonObject) -> tuple[str | None, bool]:
     return _token(spawn.get("parent_thread_id")), True
 
 
+def _child_session_header(
+    record: CodexParsedRecord,
+) -> tuple[str | None, tuple[str, ...], bool]:
+    """Return a v2 child header's child thread, its spawning sessions, and whether it declared one.
+
+    The spawning sessions are the host session tokens that may own the child's lane, strongest
+    first: the header's ``session_id`` (v2 sets it to the root session that every thread of one
+    delegation tree shares, which is the ``session_id`` the tree's hook callbacks carry) and then
+    the agreed ``parent_thread_id``. The child's own thread is never one of them.
+    """
+
+    if record.wrapper_type != "session_meta":
+        return None, (), False
+    payload = _structural_body(record)
+    if payload is None or payload.get("thread_source") != _SUBAGENT_THREAD_SOURCE:
+        return None, (), False
+    parent, spawn_supplied = _spawn_parent_thread(payload)
+    if spawn_supplied and parent is None:
+        return None, (), True
+    declared = _token(payload.get("parent_thread_id"))
+    if "parent_thread_id" in payload and declared is None:
+        return None, (), True
+    if parent is not None and declared is not None and parent != declared:
+        return None, (), True
+    parent = declared if declared is not None else parent
+    child = _token(payload.get("id"))
+    if child is None or parent is None or child == parent:
+        return None, (), True
+    spawning: list[str] = []
+    for candidate in (_token(payload.get("session_id")), parent):
+        if candidate is not None and candidate != child and candidate not in spawning:
+            spawning.append(candidate)
+    return child, tuple(spawning), True
+
+
 def _child_session_identity(record: CodexParsedRecord) -> tuple[str | None, bool]:
     """Return one v2 child rollout header's bounded child identity.
 
@@ -569,24 +671,93 @@ def _child_session_identity(record: CodexParsedRecord) -> tuple[str | None, bool
     wrong field would publish the parent as its own child.
     """
 
-    if record.wrapper_type != "session_meta":
-        return None, False
-    payload = _structural_body(record)
-    if payload is None or payload.get("thread_source") != _SUBAGENT_THREAD_SOURCE:
-        return None, False
-    parent, spawn_supplied = _spawn_parent_thread(payload)
-    if spawn_supplied and parent is None:
-        return None, True
-    declared = _token(payload.get("parent_thread_id"))
-    if "parent_thread_id" in payload and declared is None:
-        return None, True
-    if parent is not None and declared is not None and parent != declared:
-        return None, True
-    parent = declared if declared is not None else parent
-    child = _token(payload.get("id"))
-    if child is None or parent is None or child == parent:
-        return None, True
-    return child, True
+    child, _spawning, declared = _child_session_header(record)
+    return child, declared
+
+
+CodexChildRolloutHeaderStatus = Literal["child", "not_child", "identity_invalid", "unreadable"]
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class CodexChildRolloutHeader:
+    """One delegated child's own v2 rollout header, reduced to bounded thread tokens.
+
+    ``child_thread_id`` is the child's own thread and ``spawning_sessions`` the host sessions that
+    may own its lane (see ``_child_session_header``). These are local routing inputs only: never
+    persist, log, or emit them.
+    """
+
+    child_thread_id: str
+    spawning_sessions: tuple[str, ...]
+
+    def __repr__(self) -> str:
+        return "CodexChildRolloutHeader(<redacted>)"
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class CodexChildRolloutHeaderResult:
+    """Closed outcome of reading one rollout's first line as a delegated-child header.
+
+    ``child`` carries a usable header. ``identity_invalid`` is a header that declares a delegated
+    child (``thread_source: subagent``) without a usable distinct identity. ``not_child`` is an
+    admitted header that declares no delegation. ``unreadable`` is everything that proves nothing:
+    an absent, unsafe, compressed, oversized, or unadmitted header.
+    """
+
+    status: CodexChildRolloutHeaderStatus
+    header: CodexChildRolloutHeader | None = None
+
+    def __repr__(self) -> str:
+        return f"CodexChildRolloutHeaderResult(status={self.status!r})"
+
+
+_CHILD_HEADER_UNREADABLE: Final = CodexChildRolloutHeaderResult("unreadable")
+_CHILD_HEADER_READ_CHUNK: Final = 65_536
+
+
+def read_codex_child_rollout_header(path: Path) -> CodexChildRolloutHeaderResult:
+    """Read only the first line of one local rollout as a v2 delegated-child header.
+
+    The read is bounded by the rollout line limit and stops at the first newline, so a large or
+    still-growing rollout costs one small read. The caller owns path validation; this function
+    only refuses a symlink, a non-regular file, and the compressed variant it cannot read.
+    """
+
+    if path.name.lower().endswith(".jsonl.zst"):
+        return _CHILD_HEADER_UNREADABLE
+    try:
+        if path.is_symlink() or not path.is_file():
+            return _CHILD_HEADER_UNREADABLE
+        collected = bytearray()
+        with path.open("rb") as handle:
+            while len(collected) <= ROLLOUT_MAX_LINE_BYTES:
+                chunk = handle.read(_CHILD_HEADER_READ_CHUNK)
+                if not chunk:
+                    break
+                newline = chunk.find(b"\n")
+                if newline >= 0:
+                    collected += chunk[: newline + 1]
+                    break
+                collected += chunk
+    except OSError:
+        return _CHILD_HEADER_UNREADABLE
+    if not collected.endswith(b"\n") or len(collected) > ROLLOUT_MAX_LINE_BYTES + 1:
+        # An unterminated first line is a header still being written or an oversized one.
+        return _CHILD_HEADER_UNREADABLE
+    try:
+        parsed = parse_codex_rollout_jsonl_from_offset(
+            bytes(collected), None, start_ordinal=1, require_admission=True
+        )
+    except ProtocolValueError, TypeError, ValueError:
+        return _CHILD_HEADER_UNREADABLE
+    if parsed.profile is None or len(parsed.records) != 1:
+        return _CHILD_HEADER_UNREADABLE
+    child, spawning, declared = _child_session_header(parsed.records[0])
+    if not declared:
+        return CodexChildRolloutHeaderResult("not_child")
+    if child is None or not spawning:
+        return CodexChildRolloutHeaderResult("identity_invalid")
+    return CodexChildRolloutHeaderResult("child", CodexChildRolloutHeader(child, spawning))
 
 
 def _decode_stream_call_tool(value: object) -> tuple[str | None, bool]:

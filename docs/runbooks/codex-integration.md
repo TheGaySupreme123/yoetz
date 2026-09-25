@@ -624,6 +624,68 @@ IMP-015 and the registry bridge, not against a native v2 run. `0.153.4` remains 
 structural compatibility profile: it earns no exact rollout profile and no certified host cell from
 this evidence, so its admission stays `partially_understood`.
 
+**Child lanes under the shared root session (#841).** The 2026-09-25 follow-up to #823 ran the
+0.3.0 package (`2e9b35ce`, wheel SHA-256 `09e507d3…7588`) on a disposable ADR-028 instance with
+Codex Testing `0.153.4`. A parent delegated and one native child attached with the handle,
+published, checked, and obtained a receipt. The parent saw that accepted child, but its lineage
+view also kept one pending unbound provisional annotation, and one supported `observe reconcile
+--session-file <child rollout>` returned `observation_reconcile_failed:mapping_missing` (exit 20).
+The raw run evidence is private; only these structural facts are recorded here.
+
+The source analysis names two boundaries, both reproduced from the exact IMP-015 records:
+
+- **Callback identity.** v2 writes the same root `session_id` into every thread of one delegation
+  tree (the child header's `session_id` is the parent thread). A delegated child's own callbacks
+  therefore arrive under the parent's session. With no host child alias (`subagent_id`,
+  `agent_id`, `agent_thread_id`), the child's successful attach `PostToolUse` cannot publish a
+  child lane (`start_bind_child_lane_unbound`), so the native child-start bridge never binds the
+  annotation, and the child's other callbacks were ordinary parent callbacks.
+- **Rollout routing.** A v2 child rollout is named by the child's own thread, never by a host
+  session, and an accepted child's route is the digest lane derived from the root session and the
+  child thread. Hook-driven stream reconcile skipped every child lane, and manual reconcile only
+  matched raw host sessions by filename. The child's own `session_meta` header — the #754
+  child-observed delegation signal — could therefore never be delivered natively, and every child
+  rollout was refused as `mapping_missing` whether or not a child route existed.
+
+Which callback shape the native run produced is visible in that run's private
+`hook_diagnostics.reasons`: `start_bind_child_lane_unbound` on the child's attach means the child
+callbacks carried no alias; no child callback diagnostics at all means no hook reached the child
+thread. The public issue does not establish which.
+
+The repair keeps every existing authority rule and adds no inference from workspace-wide stream
+state or annotation counts:
+
+- A Codex tool, permission, prompt, `Stop`, or compaction callback whose `transcript_path` (or
+  `session_file`) is not the session's own rollout reads only that file's first line. When it is
+  a safe owner-private `.jsonl` beneath the Codex home's `sessions` root, its v2 header declares a
+  delegated child, the filename carries that child's thread, and the header names the callback's
+  session as the spawning root, the child thread becomes the callback's host child identity —
+  the same fact a native `agent_id` supplies. The attach then publishes the child lane, the native
+  child-start bridge binds the annotation, and the child's command, file, and advice evidence
+  stays on its own lane. A transcript that proves a delegated child but cannot name it for this
+  session, or that contradicts a host alias, keeps the callback an explicit attribution gap with
+  the hook diagnostic `child_transcript_identity_conflict`; it never becomes parent work. Session
+  lifecycle and `SubagentStart`/`SubagentStop` hooks are never re-attributed.
+- A callback routed to a validated host-identity child lane reconciles that child's own rollout
+  into the lane. Its header is filed under the parent named by admitted catalog lineage and bound
+  to the observing child, so the parent's provisional annotation, the child-header signal, and the
+  attach callback merge into one annotation bound to exactly one accepted child.
+- `observe reconcile` of a child rollout resolves it through its header to the one lane derived
+  from a spawning session bound to that workspace alone and already mapped to a child task. The
+  result carries `mode: recovery_child_lane` and shares the automatic cursor, so repeating it
+  accepts nothing new. A child rollout that cannot be proven is refused with a bounded reason
+  instead of `mapping_missing` (see troubleshooting below). An ordinary unmapped rollout still
+  reports `mapping_missing`.
+
+Evidence boundary: a source repair proven by focused unit rows and a composed-READY conformance
+row over the exact IMP-015 parent and child records, including idempotent recovery and the
+parent's recorded rollup of the child. It assumes the v2 child callback shape the header implies
+(root session plus the child's own transcript) and has not been rerun natively. When a child
+thread's callbacks carry neither a child alias nor their own transcript, or no hook reaches the
+child thread, the child route stays unprovable and recovery reports `child_route_missing`.
+`0.153.4` remains admitted on the structural compatibility profile only: this repair earns no
+exact rollout profile, formal parity-gate cell, or E-013 capability cell.
+
 Fresh accepted native activity on the current mapped session renews its lease. Delayed delivery
 older than 60 seconds, stream history, duplicate replay, predecessor sessions, and terminal host
 events do not. A silent child still enters contact loss and the configured recovery window;
@@ -668,8 +730,9 @@ after host exit, and its recorded receipt did not close work or erase incomplete
 cell does not prove production model behavior, semantic review, or other Codex profiles.
 
 Manual reconciliation of a native `rollout-*` file requires one full session identity already
-bound to the selected workspace. It shares the automatic stream cursor and refuses an unmapped,
-ambiguous, or foreign-workspace session as `mapping_missing` before ingesting it. Compressed
+bound to the selected workspace, or, for a v2 delegated child's own rollout, one validated child
+lane resolved through its header (#841, above). It shares the automatic stream cursor and refuses
+an unmapped, ambiguous, or foreign-workspace session as `mapping_missing` before ingesting it. Compressed
 `.jsonl.zst` files retain the bounded `unsupported_format` result. Existing truncated aliases are
 left visible as legacy recovery gaps; a filename cannot authorize rebinding or deletion of their
 pending rows.
@@ -1055,6 +1118,10 @@ egress.
 | `observe status` shows `mapping_present: false` after a consented `SessionStart` | The hook sends `start mode=create_or_attach` with the canonical `--workspace` root as `workspace_ref` and `codex-session:<session_id>` as `external_ref`. Before automatic new-pair admission, it scans private local lifecycle mappings for an eligible ended same-host session. A unique mapping from a received `SessionEnd`, with every other bound session ended and the candidate bound only to this consented workspace, is selected before the ordinary request: the hook holds the workspace and predecessor lifecycle locks, revalidates ownership and state, and sends one `mode=attach` request carrying that selector plus the new pair. The catalog requires the selected root task to be active and non-quarantined, its canonical workspace and repository-privacy binding to match, and no start already pending for that selected route. Unrelated tasks in the same workspace do not block this recovery (#814); a pair already bound to another task remains a conflict. Delegated child routes require an authenticated attach handle or target selector. Recovery takes a nonblocking workspace reservation before pruning or scanning, then holds it with ordered locks for every eligible ended same-host session through full candidate revalidation, the service RPC, authorized rewrites, and pruning. The revalidation includes unmapped sessions, cross-workspace ownership, mapping identities, and mapping recency; a busy workspace reservation or candidate-lock contention or a changed snapshot returns `auto_attach_recovery_busy` rather than creating work from an unstable selector. A successful recovery rewrites every ended same-host predecessor mapping for that task to the rotated session and writer so pending predecessor rows drain on the successor route rather than being quarantined. With no usable persisted selector, automatic `create_or_attach` admits the new pair as independent work, including beside a dormant task. `workspace_task_exists` identifies only explicit `mode=create` colliding with an identical pair; workspace membership never selects a task. The candidate set is bounded (#549): a recovery unbinds the ended predecessors it consumed, and each `SessionStart` pass keeps at most the 32 most recently mapped ended bindings per workspace, pruning unmapped ended sessions first; a binding is never pruned while its session is live or while a pending or quarantined row still names it, so protected rows may keep the total above 32, ended unmapped rows still terminalize, and a pruned session that resumes re-binds on its next hook event. The public error reveals no selector; a hard crash without `SessionEnd` remains fail-closed rather than being guessed from age. Otherwise read `hook_diagnostics.reasons` for the typed cause: `auto_attach_workspace_unbound` (no paired request was legal), `auto_attach_request_invalid` (an authoring defect — file it), `auto_attach_conflict` / `auto_attach_refused` (the service answered and declined), `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`, `vault_locked`, `timeout`, `storage_unsafe` / `storage_corrupt`, `service_incompatible`, or `service_unavailable` (the daemon was still starting; `UserPromptSubmit` and `Stop` retry under the bounded budget; teardown `SessionEnd` records its lifecycle intent and drains without an auto-attach retry). An explicit MCP `start` remains the recovery path; for `vault_locked` on a never-initialized install, that `start` returns the typed `vault_initialization_required` continuation below rather than a dead end. |
 | `observe status` shows `mapping_stale` after every resume or compaction | Before issue #578 the `yoetz hooks session-start` status read connected without a workspace locator, so the daemon's repository fence refused every probe as `SESSION_CONFLICT` and a live mapping was reported stale. The rendered command now passes `--workspace .`, and the probe selects its locator in a fixed order (issue #659): an explicit project path other than the bare `.`, then the host payload's session `cwd` (a subdirectory resolves to the repository root), then the hook's own working directory. The host cwd outranks the bare `.` because Codex hook working directories are not stable across surfaces; an explicit path that cannot be canonicalized never falls through to another repository. `yoetz hooks observe --event SessionStart` and the shared mapped-session lane derive the probe locator the same way when no explicit workspace was consented. A fence refusal is `status_workspace_unbound` / `status_workspace_mismatch` with a keep-the-mapping advisory, and a companion diagnostic row names the locator source (`locator_source_explicit`, `locator_source_host_payload`, `locator_source_cwd`, `locator_absent`, or `locator_unresolvable`) so an absent context and a supplied one that failed to resolve are distinguishable; `mapping_stale` means the daemon actually reported the session replaced, and the advisory names the replacement ids. |
 | The agent created a sibling task instead of continuing the auto-attached one | The `SessionStart` context names the mapped `session_id` and `writer_id` and says to continue with `start mode=attach` by that session id; guidance and the `start` tool description name the canonical absolute repository root as `workspace_ref`, the value the hook commits (issue #580). The agent's successful scoped `start` re-binds the mapping through `yoetz hooks post-tool-use` from `structuredContent`; a scoped start that binds nothing records `start_bind_unparsed` / `start_bind_invalid_ids` / `start_bind_write_failed`. |
+| `observe reconcile` of a child rollout reports `child_parent_unmapped` | The v2 child header names a spawning session that is not bound to the selected workspace alone with a lifecycle mapping. Reconcile or attach the parent session in its own workspace first, or select the workspace that owns it. Nothing was ingested (#841). |
+| `observe reconcile` of a child rollout reports `child_route_missing` | The spawning session is mapped, but no validated attach published a child lane for this child thread: the child's attach callback carried neither a host child alias nor its own transcript, or no hook reached the child thread. Read `hook_diagnostics.reasons` for `start_bind_child_lane_unbound`. The provisional annotation stays unbound; nothing is inferred from stream status or annotation counts (#841). |
+| `observe reconcile` of a child rollout reports `child_route_ambiguous` or `child_identity_invalid` | More than one route or workspace claims the child thread, or the header declares a delegated child without a usable distinct child and spawning thread. Nothing was ingested; the observation keeps its bounded gap (#841). |
+| `hook_diagnostics.reasons` shows `child_transcript_identity_conflict` | A Codex callback's own transcript proved it came from a delegated child that it cannot name for the callback's session, or that contradicts the host child alias. The callback is an explicit attribution gap and is never delivered as parent work (#841). |
 | `observe status` shows pending `mapping_missing` after a runtime route conflict | A non-retryable `SESSION_CONFLICT` while acquiring the task runtime keeps the envelope pending for a later drain after its lifecycle mapping is repaired. The route must still pass its ownership checks. Non-retryable conflicts after runtime acquisition remain `ledger_rejected` and enter quarantine. Retryable route conflicts report `service_unavailable` and stay pending. |
 | `observe status` shows `ledger_rejected` and `outbox_quarantined` | The service was reachable but rejected one envelope non-retryably. A repeated envelope after a lost acknowledgement, a service restart, or a workflow reattach (a second `start` in the same Codex session) is not such a rejection: its committed operation is resolved task-wide and the row is acknowledged idempotently with no quarantine row. A pending row from an ended host session whose task a successor recovered is delivered on the successor route (`session_superseded` is followed) and is also not `ledger_rejected`. A successor binding that cannot be followed quarantines that row as `session_superseded`, not `mapping_missing`. A `ledger_rejected` row is a genuine conflicting reuse of an event or operation identity. The row is retained under `quarantine_causes`, aggregate `delivery_causes`, and gaps; `pending_delivery_causes` names only rows still in the outbox. Later rows can drain; reclaim only after the underlying defect is understood. A hook-driven attempt also appears in the bounded `hook_diagnostics`, while manual and supervisor drains are represented by status rather than hook activity. Do not restart a ready service. A row is also quarantined after 128 consecutive rejections with the same retryable reason so a catch-all failure cannot block the lane forever; pause, vault, disabled, and designed back-pressure reasons keep their existing recovery behavior. |
 | `observe status` exits with `observation_status_failed:<reason>` | The reason names the layer: `workspace_unresolvable` (exit 2) is the locator; `storage_unsafe` (exit 20) is an unsafe state/lock path; `storage_unavailable` (exit 20) is a bounded open, permission, read-only, missing-parent, or lock-acquisition failure; `storage_corrupt` (exit 40) is invalid stored data. The fixed remediation never prints the absolute state path. A sandboxed Codex result proves only that sandbox cell; run and record an unrestricted-terminal comparison separately before making that claim. |

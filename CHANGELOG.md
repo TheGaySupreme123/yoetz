@@ -4,6 +4,19 @@ All notable user-visible changes to Yoetz are documented in this file. Format is
 project-native heading style that marks the pending version as unreleased above
 reverse-chronological released versions.
 
+## Unreleased
+
+### Fixed
+
+- A Codex multi-agent v2 child that attaches with its delegation handle now binds its host
+  identity to exactly one accepted child. v2 gives every thread of a delegation tree the parent's
+  session, so a child callback that names its own rollout takes its child identity from that
+  rollout's header: the attach publishes the child lane, the provisional annotation is bound, and
+  the child's command, file, and advice evidence stays on the child lane. The child's own rollout
+  is reconciled into that lane automatically, and `yoetz observe reconcile` of a child rollout
+  resolves the same lane idempotently instead of failing `mapping_missing`; an unprovable child
+  rollout is refused with a bounded `child_*` reason. Native v2 acceptance remains open (#841).
+
 ## 0.3.0 — 2026-09-21
 
 Prepared public-alpha release candidate; publication remains gated by #785. See

@@ -153,6 +153,10 @@ _REASONS: Final = frozenset(
         "start_bind_child_lane_unbound",
         "start_bind_deferred",
         "start_bind_write_failed",
+        # A Codex callback's own transcript proved it came from a delegated child but could not
+        # name that child for the callback's session, or contradicted the host child alias
+        # (issue #841). The callback stays an explicit attribution gap, never parent work.
+        "child_transcript_identity_conflict",
         # Observability only: the end-to-end hook budget is a contract, not an
         # enforcement point. Aborting mid-hook would drop ingest.
         "hook_budget_exceeded",

@@ -19,11 +19,13 @@ from yoetz.adapters.check_sandbox import probe_check_sandbox
 from yoetz.adapters.git_subject_state import GitSubjectStateAdapter, open_local_workspace
 from yoetz.adapters.integrations.codex_lifecycle import (
     load_mapping,
+    scoped_child_session_id,
     validate_codex_session_id,
 )
 from yoetz.adapters.integrations.codex_marketplace import inspect_activation
 from yoetz.adapters.integrations.codex_session_stream import (
     CodexSessionStreamLocator,
+    read_codex_child_rollout_header,
     reconcile_session_stream_path,
     resolve_codex_home,
 )
@@ -184,6 +186,102 @@ def _mapped_session_id_from_path(
         if stem == token or stem.endswith(f"-{token}") or f"-{token}_" in stem:
             candidates.append(token)
     return candidates[0] if len(candidates) == 1 else None
+
+
+# Closed refusals for a delegated child's own rollout (#841). The token leads so machine readers
+# keep one stable prefix; the sentence names the next step without any host or task identity.
+_CHILD_ROUTE_REFUSALS: Final[Mapping[str, str]] = {
+    "child_identity_invalid": (
+        "the rollout declares a delegated child without a usable distinct child and spawning "
+        "thread; it cannot be attributed to any task"
+    ),
+    "child_parent_unmapped": (
+        "the session that spawned this child is not mapped to a task in this workspace alone; "
+        "reconcile or attach the spawning session first, or select the workspace that owns it"
+    ),
+    "child_route_missing": (
+        "no validated attach is recorded for this child thread; the child must attach with its "
+        "delegation handle from a callback that names its own rollout (see observe status hook "
+        "diagnostics)"
+    ),
+    "child_route_ambiguous": (
+        "more than one route or workspace claims this child thread; nothing was reconciled"
+    ),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class _ChildRolloutRoute:
+    """Where a delegated child's own rollout may be reconciled, or why it may not.
+
+    ``lane`` is the validated derived child lane; ``reason`` is a closed bounded refusal. Both are
+    ``None`` when the file is not a delegated-child rollout, which keeps the ordinary host-session
+    recovery rules in charge of it.
+    """
+
+    lane: str | None = None
+    reason: str | None = None
+
+
+def _child_rollout_route(
+    path: Path,
+    *,
+    store: LocalObservationStore,
+    workspace_commitment: str,
+    state_root: Path | None,
+) -> _ChildRolloutRoute:
+    """Resolve a Codex multi-agent v2 child rollout to its one validated child lane (#841).
+
+    A v2 child rollout is named by the child's own thread, which is never a host session: every
+    thread of a delegation tree shares the root ``session_id``, and the accepted child's route is
+    the lane derived from that session and the child thread by its validated attach callback.
+    Filename matching can therefore never select it. Only the header can: it must name a spawning
+    session bound to this workspace alone with a lifecycle mapping, and exactly one lane derived
+    from such a session and the header's child thread must already map to a task other than that
+    session's own. Nothing here creates a mapping, a task, or an annotation, and no workspace-wide
+    stream state or annotation count stands in for that lane.
+    """
+
+    result = read_codex_child_rollout_header(path)
+    if result.status in {"not_child", "unreadable"}:
+        return _ChildRolloutRoute()
+    header = result.header
+    if result.status != "child" or header is None:
+        return _ChildRolloutRoute(reason="child_identity_invalid")
+    bound = frozenset(store.unambiguous_codex_sessions_for_workspace(workspace_commitment))
+    spawning_mapped = False
+    lanes: set[str] = set()
+    for spawning in header.spawning_sessions:
+        if spawning not in bound:
+            continue
+        spawning_mapping = load_mapping(spawning, _state=state_root)
+        if spawning_mapping is None:
+            continue
+        spawning_mapped = True
+        try:
+            lane = scoped_child_session_id(
+                spawning,
+                host="codex",
+                identity=header.child_thread_id,
+                identity_kind="host",
+            )
+        except ProtocolValueError:
+            continue
+        lane_mapping = load_mapping(lane, _state=state_root)
+        if lane_mapping is None or lane_mapping.yoetz_task_id == spawning_mapping.yoetz_task_id:
+            # No validated child attach published this lane, or the lane still names the
+            # spawning session's own task: neither is a child route.
+            continue
+        if not store.codex_session_workspace_owners(lane) <= {workspace_commitment}:
+            return _ChildRolloutRoute(reason="child_route_ambiguous")
+        lanes.add(lane)
+    if not spawning_mapped:
+        return _ChildRolloutRoute(reason="child_parent_unmapped")
+    if not lanes:
+        return _ChildRolloutRoute(reason="child_route_missing")
+    if len(lanes) != 1:
+        return _ChildRolloutRoute(reason="child_route_ambiguous")
+    return _ChildRolloutRoute(lane=next(iter(lanes)))
 
 
 def _resolve_workspace(path: str | None) -> Path:
@@ -1942,6 +2040,34 @@ def reconcile_session_stream(
         state_root=_state,
     )
     if session_token is None:
+        child = _child_rollout_route(
+            path,
+            store=store,
+            workspace_commitment=workspace_commitment,
+            state_root=_state,
+        )
+        if child.reason is not None:
+            typer.echo(
+                f"observation_reconcile_failed:{child.reason}: "
+                f"{_CHILD_ROUTE_REFUSALS[child.reason]}",
+                err=True,
+            )
+            return 20
+        if child.lane is not None:
+            # The child's own rollout drains to its validated child lane, sharing the cursor,
+            # profile, and pairing persistence the automatic child-lane reconcile uses. Its
+            # header is then the child-observed delegation signal that binds the parent's
+            # provisional annotation to this child under admitted catalog lineage.
+            session_commitment = store.bind_codex_session(workspace_commitment, child.lane)
+            payload = reconcile_session_stream_path(
+                store,
+                workspace_commitment=workspace_commitment,
+                session_commitment=session_commitment,
+                codex_session_id=child.lane,
+                path=path,
+            )
+            _emit({**payload, "mode": "recovery_child_lane"}, json_output=json_output)
+            return 0
         if path.stem.startswith("rollout-"):
             typer.echo("observation_reconcile_failed:mapping_missing", err=True)
             return 20

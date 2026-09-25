@@ -21,6 +21,7 @@ from builders.codex_rollout import (
     session_meta,
 )
 from yoetz.adapters.importers.codex_jsonl import CodexParsedRecord
+from yoetz.adapters.importers.codex_rollout_jsonl import ROLLOUT_MAX_LINE_BYTES
 from yoetz.adapters.integrations import codex_session_stream as stream_module
 from yoetz.adapters.integrations.codex_lifecycle import mapping_from_start_ids, store_mapping
 from yoetz.adapters.integrations.codex_session_stream import (
@@ -2091,6 +2092,131 @@ def test_child_session_identity_never_invents_a_delegation(payload: dict[str, An
     assert "subagent_id" not in structural
     declared_child = payload["thread_source"] == "subagent"
     assert (ObservationGapCode.MISSING_SUBAGENT_IDENTITY.value in gaps) is declared_child
+
+
+_V2_ROOT = "019f8b27-b98e-7061-bbb5-d0b897594de6"
+_V2_CHILD = "019f8b27-b98e-7061-bbb5-d0b897594de7"
+
+
+@pytest.mark.parametrize(
+    ("variant", "status"),
+    [("child", "child"), ("child_without_identity", "identity_invalid"), ("parent", "not_child")],
+)
+def test_child_rollout_header_reads_only_the_first_v2_line(
+    tmp_path: Path, variant: str, status: str
+) -> None:
+    """Issue #841: one bounded first-line read classifies a rollout as a delegated child."""
+
+    path = tmp_path / "rollout.jsonl"
+    # Trailing garbage after the header proves nothing past the first newline is read.
+    path.write_bytes(_fixture_bytes(_MULTI_AGENT_V2_0153, variant) + b"\x00not json\n")
+
+    result = stream_module.read_codex_child_rollout_header(path)
+
+    assert result.status == status
+    if status == "child":
+        assert result.header is not None
+        assert result.header.child_thread_id == _V2_CHILD
+        # v2 names the root session and the spawning thread; both are the parent here.
+        assert result.header.spawning_sessions == (_V2_ROOT,)
+        assert _V2_CHILD not in repr(result) and _V2_CHILD not in repr(result.header)
+    else:
+        assert result.header is None
+
+
+def test_child_rollout_header_orders_root_session_before_spawning_thread(tmp_path: Path) -> None:
+    """A nested child's lane belongs to the root session its callbacks carry."""
+
+    nested = "019f8b27-b98e-7061-bbb5-d0b897594de8"
+    header = session_meta(
+        cli_version="0.153.4",
+        history_mode="paginated",
+        session_id=nested,
+        extra={
+            "session_id": _V2_ROOT,
+            "thread_source": "subagent",
+            "parent_thread_id": _V2_CHILD,
+            "source": {"subagent": {"thread_spawn": {"parent_thread_id": _V2_CHILD}}},
+        },
+    )
+    path = tmp_path / "rollout.jsonl"
+    path.write_bytes(encode_lines(header))
+
+    result = stream_module.read_codex_child_rollout_header(path)
+
+    assert result.header is not None
+    assert result.header.child_thread_id == nested
+    assert result.header.spawning_sessions == (_V2_ROOT, _V2_CHILD)
+
+
+@pytest.mark.parametrize("shape", ["unterminated", "compressed", "symlink", "missing", "oversized"])
+def test_child_rollout_header_refuses_what_it_cannot_prove(tmp_path: Path, shape: str) -> None:
+    child = _fixture_bytes(_MULTI_AGENT_V2_0153, "child")
+    first_line = child.split(b"\n", 1)[0]
+    path = tmp_path / "rollout.jsonl"
+    if shape == "unterminated":
+        path.write_bytes(first_line)
+    elif shape == "compressed":
+        path = tmp_path / "rollout.jsonl.zst"
+        path.write_bytes(child)
+    elif shape == "symlink":
+        target = tmp_path / "target.jsonl"
+        target.write_bytes(child)
+        path.symlink_to(target)
+    elif shape == "oversized":
+        path.write_bytes(b"{" + b" " * (ROLLOUT_MAX_LINE_BYTES + 8) + b"}\n")
+
+    assert stream_module.read_codex_child_rollout_header(path).status == "unreadable"
+
+
+def _child_home(tmp_path: Path) -> tuple[CodexSessionStreamLocator, Path]:
+    home = tmp_path / "codex-home"
+    day = home / "sessions" / "2026" / "08" / "22"
+    day.mkdir(parents=True)
+    return CodexSessionStreamLocator(home), day
+
+
+def test_child_rollout_locator_binds_the_header_to_its_thread_filename(tmp_path: Path) -> None:
+    locator, day = _child_home(tmp_path)
+    child = day / f"rollout-2026-08-22T12-00-01-{_V2_CHILD}.jsonl"
+    child.write_bytes(_fixture_bytes(_MULTI_AGENT_V2_0153, "child"))
+
+    by_path, by_path_result = locator.resolve_child_rollout(str(child))
+    by_thread, _ = locator.resolve_child_rollout(None, child_thread_id=_V2_CHILD)
+    checked, _ = locator.resolve_child_rollout(str(child), child_thread_id=_V2_CHILD)
+
+    assert by_path == by_thread == checked == child.resolve()
+    assert by_path_result.status == "child"
+    # A different child than the caller named proves nothing about the requested rollout.
+    assert locator.resolve_child_rollout(str(child), child_thread_id=_V2_ROOT)[0] is None
+    assert locator.resolve_child_rollout(None)[0] is None
+
+
+def test_child_rollout_locator_refuses_a_header_under_another_threads_name(
+    tmp_path: Path,
+) -> None:
+    locator, day = _child_home(tmp_path)
+    copied = day / f"rollout-2026-08-22T12-00-01-{_V2_ROOT}.jsonl"
+    copied.write_bytes(_fixture_bytes(_MULTI_AGENT_V2_0153, "child"))
+    outside = tmp_path / f"rollout-2026-08-22T12-00-01-{_V2_CHILD}.jsonl"
+    outside.write_bytes(_fixture_bytes(_MULTI_AGENT_V2_0153, "child"))
+
+    for candidate in (copied, outside):
+        path, result = locator.resolve_child_rollout(str(candidate))
+        assert path is None
+        assert result.status == "unreadable"
+    assert locator.resolve_child_rollout(None, child_thread_id="../escape")[0] is None
+
+
+def test_child_rollout_locator_reports_a_declared_child_without_identity(tmp_path: Path) -> None:
+    locator, day = _child_home(tmp_path)
+    invalid = day / f"rollout-2026-08-22T12-00-01-{_V2_ROOT}.jsonl"
+    invalid.write_bytes(_fixture_bytes(_MULTI_AGENT_V2_0153, "child_without_identity"))
+
+    path, result = locator.resolve_child_rollout(str(invalid))
+
+    assert path is None
+    assert result.status == "identity_invalid"
 
 
 def test_stream_admission_classification_is_closed_and_honest() -> None:
