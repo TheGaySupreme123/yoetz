@@ -546,6 +546,16 @@ _DIRECTIVES: Final = (
         nudge="The everyday permanent install is never disposed by an instance command.",
     ),
     RecoveryDirective(
+        token="capacity_request_correction",
+        directive=(
+            "The requested observation capacity is not supported for this dimension, and nothing "
+            "was changed. Ask the owner to choose a supported finite capacity, preview it, and "
+            "apply only that exact accepted preview."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge="Never describe a finite capacity as uncapped or unlimited.",
+    ),
+    RecoveryDirective(
         token="local_state_repair",
         directive=(
             "Yoetz could not safely open local state, so nothing was read or written. Repair the "
@@ -678,6 +688,8 @@ _LOCAL_REASON_CONTINUATIONS: Final[Mapping[str, str]] = MappingProxyType(
         "storage_unsafe": "local_state_repair",
         "unsafe_root": "storage_root_unsafe",
         "workspace_unresolvable": "storage_root_unsafe",
+        # Observation capacity owner choices (issue #828).
+        "capacity_no_cap_unsupported": "capacity_request_correction",
     }
 )
 

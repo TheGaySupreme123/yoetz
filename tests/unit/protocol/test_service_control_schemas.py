@@ -1137,3 +1137,256 @@ def test_v28_native_child_start_bridge_round_trip_preserves_frozen_v27() -> None
     assert canonical_encode(parsed.body) == canonical_encode(frame["body"])
     with pytest.raises(ProtocolValueError):
         validate_schema_instance("control-request", "2.7.0", cast(JsonValue, frame))
+
+
+def _v29_custom_capacity_status_frame() -> dict[str, Any]:
+    """Return an observation-status result whose runtime reports a custom finite capacity."""
+
+    limits: dict[str, Any] = {
+        "queue_count": 1024,
+        "queue_bytes": 1_048_576,
+        "state_bytes": 2_097_152,
+        "pending_attempts": 256,
+        "capture_tickets": 512,
+        "capture_bytes": 134_217_728,
+        "protected_count": 256,
+        "protected_bytes": 262_144,
+        "session_fair_share": 256,
+        "session_fair_share_bytes": 262_144,
+        "max_pending_age_ms": 60_000,
+        "state_document_ceiling_bytes": 16_777_216,
+    }
+    effective_budget: dict[str, Any] = {
+        "schema": "yoetz.observation-effective-budget/1",
+        "budget_policy_version": "observation-budget-v2-provisional",
+        "validation_status": "not_validated",
+        "scope": "session",
+        "selected_queue_count": 1024,
+        "selected_capacity_label": "custom",
+        "effective_queue_count": 1024,
+        "effective_capacity_label": "custom",
+        "effective_reason": "selected",
+        "limits": limits,
+        "limiting_dimension": "count",
+        "utilization_bps": 19,
+        "no_cap": {
+            "available": False,
+            "dimension": "structural_queue",
+            "reason": "state_document_ceiling",
+            "state_document_ceiling_bytes": 16_777_216,
+            "largest_supported_queue_count": 8192,
+        },
+    }
+    selection_runtime: dict[str, Any] = {
+        "accounting": {
+            "accounting_scope": "locally_ingested_since_selection_upgrade",
+            "admitted_input_count": 3,
+            "buffered_input_count": 1,
+            "buffered_successful_call_count": 1,
+            "check_selection": "reported_by_each_check",
+            "delivered_input_count": 2,
+            "intentionally_omitted_input_count": 1,
+            "loss_identity_commitment": None,
+            "loss_identity_list_complete": False,
+            "loss_ranges": [],
+            "observed_count": 4,
+            "pending_attempt_count": 1,
+            "selection_epoch": 3,
+            "summarized_input_count": 1,
+            "summary_record_count": 1,
+            "unrecoverable_input_count": 0,
+        },
+        "admission_allowed": True,
+        "capture_backlog": {
+            "byte_count": 0,
+            "capture_backlog_scope": "partial",
+            "count": 0,
+            "observed_at": "2026-09-10T00:00:01.000Z",
+            "oldest_receipt_time": None,
+            "reservation_count": 0,
+            "reservation_unknown": False,
+            "reserved_byte_count": 0,
+            "route_count": 0,
+            "routes": {},
+        },
+        "content_allowed": True,
+        "effective_budget": effective_budget,
+        "effective_capacity": 1024,
+        "effective_capacity_label": "custom",
+        "effective_mode": "focused",
+        "oldest_pending_age_ms": 250,
+        "pending_attempts": 1,
+        "pending_lifecycle_count": 0,
+        "policy_version": "observation-budget-v2-provisional",
+        "pressure_state": "healthy",
+        "pressure_transition_identity": None,
+        "protected_bytes_reserve": 262_144,
+        "protected_count_reserve": 256,
+        "queue_bytes": 2048,
+        "queue_count": 2,
+        "selected_capacity": 1024,
+        "selected_capacity_label": "custom",
+        "selected_mode": "focused",
+        "selection_expires_at": "2026-09-10T01:00:00.000Z",
+        "selection_origin": "session",
+        "session_commitment": "hmac-sha256:" + "1" * 64,
+        "session_fair_share": 256,
+        "session_fair_share_bytes": 262_144,
+        "state_bytes": 4096,
+        "validation_status": "not_validated",
+    }
+    return {
+        "body": {
+            "request_id": _REQUEST_ID,
+            "schema_version": "1.0.0",
+            "status": {
+                "advice_frontier": None,
+                "gaps": [],
+                "lag_events": 0,
+                "last_observation_receipt_time": "2026-09-10T00:00:01.000Z",
+                "lifecycle": "active",
+                "selection_runtime": selection_runtime,
+                "source_coverage": {
+                    "claude_hook": True,
+                    "codex_hook": True,
+                    "codex_session_stream": False,
+                    "cursor_hook": False,
+                },
+                "unsupported_events": [],
+                "workspace_commitment": "hmac-sha256:" + "1" * 64,
+            },
+        },
+        "method": "observation_status",
+        "outcome": "ok",
+        "protocol_version": "1.0",
+        "rpc_id": _RPC_ID,
+        "service_generation": "1",
+        "service_instance_id": _INSTANCE_ID,
+    }
+
+
+def test_v29_custom_capacity_runtime_validates_only_on_29_wire() -> None:
+    """A custom finite capacity and its effective budget need the 2.9 control-result wire."""
+
+    frame = _v29_custom_capacity_status_frame()
+    validate_schema_instance("control-result", "2.9.0", cast(JsonValue, frame))
+    decoded = decode_control_frame(encode_control_frame(frame))
+    assert canonical_encode(decoded) == canonical_encode(cast(JsonValue, frame))
+    with pytest.raises(ProtocolValueError) as caught:
+        validate_schema_instance("control-result", "2.8.0", cast(JsonValue, frame))
+    assert caught.value.reason_code == "schema_instance_invalid"
+
+    def runtime(candidate: dict[str, Any]) -> dict[str, Any]:
+        return cast(dict[str, Any], candidate["body"]["status"]["selection_runtime"])
+
+    # Every profile label and the closed record stay bounded on the successor wire.
+    mutations: tuple[tuple[str, Any], ...] = (
+        ("selected_capacity", 63),
+        ("effective_capacity", 8193),
+        ("selected_capacity_label", "unlimited"),
+        ("effective_capacity_label", None),
+    )
+    for key, value in mutations:
+        invalid = deepcopy(frame)
+        runtime(invalid)[key] = value
+        with pytest.raises(ProtocolValueError):
+            validate_schema_instance("control-result", "2.9.0", cast(JsonValue, invalid))
+    for key in ("selected_capacity_label", "effective_capacity_label", "effective_budget"):
+        invalid = deepcopy(frame)
+        del runtime(invalid)[key]
+        with pytest.raises(ProtocolValueError):
+            validate_schema_instance("control-result", "2.9.0", cast(JsonValue, invalid))
+    budget_mutations: tuple[tuple[tuple[str, ...], Any], ...] = (
+        (("schema",), "yoetz.observation-effective-budget/2"),
+        (("scope",), "machine"),
+        (("effective_reason",), "largest"),
+        (("limiting_dimension",), "unbounded"),
+        (("utilization_bps",), -1),
+        (("selected_queue_count",), 0),
+        (("no_cap", "available"), True),
+        (("no_cap", "reason"), "unsupported"),
+        (("limits", "queue_bytes"), -1),
+        (("limits", "unbounded"), 1),
+        (("extra",), 1),
+    )
+    for path, value in budget_mutations:
+        invalid = deepcopy(frame)
+        target = cast(dict[str, Any], runtime(invalid)["effective_budget"])
+        for step in path[:-1]:
+            target = cast(dict[str, Any], target[step])
+        target[path[-1]] = value
+        with pytest.raises(ProtocolValueError):
+            validate_schema_instance("control-result", "2.9.0", cast(JsonValue, invalid))
+    for path in (("limits", "state_document_ceiling_bytes"), ("no_cap", "dimension"), ("scope",)):
+        invalid = deepcopy(frame)
+        target = cast(dict[str, Any], runtime(invalid)["effective_budget"])
+        for step in path[:-1]:
+            target = cast(dict[str, Any], target[step])
+        del target[path[-1]]
+        with pytest.raises(ProtocolValueError):
+            validate_schema_instance("control-result", "2.9.0", cast(JsonValue, invalid))
+
+    # The three reviewed profiles remain valid with their names on 2.9.
+    for count, label in ((512, "standard"), (2048, "larger"), (8192, "largest")):
+        profile = deepcopy(frame)
+        runtime(profile).update(
+            {
+                "selected_capacity": count,
+                "effective_capacity": count,
+                "selected_capacity_label": label,
+                "effective_capacity_label": label,
+            }
+        )
+        validate_schema_instance("control-result", "2.9.0", cast(JsonValue, profile))
+
+
+def test_v29_changes_only_the_selection_runtime_and_keeps_frozen_v28() -> None:
+    """2.9 derives from 2.8 by one runtime definition; the 2.8 documents are not rewritten."""
+
+    for name in ("control-hello", "control-hello-result", "control-request", "control-result"):
+        v28 = cast(
+            dict[str, Any], strict_json_parse((_ROOT / f"{name}-2.8.0.schema.json").read_bytes())
+        )
+        v29 = cast(
+            dict[str, Any], strict_json_parse((_ROOT / f"{name}-2.9.0.schema.json").read_bytes())
+        )
+        assert v28["$id"] == f"https://schemas.yoetz.dev/0.1/service/{name}-2.8.0.schema.json"
+        assert v29["$id"] == f"https://schemas.yoetz.dev/0.1/service/{name}-2.9.0.schema.json"
+        assert (_ROOT / f"{name}-2.9.0.schema.json").read_bytes() == _PACKAGE_ROOT.joinpath(
+            f"{name}-2.9.0.schema.json"
+        ).read_bytes()
+        if name != "control-result":
+            assert {k: v for k, v in v28.items() if k != "$id"} == {
+                k: v for k, v in v29.items() if k != "$id"
+            }
+            continue
+        v28_defs = cast(dict[str, Any], v28["$defs"])
+        v29_defs = cast(dict[str, Any], v29["$defs"])
+        assert set(v29_defs) - set(v28_defs) == {"observation_effective_budget"}
+        changed = {key for key in v28_defs if v28_defs[key] != v29_defs[key]}
+        assert changed == {"observation_selection_runtime"}
+        assert {k: v for k, v in v28.items() if k not in {"$id", "$defs"}} == {
+            k: v for k, v in v29.items() if k not in {"$id", "$defs"}
+        }
+        v28_runtime = cast(dict[str, Any], v28_defs["observation_selection_runtime"])
+        v29_runtime = cast(dict[str, Any], v29_defs["observation_selection_runtime"])
+        assert v28_runtime["properties"]["selected_capacity"] == {
+            "enum": [512, 2048, 8192],
+            "type": "integer",
+        }
+        assert "effective_budget" not in v28_runtime["properties"]
+        assert v29_runtime["properties"]["selected_capacity"] == {
+            "maximum": 8192,
+            "minimum": 64,
+            "type": "integer",
+        }
+        assert v29_runtime["required"] == [
+            *v28_runtime["required"],
+            "selected_capacity_label",
+            "effective_capacity_label",
+            "effective_budget",
+        ]
+        budget = cast(dict[str, Any], v29_defs["observation_effective_budget"])
+        assert budget["additionalProperties"] is False
+        assert set(budget["required"]) == set(budget["properties"])
+        assert budget["properties"]["no_cap"]["properties"]["available"] == {"const": False}

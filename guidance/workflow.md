@@ -400,6 +400,61 @@ record. It only works while that identity is buffered. After delivery the result
 expired bytes. Rerun or reacquire the current state when needed and record it as new evidence with
 its new time and subject state. Do not use that rerun to prove the historical state.
 
+### Change local retention capacity
+
+Capacity and cost changes need a disclosed choice. Change the structural observation capacity
+only when the user asks. Never choose a larger or uncapped local capacity for an ordinary task;
+task permission, a busy queue, or a pressure notice never authorizes it. Read the current selected
+and effective values first:
+
+```text
+yoetz observe selection-status --workspace /exact/project \
+  --session-id <host-session-id> --json
+```
+
+Preview the exact request. `--capacity` accepts `standard` (recommended, 512), `larger` (2,048),
+`largest` (8,192), `custom` with `--queue-count` from 64 to 8,192, or `none`:
+
+```text
+yoetz observe selection-preview --workspace /exact/project \
+  --detail focused --capacity custom --queue-count 1024 \
+  --session-id <host-session-id> --json
+```
+
+Relay the preview's `disclosure` to the user: the exact scope (this session, or the workspace with
+`--persist`), current and requested values, the local-hardware consequences (disk use, memory use,
+CPU work, possible slowdown of Yoetz or other apps), what stays limited, and how to lower, pause,
+and resume. Repeat the scope and the remaining limits exactly as the preview states them. The
+shared workspace queue follows the largest active selection, so an increase can raise the queue
+and state-document bounds for every session in that workspace; relay that line too. The disclosure's commands use `<workspace>` and
+`<session-id>` placeholders; substitute the exact values when you relay them. Performance
+validation is provisional: never call a larger setting safe without evidence or faster, never
+describe unknown cost as free, and never imply provider limits vanished. Content, privacy, provider, credential, and network
+authority do not change, and AI-powered review input, output, and spend limits are not part of
+this choice. Only after the user explicitly accepts that exact preview, apply it with the same
+arguments and its digest:
+
+```text
+yoetz observe selection-apply --workspace /exact/project \
+  --detail focused --capacity custom --queue-count 1024 \
+  --session-id <host-session-id> --accept --preview-digest <preview-digest> --json
+```
+
+Explain how to lower or pause before and after applying. To lower it, preview and apply
+a smaller capacity at the same scope (the "Lower it later" command restores the previous
+capacity after an increase). At the minimum of 64 rows, pause ingest if needed. To remove an
+override, run `yoetz observe selection-revoke` at that scope; this restores the inherited or
+default capacity and can increase it, so inspect the resulting selection instead of calling it
+a lowering operation.
+`yoetz observe pause --workspace /exact/project` pauses new observation ingest and
+`yoetz observe resume --workspace /exact/project` restarts it. Lowering affects future admission
+only; accepted records drain and are not deleted.
+
+`--capacity none` (No Yoetz cap) is not available for the structural queue in this revision. Both
+preview and apply return `capacity_no_cap_unsupported` and change nothing: the local state document
+has a 16 MiB safety ceiling, and the largest supported finite capacity is 8,192 rows
+(`--capacity largest`, or `--capacity custom --queue-count 8192`). Relay that outcome as given,
+with its alternative command; do not describe any setting as unlimited.
 
 ## First-start contention recovery
 

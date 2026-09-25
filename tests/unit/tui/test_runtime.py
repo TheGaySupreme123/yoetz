@@ -9,6 +9,7 @@ from typing import cast
 import pytest
 
 from builders.tui_runtime import CLI, DESKTOP
+from yoetz.adapters.workspace_binding import canonical_workspace_locator
 from yoetz.tui.models import HarnessOption
 from yoetz.tui.runtime import YoetzRuntime, _WorkSession  # pyright: ignore[reportPrivateUsage]
 
@@ -369,3 +370,127 @@ async def test_integration_preview_uses_activation_home_for_mcp(
     with pytest.raises(RuntimeError_):
         await runtime.integration_plan(CLI, selected, "strict")
     assert seen == [resolved]
+
+
+def _isolated_observation_store(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> tuple[YoetzRuntime, Path]:
+    """Point the runtime's store at an isolated state root, never the live install."""
+
+    from yoetz.adapters.integrations import observation_local
+
+    real_store = observation_local.LocalObservationStore
+    state = tmp_path / "isolated"
+    workspace = tmp_path / "workspace"
+    (workspace / ".git").mkdir(parents=True)
+
+    def isolated_store(*_args: object, **_kwargs: object) -> object:
+        return real_store(_state=state)
+
+    monkeypatch.setattr(observation_local, "LocalObservationStore", isolated_store)
+    return YoetzRuntime(cwd=workspace), state
+
+
+async def test_capacity_preview_and_apply_persist_the_workspace_selection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The TUI changes the workspace selection only, through the owning preview/apply path."""
+
+    from yoetz.adapters.integrations.observation_local import LocalObservationStore
+    from yoetz.domain.observation_budget import CapacityRequest, ObservationCapacity
+
+    runtime, state = _isolated_observation_store(monkeypatch, tmp_path)
+    request = CapacityRequest.for_capacity(ObservationCapacity(1_024))
+
+    preview = await runtime.preview_observation_selection(request)
+
+    digest = preview["preview_digest"]
+    assert isinstance(digest, str)
+    disclosure = cast(dict[str, object], preview["disclosure"])
+    assert disclosure["scope"] == "workspace"
+    assert disclosure["change"] == "increase"
+    requested = cast(dict[str, object], preview["requested_selection"])
+    assert requested["queue_count"] == 1_024
+    assert requested["detail"] == "focused"
+
+    applied = await runtime.apply_observation_selection(request, digest)
+
+    assert applied["applied"] is True
+    selection = cast(dict[str, object], applied["selection"])
+    assert selection["queue_count"] == 1_024
+    assert selection["origin"] == "workspace"
+    # The command line resolves the same workspace, so it reads the TUI's change.
+    store = LocalObservationStore(_state=state)
+    locator = canonical_workspace_locator(str(runtime.project_root()))
+    assert locator is not None
+    settings = store.selection_settings_for(store.workspace_commitment(locator))
+    assert settings.workspace is not None
+    assert settings.workspace.selection.capacity == ObservationCapacity(1_024)
+    assert settings.sessions == ()
+    status = await runtime.observation_selection_status()
+    selected = cast(dict[str, object], status["selected"])
+    assert selected["queue_count"] == 1_024
+
+
+async def test_capacity_paths_refuse_a_workspace_the_command_line_refuses(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A root the CLI's canonicalization rejects is refused here too, never hashed raw."""
+
+    from yoetz.domain.observation_budget import CapacityRequest, ObservationCapacity
+    from yoetz.tui.runtime import RuntimeError_
+
+    runtime, _state = _isolated_observation_store(monkeypatch, tmp_path)
+    runtime.project_root().chmod(0o777)
+    request = CapacityRequest.for_capacity(ObservationCapacity(1_024))
+    try:
+        assert canonical_workspace_locator(str(runtime.project_root())) is None
+        with pytest.raises(RuntimeError_) as status:
+            await runtime.observation_selection_status()
+        assert status.value.reason == "observation_status_unavailable"
+        with pytest.raises(RuntimeError_) as preview:
+            await runtime.preview_observation_selection(request)
+        assert preview.value.reason == "observation_selection_preview_failed"
+        with pytest.raises(RuntimeError_) as applied:
+            await runtime.apply_observation_selection(request, "sha256:" + "0" * 64)
+        assert applied.value.reason == "observation_selection_apply_failed"
+    finally:
+        runtime.project_root().chmod(0o755)
+
+
+async def test_capacity_apply_refuses_a_stale_digest(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from yoetz.domain.observation_budget import CapacityRequest, ObservationCapacity
+    from yoetz.tui.runtime import RuntimeError_
+
+    runtime, _state = _isolated_observation_store(monkeypatch, tmp_path)
+    request = CapacityRequest.for_capacity(ObservationCapacity(2_048))
+
+    with pytest.raises(RuntimeError_) as raised:
+        await runtime.apply_observation_selection(request, "sha256:" + "0" * 64)
+
+    assert raised.value.reason == "observation_selection_apply_failed"
+
+
+async def test_capacity_no_cap_is_a_typed_outcome_that_changes_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from yoetz.adapters.integrations.observation_local import LocalObservationStore
+    from yoetz.domain.observation_budget import CapacityRequest
+    from yoetz.tui.runtime import ObservationCapacityUnavailable
+
+    runtime, state = _isolated_observation_store(monkeypatch, tmp_path)
+
+    with pytest.raises(ObservationCapacityUnavailable) as raised:
+        await runtime.preview_observation_selection(CapacityRequest("no_cap", None))
+
+    assert raised.value.reason == "capacity_no_cap_unsupported"
+    assert raised.value.lines[0].startswith("No Yoetz cap is not available")
+    assert "--capacity largest" in raised.value.alternative_command
+    assert "--workspace <workspace>" in raised.value.alternative_command
+    store = LocalObservationStore(_state=state)
+    locator = canonical_workspace_locator(str(runtime.project_root()))
+    assert locator is not None
+    settings = store.selection_settings_for(store.workspace_commitment(locator))
+    assert settings.workspace is None

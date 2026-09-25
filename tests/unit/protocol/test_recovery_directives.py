@@ -166,6 +166,15 @@ class TestReasonResolution:
         assert continuation_for_reason("service_already_running") is None
         assert continuation_for_local_reason("unsorted_set_field") is None
 
+    def test_no_cap_capacity_refusal_is_a_local_request_correction(self) -> None:
+        """#828: an unsupported no-cap request names a finite choice, never a protocol reason."""
+
+        assert (
+            continuation_for_local_reason("capacity_no_cap_unsupported")
+            == "capacity_request_correction"
+        )
+        assert continuation_for_reason("capacity_no_cap_unsupported") is None
+
     def test_unregistered_and_non_string_input_is_refused(self) -> None:
         assert directive_for(None) is None
         assert directive_for("not_a_registered_token") is None
@@ -462,6 +471,7 @@ class TestLocalReasonRatchet:
         """The two vocabularies stay disjoint at the value end as well as the key end."""
 
         local_only = {
+            "capacity_request_correction",
             "ceremony_refusal_terminal",
             "ceremony_result_invalid",
             "config_correction_required",

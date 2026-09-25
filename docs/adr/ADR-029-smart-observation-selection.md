@@ -2,9 +2,10 @@
 
 **Status:** Proposed for issue #687; the maintainer requested the complete implementation in one
 draft PR on 2026-09-10. Product direction is acknowledged; measured performance acceptance and
-the larger-profile rollout remain review decisions on that issue.
+the larger-profile rollout remain review decisions on that issue. Amended 2026-09-24 for #828
+(configurable capacity policy, custom counts, and the typed no-Yoetz-cap outcome).
 
-**Relates to:** ADR-009, ADR-010, ADR-014, ADR-016, ADR-022, and issues #687 and #753.
+**Relates to:** ADR-009, ADR-010, ADR-014, ADR-016, ADR-022, and issues #687, #753, and #828.
 
 ## Context
 
@@ -228,3 +229,93 @@ baseline, proposed numerical targets, measured profile budgets, native-host acce
 remaining limits before this draft is marked ready. Larger profiles are not validated merely by
 passing a count-boundary unit test. No live installation or private corpus is changed by the
 implementation or its synthetic benchmarks.
+
+## Amendment — configurable capacity policy, custom counts and the no-Yoetz-cap outcome (2026-09-24, #828)
+
+Issue #828 asks for explicit larger, custom and no-Yoetz-cap choices for multi-agent capacity,
+each with a resource and cost disclosure on the terminal interface, the CLI and agent guidance.
+This amendment delivers the local structural observation queue dimension end to end and records
+the policy for the other dimensions. It does not change any default.
+
+### Capacity dimensions
+
+| Dimension | Owner-selectable finite values | No Yoetz cap | Status |
+| --- | --- | --- | --- |
+| Structural observation queue | `standard` 512, `larger` 2,048, `largest` 8,192, or `custom` 64..8,192 rows | Unsupported: typed `capacity_no_cap_unsupported`, reason `state_document_ceiling` | Implemented |
+| Pending pre/post pairs | Fixed at 256 | Unsupported | Unchanged |
+| Native capture lane | Fixed at 512 tickets / 128 MiB per workspace | Unsupported | Unchanged |
+| AI-powered review input, output and spend | Hard product constants and privacy-policy fields only | Unsupported: provider and egress ceilings still apply | Out of scope; a separate privacy/egress design change |
+
+A custom count uses the same byte ladder as the three profiles. For a queue count `N`:
+
+- queue bytes are `N × 1 KiB`;
+- the aggregate state document is `max(1 MiB, 2 × queue bytes)`, never above the 16 MiB
+  `STATE_DOCUMENT_CEILING_BYTES` safety ceiling that the local store also enforces;
+- the protected reserve is `max(64, N / 4)` rows and `max(128 KiB, queue bytes / 4)`, each capped
+  at half the queue so a small custom count still admits unprotected rows;
+- the per-session fair share is `max(1, N / 4)` rows and `max(1, queue bytes / 4)` bytes.
+
+The 512, 2,048 and 8,192 profiles produce exactly the limits in the profile table in Capacity,
+pressure, and setting lifetime. The pending-pair,
+capture, diagnostic, optional-detail and pressure-threshold values are the same for every count.
+
+### No Yoetz cap
+
+The local observation state is one document that is re-encoded on every save. Its 16 MiB safety
+ceiling is a product quota that would defeat any "unlimited" queue selection downstream, so this
+storage revision does not offer an uncapped structural queue. A no-cap request is still accepted
+as input on preview and apply and answered with the non-retryable typed outcome
+`capacity_no_cap_unsupported` (`invalid_request` class). The outcome names the state-document
+ceiling and the largest supported finite capacity (8,192 rows, `--capacity largest` or
+`--capacity custom --queue-count 8192`) and changes nothing. Status projects the same availability
+as the closed `no_cap` object. No surface may label a setting unlimited while this ceiling or a
+provider limit applies. Incremental persistence of the state document is the prerequisite for
+revisiting this and is not part of this amendment.
+
+### Explicit increases and one disclosure contract
+
+No capacity increase happens automatically, and ordinary task permission never authorizes one. Every
+change goes through the existing preview and digest-bound apply. The preview carries the closed
+`yoetz.capacity-change-disclosure/1` record: dimension, scope, change (`increase`, `decrease`,
+`unchanged` or `unsupported`), current and requested counts with their queue and state byte limits,
+closed consequence tokens, the limits that still apply, the unchanged
+content/privacy/provider/credential/network authority, the lower, revoke, pause and resume commands,
+and `validation_status: not_validated`. Every command in the disclosure and every `next_command`
+uses the literal `<workspace>` and `<session-id>` placeholders rather than the typed path or session
+id. The CLI human output and the terminal interface render that record through one shared renderer,
+and agent guidance tells agents to relay those lines, so the three surfaces cannot drift. An
+increase names possible disk, memory and CPU use and possible slowdown of Yoetz or other apps, and
+carries the consequence token `workspace_aggregate_raised` with the line that the shared workspace
+queue follows the largest active selection, so it can raise the queue and state-document bounds for
+every session in the workspace. A decrease affects future admission only; accepted records drain and
+are not deleted. The preview digest binds the requested queue count and the change token, but not
+live pressure. The selection-preview payload schema tag is `yoetz.observation-selection-preview/2`.
+The CLI no-cap failure is a standard ADR-030 failure: `error.recovery` carries the continuation and
+directive, and `error.capacity` carries the facts as `{no_cap, alternative_command}`.
+
+Status and the local control projection add a `yoetz.observation-effective-budget/1` record: the
+selected and effective counts and labels, why they differ (`selected` or `workspace_aggregate`),
+every finite limit, the limiting dimension and its utilization, and the no-cap availability. MCP
+status stays read-only and does not expose or change capacity; an agent relays a change only after
+the owner accepts the displayed preview through the local CLI or terminal interface.
+
+The shared workspace queue is the largest of the active workspace setting's count (or the 512
+default when none is active) and every active session selection's count. A session selection can
+raise that aggregate but never lower it, so a session-scoped custom count below 512 lowers only
+that session's own admission and never a sibling's.
+
+### Defaults, allocation and upgrade
+
+Focused with `standard` (512) remains the default. The benchmark phase in
+[the performance runbook](../runbooks/observation-selection-performance.md) still owns any default
+change, and the custom ladder has not been measured.
+
+The intended multi-agent allocation model is a per-task reservation plus a shared burst pool.
+That model is recorded as direction only; per-session fair share remains the implemented
+allocation.
+
+Saved selections are preserved across upgrade and the settings document keeps the queue count as
+an integer. Local control schema `2.9.0` accepts custom counts, capacity labels and the
+effective-budget record; both peers must run the `2.9.0` manifest to exchange them. An older
+revision reading a saved custom count treats it as malformed, drops that selection to the default,
+and does not report the drop. That is a disclosed limitation of downgrade, not a supported path.

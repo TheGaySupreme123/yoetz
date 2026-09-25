@@ -3939,6 +3939,151 @@ def _control_v2_8_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     return document
 
 
+# The finite structural-queue bounds a 2.9 selection runtime may report (issue #828).  Mirrored
+# from ``yoetz.domain.observation_budget`` as reviewable literals rather than imported.
+_OBSERVATION_CAPACITY_MINIMUM: Final = 64
+_OBSERVATION_CAPACITY_MAXIMUM: Final = 8_192
+_OBSERVATION_CAPACITY_LABELS: Final[tuple[str, ...]] = ("standard", "larger", "largest", "custom")
+_OBSERVATION_BUDGET_LIMIT_KEYS: Final[tuple[str, ...]] = (
+    "queue_count",
+    "queue_bytes",
+    "state_bytes",
+    "pending_attempts",
+    "capture_tickets",
+    "capture_bytes",
+    "protected_count",
+    "protected_bytes",
+    "session_fair_share",
+    "session_fair_share_bytes",
+    "max_pending_age_ms",
+    "state_document_ceiling_bytes",
+)
+
+
+def _observation_capacity_count_schema() -> dict[str, JsonValue]:
+    return {
+        "maximum": _OBSERVATION_CAPACITY_MAXIMUM,
+        "minimum": _OBSERVATION_CAPACITY_MINIMUM,
+        "type": "integer",
+    }
+
+
+def _observation_capacity_label_schema() -> dict[str, JsonValue]:
+    return {"enum": list(_OBSERVATION_CAPACITY_LABELS), "type": "string"}
+
+
+def _observation_nonnegative_integer_schema() -> dict[str, JsonValue]:
+    return {"maximum": 9_007_199_254_740_991, "minimum": 0, "type": "integer"}
+
+
+def _observation_effective_budget_schema(
+    token: Mapping[str, JsonValue],
+) -> dict[str, JsonValue]:
+    """Return the closed ``yoetz.observation-effective-budget/1`` record definition."""
+
+    limits: dict[str, JsonValue] = {
+        "additionalProperties": False,
+        "properties": {
+            key: _observation_nonnegative_integer_schema() for key in _OBSERVATION_BUDGET_LIMIT_KEYS
+        },
+        "required": list(_OBSERVATION_BUDGET_LIMIT_KEYS),
+        "type": "object",
+    }
+    no_cap: dict[str, JsonValue] = {
+        "additionalProperties": False,
+        "properties": {
+            "available": {"const": False},
+            "dimension": {"const": "structural_queue"},
+            "reason": {"const": "state_document_ceiling"},
+            "state_document_ceiling_bytes": _observation_nonnegative_integer_schema(),
+            "largest_supported_queue_count": _observation_nonnegative_integer_schema(),
+        },
+        "required": [
+            "available",
+            "dimension",
+            "reason",
+            "state_document_ceiling_bytes",
+            "largest_supported_queue_count",
+        ],
+        "type": "object",
+    }
+    properties: dict[str, JsonValue] = {
+        "schema": {"const": "yoetz.observation-effective-budget/1"},
+        "budget_policy_version": dict(token),
+        "validation_status": dict(token),
+        "scope": {"enum": ["session", "workspace"], "type": "string"},
+        "selected_queue_count": _observation_capacity_count_schema(),
+        "selected_capacity_label": _observation_capacity_label_schema(),
+        "effective_queue_count": _observation_capacity_count_schema(),
+        "effective_capacity_label": _observation_capacity_label_schema(),
+        "effective_reason": {"enum": ["selected", "workspace_aggregate"], "type": "string"},
+        "limits": limits,
+        "limiting_dimension": {
+            "enum": ["count", "bytes", "oldest_age", "capture_backlog"],
+            "type": "string",
+        },
+        "utilization_bps": _observation_nonnegative_integer_schema(),
+        "no_cap": no_cap,
+    }
+    return {
+        "additionalProperties": False,
+        "properties": properties,
+        "required": list(properties),
+        "type": "object",
+    }
+
+
+def _control_v2_9_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Extend frozen 2.8 with custom finite capacity and the effective-budget record (#828).
+
+    Only ``control-result`` changes: ``observation_selection_runtime`` accepts any finite
+    structural-queue count in the supported range, names its capacity labels, and carries the
+    closed effective-budget record.  The other three documents only move to the 2.9.0 ``$id``.
+    """
+
+    source = (
+        Path(__file__).resolve().parent.parent
+        / "schemas"
+        / entry.relative_path.replace("2.9.0", "2.8.0")
+    )
+    document = cast(dict[str, JsonValue], json.loads(source.read_bytes()))
+    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    if entry.schema_name == "control-result":
+        definitions = cast(dict[str, JsonValue], document["$defs"])
+        runtime = definitions.get("observation_selection_runtime")
+        if not isinstance(runtime, dict):
+            raise SchemaGenerationError(
+                "control_selection_runtime_schema_template_invalid",
+                entries=(entry.relative_path,),
+            )
+        properties = runtime.get("properties")
+        required = runtime.get("required")
+        if (
+            not isinstance(properties, dict)
+            or not isinstance(required, list)
+            or not isinstance(properties.get("policy_version"), dict)
+            or "selected_capacity" not in properties
+            or "effective_capacity" not in properties
+        ):
+            raise SchemaGenerationError(
+                "control_selection_runtime_schema_template_invalid",
+                entries=(entry.relative_path,),
+            )
+        token = cast(dict[str, JsonValue], properties["policy_version"])
+        properties.update(
+            {
+                "selected_capacity": _observation_capacity_count_schema(),
+                "effective_capacity": _observation_capacity_count_schema(),
+                "selected_capacity_label": _observation_capacity_label_schema(),
+                "effective_capacity_label": _observation_capacity_label_schema(),
+                "effective_budget": {"$ref": "#/$defs/observation_effective_budget"},
+            }
+        )
+        required.extend(["selected_capacity_label", "effective_capacity_label", "effective_budget"])
+        definitions["observation_effective_budget"] = _observation_effective_budget_schema(token)
+    return document
+
+
 # The local-disclosure purpose grammar owned by ``yoetz.domain.privacy``.  Mirrored here rather
 # than imported so the generated bytes stay a reviewable literal; the conformance suite asserts
 # the two stay equal.
@@ -6559,6 +6704,38 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         lambda: __import__("yoetz.ports.control", fromlist=["ControlResult"]).ControlResult,
     ),
     _RegistryEntry(
+        "service/control-hello-2.9.0.schema.json",
+        "control-hello",
+        "2.9.0",
+        "request_result",
+        "local-control",
+        lambda: __import__("yoetz.ports.control", fromlist=["ControlRequest"]).ControlRequest,
+    ),
+    _RegistryEntry(
+        "service/control-hello-result-2.9.0.schema.json",
+        "control-hello-result",
+        "2.9.0",
+        "request_result",
+        "local-control",
+        lambda: __import__("yoetz.ports.control", fromlist=["ControlResult"]).ControlResult,
+    ),
+    _RegistryEntry(
+        "service/control-request-2.9.0.schema.json",
+        "control-request",
+        "2.9.0",
+        "request_result",
+        "local-control",
+        lambda: __import__("yoetz.ports.control", fromlist=["ControlRequest"]).ControlRequest,
+    ),
+    _RegistryEntry(
+        "service/control-result-2.9.0.schema.json",
+        "control-result",
+        "2.9.0",
+        "request_result",
+        "local-control",
+        lambda: __import__("yoetz.ports.control", fromlist=["ControlResult"]).ControlResult,
+    ),
+    _RegistryEntry(
         "service/isolation-report-1.0.0.schema.json",
         "isolation-report",
         "1.0.0",
@@ -6705,6 +6882,10 @@ _BUILDER_OWNED_SCHEMA_PATHS: Final[frozenset[str]] = frozenset(
         "service/control-hello-result-2.8.0.schema.json",
         "service/control-request-2.8.0.schema.json",
         "service/control-result-2.8.0.schema.json",
+        "service/control-hello-2.9.0.schema.json",
+        "service/control-hello-result-2.9.0.schema.json",
+        "service/control-request-2.9.0.schema.json",
+        "service/control-result-2.9.0.schema.json",
     }
 )
 
@@ -7011,6 +7192,13 @@ def build_schema_documents(
             "service/control-result-2.8.0.schema.json",
         }:
             normalized = _control_v2_8_schema(entry)
+        elif entry.relative_path in {
+            "service/control-hello-2.9.0.schema.json",
+            "service/control-hello-result-2.9.0.schema.json",
+            "service/control-request-2.9.0.schema.json",
+            "service/control-result-2.9.0.schema.json",
+        }:
+            normalized = _control_v2_9_schema(entry)
         elif entry.relative_path == "operations/publish-work-request-1.1.0.schema.json":
             normalized = _publish_work_request_schema(entry)
         elif entry.relative_path == "operations/publish-work-request-1.2.0.schema.json":

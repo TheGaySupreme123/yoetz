@@ -3025,14 +3025,14 @@ whose canonical owner is `yoetz.domain.privacy`'s wider `^[a-z][a-z0-9_-]{0,127}
 agent-projection purpose `client_result_projection` is one of these: it is fixed by the
 `agent_projection` CHECK in `migrations/catalog/0001.sql` and is part of every stored receipt's
 canonical bytes and digest, so it cannot be renamed. Control result `2.6.1` (the 0.2.3 repair)
-and every later result envelope, including the 0.3 line's `2.7.0` and `2.8.0`, therefore validate
-`local_disclosure_receipt.purpose` against their own `local_disclosure_purpose` definition,
+and every later result envelope, including the 0.3 line's `2.7.0`, `2.8.0` and `2.9.0`, therefore
+validate `local_disclosure_receipt.purpose` against their own `local_disclosure_purpose` definition,
 mirroring that domain grammar, while network egress keeps the stricter external reference. Before
 `2.6.1` the local branch reused the external grammar, so every ordinary local receipt failed the
 result envelope and `privacy receipts list`/`get` answered `read_projection_failed` (issue #732);
 the frozen `2.6.0` and earlier envelopes keep their released bytes. Hello envelopes stayed `2.6.0`
-on the 0.2 line; the 0.3 line's `2.7.0` and `2.8.0` request and result envelopes derive from
-`2.6.1` and add no second grammar. CLI JSON, terminal output and the prompt-loop menu render
+on the 0.2 line; the 0.3 line's `2.7.0`, `2.8.0` and `2.9.0` request and result envelopes derive
+from `2.6.1` and add no second grammar. CLI JSON, terminal output and the prompt-loop menu render
 decoded UTC receipt timestamps in canonical millisecond RFC3339 form (issues #731 and #732). The
 0.2.3 schema inventory is reported by version-manifest `2.2.1`, the 0.2.4 inventory by `2.2.2`,
 and the 0.2 line's setup-readiness and setup-status additions by `2.2.3` and `2.2.4`; the 0.3
@@ -4464,7 +4464,8 @@ these, an oversized Cursor write recorded the generic `cursor_payload_invalid`, 
 event degraded to the bare `observe` token, and an oversized Claude Code event recorded nothing at
 all (issue #667).
 
-`ObservationSelection` separates Focused/Detailed from the 512/2,048/8,192 count profiles.
+`ObservationSelection` separates Focused/Detailed from the queue-count capacity (the
+512/2,048/8,192 profiles or a custom count; see below).
 `ObservationSelectionSettings` resolves a live session override, then an explicit workspace
 selection, then the default. Each profile also has finite queue/state byte bounds and protected
 reserves. `PressureSnapshot` drives future optional-content reduction and temporary Detailed to
@@ -4484,6 +4485,63 @@ run the `2.6.0` manifest to exchange the new projection; the service does not si
 down-convert it to `2.5.0`. Selection state upgrades preserve pending delivery and default
 historical counters to zero, so the new accounting describes locally ingested inputs since the
 selection upgrade and never estimates older traffic.
+
+Configurable capacity follows the ADR-029 #828 amendment. `CapacityProfile` (512/2,048/8,192) is
+unchanged; `ObservationCapacity` is the owner-selected finite queue count, either one of those
+profiles or a custom count from 64 to 8,192 (`MIN_CUSTOM_QUEUE_COUNT`,
+`LARGEST_SUPPORTED_QUEUE_COUNT`), with the closed label `standard`, `larger`, `largest` or
+`custom`. `ObservationSelection.capacity` and `ObservationSelectionSettings.aggregate_capacity()`
+carry it; the settings document keeps the capacity as an integer queue count, and an
+out-of-range integer is a malformed setting that falls back to the safe default. The shared
+workspace aggregate is the largest of the active workspace setting's count (or the 512 default
+when none is active) and every active session selection's count. A session selection can raise
+that aggregate but never lower it: a session-scoped custom count below 512 lowers only that
+session's own admission, never a sibling's. `BudgetLimits.for_capacity` derives every limit from
+the count: queue bytes are 1 KiB per row, state bytes are `max(1 MiB, 2 × queue bytes)`, protected
+reserve rows and bytes are a quarter of the count and queue bytes with their existing floors
+(64 rows / 128 KiB), each capped at half the queue, session fair share is a quarter of the count
+and queue bytes, and pending attempts (256) and capture (512 tickets / 128 MiB) are fixed. For
+the three named profiles `for_capacity` delegates to `BudgetLimits.for_profile`, which keeps
+their unchanged limits. `STATE_DOCUMENT_CEILING_BYTES` (16 MiB) is the single definition of the
+local state-document safety ceiling that the store enforces.
+
+`CapacityRequest` is the parsed owner request (`kind` `profile`, `custom` or `no_cap`), produced
+by `parse_capacity_request` from the `--capacity` word or a decimal count plus the optional
+`--queue-count`. A no-cap request is valid input whose only answer is the non-retryable
+`invalid_request` reason `capacity_no_cap_unsupported`: the structural queue has no uncapped mode
+in this storage revision because of the state-document ceiling (`no_cap.reason:
+state_document_ceiling`), and the outcome names the largest supported finite capacity. Preview and
+apply both refuse it and change nothing. The reason maps to the admitted continuation
+`capacity_request_correction` (ADR-030 registry), whose directive tells the agent to have the
+owner choose a supported finite capacity, preview it, and apply only that exact accepted
+preview; the CLI failure body carries `error.capacity` beside `error.recovery`. The selection
+preview payload is
+`yoetz.observation-selection-preview/2`; it carries the parsed `capacity_request`, the current
+effective budget, and the closed `yoetz.capacity-change-disclosure/1` record (scope, change token,
+current and requested limits, closed consequence tokens, limits that still apply, unchanged
+authority, lower/revoke/pause/resume commands, `validation_status`). An increase carries the
+consequence token `workspace_aggregate_raised` because the shared workspace queue follows the
+largest active selection. Every command in the disclosure (`lower_command`, `revoke_command`,
+`pause_command`, `resume_command`) and every `next_command` uses the literal `<workspace>` and
+`<session-id>` placeholders, never the typed path or session id. Human CLI output and the terminal
+interface render that record with one shared renderer and never interpolate user-controlled text.
+The preview digest binds the requested count and change token, not live pressure. The CLI no-cap
+failure is a standard ADR-030 failure: `error.recovery` carries the continuation and directive,
+and `error.capacity` carries the facts as `{no_cap, alternative_command}`.
+
+`ObservationSelectionRuntimeStatus` adds `selected_capacity_label`, `effective_capacity_label` and
+the `yoetz.observation-effective-budget/1` record: scope, selected and effective counts and
+labels, `effective_reason` (`selected` or `workspace_aggregate`), every finite limit including
+`state_document_ceiling_bytes`, the limiting dimension, utilization in basis points, and the
+closed `no_cap` availability object. `effective_budget.limits.state_bytes` is the ladder value
+for the effective count; while a lowered selection drains, the store keeps the existing state
+document's size as the enforced bound until the drain completes. Local control schema `2.9.0`
+carries custom counts, the
+labels and that record. A client and service with different manifests are rejected at the
+authenticated handshake, so both peers must run the `2.9.0` manifest to exchange them; there is
+no down-conversion to `2.8.0`, whose status keeps the three-profile enum. An older revision that
+reads a saved custom count treats it as malformed and drops that selection to the default without
+reporting it. MCP status remains read-only and does not expose or change capacity.
 
 `protect_next_reads` is a bounded request to retain read evidence linked to an obligation, claim
 or finding; it grants no content or disclosure authority. `promote_buffered_observation` can retain
@@ -6140,8 +6198,8 @@ generation, subject-state digest, and protected-read reference. Selection route 
 all present or all absent. Routine summaries use the existing closed summary schema; individual
 observations remain closed to unknown fields. Domain and service route/authority validation
 remain mandatory. Released request 2.6.0 bytes and the hello contract remain unchanged. The 0.3
-line's request contracts (`2.7.0`, `2.8.0`) derive from `2.6.1` and carry the same fields and
-summary branch, so an envelope the 0.2.3 service admits is admitted unchanged after upgrade.
+line's request contracts (`2.7.0`, `2.8.0`, `2.9.0`) derive from `2.6.1` and carry the same fields
+and summary branch, so an envelope the 0.2.3 service admits is admitted unchanged after upgrade.
 
 Routine-read classification persists its proven success bit when the native outcome was nested.
 Summary construction still revalidates that bit. A legacy buffered group that cannot prove a

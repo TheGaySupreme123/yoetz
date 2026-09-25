@@ -683,6 +683,19 @@ session/stop, five-second ordinary event, or three-second teardown budgets, or c
 privacy, provider, or network authority. Pressure can make a selected Detailed session effectively
 Focused until the bounded recovery policy returns it to its still-valid selection.
 
+**Configurable capacity (issue #828) — Cursor decision.** Cursor uses the same local capacity path
+as every other host: `yoetz observe selection-preview` with `--capacity standard|larger|largest`,
+`--capacity custom --queue-count <64..8192>`, or `--capacity none`, then `selection-apply --accept
+--preview-digest`, or the terminal interface's `/observe`. There is no Cursor-specific capacity
+control, and repository or plugin configuration cannot raise capacity. An agent may relay a change
+only after the owner accepts the displayed preview's scope, values, local-hardware consequences,
+remaining limits, and lower/pause/resume path; ordinary task permission never authorizes an
+increase. `--capacity none` returns `capacity_no_cap_unsupported` because the local state document
+has a 16 MiB safety ceiling, and changes nothing; the largest supported capacity is 8,192 rows. MCP
+`status` stays read-only for capacity. Hook body caps and Cursor's hook budgets are unchanged.
+Custom counts need control schema `2.9.0` on both the client and the service; an older revision
+drops a saved custom count to the default.
+
 Use `protect-read` before an upcoming read when a later claim needs its individual identity. The
 reference must be an `obl_`, `clm_`, or `fnd_` identifier; at most 32 logical reads are outstanding,
 and the protection expires after ten minutes by default (an explicit expiry cannot exceed that

@@ -461,6 +461,7 @@ ADMITTED_CONTINUATION_TOKENS: frozenset[str] = frozenset(
         # producer attaches them to a public error today; they are admitted here because
         # ``yoetz.protocol.recovery`` requires the registry and this set to be equal, which is
         # what keeps a token from ever being admitted onto the wire without a directive behind it.
+        "capacity_request_correction",
         "ceremony_refusal_terminal",
         "ceremony_result_invalid",
         "config_correction_required",

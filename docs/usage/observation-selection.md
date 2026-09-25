@@ -20,14 +20,46 @@ Capacity is independent from detail:
 
 | Capacity | Queue-count target | Availability |
 | --- | ---: | --- |
-| standard | 512 | Default, with Focused or Detailed |
+| standard | 512 | Default and recommended, with Focused or Detailed |
 | larger | 2,048 | Explicit owner choice, with Focused or Detailed |
 | largest | 8,192 | Explicit owner choice, with Focused or Detailed |
+| custom | 64 to 8,192 | Explicit owner choice with `--queue-count`, with Focused or Detailed |
+| none (No Yoetz cap) | — | Not available for this queue; see below |
 
-Each profile also has finite byte, state, pending-pair, protected-reserve, fair-share, diagnostic,
-and capture budgets. The larger profiles are bounded choices whose performance validation remains
-provisional; use the preview and status output to see the selected and effective values and their
-current pressure. A larger queue does not promise higher sustained throughput.
+Each choice also has finite byte, state, pending-pair, protected-reserve, fair-share, diagnostic,
+and capture budgets. The queue allows 1 KiB per row, so 1,024 rows allow 1 MiB of queued records.
+The local state document may grow to twice the queue bytes, with a 1 MiB minimum and a 16 MiB
+safety ceiling. Every choice keeps the same 256 pending pre/post pairs and the same capture limits
+of 512 tickets and 128 MiB. The larger and custom choices are bounded, but their performance has
+not been validated; use the preview and status output to see the selected and effective values
+and their current pressure. A larger queue does not promise higher sustained throughput.
+
+Sessions in one workspace share one queue. Its size is the largest of the workspace setting (or
+the 512 default when there is none) and every active session selection. A session selection can
+raise the shared queue for every session in the workspace but never lower it: a session count
+below it, such as a custom count under 512, limits only that session's own admission, never another
+session's. Status reports both
+the value you selected and the value in effect, which limit is closest to full, and whether No
+Yoetz cap is available.
+
+## No Yoetz cap
+
+Choosing `--capacity none` does not remove the limit. The structural queue has no uncapped mode in
+this version: all observation state is kept in one local document with a 16 MiB safety ceiling,
+and an "unlimited" queue would still stop at that ceiling. Preview and apply both answer with the
+outcome `capacity_no_cap_unsupported` and change nothing. The explanation reads:
+
+```text
+No Yoetz cap is not available for the structural queue in this revision: the local state
+document has a 16 MiB safety ceiling. The largest supported finite capacity is 8,192 rows
+(--capacity largest or --capacity custom --queue-count 8192).
+```
+
+With `--json`, the failure carries the same facts under `error.capacity` (`no_cap` and
+`alternative_command`) beside the standard `error.recovery` guidance.
+
+AI-powered review limits are not part of this choice. Their input, output, and spend limits stay
+fixed or are set by your privacy policy, and provider limits always apply.
 
 ## Choose a selection
 
@@ -52,6 +84,73 @@ yoetz observe selection-apply --workspace /exact/project \
   --detail detailed --capacity larger --session-id <host-session-id> \
   --accept --preview-digest <preview-digest> --json
 ```
+
+For a custom count, add `--queue-count` to both preview and apply:
+
+```text
+yoetz observe selection-preview --workspace /exact/project \
+  --detail focused --capacity custom --queue-count 1024 \
+  --session-id <host-session-id> --json
+yoetz observe selection-apply --workspace /exact/project \
+  --detail focused --capacity custom --queue-count 1024 \
+  --session-id <host-session-id> --accept --preview-digest <preview-digest> --json
+```
+
+### What the preview discloses
+
+Yoetz never raises capacity on its own, and permission to run an ordinary task is not permission
+to raise it. Every preview shows the scope (this session, or the workspace), the current and
+requested queue rows with their queue and state byte limits, and the consequences. For an
+increase, the preview says:
+
+```text
+Larger local retention can increase disk use, memory use and CPU work, and may slow Yoetz or
+other apps.
+```
+
+Because sessions in a workspace share one queue, an increase also says:
+
+```text
+The shared workspace queue follows the largest active selection, so this can raise the queue and
+state-document bounds for every session in the workspace.
+```
+
+It then lists what stays limited (256 pending pairs, 512 capture tickets and 128 MiB of captured
+content, and the 16 MiB state document), states that content, privacy, provider, credential, and
+network authority do not change, gives the commands to lower the setting, to pause new observation
+ingest, and to resume it, and marks performance validation as provisional. Those commands show
+`<workspace>` and `<session-id>` placeholders rather than your typed path; put in your project path
+and session id when you run them. For a decrease, it says that lowering affects future admission
+only: accepted records drain and are not deleted. The JSON output carries the same facts as a
+structured `disclosure` object, and the preview digest binds the requested count, so a different
+count needs a new preview.
+
+An agent may relay a capacity change only after you accept the displayed preview. It should
+repeat the preview's scope, values, consequences, remaining limits, and lower, pause, and resume
+path rather than describing the change as safe, free, or unlimited, and it should never imply that
+provider limits no longer apply.
+
+### Lower or pause
+
+To lower a setting, preview and apply a smaller capacity at the same scope (the preview's
+"Lower it later" command restores the capacity you had before an increase). At the minimum of
+64 rows, pause ingest if needed. Revoking an override restores the inherited or default setting
+and can increase capacity; check the resulting selection. To stop new observation ingest while
+keeping consent and evidence, run
+`yoetz observe pause --workspace /exact/project`; `yoetz observe resume --workspace
+/exact/project` restarts it.
+
+### In the terminal interface
+
+In the terminal interface, `/observe` shows the current selection status and effective budget,
+then asks **Change local retention capacity?** The options are to keep the current setting,
+recommended (512), larger (2,048), largest (8,192), custom (you type a count from 64 to 8,192), or
+No Yoetz cap. The terminal interface changes the workspace default and keeps the current detail
+mode. After you pick a value it shows the same disclosure as the CLI preview and asks you to apply
+or cancel. Cancelling or pressing `Esc` changes nothing. Choosing No Yoetz cap shows the
+explanation above and changes nothing.
+
+### Scope and lifetime
 
 The default is a temporary session override. It is tied to the selected host session and can have
 an optional RFC3339 UTC `--expires-at` deadline. To make an explicit workspace default, preview and

@@ -106,6 +106,13 @@ or widen tool access to unblock it. Follow the exact typed continuation. For set
 import, use the request-templates procedure; if it names a trusted terminal or unsupported channel,
 route there without handling secrets or substituting chat assent.
 
+Capacity and cost changes need a disclosed choice: never choose a larger or uncapped local
+observation capacity for an ordinary task. When the user asks, run `yoetz observe
+selection-preview`, relay its scope, current and requested values, local-hardware consequences,
+remaining limits, and lower/pause/resume path, and apply only after the user accepts that preview.
+A no-cap request returns `capacity_no_cap_unsupported`; relay it with the largest supported
+alternative. See "Change local retention capacity" in [workflow.md](references/workflow.md).
+
 For closure, follow [coverage-and-receipts.md](references/coverage-and-receipts.md): ground status
 and evidence, publish the actual result, check, respond to returned findings at the result frontier,
 read findings including resolved history, recheck after material changes, and request `receipt` last.

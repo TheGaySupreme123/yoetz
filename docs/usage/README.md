@@ -16,7 +16,8 @@ the decisions behind it see [`docs/adr/`](../adr/).
 - [Working with several agents](multi-agent-work.md) — child tasks, dependency receipts, projects,
   and consented coordination.
 - [Observation selection](observation-selection.md) — Focused and Detailed retention, independent
-  capacity profiles, evidence protection, promotion, and bounded content limits.
+  and custom capacity with its disclosure, why No Yoetz cap is unavailable, evidence protection,
+  promotion, and bounded content limits.
 - [Importing bounded Codex JSONL](importing-codex-jsonl.md) — stage, review, authorize, and resume
   one exact local `codex exec --json` import.
 - [Privacy and AI-powered review](privacy-and-semantic-review.md) — the zero-egress default, the

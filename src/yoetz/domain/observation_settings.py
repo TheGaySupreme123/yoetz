@@ -8,6 +8,12 @@ new content category, provider, credential, or network channel.
 The wire helpers in this module are used only by the owner-private local
 observation state.  They accept a closed vocabulary so a caller cannot smuggle
 an arbitrary capture policy into a hook or workspace file.
+
+Persisted settings keep ``capacity`` as a plain integer queue count.  A
+custom count (#828) outside the three named profiles is therefore read by an
+older revision as a malformed setting and dropped to the safe Focused/512
+default; this revision drops any count outside the supported finite range the
+same way.
 """
 
 from __future__ import annotations
@@ -19,7 +25,9 @@ from typing import Final, Literal, cast
 from yoetz.domain.observation_budget import (
     BUDGET_POLICY_VERSION,
     BUDGET_VALIDATION_STATUS,
+    STANDARD_CAPACITY,
     CapacityProfile,
+    ObservationCapacity,
     ObservationMode,
     PressureState,
 )
@@ -65,19 +73,24 @@ class ObservationSelection:
     """
 
     detail: ObservationDetailProfile = ObservationDetailProfile.FOCUSED
-    capacity: ObservationCapacityProfile = ObservationCapacityProfile.STANDARD
+    capacity: ObservationCapacity = STANDARD_CAPACITY
 
     def __post_init__(self) -> None:
         if type(self.detail) is not ObservationDetailProfile:
             raise ProtocolValueError("invalid_event_value_type")
-        if type(self.capacity) is not ObservationCapacityProfile:
+        capacity: object = self.capacity
+        if isinstance(capacity, CapacityProfile):
+            # Compatibility seam: callers written against the closed profile
+            # vocabulary still construct the equivalent finite capacity.
+            object.__setattr__(self, "capacity", ObservationCapacity(int(capacity)))
+        elif type(capacity) is not ObservationCapacity:
             raise ProtocolValueError("invalid_event_value_type")
 
     @property
     def queue_count(self) -> int:
-        """Return the count target associated with this closed capacity profile."""
+        """Return the finite queue-count target of this selection."""
 
-        return OBSERVATION_CAPACITY_QUEUE_COUNTS[self.capacity]
+        return self.capacity.queue_count
 
 
 DEFAULT_OBSERVATION_SELECTION: Final = ObservationSelection()
@@ -204,25 +217,36 @@ class ObservationSelectionSettings:
         self,
         *,
         now: Timestamp | None = None,
-    ) -> ObservationCapacityProfile:
+    ) -> ObservationCapacity:
         """Return the finite workspace ceiling implied by active settings.
 
-        The shared queue uses the largest active owner selection as its
-        aggregate target, capped by the closed profile vocabulary at 8,192.
-        Per-session fairness and byte limits remain admission-controller
-        responsibilities; this helper never grants a sibling's detail mode.
+        The shared queue starts from the workspace baseline: the active
+        workspace setting's capacity, else the standard default.  An active
+        session selection can only raise the aggregate above that baseline,
+        never lower it, so a session that chose a small custom count does not
+        shrink the queue its siblings share.  The result is capped by the
+        supported finite range at 8,192.  Per-session fairness and byte limits
+        remain admission-controller responsibilities; this helper never
+        grants a sibling's detail mode.
         """
 
-        settings = [self.workspace, *(setting for _, setting in self.sessions)]
-        active = [
-            setting.selection.capacity
-            for setting in settings
-            if setting is not None and (now is None or not setting.expired(now))
-        ]
-        return max(active, key=int, default=ObservationCapacityProfile.STANDARD)
+        def active(setting: ObservationSelectionSetting | None) -> bool:
+            return setting is not None and (now is None or not setting.expired(now))
+
+        workspace = self.workspace
+        baseline = (
+            workspace.selection.capacity
+            if workspace is not None and active(workspace)
+            else STANDARD_CAPACITY
+        )
+        raised = [setting.selection.capacity for _, setting in self.sessions if active(setting)]
+        return max([baseline, *raised], key=lambda capacity: capacity.queue_count)
 
 
 SelectionOrigin = Literal["session", "workspace", "configured", "default"]
+
+EFFECTIVE_BUDGET_SCHEMA: Final = "yoetz.observation-effective-budget/1"
+_EMPTY_EFFECTIVE_BUDGET: Final = JsonObject({})
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,8 +278,8 @@ class ObservationSelectionRuntimeStatus:
 
     selected_mode: ObservationDetailProfile
     effective_mode: ObservationDetailProfile
-    selected_capacity: ObservationCapacityProfile
-    effective_capacity: ObservationCapacityProfile
+    selected_capacity: ObservationCapacity
+    effective_capacity: ObservationCapacity
     selection_origin: SelectionOrigin
     selection_expires_at: Timestamp | None
     pressure_state: PressureState
@@ -277,15 +301,38 @@ class ObservationSelectionRuntimeStatus:
     session_commitment: str | None = None
     policy_version: str = BUDGET_POLICY_VERSION
     validation_status: str = BUDGET_VALIDATION_STATUS
+    # Derived from the capacities when left empty; an explicit value must
+    # match.  Older snapshots (control 2.6-2.8) carry neither key.
+    selected_capacity_label: str = ""
+    effective_capacity_label: str = ""
+    effective_budget: JsonObject = _EMPTY_EFFECTIVE_BUDGET
 
     def __post_init__(self) -> None:
         if type(self.selected_mode) is not ObservationDetailProfile:
             raise ProtocolValueError("invalid_event_value_type")
         if type(self.effective_mode) is not ObservationDetailProfile:
             raise ProtocolValueError("invalid_event_value_type")
-        if type(self.selected_capacity) is not ObservationCapacityProfile:
+        for field_name in ("selected_capacity", "effective_capacity"):
+            raw_capacity: object = getattr(self, field_name)
+            if isinstance(raw_capacity, CapacityProfile):
+                # Same compatibility seam as ObservationSelection.
+                object.__setattr__(self, field_name, ObservationCapacity(int(raw_capacity)))
+            elif type(raw_capacity) is not ObservationCapacity:
+                raise ProtocolValueError("invalid_event_value_type")
+        for field_name, capacity in (
+            ("selected_capacity_label", self.selected_capacity),
+            ("effective_capacity_label", self.effective_capacity),
+        ):
+            label = getattr(self, field_name)
+            if label == "":
+                object.__setattr__(self, field_name, capacity.label)
+            elif label != capacity.label:
+                raise ProtocolValueError("invalid_event_value_type")
+        if type(self.effective_budget) is not JsonObject:
             raise ProtocolValueError("invalid_event_value_type")
-        if type(self.effective_capacity) is not ObservationCapacityProfile:
+        if self.effective_budget and (
+            self.effective_budget.get("schema") != EFFECTIVE_BUDGET_SCHEMA
+        ):
             raise ProtocolValueError("invalid_event_value_type")
         if type(self.selection_origin) is not str or self.selection_origin not in {
             "session",
@@ -354,8 +401,11 @@ def observation_selection_runtime_status_to_json(
         {
             "selected_mode": value.selected_mode.value,
             "effective_mode": value.effective_mode.value,
-            "selected_capacity": int(value.selected_capacity),
-            "effective_capacity": int(value.effective_capacity),
+            "selected_capacity": value.selected_capacity.queue_count,
+            "effective_capacity": value.effective_capacity.queue_count,
+            "selected_capacity_label": value.selected_capacity_label,
+            "effective_capacity_label": value.effective_capacity_label,
+            "effective_budget": value.effective_budget,
             "selection_origin": value.selection_origin,
             "selection_expires_at": (
                 None if value.selection_expires_at is None else value.selection_expires_at.wire
@@ -418,16 +468,23 @@ def observation_selection_runtime_status_from_json(
         "policy_version",
         "validation_status",
     }
-    if set(source) != required:
+    # Added by #828 (control 2.9): always emitted, optional on decode so a
+    # 2.6-2.8 snapshot still decodes with derived labels and no budget record.
+    optional = {"selected_capacity_label", "effective_capacity_label", "effective_budget"}
+    if not required <= set(source) or set(source) - required - optional:
         raise ProtocolValueError("invalid_event_value_type")
     try:
         selected_mode = ObservationDetailProfile.from_value(source["selected_mode"])
         effective_mode = ObservationDetailProfile.from_value(source["effective_mode"])
-        selected_capacity = ObservationCapacityProfile.from_value(source["selected_capacity"])
-        effective_capacity = ObservationCapacityProfile.from_value(source["effective_capacity"])
+        selected_capacity = _wire_capacity(source["selected_capacity"])
+        effective_capacity = _wire_capacity(source["effective_capacity"])
         pressure_state = PressureState(source["pressure_state"])
     except (TypeError, ValueError) as exc:
         raise ProtocolValueError("invalid_event_value_type") from exc
+    labels = (source.get("selected_capacity_label", ""), source.get("effective_capacity_label", ""))
+    if any(type(label) is not str for label in labels):
+        raise ProtocolValueError("invalid_event_value_type")
+    effective_budget = source.get("effective_budget", _EMPTY_EFFECTIVE_BUDGET)
     expiry = source["selection_expires_at"]
     session_commitment = source["session_commitment"]
     try:
@@ -460,7 +517,16 @@ def observation_selection_runtime_status_from_json(
         session_commitment=(cast(str | None, session_commitment)),
         policy_version=cast(str, source["policy_version"]),
         validation_status=cast(str, source["validation_status"]),
+        selected_capacity_label=cast(str, labels[0]),
+        effective_capacity_label=cast(str, labels[1]),
+        effective_budget=cast(JsonObject, effective_budget),
     )
+
+
+def _wire_capacity(value: object) -> ObservationCapacity:
+    # An exact integer (or the historic decimal-string spelling) in the
+    # supported finite range; anything else is malformed.
+    return ObservationCapacity.from_value(value)
 
 
 def resolve_observation_selection(
@@ -504,7 +570,7 @@ def _setting_to_json(setting: ObservationSelectionSetting) -> JsonObject:
     return JsonObject(
         {
             "detail": setting.selection.detail.value,
-            "capacity": setting.selection.capacity.value,
+            "capacity": setting.selection.capacity.queue_count,
             "set_at": setting.set_at.wire,
             "expires_at": None if setting.expires_at is None else setting.expires_at.wire,
         }
@@ -536,7 +602,7 @@ def _setting_from_json(raw: object) -> ObservationSelectionSetting:
     row = cast(Mapping[str, JsonValue], raw)
     try:
         detail = ObservationDetailProfile.from_value(row.get("detail"))
-        capacity = ObservationCapacityProfile.from_value(row.get("capacity"))
+        capacity = _wire_capacity(row.get("capacity"))
     except (ValueError, TypeError) as exc:
         raise ProtocolValueError("invalid_event_value_type") from exc
     set_at = row.get("set_at")
@@ -593,7 +659,9 @@ def observation_selection_settings_from_json(raw: object) -> ObservationSelectio
 
 __all__ = [
     "DEFAULT_OBSERVATION_SELECTION",
+    "EFFECTIVE_BUDGET_SCHEMA",
     "OBSERVATION_CAPACITY_QUEUE_COUNTS",
+    "ObservationCapacity",
     "ObservationCapacityProfile",
     "ObservationDetailProfile",
     "ObservationSelection",

@@ -163,6 +163,13 @@ transcripts, credentials, whole files/repositories, or unrelated source. Use onl
 material, state-bound excerpt. Follow terminal errors and typed continuations rather than probing;
 inherited `terminal_unavailable` means delegates make no calls.
 
+Capacity and cost changes need a disclosed choice: never choose a larger or uncapped local
+observation capacity for an ordinary task. When the user asks, run `yoetz observe
+selection-preview`, relay its scope, current and requested values, local-hardware consequences,
+remaining limits, and lower/pause/resume path, and apply only after the user accepts that preview.
+A no-cap request returns `capacity_no_cap_unsupported`; relay it with the largest supported
+alternative. See "Change local retention capacity" in [workflow.md](references/workflow.md).
+
 Follow [startup failure precedence](references/coverage-and-receipts.md#startup-failure-precedence)
 before applying the optional-service fallback. Exact continuations, same-request recovery, and a
 named one-time repair come first. If startup remains blocked without an applicable recovery path,
