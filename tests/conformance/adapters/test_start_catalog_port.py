@@ -720,11 +720,14 @@ async def test_initializing_route_preserves_its_pair_without_blocking_a_new_pair
 
 
 @pytest.mark.anyio
-async def test_repository_binding_is_atomic_and_mismatch_precedes_operation_reservation() -> None:
+@pytest.mark.parametrize("schema_version", [3, 4])
+async def test_repository_binding_is_atomic_and_mismatch_precedes_operation_reservation(
+    schema_version: int,
+) -> None:
     installation_id = _id(IdKind.INSTALLATION, 705)
     clock = _Clock(datetime(2026, 7, 19, 9, 30, tzinfo=UTC))
     memory, memory_state = _memory_catalog(installation_id, clock)
-    sqlite = _sqlite_catalog(installation_id, _Clock(clock.current))
+    sqlite = _sqlite_catalog(installation_id, _Clock(clock.current), schema_version=schema_version)
     commitment_a = "hmac-sha256:" + "a" * 64
     commitment_b = "hmac-sha256:" + "b" * 64
 

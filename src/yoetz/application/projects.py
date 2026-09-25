@@ -45,6 +45,7 @@ from yoetz.domain.coordination import (
     WorkState,
     canonical_resource_identity,
     coordination_generation_is_current,
+    general_link_conflicts,
     project_id,
     relative_resource_identity,
 )
@@ -77,6 +78,7 @@ from yoetz.ports.start_catalog import (
     TaskSourceProvenance,
 )
 from yoetz.protocol.canonical import canonical_encode, strict_json_parse
+from yoetz.protocol.errors import PublicOperationError
 from yoetz.protocol.ids import IdKind, validate_id
 
 __all__ = [
@@ -1020,6 +1022,40 @@ class InMemoryProjectCatalog:
                         project_ids.add(record.descriptor.project_id)
         return tuple(sorted(project_ids))
 
+    def _general_link_conflicts(
+        self, project_id: str, member_kind: MemberKind, member_commitment_or_id: str
+    ) -> bool:
+        other: list[tuple[str, MemberKind, str]] = []
+        provenance: list[tuple[str, str | None, str | None]] = []
+        for record in self.projects.values():
+            descriptor = record.descriptor
+            if (
+                descriptor.project_id == project_id
+                or descriptor.kind is not ProjectKind.GENERAL
+                or descriptor.dissolved_at is not None
+            ):
+                continue
+            for item in record.memberships:
+                if item.active:
+                    other.append(
+                        (descriptor.project_id, item.member_kind, item.member_commitment_or_id)
+                    )
+        for task_id, source in self.provenance.items():
+            provenance.append(
+                (
+                    task_id,
+                    source.repository_privacy_commitment,
+                    source.workspace_ref_commitment,
+                )
+            )
+        return general_link_conflicts(
+            target_project_id=project_id,
+            member_kind=member_kind,
+            member=member_commitment_or_id,
+            other_memberships=other,
+            provenance=provenance,
+        )
+
     async def record_project_membership(
         self,
         project_id: str,
@@ -1044,6 +1080,10 @@ class InMemoryProjectCatalog:
         )
         if existing is not None:
             return existing
+        if record.descriptor.kind is ProjectKind.GENERAL and self._general_link_conflicts(
+            project_id, member_kind, member_commitment_or_id
+        ):
+            raise ProjectCommandError(CoordinationErrorCode.GENERAL_MEMBERSHIP_CONFLICT)
         generation = record.descriptor.membership_generation + 1
         now = datetime.now(UTC).replace(microsecond=0)
         membership = ProjectMembership(
@@ -2205,6 +2245,74 @@ class ProjectApplication:
             decode=_descriptor_from_wire,
         )
 
+    async def _general_membership_conflict(
+        self, descriptor: ProjectDescriptor, command: LinkProjectCommand
+    ) -> bool:
+        if descriptor.kind is not ProjectKind.GENERAL:
+            return False
+        project_ids = await self.catalog.list_project_ids()
+        other: list[tuple[str, MemberKind, str]] = []
+        provenance: dict[str, tuple[str, str | None, str | None]] = {}
+
+        async def remember(task_id: str) -> None:
+            if task_id in provenance:
+                return
+            source = await self.catalog.task_source_provenance(task_id)
+            if source is None:
+                provenance[task_id] = (task_id, None, None)
+                return
+            provenance[task_id] = (
+                task_id,
+                source.repository_privacy_commitment,
+                source.workspace_ref_commitment,
+            )
+
+        if command.member_kind is MemberKind.TASK:
+            await remember(command.member_commitment_or_id)
+        elif command.member_kind is MemberKind.REPOSITORY:
+            for task_id in await self.catalog.list_repository_task_ids(
+                command.member_commitment_or_id
+            ):
+                await remember(task_id)
+        else:
+            for task_id in await self.catalog.list_workspace_task_ids(
+                command.member_commitment_or_id
+            ):
+                await remember(task_id)
+        for other_project_id in project_ids:
+            if other_project_id == descriptor.project_id:
+                continue
+            other_project = await self.catalog.project_state(other_project_id)
+            if (
+                other_project is None
+                or other_project.kind is not ProjectKind.GENERAL
+                or other_project.dissolved_at is not None
+            ):
+                continue
+            for item in await self.catalog.project_memberships(other_project_id):
+                if not item.active:
+                    continue
+                other.append((other_project_id, item.member_kind, item.member_commitment_or_id))
+                if item.member_kind is MemberKind.TASK:
+                    await remember(item.member_commitment_or_id)
+                elif item.member_kind is MemberKind.REPOSITORY:
+                    for task_id in await self.catalog.list_repository_task_ids(
+                        item.member_commitment_or_id
+                    ):
+                        await remember(task_id)
+                else:
+                    for task_id in await self.catalog.list_workspace_task_ids(
+                        item.member_commitment_or_id
+                    ):
+                        await remember(task_id)
+        return general_link_conflicts(
+            target_project_id=descriptor.project_id,
+            member_kind=command.member_kind,
+            member=command.member_commitment_or_id,
+            other_memberships=other,
+            provenance=provenance.values(),
+        )
+
     async def link(
         self,
         command: LinkProjectCommand | None = None,
@@ -2257,20 +2365,8 @@ class ProjectApplication:
             # mutated; record_project_membership then advances the generation and fences future
             # deliveries.
             await self.require_grant(descriptor.project_id, descriptor.membership_generation)
-            if command.member_kind is MemberKind.TASK:
-                project_ids = await self.catalog.list_task_project_ids(
-                    command.member_commitment_or_id
-                )
-                for other_project_id in project_ids:
-                    if other_project_id == descriptor.project_id:
-                        continue
-                    other_project = await self.catalog.project_state(other_project_id)
-                    if (
-                        other_project is not None
-                        and other_project.kind is ProjectKind.GENERAL
-                        and other_project.dissolved_at is None
-                    ):
-                        raise ProjectCommandError(CoordinationErrorCode.GENERAL_MEMBERSHIP_CONFLICT)
+            if await self._general_membership_conflict(descriptor, command):
+                raise ProjectCommandError(CoordinationErrorCode.GENERAL_MEMBERSHIP_CONFLICT)
             if command.member_kind is MemberKind.REPOSITORY:
                 target_repository = (
                     command.member_repository_commitment or command.member_commitment_or_id
@@ -2324,11 +2420,21 @@ class ProjectApplication:
                     # catalog commit and the journal update can still identify the exact row.
                     effect_generation=descriptor.membership_generation + 1,
                 )
-            membership = await self.catalog.record_project_membership(
-                descriptor.project_id,
-                member_kind=membership.member_kind,
-                member_commitment_or_id=membership.member_commitment_or_id,
-            )
+            try:
+                membership = await self.catalog.record_project_membership(
+                    descriptor.project_id,
+                    member_kind=membership.member_kind,
+                    member_commitment_or_id=membership.member_commitment_or_id,
+                )
+            except PublicOperationError as exc:
+                if (
+                    exc.safe_details.get("reason_code")
+                    == CoordinationErrorCode.GENERAL_MEMBERSHIP_CONFLICT.value
+                ):
+                    raise ProjectCommandError(
+                        CoordinationErrorCode.GENERAL_MEMBERSHIP_CONFLICT
+                    ) from exc
+                raise
             if (
                 record is not None
                 and membership.membership_generation != descriptor.membership_generation + 1

@@ -66,7 +66,11 @@ _COORDINATION_CONTROL_GUIDANCE: Final[Mapping[str, str]] = MappingProxyType(
             "unlink the task from its current general project before linking another"
         ),
         "project_member_not_found": "refresh project status and choose an active member",
-        "selector_conflict": "provide selectors that identify the same task",
+        "selector_conflict": (
+            "provide selectors that identify the same task; if project status cannot choose "
+            "because one task matches more than one general project, unlink one membership "
+            "or dissolve one project, then retry"
+        ),
         "coordination_consent_required": (
             "obtain current source-workspace consent before retrying"
         ),

@@ -22,6 +22,8 @@ from yoetz.domain.coordination import (
     ProjectTextRef,
     SessionHealth,
     WorkState,
+    general_link_conflicts,
+    provenance_spans_general_projects,
 )
 from yoetz.domain.privacy import LocalDisclosureSink
 from yoetz.domain.values import format_rfc3339_millis, validate_commitment, validate_sha256_digest
@@ -1114,6 +1116,54 @@ class MemoryStartCatalogAdapter:
         validate_commitment(member_commitment_or_id)
         return member_kind, member_commitment_or_id
 
+    def _active_general_memberships(self) -> list[tuple[str, MemberKind, str]]:
+        facts: list[tuple[str, MemberKind, str]] = []
+        for key, membership in self._state.memberships.items():
+            project = self._state.projects.get(key[0])
+            if (
+                membership.unbound_at is None
+                and project is not None
+                and project.kind is ProjectKind.GENERAL
+                and project.dissolved_at is None
+            ):
+                facts.append((key[0], key[2], key[3]))
+        return facts
+
+    def _route_provenance(self) -> list[tuple[str, str | None, str | None]]:
+        return [
+            (
+                route.task_id,
+                route.repository_privacy_commitment,
+                route.workspace_ref_commitment,
+            )
+            for route in self._state.routes.values()
+            if route.state is not TaskRouteState.QUARANTINED
+        ]
+
+    def _general_link_conflicts(self, project: str, kind: MemberKind, member: str) -> bool:
+        return general_link_conflicts(
+            target_project_id=project,
+            member_kind=kind,
+            member=member,
+            other_memberships=[
+                item for item in self._active_general_memberships() if item[0] != project
+            ],
+            provenance=self._route_provenance(),
+        )
+
+    def _provenance_spans_general_projects(
+        self,
+        task_id: str,
+        repository_commitment: str | None,
+        workspace_commitment: str | None,
+    ) -> bool:
+        return provenance_spans_general_projects(
+            task_id=task_id,
+            repository_commitment=repository_commitment,
+            workspace_commitment=workspace_commitment,
+            memberships=self._active_general_memberships(),
+        )
+
     async def record_project_membership(
         self,
         project_id: str,
@@ -1132,18 +1182,6 @@ class MemoryStartCatalogAdapter:
                 raise _error(PublicErrorCode.SESSION_NOT_FOUND)
             if descriptor.dissolved_at is not None:
                 raise _error(PublicErrorCode.SESSION_CONFLICT)
-            if kind is MemberKind.TASK and descriptor.kind is ProjectKind.GENERAL:
-                general_memberships = [
-                    membership
-                    for key, membership in self._state.memberships.items()
-                    if key[2] is MemberKind.TASK
-                    and key[3] == member
-                    and membership.unbound_at is None
-                    and self._state.projects.get(key[0]) is not None
-                    and self._state.projects[key[0]].kind is ProjectKind.GENERAL
-                ]
-                if any(item.project_id != project for item in general_memberships):
-                    raise _error(PublicErrorCode.SESSION_CONFLICT)
             active = [
                 membership
                 for key, membership in self._state.memberships.items()
@@ -1156,6 +1194,13 @@ class MemoryStartCatalogAdapter:
                 raise _error(PublicErrorCode.STORAGE_CORRUPT)
             if active:
                 return active[0]
+            if descriptor.kind is ProjectKind.GENERAL and self._general_link_conflicts(
+                project, kind, member
+            ):
+                raise _error(
+                    PublicErrorCode.SESSION_CONFLICT,
+                    safe_details={"reason_code": "general_project_membership_conflict"},
+                )
             generation = (
                 max(
                     [descriptor.membership_generation]
@@ -1438,6 +1483,15 @@ class MemoryStartCatalogAdapter:
             }:
                 raise _error(PublicErrorCode.SESSION_CONFLICT)
             if record.repository_privacy_commitment is None:
+                if self._provenance_spans_general_projects(
+                    task,
+                    repository_privacy_commitment,
+                    record.workspace_ref_commitment,
+                ):
+                    raise _error(
+                        PublicErrorCode.SESSION_CONFLICT,
+                        safe_details={"reason_code": "general_project_membership_conflict"},
+                    )
                 record = replace(
                     record,
                     repository_privacy_commitment=repository_privacy_commitment,
@@ -1521,6 +1575,15 @@ class MemoryStartCatalogAdapter:
                 ):
                     raise _error(PublicErrorCode.SESSION_CONFLICT)
                 if expected is None and actual is not None:
+                    if self._provenance_spans_general_projects(
+                        route.task_id,
+                        actual,
+                        route.workspace_ref_commitment,
+                    ):
+                        raise _error(
+                            PublicErrorCode.SESSION_CONFLICT,
+                            safe_details={"reason_code": "general_project_membership_conflict"},
+                        )
                     route = replace(
                         route,
                         repository_privacy_commitment=actual,
@@ -1555,6 +1618,15 @@ class MemoryStartCatalogAdapter:
                     updated_at=now,
                     repository_privacy_commitment=request.repository_privacy_commitment,
                 )
+                if self._provenance_spans_general_projects(
+                    route.task_id,
+                    route.repository_privacy_commitment,
+                    route.workspace_ref_commitment,
+                ):
+                    raise _error(
+                        PublicErrorCode.SESSION_CONFLICT,
+                        safe_details={"reason_code": "general_project_membership_conflict"},
+                    )
                 self._install_route(route)
                 self._state.session_states[session_id] = SessionState(
                     task_id=task_id,
