@@ -1300,6 +1300,19 @@ it becomes readable without requiring a fresh event. Do not reset local state, e
 or toggle consent to manufacture a healthy status. Real hard limits continue to apply after
 inventory recovery, and previous loss counts and identities remain unchanged.
 
+A known inventory can still hold a stranded capture handoff: a ticket whose `codex_hook` row was
+already acknowledged or quarantined, so nothing will consume it. Its age alone used to hold
+`oldest_age` at the hard limit with an empty queue (#836). The row's own delivery now retires a
+ticket it leaves behind, and the same READY maintenance pass retires any handoff at least 30
+seconds old that no queued row can deliver, through the catalog route of the task that owns it
+rather than a session mapping. It reports `capture_handoff_retired` or, when an owning bundle cannot
+be read, `capture_handoff_unavailable` and retries. A handoff whose row is still queued keeps its
+pressure. `observe status --json` names each retirement under `capture_handoff_retirements` (stage,
+reason, ticket state, quarantine reason, and age) and records `content_capture_unavailable`,
+because the staged bytes are not attached. In a workspace shared with Claude Code or Cursor, their
+hooks deliver queued Codex rows without their own content profile, so a Codex row is no longer
+refused as `content_capture_profile_mismatch`.
+
 Recovery emits fixed `capture_inventory_*` reason counts in its internal maintenance summary;
 these are not ledger receipts or a new hook diagnostic format. Historical local selection losses with complete original route attribution are reported by
 service maintenance even when no later envelope is admitted. New checks reconcile their task's

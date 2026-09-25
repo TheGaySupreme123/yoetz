@@ -17,10 +17,11 @@ import re
 import stat
 import threading
 import time
-from collections.abc import Callable, Generator, Iterable, Mapping, MutableMapping
+from collections.abc import Callable, Generator, Iterable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import MappingProxyType
 from typing import Final, TypeVar, cast
 
 from yoetz.adapters.integrations.observation_admission import (
@@ -36,9 +37,12 @@ from yoetz.adapters.integrations.observation_admission import (
 )
 from yoetz.config.paths import PathSafetyError, ensure_owner_only_dir, state_dir
 from yoetz.domain.observation import (
+    CAPTURE_HANDOFF_RECONCILE_AGE_MS,
     OBSERVATION_BACKPRESSURE_REASON,
     AdviceItem,
     AdviceSnapshot,
+    CaptureHandoffRetirementReason,
+    CaptureHandoffRetirementStage,
     ObservationCaptureBacklog,
     ObservationControlCommand,
     ObservationCursor,
@@ -127,6 +131,7 @@ except ImportError:  # pragma: no cover - the Yoetz service is hosted on POSIX
 __all__ = [
     "HOOK_MAPPING_VERSION",
     "AdviceDelivery",
+    "CaptureHandoffStructuralState",
     "FrontierMotionNotice",
     "LocalContentCaptureAuthority",
     "LocalObservationConsent",
@@ -220,6 +225,13 @@ _MAX_SESSION_GAP_CODES: Final = 8
 # lane is drained on the first refusal, so this bound is never reached by a
 # repeating failure, only by many distinct ones.
 _MAX_SUMMARY_REFUSALS: Final = 16
+# Retired native capture handoffs are named, not counted anonymously: each
+# entry records the retirement stage, the ticket state, and why its structural
+# row could no longer consume it (#836). Older entries roll off; the total
+# retirement count is kept separately.
+_MAX_CAPTURE_HANDOFF_RETIREMENTS: Final = 16
+_CAPTURE_HANDOFF_STAGES: Final = frozenset(item.value for item in CaptureHandoffRetirementStage)
+_CAPTURE_HANDOFF_REASONS: Final = frozenset(item.value for item in CaptureHandoffRetirementReason)
 _MAX_CAPTURE_BACKLOG_ROUTES: Final = 256
 _MAX_CAPTURE_TICKET_RESERVATIONS: Final = 512
 _MAX_CAPTURE_CONTENT_BYTES: Final = 128 * 1024 * 1024
@@ -646,6 +658,21 @@ class LocalObservationConsent:
     @property
     def active(self) -> bool:
         return self.revoked_at is None and not self.paused
+
+
+@dataclass(frozen=True, slots=True)
+class CaptureHandoffStructuralState:
+    """Which structural rows could still consume a native capture handoff.
+
+    A handoff is keyed by ``(source, session_commitment, source_identity)``.
+    ``pending`` holds rows still waiting in the delivery outbox or the selected
+    admission buffer; ``quarantined`` maps a terminally refused row to its
+    closed reason code.  A handoff whose key is in neither set has no
+    structural row left that can consume it.  The snapshot carries no payload.
+    """
+
+    pending: frozenset[tuple[str, str, str]]
+    quarantined: Mapping[tuple[str, str, str], str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1216,6 +1243,11 @@ class _WorkspaceState:
     # letting an anonymous sweep exception repeat every minute (issue #753).
     selection_summary_refusals: tuple[JsonObject, ...] = ()
     selection_summary_refusal_notice_pending: bool = False
+    # Bounded, payload-free account of retired native capture handoffs (#836):
+    # the stage, ticket state, and reason that let a retained ticket stop
+    # holding capture pressure. The count covers entries that rolled off.
+    capture_handoff_retirements: tuple[JsonObject, ...] = ()
+    capture_handoff_retired_count: int = 0
     # (codex_session_id, envelope, reason, quarantined_at). The timestamp is
     # store-authored at quarantine time so the age bound measures time *in*
     # quarantine, never the (possibly much older) envelope receipt time.
@@ -1551,6 +1583,60 @@ def _load_pressure_snapshots(raw: object) -> dict[str, PressureSnapshot]:
         except ProtocolValueError, TypeError, ValueError:
             continue
     return loaded
+
+
+def _bounded_count(raw: object) -> int:
+    """Read a persisted non-negative counter, treating a malformed value as zero."""
+
+    if type(raw) is not int or not 0 <= raw <= _MAX_SAFE_INTEGER:
+        return 0
+    return raw
+
+
+def _capture_handoff_retirement_valid(entry: Mapping[str, JsonValue]) -> bool:
+    """Keep only closed-vocabulary, payload-free retirement diagnostics."""
+
+    quarantine_reason = entry.get("quarantine_reason")
+    age_ms = entry.get("age_ms")
+    retired_at = entry.get("retired_at")
+    try:
+        if type(retired_at) is not str:
+            return False
+        Timestamp(retired_at)
+    except ProtocolValueError, TypeError, ValueError:
+        return False
+    return (
+        entry.get("stage") in _CAPTURE_HANDOFF_STAGES
+        and entry.get("reason") in _CAPTURE_HANDOFF_REASONS
+        and entry.get("ticket_state") in {"staging", "pending"}
+        and entry.get("source") in {item.value for item in ObservationSource}
+        and type(entry.get("task_id")) is str
+        and _CAPTURE_BACKLOG_ROUTE_RE.fullmatch(cast(str, entry.get("task_id"))) is not None
+        and type(age_ms) is int
+        and 0 <= age_ms <= _MAX_SAFE_INTEGER
+        and (
+            quarantine_reason is None
+            or (
+                type(quarantine_reason) is str
+                and _OUTBOX_REASON_RE.fullmatch(quarantine_reason) is not None
+            )
+        )
+    )
+
+
+def _capture_handoff_retirements_from_json(raw: object) -> tuple[JsonObject, ...]:
+    """Decode the bounded retirement account; malformed entries are dropped."""
+
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    entries: list[JsonObject] = []
+    for item in cast(Sequence[object], raw)[-_MAX_CAPTURE_HANDOFF_RETIREMENTS:]:
+        if not isinstance(item, Mapping):
+            continue
+        entry = cast(Mapping[str, JsonValue], item)
+        if _capture_handoff_retirement_valid(entry):
+            entries.append(JsonObject(dict(entry)))
+    return tuple(entries)
 
 
 def _timestamp_age_ms(now: Timestamp, earlier: Timestamp | None) -> int:
@@ -6073,6 +6159,178 @@ class LocalObservationStore:
         with self._lock:
             return self._capture_inventory_recovery_pending(self._load(workspace))
 
+    @staticmethod
+    def _capture_handoff_candidates(
+        state: _WorkspaceState, now: Timestamp, older_than_ms: int
+    ) -> tuple[str, ...]:
+        """Task routes whose oldest unfinished handoff is at least ``older_than_ms`` old."""
+
+        oldest_by_task: dict[str, Timestamp] = {}
+        for reservation in (state.capture_reservations or {}).values():
+            current = oldest_by_task.get(reservation.task_id)
+            if current is None or reservation.reserved_at < current:
+                oldest_by_task[reservation.task_id] = reservation.reserved_at
+        for task_id, snapshot in (state.capture_backlogs or {}).items():
+            # A route report without an identity cannot be opened; unknown
+            # scope is repaired by inventory recovery instead.
+            if task_id == _UNKNOWN_CAPTURE_BACKLOG_ROUTE or snapshot.oldest_receipt_time is None:
+                continue
+            current = oldest_by_task.get(task_id)
+            if current is None or snapshot.oldest_receipt_time < current:
+                oldest_by_task[task_id] = snapshot.oldest_receipt_time
+        eligible = sorted(
+            (
+                (stamp, task_id)
+                for task_id, stamp in oldest_by_task.items()
+                if _timestamp_age_ms(now, stamp) >= older_than_ms
+            ),
+            key=lambda item: (item[0].wire, item[1].encode()),
+        )
+        return tuple(task_id for _stamp, task_id in eligible)
+
+    def capture_handoff_candidates(
+        self,
+        workspace: str,
+        *,
+        older_than_ms: int = CAPTURE_HANDOFF_RECONCILE_AGE_MS,
+    ) -> tuple[str, ...]:
+        """Return task routes, oldest first, with a handoff old enough to reconcile.
+
+        Central reservations and cached task snapshots both count, so a legacy
+        ticket without a reservation is still found. This read never changes
+        pressure, admission, or accounting (#836).
+        """
+
+        workspace = validate_commitment(workspace)
+        if (
+            type(older_than_ms) is not int
+            or isinstance(older_than_ms, bool)
+            or not 0 <= older_than_ms <= _MAX_SAFE_INTEGER
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+        now = self._wall_timestamp()
+        with self._lock:
+            return self._capture_handoff_candidates(self._load(workspace), now, older_than_ms)
+
+    def capture_handoff_structural_state(self, workspace: str) -> CaptureHandoffStructuralState:
+        """Name the structural rows that could still consume a native handoff.
+
+        Only an outbox row or a selected-admission input can still be delivered
+        to the coordinator. A quarantined row is terminal: its reason is kept
+        so a retired handoff can name the transition that stranded it.
+        """
+
+        workspace = validate_commitment(workspace)
+        with self._lock:
+            state = self._load(workspace)
+            pending: set[tuple[str, str, str]] = set()
+            for row in state.pending_outbox or ():
+                pending.add(
+                    (
+                        row.envelope.source.value,
+                        row.envelope.session_commitment,
+                        row.envelope.source_identity,
+                    )
+                )
+            for item in state.admission_buffer.inputs:
+                pending.add(
+                    (
+                        item.envelope.source.value,
+                        item.envelope.session_commitment,
+                        item.envelope.source_identity,
+                    )
+                )
+            quarantined: dict[tuple[str, str, str], str] = {}
+            for _session, envelope, reason, _at in state.quarantine or ():
+                key = (envelope.source.value, envelope.session_commitment, envelope.source_identity)
+                if key not in pending:
+                    quarantined[key] = reason
+            return CaptureHandoffStructuralState(
+                pending=frozenset(pending),
+                quarantined=MappingProxyType(quarantined),
+            )
+
+    def record_capture_handoff_retirement(
+        self,
+        workspace: str,
+        *,
+        stage: CaptureHandoffRetirementStage,
+        reason: CaptureHandoffRetirementReason,
+        ticket_state: str,
+        source: ObservationSource,
+        task_id: str,
+        age_ms: int,
+        quarantine_reason: str | None = None,
+    ) -> None:
+        """Account one retired handoff and its honest content gap (#836).
+
+        The staged content of a retired handoff will never be attached to its
+        structural observation, so ``content_capture_unavailable`` is recorded.
+        The bounded entry names the stage, ticket state, and reason; it never
+        carries a source identity, content, path, or exception text.
+        """
+
+        workspace = validate_commitment(workspace)
+        if (
+            type(stage) is not CaptureHandoffRetirementStage
+            or type(reason) is not CaptureHandoffRetirementReason
+            or ticket_state not in {"staging", "pending"}
+            or type(source) is not ObservationSource
+            or type(task_id) is not str
+            or _CAPTURE_BACKLOG_ROUTE_RE.fullmatch(task_id) is None
+            or type(age_ms) is not int
+            or isinstance(age_ms, bool)
+            or age_ms < 0
+            or (
+                quarantine_reason is not None
+                and (
+                    type(quarantine_reason) is not str
+                    or _OUTBOX_REASON_RE.fullmatch(quarantine_reason) is None
+                )
+            )
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+        entry = JsonObject(
+            {
+                "stage": stage.value,
+                "reason": reason.value,
+                "ticket_state": ticket_state,
+                "source": source.value,
+                "task_id": task_id,
+                "age_ms": min(age_ms, _MAX_SAFE_INTEGER),
+                "quarantine_reason": quarantine_reason,
+                "retired_at": self._wall_timestamp().wire,
+            }
+        )
+        with self._lock:
+            state = self._load(workspace)
+            self._note_gap_state(state, ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
+            state.capture_handoff_retirements = (
+                *state.capture_handoff_retirements,
+                entry,
+            )[-_MAX_CAPTURE_HANDOFF_RETIREMENTS:]
+            state.capture_handoff_retired_count = min(
+                _MAX_SAFE_INTEGER, state.capture_handoff_retired_count + 1
+            )
+            self._save(workspace, state)
+
+    def capture_handoff_retirements(self, workspace: str) -> JsonObject:
+        """Return the bounded local-only account of retired native handoffs.
+
+        Like ``summary_refusals`` this is read by ``observe status`` and the
+        owner's diagnostics; it is not part of a frozen control-result schema.
+        """
+
+        workspace = validate_commitment(workspace)
+        with self._lock:
+            state = self._load(workspace)
+            return JsonObject(
+                {
+                    "retired_count": state.capture_handoff_retired_count,
+                    "recent": state.capture_handoff_retirements,
+                }
+            )
+
     def capture_reservation_bootstrap_ready(
         self, workspace: str, task_id: str | None = None
     ) -> bool:
@@ -6753,6 +7011,7 @@ class LocalObservationStore:
     def pending_workspaces(self) -> tuple[str, ...]:
         """Return opaque commitments with delivery, lifecycle, or capture recovery work."""
 
+        now = self._wall_timestamp()
         with self._lock:
             pending: list[str] = []
             for workspace, state in self._iter_workspaces():
@@ -6770,6 +7029,11 @@ class LocalObservationStore:
                     or pressure_active
                     or self._capture_inventory_recovery_pending(state)
                     or self._pending_selection_losses(state)
+                    # An aged native handoff is maintenance demand even with an
+                    # empty outbox: its structural row may be gone (#836).
+                    or self._capture_handoff_candidates(
+                        state, now, CAPTURE_HANDOFF_RECONCILE_AGE_MS
+                    )
                 ):
                     pending.append(workspace)
             return tuple(sorted(pending, key=str.encode))
@@ -9528,6 +9792,9 @@ class LocalObservationStore:
                     )
                 }
             )
+        if state.capture_handoff_retirements or state.capture_handoff_retired_count:
+            payload["capture_handoff_retirements"] = state.capture_handoff_retirements
+            payload["capture_handoff_retired_count"] = state.capture_handoff_retired_count
         if state.pressure_snapshots:
             payload["pressure_snapshots"] = _pressure_snapshots_to_json(state.pressure_snapshots)
         return payload
@@ -10268,6 +10535,10 @@ class LocalObservationStore:
             selection_summary_refusal_notice_pending=(
                 raw.get("selection_summary_refusal_notice_pending") is True
             ),
+            capture_handoff_retirements=_capture_handoff_retirements_from_json(
+                raw.get("capture_handoff_retirements")
+            ),
+            capture_handoff_retired_count=_bounded_count(raw.get("capture_handoff_retired_count")),
             session_workspaces=session_workspaces,
             cursors=cursors,
             dedup=set(dedup_order),

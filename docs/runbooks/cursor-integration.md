@@ -613,6 +613,15 @@ Native AI-powered review selection uses the accepted tool event's durable sessio
 require an approved-check policy. Local capture consent and repository disclosure permission
 remain separate requirements.
 
+A handoff that its structural row can no longer consume (the row was already acknowledged,
+quarantined, or refused) is retired by that row's own delivery, by the READY maintenance sweep once
+it is 30 seconds old, or by a new CHECK's preflight, instead of holding shared oldest-age pressure
+at the hard limit (#836). `observe status --json` names each retirement under
+`capture_handoff_retirements` and records `content_capture_unavailable`. A handoff whose row is
+still queued keeps counting toward pending age. This hook sends its Cursor content profile only with
+Cursor rows; a queued Codex or Claude Code row drained from the same workspace carries no profile, so
+it is not refused as `content_capture_profile_mismatch`.
+
 ### Oversized hook payloads (issue #667)
 
 A Cursor hook body over the 256 KiB trusted parse cap (`MAX_HOOK_STDIN_BYTES`) is not admitted as

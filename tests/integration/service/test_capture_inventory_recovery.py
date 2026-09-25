@@ -110,6 +110,12 @@ class _World:
             clock=self.coordinator.clock,
             generation_is_current=generation_is_current,
         )
+        self.coordinator.capture_handoff_reconcile = partial(
+            ready_module._reconcile_capture_handoffs,  # pyright: ignore[reportPrivateUsage]
+            catalog=cast(StartCatalogPort, self.catalog),
+            runtime=cast(BundleRuntimePort, self.routes),
+            generation_is_current=generation_is_current,
+        )
 
     def sweep(self, *, capture_recovery_budget_seconds: float = 5.0) -> ObservationOutboxSweeper:
         return ObservationOutboxSweeper(
@@ -704,6 +710,10 @@ async def test_recovered_inventory_preserves_real_pending_ticket_pressure(
 
     monkeypatch.setattr(BudgetLimits, "for_profile", classmethod(small_capture_budget))
     stamp = timestamp_from_datetime(world.coordinator.clock.now_utc())
+    # Genuinely pending handoffs carry the current content authority; a stale
+    # generation could never be consumed and is retired as stranded (#836).
+    authority = world.local.content_capture_authority(world.workspace)
+    assert authority is not None
     for number, (current, store) in enumerate(
         (
             (world.runtime, world.observation),
@@ -722,7 +732,7 @@ async def test_recovered_inventory_preserves_real_pending_ticket_pressure(
                 cursor=ObservationCursor(1, 0, number, "hmac-sha256:" + "a" * 64, "fixture-v1"),
                 logical_identity=f"retained-{number}",
                 content_capture_profile=CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
-                authority_generation="sha256:" + "0" * 64,
+                authority_generation=authority.generation,
                 object_ids=(),
                 captured_at=stamp,
             )
@@ -990,7 +1000,10 @@ async def test_partial_ticket_ids_do_not_release_an_unlisted_reservation(
         world.workspace, "sha256:" + "c" * 64, world.runtime.task_id, 17
     )
     world.local.mark_capture_backlog_scope_unknown(world.workspace)
-    stamp = timestamp_from_datetime(world.coordinator.clock.now_utc())
+    # A fresh aggregate keeps this test on the bootstrap step. An aged handoff
+    # would also be reconciled against the durable listing (#836), which is
+    # covered by tests/integration/service/test_capture_handoff_recovery.py.
+    stamp = world.local._wall_timestamp()  # pyright: ignore[reportPrivateUsage]
 
     def retained_without_complete_ids(workspace: str) -> ObservationCaptureBacklog:
         assert workspace == world.workspace

@@ -393,6 +393,34 @@ class SqliteObservationStore:
             tickets.append(ticket)
         return tuple(tickets)
 
+    def structural_envelope_accepted(self, workspace: str, envelope: ObservationEnvelope) -> bool:
+        """Report whether this exact structural envelope already passed store dedup.
+
+        The dedup identity omits content references and gap codes, so a
+        contentless copy and a content-bearing copy of one native row share it.
+        A capture-only handoff staged after that point could never be consumed:
+        the structural FIFO has already moved past the row (#836).
+        """
+
+        if type(envelope) is not ObservationEnvelope:
+            raise _error(
+                PublicErrorCode.INVALID_REQUEST,
+                "Observation envelope is invalid.",
+                retryable=False,
+            )
+        try:
+            row = self._db.execute(
+                "SELECT 1 FROM observation_dedup WHERE dedup_key = ?",
+                (_dedup_key(workspace, envelope),),
+            ).fetchone()
+        except apsw.Error as exc:
+            raise _error(
+                PublicErrorCode.STORAGE_CORRUPT,
+                "Observation dedup table is unavailable.",
+                retryable=False,
+            ) from exc
+        return row is not None
+
     def bind_session(self, workspace_commitment: str, session_commitment: str) -> None:
         consent = self._consent_row(workspace_commitment)
         if consent is None:

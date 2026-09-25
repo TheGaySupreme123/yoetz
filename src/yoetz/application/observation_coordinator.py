@@ -29,6 +29,8 @@ from yoetz.adapters.integrations.codex_lifecycle import (
     validate_codex_session_id,
 )
 from yoetz.adapters.integrations.observation_local import (
+    CaptureHandoffStructuralState,
+    LocalContentCaptureAuthority,
     LocalObservationStore,
     session_commitment_from_codex_id,
 )
@@ -116,9 +118,12 @@ from yoetz.domain.host_lineage import (
     host_lineage_from_payload,
 )
 from yoetz.domain.observation import (
+    CAPTURE_HANDOFF_RECONCILE_AGE_MS,
     OBSERVATION_BACKPRESSURE_REASON,
     OBSERVATION_CONTENT_CAPTURE_PENDING_REASON,
     AdviceItem,
+    CaptureHandoffRetirementReason,
+    CaptureHandoffRetirementStage,
     ObservationCapturePart,
     ObservationCaptureTicket,
     ObservationContentChunk,
@@ -216,6 +221,9 @@ _CAPTURED_CONTENT_MEDIA_TYPE: Final = "application/vnd.yoetz.observation-content
 # actual manifest-byte check at its durable boundary.
 _MAX_CAPTURE_CONTENT_BYTES: Final = 128 * 1024 * 1024
 _MAX_CAPTURE_BOOTSTRAP_WORKSPACES: Final = 256
+# One maintenance turn opens at most this many task routes for aged handoffs,
+# oldest first; the next sweep continues with any that remain (#836).
+_MAX_CAPTURE_HANDOFF_TASKS_PER_TURN: Final = 8
 _CAPTURE_TICKET_RETRYABLE_REJECTION_REASONS: Final = frozenset(
     {
         OBSERVATION_BACKPRESSURE_REASON,
@@ -605,6 +613,71 @@ class CaptureBudgetBootstrapHook(Protocol):
     ) -> Awaitable[bool]: ...
 
 
+type CaptureHandoffVisitor = Callable[[TaskRuntime, TaskObservationPort], Awaitable[int]]
+
+
+class CaptureHandoffReconcileHook(Protocol):
+    """Ready-owned routing of the tasks that own aged native capture handoffs.
+
+    The callback opens each named task route through the service catalog,
+    applies ``visit`` to its runtime and observation store, and releases it.
+    It needs no host-session mapping, so a handoff left by an ended session is
+    still reachable.  It returns ``True`` only when every named task was
+    visited.  The coordinator invokes it while holding the shared capture lock
+    (#836).
+    """
+
+    def __call__(
+        self,
+        workspace: str,
+        task_ids: tuple[str, ...],
+        visit: CaptureHandoffVisitor,
+        /,
+    ) -> Awaitable[bool]: ...
+
+
+def _capture_handoff_retirement_reason(
+    ticket: ObservationCaptureTicket,
+    authority: LocalContentCaptureAuthority | None,
+    structural: CaptureHandoffStructuralState | None,
+    *,
+    age_ms: int,
+) -> tuple[CaptureHandoffRetirementReason, str | None] | None:
+    """Decide whether an unfinished handoff can still be consumed.
+
+    Current local content authority is required first; those rules match the
+    CHECK preflight.  With ``structural`` supplied, an aged handoff is kept only
+    while an outbox row or selected input with its exact native identity can
+    still be delivered.  A missing row cannot come back: only the row itself
+    consumes a ticket, and the drain acknowledges or quarantines it only after
+    the coordinator has returned.  Returns the reason and, for a quarantined
+    row, its closed quarantine reason.
+    """
+
+    if authority is None:
+        return CaptureHandoffRetirementReason.AUTHORITY_ABSENT, None
+    if not authority.active:
+        return CaptureHandoffRetirementReason.AUTHORITY_INACTIVE, None
+    if not authority.runtime_enabled:
+        return CaptureHandoffRetirementReason.RUNTIME_DISABLED, None
+    if ticket.authority_generation != authority.generation:
+        return CaptureHandoffRetirementReason.AUTHORITY_GENERATION_CHANGED, None
+    if (
+        ticket.content_capture_profile is not None
+        and ticket.content_capture_profile not in authority.profiles
+    ):
+        return CaptureHandoffRetirementReason.PROFILE_UNSELECTED, None
+    if structural is None or age_ms < CAPTURE_HANDOFF_RECONCILE_AGE_MS:
+        return None
+    key = (ticket.source.value, ticket.session_commitment, ticket.source_identity)
+    if key in structural.pending:
+        return None
+    quarantine_reason = structural.quarantined.get(key)
+    if quarantine_reason is not None:
+        return CaptureHandoffRetirementReason.STRUCTURAL_ROW_QUARANTINED, quarantine_reason
+    return CaptureHandoffRetirementReason.STRUCTURAL_ROW_ABSENT, None
+
+
 def _native_child_start_observation(envelope: ObservationEnvelope) -> HostLineageObservation | None:
     fields = envelope.structural_payload
     return host_lineage_from_payload(
@@ -650,6 +723,26 @@ def _selection_route_is_current(
     return (selected_session, selected_writer) in admitted_routes
 
 
+class _StructuralCaptureHandoff:
+    """The native row a structural delivery carries, once its capture fence resolved.
+
+    Only this row can consume a durable handoff bound to its content identity,
+    so a delivery that commits or is refused terminally retires any handoff it
+    leaves behind (#836). A capture-only request stages handoffs and never binds.
+    """
+
+    __slots__ = ("content_identity", "envelope")
+
+    def __init__(self) -> None:
+        self.envelope: ObservationEnvelope | None = None
+        self.content_identity: str | None = None
+
+    def bind(self, request: ObservationIngestRequest, capture: _NativeCaptureContext) -> None:
+        if not request.capture_only and capture.content_identity is not None:
+            self.envelope = request.envelope
+            self.content_identity = capture.content_identity
+
+
 def _empty_advice_event_ref_cache() -> dict[tuple[str, str], tuple[str, ...]]:
     return {}
 
@@ -691,6 +784,10 @@ class ObservationCoordinator:
     advice_semantic_cancellation_reconciler: AdviceSemanticCancellationReconciler | None = None
     observation_enabled: bool = True
     capture_budget_bootstrap: CaptureBudgetBootstrapHook | None = None
+    # READY routes the tasks that own aged native handoffs so maintenance can
+    # retire one whose structural row is gone (#836). Without it only the
+    # routed mapping's own task is reconciled.
+    capture_handoff_reconcile: CaptureHandoffReconcileHook | None = None
     lineage_coordinator: LineageManifestCoordinator | None = None
     # Host observations are recorded in the service-owned catalog after local ingest accepts the
     # envelope. The registry is optional for pre-migration/test compositions.
@@ -1065,22 +1162,54 @@ class ObservationCoordinator:
 
     async def recover_capture_inventory(
         self, workspace: str
-    ) -> ObservationCaptureRecoveryOutcome | None:
-        """Repair unknown inventory without requiring a newly admitted observation.
+    ) -> ObservationCaptureRecoveryOutcome | tuple[ObservationCaptureRecoveryOutcome, ...] | None:
+        """Repair capture accounting without requiring a newly admitted observation.
 
-        The service sweep invokes this metadata-only path. It uses existing,
-        unambiguous lifecycle mappings, not a synthetic envelope or a new grant.
-        Eight mapping candidates per turn and a bounded rotating cursor keep
-        missing parent/worker mappings from starving a usable route. The sweep
-        owns the elapsed deadline; the authoritative bootstrap joins its local
-        publication worker before cancellation can release the capture lock.
+        The service sweep invokes this metadata-only path. Unknown inventory is
+        repaired first. An aged native handoff is then reconciled against the
+        structural rows that could still consume it, so one stranded ticket
+        cannot hold oldest-age pressure at the hard limit while the outbox is
+        empty (#836). Both steps return fixed outcomes and never admit input.
         """
 
         await self._reconcile_selection_losses(workspace)
-        if not await self._local(partial(self.local.capture_inventory_recovery_needed, workspace)):
+        inventory_needed = await self._local(
+            partial(self.local.capture_inventory_recovery_needed, workspace)
+        )
+        handoffs_due = bool(await self._capture_handoff_candidates(workspace))
+        if not inventory_needed and not handoffs_due:
             return None
         if not self.observation_enabled or not await self._local(self.local.runtime_enabled):
             return ObservationCaptureRecoveryOutcome.DISABLED
+        outcomes: list[ObservationCaptureRecoveryOutcome] = []
+        if inventory_needed:
+            inventory = await self._recover_capture_inventory_scope(workspace)
+            if inventory is not None:
+                if inventory is not ObservationCaptureRecoveryOutcome.RECOVERED:
+                    # Handoffs are reconciled against a known inventory only;
+                    # the next sweep retries both steps.
+                    return inventory
+                outcomes.append(inventory)
+        handoff = await self._reconcile_capture_handoffs(workspace)
+        if handoff is not None:
+            outcomes.append(handoff)
+        if not outcomes:
+            return None
+        return outcomes[0] if len(outcomes) == 1 else tuple(outcomes)
+
+    async def _recover_capture_inventory_scope(
+        self, workspace: str
+    ) -> ObservationCaptureRecoveryOutcome | None:
+        """Repair unknown inventory through an existing lifecycle mapping.
+
+        It uses existing, unambiguous lifecycle mappings, not a synthetic
+        envelope or a new grant. Eight mapping candidates per turn and a bounded
+        rotating cursor keep missing parent/worker mappings from starving a
+        usable route. The sweep owns the elapsed deadline; the authoritative
+        bootstrap joins its local publication worker before cancellation can
+        release the capture lock.
+        """
+
         bootstrap = self.capture_budget_bootstrap
         if bootstrap is None:
             return ObservationCaptureRecoveryOutcome.INVENTORY_UNKNOWN
@@ -1362,6 +1491,313 @@ class ObservationCoordinator:
             # Preserve ``needs_reconcile`` or unknown scope on any read error;
             # this path never weakens capture admission.
             return
+
+    async def _capture_handoff_candidates(self, workspace: str) -> tuple[str, ...]:
+        """Read the task routes that own aged handoffs; an older store reports none."""
+
+        candidates = getattr(self.local, "capture_handoff_candidates", None)
+        if not callable(candidates):
+            return ()
+        try:
+            raw = await self._local(partial(candidates, workspace))
+        except Exception:
+            return ()
+        values = cast(tuple[object, ...], raw)
+        if type(raw) is not tuple or any(type(item) is not str for item in values):
+            return ()
+        return cast(tuple[str, ...], raw)
+
+    def _capture_handoff_age_ms(self, ticket: ObservationCaptureTicket) -> int:
+        """Age a durable ticket against the service clock; unknown clocks read as fresh."""
+
+        try:
+            now = timestamp_from_datetime(self.clock.now_utc())
+        except Exception:
+            return 0
+        if ticket.captured_at >= now:
+            return 0
+        delta = now.as_datetime() - ticket.captured_at.as_datetime()
+        return delta.days * 86_400_000 + delta.seconds * 1_000 + delta.microseconds // 1_000
+
+    async def _record_capture_handoff_retirement(
+        self,
+        workspace: str,
+        ticket: ObservationCaptureTicket,
+        *,
+        stage: CaptureHandoffRetirementStage,
+        reason: CaptureHandoffRetirementReason,
+        quarantine_reason: str | None = None,
+    ) -> None:
+        """Name the stage and reason of one retirement; accounting never fails ingest."""
+
+        recorder = getattr(self.local, "record_capture_handoff_retirement", None)
+        if not callable(recorder) or ticket.state not in {"staging", "pending"}:
+            return
+        try:
+            await self._local(
+                partial(
+                    recorder,
+                    workspace,
+                    stage=stage,
+                    reason=reason,
+                    ticket_state=ticket.state,
+                    source=ticket.source,
+                    task_id=ticket.task_id,
+                    age_ms=self._capture_handoff_age_ms(ticket),
+                    quarantine_reason=quarantine_reason,
+                )
+            )
+        except Exception as exc:
+            record_unexpected_exception_without_raising(
+                exc,
+                component="application.observation_coordinator",
+                operation="capture_handoff_retirement_record_failed",
+            )
+
+    async def _retire_stranded_capture_handoff(
+        self,
+        workspace: str,
+        runtime: TaskRuntime | None,
+        store: TaskObservationPort | None,
+        handoff: _StructuralCaptureHandoff,
+        *,
+        stage: CaptureHandoffRetirementStage,
+        reason: CaptureHandoffRetirementReason,
+    ) -> None:
+        """Retire a handoff its own structural row can no longer consume.
+
+        Called after that row committed or was refused terminally. The capture
+        lock serializes this with capture-only staging, so a handoff staged
+        while the row was being delivered is retired here, and a later request
+        finds the row already accepted and stages nothing. The durable ticket is
+        re-read and must match this exact native row, so a consumed ticket or
+        another row's handoff is never touched. Cleanup never changes the
+        delivery's outcome: a failure is recorded and the READY sweep retires
+        the handoff later.
+        """
+
+        envelope = handoff.envelope
+        identity = handoff.content_identity
+        loader = getattr(store, "load_capture_ticket", None)
+        if envelope is None or identity is None or runtime is None or not callable(loader):
+            return
+        assert store is not None
+        try:
+            async with self._capture_lock:
+                ticket = loader(workspace=workspace, logical_identity=identity)
+                if (
+                    type(ticket) is not ObservationCaptureTicket
+                    or ticket.state not in {"staging", "pending"}
+                    or ticket.task_id != runtime.task_id
+                    or ticket.session_commitment != envelope.session_commitment
+                    or ticket.source is not envelope.source
+                    or ticket.source_identity != envelope.source_identity
+                    or ticket.cursor != envelope.cursor
+                ):
+                    return
+                await self._retire_capture_ticket(workspace, runtime, store, ticket)
+                await self._record_capture_handoff_retirement(
+                    workspace, ticket, stage=stage, reason=reason
+                )
+        except Exception as exc:
+            record_unexpected_exception_without_raising(
+                exc,
+                component="application.observation_coordinator",
+                operation="capture_handoff_stranded_retirement_failed",
+            )
+
+    async def _reconcile_task_capture_handoffs(
+        self,
+        runtime: TaskRuntime,
+        store: TaskObservationPort,
+        *,
+        stage: CaptureHandoffRetirementStage,
+        workspace: str | None = None,
+        structural: bool = True,
+    ) -> int:
+        """Retire this task's handoffs that no current authority or live row backs.
+
+        With ``structural`` the caller holds the capture lock, so no capture-only
+        request can stage a handoff during this pass. The structural rows are
+        read before the tickets that are classified: a ticket still listed
+        afterwards whose row was already gone cannot be consumed any more,
+        because a delivery deletes its ticket before the drain acknowledges or
+        quarantines the row. ``workspace`` limits the pass to one workspace and
+        republishes that workspace's backlog even when no ticket remains, which
+        releases a reservation that outlived its ticket.
+        """
+
+        list_pending = getattr(store, "list_pending_capture_tickets", None)
+        if not callable(list_pending) or not callable(
+            getattr(store, "tombstone_capture_ticket", None)
+        ):
+            return 0
+
+        def listing() -> tuple[ObservationCaptureTicket, ...]:
+            raw = list_pending(runtime.task_id)
+            values = cast(tuple[object, ...], raw)
+            if type(raw) is not tuple or any(
+                type(item) is not ObservationCaptureTicket or item.task_id != runtime.task_id
+                for item in values
+            ):
+                raise PublicOperationError(
+                    PublicErrorCode.STORAGE_CORRUPT,
+                    "Observation capture ticket listing is invalid.",
+                    retryable=False,
+                )
+            return tuple(
+                item
+                for item in cast(tuple[ObservationCaptureTicket, ...], raw)
+                if workspace is None or item.workspace_commitment == workspace
+            )
+
+        workspaces = {item.workspace_commitment for item in listing()}
+        if workspace is not None:
+            workspaces.add(workspace)
+        structural_states: dict[str, CaptureHandoffStructuralState | None] = {}
+        reader = getattr(self.local, "capture_handoff_structural_state", None)
+        for current_workspace in sorted(workspaces, key=str.encode):
+            state: CaptureHandoffStructuralState | None = None
+            if structural and callable(reader):
+                state = cast(
+                    CaptureHandoffStructuralState,
+                    await self._local(partial(reader, current_workspace)),
+                )
+            structural_states[current_workspace] = state
+        authorities: dict[str, LocalContentCaptureAuthority | None] = {}
+        retired = 0
+        for ticket in listing():
+            current_workspace = ticket.workspace_commitment
+            if current_workspace not in structural_states:
+                # Staged after the structural read: never classified this pass.
+                continue
+            if current_workspace not in authorities:
+                authorities[current_workspace] = await self._local(
+                    partial(self.local.content_capture_authority, current_workspace)
+                )
+            decision = _capture_handoff_retirement_reason(
+                ticket,
+                authorities[current_workspace],
+                structural_states[current_workspace],
+                age_ms=self._capture_handoff_age_ms(ticket),
+            )
+            if decision is None:
+                continue
+            reason, quarantine_reason = decision
+            await self._retire_capture_ticket(current_workspace, runtime, store, ticket)
+            await self._record_capture_handoff_retirement(
+                current_workspace,
+                ticket,
+                stage=stage,
+                reason=reason,
+                quarantine_reason=quarantine_reason,
+            )
+            retired += 1
+        for current_workspace in sorted(structural_states, key=str.encode):
+            await self._publish_capture_backlog(current_workspace, runtime, store)
+        return retired
+
+    async def reconcile_task_capture_handoffs(self, runtime: TaskRuntime) -> int:
+        """Retire a routed task's stranded handoffs before a CHECK retries its freeze.
+
+        A CHECK never waits behind capture work: while the capture lock is busy
+        only the authority rules run, and the READY sweep reconciles aged
+        handoffs against their structural rows later (#836).
+        """
+
+        store = runtime.observation
+        if store is None:
+            return 0
+        if self._capture_lock.locked():
+            return await self._reconcile_task_capture_handoffs(
+                runtime,
+                store,
+                stage=CaptureHandoffRetirementStage.CHECK_PREFLIGHT,
+                structural=False,
+            )
+        async with self._capture_lock:
+            return await self._reconcile_task_capture_handoffs(
+                runtime, store, stage=CaptureHandoffRetirementStage.CHECK_PREFLIGHT
+            )
+
+    async def _reconcile_capture_handoffs(
+        self, workspace: str
+    ) -> ObservationCaptureRecoveryOutcome | None:
+        """Visit the tasks that own aged handoffs, oldest first, under the capture lock.
+
+        A handoff kept by current authority and a still-pending structural row
+        remains, so a genuinely pending capture keeps its oldest-age pressure;
+        that turn reports no outcome.
+        """
+
+        task_ids = (await self._capture_handoff_candidates(workspace))[
+            :_MAX_CAPTURE_HANDOFF_TASKS_PER_TURN
+        ]
+        if not task_ids:
+            return None
+        if self._capture_lock.locked():
+            return ObservationCaptureRecoveryOutcome.BUSY
+        retired = 0
+
+        async def visit(task_runtime: TaskRuntime, task_store: TaskObservationPort) -> int:
+            nonlocal retired
+            count = await self._reconcile_task_capture_handoffs(
+                task_runtime,
+                task_store,
+                stage=CaptureHandoffRetirementStage.SWEEP,
+                workspace=workspace,
+            )
+            retired += count
+            return count
+
+        async with self._capture_lock:
+            hook = self.capture_handoff_reconcile
+            if hook is not None:
+                try:
+                    complete = await hook(workspace, task_ids, visit)
+                except Exception:
+                    complete = False
+            else:
+                complete = await self._reconcile_mapped_capture_handoffs(workspace, task_ids, visit)
+        if retired:
+            return ObservationCaptureRecoveryOutcome.HANDOFF_RETIRED
+        if not complete:
+            return ObservationCaptureRecoveryOutcome.HANDOFF_UNAVAILABLE
+        return None
+
+    async def _reconcile_mapped_capture_handoffs(
+        self,
+        workspace: str,
+        task_ids: tuple[str, ...],
+        visit: CaptureHandoffVisitor,
+    ) -> bool:
+        """Reach handoff tasks through existing mappings when READY supplies no router."""
+
+        remaining = set(task_ids)
+        sessions = await self._local(
+            partial(self.local.unambiguous_codex_sessions_for_workspace, workspace)
+        )
+        for host_session in sessions[:_MAX_CAPTURE_HANDOFF_TASKS_PER_TURN]:
+            if not remaining:
+                break
+            current_runtime: TaskRuntime | None = None
+            try:
+                mapping = await self._local(
+                    partial(self.mapping_loader, host_session, _state=self.state_root)
+                )
+                if mapping is None or mapping.yoetz_task_id not in remaining:
+                    continue
+                current_runtime, _ = await self._route_observation_mapping(
+                    mapping, required_capabilities=frozenset({RuntimeCapability.WRITE})
+                )
+                await visit(current_runtime, self._observation_store(current_runtime))
+                remaining.discard(current_runtime.task_id)
+            except Exception:
+                continue
+            finally:
+                if current_runtime is not None:
+                    await self.runtime.release(current_runtime)
+        return not remaining
 
     def _release_finished(self, pending: asyncio.Future[None]) -> None:
         self._pending_releases.discard(pending)
@@ -1754,6 +2190,20 @@ class ObservationCoordinator:
                     await self._confirm_capture_ticket_reservation(
                         workspace, runtime, pending_ticket
                     )
+            elif (
+                request.content_chunks
+                and ticket_schema_available
+                and request.capture_only
+                and await self._structural_row_passed(store, workspace, request.envelope)
+            ):
+                # A capture-only request that arrives after its structural row
+                # was accepted and acknowledged (a lease-free drain delivered it
+                # first) must not stage a handoff: only that row can consume a
+                # ticket, and the FIFO has moved past it (#836).
+                rejection_reason = ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+                await self._local(
+                    partial(self.local.note_coverage_gap, workspace, rejection_reason)
+                )
             elif request.content_chunks and ticket_schema_available:
                 staging_ticket = ObservationCaptureTicket(
                     workspace_commitment=workspace,
@@ -1808,6 +2258,39 @@ class ObservationCoordinator:
             expected_capture_parts=expected_capture_parts,
             rejection_reason=rejection_reason,
         )
+
+    async def _structural_row_passed(
+        self, store: TaskObservationPort, workspace: str, envelope: ObservationEnvelope
+    ) -> bool:
+        """Report whether the structural FIFO has moved past this native row.
+
+        That holds once the task store accepted the envelope and no outbox row
+        or selected input can deliver it again. A row still queued after an
+        interrupted delivery can consume a new handoff on its retry, and a
+        delivery still in flight retires one it could not consume. An
+        unreadable answer counts as passed: refusing one late handoff records an
+        honest content gap, while staging it could strand a ticket.
+        """
+
+        probe = getattr(store, "structural_envelope_accepted", None)
+        if not callable(probe):
+            return False
+        try:
+            if probe(workspace, envelope) is False:
+                return False
+        except Exception:
+            return True
+        reader = getattr(self.local, "capture_handoff_structural_state", None)
+        if not callable(reader):
+            return True
+        try:
+            structural = cast(
+                CaptureHandoffStructuralState, await self._local(partial(reader, workspace))
+            )
+        except Exception:
+            return True
+        key = (envelope.source.value, envelope.session_commitment, envelope.source_identity)
+        return key not in structural.pending
 
     @staticmethod
     def _tombstone_capture_ticket(
@@ -2058,6 +2541,7 @@ class ObservationCoordinator:
                 tuple[TaskRuntime, ObservationEnvelope, ObservationIngestResult] | None
             ) = None
             stage = "runtime_route"
+            handoff = _StructuralCaptureHandoff()
             try:
                 runtime, mapping = await self._route_observation_mapping(
                     mapping, route_history=route_history
@@ -2150,6 +2634,7 @@ class ObservationCoordinator:
                     capture_staging_ticket = capture.capture_staging_ticket
                     staged_ticket = capture.staged_ticket
                     expected_capture_parts = capture.expected_capture_parts
+                    handoff.bind(request, capture)
                     if content_capture_blocked or capture_ticket_revoked:
                         captured_content = ()
                         replay_content_candidates = ()
@@ -2343,6 +2828,16 @@ class ObservationCoordinator:
                             if ticket is not None and ticket.state in {"staging", "pending"}:
                                 await self._retire_capture_ticket(workspace, runtime, store, ticket)
                                 break
+                        # A matched handoff this delivery never staged (content
+                        # blocked or unauthorized) is stranded as well (#836).
+                        await self._retire_stranded_capture_handoff(
+                            workspace,
+                            runtime,
+                            store,
+                            handoff,
+                            stage=CaptureHandoffRetirementStage.STRUCTURAL_REFUSED,
+                            reason=CaptureHandoffRetirementReason.TERMINAL_REFUSAL,
+                        )
                     return result
 
                 # Keep host attribution in the service-owned catalog alongside the local
@@ -2757,6 +3252,19 @@ class ObservationCoordinator:
                     await self._retire_capture_ticket(
                         workspace, runtime, store, staged_ticket, delete=True
                     )
+                # Once this row is acknowledged nothing else can consume its
+                # handoff. Retire one it matched but could not consume (content
+                # blocked, unauthorized, or fenced) or one staged while it was in
+                # flight, instead of leaving a ticket that holds capture pressure
+                # and blocks new checks (#836).
+                await self._retire_stranded_capture_handoff(
+                    workspace,
+                    runtime,
+                    store,
+                    handoff,
+                    stage=CaptureHandoffRetirementStage.STRUCTURAL_COMMITTED,
+                    reason=CaptureHandoffRetirementReason.CONTENT_NOT_ADMITTED,
+                )
                 completed_ingest = (runtime, envelope, result)
             except PublicOperationError as exc:
                 if exc.retryable and exc.code in {
@@ -2784,8 +3292,24 @@ class ObservationCoordinator:
                         # envelope, not the bundle. ADR-010 scopes the
                         # generation latch to bundle corruption, so reject just
                         # this envelope and keep the session observable.
+                        await self._retire_stranded_capture_handoff(
+                            workspace,
+                            runtime,
+                            store,
+                            handoff,
+                            stage=CaptureHandoffRetirementStage.STRUCTURAL_REFUSED,
+                            reason=CaptureHandoffRetirementReason.TERMINAL_REFUSAL,
+                        )
                         return _reject(ObservationGapCode.DEDUP_CONFLICT.value)
                     self._storage_corrupt_sessions.add(codex_session_id)
+                    await self._retire_stranded_capture_handoff(
+                        workspace,
+                        runtime,
+                        store,
+                        handoff,
+                        stage=CaptureHandoffRetirementStage.STRUCTURAL_REFUSED,
+                        reason=CaptureHandoffRetirementReason.TERMINAL_REFUSAL,
+                    )
                     return _reject(ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value)
                 if (
                     exc.code is PublicErrorCode.SESSION_NOT_FOUND
@@ -2796,6 +3320,14 @@ class ObservationCoordinator:
                     # followed, a hop cycle, or a rotation after the route
                     # opened is route retirement, not a missing mapping file
                     # and not a ledger content refusal (#577).
+                    await self._retire_stranded_capture_handoff(
+                        workspace,
+                        runtime,
+                        store,
+                        handoff,
+                        stage=CaptureHandoffRetirementStage.STRUCTURAL_REFUSED,
+                        reason=CaptureHandoffRetirementReason.TERMINAL_REFUSAL,
+                    )
                     return _reject(ObservationGapCode.SESSION_SUPERSEDED.value)
                 if (
                     exc.code is PublicErrorCode.SESSION_CONFLICT
@@ -2815,6 +3347,14 @@ class ObservationCoordinator:
                     # SESSION_NOT_FOUND without a followable binding and
                     # non-retryable SESSION_CONFLICT after the narrower route
                     # recovery case above (#554).
+                    await self._retire_stranded_capture_handoff(
+                        workspace,
+                        runtime,
+                        store,
+                        handoff,
+                        stage=CaptureHandoffRetirementStage.STRUCTURAL_REFUSED,
+                        reason=CaptureHandoffRetirementReason.TERMINAL_REFUSAL,
+                    )
                     return _reject(ObservationGapCode.LEDGER_REJECTED.value)
                 if exc.code is PublicErrorCode.VAULT_LOCKED:
                     return _reject(ObservationGapCode.VAULT_LOCKED.value)

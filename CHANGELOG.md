@@ -106,6 +106,13 @@ Prepared public-alpha release candidate; publication remains gated by #785. See
   selected installation (#796), plus the remaining 0.2.5 repairs: exact-session recovery and
   automatic reattachment beside independent tasks in the same workspace, with delegated children
   still behind their authenticated attachment path (#811, #815, #816).
+- One stranded native capture handoff no longer closes observation admission and content for a
+  whole workspace. A handoff whose structural record can no longer deliver it is retired by that
+  record's delivery, by background service maintenance without waiting for new input, or by a new
+  check's preflight; a handoff whose record is still waiting keeps the unchanged pending-age limit.
+  A Claude Code or Cursor hook no longer quarantines a queued Codex row in the same workspace as a
+  content-profile mismatch, and a late capture for an already delivered record stages nothing.
+  `observe status --json` names each retirement under `capture_handoff_retirements` (#836).
 
 ## 0.2.5 — 2026-09-23
 

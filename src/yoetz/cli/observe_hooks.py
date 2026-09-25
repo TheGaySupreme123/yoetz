@@ -1884,6 +1884,20 @@ async def _drain_outbox_leased(
                 or row.envelope.source_identity in staged_content_sources
                 else content_by_source_identity.get(row.envelope.source_identity, ())
             )
+            # A drain delivers every mapped lane in the shared workspace. The
+            # hook's content profile names only its own host's rows: sending it
+            # with a Codex or other-host row made the service refuse that row as
+            # content_capture_profile_mismatch, a terminal quarantine that also
+            # stranded the row's durable capture handoff (#836). The service
+            # resolves a foreign row's profile from its own ticket.
+            row_profile = (
+                content_capture_profile
+                if content_capture_profile is not None
+                and content_capture_profile_matches_source(
+                    row.envelope.source.value, content_capture_profile
+                )
+                else None
+            )
             try:
                 result = await asyncio.wait_for(
                     _try_service_ingest(
@@ -1891,7 +1905,7 @@ async def _drain_outbox_leased(
                         row.codex_session_id,
                         row.envelope,
                         content_chunks=chunks,
-                        content_capture_profile=content_capture_profile,
+                        content_capture_profile=row_profile,
                         deadline_ms=max(1, int(remaining * 1_000)),
                     ),
                     timeout=remaining,

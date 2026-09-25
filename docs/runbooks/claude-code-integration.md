@@ -468,6 +468,15 @@ selection uses the accepted tool event's durable session route and does not requ
 approved-check policy. Local capture consent and repository disclosure permission remain separate
 requirements.
 
+A handoff that its structural row can no longer consume (the row was already acknowledged,
+quarantined, or refused) is retired by that row's own delivery, by the READY maintenance sweep once
+it is 30 seconds old, or by a new CHECK's preflight, instead of holding shared oldest-age pressure
+at the hard limit (#836). `observe status --json` names each retirement under
+`capture_handoff_retirements` and records `content_capture_unavailable`. A handoff whose row is
+still queued keeps counting toward pending age. This hook sends its Claude Code content profile only with
+Claude Code rows; a queued Codex or Cursor row drained from the same workspace carries no profile, so
+it is not refused as `content_capture_profile_mismatch`.
+
 Claude Code has no `codex exec --json` import surface. Issue #301's bounded import authorization
 therefore makes no Claude adapter change; Claude evidence continues through cooperative MCP and
 the native hook/observation paths below.

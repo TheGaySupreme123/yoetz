@@ -3,7 +3,8 @@
 **Status:** Proposed for issue #687; the maintainer requested the complete implementation in one
 draft PR on 2026-09-10. Product direction is acknowledged; measured performance acceptance and
 the larger-profile rollout remain review decisions on that issue. Amended 2026-09-24 for #828
-(configurable capacity policy, custom counts, and the typed no-Yoetz-cap outcome).
+(configurable capacity policy, custom counts, and the typed no-Yoetz-cap outcome) and 2026-09-25
+for #836 (stranded capture handoffs are reconciled as admission-independent maintenance).
 
 **Relates to:** ADR-009, ADR-010, ADR-014, ADR-016, ADR-022, and issues #687, #753, and #828.
 
@@ -118,6 +119,18 @@ same authoritative catalog/bundle inventory as capture reservation; it does not 
 event, a task binding, or a zero-backlog proof. Missing mappings and unreadable or inactive relevant
 routes remain unknown and are retried without requiring another hook. A healthy proven workspace
 does not request another recovery scan.
+
+A known inventory can still hold one stranded handoff: a ticket and reservation whose structural
+row was already acknowledged or quarantined, so nothing will consume it. Its age alone held the
+oldest-age dimension at the hard limit with an empty queue, closing admission and content for the
+whole workspace until an unrelated authority change (#836). A handoff at least 30 seconds old is
+therefore also maintenance demand. After inventory is known, the same sweep turn opens at most
+eight owning task routes through the catalog, oldest first, and retires a handoff only when current
+authority no longer backs it or no outbox row or selected input can still deliver its row. The
+ordering (structural rows read before tickets, under the capture lock) cannot retire a handoff that
+is about to be consumed. Genuinely pending handoffs keep their pressure: this does not relax the
+pending-age limit, raise a capture ceiling, or clear pressure directly. Once the stranded age is
+gone, hard admission reopens at once and optional detail follows the unchanged recovery dwell.
 
 A sweep rotates through at most four workspace candidates with a shared five-second cooperative
 recovery budget inside its ordinary sweep budget. A workspace turn rotates through at most eight

@@ -21,7 +21,9 @@ for moderator-approved issue #244 and the reopened issue #216 recurrence; 2026-0
 ordinary-profile ingress and bounded native-content draining, with cancellation limits kept
 explicit); 2026-09-06 for the native capture handoff and FIFO/check barrier contract; 2026-09-07
 for the source-qualified, profileless Codex hook capture handoff and its independent AI-powered review
-selection fence.
+selection fence; 2026-09-25 for issue #836 (a handoff its own structural row can no longer consume
+is retired at delivery, by the READY sweep, or at the CHECK preflight, and drains send a content
+profile only with their own host's rows).
 **Implemented by:** `src/yoetz/application/observation_materialize.py`,
 `src/yoetz/application/observation_coordinator.py`, `src/yoetz/cli/observe_hooks.py`,
 `src/yoetz/adapters/memory/ledger.py`,
@@ -498,6 +500,25 @@ limits remain in the host integration runbooks.
     a ticket pending; inactive, revoked, runtime-disabled, profile-unselected, or stale-generation
     tickets are tombstoned without changing encrypted objects or retained observation history. A
     completed same-request replay returns before inspecting newer tickets.
+
+    Current authority alone does not keep a handoff consumable (#836). Only the structural row a
+    ticket was staged for can consume it, and the drain acknowledges or quarantines that row only
+    after the coordinator returns. So the row's own delivery retires a ticket it leaves behind:
+    after committing without consuming its matched ticket, or after a terminal refusal, it
+    re-reads the durable ticket under the capture lock and tombstones it when the exact
+    task/session/source/cursor binding matches. That includes a ticket staged by a capture-only
+    request after the row passed its capture fence. A capture-only request whose structural
+    envelope the task store already accepted, and which no queued row can deliver again, stages
+    nothing (`content_capture_unavailable`). A ticket still stranded some other way (a retry
+    ceiling, a session-wide quarantine, a lost release) is retired, independent of native
+    admission, by the READY maintenance sweep and by the CHECK preflight when the capture lock is
+    free, once it is 30 seconds old and no outbox row or selected input carries its native
+    identity. The pending-age limit is unchanged: a ticket with current authority and a queued row
+    still counts toward it. A hook drain delivers every lane in the shared workspace but sends its
+    content profile only with rows of its own host; another host's row carries no profile and its
+    ticket supplies it, so a Codex row drained by a Claude Code or Cursor hook is no longer refused
+    as a terminal profile mismatch. Each such retirement records `content_capture_unavailable` and
+    a bounded, payload-free local entry naming its stage, reason, ticket state, and age.
 
     At most 512 `staging` or `pending` tickets are outstanding per workspace. Revoked tickets are
     excluded from that quota but retained as metadata-only tombstones to prevent reuse after an

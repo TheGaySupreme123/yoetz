@@ -235,6 +235,16 @@ unknown, or unpaired as appropriate and is surfaced as a content gap when the bo
 is not silently converted into a successful routine summary. Capture status describes configuration,
 not proof that bytes were captured or selected for a check.
 
+Captured content waits in a short handoff until its structural record is delivered. If that record
+can no longer deliver it (it was already recorded without the content, refused, or quarantined),
+Yoetz retires the handoff instead of letting its age hold the whole workspace at the pending-age
+limit. The local service does this in the background, normally within about a minute and a half,
+even when no new host input arrives; a new check does it for its own task. The retired content is
+not attached, so status reports `content_capture_unavailable`, and `yoetz observe status --json`
+lists recent retirements under `capture_handoff_retirements` with the stage, the reason, and the
+handoff's age. A handoff whose record is still waiting keeps counting toward the unchanged
+pending-age limit.
+
 A single hook event is also bounded. Yoetz fully reads a host body of at most 256 KiB. An edit to
 a large enough file can exceed that, because a host sends the whole new file content inside the
 event. Codex and Claude Code record that event as a `payload_too_large` coverage gap and do not

@@ -4089,6 +4089,22 @@ independently of AI-powered review. A terminal structural rejection retires only
 capture ticket so it cannot permanently block later checks; retryable coordination retains that
 ticket for the next attempt.
 
+Only the structural row a handoff was staged for can consume it, so that row's delivery also
+retires a handoff it leaves behind (issue #836). After the row commits without consuming its
+matched ticket (content fenced, blocked, or unauthorized at delivery), or after a terminal refusal
+(`ledger_rejected`, `dedup_conflict`, `session_superseded`, `observation_storage_corrupt`, or a
+terminal store refusal), the coordinator re-reads the durable ticket under the capture lock and
+tombstones it only when its task, host session, source, source identity, and cursor match that row.
+The same step retires a handoff that a capture-only request staged while the row was already past
+its capture fence. A capture-only request whose structural envelope the task store has already
+accepted, and which no outbox row or selected input can deliver again, stages nothing and returns
+`content_capture_unavailable` with that coverage gap; a row still queued after an interrupted
+delivery can still receive a handoff and consume it on retry. A hook drain delivers every mapped
+lane in the shared workspace, but sends its content profile only with rows from its own host: a
+Claude Code or Cursor hook delivers a queued Codex or other-host row without a profile, and the
+service resolves that row's profile from its own ticket, instead of refusing it as the terminal
+`content_capture_profile_mismatch`.
+
 `content_capture_pending` means encrypted staging is durable while structural ledger ingest is still
 pending. It is separate from `operation_pending`, which is generic observation back-pressure and
 makes no claim that content was retained. Up to 512 `staging`/`pending` tickets may be outstanding
@@ -4099,8 +4115,12 @@ encounters this barrier, READY performs a bounded listing for the exact routed t
 each ticket against current local content authority before one freeze retry. This task-local
 preflight retires tickets whose authority is absent, inactive, revoked, runtime-disabled,
 profile-unselected, or from an old authority generation, including tickets left without a structural
-outbox row; matching active tickets retain the retryable barrier. A completed same-request replay
-returns without inspecting newer tickets. It does not rewrite captured history or encrypted objects.
+outbox row. When the capture lock is free it then also retires an active ticket at least
+`CAPTURE_HANDOFF_RECONCILE_AGE_MS` (30 seconds) old whose structural row is neither in the outbox nor
+in the selected-admission buffer (issue #836); a younger ticket, or one whose row is still queued,
+retains the retryable barrier. A CHECK never waits for the capture lock. A completed same-request
+replay returns without inspecting newer tickets. It does not rewrite captured history or encrypted
+objects.
 The capture lane can stage while a heavy append runs, while its bounded object/manifest writes stay
 serialized. This boundary provides local encrypted durability only: there is no plaintext spool or
 offline guarantee, and a host kill or service failure before authenticated staging may leave the
@@ -4124,14 +4144,46 @@ The service callback verifies opened runtime task/session identities and supplie
 `proof_guard` to `bootstrap_capture_reservations`; it rechecks the READY service/vault generation
 under the local-store publication lock. A false or failed guard leaves accounting unknown.
 
+A stranded native handoff is the same kind of admission-independent maintenance demand (issue
+#836). `LocalObservationStore.capture_handoff_candidates(workspace, older_than_ms=30_000)` returns,
+oldest first, the task routes whose central reservation or cached task snapshot is at least that
+old; `pending_workspaces()` includes such a workspace even with an empty outbox. After inventory is
+known, `recover_capture_inventory(workspace)` reconciles at most eight of those tasks per turn under
+the shared capture lock, and returns a tuple when both steps report. READY supplies
+`ObservationCoordinator.capture_handoff_reconcile`, which opens each named task through its active
+catalog route and session binding rather than a host-session mapping, so a handoff left by an ended
+session stays reachable; without it only mapped routes are reconciled. For each task the
+coordinator reads `capture_handoff_structural_state(workspace)` (outbox rows and selected inputs
+that can still be delivered, and quarantined rows with their reason) before listing tickets, then
+tombstones a ticket whose authority fails the CHECK-preflight rules, or which is at least 30 seconds
+old and has no deliverable row. The ordering is sound under the capture lock: no handoff can be
+staged during the pass, and a delivery deletes its ticket before the drain acknowledges or
+quarantines the row. Each visited task's backlog is republished, which also releases a reservation
+that outlived its completed or tombstoned ticket. A handoff kept by current authority and a queued
+row is retained and still counts toward the unchanged pending-age limit.
+
 The closed internal recovery outcomes are `capture_inventory_recovered`,
 `capture_inventory_mapping_missing`, `capture_inventory_route_unavailable`,
-`capture_inventory_unknown`, `capture_inventory_disabled`, `capture_inventory_busy`, and
-`capture_inventory_timeout`. They contribute only fixed reason counts to
+`capture_inventory_unknown`, `capture_inventory_disabled`, `capture_inventory_busy`,
+`capture_inventory_timeout`, `capture_handoff_retired`, and `capture_handoff_unavailable`
+(an owning task could not be opened or read; the next sweep retries). A turn that retains every
+aged handoff reports nothing. They contribute only fixed reason counts to
 `ObservationDrainSummary.reasons`, not row delivery/attempt counts, coverage gaps, or raw
-exception text. No new diagnostic/RPC or event schema is introduced. `recovery_routes()` owns a separate
+exception text. No new RPC or event schema is introduced. `recovery_routes()` owns a separate
 read-only connection for each file-backed complete scan and joins its worker on cancellation.
 The shared writable catalog connection never crosses to that worker.
+
+Every stranded-handoff retirement is also named locally. `record_capture_handoff_retirement`
+records `content_capture_unavailable`, increments `capture_handoff_retired_count`, and keeps the
+last 16 entries in the owner-private workspace state as `capture_handoff_retirements`. An entry
+holds `stage` (`structural_committed`, `structural_refused`, `sweep`, or `check_preflight`),
+`reason` (`content_not_admitted`, `terminal_refusal`, `structural_row_absent`,
+`structural_row_quarantined`, `authority_absent`, `authority_inactive`, `runtime_disabled`,
+`authority_generation_changed`, or `profile_unselected`), `ticket_state` (`staging` or `pending`),
+`source`, `task_id`, `age_ms`, the closed `quarantine_reason` of a quarantined row or null, and
+`retired_at`. It carries no source identity, content, path, or exception text. `yoetz observe
+status` reports the account as `capture_handoff_retirements` (`retired_count` and `recent`); it is
+local-only and outside the frozen control-result schema, like `summary_refusals`.
 
 `LocalObservationStore.pending_selection_losses(workspace)` returns at most 64 retained,
 fully validated and routed lanes; `selection_loss_workspaces(task_id)` filters the returned

@@ -41,7 +41,6 @@ from yoetz.domain.observation_profiles import CLAUDE_CODE_ORDINARY_OBSERVATION_P
 from yoetz.ports.ledger import FrozenCase
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind
-from yoetz.service import ready_composition
 
 
 @pytest.mark.anyio
@@ -346,8 +345,8 @@ async def test_check_preflight_retires_disabled_ticket_without_structural_outbox
     )
     assert pending is not None and pending.state == "pending"
 
-    reconcile = getattr(ready_composition, "_reconcile_observation_capture")
-    await reconcile(runtime, local)
+    # READY's CHECK preflight is the coordinator's exact-task handoff pass.
+    assert await coordinator.reconcile_task_capture_handoffs(runtime) == 1
     retired = observation.load_capture_ticket(
         workspace=workspace,
         logical_identity=logical_identity,
@@ -422,7 +421,9 @@ async def test_check_reconciliation_keeps_profileless_codex_ticket_active(
     )
     assert pending is not None and pending.state == "pending"
 
-    await getattr(ready_composition, "_reconcile_observation_capture")(runtime, local)
+    # A fresh profileless handoff with current authority is not stranded, even
+    # though this direct capture-only request left no structural outbox row.
+    assert await coordinator.reconcile_task_capture_handoffs(runtime) == 0
 
     retained = observation.load_capture_ticket(
         workspace=workspace,
