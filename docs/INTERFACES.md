@@ -1119,7 +1119,7 @@ the readable effective current plan declares zero obligations, exactly one appli
 Both force `coverage_incomplete`, `insufficient_coverage`, and an insufficient-coverage receipt.
 The typed declaration records the participant's scope decision but never purchases a clean verdict.
 
-Three further codes describe a review that did run but could not deliver everything it produced:
+Four further codes describe a review that did run but could not deliver everything it produced:
 
 - `semantic_review_context_withheld` — the review ran without categories its own profile selected;
 - `semantic_challenges_rejected` — the reviewer returned challenges and post-validation dropped at
@@ -1129,6 +1129,13 @@ Three further codes describe a review that did run but could not deliver everyth
   the case shortened it or replaced the payload with a `yoetz.bounded-content-omission/1` marker.
   The marker's `reason` is `over_case_item_limit`, distinguishing a size drop from the
   `not_selected` omission the selection policy raises for material it declined to carry.
+- `semantic_case_finding_refs_over_limit` — a local finding cites more subjects than one case
+  item may link (`MAX_SEMANTIC_ITEM_SUBJECT_REFS`, 16; a finding may cite up to 64). The finding
+  keeps its identity in `local_check_refs` and in the check result, but the case carries neither
+  its prose nor its projected assessment: both appear as explicit `not_selected` omissions
+  (`finding_summary` and `bounded_structural_metadata`) and this gap names the capacity reason.
+  References are never sliced to fit; a partial subject list presented as the finding's own would
+  be a different finding. The review still dispatches once with the other findings.
 
 Post-validation fences each challenge independently: a rejected challenge costs only itself, the
 challenges beside it still become findings, and the drop is declared through this gap. A judgment
@@ -1732,7 +1739,8 @@ AI-powered review absence/weakness codes
 semantic_relevance_review_not_run|optional_semantic_review_blocked_by_policy|
 optional_semantic_review_registration_drift|
 semantic_review_context_withheld|semantic_challenges_rejected|
-semantic_case_content_over_item_limit`) plus the evidence-strength codes
+semantic_case_content_over_item_limit|semantic_case_finding_refs_over_limit`) plus the
+evidence-strength codes
 (`evidence_content_digest_only|evidence_content_withheld|evidence_digest_subject_legacy_unknown`)
 and the host-observation codes (`captured_object_unavailable|content_unselected|
 host_outcome_unavailable|unpaired_event`). Those host codes remain receipt coverage limitations;
@@ -3995,7 +4003,19 @@ Shared closed types:
   advice is disabled because `followup_message` auto-submits a user message; and `afterFileEdit`,
   `afterMCPExecution`, and `sessionEnd` emit `{}`. Cursor leases and commits advice only for a
   nonempty `sessionStart` object after its bytes are written successfully. Output-less events never
-  lease or consume advice or frontier-motion notices. Advice projection is bounded by the domain
+  lease or consume advice or frontier-motion notices. Provider-repair advice is standing advice and
+  uses only the session-boundary channels (#844). Service composition sets `semantic_configured`
+  only when verification is not disabled, a provider endpoint is bound, network egress is permitted,
+  and an LLM inference channel is enabled. The verification default, including absent config, is not
+  that intent. A private or no-egress install, an install with no provider endpoint, and a disabled
+  verification setting do not receive `connect_provider`, `renew_provider_sign_in`, or
+  `repair_semantic_provider`. When that intent is recorded and the provider is structurally unusable,
+  `connect_provider` is still produced, including when no factory id is available
+  (`semantic:not_ready`). Codex `SessionStart` places that text in `additionalContext`; Codex `Stop`
+  places it in `reason` with `decision: block`. Claude Code places it in `additionalContext` on
+  `SessionStart` and `Stop` and still does not emit `decision`. `PostToolUse` does not carry it on
+  either host. Cursor places it in `sessionStart` `additional_context`; `stop` still does not submit
+  a `followup_message` and does not consume the pending delivery. Advice projection is bounded by the domain
   wire limits: each item carries at most 16 evidence refs and a snapshot carries at most 64 ranked
   findings. The evidence-basis digest still commits to every policy candidate, ref, AI-powered
   review coverage input, and discarded condition. When a projection limit is reached, the visible
@@ -5083,7 +5103,18 @@ serve command, refuse an observed foreign replacement, and treat an already-abse
 `host_remove_not_compare_and_swap`; callers must quiesce concurrent host configuration writers,
 and the port does not claim atomic exclusion inside the final host subprocess window. The same
 positive-absence fallback is required after removal, so a generic failed named lookup never proves
-success. The interactive approval surface prints the exact command, route, isolated root, warnings,
+success. After a returned nonzero remove exit, the adapter still performs that bounded read-only
+probe once. Verified absence returns `UNREGISTER` with the fixed warning
+`host_remove_returned_nonzero`; no mutation is retried. `McpRegistrationResult.warnings` carries
+that token to the CLI and setup disconnect. Their nested `removal` / `status.mcp_removal` report
+uses `yoetz.mcp-removal/1` (`schemas/integrations/mcp-removal-1.0.0.schema.json`): `completed`
+requires `state_after=absent`; `unverified` carries an observed present state or null and
+`next_action=inspect_registration`. A mutating command exception or unreadable post-state remains
+`REGISTRATION_FAILED`. The CLI retains exit 20 and emits an exact runtime/home/binary-bound status
+continuation; it does not treat a failed lookup as absence. Only verified absence clears applied-route
+bookkeeping and permits subsequent cleanup. Successful zero-exit removal has no result warning.
+This is a client-local report; it adds no MCP tool, hook event, ledger receipt field, or TUI operation.
+The interactive approval surface prints the exact command, route, isolated root, warnings,
 and preview digest. The preview binds the exact command, `policy|strict` route profile, and exact
 ADR-026 isolated root when present. Ambient external registrations carry no environment. Isolated
 external Codex registrations carry exactly one native `--env` pair,

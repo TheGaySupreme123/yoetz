@@ -240,6 +240,7 @@ class McpRegistrationResult:
     state_before: McpRegistrationState
     state_after: McpRegistrationState
     preview_digest: str
+    warnings: tuple[Literal["host_remove_returned_nonzero"], ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.harness_id) is not HarnessId:
@@ -252,6 +253,14 @@ class McpRegistrationResult:
         ):
             raise _port_error("integration_state_invalid")
         validate_sha256_digest(self.preview_digest)
+        if self.warnings not in ((), ("host_remove_returned_nonzero",)) or (
+            self.warnings
+            and (
+                self.action is not McpRegistrationAction.UNREGISTER
+                or self.state_after is not McpRegistrationState.ABSENT
+            )
+        ):
+            raise _port_error("integration_value_invalid")
 
 
 @dataclass(frozen=True, slots=True)

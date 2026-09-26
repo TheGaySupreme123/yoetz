@@ -824,6 +824,17 @@ from AI-powered review selection. The current hook path may still stage consente
 chunks locally pending the follow-up staging filter. Codex keeps its existing replay semantics; the
 shared operation-replay, source-generation fencing, and teardown repairs apply to all host adapters.
 
+Provider-repair advice is standing advice, so Codex delivers it only at session boundaries (#844).
+`SessionStart` carries it in `hookSpecificOutput.additionalContext`. `Stop` carries it as
+`decision: block` plus `reason`, which Codex treats as a continuation rather than a rejected turn.
+`PostToolUse` and `UserPromptSubmit` do not carry it. A private or no-egress install, an install
+with no provider endpoint, and an install whose verification is disabled do not emit
+`connect_provider`, `renew_provider_sign_in`, or `repair_semantic_provider`. The service emits
+that advice only when verification is not disabled, a provider endpoint is bound, network egress
+is permitted, and an LLM inference channel is enabled, and the provider is still structurally
+unusable, including when no factory id is available. `SessionEnd` still emits `{}` and does not
+consume a pending delivery.
+
 Legacy synchronous `hooks spool` is a separate structural fast path. It only appends the owner-only
 structural spool record and returns; it does not normalize or pair the event, open the service, drain
 an outbox, or carry native content. The READY forwarder later consumes the spool and performs normal
@@ -1118,6 +1129,23 @@ inside the final subprocess scheduling window. Post-apply verification still fai
 entry is not positively observed absent; a generic failed named lookup is not success.
 Plugin-managed MCP is not this command: it goes away with the plugin artifact, not with `codex mcp
 remove`.
+
+After the removal command returns, Yoetz checks the selected home again even if Codex exited
+nonzero. A successful structural list confirming absence completes removal with exit 0 and
+`removal.warnings=["host_remove_returned_nonzero"]`; a zero-exit removal has an empty warning
+list. Setup disconnect carries the same versioned outcome in `status.mcp_removal` and prints
+the warning in its human report. No host stderr or subprocess payload is echoed.
+
+If the entry is still present or the check is unreadable, removal remains unverified (CLI exit 20).
+Its report carries the observed owned/foreign state or null, `next_action=inspect_registration`,
+and an exact `next_command` for the selected runtime, binary and home. Run that read-only command
+first. If absent, a newly accepted removal preview is a no-op and reconciles stale route metadata;
+if still owned, obtain and accept a fresh preview before retrying. Preserve foreign entries.
+Command exceptions also remain unverified. Yoetz never retries the mutation automatically.
+
+This reconciliation applies to external Codex MCP removal on macOS, Linux and Windows through
+WSL 2; it does not establish native Windows support. Deterministic adapter coverage is separate
+from host-version acceptance: issue #860 records the bounded disposable native round trip.
 
 ## 9. Bounded `codex exec --json` import
 

@@ -18,7 +18,7 @@ import pytest
 import yoetz.adapters.sqlite.connection as connection_module
 import yoetz.adapters.sqlite.recovery as recovery_module
 import yoetz.service.ready_composition as ready_composition_module
-from builders.privacy_policies import minimal_external_policy
+from builders.privacy_policies import local_only_policy, minimal_external_policy
 from yoetz.adapters.integrations.codex_lifecycle import mapping_from_start_ids, store_mapping
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.adapters.keys.encrypted_vault import EncryptedVaultStore
@@ -31,7 +31,7 @@ from yoetz.adapters.sqlite.migrations import (
     initialize_catalog,
 )
 from yoetz.application.service import ClientProjectionContext, ControlProjectionBinding
-from yoetz.config.models import YoetzConfig
+from yoetz.config.models import VerificationConfig, YoetzConfig
 from yoetz.config.write import fireworks_provider
 from yoetz.domain.host_lineage import host_lineage_from_payload
 from yoetz.domain.observation import (
@@ -2712,8 +2712,13 @@ async def test_ready_composition_reports_exact_configured_credential_presence(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("provider_bound", [False, True])
+@pytest.mark.parametrize("review_enabled", [False, True])
 async def test_observation_provider_fact_tracks_live_credential_within_one_generation(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    provider_bound: bool,
+    review_enabled: bool,
 ) -> None:
     """The standing-advice provider fact follows the vault, not the READY snapshot (#265).
 
@@ -2747,7 +2752,11 @@ async def test_observation_provider_fact_tracks_live_credential_within_one_gener
     initialize = memory.capture(SecretPurpose.VAULT_INITIALIZE, bytearray(b"correct horse battery"))
     await vault.initialize_passphrase(initialize, "sha256:" + "f" * 64)
     provider = fireworks_provider(model="accounts/fireworks/models/minimax-m3")
-    config = YoetzConfig(profile="local-openai", provider=provider)
+    config = YoetzConfig(
+        profile="local-openai" if provider_bound else "strict-local",
+        provider=provider if provider_bound else None,
+        verification=VerificationConfig(semantic="required" if review_enabled else "disabled"),
+    )
     factory = build_ready_application_factory(
         lifecycle=lifecycle,
         vault=vault,
@@ -2784,12 +2793,35 @@ async def test_observation_provider_fact_tracks_live_credential_within_one_gener
         )
         app = await factory.open(context)
 
+        # The actual default machine policy permits update checks, not LLM review.
+        # Required verification (including absent config's default) is not intent.
+        baseline = await composition()
+        assert type(baseline) is ObservationCompositionFact
+        assert baseline.semantic_configured is False
+        assert provider_rules(baseline) == set()
+        policy_app = app.privacy.policy_application
+        assert policy_app is not None
+        current_policy = replace(
+            minimal_external_policy(),
+            effective_scope=AuthorizationScope(AuthorizationScopeKind.MACHINE, _INSTALLATION_ID),
+        )
+
+        async def effective_policy(
+            store: object, scope: AuthorizationScope
+        ) -> EffectivePrivacyPolicy:
+            assert store is policy_app.policy_store
+            assert scope == current_policy.effective_scope
+            return EffectivePrivacyPolicy(current_policy, 2, current_policy.policy_digest)
+
+        monkeypatch.setattr(type(policy_app.policy_store), "effective_policy", effective_policy)
+        intended = provider_bound and review_enabled
+
         # Genuinely missing credential: the advice stays visible.
         fact = await composition()
         assert type(fact) is ObservationCompositionFact
-        assert fact.semantic_configured is True
+        assert fact.semantic_configured is intended
         assert fact.semantic_ready is False
-        assert "provider_not_ready" in provider_rules(fact)
+        assert ("provider_not_ready" in provider_rules(fact)) is intended
 
         # Credential ceremony lands mid-generation: the next build sees it and
         # the connect_provider recommendation becomes inapplicable, even though
@@ -2818,7 +2850,7 @@ async def test_observation_provider_fact_tracks_live_credential_within_one_gener
 
         connected = await composition()
         assert type(connected) is ObservationCompositionFact
-        assert connected.semantic_ready is True
+        assert connected.semantic_ready is provider_bound
         assert "fireworks" not in connected.connected_provider_ids
         assert provider_rules(connected) == set()
 
@@ -2827,7 +2859,25 @@ async def test_observation_provider_fact_tracks_live_credential_within_one_gener
         revoked = await composition()
         assert type(revoked) is ObservationCompositionFact
         assert revoked.semantic_ready is False
-        assert "provider_not_ready" in provider_rules(revoked)
+        assert ("provider_not_ready" in provider_rules(revoked)) is intended
+
+        # A policy tightening in the same generation immediately silences repair
+        # advice, even with a configured provider and now-revoked credential.
+        current_policy = replace(
+            local_only_policy(), effective_scope=current_policy.effective_scope
+        )
+        private = await composition()
+        assert type(private) is ObservationCompositionFact
+        assert private.semantic_configured is False
+        assert provider_rules(private) == set()
+
+        async def unavailable_policy(
+            store: object, scope: AuthorizationScope
+        ) -> EffectivePrivacyPolicy:
+            raise RuntimeError("policy unavailable")
+
+        monkeypatch.setattr(type(policy_app.policy_store), "effective_policy", unavailable_policy)
+        assert await composition() is None
     finally:
         if app is not None:
             await app.close()

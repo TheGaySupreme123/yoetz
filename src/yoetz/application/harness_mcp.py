@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
 from yoetz.application.applied_mcp_route import clear_applied_route, record_applied_route
 from yoetz.domain.values import validate_sha256_digest
@@ -13,7 +13,6 @@ from yoetz.ports.harness_mcp import (
     MCP_STRICT_SERVE_COMMAND,
     HarnessBinary,
     HarnessMcpPort,
-    McpRegistrationAction,
     McpRegistrationCommand,
     McpRegistrationError,
     McpRegistrationObservation,
@@ -23,15 +22,47 @@ from yoetz.ports.harness_mcp import (
     McpRegistrationState,
 )
 from yoetz.ports.integrations import HarnessId
+from yoetz.protocol.canonical import JsonValue
+from yoetz.protocol.mcp_removal import CompletedMcpRemoval, UnverifiedMcpRemoval
 
 __all__ = [
     "HarnessMcpDiagnosticSink",
     "HarnessMcpService",
     "McpRegistrationConfirmation",
     "McpRegistrationDiagnostic",
+    "mcp_removal_report",
 ]
 
 type ConfirmationChannel = Literal["interactive", "noninteractive_flag"]
+
+
+def mcp_removal_report(
+    result: McpRegistrationResult | McpRegistrationError,
+) -> dict[str, JsonValue]:
+    """Render only closed state and warning tokens, never host payloads."""
+
+    report: CompletedMcpRemoval | UnverifiedMcpRemoval
+    if isinstance(result, McpRegistrationResult):
+        if result.state_after is not McpRegistrationState.ABSENT:
+            raise ValueError("mcp_removal_not_absent")
+        report = CompletedMcpRemoval(warnings=list(result.warnings))
+    else:
+        state = result.safe_details.get("verified_state")
+        report = UnverifiedMcpRemoval(
+            state_after=(
+                "yoetz_owned"
+                if state == "yoetz_owned"
+                else "foreign_present"
+                if state == "foreign_present"
+                else None
+            ),
+            warnings=(
+                ["host_remove_returned_nonzero"]
+                if result.safe_details.get("exit_code_class") == "nonzero"
+                else []
+            ),
+        )
+    return cast(dict[str, JsonValue], report.model_dump(by_alias=True))
 
 
 def _invalid(reason: str) -> ValueError:
@@ -288,10 +319,7 @@ class HarnessMcpService:
                 None,
             )
         )
-        if (
-            result.action is McpRegistrationAction.UNREGISTER
-            and result.state_after is McpRegistrationState.ABSENT
-        ):
+        if result.state_after is McpRegistrationState.ABSENT:
             try:
                 clear_applied_route(_state=_state)
             except Exception:

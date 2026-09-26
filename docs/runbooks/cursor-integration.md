@@ -1,5 +1,9 @@
 # Cursor local integration runbook
 
+Codex's external MCP removal reconciliation (issue #860) does not apply to Cursor IDE or CLI:
+Cursor project MCP cleanup uses its own digest-bound file mutation, not `codex mcp remove`.
+The Cursor lifecycle and outcome contracts remain unchanged.
+
 For setup prerequisites, use `yoetz setup status --next --host cursor-cli` with the same
 executable, configuration root and project. `--operation connection` inspects installation without
 provider sign-in; `local` and `review` inspect their respective vault/privacy prerequisites.
@@ -821,7 +825,13 @@ Advice uses Cursor's native output contract rather than the Codex/Claude Code en
 would auto-submit it as a new user message. `afterFileEdit`, `afterMCPExecution`, and `sessionEnd`
 have no advice output channel and emit `{}`. Only a successfully written, nonempty `sessionStart`
 object commits advice delivery; output-less events do not acquire the delivery lease or consume a
-frontier-motion notice.
+frontier-motion notice. Provider-repair advice uses that `sessionStart` channel only (#844).
+A private or no-egress install, an install with no provider endpoint, and an install whose
+verification is disabled do not put `connect_provider` or another provider-repair request in
+`additional_context`. The service emits it only when verification is not disabled, a provider
+endpoint is bound, network egress is permitted, and an LLM inference channel is enabled, and the
+provider is still structurally unusable, including when no factory id is available. `stop` still
+emits `{}` and leaves that delivery pending.
 
 Workspace binding does not trust plugin-hook CWD. It selects a single `workspace_roots` entry first,
 then `CURSOR_PROJECT_DIR`, then the explicit `--workspace` value. A multiroot workspace selects the

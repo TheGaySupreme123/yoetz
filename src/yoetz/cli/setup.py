@@ -49,7 +49,11 @@ from yoetz.adapters.integrations.codex_skill import (
 from yoetz.adapters.workspace_binding import canonical_workspace_locator
 from yoetz.application.applied_mcp_route import clear_applied_route, read_applied_route
 from yoetz.application.codex_plugin import CodexPluginService
-from yoetz.application.harness_mcp import HarnessMcpService, McpRegistrationConfirmation
+from yoetz.application.harness_mcp import (
+    HarnessMcpService,
+    McpRegistrationConfirmation,
+    mcp_removal_report,
+)
 from yoetz.application.observation_check_policy import load_observation_check_policy
 from yoetz.cli.agent_start import AGENT_START_HANDOFF
 from yoetz.config.load import load_config
@@ -3300,6 +3304,7 @@ async def integrate_mcp(
                     "inspected_codex_home": str(selected_home),
                     "state_after": result.state_after.value,
                     "state_before": result.state_before.value,
+                    "removal": mcp_removal_report(result),
                 },
                 json_output=json_output,
             )
@@ -3390,6 +3395,31 @@ async def integrate_mcp(
             _state=_state,
         )
     except McpRegistrationError as error:
+        if action == "remove" and error.reason.value == "registration_failed":
+            from yoetz.cli.setup_readiness import continuation
+
+            inspect_command = continuation(
+                [
+                    "integrate",
+                    "codex",
+                    "mcp",
+                    "status",
+                    "--codex-path",
+                    chosen.executable_path,
+                    "--codex-home",
+                    str(selected_home),
+                    "--json",
+                ]
+            )
+            _emit(
+                {"removal": mcp_removal_report(error), "next_command": inspect_command},
+                json_output=json_output,
+            )
+            typer.echo(
+                "Removal was attempted but absence is unverified. Inspect the selected "
+                "registration before obtaining a fresh removal preview: " + inspect_command,
+                err=True,
+            )
         return _mcp_error_exit(error.reason.value)
     _emit(
         {

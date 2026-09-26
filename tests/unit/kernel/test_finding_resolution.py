@@ -545,7 +545,13 @@ def test_snapshot_rejects_a_null_resolution_key() -> None:
 
 
 @pytest.mark.parametrize(
-    "gap", ["host_outcome_unavailable", "unpaired_event", "semantic_case_content_over_item_limit"]
+    "gap",
+    [
+        "host_outcome_unavailable",
+        "unpaired_event",
+        "semantic_case_content_over_item_limit",
+        "semantic_case_finding_refs_over_limit",
+    ],
 )
 def test_resolution_explains_only_disqualifying_semantic_gaps(gap: str) -> None:
     from yoetz.kernel.finding_resolution import resolution_blockers

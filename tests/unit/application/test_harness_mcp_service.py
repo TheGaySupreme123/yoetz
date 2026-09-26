@@ -8,13 +8,14 @@ from typing import Literal
 import anyio
 import pytest
 
-from yoetz.application.applied_mcp_route import read_applied_route
+from yoetz.application.applied_mcp_route import read_applied_route, record_applied_route
 from yoetz.application.harness_mcp import (
     HarnessMcpService,
     McpRegistrationConfirmation,
     McpRegistrationDiagnostic,
 )
 from yoetz.ports.harness_mcp import (
+    MCP_SERVE_COMMAND,
     HarnessBinary,
     McpRegistrationAction,
     McpRegistrationCommand,
@@ -119,7 +120,9 @@ class _Port:
             raise McpRegistrationError(self.fail_with, {})
         return McpRegistrationResult(
             binary.harness_id,
-            McpRegistrationAction.UNREGISTER,
+            McpRegistrationAction.NOOP
+            if self.state is McpRegistrationState.ABSENT
+            else McpRegistrationAction.UNREGISTER,
             self.state,
             McpRegistrationState.ABSENT,
             command.preview_digest,
@@ -258,9 +261,16 @@ def test_unregister_requires_explicit_acceptance() -> None:
     assert port.applied == []
 
 
-def test_unregister_passes_exact_digest_and_records_result(tmp_path: Path) -> None:
+@pytest.mark.parametrize("state", [McpRegistrationState.YOETZ_OWNED, McpRegistrationState.ABSENT])
+def test_unregister_passes_exact_digest_and_records_result(
+    tmp_path: Path, state: McpRegistrationState
+) -> None:
     sink = _Sink()
-    port = _Port(McpRegistrationState.YOETZ_OWNED)
+    port = _Port(state)
+    record_applied_route(
+        "policy", list(MCP_SERVE_COMMAND), list(MCP_SERVE_COMMAND), _DIGEST, _state=tmp_path
+    )
+    assert read_applied_route(_state=tmp_path) is not None
     service = HarnessMcpService(port, sink)
     result = anyio.run(
         lambda: service.unregister(

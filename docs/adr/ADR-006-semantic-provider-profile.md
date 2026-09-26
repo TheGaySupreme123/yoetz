@@ -435,6 +435,14 @@ force. Irreducible required structure fails before job/attempt creation with
 `case_capacity_exceeded` and `semantic_case_capacity_exceeded` coverage. Narrowing scope creates new
 work; it does not replay a terminal check or imply that the reduced packet reviewed the whole task.
 
+A local finding wider than one case item's reference bound (16 subjects; findings may cite 64) is
+not irreducible structure and does not fail the case (#858). The builder omits that finding's prose
+and projected assessment as explicit `not_selected` omissions, declares
+`semantic_case_finding_refs_over_limit` on packet, check, status and receipt coverage, and
+dispatches the bounded case once. Subject references are never truncated to fit: a partial subject
+list would misstate the finding's identity. The finding itself remains a complete local check
+result and a citable `local_check_refs` entry.
+
 Exceptional attempts retain a request-joined stage/category before cleanup. Dispatch entry is an
 uncertain execution boundary; null provenance and missing diagnostics are not non-dispatch proof.
 Provider-return, mapping and persistence faults remain distinct. Diagnostics cannot change retry
