@@ -938,6 +938,15 @@ has a 16 MiB safety ceiling, and changes nothing; the largest supported capacity
 counts need control schema `2.9.0` on both the client and the service; an older revision drops a
 saved custom count to the default.
 
+**Lowering above the fallback byte bound (issue #843) — Codex decision.** Codex uses the shared
+store path with no Codex-specific behavior. Lowering, revoking, expiring, or ending a larger
+selection can leave more accepted rows than the new target holds. Those rows still drain, and the
+store keeps finite room, tied only to them, for refused-input loss, delivery attempts, and session
+ends. A refused hook reports `hook_observe_degraded: outbox_overflow; loss accounted` only after
+the loss is durable. If a `SessionEnd` hook cannot persist its local end, it stays fail-open
+within its teardown budget. It prints `hook_observe_degraded: session_end_unrecorded` and
+records that reason in `hook_diagnostics.reasons`.
+
 To keep an upcoming read individually linked to a later claim, use the bounded narrowing control
 with an active consent and the exact current Codex session:
 

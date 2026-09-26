@@ -3,9 +3,10 @@
 **Status:** Proposed for issue #687; the maintainer requested the complete implementation in one
 draft PR on 2026-09-10. Product direction is acknowledged; measured performance acceptance and
 the larger-profile rollout remain review decisions on that issue. Amended 2026-09-24 for #828
-(configurable capacity policy, custom counts, and the typed no-Yoetz-cap outcome).
+(configurable capacity policy, custom counts, and the typed no-Yoetz-cap outcome) and 2026-09-25
+for #843 (a finite over-target drain bound that keeps accounting writable).
 
-**Relates to:** ADR-009, ADR-010, ADR-014, ADR-016, ADR-022, and issues #687, #753, and #828.
+**Relates to:** ADR-009, ADR-010, ADR-014, ADR-016, ADR-022, and issues #687, #753, #828, and #843.
 
 ## Context
 
@@ -170,7 +171,8 @@ Detailed and larger capacity default to a current-session override. Workspace pe
 explicit owner choice. A preview precedes non-default authority and describes scope, expiry,
 finite budgets, and increased storage and processing costs. Expiry, revoke, reset, and lowering a
 setting affect future admission. Accepted records drain under a finite over-target transition;
-they are not deleted to make occupancy match a lower selection.
+they are not deleted to make occupancy match a lower selection. The transition's byte bound is
+defined in the #843 amendment below.
 
 Selection is local operational state under ADR-014, not an artifact replacement or a privacy
 grant. The preview binds the requested detail, capacity, exact scope and expiry to an acceptance
@@ -319,3 +321,57 @@ an integer. Local control schema `2.9.0` accepts custom counts, capacity labels 
 effective-budget record; both peers must run the `2.9.0` manifest to exchange them. An older
 revision reading a saved custom count treats it as malformed, drops that selection to the default,
 and does not report the drop. That is a disclosed limitation of downgrade, not a supported path.
+
+## Amendment — a finite over-target drain keeps accounting writable (2026-09-25, #843)
+
+### Problem
+
+Lowering, revoking or letting a larger selection expire, or ending the session that held it, can
+leave the state document above the 1 MiB fallback. The store used the current file size as the
+byte bound for that drain. Accepted rows were kept, but no write could grow the file. Accounting
+for refused input (`outbox_overflow`, `observation_input_loss`), delivery-attempt metadata, and
+a local session end all failed as `storage_unsafe`. A hook's capture batch rolled back with them,
+so the hook reported a refusal as accounted when it was not. The native `SessionEnd` hook
+discarded the failure, so the session and its temporary override stayed active.
+
+### Decision
+
+While accepted rows exceed the lowered selection, a write that does not fit the ordinary bound
+may use a finite over-target bound. Accepted rows exceed the selection when their count is above
+its queue count or their admission bytes are above its queue bytes. The bound is:
+
+- the selected state bytes;
+- plus the persisted bytes of accepted pending rows and buffered inputs above the selected queue
+  bytes;
+- plus a fixed 128 KiB accounting reserve;
+- never above the 16 MiB `STATE_DOCUMENT_CEILING_BYTES` and never below the current file size.
+
+Accepted rows carry their own persisted bytes, including delivery-attempt metadata. Everything
+else has the lowered selection's non-queue budget plus the reserve, including loss and lifecycle
+accounting. That accounting is count-bounded (at most 256 session gap maps and 64 loss ranges),
+so recording refusals cannot raise the bound. Only admission and drain change accepted rows, and
+admission is closed while the queue is over target. The bound shrinks as rows drain. It ends when
+they fit the selected target, and the ordinary bound applies again.
+
+The bound is never used outside an over-target transition. An ordinary full queue keeps the
+standard retention ladder, and the standard pressure seam is unchanged. Retention still trims
+disposable classes to the bound first. When protected state cannot fit even then, the write
+still fails without replacing the previous durable state. Landing within the over-target bound
+is not evidence of health: an active truncation gap clears only with headroom under the ordinary
+bound.
+
+Admission is unchanged. New host input, including protected and lifecycle observations, is
+refused and accounted while accepted rows exceed the selected target. The 600-rows-over-512
+backlog still reports `outbox_overflow` and keeps its rows.
+
+A `SessionEnd` hook whose local session end still cannot persist stays fail-open. It prints
+`hook_observe_degraded: session_end_unrecorded` and records the bounded `session_end_unrecorded`
+hook diagnostic instead of discarding the failure.
+
+### Unchanged
+
+No wire field or schema changes. Status keeps reporting the lowered selection's limits. The
+transition shows as over-100% utilization with `pressure_state: hard_limit`, beside the queue
+counts and bytes, gaps, and loss accounting. The per-write cost of a large state document is also
+unchanged: each acknowledgement during a 2 MiB drain rewrites the whole document. Incremental
+persistence remains the prerequisite for revisiting that.

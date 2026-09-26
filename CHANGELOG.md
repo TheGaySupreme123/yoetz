@@ -136,6 +136,11 @@ Prepared public-alpha release candidate; publication remains gated by #785. See
   selected installation (#796), plus the remaining 0.2.5 repairs: exact-session recovery and
   automatic reattachment beside independent tasks in the same workspace, with delegated children
   still behind their authenticated attachment path (#811, #815, #816).
+- Lowering, revoking, expiring or ending a larger observation capacity while the local state is
+  above 1 MiB no longer blocks later writes. Accepted records still drain. Refused input is
+  recorded as loss, and delivery attempts and session ends are still saved, within finite room
+  that follows only the accepted records. A session end that still cannot be saved is reported as
+  `session_end_unrecorded` (#843).
 
 ## 0.2.5 — 2026-09-23
 

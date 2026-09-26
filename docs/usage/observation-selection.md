@@ -174,7 +174,11 @@ yoetz observe selection-revoke --workspace /exact/project \
 ```
 
 Expiry, revoke, or a lower capacity changes future admission. Accepted records continue through
-the bounded drain and are not rewritten or deleted just to match the new target. Under pressure,
+the bounded drain and are not rewritten or deleted just to match the new target. While they are
+above the new target, new input is refused and each refusal is recorded as loss. Delivery attempts
+and session ends are still recorded too, even when the accepted records hold more than the new
+setting's storage budget. That extra room is finite and follows only the accepted records. It
+shrinks as they drain and ends when they fit the new target. Under pressure,
 the effective mode can temporarily be Focused even when Detailed remains selected. Status exposes
 both values, the setting origin and expiry, pressure, accounting, capture backlog, and historical
 loss. At a hard limit, replayable input pauses for retry and non-replayable input receives bounded

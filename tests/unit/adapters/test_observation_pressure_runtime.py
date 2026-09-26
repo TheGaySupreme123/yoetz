@@ -313,7 +313,7 @@ def test_buffer_only_plan_checks_aggregate_bytes_before_mutation(
     state = store._load(workspace)  # pyright: ignore[reportPrivateUsage]
     initial_size = len(store._encode_state(workspace, state))  # pyright: ignore[reportPrivateUsage]
 
-    def limit(workspace: str, state: object) -> int:
+    def limit(workspace: str, state: object, *, required: int | None = None) -> int:
         return initial_size + 1_000
 
     monkeypatch.setattr(store, "_state_byte_limit", limit)
