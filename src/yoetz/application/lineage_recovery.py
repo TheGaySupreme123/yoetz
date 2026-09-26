@@ -7,9 +7,15 @@ from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime
 from typing import TYPE_CHECKING, cast
 
-from yoetz.application.lineage import DelegationOperation, DelegationPhase, LineageSnapshot
+from yoetz.application.lineage import (
+    DelegationOperation,
+    DelegationPhase,
+    LineageCoordinator,
+    LineageSnapshot,
+)
 from yoetz.application.start import provision_lineage_recovery
 from yoetz.application.unit_of_work import PreparedMutation, run_prepared_append
+from yoetz.domain.coordination import SessionHealth
 from yoetz.domain.events import (
     LINEAGE_EVENT_SCHEMA_VERSION,
     OBSERVATION_COORDINATOR_ACTOR_ID,
@@ -21,17 +27,157 @@ from yoetz.domain.events import (
     media_type_for,
 )
 from yoetz.domain.values import Actor, ActorType, actor_id, event_id, timestamp_from_datetime
+from yoetz.ports.clock import ClockPort
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.ledger import AppendCommand, AppendEntry, OperationKind
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectSource
 from yoetz.ports.runtime import RouteAccess, RouteCommand, TaskRuntime
-from yoetz.ports.start_catalog import TaskRouteState
+from yoetz.ports.start_catalog import SessionBinding, SessionState, TaskRouteState
 from yoetz.protocol.canonical import canonical_digest, canonical_encode
 from yoetz.protocol.coverage import AuthorshipAssurance, PublicationChannel, coverage_for_channel
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 
 if TYPE_CHECKING:
     from yoetz.application.service import Application
+
+
+async def extend_session_lease(
+    start_catalog: object,
+    clock: ClockPort,
+    *,
+    task_id: str,
+    session_id: str,
+    lease_until: datetime,
+) -> bool:
+    """Hold one session active until ``lease_until`` without shortening a later lease.
+
+    Evidence-anchored renewal and the in-flight hold both end before a lease that a newer
+    workflow call or host event already recorded; only the later end is kept.
+    """
+
+    now = clock.now_utc()
+    if lease_until <= now:
+        # Evidence that ran out while this call waited cannot hold the session active now.
+        return False
+    extend = getattr(start_catalog, "extend_session_lease", None)
+    if callable(extend):
+        result = await cast(Callable[..., Awaitable[object]], extend)(
+            task_id,
+            session_id,
+            changed_at=now,
+            lease_expires_at=lease_until,
+        )
+        health = getattr(result, "health", None)
+        return True if health is None else health is SessionHealth.ACTIVE
+    # Older test-only catalog doubles may not expose the atomic operation yet.  Keep the
+    # fallback fenced by a second read and never replace a later lease with this offer.
+    record = getattr(start_catalog, "record_session_state", None)
+    if not callable(record):
+        return False
+    lookup = getattr(start_catalog, "task_session_state", None)
+    if callable(lookup):
+        current = await cast(Callable[[str], Awaitable[SessionState | None]], lookup)(session_id)
+        if (
+            current is not None
+            and current.health is SessionHealth.ACTIVE
+            and current.lease_expires_at is not None
+            and current.lease_expires_at >= lease_until
+        ):
+            return True
+        if current is not None and current.health is SessionHealth.ENDED:
+            return False
+    result = await cast(Callable[..., Awaitable[object]], record)(
+        task_id,
+        session_id,
+        health=SessionHealth.ACTIVE,
+        changed_at=now,
+        lease_expires_at=lease_until,
+    )
+    health = getattr(result, "health", None)
+    return True if health is None else health is SessionHealth.ACTIVE
+
+
+def observed_host_session_binding(
+    start_catalog: object,
+    lineage: LineageCoordinator,
+) -> Callable[[str, str, str], Awaitable[None]]:
+    """Bind accepted ingress to the exact active host/Yoetz session pair.
+
+    A historical Yoetz route can still be readable for replay, so a task id alone is not enough
+    to establish that a host annotation belongs to its current session.  The catalog's active
+    route is checked before recording the commitment; missing or stale route state fails closed.
+    """
+
+    route_lookup = getattr(start_catalog, "task_route", None)
+
+    async def bind(task_id: str, session_id: str, session_commitment: str) -> None:
+        if not callable(route_lookup):
+            return
+        try:
+            route = await cast(Callable[[str], Awaitable[object | None]], route_lookup)(task_id)
+            if (
+                route is None
+                or getattr(route, "task_id", None) != task_id
+                or getattr(route, "session_id", None) != session_id
+            ):
+                return
+            await lineage.bind_host_session_commitment(
+                task_id=task_id,
+                session_id=session_id,
+                session_commitment=session_commitment,
+            )
+        except Exception:
+            # A route/storage failure must not turn an accepted observation into a retry loop;
+            # without exact proof the recovery binding remains absent and holds fail closed.
+            return
+
+    return bind
+
+
+def observed_activity_renewal(
+    start_catalog: object,
+    lineage: LineageCoordinator,
+    clock: ClockPort,
+) -> Callable[[str, str, str, datetime], Awaitable[None]]:
+    """Build the observation hook that offers admitted host activity as contact evidence.
+
+    The catalog binding is revalidated first: evidence renews only the exact current session and
+    writer the observation was routed to.  ``observed_at`` is the host event's receipt time.
+    """
+
+    binding_lookup = getattr(start_catalog, "session_binding", None)
+
+    async def renew(task_id: str, session_id: str, writer_id: str, observed_at: datetime) -> None:
+        if not callable(binding_lookup):
+            return
+        binding = await cast(Callable[[str], Awaitable[SessionBinding | None]], binding_lookup)(
+            session_id
+        )
+        if (
+            binding is None
+            or binding.task_id != task_id
+            or binding.session_id != session_id
+            or binding.writer_id != writer_id
+        ):
+            return
+
+        async def renew_lease(lease_until: datetime) -> bool:
+            return await extend_session_lease(
+                start_catalog,
+                clock,
+                task_id=task_id,
+                session_id=session_id,
+                lease_until=lease_until,
+            )
+
+        await lineage.renew_observed_activity(
+            task_id=task_id,
+            session_id=session_id,
+            renew_lease=renew_lease,
+            observed_at=observed_at,
+        )
+
+    return renew
 
 
 async def lineage_recovery_runtime(app: Application, task_id: str) -> TaskRuntime:

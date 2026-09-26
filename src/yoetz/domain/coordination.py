@@ -117,6 +117,12 @@ class SessionHealth(str, Enum):  # noqa: UP042 - mirrors the exact wire vocabula
     ENDED = "ended"
 
 
+# One authenticated contact holds a task session ``active`` for this long.  Every catalog that
+# stores a session lease and every evidence-anchored renewal share this value, so a lease derived
+# from a host event's own time and a lease written by a workflow call have the same meaning.
+SESSION_LEASE_SECONDS: Final = 60
+
+
 class LineageOrigin(str, Enum):  # noqa: UP042 - mirrors the exact wire vocabulary
     PARENT_MINTED = "parent_minted"
     SELF_REGISTERED = "self_registered"

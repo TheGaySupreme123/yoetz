@@ -105,6 +105,21 @@ Prepared public-alpha release candidate; publication remains gated by #785. See
   own projection now return `STORAGE_CORRUPT` or `INTERNAL_ERROR` with a correlation id that
   resolves to the failing stage and source location, and one unreadable member is reported as a
   `project_member_unavailable` gap instead of failing the whole view (#840).
+
+- Active native work is no longer abandoned while it keeps working, and abandoned work has a
+  supported way forward (#837):
+  - Host activity counts as contact from when the host reported it, even when Yoetz delivers or
+    retries it later. That includes a turn ending or a subagent finishing.
+  - A native subagent the host reported starting keeps its parent in contact until the host
+    reports it finished, for up to an hour.
+  - Queued host events are delivered before Yoetz decides whether contact was lost.
+  - Resuming finished or abandoned work is refused without disturbing the session still in use.
+  - A task whose work is finished or abandoned cannot start child work. It gets its own reason
+    and directs you to a successor task for new work, while its history and receipts stay as
+    recorded.
+
+  The session lease and the default recovery window are unchanged. A single long quiet operation
+  can still lose contact, as described in the multi-agent usage page.
 - Busy starts recover their recorded route, and review-case construction resolves authenticated
   captured evidence instead of substituting its description (#745).
 - Long AI-powered reviews retain execution leases and durable responses through client

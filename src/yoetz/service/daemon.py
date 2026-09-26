@@ -1832,17 +1832,21 @@ class ServiceDaemon:
                         if resolved == 0
                         else _OBSERVATION_SWEEP_PROGRESS_DELAY_SECONDS
                     )
-                if (
-                    lineage_recovery is not None
-                    and asyncio.get_running_loop().time() >= next_recovery
-                ):
-                    await self._bounded_lineage_recovery(lineage_recovery)
-                    next_recovery = (
-                        asyncio.get_running_loop().time() + _OBSERVATION_SWEEP_INTERVAL_SECONDS
-                    )
                 if observation_sweep is not None:
                     summary = await self._bounded_observation_sweep(observation_sweep)
                     await self._note_sweep_liveness(summary)
+                now = asyncio.get_running_loop().time()
+                if lineage_recovery is not None and now >= next_recovery:
+                    # Queued host events are contact evidence. Recovery judges lease expiry and
+                    # abandonment only after this turn delivered them; while passes are still
+                    # resolving a backlog, the next immediate pass may carry newer evidence, so
+                    # wait for it, but never more than one extra interval (#837).
+                    resolved = 0 if summary is None else summary.acknowledged + summary.quarantined
+                    if resolved == 0 or now >= next_recovery + _OBSERVATION_SWEEP_INTERVAL_SECONDS:
+                        await self._bounded_lineage_recovery(lineage_recovery)
+                        next_recovery = (
+                            asyncio.get_running_loop().time() + _OBSERVATION_SWEEP_INTERVAL_SECONDS
+                        )
                 if coordination_sweep is not None:
                     await self._bounded_coordination_sweep(coordination_sweep)
         except asyncio.CancelledError:

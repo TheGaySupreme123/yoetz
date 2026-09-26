@@ -389,6 +389,10 @@ class TestClaimRevisionCorrections:
         ("lineage_operation_quarantined", "lineage_terminal_review"),
         ("lineage_catalog_migration_required", "lineage_service_review"),
         ("lineage_manifest_stale", "lineage_state_refresh"),
+        # The parent reconciles its own session; the child-attach directive never fits it (#837).
+        ("lineage_parent_session_invalid", "lineage_state_refresh"),
+        ("lineage_parent_work_terminal", "lineage_successor_task"),
+        ("lineage_resume_work_terminal", "lineage_successor_task"),
         ("cursor_project_mcp_preview_required", "cursor_project_preview_review"),
         ("stored_result_shape_invalid", "lineage_integrity_review"),
     ],
