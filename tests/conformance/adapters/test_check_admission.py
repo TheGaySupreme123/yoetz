@@ -395,13 +395,14 @@ async def test_sqlite_freeze_merges_over_concurrent_lifecycle_motion() -> None:
 
 
 @pytest.mark.anyio
-async def test_sqlite_freeze_refuses_as_contended_when_case_inputs_move() -> None:
+@pytest.mark.parametrize("kind", _KINDS)
+async def test_freeze_refuses_as_contended_when_case_inputs_move(kind: _Kind) -> None:
     """Motion in the case's own inputs refuses precisely, releases, and the replay admits."""
 
     command = ledger_command(unknown=True)
     clock = _SteppingClock()
-    adapter, gate = _adapter("sqlite", command, clock, gated=True)
-    assert isinstance(adapter, SqliteLedger) and gate is not None
+    adapter, gate = _adapter(kind, command, clock, gated=True)
+    assert gate is not None
     await adapter.append_batch(command)
     request_id = "req_00000000-0000-4000-8000-0000000008b3"
     frozen = asyncio.create_task(_freeze(adapter, command, request_id))
@@ -427,12 +428,13 @@ async def test_sqlite_freeze_refuses_as_contended_when_case_inputs_move() -> Non
 
 
 @pytest.mark.anyio
-async def test_sqlite_stalled_acquisition_yields_to_its_successor() -> None:
+@pytest.mark.parametrize("kind", _KINDS)
+async def test_stalled_acquisition_yields_to_its_successor(kind: _Kind) -> None:
     """A reservation that lapsed mid-staging names the live successor, which then admits."""
 
     command = ledger_command(unknown=True)
     clock = _SteppingClock()
-    adapter, gate = _adapter("sqlite", command, clock, gated=True)
+    adapter, gate = _adapter(kind, command, clock, gated=True)
     assert gate is not None
     await adapter.append_batch(command)
     request_id = "req_00000000-0000-4000-8000-0000000008b4"

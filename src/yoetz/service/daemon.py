@@ -1860,7 +1860,9 @@ class ServiceDaemon:
             try:
                 await asyncio.wait_for(wake.wait(), timeout=delay)
             except TimeoutError:
-                pass
+                # A wake can be set after wait_for decides the timeout but before this task
+                # resumes.  Leave it armed so that boundary wake is observed by the next turn.
+                return
         wake.clear()
 
     async def _refresh_ready_recommendations(

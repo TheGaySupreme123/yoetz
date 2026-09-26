@@ -2351,6 +2351,7 @@ class MemoryLedgerAdapter:
         projection: ProjectionState | None = None
         frontier: Frontier | None = None
         records: tuple[LedgerRecord, ...] | None = None
+        object_refs: dict[str, ObjectRef] | None = None
         acquisition_reservation: _CheckReservation | None = None
         async with self._lock:
             prior = self._state.operations.get(key)
@@ -2406,6 +2407,7 @@ class MemoryLedgerAdapter:
                 ):
                     raise _frontier_conflict(frontier)
                 records = self._state.records
+                object_refs = dict(self._state.object_refs)
                 writer = self._state.writers.get(writer_id)
                 if writer is None or writer.session_id != session_id:
                     raise _error(PublicErrorCode.SESSION_NOT_FOUND)
@@ -2440,6 +2442,7 @@ class MemoryLedgerAdapter:
                 _, renewed = self._replace_pending_record(prior_record)
                 return FrozenCase(case, renewed)
         assert projection is not None and frontier is not None and records is not None
+        assert object_refs is not None
         try:
             availability = await self.load_case_availability(session_id, frontier, projection)
             try:
@@ -2481,11 +2484,29 @@ class MemoryLedgerAdapter:
                     # Another invocation admitted this exact key after this one's reservation
                     # lapsed; the replay converges on that operation.
                     raise check_admission_refused(CheckAdmissionStage.ACQUIRING)
+                current_reservation = self._state.check_reservations.get(key)
+                if (
+                    acquisition_reservation is not None
+                    and current_reservation is not acquisition_reservation
+                ):
+                    # A successor may replace an expired reservation while this invocation is
+                    # staging.  Its exact token owns the admission; this stale attempt must not
+                    # overwrite the successor or win the race itself.
+                    raise check_admission_refused(
+                        CheckAdmissionStage.ACQUIRING
+                        if current_reservation is not None
+                        else CheckAdmissionStage.ACQUISITION_CONTENDED
+                    )
                 current = Frontier(
                     self._state.projection.frontier, self._state.projection.head_digest
                 )
                 if current != frontier or self._pending_import(session_id):
                     raise _frontier_conflict(current)
+                if self._state.object_refs != object_refs:
+                    # Case availability includes the object inventory.  A concurrent inventory
+                    # refresh can change that input without moving the ledger frontier, so the
+                    # staged case must be retried instead of admitting stale availability.
+                    raise check_admission_refused(CheckAdmissionStage.ACQUISITION_CONTENDED)
                 operation = OperationRecord(
                     writer_id,
                     request_id,

@@ -3635,3 +3635,34 @@ async def test_capture_refused_check_wakes_the_observation_sweep(
     # The idle interval is 60 s; only the wake can bring the second sweep this soon.
     await asyncio.wait_for(second_sweep.wait(), timeout=5)
     await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_observation_sweep_wake_survives_timeout_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wake arriving with the timeout result stays armed for the next sweep turn."""
+
+    daemon, _application, _vault, _listener = _daemon()
+    wake = daemon._observation_sweep_wake  # pyright: ignore[reportPrivateUsage]
+    timeout_started = asyncio.Event()
+    release_timeout = asyncio.Event()
+
+    async def timeout_barrier(awaitable: object, timeout: float) -> object:
+        del timeout
+        timeout_started.set()
+        await release_timeout.wait()
+        wake.set()
+        close = getattr(awaitable, "close", None)
+        if callable(close):
+            close()
+        raise TimeoutError
+
+    monkeypatch.setattr(daemon_module.asyncio, "wait_for", timeout_barrier)
+    waiting = asyncio.create_task(daemon._await_observation_sweep_turn(60.0))  # pyright: ignore[reportPrivateUsage]
+    await timeout_started.wait()
+    release_timeout.set()
+    await waiting
+
+    assert wake.is_set()
+    await daemon.close()
