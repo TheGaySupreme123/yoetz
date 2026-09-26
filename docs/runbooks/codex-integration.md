@@ -910,6 +910,14 @@ privacy authority. Configure the evaluator only through
 native `0.150.1` app-server cell. Never reuse the host's ambient home, environment, session, tools,
 instructions, or repository cwd for the evaluator.
 
+The evaluator binds Yoetz's own verified copy of that admitted release (issue #855), never the host
+Codex installation. Updating the host Codex therefore changes neither the evaluator nor its
+binding. A binding stranded by an earlier host update or a capability-identity change is repaired
+with `yoetz provider codex-subscription repair`, which reuses the dedicated home's sign-in. Decision
+for this host: supported through the shared provider surfaces, with no Codex-specific step. Native
+Codex acceptance of a post-repair check is pending; see the
+[subscription evaluator runbook](codex-subscription-evaluator.md#evaluator-runtime-retention-and-repair).
+
 The registered host route still decides whether this Codex process may request AI-powered review
 work: `strict` proves zero evaluator launch, while `policy` only permits ADR-009 to decide. Read the
 [subscription evaluator runbook](codex-subscription-evaluator.md) before claiming live model use,

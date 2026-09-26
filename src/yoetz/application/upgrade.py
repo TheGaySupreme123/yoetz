@@ -192,4 +192,16 @@ def build_upgrade_plan(
             ((launcher, "version", "--json"), (launcher, "service", "status", "--json")),
         )
     )
+    steps.append(
+        UpgradeStep(
+            "AI-powered review evaluator",
+            "Only when a Codex subscription evaluator is bound. Package, service and host success "
+            "do not prove the evaluator can still run. Check it with the fresh launcher; the "
+            "check starts no Codex process and does not check sign-in. If it names a next "
+            "command, such as repair after a capability-identity change or a replaced Codex "
+            "executable, review that command's preview before applying it. Repair keeps the "
+            "sign-in, model, effort, timeout, retries and privacy grants, and never signs in.",
+            ((launcher, "provider", "codex-subscription", "runtime", "status", "--json"),),
+        )
+    )
     return tuple(steps)

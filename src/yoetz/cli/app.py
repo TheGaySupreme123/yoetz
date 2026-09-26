@@ -161,6 +161,13 @@ provider_app = typer.Typer(help="Manage provider setup.", no_args_is_help=True)
 codex_subscription_app = typer.Typer(
     help="Manage the exact Codex-owned ChatGPT subscription evaluator.", no_args_is_help=True
 )
+codex_evaluator_runtime_app = typer.Typer(
+    help=(
+        "Inspect, retain, or remove Yoetz's verified private copy of the evaluator runtime, kept "
+        "apart from your everyday Codex installation."
+    ),
+    no_args_is_help=True,
+)
 credential_app = typer.Typer(
     help="Provision credentials through a trusted ceremony.", no_args_is_help=True
 )
@@ -218,6 +225,7 @@ service_app.add_typer(recovery_app, name="recovery")
 app.add_typer(provider_app, name="provider")
 provider_app.add_typer(credential_app, name="credential")
 provider_app.add_typer(codex_subscription_app, name="codex-subscription")
+codex_subscription_app.add_typer(codex_evaluator_runtime_app, name="runtime")
 provider_app.add_typer(fallback_app, name="fallback")
 app.add_typer(privacy_app, name="privacy")
 privacy_app.add_typer(privacy_receipts_app, name="receipts")
@@ -571,9 +579,16 @@ def _bounded_failure_line(reason: str, *, prefix: str | None = None) -> str:
 
 
 def _codex_subscription_cli_failure(error: BaseException) -> None:
-    from yoetz.cli.codex_subscription import subscription_failure_reason
+    from yoetz.cli.codex_subscription import subscription_failure_reason, subscription_remediation
 
-    _stderr(_bounded_failure_line(subscription_failure_reason(error), prefix="codex_subscription"))
+    reason = subscription_failure_reason(error)
+    rendered = _bounded_failure_line(reason, prefix="codex_subscription")
+    guidance = subscription_remediation(reason)
+    if guidance is not None and remediation_message(reason) is None:
+        # Evaluator-runtime tokens carry their next step beside the subscription commands (#855).
+        head, separator, directives = rendered.partition("\n")
+        rendered = f"{head}: {guidance}{separator}{directives}"
+    _stderr(rendered)
 
 
 async def _codex_subscription_mutate[T](operation: Callable[[], Awaitable[T]]) -> T:
@@ -3631,12 +3646,16 @@ credential_app.command("rotate")(_provider_credential_command("rotate"))
 @codex_subscription_app.command("setup")
 def provider_codex_subscription_setup(
     executable: Annotated[
-        Path,
+        Path | None,
         typer.Option(
             "--executable",
-            help="Selected Codex CLI/native executable; its exact native binary is digest-bound.",
+            help=(
+                "Codex CLI/native executable to take the admitted runtime from. Defaults to "
+                "Yoetz's retained runtime, then an existing binding or discovered installation "
+                "that holds the exact admitted bytes."
+            ),
         ),
-    ],
+    ] = None,
     model: Annotated[
         str | None,
         typer.Option(
@@ -3648,8 +3667,12 @@ def provider_codex_subscription_setup(
         ),
     ] = None,
     reasoning_effort: Annotated[
-        str, typer.Option("--reasoning-effort", help="Exact reasoning effort.")
-    ] = "high",
+        str | None,
+        typer.Option(
+            "--reasoning-effort",
+            help="Exact reasoning effort. Defaults to high, or preserves an existing binding's.",
+        ),
+    ] = None,
     codex_home: Annotated[
         Path | None,
         typer.Option("--codex-home", help="Dedicated owner-private evaluator CODEX_HOME."),
@@ -3688,15 +3711,24 @@ def provider_codex_subscription_setup(
     import platform
 
     from yoetz.adapters.providers.codex_app_server import codex_evaluator_cell_for_platform
+    from yoetz.adapters.providers.codex_evaluator_runtime import managed_runtime_path
     from yoetz.cli.codex_subscription import (
         codex_subscription_setup,
+        default_codex_evaluator_executable,
         default_codex_home,
         default_codex_subscription_model,
+        default_codex_subscription_reasoning_effort,
         resolve_supported_codex_executable,
+        runtime_bundle,
     )
 
     try:
-        native, digest, source = resolve_supported_codex_executable(executable)
+        selected_executable = (
+            default_codex_evaluator_executable() if executable is None else executable
+        )
+        if selected_executable is None:
+            raise ValueError("codex_evaluator_runtime_unavailable")
+        native, digest, source = resolve_supported_codex_executable(selected_executable)
         cell = codex_evaluator_cell_for_platform(
             "linux" if sys.platform.startswith("linux") else sys.platform,
             platform.machine(),
@@ -3705,14 +3737,23 @@ def provider_codex_subscription_setup(
             raise ValueError("codex_runtime_capability_unsupported")
         destination = default_codex_home() if codex_home is None else codex_home
         selected_model = default_codex_subscription_model() if model is None else model
+        selected_effort = (
+            default_codex_subscription_reasoning_effort()
+            if reasoning_effort is None
+            else reasoning_effort
+        )
         typer.echo("Codex with ChatGPT subscription")
-        typer.echo(f"  runtime: {native}")
+        typer.echo(f"  runtime source: {native}")
+        typer.echo(
+            f"  bound runtime: {managed_runtime_path(runtime_bundle(), cell)} (Yoetz's verified "
+            "private copy; updating your everyday Codex leaves it unchanged)"
+        )
         typer.echo(f"  executable_sha256: {digest}")
         typer.echo(f"  source: {source}")
         typer.echo(f"  capability cell: {cell.capability_cell_sha256}")
         typer.echo(f"  cell evidence expires: {cell.capability_evidence_expires_at}")
         typer.echo(f"  dedicated CODEX_HOME: {destination}")
-        typer.echo(f"  model/reasoning: {selected_model} / {reasoning_effort}")
+        typer.echo(f"  model/reasoning: {selected_model} / {selected_effort}")
         typer.echo("  destination: OpenAI through Codex-managed ChatGPT authentication")
         typer.echo("  data-use posture: unknown; your ChatGPT plan and terms apply")
         typer.echo("  Yoetz sends only a privacy-approved case; Codex owns the upstream body.")
@@ -3737,10 +3778,10 @@ def provider_codex_subscription_setup(
         payload = run_async(
             lambda: _codex_subscription_mutate(
                 lambda: codex_subscription_setup(
-                    executable=executable,
+                    executable=selected_executable,
                     codex_home=destination,
                     model=selected_model,
-                    reasoning_effort=reasoning_effort,
+                    reasoning_effort=selected_effort,
                     login_mode="device_code" if device_code else "browser",
                     open_browser=open_browser,
                     switch_account=switch_account,
@@ -3811,6 +3852,189 @@ def provider_codex_subscription_rollback(json_output: _JSON = False) -> None:
             await _codex_subscription_mutate(_noop_subscription_recompose)
 
         run_async(recompose)
+        _human_or_json(payload, json_output=json_output)
+        _finish(0)
+    except (OSError, ValueError) as error:
+        _codex_subscription_cli_failure(error)
+        _finish(20)
+
+
+def _confirm_or_refuse(accept: bool, question: str) -> bool:
+    """An explicit ``--accept``, or a yes from an interactive terminal; never an implied yes."""
+
+    if accept:
+        return True
+    return sys.stdin.isatty() and sys.stdout.isatty() and typer.confirm(question, default=False)
+
+
+@codex_subscription_app.command("repair")
+def provider_codex_subscription_repair(
+    executable: Annotated[
+        Path | None,
+        typer.Option(
+            "--executable",
+            help=(
+                "Codex CLI/native executable to take the admitted runtime from when Yoetz has no "
+                "retained copy yet. It must hold the exact admitted bytes."
+            ),
+        ),
+    ] = None,
+    accept: Annotated[
+        bool, typer.Option("--accept", help="Confirm the displayed rebinding without a prompt.")
+    ] = False,
+    json_output: _JSON = False,
+) -> None:
+    """Rebind a stranded or outdated binding to the admitted runtime; keep its login and choices.
+
+    Model, reasoning effort, timeout, retries, dedicated home, endpoint role, and privacy grants
+    are preserved. The existing sign-in is reused only when Codex reports the dedicated home
+    signed in with the exact model; repair never opens a sign-in or switches accounts.
+    """
+
+    from yoetz.cli.codex_subscription import (
+        codex_subscription_repair,
+        codex_subscription_repair_plan,
+    )
+
+    try:
+        plan = codex_subscription_repair_plan(executable=executable)
+        changed = cast(list[str], plan["changed_fields"])
+        if not json_output:
+            typer.echo("Repair the Codex subscription evaluator binding")
+            typer.echo(f"  current state: {plan['state_before']}")
+            typer.echo(f"  runtime source: {plan['source_path']} ({plan['source']})")
+            typer.echo(
+                f"  bound runtime: {plan['executable_path_after']} (Yoetz's verified private "
+                "copy; updating your everyday Codex leaves it unchanged)"
+            )
+            typer.echo(
+                f"  capability profile: {plan['capability_profile_before']} -> "
+                f"{plan['capability_profile_after']}"
+            )
+            typer.echo(f"  changed fields: {', '.join(changed) if changed else 'none'}")
+            typer.echo(
+                "  preserved: model, reasoning effort, timeout, retries, dedicated home, "
+                "endpoint role, and privacy grants"
+            )
+            typer.echo(
+                "  sign-in: reused only if Codex reports this home signed in; repair never signs "
+                "in, logs out, or switches accounts"
+            )
+        if not _confirm_or_refuse(accept, "Apply this repair?"):
+            _finish(20)
+            return
+        payload = run_async(
+            lambda: _codex_subscription_mutate(
+                lambda: codex_subscription_repair(executable=executable)
+            )
+        )
+        _human_or_json(cast(Mapping[str, JsonValue], payload), json_output=json_output)
+        _finish(0)
+    except (OSError, TimeoutError, ValueError) as error:
+        _codex_subscription_cli_failure(error)
+        _finish(20)
+
+
+@codex_evaluator_runtime_app.command("status")
+def provider_codex_evaluator_runtime_status(json_output: _JSON = False) -> None:
+    """Report the retained runtime and the binding's structural state without starting Codex."""
+
+    from yoetz.cli.codex_subscription import codex_evaluator_runtime_status
+
+    try:
+        payload = codex_evaluator_runtime_status()
+        _human_or_json(payload, json_output=json_output)
+        binding = payload.get("binding")
+        ready = binding is None or cast(Mapping[str, object], binding).get("state") == "ready"
+        _finish(0 if ready else 20)
+    except (OSError, ValueError) as error:
+        _codex_subscription_cli_failure(error)
+        _finish(20)
+
+
+@codex_evaluator_runtime_app.command("install")
+def provider_codex_evaluator_runtime_install(
+    source: Annotated[
+        Path | None,
+        typer.Option(
+            "--from",
+            help="Codex CLI/native executable holding the exact admitted bytes to retain.",
+        ),
+    ] = None,
+    download: Annotated[
+        bool,
+        typer.Option(
+            "--download",
+            help=(
+                "Allow downloading the exact admitted release with your npm when no local copy "
+                "holds the admitted bytes."
+            ),
+        ),
+    ] = False,
+    npm: Annotated[
+        Path | None, typer.Option("--npm", help="Absolute npm executable to download with.")
+    ] = None,
+    accept: Annotated[
+        bool, typer.Option("--accept", help="Confirm the displayed retention without a prompt.")
+    ] = False,
+    json_output: _JSON = False,
+) -> None:
+    """Keep a verified private copy of the admitted evaluator runtime; never edits the binding."""
+
+    from yoetz.cli.codex_subscription import (
+        codex_evaluator_runtime_install,
+        codex_evaluator_runtime_install_plan,
+        describe_runtime_download,
+    )
+
+    try:
+        plan = codex_evaluator_runtime_install_plan(source=source, download=download)
+        if not json_output:
+            typer.echo("Retain the Codex subscription evaluator runtime")
+            if plan["download"] is True:
+                typer.echo("  source: download")
+                for line in describe_runtime_download():
+                    typer.echo(f"  {line}")
+            else:
+                typer.echo(f"  source: {plan['source_path']} ({plan['source']})")
+            typer.echo(f"  runtime: Codex {plan['runtime_version']} {plan['executable_sha256']}")
+            typer.echo(f"  retained at: {plan['managed_runtime_path']}")
+            typer.echo(f"  current copy: {plan['managed_runtime_state']}")
+            typer.echo("  the binding is not changed; run repair or setup to bind this copy")
+        question = (
+            "Download and retain the evaluator runtime?"
+            if plan["download"] is True
+            else "Retain this evaluator runtime?"
+        )
+        if not _confirm_or_refuse(accept, question):
+            _finish(20)
+            return
+        payload = codex_evaluator_runtime_install(source=source, npm=npm, download=download)
+        _human_or_json(payload, json_output=json_output)
+        _finish(0)
+    except (OSError, ValueError) as error:
+        _codex_subscription_cli_failure(error)
+        _finish(20)
+
+
+@codex_evaluator_runtime_app.command("remove")
+def provider_codex_evaluator_runtime_remove(
+    accept: Annotated[
+        bool, typer.Option("--accept", help="Confirm removal of the unreferenced retained copy.")
+    ] = False,
+    json_output: _JSON = False,
+) -> None:
+    """Delete only Yoetz's retained runtime copy; refused while the binding still uses it."""
+
+    from yoetz.cli.codex_subscription import codex_evaluator_runtime_remove
+
+    if not _confirm_or_refuse(
+        accept, "Remove Yoetz's retained evaluator runtime copy (not your Codex installation)?"
+    ):
+        _finish(20)
+        return
+    try:
+        payload = codex_evaluator_runtime_remove()
         _human_or_json(payload, json_output=json_output)
         _finish(0)
     except (OSError, ValueError) as error:
@@ -4031,9 +4255,7 @@ def provider_endpoint(
                 return
             selected = prompt_provider_endpoint_binding()
             if selected == "codex_subscription":
-                typer.echo(
-                    "next: yoetz provider codex-subscription setup --executable <absolute-path>"
-                )
+                typer.echo("next: yoetz provider codex-subscription setup")
             _finish(0)
             return
         if (

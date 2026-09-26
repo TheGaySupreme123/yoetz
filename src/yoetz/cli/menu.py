@@ -85,6 +85,28 @@ def _run(operation: Callable[[], Awaitable[None]]) -> None:
     run_async(wrapped)
 
 
+def _run_subscription(operation: Callable[[], Awaitable[object]]) -> None:
+    """Subscription actions report their exact bounded cause and next step (#855).
+
+    The generic ceremony renderer knows only shared CLI remediations, so an evaluator-runtime
+    refusal such as a replaced executable would otherwise read as invalid input.
+    """
+
+    from yoetz.cli.app import run_async
+    from yoetz.cli.codex_subscription import subscription_failure_line
+
+    async def wrapped() -> int:
+        try:
+            _show(await operation())
+        except ControlError as error:
+            typer.echo(_control_guidance(error), err=True)
+        except (OSError, TimeoutError, ValueError) as error:
+            typer.echo(subscription_failure_line(error), err=True)
+        return 0
+
+    run_async(wrapped)
+
+
 def _run_ceremony(operation: Callable[[], Awaitable[object]]) -> None:
     from yoetz.cli.app import run_async
     from yoetz.cli.unlock import HumanCeremonyCliError
@@ -304,8 +326,10 @@ def _provider_menu() -> None:
     typer.echo("  5  Codex subscription status")
     typer.echo("  6  Disconnect dedicated Codex home")
     typer.echo("  7  Roll back Yoetz's Codex binding only")
+    typer.echo("  8  Repair the Codex evaluator binding (keeps sign-in and settings)")
+    typer.echo("  9  Codex evaluator runtime status (no sign-in check)")
     typer.echo("  b  Back")
-    choice = _ask(("1", "2", "3", "4", "5", "6", "7", _BACK))
+    choice = _ask(("1", "2", "3", "4", "5", "6", "7", "8", "9", _BACK))
     if choice == _BACK:
         return
     if choice == "1":
@@ -315,9 +339,12 @@ def _provider_menu() -> None:
         if selected == "codex_subscription":
             typer.echo("Use menu option 4 to continue with Codex-managed sign-in.")
         return
-    if choice in {"4", "5", "6", "7"}:
+    if choice in {"4", "5", "6", "7", "8", "9"}:
         from yoetz.cli.codex_subscription import (
+            codex_evaluator_runtime_status,
             codex_subscription_disconnect,
+            codex_subscription_repair,
+            codex_subscription_repair_plan,
             codex_subscription_rollback,
             codex_subscription_status,
             prompt_codex_subscription_setup,
@@ -336,9 +363,31 @@ def _provider_menu() -> None:
                 except (OSError, TimeoutError, ValueError) as error:
                     raise ValueError(subscription_failure_reason(error)) from error
 
-            _run_ceremony(setup_subscription)
+            _run_subscription(setup_subscription)
         elif choice == "5":
-            _run_ceremony(codex_subscription_status)
+            _run_subscription(codex_subscription_status)
+        elif choice == "8":
+
+            async def repair_subscription() -> object:
+                from yoetz.cli.setup import restart_service_for_semantic_composition
+
+                _show(codex_subscription_repair_plan())
+                if not typer.confirm(
+                    "Rebind to Yoetz's retained runtime, keeping the sign-in and settings?",
+                    default=False,
+                ):
+                    raise ValueError("cancelled")
+                result = await codex_subscription_repair()
+                await restart_service_for_semantic_composition()
+                return result
+
+            _run_subscription(repair_subscription)
+        elif choice == "9":
+
+            async def runtime_status() -> object:
+                return codex_evaluator_runtime_status()
+
+            _run_subscription(runtime_status)
         elif choice == "6":
             if typer.confirm(
                 "Log out only the dedicated evaluator home and remove its binding?",
@@ -356,7 +405,7 @@ def _provider_menu() -> None:
                     except (OSError, TimeoutError, ValueError) as error:
                         raise ValueError(subscription_failure_reason(error)) from error
 
-                _run_ceremony(disconnect_subscription)
+                _run_subscription(disconnect_subscription)
         else:
 
             async def rollback_subscription() -> object:
@@ -370,7 +419,7 @@ def _provider_menu() -> None:
                 except (OSError, ValueError) as error:
                     raise ValueError(subscription_failure_reason(error)) from error
 
-            _run_ceremony(rollback_subscription)
+            _run_subscription(rollback_subscription)
         return
     action: Literal["set", "rotate"] = "set" if choice == "2" else "rotate"
     from yoetz.config.load import load_config

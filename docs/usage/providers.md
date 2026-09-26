@@ -106,6 +106,44 @@ yoetz provider codex-subscription disconnect --accept  # Codex logout, then remo
 yoetz provider codex-subscription rollback             # remove binding; preserve home/install
 ```
 
+### Keeping the evaluator working when Codex updates
+
+Your everyday Codex can stay on any version. Setup keeps its own verified private copy of the one
+Codex release the evaluator admits, in Yoetz's data directory, and binds that copy instead of your
+Codex installation. Updating or replacing your everyday Codex therefore leaves AI-powered review
+working. `--executable` is optional: setup uses Yoetz's copy first, then any installation that
+already holds the admitted release. It never offers a newer Codex that the evaluator does not
+admit. When nothing eligible is found, first-run setup and the prompt menu offer to download the
+admitted release. The terminal interface's `/provider` shows the download command. You can also
+run it yourself:
+
+```text
+yoetz provider codex-subscription runtime status              # what is bound, and what to do next
+yoetz provider codex-subscription runtime install --download  # uses your npm; asks first
+yoetz provider codex-subscription runtime install --from /absolute/path/to/codex
+yoetz provider codex-subscription runtime remove              # only when no binding uses it
+```
+
+The download runs your own npm with install scripts disabled. Yoetz keeps only the executable whose
+SHA-256 matches the reviewed evaluator and deletes the rest. It sends no task content, credential,
+or account data, and it does not change your Codex installation, settings, or sign-ins.
+
+If AI-powered review stops working after a Codex update or a Yoetz upgrade, `runtime status`,
+`codex-subscription status`, and `yoetz provider status` name the exact cause, for example
+`codex_runtime_executable_changed` or `codex_runtime_profile_outdated`, and the command that fixes
+it. For those, run:
+
+```text
+yoetz provider codex-subscription repair
+```
+
+Repair shows what will change and asks first. It keeps your model, reasoning effort, timeout,
+retries, dedicated home, fallback role, and privacy permissions. It reuses your existing ChatGPT
+sign-in only when Codex reports the dedicated home still signed in; it never starts a new sign-in,
+logs out, or switches accounts. If the home is not signed in, repair changes nothing and tells you
+to run `setup`. Re-running `setup` also keeps an existing binding's timeout, retries, and reasoning
+effort unless you pass new values.
+
 When an attempt fails after the case was disclosed, the receipt keeps the closed
 `semantic_status` / `semantic_reason` pair and adds `runtime_evidence.failure_stage`: one fixed
 token such as `output_not_json`, `judgment_refs_duplicate`, `judgment_conclusion_mismatch`,

@@ -305,6 +305,63 @@ or unconfirmed process-group cleanup is terminal `unavailable/outcome_unknown` a
 automatically retried. Schema-valid model output remains advisory and follows the unchanged
 post-validation/finding path.
 
+### Evaluator runtime retention and repair amendment (2026-09-26, issue #855)
+
+Binding the exact cell to an ordinary host installation coupled AI-powered review to the host's
+package manager: a routine Codex update replaced the bytes at the bound path, and a capability
+identity change (the #584 v1 → v2 transition) stranded a valid login behind an outdated binding.
+Both failed before dispatch and surfaced only as `credential_unavailable`. This amendment keeps
+exact-version admission and separates the **evaluator runtime** from the **host installation**.
+
+1. **Admission is unchanged.** Each platform cell still admits exactly one reviewed native
+   executable digest. No newer Codex release is admitted, and nothing is inferred from a version
+   string, path, or discovery order. Capability-based admission of further releases stays future
+   work that needs its own evidence and amendment.
+2. **A retained runtime per data bundle.** Setup and repair bind an owner-private copy at
+   `<data bundle>/external-runtimes/codex-evaluator/<source identity>/codex` (directory `0700`,
+   file `0500`). Bytes are hashed while they are copied and committed by atomic replace only when
+   they equal the admitted digest; the unchanged launch fence re-verifies them before every child.
+   Host package-manager updates cannot replace the copy, and every instance keeps its own.
+3. **Sources for the copy.** A selected local executable that resolves to the admitted cell, or,
+   after explicit consent, the operator's own `npm` installing the exact admitted release into an
+   owner-private staging prefix with lifecycle scripts disabled. Only the verified native
+   executable is kept; the staging prefix is always removed. This is package acquisition under the
+   operator's registry settings. No task content, credential, or account data is sent on it, and
+   it grants no review egress.
+4. **Selection by eligibility.** Setup defaults to the retained copy, then the existing binding's
+   executable when it still holds the admitted bytes, then the first discovered installation that
+   resolves to the admitted cell. An unadmitted discovered binary is never presented as a default.
+5. **Rebinding preserves choices.** Setup and repair preserve the provider role, model, reasoning
+   effort, timeout, retry budget, and dedicated home unless the owner explicitly changes one.
+   `repair` is the explicit capability-identity transition the #584 amendment requires: it shows the
+   changed fields, needs acceptance, and reuses the login only when Codex's own
+   `account/read`/`model/list` probe reports the home signed in with the exact model. It never
+   starts a sign-in, logs out, or switches accounts, and it writes against the exact configuration
+   preimage. Privacy grants are not part of the binding and do not migrate. A missing home, an
+   unsafe home, and a modified isolated config are refused for the owner to fix; only a missing
+   Yoetz-owned isolated config is restored.
+6. **Precise pre-dispatch diagnosis.** A closed structural state is computed from local structure
+   only (binding, executable bytes, dedicated home): `codex_runtime_platform_unsupported`,
+   `codex_runtime_binding_invalid`, `codex_runtime_capability_evidence_stale`,
+   `codex_runtime_capability_unsupported`, `codex_runtime_executable_missing|invalid|changed`,
+   `codex_runtime_profile_outdated`, `codex_home_missing|unsafe`,
+   `codex_runtime_config_missing|changed`, `codex_runtime_unavailable`, or `ready`. `ready` is
+   reported only when the launch fence also accepts the binding. READY composition still spawns no
+   app-server. The public semantic outcome is unchanged; a request-joined companion diagnostic names
+   the structural state, and `provider status` reports it with its continuation.
+7. **Reverse operations stay distinct.** `runtime remove` refuses while the binding uses the copy.
+   Disconnect and rollback leave the copy in place. A stranded binding can still be disconnected:
+   the admitted runtime is used in memory for that one logout.
+   Setup, repair, install, and removal hold one owner-private lock per runtime store. Setup and
+   repair keep it through the readiness probe and configuration write, so removal cannot delete
+   a runtime between those steps. Contention fails immediately as `codex_evaluator_runtime_busy`;
+   the operator retries after the other command finishes. The lock is released on every exit.
+
+Evidence expiry is unchanged: after `2026-11-30T00:00:00Z` every cell reports
+`codex_runtime_capability_evidence_stale`, which only a Yoetz release carrying renewed evidence
+resolves. The upgrade plan names the evaluator check; applying a repair stays an explicit owner
+step.
+
 ## Fallback endpoint amendment (2026-09-04, issue #582)
 
 AI-powered review may bind one primary endpoint plus exactly one fallback endpoint. The pairing is

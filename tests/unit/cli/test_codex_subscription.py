@@ -22,6 +22,10 @@ from yoetz.adapters.providers.codex_app_server import (
     CodexEvaluatorCell,
     CodexRuntimeStatus,
 )
+from yoetz.adapters.providers.codex_evaluator_runtime import (
+    CodexBindingDiagnosis,
+    managed_runtime_path,
+)
 from yoetz.cli import codex_subscription as module
 from yoetz.config.models import ConfigError, ExternalRuntimeProfileConfig, YoetzConfig
 from yoetz.config.write import codex_subscription_runtime, render_config_toml
@@ -44,6 +48,46 @@ def _ambient_config_environment(  # pyright: ignore[reportUnusedFunction]
             monkeypatch.delenv(name)
     absent = tmp_path_factory.mktemp("config") / "absent.toml"
     monkeypatch.setenv("YOETZ_CONFIG", str(absent))
+    # The retained evaluator runtime lives in the data bundle. No case may reach the invoking
+    # user's real data directory, discover a real Codex on PATH, or download with a real npm
+    # (#855); a case that exercises any of them opts in explicitly.
+    bundle = tmp_path_factory.mktemp("bundle")
+
+    def runtime_bundle(_config: YoetzConfig | None = None) -> Path:
+        return bundle
+
+    monkeypatch.setattr(module, "runtime_bundle", runtime_bundle)
+
+    # This module stubs runtime retention; store-path safety is covered by the adapter tests.
+    # Keep the real lock while allowing the synthetic shared temporary test bundle.
+    def allow_private(_path: Path) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "yoetz.adapters.providers.codex_evaluator_runtime.verify_private_local_bundle",
+        allow_private,
+    )
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.codex_discovery.discover_codex_binaries", lambda: ()
+    )
+
+    def no_download(**_kwargs: object) -> Path:
+        raise AssertionError("unit tests never download a real evaluator runtime")
+
+    def retain_in_place(_source: Path, *, bundle: Path, cell: CodexEvaluatorCell) -> Path:
+        return managed_runtime_path(bundle, cell)
+
+    monkeypatch.setattr(module, "provision_codex_runtime", no_download)
+    monkeypatch.setattr(module, "retain_codex_runtime", retain_in_place)
+
+
+def _assume_structurally_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Treat a synthetic binding as structurally ready; its paths are never real executables."""
+
+    def ready(_binding: ExternalRuntimeProfileConfig) -> CodexBindingDiagnosis:
+        return CodexBindingDiagnosis("ready", "current", "admitted", "ready")
+
+    monkeypatch.setattr(module, "diagnose_bound_runtime", ready)
 
 
 def _binding(executable: Path, home: Path):
@@ -96,11 +140,15 @@ def _stub_setup_persistence(
     def prepare(_home: Path) -> None:
         return None
 
+    def retain(*_args: object, **_kwargs: object) -> None:
+        return None
+
     monkeypatch.setattr(module, "_binding", build_binding)
     monkeypatch.setattr(module, "_profile", build_profile)
     monkeypatch.setattr(module, "_config_snapshot", snapshot)
     monkeypatch.setattr(module, "preflight_config_write", preflight)
     monkeypatch.setattr(module, "prepare_codex_home", prepare)
+    monkeypatch.setattr(module, "_retain_binding_runtime", retain)
     monkeypatch.setattr(module, "write_config_toml_if_unchanged", write_binding)
 
 
@@ -664,6 +712,7 @@ async def test_setup_preserves_a_concurrent_config_edit_during_login(
 async def test_disconnect_confirms_logout_before_removing_only_the_binding(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    _assume_structurally_ready(monkeypatch)
     binding = _binding(tmp_path / "codex", tmp_path / "dedicated-home")
     config = YoetzConfig(profile="codex-subscription", external_runtime=binding)
     removed: list[object] = []
@@ -702,6 +751,7 @@ async def test_disconnect_confirms_logout_before_removing_only_the_binding(
 async def test_disconnect_preserves_a_concurrent_config_edit_during_logout(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    _assume_structurally_ready(monkeypatch)
     binding = _binding(tmp_path / "codex", tmp_path / "dedicated-home")
     target = _bound_config_file(tmp_path, binding)
     before = target.read_text(encoding="utf-8")
@@ -901,6 +951,7 @@ def test_menu_disconnect_and_rollback_recompose_the_service(
 def test_guided_setup_offers_account_switch(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    monkeypatch.setattr(module, "default_codex_evaluator_executable", lambda: tmp_path / "codex")
     prompts = iter(
         [
             str(tmp_path / "codex"),
@@ -960,6 +1011,7 @@ def test_guided_setup_offers_account_switch(
 def test_guided_setup_preserves_existing_model_when_switching_accounts(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    monkeypatch.setattr(module, "default_codex_evaluator_executable", lambda: tmp_path / "codex")
     prompts = iter(
         [
             str(tmp_path / "codex"),
@@ -1440,6 +1492,7 @@ def test_rollback_preserves_storage_data_dir_while_removing_only_the_binding(
 async def test_status_reads_a_binding_from_a_config_with_explicit_data_dir(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    _assume_structurally_ready(monkeypatch)
     binding = _binding(tmp_path / "codex", tmp_path / "dedicated-home")
     target = _bound_config_file(tmp_path, binding)
 
@@ -1458,6 +1511,7 @@ async def test_status_reads_a_binding_from_a_config_with_explicit_data_dir(
 async def test_disconnect_preserves_storage_data_dir_from_a_valid_config(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    _assume_structurally_ready(monkeypatch)
     binding = _binding(tmp_path / "codex", tmp_path / "dedicated-home")
     target = _bound_config_file(tmp_path, binding)
 
@@ -1553,6 +1607,7 @@ async def test_setup_probes_the_writable_binding_target_before_login(
 async def test_disconnect_probes_the_removal_write_before_codex_logout(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    _assume_structurally_ready(monkeypatch)
     _mock_macos_arm64_host(monkeypatch)
     binding = _binding(tmp_path / "codex", tmp_path / "dedicated-home")
     target = _bound_config_file(tmp_path, binding)
@@ -1610,7 +1665,10 @@ def test_cli_setup_recommends_luna_and_keeps_independent_high_effort() -> None:
 
     params = inspect.signature(provider_codex_subscription_setup).parameters
     assert params["model"].default is None
-    assert params["reasoning_effort"].default == "high"
+    # ``None`` resolves to high for a new binding and preserves an existing binding's effort.
+    assert params["reasoning_effort"].default is None
+    assert params["executable"].default is None
+    assert module.default_codex_subscription_reasoning_effort() == "high"
 
 
 def test_default_subscription_model_recommends_luna_or_preserves_existing_binding(

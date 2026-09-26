@@ -1454,14 +1454,25 @@ class YoetzTui(App[int]):
         )
 
     async def _command_codex_subscription(self, *, switch_account: bool = False) -> None:
-        executable_default, home_default, model_default, _effort_default = (
+        executable_default, home_default, model_default, effort_default = (
             self.runtime.codex_subscription_defaults()
         )
+        if not executable_default:
+            self.say(
+                Level.OPTIONAL,
+                "No eligible Codex evaluator runtime was found",
+                (
+                    "To download the admitted release, run this in your shell:",
+                    "yoetz provider codex-subscription runtime install --download",
+                    "The command asks before downloading. Then return to /provider, or enter "
+                    "the path to a local admitted runtime below.",
+                ),
+            )
         entries = (
             TextEntryView(
                 name="codex-subscription-executable",
                 title="Codex with ChatGPT subscription",
-                label="Exact Codex executable",
+                label="Codex evaluator executable (Yoetz keeps a verified private copy)",
                 initial=executable_default,
                 placeholder="/absolute/path/to/codex",
             ),
@@ -1492,7 +1503,9 @@ class YoetzTui(App[int]):
                 title="Reasoning effort",
                 options=[
                     Option(value, value, "Exact selection bound into every attempt.")
-                    for value in ("high", "low", "medium", "xhigh", "max", "ultra")
+                    # The existing binding's effort is offered first so setup never changes it
+                    # silently (#855).
+                    for value in _efforts_with_default(effort_default)
                 ],
             )
         )
@@ -1506,7 +1519,8 @@ class YoetzTui(App[int]):
             self._report(error)
             return
         body = (
-            f"Runtime: {preview.get('executable_path')}",
+            f"Runtime source: {preview.get('executable_path')}",
+            "Bound runtime: Yoetz's verified private copy; updating your everyday Codex leaves it.",
             f"Executable digest: {preview.get('executable_sha256')}",
             f"Codex version: {preview.get('runtime_version')}",
             f"Capability cell: {preview.get('capability_cell_sha256')}",
@@ -1554,7 +1568,7 @@ class YoetzTui(App[int]):
                 "This terminal cannot open Codex sign-in",
                 (
                     "Run this from your shell instead:",
-                    "yoetz provider codex-subscription setup --executable <absolute-path>",
+                    "yoetz provider codex-subscription setup",
                 ),
             )
             return
@@ -1680,6 +1694,88 @@ class YoetzTui(App[int]):
             ),
         )
 
+    async def _command_codex_subscription_repair(self) -> None:
+        try:
+            plan = self.runtime.codex_subscription_repair_plan()
+        except RuntimeError_ as error:
+            self._report(error)
+            return
+        changed = plan.get("changed_fields")
+        changed_text = (
+            ", ".join(str(item) for item in cast(list[object], changed))
+            if isinstance(changed, list) and changed
+            else "none"
+        )
+        confirmed = await self.ask(
+            ApprovalView(
+                name="codex-subscription-repair",
+                title="Repair the Codex evaluator binding?",
+                body=(
+                    f"Current state: {plan.get('state_before')}",
+                    f"Runtime source: {plan.get('source_path')}",
+                    f"Bound runtime: {plan.get('executable_path_after')}",
+                    f"Capability profile: {plan.get('capability_profile_before')} -> "
+                    f"{plan.get('capability_profile_after')}",
+                    f"Changed fields: {changed_text}",
+                    "Model, reasoning effort, timeout, retries, dedicated home, endpoint role, "
+                    "and privacy grants are kept.",
+                    "The existing sign-in is reused only if Codex reports it; repair never signs "
+                    "in, logs out, or switches accounts.",
+                ),
+                approve_label="Repair binding",
+                decline_label="Cancel",
+                default_to_safe=True,
+            )
+        )
+        if confirmed != "approve":
+            self.say(Level.OPTIONAL, "Codex evaluator repair was cancelled.")
+            return
+        try:
+            status = await self.runtime.repair_codex_subscription()
+        except RuntimeError_ as error:
+            self._report(error)
+            return
+        self.say(
+            Level.VERIFIED,
+            "Codex evaluator binding repaired",
+            (
+                "Sign-in: reused the existing Codex login",
+                f"Bound runtime: {status.get('executable_path')}",
+                f"Model available: {status.get('model_available')}",
+                f"Process cleanup: {status.get('process_cleanup')}",
+            ),
+        )
+
+    async def _command_codex_evaluator_runtime_status(self) -> None:
+        try:
+            report = self.runtime.codex_evaluator_runtime_status()
+        except RuntimeError_ as error:
+            self._report(error)
+            return
+        managed = report.get("managed_runtime")
+        binding = report.get("binding")
+        managed_state = (
+            cast(Mapping[str, object], managed).get("state")
+            if isinstance(managed, Mapping)
+            else None
+        )
+        binding_state = (
+            cast(Mapping[str, object], binding).get("state")
+            if isinstance(binding, Mapping)
+            else None
+        )
+        next_command = report.get("next_command")
+        self.say(
+            Level.ACTIVE if binding_state in {None, "ready"} else Level.BLOCKED,
+            "Codex evaluator runtime",
+            (
+                f"Retained runtime: {managed_state or 'unavailable on this platform'}",
+                f"Binding: {binding_state or 'not configured'}",
+                "Sign-in was not checked; use Codex subscription status for that.",
+                *(() if next_command is None else (f"Next: {next_command}",)),
+            ),
+        )
+
     async def command_provider(self) -> None:
         options = self.runtime.provider_options()
         chosen = await self.ask(
@@ -1710,6 +1806,16 @@ class YoetzTui(App[int]):
                         "Switch Codex ChatGPT account",
                         "Log out the dedicated home, then sign in again.",
                     ),
+                    Option(
+                        "codex_repair",
+                        "Repair Codex evaluator binding",
+                        "Rebind to Yoetz's retained runtime; keep sign-in and settings.",
+                    ),
+                    Option(
+                        "codex_runtime",
+                        "Codex evaluator runtime status",
+                        "Retained runtime and binding structure; no sign-in check.",
+                    ),
                 ],
                 searchable=True,
                 hint="type to filter · enter to choose · esc to cancel",
@@ -1732,6 +1838,12 @@ class YoetzTui(App[int]):
             return
         if chosen == "codex_switch":
             await self._command_codex_subscription(switch_account=True)
+            return
+        if chosen == "codex_repair":
+            await self._command_codex_subscription_repair()
+            return
+        if chosen == "codex_runtime":
+            await self._command_codex_evaluator_runtime_status()
             return
         option = next(item for item in options if item.choice == chosen)
         origin: str | None = None
@@ -1992,3 +2104,10 @@ class YoetzTui(App[int]):
             return self._active_task_title
         await self.command_work()
         return self._active_task_title
+
+
+def _efforts_with_default(default: str) -> tuple[str, ...]:
+    """The reviewed reasoning efforts with ``default`` first, so the preselection preserves it."""
+
+    efforts = ("high", "low", "medium", "xhigh", "max", "ultra")
+    return (default, *(item for item in efforts if item != default))

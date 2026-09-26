@@ -948,17 +948,28 @@ class YoetzRuntime:
         return tuple(options)
 
     def codex_subscription_defaults(self) -> tuple[str, str, str, str]:
-        """Return discovered nonsecret defaults; setup still digest-validates the exact binary."""
+        """Return eligible nonsecret defaults; setup still digest-validates the exact binary.
 
-        from yoetz.adapters.integrations.codex_discovery import discover_codex_binaries
+        The executable default is an admitted evaluator runtime only (#855) — Yoetz's retained
+        copy first — never merely the first discovered host binary. An existing binding's model
+        and reasoning effort are offered unchanged.
+        """
+
         from yoetz.cli.codex_subscription import (
+            default_codex_evaluator_executable,
             default_codex_home,
             default_codex_subscription_model,
+            default_codex_subscription_reasoning_effort,
         )
 
-        binaries = discover_codex_binaries()
-        executable = "" if not binaries else binaries[0].executable_path
-        return executable, str(default_codex_home()), default_codex_subscription_model(), "high"
+        selected = default_codex_evaluator_executable()
+        executable = "" if selected is None else str(selected)
+        return (
+            executable,
+            str(default_codex_home()),
+            default_codex_subscription_model(),
+            default_codex_subscription_reasoning_effort(),
+        )
 
     def preview_codex_subscription(
         self, executable: str, codex_home: str, model: str, reasoning_effort: str
@@ -975,12 +986,7 @@ class YoetzRuntime:
                 reasoning_effort=reasoning_effort,
             )
         except (OSError, ValueError) as error:
-            from yoetz.cli.codex_subscription import subscription_failure_reason
-
-            raise RuntimeError_(
-                subscription_failure_reason(error),
-                "that Codex evaluator cell is not supported",
-            ) from None
+            raise _subscription_error(error, "that Codex evaluator cell is not supported") from None
 
     async def setup_codex_subscription(
         self,
@@ -993,10 +999,7 @@ class YoetzRuntime:
     ) -> Mapping[str, object]:
         """Run Codex-owned login, then recompose the service around the exact binding."""
 
-        from yoetz.cli.codex_subscription import (
-            codex_subscription_setup,
-            subscription_failure_reason,
-        )
+        from yoetz.cli.codex_subscription import codex_subscription_setup
         from yoetz.cli.setup import restart_service_for_semantic_composition
 
         try:
@@ -1012,34 +1015,24 @@ class YoetzRuntime:
             await restart_service_for_semantic_composition()
             return result
         except (OSError, TimeoutError, ValueError) as error:
-            raise RuntimeError_(
-                subscription_failure_reason(error),
-                "Codex subscription setup did not complete",
-            ) from None
+            raise _subscription_error(error, "Codex subscription setup did not complete") from None
 
     async def codex_subscription_status(self) -> Mapping[str, object]:
         """Read structural Codex login/model state without sending a task case."""
 
-        from yoetz.cli.codex_subscription import (
-            codex_subscription_status,
-            subscription_failure_reason,
-        )
+        from yoetz.cli.codex_subscription import codex_subscription_status
 
         try:
             return await codex_subscription_status()
         except (OSError, TimeoutError, ValueError) as error:
-            raise RuntimeError_(
-                subscription_failure_reason(error),
-                "Codex subscription status could not be read",
+            raise _subscription_error(
+                error, "Codex subscription status could not be read"
             ) from None
 
     async def disconnect_codex_subscription(self) -> Mapping[str, object]:
         """Log out the dedicated home, remove the binding, then recompose the service."""
 
-        from yoetz.cli.codex_subscription import (
-            codex_subscription_disconnect,
-            subscription_failure_reason,
-        )
+        from yoetz.cli.codex_subscription import codex_subscription_disconnect
         from yoetz.cli.setup import restart_service_for_semantic_composition
 
         try:
@@ -1047,18 +1040,14 @@ class YoetzRuntime:
             await restart_service_for_semantic_composition()
             return result
         except (OSError, TimeoutError, ValueError) as error:
-            raise RuntimeError_(
-                subscription_failure_reason(error),
-                "Codex subscription disconnect did not complete",
+            raise _subscription_error(
+                error, "Codex subscription disconnect did not complete"
             ) from None
 
     async def rollback_codex_subscription(self) -> Mapping[str, object]:
         """Remove only the Yoetz binding, then recompose so the old cell cannot dispatch."""
 
-        from yoetz.cli.codex_subscription import (
-            codex_subscription_rollback,
-            subscription_failure_reason,
-        )
+        from yoetz.cli.codex_subscription import codex_subscription_rollback
         from yoetz.cli.setup import restart_service_for_semantic_composition
 
         try:
@@ -1066,9 +1055,45 @@ class YoetzRuntime:
             await restart_service_for_semantic_composition()
             return result
         except (OSError, ValueError) as error:
-            raise RuntimeError_(
-                subscription_failure_reason(error),
-                "Codex subscription rollback did not complete",
+            raise _subscription_error(
+                error, "Codex subscription rollback did not complete"
+            ) from None
+
+    def codex_subscription_repair_plan(self) -> Mapping[str, object]:
+        """What repair would change, without any store, home, config, or Codex side effect."""
+
+        from yoetz.cli.codex_subscription import codex_subscription_repair_plan
+
+        try:
+            return codex_subscription_repair_plan()
+        except (OSError, ValueError) as error:
+            raise _subscription_error(
+                error, "The Codex evaluator binding cannot be repaired"
+            ) from None
+
+    async def repair_codex_subscription(self) -> Mapping[str, object]:
+        """Rebind to the retained runtime keeping sign-in and choices, then recompose."""
+
+        from yoetz.cli.codex_subscription import codex_subscription_repair
+        from yoetz.cli.setup import restart_service_for_semantic_composition
+
+        try:
+            result = await codex_subscription_repair()
+            await restart_service_for_semantic_composition()
+            return result
+        except (OSError, TimeoutError, ValueError) as error:
+            raise _subscription_error(error, "Codex evaluator repair did not complete") from None
+
+    def codex_evaluator_runtime_status(self) -> Mapping[str, object]:
+        """Structural runtime and binding state; starts no Codex process."""
+
+        from yoetz.cli.codex_subscription import codex_evaluator_runtime_status
+
+        try:
+            return codex_evaluator_runtime_status()
+        except (OSError, ValueError) as error:
+            raise _subscription_error(
+                error, "Codex evaluator runtime status could not be read"
             ) from None
 
     def save_provider_binding(
@@ -1739,3 +1764,13 @@ class YoetzRuntime:
                 )
             )
         return DoctorReport(entries=tuple(entries))
+
+
+def _subscription_error(error: BaseException, message: str) -> RuntimeError_:
+    """One bounded subscription failure with its exact next step (#855); never native text."""
+
+    from yoetz.cli.codex_subscription import subscription_failure_reason, subscription_remediation
+
+    reason = subscription_failure_reason(error)
+    remediation = subscription_remediation(reason)
+    return RuntimeError_(reason, message, details=() if remediation is None else (remediation,))

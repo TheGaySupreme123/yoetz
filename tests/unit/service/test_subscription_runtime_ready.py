@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -36,8 +37,16 @@ def _binding(executable: Path, home: Path):
     )
 
 
+@pytest.mark.parametrize(
+    ("now", "expected"),
+    [
+        (datetime(2026, 9, 26, tzinfo=UTC), True),
+        (datetime(2026, 11, 30, tzinfo=UTC), False),
+        (datetime(2026, 12, 1, tzinfo=UTC), False),
+    ],
+)
 def test_ready_credential_presence_is_binding_digest_and_home(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, now: datetime, expected: bool
 ) -> None:
     launches: list[object] = []
 
@@ -57,6 +66,6 @@ def test_ready_credential_presence_is_binding_digest_and_home(
 
     binding = _binding(tmp_path / "codex", tmp_path / "home")
 
-    assert subscription_runtime_structurally_ready(binding) is True
+    assert subscription_runtime_structurally_ready(binding, now=now) is expected
     assert launches == []
     assert subscription_runtime_structurally_ready(object()) is False

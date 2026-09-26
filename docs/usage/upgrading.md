@@ -57,3 +57,20 @@ respected. Turning off update checks remains the global network opt-out.
 Upgrading preserves your choices. Expanded review and other new features can be discussed afterward
 and enabled only with their own approval. Accepting an update notice does not authorize package
 execution, new observation consent, or broader disclosure.
+
+## AI-powered review with a ChatGPT subscription
+
+A successful package, service, and host upgrade does not by itself show that subscription-backed
+AI-powered review still runs. When Codex with a ChatGPT subscription is set up, the upgrade guide
+ends with a check that starts no Codex process and does not check your sign-in:
+
+```text
+yoetz provider codex-subscription runtime status --json
+```
+
+If it names a next command, usually `yoetz provider codex-subscription repair` after Yoetz adopted
+a newer reviewed capability identity or after your everyday Codex was replaced, review that
+command's preview before applying it. Repair keeps your ChatGPT sign-in, model, reasoning effort,
+timeout, retries, and privacy permissions, and never signs in again on its own. Updating your
+everyday Codex later does not affect the evaluator: Yoetz uses its own verified copy of the admitted
+release. See [Providers](providers.md#keeping-the-evaluator-working-when-codex-updates).
