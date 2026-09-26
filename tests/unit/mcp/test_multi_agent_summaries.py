@@ -23,11 +23,14 @@ def test_project_summary_carries_generation_and_counts_without_content() -> None
                 "receipts": [],
                 "next_cursor": "private cursor",
             },
+            "gaps": ["project_member_unavailable", "/private/raw/path"],
         }
     )
     assert "generation: 3; grant: active; members: 1" in text
     assert "detections: 1; receipts: 0; children: 0; host annotations: 1" in text
     assert "coverage: 1" in text
+    assert "gap codes: project_member_unavailable;" in text
+    assert "/private/raw/path" not in text
     assert "More pages available" in text
     assert "private" not in text and "/secret" not in text
     assert len(text.encode()) <= 512

@@ -2101,7 +2101,8 @@ may dereference it for either affected task only after both participants pass cu
 workspace-consent, and source-policy checks; the recipient projection then applies its own sink
 policy to the relative-resource content. The typed project detection row carries either the
 approved repository-relative path tuple or a bounded omission. Catalog rows, delivery events, and
-MCP text summaries retain only identities, counts, and digests.
+MCP text summaries retain only identities, counts, digests, and allowlisted gap codes; they never
+carry raw paths.
 The ordinary advice view carries the counterpart task and an exact project/detection/generation
 selector; its resource field follows the same sink-bound hydration and omission rules.
 
@@ -6073,6 +6074,49 @@ best-effort; absence can mean that the sink was unavailable, and never licenses 
 returned by check/operation status. `--correlation-id err_…` remains supported; exactly one selector
 is required. Both use the same bounded, payload-free record projection and require no ledger
 inspection. No new retry, lease, cancellation, network or credential authority is introduced.
+
+### Status fault classification and project member containment (issue #840)
+
+A status request reaches the application already validated against its frozen schema.
+`INVALID_REQUEST` is therefore returned only from the explicit caller-shape sites: cursor decoding
+and binding, the requested frontier, selector and view consistency, and the translation of the
+caller's view, filter, and cursor position into a projection query. Any other `TypeError` or
+`ValueError` raised while serving the read — including a pydantic `ValidationError` and the
+`CoordinationError`/`ProjectCommandError` family, which subclass `ValueError` — is a fault in stored
+state or in the service's own projection, and `application/status_faults.py` classifies it once by
+the stage that raised it:
+
+| Stage | Raised while | Public code |
+|---|---|---|
+| `replay` | decoding a recorded ledger, lineage manifest, host-lineage registry row, or stored operation result | `STORAGE_CORRUPT` |
+| `model` | validating a projected row against its closed public wire model | `INTERNAL_ERROR` |
+| `digest` | computing the task/project snapshot identity | `INTERNAL_ERROR` |
+| `projection` | any other internal step (the untagged residual) | `INTERNAL_ERROR` |
+
+All are non-retryable. Sites that already had specific fixed wording keep it (`The task ledger is
+unreadable.`, `The status case is unreadable.`, `The stored operation result is invalid.`, `Host
+lineage status is inconsistent.`). Each classification records one diagnostic with component
+`application.status`, operation `status_<view>_<stage>_failed`, the reviewed exception-class
+reason token, the innermost `yoetz` source `origin` of the original exception (never the stage
+boundary), and the request id. The public error carries that record's correlation id, so the
+daemon and MCP bridge reuse it and mint no second `status_public_error` record; `yoetz service
+diagnostics --correlation-id` or `--request-id` resolves the failure. The record never contains an
+exception message, a validation payload, a path, or user content. `CoordinationError` and
+`ProjectCommandError` are reviewed exception-class tokens (`exception_coordination_error`,
+`exception_project_command_error`, and `exception_host_lineage_registry_error`).
+
+The project view contains faults to the member that raised them. A member that cannot be routed,
+replayed, or projected contributes no lineage or receipt rows, the response `gaps` carry
+`project_member_unavailable`, and a diagnostic joined by request id records the stage (or, for an
+uncorrelated member public error, `status_project_member_unavailable` with its lowercase code).
+One member's rows are admitted together only after both were read. Project-level detection and
+coverage rows, the snapshot digest, and the page model still fail the read with a correlated
+error. Member receipt rows carry the receipt's recorded `subject_frontier`; the frozen `Frontier`
+wire object is normalized to a plain mapping at the strict `FrontierModel` boundary. Passing the
+frozen object directly rejected every member with a recorded receipt, which failed every root's
+project view as `INVALID_REQUEST` in the two-host 0.3.0 dogfood. The multi-agent MCP text summary
+also carries the allowlisted gap codes within its bounded fallback so a generic client can see a
+member omission without receiving private row content.
 
 
 ### Evidence-aware closure preparation (issues #569, #618, #657, #660, #666)

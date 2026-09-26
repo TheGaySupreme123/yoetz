@@ -367,6 +367,15 @@ repository may belong to different general projects when their included task set
 Memberships that already violate the rule are kept; project status reports `selector_conflict`,
 and the repair is to unlink one membership or dissolve one project.
 
+The project status view is assembled from every admitted member's own bundle, so one member's
+unreadable or unprojectable state is contained to that member (#840): its rows are omitted, the
+response carries the `project_member_unavailable` gap, and a bounded diagnostic joined by the
+request id records the failing stage, exception class, and source origin. It never fails the other
+members' view and is never reported as invalid caller input. Project-level rows (detections and
+coverage), the snapshot identity, and the page itself still fail the whole read with a classified,
+correlated error. Member receipt rows carry each member's latest recorded receipt identity,
+conclusion, and exact subject frontier.
+
 ## Alternatives considered
 
 **Keep subagents as metadata-only evidence.** Rejected: accepted delegation and self-registration
