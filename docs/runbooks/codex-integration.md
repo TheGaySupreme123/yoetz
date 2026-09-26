@@ -464,6 +464,17 @@ only from real observation evidence. `AdviceSnapshot` surfaces via nonblocking h
 path fails, use the ordinary manual resume/compaction procedure and cooperative publication; do not
 infer support from a different Codex version.
 
+Codex setup's consent step is a structural grant. It uses the same path from `yoetz setup`, host
+connection, and the terminal interface. When the workspace already has live consent (for example,
+from a Claude Code or Cursor connection), the step keeps that consent: the original grant time,
+every approved Claude Code or Cursor content profile, selection and capacity settings, and the
+unchanged content fence. Capture already in progress for the other host therefore stays authorized
+(#835). The setup report's `observation_consent.transition` reads `unchanged` and lists the retained
+`content_capture_profiles`. A paused workspace is resumed (`resumed`). With no prior consent, or
+after a completed revoke, consent starts fresh (`granted`) with no content profile. While a revoke's
+project fence is pending, the consent step reports `failed` and leaves consent revoked. Only
+`observe content-disable` or `observe revoke` removes a host's content arm.
+
 ### Subagent correlation (#507)
 
 The Codex native hook artifact includes `SubagentStart` and `SubagentStop`. Their structural

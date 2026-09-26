@@ -1631,9 +1631,14 @@ def grant_observation(*, workspace: str, _state: Path | None = None) -> int:
     store = LocalObservationStore(_state=_state)
     root = _resolve_workspace(workspace)
     commitment = store.workspace_commitment(str(root))
-    store.grant_consent(commitment)
+    # A repeated grant keeps already-approved native content arms and the unchanged
+    # content fence; only content-disable or revoke removes an arm (issue #835).
+    grant = store.grant_consent(commitment)
     # Never log the raw path — only the commitment.
     typer.echo(f"observation_consent_granted:{commitment}")
+    kept = grant.consent.content_capture_profiles
+    if kept:
+        typer.echo(f"observation_content_capture_kept:{','.join(kept)}")
     return 0
 
 

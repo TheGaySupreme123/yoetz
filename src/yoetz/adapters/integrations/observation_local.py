@@ -20,6 +20,7 @@ import time
 from collections.abc import Callable, Generator, Iterable, Mapping, MutableMapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from pathlib import Path
 from typing import Final, TypeVar, cast
 
@@ -128,6 +129,8 @@ __all__ = [
     "HOOK_MAPPING_VERSION",
     "AdviceDelivery",
     "FrontierMotionNotice",
+    "LocalConsentGrant",
+    "LocalConsentTransition",
     "LocalContentCaptureAuthority",
     "LocalObservationConsent",
     "LocalObservationStore",
@@ -646,6 +649,23 @@ class LocalObservationConsent:
     @property
     def active(self) -> bool:
         return self.revoked_at is None and not self.paused
+
+
+class LocalConsentTransition(StrEnum):
+    """What one structural grant did to a workspace's local consent."""
+
+    GRANTED = "granted"  # no prior consent, or a fresh grant after revocation
+    RESUMED = "resumed"  # a live paused consent became active again
+    UPDATED = "updated"  # an explicit content-profile set replaced the live arms
+    UNCHANGED = "unchanged"  # already effective; the content fence did not advance
+
+
+@dataclass(frozen=True, slots=True)
+class LocalConsentGrant:
+    """The consent a grant left in force and how it got there."""
+
+    transition: LocalConsentTransition
+    consent: LocalObservationConsent
 
 
 @dataclass(frozen=True, slots=True)
@@ -2382,12 +2402,30 @@ class LocalObservationStore:
         workspace_commitment: str,
         granted_at: Timestamp | None = None,
         *,
-        content_capture_profiles: tuple[str, ...] = (),
-    ) -> None:
-        if type(content_capture_profiles) is not tuple:
-            raise ProtocolValueError("invalid_event_value_type")
-        for profile in content_capture_profiles:
-            validate_content_capture_profile(profile)
+        content_capture_profiles: tuple[str, ...] | None = None,
+    ) -> LocalConsentGrant:
+        """Record structural observation consent without disturbing live content arms.
+
+        A grant over a live (unrevoked) consent continues it: the original
+        ``granted_at`` is kept, and so are the already-approved native content
+        profiles unless ``content_capture_profiles`` names an explicit
+        replacement set.  An already-effective grant therefore leaves the
+        consent unchanged and never advances the content fence, so connecting
+        a second host or repeating setup cannot silently drop or re-fence
+        another host's arm (issue #835).  A grant over a paused consent resumes it exactly as
+        ``resume`` does.
+
+        With no prior consent, or after revocation, the grant starts fresh at
+        ``granted_at`` (default now) with no content arm unless one is named.
+        Revocation already cleared the arms; a later grant never infers them
+        back.
+        """
+
+        if content_capture_profiles is not None:
+            if type(content_capture_profiles) is not tuple:
+                raise ProtocolValueError("invalid_event_value_type")
+            for profile in content_capture_profiles:
+                validate_content_capture_profile(profile)
         with self._lock:
             state = self._load(workspace_commitment)
             if state.pending_consent_revocation is not None:
@@ -2396,18 +2434,40 @@ class LocalObservationStore:
                     "Observation consent revocation is still being fenced.",
                     retryable=True,
                 )
-            stamp = granted_at if granted_at is not None else _now()
+            prior = state.consent
+            live = prior if prior is not None and prior.revoked_at is None else None
+            if live is not None:
+                stamp = live.granted_at
+                profiles = (
+                    live.content_capture_profiles
+                    if content_capture_profiles is None
+                    else content_capture_profiles
+                )
+            else:
+                stamp = granted_at if granted_at is not None else _now()
+                profiles = () if content_capture_profiles is None else content_capture_profiles
             next_consent = LocalObservationConsent(
                 workspace_commitment=workspace_commitment,
                 granted_at=stamp,
                 revoked_at=None,
                 paused=False,
-                content_capture_profiles=content_capture_profiles,
+                content_capture_profiles=profiles,
             )
-            if state.consent != next_consent:
+            if live is None:
+                transition = LocalConsentTransition.GRANTED
+            elif live == next_consent:
+                transition = LocalConsentTransition.UNCHANGED
+            elif live.paused:
+                transition = LocalConsentTransition.RESUMED
+            else:
+                transition = LocalConsentTransition.UPDATED
+            if prior != next_consent:
                 _rotate_content_capture_epoch(state)
             state.consent = next_consent
+            # Still a mutation-driven save: bounded housekeeping (such as aged quarantine
+            # pruning) runs as it always did, while the consent and its fence stay put.
             self._save(workspace_commitment, state)
+            return LocalConsentGrant(transition, next_consent)
 
     def enable_content_capture(self, workspace_commitment: str, profile: str) -> None:
         """Explicitly enable one versioned native-host content profile.

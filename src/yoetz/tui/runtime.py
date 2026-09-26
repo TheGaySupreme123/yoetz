@@ -717,6 +717,13 @@ class YoetzRuntime:
         verified = registered and report.get("state") == "yoetz_owned"
         plugin_installed = plugin_map.get("presence") == "installed"
         consent_active = consent_map.get("outcome") == "granted"
+        kept_profiles = consent_map.get("content_capture_profiles")
+        consent_detail = (
+            "native content profiles kept: "
+            + ", ".join(str(profile) for profile in cast(list[object], kept_profiles))
+            if consent_active and isinstance(kept_profiles, list) and kept_profiles
+            else ""
+        )
         policy_trusted = policy_map.get("outcome") == "trusted"
         policy_absent = policy_map.get("outcome") == "absent" or not policy_map
 
@@ -747,6 +754,7 @@ class YoetzRuntime:
                 "project_consent",
                 "Project consent active",
                 LayerState.VERIFIED if consent_active else LayerState.NOT_CONFIGURED,
+                detail=consent_detail,
             ),
             ReadinessLayer(
                 "policy_digest_trusted",

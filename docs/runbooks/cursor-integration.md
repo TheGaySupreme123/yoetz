@@ -583,6 +583,11 @@ yoetz observe content-disable --workspace /exact/project \
   --profile cursor-ordinary-observation-v1
 ```
 
+This arm persists through later structural grants in the same workspace: connecting Codex,
+rerunning Codex setup, or repeating `yoetz observe grant` keeps it and does not advance its content
+fence (#835). Only `content-disable` or `observe revoke` removes it; after a revoke, enable it again
+explicitly.
+
 The service accepts Cursor chunks only when that exact profile is active in local consent and in
 the mapped task grant. A missing or mismatched profile drops plaintext chunks and records
 `content_capture_unavailable`; chunks are not written to the structural outbox. Authorized native
