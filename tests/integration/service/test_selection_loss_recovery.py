@@ -505,7 +505,21 @@ async def test_refusal_after_lowering_above_the_byte_ceiling_reaches_check_and_r
         assert accounting["unrecoverable_input_count"] == 1
         assert world.local.pending_selection_losses(world.workspace)
         backlog = world.local.pending_outbox_count(world.workspace)
-        assert backlog == 1_700
+        # The refused hook may already deliver and acknowledge accepted rows. A
+        # committed row can also remain queued for an idempotent retry when the
+        # hook budget ends, so pending and delivered identities may overlap.
+        expected_sources = {f"backlog:{index}" for index in range(1_700)}
+        pending_sources = {
+            row.envelope.source_identity
+            for row in world.local.list_pending_outbox_rows(world.workspace)
+        }
+        before_history = world.observation.list_envelopes_for_session(
+            world.workspace, world.session
+        )
+        delivered_sources = {
+            item.source_identity for item in before_history if item.event_kind == "PostToolUse"
+        }
+        assert pending_sources | delivered_sources == expected_sources
 
         # A bounded real drain at the byte boundary: deliveries acknowledge and
         # the loss reaches task history without any new host event.
@@ -525,7 +539,14 @@ async def test_refusal_after_lowering_above_the_byte_ceiling_reaches_check_and_r
         assert [item.gap_codes for item in history if item.event_kind == "observation_gap"] == [
             ("observation_input_loss",)
         ]
-        assert sum(item.event_kind == "PostToolUse" for item in history) == 2
+        pending_sources = {
+            row.envelope.source_identity
+            for row in world.local.list_pending_outbox_rows(world.workspace)
+        }
+        delivered_sources = {
+            item.source_identity for item in history if item.event_kind == "PostToolUse"
+        }
+        assert pending_sources | delivered_sources == expected_sources
 
         # The frozen check input and the receipt carry the loss.
         frontier = await world.runtime.ledger.load_frontier()
