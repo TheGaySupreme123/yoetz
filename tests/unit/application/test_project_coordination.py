@@ -1913,3 +1913,93 @@ async def test_journal_retries_unlink_after_catalog_effect_before_response_compl
     )
     assert replay.unbound_at is not None
     assert journal.records[request].completed
+
+
+@pytest.mark.anyio
+async def test_declaration_ownership_read_failure_is_isolated_to_its_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dataclasses import replace
+
+    from yoetz.application import coordination as coordination_module
+    from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
+
+    tasks = tuple(new_id(IdKind.TASK) for _ in range(3))
+    busy, left, right = tasks
+    repository = _commitment("a")
+    workspaces = dict(zip(tasks, (_commitment("b"), _commitment("c"), _commitment("d"))))
+    catalog = _Catalog({task: _provenance(task, workspaces[task], repository) for task in tasks})
+    app = ProjectApplication(
+        catalog,
+        ids=FixedIds(),
+        workspace_consent=lambda _workspace: True,
+        coordination_source_authorizer=_allow_coordination_source,
+    )
+    project = await catalog.ensure_repository_project(repository)
+    declaration = CoordinationObligationDeclaredPayload(
+        event_id(new_id(IdKind.EVENT)),
+        project.project_id,
+        project.membership_generation,
+        task_id(busy),
+        obligation_id(new_id(IdKind.OBLIGATION)),
+    )
+    inputs = {
+        task: DeclaredCoordinationInput(
+            task,
+            project.project_id,
+            repository,
+            workspaces[task],
+            1,
+            ("src/shared.py",),
+            coordination_declarations=(declaration,) if task == busy else (),
+        )
+        for task in tasks
+    }
+
+    class _Inputs:
+        async def route(self, _command: object) -> object:
+            raise AssertionError("test supplies accepted inputs")
+
+        async def release(self, _runtime: object) -> None:
+            return None
+
+        async def owns_obligation(self, task: str, obligation: str) -> bool:
+            assert task == busy and obligation == declaration.obligation_id
+            raise PublicOperationError(
+                PublicErrorCode.BUNDLE_BUSY, "The task is temporarily busy.", True
+            )
+
+        async def input_for(
+            self, task: str, project_id: str, **kwargs: object
+        ) -> DeclaredCoordinationInput:
+            assert task == busy and project_id == project.project_id
+            assert kwargs == {"resources": (), "source_has_attributable_paths": False}
+            return replace(
+                inputs[task],
+                resources=(),
+                source_has_attributable_paths=False,
+                coordination_declarations=(),
+            )
+
+    diagnostics: list[tuple[str, str, str]] = []
+
+    def record(exc: BaseException, *, component: str, operation: str, **_: object) -> str:
+        diagnostics.append((type(exc).__name__, component, operation))
+        return new_id(IdKind.CORRELATION)
+
+    monkeypatch.setattr(coordination_module, "record_classified_exception_without_raising", record)
+    store = InMemoryCoordinationStore()
+    stub = _Inputs()
+    provider = LedgerCoordinationInputProvider(app, stub)  # type: ignore[arg-type]
+    monkeypatch.setattr(provider, "owns_obligation", stub.owns_obligation)
+    monkeypatch.setattr(provider, "input_for", stub.input_for)
+    runtime = CoordinationRuntime(app, CoordinationDetector(app, store), provider)
+    await runtime.detect(project.project_id, inputs=inputs)
+    detections = await store.list_detections(project.project_id)
+    assert len(detections) == 1
+    assert {detections[0].left_task_id, detections[0].right_task_id} == {left, right}
+    coverage = await store.coverage_for(project.project_id, project.membership_generation)
+    assert [(row.task_id, row.coverage) for row in coverage] == [(busy, "unobservable")]
+    assert diagnostics == [
+        ("PublicOperationError", "application.coordination", "coordination_input_unavailable")
+    ]

@@ -2062,8 +2062,9 @@ before it reads them. It then reads them through one `payload_read` lease, so a 
 yields the same input as a warm one. A task that is not currently admitted contributes no input
 and no row, and it does not abort the sweep for admitted tasks. This includes a task whose runtime
 cannot be opened to confirm its consent. If an admitted task's input read fails during a sweep,
-that task is kept out of pair detection and receives the same bounded coverage row. One
-diagnostic, `application.coordination`/`coordination_input_unavailable`, records only the
+that task is kept out of pair detection and receives the same bounded coverage row. This also
+applies when the later payload lease used to revalidate declaration ownership fails; successful
+input loading alone does not establish that ownership can still be read. One diagnostic, `application.coordination`/`coordination_input_unavailable`, records only the
 exception-class token and a correlation ID. The other pairs are still detected, and the next
 sweep retries. A post-publish sweep that fails as a whole never fails the committed publication;
 it records `application.service`/`project_coordination_sweep` with the request ID.

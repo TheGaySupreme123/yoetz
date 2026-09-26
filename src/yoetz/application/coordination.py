@@ -1651,21 +1651,37 @@ class CoordinationRuntime:
                 raise CoordinationError(CoordinationErrorCode.INVALID)
             selected = tuple(item for item in inputs.values() if item.project_id == project)
         ordered = tuple(sorted(selected, key=lambda item: item.task_id.encode()))
+        declarations_by_task: dict[str, tuple[CoordinationObligationDeclaredPayload, ...]] = {}
+        readable: list[DeclaredCoordinationInput] = []
+        for item in ordered:
+            task = item.task_id
+            declarations = item.coordination_declarations
+            if any(
+                declaration.project_id != project or declaration.recipient_task_id != task
+                for declaration in declarations
+            ):
+                raise CoordinationError(CoordinationErrorCode.INVALID)
+            try:
+                owned = [
+                    await self.inputs.owns_obligation(task, str(declaration.obligation_id))
+                    for declaration in declarations
+                ]
+            except Exception as exc:
+                # Ownership revalidation opens another payload lease. A failure here has
+                # the same per-task coverage boundary as the first input read.
+                placeholder = await self._unreadable_input(task, project, exc)
+                if placeholder is not None:
+                    unreadable.append(placeholder)
+                continue
+            if not all(owned):
+                raise CoordinationError(CoordinationErrorCode.INVALID)
+            declarations_by_task[task] = declarations
+            readable.append(item)
+        ordered = tuple(readable)
         await self.record_unobservable_coverage(
             tuple(sorted((*ordered, *unreadable), key=lambda item: item.task_id.encode())),
             expected_generation=expected_generation,
         )
-        declarations_by_task: dict[str, tuple[CoordinationObligationDeclaredPayload, ...]] = {
-            item.task_id: item.coordination_declarations for item in ordered
-        }
-        for task, declarations in declarations_by_task.items():
-            for declaration in declarations:
-                if (
-                    declaration.project_id != project
-                    or declaration.recipient_task_id != task
-                    or not await self.inputs.owns_obligation(task, str(declaration.obligation_id))
-                ):
-                    raise CoordinationError(CoordinationErrorCode.INVALID)
         outputs: list[CoordinationAdvice] = []
         for index, left in enumerate(ordered):
             for right in ordered[index + 1 :]:
