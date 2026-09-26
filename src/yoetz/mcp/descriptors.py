@@ -1713,7 +1713,7 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "Completion requires explicit obligation_refs; [] cannot carry obligation support. "
         "An accepted empty-scope target can be superseded with explicit empty or populated scope. "
         "Dry-run checks references, outcome, scope, replacement, and limitation linkage; author "
-        "corrections from candidate_findings, history, and results. occurred_at asserts real "
+        "corrections from candidate_findings, history, and results. occurred_at is caller-asserted "
         "RFC 3339 UTC time with milliseconds; do not copy the illustrative example timestamp. Ledger order uses "
         "ingestion sequence. Service accepted_at is independent; receipt freshness is frontier-bound. "
         "Dry-run previews are not evidence. Read status "
@@ -1913,7 +1913,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         "policy": MappingProxyType(
             {
                 "start": "sha256:3a2186a2db53b91fcf7a8f3117cb8ff6a2b8bad6bc78e3e796e5e611e8598405",
-                "publish_work": "sha256:beac3d5a856ef374947ffda1b47cea2fbf2cf6020758cdd35c3c9a02043e1a05",
+                "publish_work": "sha256:5b7e151a4583762f500803165aa48d3c49ec61172a36945a6af92064ffc171ff",
                 "check": "sha256:9befe13b257acf10535009c1dd69d9a933f3d94f5cd2aaac1655d4867596f89e",
                 "respond": "sha256:8b5dc94f431a411ef332021af01050a4b0c248a800e46d5b3bdb567f770d25a5",
                 "status": "sha256:517eb05aa015834d98bd96ed59d4b647a95e6c42a13013803caf19b9b4b07875",
@@ -1924,7 +1924,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         "strict": MappingProxyType(
             {
                 "start": "sha256:3a2186a2db53b91fcf7a8f3117cb8ff6a2b8bad6bc78e3e796e5e611e8598405",
-                "publish_work": "sha256:beac3d5a856ef374947ffda1b47cea2fbf2cf6020758cdd35c3c9a02043e1a05",
+                "publish_work": "sha256:5b7e151a4583762f500803165aa48d3c49ec61172a36945a6af92064ffc171ff",
                 "check": "sha256:2bd9947abc7b60564474840a73d99a80bfa528b98af1a725d11fdfde5dac9795",
                 "respond": "sha256:8b5dc94f431a411ef332021af01050a4b0c248a800e46d5b3bdb567f770d25a5",
                 "status": "sha256:517eb05aa015834d98bd96ed59d4b647a95e6c42a13013803caf19b9b4b07875",
@@ -1936,8 +1936,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:0325eef389b97aab94bc6a0855ea405214bd43cdd7d7a6f2cfc600569c10a0d4",
-        "strict": "sha256:242473ec8961f90d8d6cddeaae11a13ac7af7b2d278af75a9ec3f364ad1c7737",
+        "policy": "sha256:9c103a3fa8fdb85a6c2c20608bdde6294651e94b24407bca719c7e32a8c50722",
+        "strict": "sha256:e272d0216684ffa792ad0b10b55cdd4c436f1a8877cc03033b2fa14126a737b0",
     }
 )
 
