@@ -6,6 +6,16 @@ reverse-chronological released versions.
 
 ## Unreleased
 
+### Added
+
+- Claude Code's scoped `PermissionDenied` hook now shows the user a notice based on a fresh
+  repository grant read and may emit the host's one-retry cue. The same request must be preserved;
+  a later hold goes to human approval. No-verdict denials and an unreadable, full or unsafe retry
+  ledger offer no retry. Both structural and ordinary capture profiles carry the notice. Claude
+  does not deliver `additionalContext` on this event, so the model receives only the host's retry
+  cue, not the grant explanation. Shipped guidance keeps grant claims conditional and host approval
+  separate. Live acceptance and the remaining cross-host work stay tracked in #857.
+
 ### Fixed
 
 - A Codex multi-agent v2 child that attaches with its delegation handle now binds its host

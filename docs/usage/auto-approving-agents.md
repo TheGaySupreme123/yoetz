@@ -154,6 +154,20 @@ it should. Yoetz never ships a hook that approves its own tool calls, and never 
 `yoetz observe status` records one payload-free `host_auto_review_denied` diagnostic so the hold
 is visible as what it is, not as an AI-powered review result.
 
+### When Claude Code holds a check you already authorized
+
+In Claude Code, Yoetz can show you whether this repository's privacy grant permits external
+AI-powered review. When it confirms the grant and Claude's classifier returned a verdict, the
+hook may offer one retry in the session. Claude shows the notice to you and gives the agent a
+retry cue. The agent must preserve the exact request and ask you after another hold. A missing
+or unreadable grant, unknown verdict, or unavailable retry record produces no retry.
+
+The notice does not approve a tool call or change settings. Higher-priority host instructions,
+your explicit denial, the MCP route and Yoetz's disclosure gates still apply. The durable owner
+choice is `yoetz integrate claude admission grant`, with `admission revoke` as its reverse.
+Codex and Cursor retain the pause-and-ask workflow. Live acceptance of the new Claude notice and
+retry cue is still pending; it is not proof that a provider received or reviewed anything.
+
 ## Codex registration
 
 `yoetz setup run` and `yoetz integrate codex mcp preview` show the exact command, route profile, and

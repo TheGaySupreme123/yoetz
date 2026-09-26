@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import io
 import os
 import re
 import sys
@@ -4768,25 +4769,83 @@ def _native_outcome_facts(
 
 
 def _record_claude_permission_denied(
-    payload: Mapping[str, JsonValue], *, _state: Path | None
-) -> None:
-    """Record that a host reviewer held a scoped AI-powered ``check`` (issue #467).
+    payload: Mapping[str, JsonValue],
+    *,
+    _state: Path | None,
+    workspace: str | None = None,
+    connect: ServiceConnector | None = None,
+    run_async: AsyncRunner | None = None,
+    skip_service: bool = False,
+) -> dict[str, JsonValue]:
+    """Record that a host reviewer held a scoped AI-powered ``check`` and advise on it.
 
     ``source`` is Claude Code's closed origin token (``auto_mode`` | ``permission_rule`` |
     ``hook``). An absent source is attributed to auto mode, the only reviewer that produces a
-    ``classifier_denied`` / ``no_verdict`` reason. Any other tool name is ignored: the rendered
-    matcher is scoped to ``check`` and this ingress must not widen it.
+    ``classifier_denied`` / ``no_verdict`` reason (issue #467). Any other tool name is ignored:
+    the rendered matcher is scoped to ``check`` and this ingress must not widen it.
+
+    The returned object is the hook's stdout (issue #857): Yoetz's first-hand grant and
+    admission facts, read inside the hook deadline, decide whether the advisory confirms the
+    owner's standing authorization and offers the session's one ``retry``, or tells the agent to
+    stop and ask. It is advice plus the host's own documented retry flag, never an allow
+    decision, and it echoes nothing from the host payload.
     """
 
     if payload.get("tool_name") not in _CLAUDE_CHECK_TOOL_NAMES:
-        return
+        return {}
     source = payload.get("source")
-    reason = (
-        "host_permission_rule_denied"
-        if source in {"permission_rule", "hook"}
-        else "host_auto_review_denied"
+    held_by_rule = source in ("permission_rule", "hook")
+    record_hook_diagnostic(
+        "host_permission_rule_denied" if held_by_rule else "host_auto_review_denied",
+        "PermissionDenied",
+        _state=_state,
     )
-    record_hook_diagnostic(reason, "PermissionDenied", _state=_state)
+    tool_input = payload.get("tool_input")
+    if isinstance(tool_input, Mapping) and tool_input.get("mode") == "deterministic_only":
+        # This call explicitly opts out of external review; a semantic grant says nothing
+        # about why the host held it. Leave the ordinary host approval path intact.
+        return {}
+    from yoetz.cli.hooks import resolve_session_workspace
+    from yoetz.cli.host_hold_advisory import (
+        PrivacyConnector,
+        RetryOfferOutcome,
+        classifier_verdict_present,
+        compose_host_hold_advisory,
+        note_retry_offer,
+        read_host_hold_facts,
+    )
+
+    locator = resolve_session_workspace(workspace, payload).locator
+    facts = read_host_hold_facts(
+        locator,
+        connect=None if connect is None else cast(PrivacyConnector, connect),
+        run_async=run_async if run_async is not None else _default_runner(),
+        skip_service=skip_service,
+    )
+    session = _token_or_none(payload.get("session_id"))
+    retry_offer: RetryOfferOutcome = "unrecorded"
+    if facts.grant_confirmed and classifier_verdict_present(source, payload.get("reason")):
+        # The ledger is consulted only when a retry could actually be emitted, so a session
+        # whose first hold was unconfirmed or rule-held keeps its one retry for later.
+        retry_offer = "unrecorded" if session is None else note_retry_offer(session, _state=_state)
+    advisory = compose_host_hold_advisory(
+        facts,
+        source=source,
+        reason=payload.get("reason"),
+        retry_offer=retry_offer,
+    )
+    with contextlib.suppress(Exception):
+        record_hook_diagnostic(advisory.diagnostic, "PermissionDenied", _state=_state)
+    return hook_io.claude_permission_denied_output(
+        advisory.explanation,
+        retry=advisory.retry,
+    )
+
+
+def _default_runner() -> AsyncRunner:
+    import anyio
+
+    return cast(AsyncRunner, anyio.run)
 
 
 def handle_claude_observe(
@@ -4870,12 +4929,30 @@ def handle_claude_observe(
             hook_io.stdout_json({}, stdout)
             return 0
         raw_event = event_name or payload.get("hook_event_name")
-        if raw_event == "PermissionDenied" and not ordinary_profile:
+        denied_output: dict[str, JsonValue] | None = None
+        if raw_event == "PermissionDenied" and (
+            not ordinary_profile or payload.get("tool_name") in _CLAUDE_CHECK_TOOL_NAMES
+        ):
             # Not an observation of work: the host refused the call before Yoetz saw it. Retain
             # only a closed reason token; tool input, reason prose, cwd, and ids are discarded.
-            _record_claude_permission_denied(payload, _state=_state)
-            hook_io.stdout_json({}, stdout)
-            return 0
+            # The stdout object is the bounded hold advisory (issue #857), or `{}` for any other
+            # tool. Nothing here may raise past the write: a second object would corrupt stdout.
+            output: dict[str, JsonValue] = {}
+            try:
+                output = _record_claude_permission_denied(
+                    payload,
+                    _state=_state,
+                    workspace=workspace,
+                    connect=connect,
+                    run_async=run_async,
+                    skip_service=skip_service,
+                )
+            except Exception:
+                output = {}
+            if not ordinary_profile:
+                hook_io.stdout_json(output, stdout)
+                return 0
+            denied_output = output
         if type(raw_event) is not str or raw_event not in event_map:
             hook_io.stdout_json({}, stdout)
             return 0
@@ -5132,10 +5209,10 @@ def handle_claude_observe(
                 # applies to a successful callback carrying child-only transcript metadata: a
                 # success bit does not authorize parent attribution.
                 child_attribution_gap = True
-        return handle_observe(
+        result = handle_observe(
             event_name=event_map[raw_event],
             stdin_bytes=canonical_encode(structural),
-            stdout=stdout,
+            stdout=io.BytesIO() if denied_output is not None else stdout,
             workspace=workspace,
             _state=_state,
             connect=connect,
@@ -5151,6 +5228,9 @@ def handle_claude_observe(
             ),
             _content_payload=payload if ordinary_profile else None,
         )
+        if denied_output is not None:
+            hook_io.stdout_json(denied_output, stdout)
+        return result
     except BaseException:
         with contextlib.suppress(BaseException):
             hook_io.stdout_json({}, stdout)

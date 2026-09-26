@@ -172,6 +172,15 @@ _REASONS: Final = frozenset(
         # not a Yoetz AI-powered review result: no AI-powered review status can be inferred.
         "host_auto_review_denied",
         "host_permission_rule_denied",
+        # What the same ``PermissionDenied`` hook then said about the hold (issue #857): the
+        # grant was confirmed first-hand and the session's one retry was offered; the grant was
+        # confirmed but the retry was already spent, the denial came from the owner's own rule,
+        # or the host produced no verdict; the retry ledger could not be written so no retry was
+        # emitted; or the grant could not be confirmed inside the hook deadline. Payload-free.
+        "host_denial_retry_offered",
+        "host_denial_retry_exhausted",
+        "host_denial_retry_unrecorded",
+        "host_denial_grant_unconfirmed",
         # The durable applied route and the live host registration disagree:
         # policy was applied but the host now serves strict (or vice versa),
         # so a fresh Codex process is still on the old route (issue #537).
