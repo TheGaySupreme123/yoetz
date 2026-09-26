@@ -209,6 +209,81 @@ attributed from the new diagnostic format. Keep those acceptance limits visible
 when assessing the linked PR.
 
 
+## Shared-store contention repair (#689, reopened 2026-09-26)
+
+The reopened incident (three concurrent native hosts on `0.3` at
+`f0693e93e35e58a6b77f7dee30937e82cdd73963`) showed process and thread store-lock timeouts,
+multi-second hooks, a failed child recheck and a stalled delivery queue. Before changing code, the
+repair measured where the lock time went. One pre-tool hook pass took the store lock five
+separate times and held it about 270 ms on the 366 KiB fixture below, mostly re-parsing and
+re-encoding the whole document. Each acquisition had its own two-second wait, and a
+waiter that timed out while resolving its workspace was reported as `workspace_unconsented`.
+The service sweep took the lock two to four times per delivered row, loaded every workspace under
+one hold, and could leave a cancelled worker running beside the next pass.
+
+The repair keeps the document format and every durability rule, and changes who holds the lock and
+for how long: lock-free committed reads, one transaction per hook capture and per answered sweep
+row, the document parsed and its members encoded before the cross-process flock is requested,
+members spliced as cached
+canonical fragments on write, already-validated envelopes neither re-validated nor re-decoded on a
+re-read, hook lock waits bounded by the host window, and payload-free holder facts on every
+timeout. After it, a warm capture batch holds the lock 24–44 ms. Encoding a 2.1 MB state takes
+9 ms instead of 244 ms, and re-reading it after another writer's commit takes 65 ms instead of
+500 ms (12 ms instead of 98 ms at 384 KiB). Written bytes are identical to inline encoding.
+
+The concurrent probe was extended with `--pending-rows` (accepted rows in the retained fixture;
+above 60 it selects Largest capacity) and `--drain` (the real service sweeper runs in the probe
+process against the same store, delivering to an acknowledging stub for at most 60 seconds after
+the hooks finish). It was run on 2026-09-26 in a 4-vCPU Linux container (x86_64, Python 3.14.6)
+against a clean worktree of the tested revision (baseline) and this change (fix). Times are
+milliseconds for the adapter call, interpreter start excluded. "Retained" counts inputs that were
+pending or delivered afterwards. With at most 16 samples, p95 is close to the maximum, and these
+figures are not tail-latency guarantees.
+
+| State | Hooks | Sweeper | Baseline retained per host (p50 / max) | Fix retained per host (p50 / max) |
+| --- | ---: | --- | --- | --- |
+| 366 KiB, 60 rows | 8 | no | 8, 8, 8 of 8 (1,818–2,213 / ≤3,271) | 8, 8, 8 of 8 (804–1,030 / ≤1,229) |
+| 366 KiB, 60 rows | 16 | no | 10, 11, 12 of 16 (3,980–4,311 / ≤5,404) | 16, 16, 16 of 16 (1,839–2,263 / ≤2,695) |
+| 366 KiB, 60 rows | 16 | yes | 11, 10, 9 of 16; a sweep pass failed on a lock timeout in two runs | 16, 16, 16 of 16; all 76 rows delivered, no sweep failure |
+| 1.9 MB, 2,000 rows | 8 | no | 2, 2, 3 of 8 (3,077–3,166 / ≤6,393) | 8, 8, 8 of 8 (2,238–2,421 / ≤3,095) |
+| 1.9 MB, 2,000 rows | 8 | yes | 2, 2, 1 of 8; 179–183 of 2,001 delivered after 60 s | 7, 5, 6 of 8; all 2,005–2,007 delivered 17–23 s after the hooks |
+| 1.9 MB, 2,000 rows | 16 | no | 3, 3, 2 of 16 | 13, 2, 2 of 16 |
+
+Host order in each cell is Codex, Claude Code, Cursor. Every baseline loss was recorded as
+`workspace_unconsented` or the generic `observe`, and baseline sweeps also failed on store-lock
+`TimeoutError`. Every loss after the fix is a named `store_lock_timeout` with the holder's role,
+phase and hold time. Neither run recorded a service-side lock timeout.
+
+The last row is the known limit. With 16 cold hook processes on four cores, each one spends
+several hundred milliseconds of CPU parsing and priming a 1.9 MB document before it can queue.
+In a diagnostic run of that shape, 10 of 14 timeouts reached the lock with their host-window
+budget already spent outside it (0 ms waited) and the rest waited at most 180 ms, behind holders
+of 18–482 ms. Lock scheduling cannot fix that; the fix bounds
+the hooks and names the loss. Reducing per-process whole-document cost (an append-oriented
+representation, ADR-022 decision 23) remains the path if native workloads reach that shape. Two
+fairness mechanisms were measured and not kept: a 2 ms lock poll interval and a
+background-yields-to-foreground marker each moved 8-way/1.9 MB retention by less than run-to-run
+noise (39 versus 40 and 38 versus 40 of 48 inputs).
+The final revision moves that parse inside the process-local lock (still before the flock) after a
+stress run showed a later-arriving in-process thread could otherwise commit first; a repeat of the
+366 KiB 16-way row and the 1.9 MB 8-way sweeper row on that revision retained 16, 16, 16 and 8, 5,
+5 inputs, with every row delivered.
+
+To reproduce, with the baseline in a separate clean worktree:
+
+```text
+BASELINE=/path/to/clean/f0693e93e35e58a6b77f7dee30937e82cdd73963
+PYTHONPATH="$BASELINE/src" env -u YOETZ_ISOLATED_ROOT uv run python \
+  scripts/benchmark_observation_hooks.py --retained --fanout 16 --drain
+env -u YOETZ_ISOLATED_ROOT uv run python \
+  scripts/benchmark_observation_hooks.py --retained --fanout 8 --pending-rows 2000 --drain
+```
+
+This is adapter and in-process sweeper evidence on Linux. It is not the issue's native acceptance
+run. That run still needs installed Codex, Claude Code and Cursor parent/delegate sessions on the
+macOS instance, real service RPC, vault and ledger, encrypted native capture, a child recheck, and
+a final receipt; Linux/WSL host coverage remains separately untested.
+
 ## Capture-inventory recovery regression (#695)
 
 The recovery regression must start from unknown capture accounting and an empty outbox, reject a

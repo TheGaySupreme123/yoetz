@@ -8,6 +8,18 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- Concurrent Codex, Claude Code and Cursor sessions, including their delegates, no longer queue
+  behind one another on the local observation store until hooks time out and inputs are lost.
+  Reads such as `yoetz observe status`, consent checks and the service's delivery selection no
+  longer wait for the store lock; each write holds it only for what changed rather than for the
+  whole observation state; and every lock wait in a hook stays inside that host's hook timeout.
+  When the store is still contended, the hook reports `store_lock_timeout` with the role and step
+  that held the lock (instead of a generic failure or a false "unconsented workspace"), the
+  service's delivery pass stops and retries without failing, a check refused for store contention
+  can be retried with the same request instead of failing internally, and a cancelled delivery
+  pass can no longer run beside the next one. Native three-host acceptance on macOS remains open
+  (#689).
+
 - A Codex multi-agent v2 child that attaches with its delegation handle now binds its host
   identity to exactly one accepted child. v2 gives every thread of a delegation tree the parent's
   session, so a child callback that names its own rollout takes its child identity from that

@@ -4436,7 +4436,12 @@ with the shared cause), and an ended unmapped session is terminally quarantined 
 mapping can deliver it, but only after atomically acquiring its lifecycle lock so an attach already
 in flight wins. The service sweeper yields with its partial summary once a pass has run for its
 20-second budget, under the daemon's 30-second sweep deadline, so rows it resolved license the
-immediate re-sweep instead of being discarded as a deadline timeout. The installation maintenance
+immediate re-sweep instead of being discarded as a deadline timeout. A row's attempt, coverage gap,
+lane reason and acknowledgement or quarantine commit in one local transaction after the service
+answered, never before it. A pass that meets a contended store stops with its partial summary and
+the closed `observation_store_busy` reason instead of failing; an answered row whose settlement lost
+that race stays pending and replays as a duplicate. A workspace whose admission maintenance is
+contended sits that pass out (fail-closed) while other workspaces drain (issue #689). The installation maintenance
 gate covers one coordinator ingest at a time rather than the whole pass, so a backlog cannot hold
 ordinary workflow control behind local outbox bookkeeping; the workspace lease and the routed task
 fence still serialize each row against recovery and bundle rotation. Legacy hook-spool normalization
@@ -4568,14 +4573,41 @@ never includes the raw exception or absolute state path. `--json` callers receiv
 carrying `code`, `reason`, `retryable`, `operation`, and the bounded message (issue #428). A
 `service_unavailable` rejection retires that session's lane for the pass while other sessions remain
 eligible; no later row may step over a failed lane head. Local observation-store acquisition is
-capped at two seconds for both the process-local reentrant lock and the cross-process flock. Hook
-timing rows attribute that queueing as `store_lock_wait`, cover the previously unwindowed
-resolve/deliver regions, and name any remaining wall-time difference as `unattributed`; nested store
-sub-stages are reported separately from the end-to-end partition (issues #310 and #311). A
+capped at two seconds for both the process-local reentrant lock and the cross-process flock, and a
+caller may shorten that cap with one monotonic deadline for every acquisition in its scope: a hook
+pass bounds all of its lock waits by its host window (2 s after entry for a 3-second SessionEnd,
+3.5 s for a 5-second Claude Code or Cursor tool event, 7 s for a 10-second Codex observe hook or
+Claude Code/Cursor SessionStart and Stop), and a sweep bounds its pre-delivery hops by its pass
+budget (issue #689). Reads never take the lock: every workspace document is replaced atomically, so
+a read observes one committed version, never another writer's open transaction; a read-mostly
+operation that reaches a write (a legacy repair) reruns under the lock. The depth-one flock holder
+stamps its closed role (`hook`, `service`, `sweep`, `coordinator`, `spool_replay`, `cli`, `local`),
+its store phase (a code identifier) and its monotonic start into the lock file and clears it on
+release; a timed-out waiter raises `ObservationStoreLockTimeout` (a `TimeoutError` whose text stays
+`observation_store_lock_timeout`) carrying the scope (`thread` or `process`), the holder's role,
+phase and hold time, and whether an in-process holder was itself still queueing for the flock. Hooks
+record those facts, and holds of one second or more, as payload-free `store_lock` rows
+(`store_lock_timeout`, `store_lock_long_hold`) listed under `store_lock_events` in `observe status`
+hook diagnostics; the service records them as `observation.store_lock.<role>` diagnostics. Hook
+timing rows attribute queueing as `store_lock_wait` and the pass's own critical sections as
+`store_lock_hold`, cover the previously unwindowed resolve/deliver regions, and name any remaining
+wall-time difference as `unattributed`; nested store sub-stages are reported separately from the
+end-to-end partition (issues #310 and #311). A hook pass whose capture batch cannot take the lock
+within its budget still exits 0 with its host's fail-open output, and reports
+`store_lock_timeout` instead of the generic `observe` or a false `workspace_unconsented`; that
+input is not retained. Serialization splices a cached canonical fragment for each immutable
+envelope, outbox row and quarantine entry, and a re-read after another writer's commit neither
+re-validates nor re-decodes an envelope whose equal JSON this process already validated, so a
+critical section costs what changed rather than the whole document. The bytes written are identical
+to inline encoding, and a re-read accepts and rejects exactly the documents whole-document
+validation would (a document that fails still reads as an empty, unreadable state). A
 conflicting logical-identity claim rejects and quarantines only its own envelope as
 `dedup_conflict`; it does not establish bundle corruption or arm the session latch (issue #309).
 Coordinator and sweeper calls use separate bounded executors, so cancellation cannot strand an
-exit-blocking flock wait or exhaust the shared default executor. `observation_storage_corrupt` is
+exit-blocking flock wait or exhaust the shared default executor. The sweeper tracks every worker hop
+it submitted; a pass that finds a hop from a cancelled pass still running waits up to five seconds
+for it and otherwise yields an empty summary with `observation_store_busy`, so a stranded worker is
+never joined by new store work beside it (issue #689). `observation_storage_corrupt` is
 terminal for its Codex session in the current READY generation: the coordinator remembers that
 session only after a bundle-level `STORAGE_CORRUPT`, later ingests are rejected without reopening
 the bundle, and the sweeper atomically moves that session's pending backlog to quarantine while
@@ -6395,7 +6427,7 @@ Every branch that refuses a new check before an operation record exists raises r
 | --- | --- | --- | --- |
 | `acquiring` | `check_admission_in_progress` | 2000 | A live acquisition reservation already holds the exact (writer, request) key, or another invocation admitted it first. |
 | `capture_handoff_pending` | `check_admission_capture_pending` | 5000 | A native capture handoff for the task is outstanding, before staging or landing during it. |
-| `acquisition_contended` | `check_admission_contended` | 1000 | Concurrent motion in the case's own inputs, or a lapsed reservation, left nothing admitted. |
+| `acquisition_contended` | `check_admission_contended` | 1000 | Concurrent motion in the case's own inputs, or a lapsed reservation, left nothing admitted. Also raised when the shared local observation store stayed contended through the bounded pre-admission loss reconciliation (issue #689); store contention during the capture-barrier reconciliation keeps that barrier's own `check_admission_capture_pending` refusal. |
 | `import_pending` | `check_admission_import_pending` | 5000 | A Codex import for the session is still being published. |
 
 Nothing is recorded under the request identity at any stage, so the exact replay after

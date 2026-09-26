@@ -1152,6 +1152,15 @@ ingest refresh it. Once structural ingress is durable, ordinary hooks that spent
 one-second allowance defer optional follow-up with `hook_followup_deferred`. Transient native
 content and lifecycle hooks do not take that deferral. Drain snapshot, connect, RPC and local
 bookkeeping share one elapsed drain budget; synchronous local writes cannot be interrupted safely.
+Reads of the local observation store never wait for its lock (issue #689). Every store-lock
+wait in one hook pass shares a single deadline measured from hook entry: 3.5 s for
+tool events (5-second host timeout), 7 s for SessionStart and Stop (10 seconds) and 2 s for
+SessionEnd (3 seconds); each wait
+is still capped at two seconds. A pass whose capture cannot take the lock in time still exits
+with the host's ordinary fail-open output, does not retain that input, and records a
+`store_lock_timeout` diagnostic naming the holder's role, store phase and hold time (listed
+under `store_lock_events` in `yoetz observe status`); holds of one second or more are recorded
+as `store_lock_long_hold`. Neither is reported as `observe` or `workspace_unconsented`.
 
 For shared-store measurements and the remaining native-host coverage boundary, see
 [the performance runbook](observation-selection-performance.md).
