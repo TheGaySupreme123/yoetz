@@ -2030,7 +2030,10 @@ input to the in-flight contact hold and never mints, binds, or accepts a child. 
 the commitment from an admitted event routed to the exact current session. A missing or stale
 binding fails closed; after restart, the service may bootstrap the commitment only from the
 durable observation route for that exact task/session pair. Task or project membership never
-selects a host session.
+selects a host session. Native lifecycle events persist that route at admission, before optional
+verification or advice work. An ended or rerouted predecessor remains structural evidence only;
+its event cannot bind the successor, and a durable route's host-session commitment is a
+compare-and-set fence that a later envelope cannot replace.
 
 Session lease extension is an atomic, monotonic catalog operation. A newer observation, an ended
 session, or a rotated session fence wins over a delayed renewal and cannot be overwritten by its

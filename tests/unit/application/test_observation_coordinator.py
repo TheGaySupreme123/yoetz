@@ -6095,7 +6095,7 @@ async def test_native_activity_releases_runtime_before_lineage_callback(tmp_path
 
     from builders.ledger_adapters import FixedClock
 
-    local, _workspace, session, mapping = _mapped_local(tmp_path, "native-activity-release")
+    local, workspace, session, mapping = _mapped_local(tmp_path, "native-activity-release")
     db = apsw.Connection(":memory:")
     initialize_bundle(db, {"task_id": mapping.yoetz_task_id, "owner_generation": "1"})
     store = SqliteObservationStore(db)
@@ -6152,12 +6152,175 @@ async def test_native_activity_releases_runtime_before_lineage_callback(tmp_path
     try:
         accepted = await coordinator.ingest_request(request)
         assert accepted.disposition is ObservationIngestDisposition.ACCEPTED
+        # The first admitted native event persists its exact host-session route before any
+        # optional verification/advice work. A fresh READY generation can bootstrap this row.
+        assert (
+            store.codex_session_commitment_for_session(
+                workspace=workspace,
+                yoetz_session_id=mapping.yoetz_session_id,
+            )
+            == session
+        )
         assert calls == [(mapping.yoetz_task_id, mapping.yoetz_session_id, mapping.yoetz_writer_id)]
         duplicate = await coordinator.ingest_request(request)
         assert duplicate.disposition is ObservationIngestDisposition.DUPLICATE
         # The duplicate re-offers the same evidence time; lineage applies it idempotently.
         assert len(calls) == 2 and calls[0] == calls[1]
     finally:
+        db.close(force=True)
+
+
+@pytest.mark.anyio
+async def test_ended_predecessor_cannot_seed_successor_host_route(tmp_path: Path) -> None:
+    """A rewritten ended mapping stays structural and cannot bind the successor host lane."""
+
+    from types import SimpleNamespace
+
+    from builders.ledger_adapters import FixedClock
+
+    local = LocalObservationStore(_state=tmp_path)
+    workspace = local.workspace_commitment(str(tmp_path.resolve()))
+    local.grant_consent(workspace)
+    predecessor_codex_id = "native-predecessor-route"
+    current_codex_id = "native-current-route"
+    predecessor_commitment = local.bind_codex_session(workspace, predecessor_codex_id)
+    current_commitment = local.bind_codex_session(workspace, current_codex_id)
+    local.note_session_end(workspace, predecessor_commitment)
+
+    task = _task_id()
+    current_session_id = PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4())
+    current_writer_id = PREFIX_BY_KIND[IdKind.WRITER] + str(uuid.uuid4())
+    predecessor_mapping = LifecycleMapping(
+        mapping_version=1,
+        codex_session_id=predecessor_codex_id,
+        yoetz_task_id=task,
+        # Lifecycle recovery rewrites the ended predecessor's mapping to this successor route.
+        yoetz_session_id=current_session_id,
+        yoetz_writer_id=current_writer_id,
+        last_frontier=None,
+    )
+    current_mapping = replace(predecessor_mapping, codex_session_id=current_codex_id)
+
+    db = apsw.Connection(":memory:")
+    initialize_bundle(db, {"task_id": task, "owner_generation": "1"})
+    store = SqliteObservationStore(db)
+    store.grant_consent(workspace, Timestamp("2026-01-01T00:00:00.000Z"))
+    store.bind_session(workspace, predecessor_commitment)
+    store.bind_session(workspace, current_commitment)
+    runtime = SimpleNamespace(
+        task_id=task,
+        session_id=current_session_id,
+        writer_id=observation_writer_id(task, current_session_id),
+        observation=store,
+    )
+    calls: list[tuple[str, str, str]] = []
+
+    class RuntimePort:
+        async def route(self, command: object) -> object:
+            del command
+            return runtime
+
+        async def release(self, value: object) -> None:
+            assert value is runtime
+
+    async def renew(task_id: str, session_id: str, writer_id: str, observed_at: object) -> None:
+        del observed_at
+        calls.append((task_id, session_id, writer_id))
+
+    class Coordinator(ObservationCoordinator):
+        async def _run_advice(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            pass
+
+        async def _append_materialized(  # type: ignore[override]
+            self, *args: object, **kwargs: object
+        ) -> None:
+            # Keep this regression focused on route admission and the verification worker's
+            # idempotent route write; ledger projection is covered by the surrounding suite.
+            del args, kwargs
+            return None
+
+    def load_mapping_for_session(
+        codex_session_id: str, *, _state: Path | None = None
+    ) -> LifecycleMapping:
+        del _state
+        return predecessor_mapping if codex_session_id == predecessor_codex_id else current_mapping
+
+    coordinator = Coordinator(
+        runtime=RuntimePort(),  # type: ignore[arg-type]
+        local=local,
+        clock=FixedClock(),
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+        observed_activity_hook=renew,
+        mapping_loader=load_mapping_for_session,
+    )
+
+    def post_tool_envelope(session: str, identity: str) -> ObservationEnvelope:
+        return replace(
+            _envelope(session=session, kind="PostToolUse", identity=identity, exit_status=0),
+            receipt_time=Timestamp("2026-07-19T12:00:00.000Z"),
+        )
+
+    def subagent_start_envelope(session: str, identity: str) -> ObservationEnvelope:
+        return replace(
+            _envelope(session=session, kind="SubagentStart", identity=identity),
+            structural_payload=JsonObject({}),
+            receipt_time=Timestamp("2026-07-19T12:00:00.000Z"),
+        )
+
+    try:
+        predecessor_first = await coordinator.ingest_request(
+            ObservationIngestRequest(
+                codex_session_id=predecessor_codex_id,
+                envelope=post_tool_envelope(predecessor_commitment, "hook:early-predecessor"),
+            )
+        )
+        assert predecessor_first.disposition is ObservationIngestDisposition.ACCEPTED
+        assert calls == []
+        assert (
+            store.codex_session_commitment_for_session(
+                workspace=workspace,
+                yoetz_session_id=current_session_id,
+            )
+            is None
+        )
+
+        current = await coordinator.ingest_request(
+            ObservationIngestRequest(
+                codex_session_id=current_codex_id,
+                envelope=subagent_start_envelope(current_commitment, "hook:current-route"),
+            )
+        )
+        assert current.disposition is ObservationIngestDisposition.ACCEPTED
+        assert calls == [(task, current_session_id, current_writer_id)]
+        assert (
+            store.codex_session_commitment_for_session(
+                workspace=workspace,
+                yoetz_session_id=current_session_id,
+            )
+            == current_commitment
+        )
+
+        # The old host event follows the rewritten mapping to the successor runtime. The local
+        # ended-session authority and the original mapping identity fence must win before route
+        # persistence or lineage liveness can see it.
+        predecessor = await coordinator.ingest_request(
+            ObservationIngestRequest(
+                codex_session_id=predecessor_codex_id,
+                envelope=post_tool_envelope(predecessor_commitment, "hook:late-predecessor-route"),
+            )
+        )
+        assert predecessor.disposition is ObservationIngestDisposition.ACCEPTED
+        assert calls == [(task, current_session_id, current_writer_id)]
+        assert (
+            store.codex_session_commitment_for_session(
+                workspace=workspace,
+                yoetz_session_id=current_session_id,
+            )
+            == current_commitment
+        )
+    finally:
+        coordinator.close()
         db.close(force=True)
 
 

@@ -236,7 +236,10 @@ than implementation notes.
      obtains that commitment from an admitted event routed to the exact current session; a missing
      or stale binding fails closed. After restart, it may bootstrap only from the durable
      observation route for that exact task/session pair. Task or project membership cannot select a
-     predecessor host session.
+     predecessor host session. Native lifecycle events persist that route at admission, before
+     optional verification or advice work. An ended or rerouted predecessor remains structural
+     evidence only, and the durable route's host-session commitment is a compare-and-set fence
+     that a later envelope cannot replace.
    - **Lease renewal is monotonic and fenced.** Renewal is an atomic catalog update that cannot
      replace a newer lease or revive an ended or rotated session. Recovery rechecks the clock after
      awaited work and before saving an active state, so evidence that expired during the wait is

@@ -5986,6 +5986,7 @@ async def provide_service_ready_context(
         local=local_observation,
         clock=clock,
         ids=ids,
+        state_root=paths.state,
         consent_invalidation_planner=_plan_source_consent_invalidation,
         consent_invalidation_applier=project_application.apply_source_workspace_consent_invalidation,
         advice_context_builder=ObservationAdviceContextBuilder(

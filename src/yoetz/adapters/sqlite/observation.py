@@ -786,14 +786,16 @@ class SqliteObservationStore:
         yoetz_writer_id: str,
         codex_session_commitment: str,
         bound_at: Timestamp,
-    ) -> None:
+    ) -> bool:
         try:
             with self._db:
                 # Routes are keyed by Yoetz session, not by workspace.  Deactivating every other
                 # row here encoded the old one-session-per-workspace assumption and made a second
-                # explicit sibling appear to retire the first one's route.  A replacement of the
-                # *same* Yoetz session is still an upsert below; unrelated sessions remain active
-                # and can drain their task-local verification repositories concurrently.
+                # explicit sibling appear to retire the first one's route.  A repeated route may
+                # refresh its writer/bound time, but its host-session commitment is a fence: a
+                # late predecessor envelope must never overwrite the current host binding.  Keep
+                # that fence in the single SQLite upsert predicate so two connections racing from
+                # an absent row cannot turn a stale INSERT into a commitment replacement.
                 self._db.execute(
                     "INSERT INTO observation_workspace_session_routes("
                     "workspace_commitment, yoetz_session_id, yoetz_task_id, yoetz_writer_id, "
@@ -802,8 +804,9 @@ class SqliteObservationStore:
                     "ON CONFLICT(workspace_commitment, yoetz_session_id) DO UPDATE SET "
                     "yoetz_task_id=excluded.yoetz_task_id, "
                     "yoetz_writer_id=excluded.yoetz_writer_id, "
-                    "codex_session_commitment=excluded.codex_session_commitment, "
-                    "active=1, bound_at=excluded.bound_at, unbound_at=NULL",
+                    "active=1, bound_at=excluded.bound_at, unbound_at=NULL "
+                    "WHERE observation_workspace_session_routes.codex_session_commitment = "
+                    "excluded.codex_session_commitment",
                     (
                         workspace,
                         yoetz_session_id,
@@ -813,8 +816,10 @@ class SqliteObservationStore:
                         bound_at.wire,
                     ),
                 )
+                return self._db.changes() == 1
         except Exception:
-            return
+            return False
+        return False
 
     def record_inspection_snapshot(
         self,

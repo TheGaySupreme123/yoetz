@@ -469,6 +469,43 @@ def test_codex_session_commitment_for_session_recovers_historical_route() -> Non
     )
 
 
+def test_workspace_session_route_commitment_is_first_writer_fence() -> None:
+    store = _store()
+    store.grant_consent(_WORKSPACE, _TIME)
+    yoetz_session = "ses_10000000-0000-4000-8000-000000000003"
+    assert (
+        store.record_workspace_session_route(
+            workspace=_WORKSPACE,
+            yoetz_session_id=yoetz_session,
+            yoetz_task_id=_TASK,
+            yoetz_writer_id="wtr_10000000-0000-4000-8000-000000000003",
+            codex_session_commitment=_SESSION,
+            bound_at=_TIME,
+        )
+        is True
+    )
+    # A late predecessor may race the first route write. The conflict is a no-op and
+    # reports failure so callers cannot treat the stale envelope as current activity.
+    assert (
+        store.record_workspace_session_route(
+            workspace=_WORKSPACE,
+            yoetz_session_id=yoetz_session,
+            yoetz_task_id=_TASK,
+            yoetz_writer_id="wtr_10000000-0000-4000-8000-000000000004",
+            codex_session_commitment=_SESSION_B,
+            bound_at=_TIME,
+        )
+        is False
+    )
+    assert (
+        store.codex_session_commitment_for_session(
+            workspace=_WORKSPACE,
+            yoetz_session_id=yoetz_session,
+        )
+        == _SESSION
+    )
+
+
 def test_workspace_routes_keep_unrelated_sessions_active() -> None:
     """A shared source workspace may have multiple task/session lanes (#498)."""
 
