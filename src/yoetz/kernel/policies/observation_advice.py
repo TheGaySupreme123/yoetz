@@ -183,7 +183,10 @@ class ObservationCompositionFact:
     # semantic_ready is the structural usability of the configured AI-powered review
     # path — endpoint bound, factory available, configured credential present.
     # It claims nothing about repository-scoped dispatch authority, which is
-    # resolved per check (#265).
+    # resolved per check (#265). semantic_configured is the operator's effective intent to
+    # use external AI-powered review — review not disabled, an endpoint bound, and the
+    # machine privacy policy admitting LLM-inference egress — so a private or intentionally
+    # unbound install is never told to connect or repair a provider (#844).
     semantic_configured: bool
     semantic_ready: bool
     provider_factory_ids: tuple[str, ...]
@@ -694,7 +697,8 @@ def _provider_not_ready(
     # but the configured path is structurally unusable. Absence from the
     # connected registry is not such a fact — activation is lazy and
     # repository-scoped, re-established automatically on dispatch (#265) —
-    # so registry lag only names evidence, it never triggers the advice.
+    # so registry lag only names evidence, it never triggers the advice. Without effective
+    # review intent there is nothing to connect; check reports that coverage gap itself (#844).
     if composition is None:
         return []
     if not composition.semantic_configured or composition.semantic_ready:

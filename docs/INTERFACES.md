@@ -3991,7 +3991,19 @@ Shared closed types:
   advice is disabled because `followup_message` auto-submits a user message; and `afterFileEdit`,
   `afterMCPExecution`, and `sessionEnd` emit `{}`. Cursor leases and commits advice only for a
   nonempty `sessionStart` object after its bytes are written successfully. Output-less events never
-  lease or consume advice or frontier-motion notices. Advice projection is bounded by the domain
+  lease or consume advice or frontier-motion notices. Provider-repair advice is standing advice and
+  uses only the session-boundary channels (#844). Service composition sets `semantic_configured`
+  only when verification is not disabled, a provider endpoint is bound, network egress is permitted,
+  and an LLM inference channel is enabled. The verification default, including absent config, is not
+  that intent. A private or no-egress install, an install with no provider endpoint, and a disabled
+  verification setting do not receive `connect_provider`, `renew_provider_sign_in`, or
+  `repair_semantic_provider`. When that intent is recorded and the provider is structurally unusable,
+  `connect_provider` is still produced, including when no factory id is available
+  (`semantic:not_ready`). Codex `SessionStart` places that text in `additionalContext`; Codex `Stop`
+  places it in `reason` with `decision: block`. Claude Code places it in `additionalContext` on
+  `SessionStart` and `Stop` and still does not emit `decision`. `PostToolUse` does not carry it on
+  either host. Cursor places it in `sessionStart` `additional_context`; `stop` still does not submit
+  a `followup_message` and does not consume the pending delivery. Advice projection is bounded by the domain
   wire limits: each item carries at most 16 evidence refs and a snapshot carries at most 64 ranked
   findings. The evidence-basis digest still commits to every policy candidate, ref, AI-powered
   review coverage input, and discarded condition. When a projection limit is reached, the visible
