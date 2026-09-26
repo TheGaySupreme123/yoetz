@@ -8,8 +8,6 @@ import os
 import sys
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from datetime import datetime
-from enum import Enum
 from functools import cache
 from pathlib import Path
 from types import MappingProxyType
@@ -21,22 +19,40 @@ from pydantic import BaseModel, ValidationError
 
 from yoetz import __version__
 from yoetz.cli.agent_start import AGENT_START_HANDOFF
+from yoetz.cli.bootstrap import (
+    control_failure as _shared_control_failure,
+)
+from yoetz.cli.bootstrap import (
+    human_or_json as _shared_human_or_json,
+)
+from yoetz.cli.bootstrap import (
+    plain_json as _shared_plain_json,
+)
+from yoetz.cli.bootstrap import resolve_cli_workspace_locator
+from yoetz.cli.bootstrap import (
+    stderr as _shared_stderr,
+)
+from yoetz.cli.bootstrap import (
+    stdout_json as _shared_stdout_json,
+)
 from yoetz.cli.exits import (
-    ceremony_refusal_message,
     exit_code_for,
     lifecycle_public_code,
     remediation_message,
 )
+from yoetz.cli.project import project_app
 from yoetz.cli.render import (
+    bounded_failure_line,
+    ceremony_refusal_line,
+    render_error_recovery_lines,
     render_human_awaiting_human,
     render_human_check,
     render_human_error,
     render_human_receipt,
     render_human_status,
     render_local_recovery_lines,
-    render_recovery_directive_lines,
 )
-from yoetz.domain.values import JsonObject, format_rfc3339_millis
+from yoetz.domain.values import JsonObject
 from yoetz.ports.control import (
     ControlClientKind,
     ControlError,
@@ -66,10 +82,8 @@ from yoetz.protocol.models import (
     StatusSuccessModel,
     public_model_to_wire,
 )
-from yoetz.protocol.recovery import continuation_for_reason, directive_for, timeout_operation_kind
 from yoetz.protocol.schemas import schema_document_for
-from yoetz.service.client import ServiceClient, accepted_but_unresponsive, connect_service
-from yoetz.service.control_protocol import public_error_code_for_control_reason
+from yoetz.service.client import ServiceClient, connect_service
 from yoetz.version import ResourceIntegrityError
 
 if TYPE_CHECKING:
@@ -81,9 +95,11 @@ if TYPE_CHECKING:
 __all__ = [
     "app",
     "build_service_client",
+    "control_failure",
     "main",
     "run_async",
     "support_methods_carrying_schema_version",
+    "usage_failure",
     "with_body_schema_version",
 ]
 
@@ -229,6 +245,7 @@ app.add_typer(elevated_app, name="consent")
 app.add_typer(hooks_app, name="hooks")
 app.add_typer(observe_app, name="observe")
 observe_app.add_typer(observe_checks_app, name="checks")
+app.add_typer(project_app, name="project")
 
 
 def _recommend_operation(name: str) -> Callable[..., None]:
@@ -331,14 +348,24 @@ def upgrade_cmd(
     accept: Annotated[
         bool,
         typer.Option(
-            "--accept", help="Run only the fixed uv package upgrade; other stages stay explicit."
+            "--accept",
+            help="Run only the fixed uv package upgrade now; open sessions keep working and "
+            "switch to the new version when they are reopened.",
+        ),
+    ] = False,
+    prune_runtimes: Annotated[
+        bool,
+        typer.Option(
+            "--prune-runtimes",
+            help="Remove unused retained runtimes without stopping active sessions.",
         ),
     ] = False,
     writers_stopped: Annotated[
         bool,
         typer.Option(
             "--writers-stopped",
-            help="Confirm old hosts/hooks and service have been quiesced before package replacement.",
+            hidden=True,
+            help="Accepted for compatibility; stopping hosts and the service is no longer required.",
         ),
     ] = False,
     project_root: Annotated[
@@ -390,6 +417,7 @@ def upgrade_cmd(
     ] = None,
 ) -> None:
     """Plan a complete upgrade while preserving settings; optionally replace this uv tool."""
+    del writers_stopped  # Older guidance passed it; the package step no longer needs quiescence.
     module = importlib.import_module("yoetz.cli.upgrade")
     operation = cast(Callable[..., int], module.run_upgrade)
     options = {
@@ -410,7 +438,7 @@ def upgrade_cmd(
             hosts=host,
             options={key: value for key, value in options.items() if value is not None},
             accept=accept,
-            writers_stopped=writers_stopped,
+            prune_runtimes=prune_runtimes,
         )
     )
 
@@ -444,9 +472,9 @@ async def build_service_client(
     """
 
     locator = (
-        WorkspaceLocator(os.fspath(Path.cwd().resolve(strict=True)))
+        resolve_cli_workspace_locator()
         if workspace_locator is _WORKSPACE_LOCATOR_DEFAULT
-        else cast(WorkspaceLocator | None, workspace_locator)
+        else resolve_cli_workspace_locator(cast(WorkspaceLocator | None, workspace_locator))
     )
     return await connect_service(
         client_kind,
@@ -495,49 +523,35 @@ def _safe_write(stream: BinaryIO, data: bytes) -> None:
 
 
 def _stdout_json(value: JsonValue) -> None:
-    _safe_write(sys.stdout.buffer, canonical_encode(value) + b"\n")
+    _shared_stdout_json(value)
 
 
 def _stderr(message: str) -> None:
-    try:
-        typer.echo(message, err=True)
-    except BrokenPipeError:
-        pass
+    _shared_stderr(message)
 
 
 def _plain_json(value: object) -> JsonValue:
-    if value is None or type(value) in {bool, int, str}:
-        return cast(JsonValue, value)
-    if isinstance(value, Enum):
-        return cast(JsonValue, value.value)
-    if type(value) is datetime:
-        return format_rfc3339_millis(value)
-    if isinstance(value, BaseModel):
-        return cast(JsonValue, value.model_dump(mode="json", by_alias=True, exclude_none=False))
-    if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return _plain_json(dataclasses.asdict(value))
-    if isinstance(value, Mapping):
-        source = cast(Mapping[object, object], value)
-        return {str(key): _plain_json(item) for key, item in source.items()}
-    if isinstance(value, (list, tuple)):
-        sequence = cast(list[object] | tuple[object, ...], value)
-        return [_plain_json(item) for item in sequence]
-    if isinstance(value, (set, frozenset)):
-        members = cast(set[object] | frozenset[object], value)
-        return [_plain_json(item) for item in sorted(members, key=str)]
-    raise TypeError("cli_result_not_json")
+    return _shared_plain_json(value)
 
 
 def _human_or_json(value: object, *, json_output: bool) -> None:
-    if json_output or not sys.stdout.isatty():
-        _stdout_json(_plain_json(value))
-    else:
-        typer.echo(canonical_encode(_plain_json(value)).decode("utf-8"))
+    _shared_human_or_json(
+        value,
+        json_output=json_output,
+        stdout_writer=_stdout_json,
+        plain_json_converter=_plain_json,
+    )
 
 
 def _usage_failure() -> int:
     _stderr("invalid_request: the command input is invalid")
     return 2
+
+
+def usage_failure() -> int:
+    """Return the standard CLI exit code for invalid command usage."""
+
+    return _usage_failure()
 
 
 def _machine_scope_request_or_none() -> JsonObject | None:
@@ -558,16 +572,14 @@ def _machine_scope_request_or_none() -> JsonObject | None:
 
 
 def _bounded_failure_line(reason: str, *, prefix: str | None = None) -> str:
-    """Render one bounded token with its remediation; the token itself stays first.
+    """Render one bounded token with its remediation and its recovery directive.
 
-    When the reason has a registered recovery directive (ADR-030), the directive lines follow on
-    their own lines, so a lifecycle refusal the MCP bridge would explain is explained here too.
+    One shape for every human-rendered CLI refusal, shared with ``menu``, ``instance``, and
+    ``observe`` so a lifecycle refusal the MCP bridge would explain is explained here too
+    (issue #741).
     """
 
-    head = reason if prefix is None else f"{prefix}: {reason}"
-    remediation = remediation_message(reason)
-    line = head if remediation is None else f"{head}: {remediation}"
-    return "\n".join([line, *render_local_recovery_lines(reason)])
+    return bounded_failure_line(reason, prefix=prefix)
 
 
 def _codex_subscription_cli_failure(error: BaseException) -> None:
@@ -645,69 +657,6 @@ def _with_holder_pid(line: str) -> str:
     return line if holder is None else _annotate_first_line(line, f" (holder pid {holder})")
 
 
-def _with_holder_identity(line: str) -> str:
-    """Append the stamped holder's pid/version/manifest identity when it is readable."""
-
-    try:
-        from yoetz.config.paths import state_dir
-        from yoetz.service.lifecycle import SINGLETON_LOCK_NAME, probe_singleton_holder_identity
-
-        holder = probe_singleton_holder_identity(state_dir() / SINGLETON_LOCK_NAME)
-    except Exception:
-        holder = None
-    if holder is None:
-        return line
-    version = holder.service_version or "unknown"
-    digest = holder.schema_manifest_digest or "unknown"
-    return f"{line} (holder pid {holder.pid}, service version {version}, schema manifest {digest})"
-
-
-def _with_correlation(line: str, error: ControlError) -> str:
-    if error.correlation_id is None:
-        return line
-    return _annotate_first_line(line, f"; correlation_id {error.correlation_id}")
-
-
-def _holder_identity_json() -> dict[str, JsonValue] | None:
-    """Bounded singleton-stamp fields for machine-readable control failures."""
-
-    try:
-        from yoetz.config.paths import state_dir
-        from yoetz.service.lifecycle import SINGLETON_LOCK_NAME, probe_singleton_holder_identity
-
-        holder = probe_singleton_holder_identity(state_dir() / SINGLETON_LOCK_NAME)
-    except Exception:
-        return None
-    if holder is None:
-        return None
-    body: dict[str, JsonValue] = {"pid": holder.pid}
-    if holder.service_version is not None:
-        body["service_version"] = holder.service_version
-    if holder.schema_manifest_digest is not None:
-        body["schema_manifest_digest"] = holder.schema_manifest_digest
-    return body
-
-
-def _bind_handshake_correlation(error: ControlError) -> ControlError:
-    if error.reason not in {"service_incompatible", "protocol_mismatch"}:
-        return error
-    if error.correlation_id is not None:
-        return error
-    from yoetz.observability.logging import record_public_error_without_raising
-
-    correlation_id = record_public_error_without_raising(
-        component="cli.service",
-        operation="control_handshake",
-        reason=error.reason,
-    )
-    return ControlError(
-        error.reason,
-        retryable=error.retryable,
-        accepted_state=error.accepted_state or None,
-        correlation_id=correlation_id,
-    )
-
-
 def _lifecycle_exit_code(error: BaseException) -> int | None:
     """Exit code for a bounded lifecycle refusal, or None for anything else.
 
@@ -738,79 +687,21 @@ def _lifecycle_failure(error: LifecycleError) -> int:
 def _control_failure(
     error: ControlError, *, json_output: bool = False, operation: str | None = None
 ) -> int:
-    error = _bind_handshake_correlation(error)
-    code = public_error_code_for_control_reason(error.reason)
-    if error.reason == "request_timeout" and operation is not None:
-        # The directive depends on what timed out (issue #669): a read proves nothing committed, a
-        # write may have, and a start may have without returning the ids a status query needs.
-        # Only the workflow commands know their operation; other callers keep the generic line.
-        kind = timeout_operation_kind(operation)
-        directive = directive_for(continuation_for_reason("request_timeout", operation_kind=kind))
-        lines = [
-            f"{code.value.lower()}: request_timeout: the local {operation} request did not answer "
-            "within its deadline"
-        ]
-        if directive is not None:
-            lines.extend(render_recovery_directive_lines(directive))
-        _stderr(_with_correlation("\n".join(lines), error))
-        return exit_code_for(code)
-    if error.reason in {"service_incompatible", "protocol_mismatch"}:
-        # The endpoint answered, but with a service of another installation or protocol
-        # generation. Neither 'service run' (refused while the holder lives) nor a plain retry
-        # helps; the explicit repair replaces that holder with this installation's service.
-        guidance = _with_correlation(
-            _with_holder_identity(
-                f"{error.reason}: the running local service was started by a different Yoetz "
-                "installation than this command and rejected its handshake. Run "
-                "'yoetz service restart' on a local terminal to replace it with this "
-                "installation's service, then retry"
-            ),
-            error,
-        )
-        _stderr(guidance)
-        if json_output:
-            payload: dict[str, JsonValue] = {
-                "ok": False,
-                "public_code": code.value,
-                "reason": error.reason,
-                "retryable": error.retryable,
-            }
-            if error.correlation_id is not None:
-                payload["correlation_id"] = error.correlation_id
-            holder = _holder_identity_json()
-            if holder is not None:
-                payload["holder"] = holder
-            _stdout_json(payload)
-        return exit_code_for(code)
-    if code is PublicErrorCode.SERVICE_UNAVAILABLE and accepted_but_unresponsive(error):
-        # A service that answered the connect and then went silent is running. Prescribing
-        # 'service run' here sent an operator to a command that must refuse, and the refusal
-        # then read as "the service died" (#237).
-        _stderr(
-            _with_holder_pid(
-                "service_unavailable: a local service is listening but did not answer within "
-                "5 seconds; it may still be starting or may be wedged. Wait and retry "
-                "'yoetz service status'. Do not run 'yoetz service run' -- it will refuse "
-                "while that process holds the singleton; stop it with 'yoetz service stop' "
-                "instead"
-            )
-        )
-        return exit_code_for(code)
-    guidance = {
-        PublicErrorCode.VAULT_LOCKED: (
-            "vault_locked: run `yoetz service unlock` on a local terminal "
-            "(uses the platform credential store when setup provisioned auto-unlock); "
-            "if auto-unlock is stale, run `yoetz service auto-unlock repair`; "
-            "if ordinary unlock authority may be lost, run `yoetz service recovery status`; "
-            "if uninitialized with no TTY, prepare `vault_initialize`, then "
-            "`yoetz consent review` on a trusted console"
-        ),
-        PublicErrorCode.SERVICE_UNAVAILABLE: (
-            "service_unavailable: run 'yoetz service run' under your selected user supervisor"
-        ),
-    }.get(code, f"{code.value.lower()}: the local request could not be completed")
-    _stderr(guidance)
-    return exit_code_for(code)
+    return _shared_control_failure(
+        error,
+        json_output=json_output,
+        operation=operation,
+        stderr_writer=_stderr,
+        stdout_writer=_stdout_json,
+    )
+
+
+def control_failure(
+    error: ControlError, *, json_output: bool = False, operation: str | None = None
+) -> int:
+    """Render a control-channel failure using the shared CLI taxonomy."""
+
+    return _control_failure(error, json_output=json_output, operation=operation)
 
 
 type WorkflowRequest = (
@@ -846,6 +737,12 @@ async def _call_workflow(
         branch = result.root
         if json_output or not sys.stdout.isatty():
             _stdout_json(wire)
+            if isinstance(branch, OperationFailureModel):
+                # stdout is the frozen wire failure result and admits no extra field, so the
+                # directive this renderer resolves from the token goes to stderr (ADR-030, #741).
+                recovery = render_error_recovery_lines(branch.error.safe_details)
+                if recovery:
+                    _stderr("\n".join(recovery))
         elif isinstance(branch, OperationFailureModel):
             _stderr(render_human_error(branch.error))
         elif isinstance(branch, CheckSuccessModel):
@@ -1203,6 +1100,13 @@ def observe_content_status_cmd(
     )
 
 
+_CAPACITY_HELP = (
+    "standard (recommended, 512), larger (2048), largest (8192), custom (with --queue-count "
+    "64..8192), or none (no Yoetz cap; reports why it is unavailable)"
+)
+_QUEUE_COUNT_HELP = "Custom queue count from 64 to 8192 rows; only with --capacity custom."
+
+
 @observe_app.command("selection-status")
 def observe_selection_status_cmd(
     workspace: Annotated[str, typer.Option("--workspace")],
@@ -1235,8 +1139,12 @@ def observe_selection_preview_cmd(
     ],
     capacity: Annotated[
         str,
-        typer.Option("--capacity", help="standard, larger, or largest (512/2048/8192)"),
+        typer.Option("--capacity", help=_CAPACITY_HELP),
     ],
+    queue_count: Annotated[
+        int | None,
+        typer.Option("--queue-count", help=_QUEUE_COUNT_HELP),
+    ] = None,
     session_id: Annotated[str | None, typer.Option("--session-id")] = None,
     persist: Annotated[
         bool,
@@ -1258,6 +1166,7 @@ def observe_selection_preview_cmd(
             workspace=workspace,
             detail=detail,
             capacity=capacity,
+            queue_count=queue_count,
             session_id=session_id,
             persist=persist,
             expires_at=expires_at,
@@ -1272,8 +1181,12 @@ def observe_selection_apply_cmd(
     detail: Annotated[str, typer.Option("--detail", help="focused or detailed")],
     capacity: Annotated[
         str,
-        typer.Option("--capacity", help="standard, larger, or largest (512/2048/8192)"),
+        typer.Option("--capacity", help=_CAPACITY_HELP),
     ],
+    queue_count: Annotated[
+        int | None,
+        typer.Option("--queue-count", help=_QUEUE_COUNT_HELP),
+    ] = None,
     session_id: Annotated[str | None, typer.Option("--session-id")] = None,
     persist: Annotated[
         bool,
@@ -1306,6 +1219,7 @@ def observe_selection_apply_cmd(
             workspace=workspace,
             detail=detail,
             capacity=capacity,
+            queue_count=queue_count,
             session_id=session_id,
             persist=persist,
             expires_at=expires_at,
@@ -1765,7 +1679,8 @@ async def _service_restart(json_output: bool) -> int:
             client = await build_service_client(workspace_locator=None)
         except ControlError as error:
             if error.reason in {"service_incompatible", "protocol_mismatch"}:
-                if not await supersede_incompatible_service(deadline=deadline):
+                # An explicit human restart may also replace a newer holder (a rollback).
+                if not await supersede_incompatible_service(deadline=deadline, replace_newer=True):
                     return _control_failure(error, json_output=json_output)
             elif error.reason != "service_unavailable":
                 return _control_failure(error, json_output=json_output)
@@ -1842,10 +1757,24 @@ def service_run() -> None:
 
 
 @service_app.command("isolation")
-def service_isolation(json_output: _JSON = False) -> None:
+def service_isolation(
+    json_output: _JSON = False,
+    content_digests: Annotated[
+        bool,
+        typer.Option(
+            "--content-digests",
+            help=(
+                "Also observe the selected config file's bytes as SHA-256, size, existence, and "
+                "observation time (never its content)."
+            ),
+        ),
+    ] = False,
+) -> None:
     """Report the resolved identity roots and isolation mode without connecting to a service.
 
-    Digest-only output: each root is a digest over its canonical resolved path identity. The
+    Digest-only output (``yoetz.isolation-report/1``): each root is a path-identity digest over
+    its canonical resolved path, which does not change when the file's bytes change. With
+    ``--content-digests`` the selected config also gets a bounded byte-content observation. The
     dogfood parity preflight compares one report from the exact normal target with another from
     the isolated launch environment; platform defaults cannot stand in for a relocated target.
     """
@@ -1856,7 +1785,7 @@ def service_isolation(json_output: _JSON = False) -> None:
     from yoetz.config.paths import PathSafetyError
 
     try:
-        report = isolation_report()
+        report = isolation_report(content=content_digests)
     except PathSafetyError as error:
         _stderr(f"isolation_invalid: {error.reason_code}")
         _finish(2)
@@ -2912,8 +2841,9 @@ def _trusted_exception_failure(error: Exception) -> int | None:
             return exit_code_for(PublicErrorCode.INTERNAL_ERROR)
         # A ceremony that could not find a console it owns is not malformed input. Reporting it
         # as invalid_request sent operators looking for a bad flag they never typed.
-        if remediation_message(reason) is not None:
-            _stderr(_bounded_failure_line(reason))
+        line = _bounded_failure_line(reason)
+        if line != reason:
+            _stderr(line)
             return exit_code_for(PublicErrorCode.INVALID_REQUEST)
         return _usage_failure()
     if isinstance(error, client_error):
@@ -2921,7 +2851,7 @@ def _trusted_exception_failure(error: Exception) -> int | None:
         if reason == "cancelled":
             _stderr("cancelled")
             return exit_code_for("cancelled")
-        ceremony_refusal = ceremony_refusal_message(reason)
+        ceremony_refusal = ceremony_refusal_line(reason)
         if ceremony_refusal is not None:
             _stderr(ceremony_refusal)
             return exit_code_for(PublicErrorCode.INVALID_REQUEST)
@@ -3648,8 +3578,22 @@ def provider_codex_subscription_setup(
         ),
     ] = None,
     reasoning_effort: Annotated[
-        str, typer.Option("--reasoning-effort", help="Exact reasoning effort.")
+        str,
+        typer.Option(
+            "--reasoning-effort",
+            help="Exact reasoning effort for final (completion) reviews.",
+        ),
     ] = "high",
+    routine_reasoning_effort: Annotated[
+        str | None,
+        typer.Option(
+            "--routine-reasoning-effort",
+            help=(
+                "Exact reasoning effort for routine checkpoint reviews. Defaults to medium for "
+                "a new binding and preserves an existing binding's routine choice when omitted."
+            ),
+        ),
+    ] = None,
     codex_home: Annotated[
         Path | None,
         typer.Option("--codex-home", help="Dedicated owner-private evaluator CODEX_HOME."),
@@ -3692,6 +3636,7 @@ def provider_codex_subscription_setup(
         codex_subscription_setup,
         default_codex_home,
         default_codex_subscription_model,
+        default_codex_subscription_routine_effort,
         resolve_supported_codex_executable,
     )
 
@@ -3705,6 +3650,11 @@ def provider_codex_subscription_setup(
             raise ValueError("codex_runtime_capability_unsupported")
         destination = default_codex_home() if codex_home is None else codex_home
         selected_model = default_codex_subscription_model() if model is None else model
+        selected_routine = (
+            default_codex_subscription_routine_effort()
+            if routine_reasoning_effort is None
+            else routine_reasoning_effort
+        )
         typer.echo("Codex with ChatGPT subscription")
         typer.echo(f"  runtime: {native}")
         typer.echo(f"  executable_sha256: {digest}")
@@ -3712,7 +3662,15 @@ def provider_codex_subscription_setup(
         typer.echo(f"  capability cell: {cell.capability_cell_sha256}")
         typer.echo(f"  cell evidence expires: {cell.capability_evidence_expires_at}")
         typer.echo(f"  dedicated CODEX_HOME: {destination}")
-        typer.echo(f"  model/reasoning: {selected_model} / {reasoning_effort}")
+        typer.echo(f"  model: {selected_model}")
+        typer.echo(
+            f"  reasoning: final {reasoning_effort} / routine "
+            + (
+                f"{reasoning_effort} (legacy single effort kept)"
+                if selected_routine is None
+                else selected_routine
+            )
+        )
         typer.echo("  destination: OpenAI through Codex-managed ChatGPT authentication")
         typer.echo("  data-use posture: unknown; your ChatGPT plan and terms apply")
         typer.echo("  Yoetz sends only a privacy-approved case; Codex owns the upstream body.")
@@ -3741,6 +3699,7 @@ def provider_codex_subscription_setup(
                     codex_home=destination,
                     model=selected_model,
                     reasoning_effort=reasoning_effort,
+                    routine_reasoning_effort=selected_routine,
                     login_mode="device_code" if device_code else "browser",
                     open_browser=open_browser,
                     switch_account=switch_account,
@@ -4379,6 +4338,8 @@ def version_command(
         remediation = remediation_message(error.reason)
         if remediation is not None:
             _stderr(f"version: remediation: {remediation}")
+        for line in render_local_recovery_lines(error.reason):
+            _stderr(f"version: {line}")
         raise typer.Exit(1) from None
     except ImportError:
         _stdout_json({"package_name": "yoetz", "package_version": __version__})
@@ -4574,6 +4535,18 @@ def elevated_prepare(
             help="Exact repository privacy recipe for repository_privacy_grant.",
         ),
     ] = None,
+    project_id: Annotated[
+        str | None,
+        typer.Option("--project-id", help="Exact project id for project coordination grant."),
+    ] = None,
+    membership_generation: Annotated[
+        int | None,
+        typer.Option("--membership-generation", min=1),
+    ] = None,
+    audit_record_id: Annotated[
+        str | None,
+        typer.Option("--audit-record-id", help="Exact project grant audit event id."),
+    ] = None,
     target_digest: Annotated[
         str | None,
         typer.Option("--target-digest", help="Exact plan/preview digest when required."),
@@ -4588,6 +4561,7 @@ def elevated_prepare(
     prepare = cast(Callable[..., object], getattr(module, "prepare_elevated"))
     binding: dict[str, str] | None = None
     grant: dict[str, JsonValue] | None = None
+    coordination: dict[str, JsonValue] | None = None
     if operation in {"provider_credential_set", "provider_credential_rotate"}:
         required = {
             "provider_id": provider_id,
@@ -4707,11 +4681,28 @@ def elevated_prepare(
             raise SystemExit(2) from None
         if code != 0 or grant is None:
             raise SystemExit(2)
+    if operation == "project_coordination_grant":
+        if project_id is None or membership_generation is None or audit_record_id is None:
+            _finish(_usage_failure())
+        try:
+            coordination_builder = cast(
+                Callable[..., dict[str, JsonValue]],
+                getattr(errors, "project_coordination_grant_binding"),
+            )
+            coordination = coordination_builder(
+                project_id=project_id,
+                membership_generation=membership_generation,
+                audit_record_id=audit_record_id,
+            )
+        except elevated_error as exc:
+            _elevated_failure(exc)
+            raise SystemExit(2) from None
     try:
         payload = prepare(
             operation,
             provider_binding=binding,
             grant_binding=grant,
+            coordination_binding=coordination,
             target_digest=target_digest,
         )
     except elevated_error as exc:

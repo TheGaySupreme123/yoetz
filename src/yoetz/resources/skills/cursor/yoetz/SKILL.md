@@ -32,6 +32,34 @@ After a resume, compaction, or handoff, read current Yoetz status before publish
 does not by itself create a new ledger. Pass task identity and bounded availability to delegates;
 inherited `terminal_unavailable` means they make no Yoetz calls.
 
+For cooperative delegation, the parent calls `start mode=delegate` with its current session and
+passes the complete single-use `attach_handle` with a bounded assignment to the intended child. The
+child calls `start mode=attach` and uses its own returned session and writer. A child without a handle
+may create a stable child-specific task with `parent_session_id`; it remains `self_registered` and
+`pending` until the parent records `child_accepted` or `child_rejected`. Read `status view=lineage`
+after handoff. A receipt never closes work or refreshes the parent's dependency manifest. The `prj_`
+project membership object groups work; each source workspace grants workspace-level observation
+consent separately, and the exact membership generation binds coordination delivery. Membership does
+not select a task or authorize sibling content. A clean child receipt does not prove integration.
+
+### Cursor native boundary
+
+The reviewed Cursor IDE profile exposes `sessionStart`, `sessionEnd`, `afterMCPExecution`,
+`afterFileEdit`, and `stop`; it is post-only for structural observation and excludes
+`afterAgentThought`. Cursor's Agent CLI, Cloud/Cloud Agents, and SDK fixture metadata do not supply
+an admitted native child-hook cell here. Shipped type names or a newer installed Cursor build are
+artifact evidence only and do not prove runtime child identity. A child event without an explicit
+cooperative task/session binding remains an attribution gap and is never assigned to the parent.
+`generation_id` identifies a host turn or conversation and never becomes a tool-call identity.
+
+Ordinary Cursor tool capture uses the exact `cursor-ordinary-observation-v1` profile and its separate
+workspace content-consent selection. Structural observation consent does not grant content retention
+or semantic disclosure. Hooks are fail-open and never enforce Cursor work. Native registration,
+session binding, hook drainage, or MCP approval does not prove accepted observation content, semantic
+review, or receipt coverage; report those boundaries separately. When a native child or content
+signal is unsupported, use cooperative MCP delegation or explicit task registration when allowed and
+disclose the native gap.
+
 ## Load the shared Yoetz guidance
 
 These five references are the complete installed guidance set. Follow the one that matches the
@@ -66,6 +94,16 @@ only when review is known to be optional. Keep a strict route's AI-powered revie
 If Cursor asks for MCP approval, preserve the exact proposed request and request ID while it is
 held. Do not retry with a new request, switch to local-only, or use `--approve-mcps` as a
 workaround. Do not change Cursor privacy, auto-run, or MCP settings without the user's decision.
+A host hold does not establish the Yoetz grant state. State existing repository authorization
+only after a current first-hand read confirms it; configured routing alone is not consent. For a
+confirmed grant, propose the owner's `yoetz integrate cursor admission grant` as the durable fix.
+
+Capacity and cost changes need a disclosed choice: never choose a larger or uncapped local
+observation capacity for an ordinary task. When the user asks, run `yoetz observe
+selection-preview`, relay its scope, current and requested values, local-hardware consequences,
+remaining limits, and lower/pause/resume path, and apply only after the user accepts that preview.
+A no-cap request returns `capacity_no_cap_unsupported`; relay it with the largest supported
+alternative. See "Change local retention capacity" in [workflow.md](references/workflow.md).
 
 ## Cursor activation recovery
 

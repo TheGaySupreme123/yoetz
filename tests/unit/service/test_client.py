@@ -11,6 +11,7 @@ from collections.abc import Buffer, Generator
 from contextlib import contextmanager
 from inspect import signature
 from pathlib import Path
+from types import SimpleNamespace
 from typing import BinaryIO, cast
 
 import pytest
@@ -33,14 +34,16 @@ from yoetz.ports.control import (
 from yoetz.ports.privacy import LocalDisclosureReceiptView, PrivacyReceiptPage
 from yoetz.protocol.errors import PublicErrorCode
 from yoetz.protocol.ids import IdKind, new_id
-from yoetz.protocol.models import ReceiptRequest
+from yoetz.protocol.models import CheckRequest, ReceiptRequest
 from yoetz.service.client import (
     GetPrivacyReceiptRequest,
     ListPrivacyReceiptsRequest,
+    PreparedProjectRequest,
     PrivacyReceiptFound,
     PrivacyReceiptNotFound,
     ServiceClient,
     connect_service_on_demand,
+    prepare_project_request,
 )
 from yoetz.service.control_protocol import (
     ControlSession,
@@ -178,6 +181,118 @@ async def _wait_for_sent(stream: _FakeStream, count: int) -> None:
             return
         await asyncio.sleep(0)
     raise AssertionError("client did not write expected frame")
+
+
+@pytest.mark.anyio
+async def test_project_preserves_supplied_request_id_on_the_control_wire() -> None:
+    stream = _FakeStream()
+    client = _client(stream)
+    supplied = "req_00000000-0000-4000-8000-000000000101"
+    task = asyncio.create_task(
+        client.project(
+            JsonObject(
+                {
+                    "schema_version": "1.0.0",
+                    "operation": "create",
+                    "owner_task_id": "tsk_00000000-0000-4000-8000-000000000102",
+                    "title": "project",
+                    "request_id": supplied,
+                }
+            )
+        )
+    )
+    await _wait_for_sent(stream, 1)
+    request = decode_control_frame(stream.sent[0])
+    body = cast(dict[str, object], request["body"])
+    assert body["request_id"] == supplied
+    assert client.last_project_request == PreparedProjectRequest(JsonObject(body), supplied)
+    await stream.feed(
+        encode_control_frame(
+            ControlResult(
+                protocol_version="1.0",
+                rpc_id=cast(str, request["rpc_id"]),
+                service_instance_id=_SERVICE_ID,
+                service_generation="1",
+                method=ControlMethod.PROJECT,
+                outcome="error",
+                body=ControlError("project_not_found"),
+            )
+        )
+    )
+    with pytest.raises(ControlError, match="project_not_found"):
+        await task
+    await client.close()
+
+
+@pytest.mark.anyio
+async def test_project_generated_request_id_is_exposed_and_reusable_for_recovery() -> None:
+    stream = _FakeStream()
+    client = _client(stream)
+    original = JsonObject(
+        {
+            "schema_version": "1.0.0",
+            "operation": "create",
+            "owner_task_id": "tsk_00000000-0000-4000-8000-000000000103",
+            "title": "project",
+        }
+    )
+    first_task = asyncio.create_task(client.project(original))
+    await _wait_for_sent(stream, 1)
+    first = decode_control_frame(stream.sent[0])
+    first_body = cast(dict[str, object], first["body"])
+    prepared = client.last_project_request
+    assert prepared is not None
+    assert prepared.body is not original
+    assert prepared.body["request_id"] == prepared.request_id
+    assert first_body["request_id"] == prepared.request_id
+    assert "request_id" not in original
+    await stream.feed(
+        encode_control_frame(
+            ControlResult(
+                protocol_version="1.0",
+                rpc_id=cast(str, first["rpc_id"]),
+                service_instance_id=_SERVICE_ID,
+                service_generation="1",
+                method=ControlMethod.PROJECT,
+                outcome="error",
+                body=ControlError("project_not_found"),
+            )
+        )
+    )
+    with pytest.raises(ControlError, match="project_not_found"):
+        await first_task
+
+    retry_task = asyncio.create_task(client.project(prepared.body))
+    await _wait_for_sent(stream, 2)
+    retry = decode_control_frame(stream.sent[1])
+    assert retry["body"] == first["body"]
+    await stream.feed(
+        encode_control_frame(
+            ControlResult(
+                protocol_version="1.0",
+                rpc_id=cast(str, retry["rpc_id"]),
+                service_instance_id=_SERVICE_ID,
+                service_generation="1",
+                method=ControlMethod.PROJECT,
+                outcome="error",
+                body=ControlError("project_not_found"),
+            )
+        )
+    )
+    with pytest.raises(ControlError, match="project_not_found"):
+        await retry_task
+    await client.close()
+
+
+def test_prepare_project_request_uses_matching_explicit_identity() -> None:
+    supplied = "req_00000000-0000-4000-8000-000000000104"
+    prepared = prepare_project_request(
+        JsonObject({"schema_version": "1.0.0", "operation": "opt_in"}),
+        request_id=supplied,
+    )
+    assert prepared.request_id == supplied
+    assert prepared.body["request_id"] == supplied
+    assert prepared.request == prepared.body
 
 
 @pytest.mark.anyio
@@ -862,7 +977,9 @@ async def test_late_timed_out_result_is_retired_without_poisoning_concurrent_cal
         if frame["kind"] == "call"
     )
 
-    healthy = asyncio.create_task(client.receipt(_receipt_request(23), deadline_ms=500))
+    # The second call tests correlation, not another timeout. Its completion is driven by
+    # the explicit reply below, so unrelated CI load cannot spend a second wall-clock budget.
+    healthy = asyncio.create_task(client.receipt(_receipt_request(23)))
     await _wait_for_sent(stream, 3)
     second = decode_control_frame(stream.sent[2])
     assert second["kind"] == "call"
@@ -1192,6 +1309,261 @@ async def test_supersede_signals_only_a_live_foreign_identity_holder(
         if holder.poll() is None:
             holder.kill()
             holder.wait(timeout=5)
+
+
+def test_holder_version_order_orders_packages_and_never_guesses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yoetz.service.client as client_module
+
+    monkeypatch.setattr(client_module, "__version__", "0.3.1")
+    order = client_module.holder_version_order
+    assert order("0.3.0") == "older"
+    assert order("0.3.1") == "same"
+    assert order("0.3.2") == "newer"
+    assert order("0.10.0") == "newer"
+    # A legacy stamp or an unparsable version keeps the version-agnostic behavior.
+    assert order(None) is None
+    assert order("not-a-version") is None
+
+
+@pytest.mark.anyio
+async def test_supersede_never_replaces_a_newer_holder_unless_explicitly_restarted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A process from before an in-place upgrade must not undo it (#820)."""
+
+    import subprocess
+    import sys
+    import threading
+
+    import yoetz.observability.logging as logging_module
+    import yoetz.service.client as client_module
+    from yoetz.protocol.canonical import canonical_encode
+
+    lock = tmp_path / "service.lock"
+    monkeypatch.setattr(client_module, "_singleton_lock_path", lambda: lock)
+    monkeypatch.setattr(client_module, "__version__", "0.3.1")
+    recorded: list[str] = []
+
+    def record(
+        *, component: str, operation: str, reason: str, request_id: str | None = None
+    ) -> str:
+        del component, reason, request_id
+        recorded.append(operation)
+        return _CORRELATION_FOR_TEST
+
+    monkeypatch.setattr(logging_module, "record_public_error_without_raising", record)
+
+    def sleeper() -> tuple[subprocess.Popen[bytes], threading.Thread]:
+        process = subprocess.Popen(  # noqa: S603 - fixed interpreter
+            (sys.executable, "-c", "import time; time.sleep(30)"),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        reaper = threading.Thread(target=process.wait, daemon=True)
+        reaper.start()
+        return process, reaper
+
+    def stamp(pid: int, version: str) -> None:
+        body = {
+            "instance_id": "svc_test",
+            "pid": pid,
+            "schema_manifest_digest": "sha256:" + "0" * 64,
+            "service_version": version,
+        }
+        lock.write_bytes(canonical_encode(body) + b"\n")  # type: ignore[arg-type]
+        lock.chmod(0o600)
+
+    deadline = time.monotonic() + 5.0
+    newer, newer_reaper = sleeper()
+    older, older_reaper = sleeper()
+    try:
+        stamp(newer.pid, "0.4.0")
+        assert await client_module.supersede_incompatible_service(deadline=deadline) is False
+        assert newer.poll() is None
+        assert recorded == []
+        # An explicit human restart may still roll back.
+        assert (
+            await client_module.supersede_incompatible_service(
+                deadline=deadline, replace_newer=True
+            )
+            is True
+        )
+        newer_reaper.join(timeout=5)
+        assert newer.returncode is not None
+        assert recorded == ["service_supersede"]
+        # The upgrade direction is unchanged: an older holder is replaced.
+        stamp(older.pid, "0.3.0")
+        assert await client_module.supersede_incompatible_service(deadline=deadline) is True
+        older_reaper.join(timeout=5)
+        assert older.returncode is not None
+        assert recorded == ["service_supersede", "service_supersede"]
+    finally:
+        for process in (newer, older):
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+
+
+class _HelloClient:
+    """A connected client whose hello reported ``service_version``."""
+
+    def __init__(self, service_version: str) -> None:
+        self.hello_service_status = SimpleNamespace(service_version=service_version)
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+def _script_on_demand(
+    monkeypatch: pytest.MonkeyPatch,
+    connections: list[object],
+    *,
+    supersede_result: bool | ControlError = True,
+) -> dict[str, int]:
+    import yoetz.service.client as client_module
+
+    counts = {"connect": 0, "supersede": 0, "spawn": 0}
+
+    async def scripted_connect(_kind: ControlClientKind, **_kwargs: object) -> object:
+        counts["connect"] += 1
+        item = connections.pop(0)
+        if isinstance(item, ControlError):
+            raise item
+        return item
+
+    async def supersede(*, deadline: float, replace_newer: bool = False) -> bool:
+        assert replace_newer is False
+        counts["supersede"] += 1
+        if isinstance(supersede_result, ControlError):
+            raise supersede_result
+        return supersede_result
+
+    def spawn() -> None:
+        counts["spawn"] += 1
+
+    monkeypatch.setattr(client_module, "__version__", "0.3.1")
+    monkeypatch.setattr(client_module, "_connect_service_attempt", scripted_connect)
+    monkeypatch.setattr(client_module, "supersede_incompatible_service", supersede)
+    monkeypatch.setattr(client_module, "_spawn_service_process", spawn)
+    monkeypatch.setattr(client_module, "_SERVICE_START_POLL_SECONDS", 0.01)
+    return counts
+
+
+@pytest.mark.anyio
+async def test_new_session_bridge_retires_an_older_compatible_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first session opened after an in-place upgrade switches to the new package (#820)."""
+
+    stale = _HelloClient("0.3.0")
+    successor = _HelloClient("0.3.1")
+    counts = _script_on_demand(
+        monkeypatch,
+        [stale, ControlError("service_unavailable", retryable=True), successor],
+    )
+    connected = await connect_service_on_demand(ControlClientKind.MCP_BRIDGE, timeout_seconds=0.5)
+    assert connected is successor
+    assert stale.closed is True
+    assert counts == {"connect": 3, "supersede": 1, "spawn": 1}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("kind", "version"),
+    [
+        # Open sessions' hooks and ordinary CLI commands keep the service they found.
+        (ControlClientKind.CLI, "0.3.0"),
+        # Same or newer packages are never retired by a bridge.
+        (ControlClientKind.MCP_BRIDGE, "0.3.1"),
+        (ControlClientKind.MCP_BRIDGE, "0.4.0"),
+    ],
+)
+async def test_only_a_bridge_retires_and_only_an_older_service(
+    monkeypatch: pytest.MonkeyPatch, kind: ControlClientKind, version: str
+) -> None:
+    running = _HelloClient(version)
+    counts = _script_on_demand(monkeypatch, [running])
+    connected = await connect_service_on_demand(kind, timeout_seconds=0.5)
+    assert connected is running
+    assert running.closed is False
+    assert counts == {"connect": 1, "supersede": 0, "spawn": 0}
+
+
+@pytest.mark.anyio
+async def test_bridge_keeps_the_compatible_service_when_nothing_can_be_retired(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stale = _HelloClient("0.3.0")
+    again = _HelloClient("0.3.0")
+    counts = _script_on_demand(monkeypatch, [stale, again], supersede_result=False)
+    connected = await connect_service_on_demand(ControlClientKind.MCP_BRIDGE, timeout_seconds=0.5)
+    assert connected is again
+    assert counts == {"connect": 2, "supersede": 1, "spawn": 0}
+
+
+@pytest.mark.anyio
+async def test_bridge_reports_a_retryable_outage_while_the_older_service_drains(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    counts = _script_on_demand(
+        monkeypatch,
+        [_HelloClient("0.3.0")],
+        supersede_result=ControlError(
+            "service_incompatible", retryable=True, correlation_id=_CORRELATION_FOR_TEST
+        ),
+    )
+    with pytest.raises(ControlError) as outage:
+        await connect_service_on_demand(ControlClientKind.MCP_BRIDGE, timeout_seconds=0.5)
+    assert outage.value.reason == "service_unavailable"
+    assert outage.value.retryable is True
+    assert outage.value.correlation_id == _CORRELATION_FOR_TEST
+    assert counts == {"connect": 1, "supersede": 1, "spawn": 0}
+
+
+@pytest.mark.anyio
+async def test_cancelled_check_wait_consumes_late_result_without_cancelling_review() -> None:
+    stream = _FakeStream()
+    client = _client(stream, ControlClientKind.MCP_BRIDGE)
+    source = _receipt_request(31).model_dump(mode="json", exclude_none=True)
+    for key in ("task_id", "format", "include", "redaction_profile"):
+        source.pop(key)
+    source["mode"] = "semantic_required"
+    check = CheckRequest.model_validate(source)
+    waiting = asyncio.create_task(client.check(check))
+    await _wait_for_sent(stream, 1)
+    first = decode_control_frame(stream.sent[0])
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    # Local wait cancellation is not an explicit control cancel of the admitted review.
+    assert len(stream.sent) == 1
+    assert first["rpc_id"] in client._retired_rpc_ids  # pyright: ignore[reportPrivateUsage]
+    healthy = asyncio.create_task(client.receipt(_receipt_request(32), deadline_ms=500))
+    await _wait_for_sent(stream, 2)
+    second = decode_control_frame(stream.sent[1])
+    for frame, method in ((first, ControlMethod.CHECK), (second, ControlMethod.RECEIPT)):
+        await stream.feed(
+            encode_control_frame(
+                ControlResult(
+                    protocol_version="1.0",
+                    rpc_id=cast(str, frame["rpc_id"]),
+                    service_instance_id=_SERVICE_ID,
+                    service_generation="1",
+                    method=method,
+                    outcome="error",
+                    body=ControlError("privacy_projection_unavailable", retryable=True),
+                )
+            )
+        )
+    with pytest.raises(ControlError, match="privacy_projection_unavailable"):
+        await healthy
+    assert not stream.closed
+    assert not client._retired_rpc_ids  # pyright: ignore[reportPrivateUsage]
+    await client.close()
 
 
 @pytest.mark.anyio

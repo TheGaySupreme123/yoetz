@@ -18,18 +18,38 @@ import pytest
 import yoetz.adapters.sqlite.connection as connection_module
 import yoetz.adapters.sqlite.recovery as recovery_module
 import yoetz.service.ready_composition as ready_composition_module
-from builders.privacy_policies import minimal_external_policy
+from builders.privacy_policies import local_only_policy, minimal_external_policy
+from yoetz.adapters.integrations.codex_lifecycle import mapping_from_start_ids, store_mapping
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.adapters.keys.encrypted_vault import EncryptedVaultStore
 from yoetz.adapters.keys.secret_memory import LocalSecretMemory
 from yoetz.adapters.sqlite.connection import open_catalog_writer
-from yoetz.adapters.sqlite.migrations import CATALOG_MIGRATIONS, Migration, initialize_catalog
+from yoetz.adapters.sqlite.migrations import (
+    BUNDLE_MIGRATIONS,
+    CATALOG_MIGRATIONS,
+    Migration,
+    initialize_catalog,
+)
 from yoetz.application.service import ClientProjectionContext, ControlProjectionBinding
-from yoetz.config.models import YoetzConfig
+from yoetz.config.models import VerificationConfig, YoetzConfig
 from yoetz.config.write import fireworks_provider
-from yoetz.domain.observation import ObservationLifecycle
+from yoetz.domain.host_lineage import host_lineage_from_payload
+from yoetz.domain.observation import (
+    ObservationCursor,
+    ObservationEnvelope,
+    ObservationIngestRequest,
+    ObservationLifecycle,
+    ObservationSource,
+    observation_ingest_request_to_json,
+)
 from yoetz.domain.privacy import AuthorizationScope, AuthorizationScopeKind
-from yoetz.domain.values import JsonObject
+from yoetz.domain.values import (
+    Frontier,
+    JsonObject,
+    format_rfc3339_millis,
+    task_id,
+    timestamp_from_datetime,
+)
 from yoetz.kernel.policies.observation_advice import (
     ObservationAdviceContext,
     ObservationCompositionFact,
@@ -44,15 +64,21 @@ from yoetz.ports.control import (
     ServiceState,
 )
 from yoetz.ports.diagnostics import StartupCheckResult
+from yoetz.ports.keys import BundleKeys, WrapKeyHandle
 from yoetz.ports.ledger import CheckCommitResult
 from yoetz.ports.privacy import (
     EffectivePrivacyPolicy,
     HumanAuthorityCapability,
     LocalDisclosureReceiptView,
     OutboundGatewayPort,
+    PrivacyAuditObjectRoots,
     PrivacyReceiptAudience,
 )
-from yoetz.ports.runtime import BundleProvisionCommand, OwnershipFence, RouteAccess
+from yoetz.ports.runtime import (
+    BundleProvisionCommand,
+    OwnershipFence,
+    RouteAccess,
+)
 from yoetz.ports.secret_memory import HumanAuthorizationProof, SecretPurpose
 from yoetz.ports.start_catalog import TaskRoute, TaskRouteState
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
@@ -64,6 +90,15 @@ from yoetz.protocol.models import (
     PublishWorkRequest,
     StartRequest,
     StartResult,
+)
+from yoetz.service.bundle_upgrade import (
+    BUNDLE_UPGRADE_TARGET_VERSION,
+    BackupEvidence,
+    BundleIntegrity,
+    BundleUpgradeError,
+    BundleUpgradeReason,
+    BundleUpgradeReport,
+    BundleUpgradeTarget,
 )
 from yoetz.service.daemon import ServiceComposition, ServiceDaemon
 from yoetz.service.lifecycle import ServiceLifecycle
@@ -130,6 +165,13 @@ class _Paths:
     @property
     def state(self) -> Path:
         return self._bundle / "state"
+
+
+class _StartupLifecycle:
+    instance = SimpleNamespace(instance_id=_INSTANCE_ID)
+
+    def assert_singleton_held(self) -> None:
+        return None
 
 
 def _runtime_route() -> TaskRoute:
@@ -271,6 +313,127 @@ async def test_route_inspection_is_off_loop_and_closes_private_catalog_after_can
     inspection_release.set()
     await _wait_thread_event(inspection_started)
     await _wait_thread_event(inspection_done)
+
+
+@pytest.mark.anyio
+async def test_joined_blocking_worker_cleans_up_late_resource_after_cancellation() -> None:
+    """A cancelled writer-open wait closes a resource returned by its joined worker."""
+
+    started = threading.Event()
+    release = threading.Event()
+    cleaned = threading.Event()
+
+    class _Resource:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+            cleaned.set()
+
+    resource = _Resource()
+
+    def open_resource() -> _Resource:
+        started.set()
+        assert release.wait(5.0)
+        return resource
+
+    def close_resource(value: _Resource) -> None:
+        value.close()
+
+    task = asyncio.create_task(
+        ready_composition_module._run_blocking_joined(  # pyright: ignore[reportPrivateUsage]
+            open_resource,
+            operation="joined_resource_open_failed",
+            cleanup_result=close_resource,
+        )
+    )
+    await _wait_thread_event(started)
+    task.cancel()
+    assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await _wait_thread_event(cleaned)
+    assert resource.closed
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("recovery_failure", [False, True])
+async def test_replay_cancellation_joins_shielded_ledger_recovery_before_close(
+    tmp_path: Path, recovery_failure: bool
+) -> None:
+    """Replay teardown waits for SqliteLedger recovery before the fenced DB can be closed."""
+
+    started = threading.Event()
+    cancellation_seen = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    class _Ledger:
+        _recovery_task: asyncio.Task[None] | None = None
+
+        async def load_frontier(self) -> Frontier:
+            async def recover() -> None:
+                started.set()
+                await asyncio.to_thread(release.wait, 5.0)
+                finished.set()
+                if recovery_failure:
+                    raise RuntimeError("synthetic_recovery_failure")
+
+            self._recovery_task = asyncio.create_task(recover())
+            try:
+                # ``asyncio.wait`` keeps the recovery task alive on cancellation without the
+                # late-exception warning produced by a cancelled ``shield`` wrapper on Python
+                # 3.14.  This is the same non-cancelling contract that the production adapter
+                # must join before releasing its fenced connection.
+                await asyncio.wait((self._recovery_task,))
+            except asyncio.CancelledError:
+                cancellation_seen.set()
+                raise
+            return Frontier.genesis()
+
+        async def rebuild_projection(self, _projection: str) -> None:
+            return None
+
+    route = _runtime_route()
+    target = BundleUpgradeTarget(
+        task_id=task_id(route.task_id),
+        session_id=route.session_id,
+        bundle_path=tmp_path / "ledger.sqlite3",
+        route_generation=route.route_generation,
+        route_identity_digest=route.route_identity_digest,
+        frontier=Frontier.genesis(),
+        catalog_owner_generation=1,
+    )
+    digest = "sha256:" + "0" * 64
+    after = BundleIntegrity(
+        task_id=task_id(route.task_id),
+        schema_version=14,
+        frontier=Frontier.genesis(),
+        history_digest=digest,
+        event_count=0,
+        object_digest=digest,
+        object_count=0,
+        preserved_digest=digest,
+        projection_digest=digest,
+    )
+    backup = BackupEvidence(task_id(route.task_id), Frontier.genesis(), digest)
+    ledger = _Ledger()
+    adapter = ready_composition_module._BundleUpgradeReplayLedger(  # pyright: ignore[reportPrivateUsage]
+        cast(ready_composition_module.SqliteLedger, ledger),
+        cast(apsw.Connection, object()),
+    )
+    task = asyncio.create_task(
+        adapter.verify_replay(target=target, before=None, after=after, backup=backup)
+    )
+    await _wait_thread_event(started)
+    task.cancel()
+    assert not task.done()
+    await _wait_thread_event(cancellation_seen)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await _wait_thread_event(finished)
 
 
 @pytest.mark.anyio
@@ -615,10 +778,10 @@ async def test_open_ready_catalog_transactionally_migrates_v2_before_runtime_use
         ids=IdPort(),
     )
     try:
-        assert catalog._db.execute("PRAGMA user_version").fetchone() == (3,)  # pyright: ignore[reportPrivateUsage]
+        assert catalog._db.execute("PRAGMA user_version").fetchone() == (5,)  # pyright: ignore[reportPrivateUsage]
         assert catalog._db.execute(  # pyright: ignore[reportPrivateUsage]
             "SELECT value FROM catalog_meta WHERE key = 'storage_schema_version'"
-        ).fetchone() == ("3",)
+        ).fetchone() == ("5",)
         assert (
             catalog._db.execute(  # pyright: ignore[reportPrivateUsage]
                 "SELECT repository_privacy_commitment FROM task_routes LIMIT 1"
@@ -773,6 +936,424 @@ def test_ready_factory_synchronizes_observation_gate_from_loaded_config(tmp_path
 
 
 @pytest.mark.anyio
+async def test_startup_bundle_upgrade_precedes_lineage_and_runtime_composition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The startup upgrade callback is complete before any ready graph client is built."""
+
+    events: list[str] = []
+
+    class _DB:
+        def close(self, *, force: bool = False) -> None:
+            assert force
+
+    class _Catalog:
+        _db = _DB()
+
+    class _Vault:
+        ready = True
+        generation = 2
+        _installation_id = _INSTALLATION_ID
+
+        def installation_mac_handle(self, _purpose: object) -> _Lookup:
+            return _Lookup()
+
+    catalog = _Catalog()
+
+    async def open_catalog(_path: Path, **_kwargs: object) -> _Catalog:
+        return catalog
+
+    async def upgrade(**_kwargs: object) -> None:
+        events.append("upgrade")
+
+    def lineage(*_args: object, **_kwargs: object) -> object:
+        events.append("lineage")
+        raise RuntimeError("stop_after_order_probe")
+
+    monkeypatch.setattr(ready_composition_module, "ensure_owner_only_dir", _accept_private_path)
+    monkeypatch.setattr(ready_composition_module, "open_ready_catalog", open_catalog)
+    monkeypatch.setattr(ready_composition_module, "SqliteLineageStore", lineage)
+
+    with pytest.raises(RuntimeError, match="stop_after_order_probe"):
+        await ready_composition_module.provide_service_ready_context(
+            1,
+            2,
+            lifecycle=_StartupLifecycle(),
+            vault=_Vault(),  # type: ignore[arg-type]
+            config=YoetzConfig(),
+            paths=_Paths(tmp_path),
+            clock=_Clock(),
+            secret_memory=object(),
+            startup_bundle_upgrade=upgrade,
+        )
+
+    assert events == ["upgrade", "lineage"]
+
+
+@pytest.mark.anyio
+async def test_startup_bundle_upgrade_failure_closes_catalog_and_blocks_ready_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed upgrade cannot leak the catalog or compose a partially ready generation."""
+
+    events: list[str] = []
+
+    class _DB:
+        close_count = 0
+
+        def close(self, *, force: bool = False) -> None:
+            assert force
+            self.close_count += 1
+
+    class _Catalog:
+        def __init__(self, db: _DB) -> None:
+            self._db = db
+
+    class _Vault:
+        ready = True
+        generation = 2
+        _installation_id = _INSTALLATION_ID
+
+        def installation_mac_handle(self, _purpose: object) -> _Lookup:
+            return _Lookup()
+
+    db = _DB()
+    catalog = _Catalog(db)
+
+    async def open_catalog(_path: Path, **_kwargs: object) -> _Catalog:
+        return catalog
+
+    async def upgrade(**_kwargs: object) -> None:
+        events.append("upgrade")
+        raise BundleUpgradeError(BundleUpgradeReason.BACKUP_FAILED, True)
+
+    def lineage(*_args: object, **_kwargs: object) -> object:
+        events.append("lineage")
+        raise AssertionError("lineage must not run after startup upgrade failure")
+
+    monkeypatch.setattr(ready_composition_module, "ensure_owner_only_dir", _accept_private_path)
+    monkeypatch.setattr(ready_composition_module, "open_ready_catalog", open_catalog)
+    monkeypatch.setattr(ready_composition_module, "SqliteLineageStore", lineage)
+
+    with pytest.raises(BundleUpgradeError) as raised:
+        await ready_composition_module.provide_service_ready_context(
+            1,
+            2,
+            lifecycle=_StartupLifecycle(),
+            vault=_Vault(),  # type: ignore[arg-type]
+            config=YoetzConfig(),
+            paths=_Paths(tmp_path),
+            clock=_Clock(),
+            secret_memory=object(),
+            startup_bundle_upgrade=upgrade,
+        )
+
+    assert raised.value.reason is BundleUpgradeReason.BACKUP_FAILED
+    assert raised.value.retryable is True
+    assert events == ["upgrade"]
+    assert db.close_count == 1
+
+
+@pytest.mark.anyio
+async def test_startup_bundle_upgrade_retry_reenters_before_ready_composition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retry gets a fresh catalog and can proceed after a bounded startup failure."""
+
+    attempts = 0
+    catalogs: list[object] = []
+
+    class _DB:
+        def close(self, *, force: bool = False) -> None:
+            assert force
+
+    class _Catalog:
+        def __init__(self) -> None:
+            self._db = _DB()
+
+    class _Vault:
+        ready = True
+        generation = 2
+        _installation_id = _INSTALLATION_ID
+
+        def installation_mac_handle(self, _purpose: object) -> _Lookup:
+            return _Lookup()
+
+    async def open_catalog(_path: Path, **_kwargs: object) -> _Catalog:
+        catalog = _Catalog()
+        catalogs.append(catalog)
+        return catalog
+
+    async def upgrade(**_kwargs: object) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise BundleUpgradeError(BundleUpgradeReason.MAINTENANCE_BUSY, True)
+        raise RuntimeError("stop_after_retry_probe")
+
+    monkeypatch.setattr(ready_composition_module, "ensure_owner_only_dir", _accept_private_path)
+    monkeypatch.setattr(ready_composition_module, "open_ready_catalog", open_catalog)
+
+    for _ in range(2):
+        with pytest.raises((BundleUpgradeError, RuntimeError)):
+            await ready_composition_module.provide_service_ready_context(
+                1,
+                2,
+                lifecycle=_StartupLifecycle(),
+                vault=_Vault(),  # type: ignore[arg-type]
+                config=YoetzConfig(),
+                paths=_Paths(tmp_path),
+                clock=_Clock(),
+                secret_memory=object(),
+                startup_bundle_upgrade=upgrade,
+            )
+
+    assert attempts == 2
+    assert len(catalogs) == 2
+
+
+@pytest.mark.anyio
+async def test_startup_bundle_upgrade_skips_legacy_route_and_keeps_v12_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unsupported dormant route is reported while a supported route remains migratable."""
+
+    legacy = _runtime_route()
+    supported = _runtime_route()
+    routes = (legacy, supported)
+    schemas = {legacy.task_id: 9, supported.task_id: 12}
+
+    class _Cursor:
+        def fetchall(self) -> list[tuple[object, ...]]:
+            return []
+
+    class _DB:
+        def execute(self, _sql: str, _params: tuple[object, ...]) -> _Cursor:
+            return _Cursor()
+
+    class _Catalog:
+        _db = _DB()
+        _lookup = _Lookup()
+        generation = 7
+
+        async def recovery_routes(self) -> tuple[TaskRoute, ...]:
+            return routes
+
+    class _PrivacyStore:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def live_object_roots(
+            self, task_id: str, route_identity_digest: str
+        ) -> PrivacyAuditObjectRoots:
+            assert task_id == supported.task_id
+            assert route_identity_digest == supported.route_identity_digest
+            return PrivacyAuditObjectRoots(
+                supported.task_id,
+                supported.route_identity_digest,
+                4,
+                (),
+                canonical_digest(()),
+            )
+
+    diagnostics: list[StartupCheckResult] = []
+
+    class _Diagnostics:
+        def record(self, result: StartupCheckResult) -> None:
+            diagnostics.append(result)
+
+    def schema_and_frontier(path: Path) -> tuple[int, Frontier]:
+        return schemas[path.parent.name], Frontier.genesis()
+
+    monkeypatch.setattr(
+        ready_composition_module,
+        "_bundle_upgrade_schema_and_frontier",
+        schema_and_frontier,
+    )
+    monkeypatch.setattr(ready_composition_module, "CatalogPrivacyAudit", _PrivacyStore)
+
+    _routes, targets = await ready_composition_module._bundle_upgrade_targets(  # pyright: ignore[reportPrivateUsage, reportArgumentType]
+        _Catalog(),  # pyright: ignore[reportArgumentType]
+        bundle_root=tmp_path,
+        installation_id=_INSTALLATION_ID,
+        clock=_Clock(),
+        diagnostics=_Diagnostics(),
+    )
+
+    assert tuple(target.task_id for target in targets) == (supported.task_id,)
+    assert len(diagnostics) == 1
+    assert diagnostics[0].reason_code == BundleUpgradeReason.SCHEMA_UPGRADE_PATH_UNKNOWN.value
+    assert diagnostics[0].safe_details["route_identity_digest"] == legacy.route_identity_digest
+    assert diagnostics[0].safe_details["schema_version"] == 9
+
+
+@pytest.mark.anyio
+async def test_default_startup_bundle_upgrade_runs_real_effects_on_isolated_v12_fixture(
+    tmp_path: Path,
+) -> None:
+    """Exercise the production backup, migration, and replay glue against an isolated bundle."""
+
+    tmp_path.chmod(0o700)
+    route = _runtime_route()
+    bundle_dir = tmp_path / "tasks" / route.task_id
+    bundle_dir.mkdir(mode=0o700, parents=True)
+    bundle = bundle_dir / "ledger.sqlite3"
+    bundle_db = apsw.Connection(str(bundle))
+    bundle_db.execute("PRAGMA foreign_keys = ON")
+    bundle_db.execute("PRAGMA trusted_schema = OFF")
+    with bundle_db:
+        for migration in BUNDLE_MIGRATIONS[:12]:
+            bundle_db.execute(migration.ddl.decode("utf-8"))
+        bundle_db.execute(
+            "INSERT INTO bundle_meta(key,value) VALUES"
+            "('task_id',?),('owner_generation','2'),('owner_nonce','fixture_nonce_0001'),"
+            "('route_generation','1'),('route_identity_digest',?),"
+            "('storage_schema_version','12'),('protocol_version','0.1'),"
+            "('import_schema_version','1'),('updated_at',?)",
+            (route.task_id, route.route_identity_digest, format_rfc3339_millis(_Clock().now_utc())),
+        )
+        bundle_db.execute("INSERT INTO counters(name,next_value) VALUES('ingestion_sequence',1)")
+    bundle_db.close()
+    bundle.chmod(0o600)
+
+    catalog = await open_ready_catalog(
+        tmp_path / "catalog.sqlite3",
+        installation_id=_INSTALLATION_ID,
+        service_generation=2,
+        lookup=_Lookup(),
+        clock=_Clock(),
+        ids=IdPort(),
+    )
+    catalog_db = catalog._db  # pyright: ignore[reportPrivateUsage]
+    catalog_db.execute(
+        "INSERT INTO task_routes(task_id,active_session_id,bundle_relpath,route_generation,"
+        "active_route_identity_digest,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+        (
+            route.task_id,
+            route.session_id,
+            route.bundle_relpath,
+            route.route_generation,
+            route.route_identity_digest,
+            "active",
+            format_rfc3339_millis(_Clock().now_utc()),
+            format_rfc3339_millis(_Clock().now_utc()),
+        ),
+    )
+
+    class _Mac:
+        def mac(self, domain: bytes, message: bytes) -> str:
+            del domain, message
+            return "hmac-sha256:" + "c" * 64
+
+    class _Vault:
+        def installation_mac_handle(self, _purpose: object) -> _Mac:
+            return _Mac()
+
+        async def load_bundle_keys(self, _task: str) -> BundleKeys:
+            return BundleKeys("fixture-slot", cast(WrapKeyHandle, object()), _Mac())
+
+    class _Recovery:
+        def __init__(self, _catalog_path: Path, _clock: _Clock) -> None:
+            pass
+
+        def inspect(
+            self,
+            bundle_root: Path,
+            *,
+            catalog_path: Path,
+            task_id: str,
+            route_generation: int,
+            route_identity_digest: str,
+        ) -> object:
+            return recovery_module.RecoveryState(
+                bundle_root=bundle_root,
+                catalog_path=catalog_path,
+                task_id=task_id,
+                route_generation=route_generation,
+                route_identity_digest=route_identity_digest,
+                storage_schema_version=14,
+                owner_generation=2,
+                owner_nonce="fixture_nonce_0001",
+                last_verified_frontier=Frontier.genesis(),
+                tail_state=recovery_module.RecoveryTailState.CLEAN,
+                object_state=recovery_module.RecoveryObjectState.VERIFIED,
+                key_state=recovery_module.RecoveryKeyState.READY,
+                marker_state=recovery_module.RecoveryMarkerState.ABSENT,
+                projection_state=recovery_module.RecoveryProjectionState.CURRENT,
+                privacy_root_generation=0,
+                privacy_root_digest=canonical_digest(()),
+            )
+
+    class _Diagnostics:
+        def record(self, result: StartupCheckResult) -> None:
+            assert type(result) is StartupCheckResult
+
+    old_recovery_persistence = getattr(ready_composition_module, "_RecoveryPersistence")
+    old_install_recovery_persistence = getattr(
+        ready_composition_module, "_install_recovery_persistence"
+    )
+    journal_row: tuple[object, ...] | None = None
+
+    def ignore_recovery(_value: object) -> None:
+        return None
+
+    try:
+        # The real callback still uses the production temporary fence and effects. The recovery
+        # state itself is supplied by an isolated fixture adapter so this test does not mutate a
+        # user installation or depend on a preexisting recovery sidecar.
+        setattr(ready_composition_module, "_RecoveryPersistence", _Recovery)
+        setattr(ready_composition_module, "_install_recovery_persistence", ignore_recovery)
+        builder = cast(
+            Callable[..., Callable[..., Awaitable[object]]],
+            getattr(ready_composition_module, "_build_default_startup_bundle_upgrade"),
+        )
+        upgrade = builder(
+            lifecycle=_StartupLifecycle(),
+            vault=_Vault(),  # type: ignore[arg-type]
+            config=YoetzConfig(),
+            paths=_Paths(tmp_path),
+            secret_memory=object(),
+        )
+        report = await upgrade(
+            catalog=catalog,
+            bundle_root=tmp_path,
+            installation_id=_INSTALLATION_ID,
+            service_generation=2,
+            vault_generation=2,
+            clock=_Clock(),
+            ids=IdPort(),
+            diagnostics=_Diagnostics(),
+        )
+        journal_row = catalog_db.execute(
+            "SELECT state, phase, backup_manifest_digest FROM maintenance_operations"
+        ).fetchone()
+    finally:
+        setattr(ready_composition_module, "_RecoveryPersistence", old_recovery_persistence)
+        setattr(
+            ready_composition_module,
+            "_install_recovery_persistence",
+            old_install_recovery_persistence,
+        )
+        catalog_db.close(force=True)
+
+    assert type(report) is BundleUpgradeReport
+    assert len(report.migrated) == 1
+    assert journal_row is not None
+    assert journal_row[0:2] == ("complete", "terminal")
+    assert type(journal_row[2]) is str and journal_row[2].startswith("sha256:")
+    backup_sets = tuple((tmp_path / "backups" / route.task_id).iterdir())
+    assert len(backup_sets) == 1
+    assert (backup_sets[0] / "backup-manifest.json").is_file()
+    inspection = apsw.Connection(str(bundle), flags=apsw.SQLITE_OPEN_READONLY)
+    try:
+        assert inspection.execute("PRAGMA user_version").fetchone() == (
+            BUNDLE_UPGRADE_TARGET_VERSION,
+        )
+    finally:
+        inspection.close(force=True)
+
+
+@pytest.mark.anyio
 async def test_ready_factory_starts_and_reads_repository_bound_setup(tmp_path: Path) -> None:
     tmp_path.chmod(0o700)
     clock = _Clock()
@@ -897,7 +1478,10 @@ async def test_ready_factory_starts_and_reads_repository_bound_setup(tmp_path: P
                 "requested_view": "compact",
             }
         )
-        result = await app.start(request)
+        result = await app.start(
+            request,
+            repository_privacy_context=repository_context,
+        )
         rpc_id = new_id(IdKind.CONTROL_RPC)
         facts = await app.projection_binding_facts(ControlMethod.START, request, result)
         binding = ControlProjectionBinding(
@@ -928,6 +1512,19 @@ async def test_ready_factory_starts_and_reads_repository_bound_setup(tmp_path: P
         assert result.ok is True
         assert result.outcome == "created"
         assert result.frontier.sequence == "1"
+        route = await app.start_catalog.task_route(result.task_id)
+        assert route is not None
+        assert route.repository_privacy_commitment == repository_context.commitment
+        # The runtime cache retains the inspected route after START releases its lease.  This
+        # checks the production provision callback carried the catalog authority through the
+        # command instead of rebuilding a route with default metadata.
+        entries = cast(dict[str, object], getattr(app.runtime, "_entries"))
+        entry = entries[result.task_id]
+        inspection = cast(object, getattr(entry, "inspection"))
+        inspected_route = cast(object, getattr(inspection, "route"))
+        assert getattr(inspected_route, "repository_privacy_commitment") == (
+            repository_context.commitment
+        )
         verified_routes, replayed_events, verified_objects = await app.verify_recovery_candidate()
         assert verified_routes == 1
         assert replayed_events >= 1
@@ -1052,6 +1649,202 @@ async def test_create_then_attach_same_service_generation_advances_owner_once(
             await app.close()
         await vault.close()
         memory.close()
+        await lifecycle.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.timeout(20)
+async def test_ready_lineage_bootstraps_exact_durable_host_session_route(
+    tmp_path: Path,
+) -> None:
+    """READY recovery scopes an open host operation to the current reattached session."""
+
+    tmp_path.chmod(0o700)
+    clock = _Clock()
+    memory = LocalSecretMemory()
+    lifecycle = ServiceLifecycle(
+        clock,
+        generation_store=_GenerationStore(),
+        process_start_identity_commitment="sha256:" + "1" * 64,
+        instance_id=_INSTANCE_ID,
+    )
+    await lifecycle.acquire_singleton()
+    await lifecycle.transition(ServiceState.LOCKED)
+    vault = VaultService(
+        installation_id=_INSTALLATION_ID,
+        service_generation=1,
+        mode=VaultMode.UNINITIALIZED,
+        secret_memory=memory,
+        clock=clock,
+        vault_store_factory=lambda: EncryptedVaultStore(tmp_path / "vault"),
+        pristine_state_digest="sha256:" + "2" * 64,
+    )
+    initialize = memory.capture(SecretPurpose.VAULT_INITIALIZE, bytearray(b"correct horse battery"))
+    await vault.initialize_passphrase(initialize, "sha256:" + "3" * 64)
+    app = None
+    recomposed_lifecycle: ServiceLifecycle | None = None
+    try:
+        factory = build_ready_application_factory(
+            lifecycle=lifecycle,
+            vault=vault,
+            config=YoetzConfig(),
+            paths=_Paths(tmp_path),
+            clock=clock,
+            secret_memory=memory,
+            diagnostics=_Diagnostics(),
+        )
+        app = await factory(1, vault.generation)
+        common = {
+            "protocol_version": "0.1",
+            "schema_version": "1.0.0",
+            "actor": {"actor_id": "harness:pytest", "actor_type": "harness"},
+            "client": {
+                "kind": "codex_cli",
+                "version": "0.144.6",
+                "integration": "local_cli",
+            },
+            "requested_view": "compact",
+            "task_title": "READY host session bootstrap regression",
+            "workspace_ref": "https://github.com/example/yoetz-core.git",
+            "external_ref": "plan/ready-host-session-bootstrap",
+        }
+        first = await app.start(
+            StartRequest.model_validate(
+                {
+                    **common,
+                    "request_id": "req_00000000-0000-4000-8000-000000000231",
+                    "mode": "create",
+                }
+            )
+        )
+        second = await app.start(
+            StartRequest.model_validate(
+                {
+                    **common,
+                    "request_id": "req_00000000-0000-4000-8000-000000000232",
+                    "mode": "attach",
+                    "session_id": first.session_id,
+                }
+            )
+        )
+        assert first.ok is True and second.ok is True
+        assert first.task_id == second.task_id
+        assert first.session_id != second.session_id
+        assert first.writer_id != second.writer_id
+
+        host_session_id = "ready-native-subagent-start"
+        local = LocalObservationStore(_state=tmp_path / "state")
+        workspace = local.workspace_commitment(str(tmp_path.resolve()))
+        local.grant_consent(workspace)
+        current_host_session = local.bind_codex_session(workspace, host_session_id)
+        store_mapping(
+            mapping_from_start_ids(
+                codex_session_id=host_session_id,
+                yoetz_task_id=second.task_id,
+                yoetz_session_id=second.session_id,
+                yoetz_writer_id=second.writer_id,
+                last_frontier=None,
+            ),
+            _state=tmp_path / "state",
+        )
+        # Feed the first native SubagentStart through the production coordinator. Its admission
+        # path must persist the host route before optional verification/advice work, so the next
+        # READY generation can bootstrap from this row without a process-local cache or a manual
+        # route write.
+        envelope = ObservationEnvelope(
+            session_commitment=current_host_session,
+            event_kind="SubagentStart",
+            source_identity="hook:ready-native-subagent-start",
+            source=ObservationSource.CODEX_HOOK,
+            cursor=ObservationCursor(1, 0, 1, current_host_session, "codex-obs-hook/1.0.0"),
+            receipt_time=timestamp_from_datetime(clock.now_utc()),
+            structural_payload=JsonObject({}),
+            content_object_refs=(),
+            gap_codes=(),
+        )
+        ingest = app.support_handlers[ControlMethod.OBSERVATION_INGEST]
+        ingest_result = await ingest(
+            observation_ingest_request_to_json(
+                ObservationIngestRequest(codex_session_id=host_session_id, envelope=envelope)
+            )
+        )
+        assert ingest_result["disposition"] == "accepted", ingest_result
+
+        # Recompose the application so the lookup closure and lineage process cache are fresh.
+        await app.close()
+        await lifecycle.close()
+        recomposed_lifecycle = ServiceLifecycle(
+            clock,
+            generation_store=_GenerationStore(),
+            process_start_identity_commitment="sha256:" + "1" * 64,
+            instance_id=_INSTANCE_ID,
+            singleton_lock_path=tmp_path / "singleton.lock",
+        )
+        await recomposed_lifecycle.acquire_singleton()
+        await recomposed_lifecycle.transition(ServiceState.LOCKED)
+        recomposed_factory = build_ready_application_factory(
+            lifecycle=recomposed_lifecycle,
+            vault=vault,
+            config=YoetzConfig(),
+            paths=_Paths(tmp_path),
+            clock=clock,
+            secret_memory=memory,
+            diagnostics=_Diagnostics(),
+        )
+        app = await recomposed_factory(1, vault.generation)
+
+        lineage = app.lineage
+        assert lineage is not None
+        lookup = getattr(lineage, "_host_session_commitment_lookup", None)
+        assert callable(lookup)
+        lookup_fn = cast(Callable[[str, str], Awaitable[str | None]], lookup)
+        assert await lookup_fn(second.task_id, second.session_id) == current_host_session
+        assert await lookup_fn(second.task_id, first.session_id) is None
+
+        predecessor_host_session = "hmac-sha256:" + "a" * 64
+        registry = app.host_lineage_registry
+        assert registry is not None
+        predecessor_start = host_lineage_from_payload(
+            "codex", "SubagentStart", {"subagent_id": "worker-predecessor"}
+        )
+        assert predecessor_start is not None
+        await registry.record_host_lineage_observation(
+            first.task_id,
+            predecessor_start,
+            observed_session_commitment=predecessor_host_session,
+            source=ObservationSource.CODEX_HOOK,
+        )
+
+        await lineage.mark_contact_lost(session_id=second.session_id)
+        renewed: list[tuple[str, str, datetime]] = []
+
+        async def renew(task_id: str, session_id: str, lease_until: datetime) -> None:
+            renewed.append((task_id, session_id, lease_until))
+
+        # The only open annotation belongs to the predecessor host session, so the current
+        # reattached session cannot inherit its hold.
+        assert await lineage.hold_in_flight_contact(renew) == ()
+        assert renewed == []
+
+        current_start = host_lineage_from_payload(
+            "codex", "SubagentStart", {"subagent_id": "worker-current"}
+        )
+        assert current_start is not None
+        await registry.record_host_lineage_observation(
+            second.task_id,
+            current_start,
+            observed_session_commitment=current_host_session,
+            source=ObservationSource.CODEX_HOOK,
+        )
+        assert await lineage.hold_in_flight_contact(renew) == (second.task_id,)
+        assert renewed and renewed[0][1] == second.session_id
+    finally:
+        if app is not None:
+            await app.close()
+        await vault.close()
+        memory.close()
+        if recomposed_lifecycle is not None:
+            await recomposed_lifecycle.close()
         await lifecycle.close()
 
 
@@ -1919,8 +2712,13 @@ async def test_ready_composition_reports_exact_configured_credential_presence(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("provider_bound", [False, True])
+@pytest.mark.parametrize("review_enabled", [False, True])
 async def test_observation_provider_fact_tracks_live_credential_within_one_generation(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    provider_bound: bool,
+    review_enabled: bool,
 ) -> None:
     """The standing-advice provider fact follows the vault, not the READY snapshot (#265).
 
@@ -1954,7 +2752,11 @@ async def test_observation_provider_fact_tracks_live_credential_within_one_gener
     initialize = memory.capture(SecretPurpose.VAULT_INITIALIZE, bytearray(b"correct horse battery"))
     await vault.initialize_passphrase(initialize, "sha256:" + "f" * 64)
     provider = fireworks_provider(model="accounts/fireworks/models/minimax-m3")
-    config = YoetzConfig(profile="local-openai", provider=provider)
+    config = YoetzConfig(
+        profile="local-openai" if provider_bound else "strict-local",
+        provider=provider if provider_bound else None,
+        verification=VerificationConfig(semantic="required" if review_enabled else "disabled"),
+    )
     factory = build_ready_application_factory(
         lifecycle=lifecycle,
         vault=vault,
@@ -1991,12 +2793,35 @@ async def test_observation_provider_fact_tracks_live_credential_within_one_gener
         )
         app = await factory.open(context)
 
+        # The actual default machine policy permits update checks, not LLM review.
+        # Required verification (including absent config's default) is not intent.
+        baseline = await composition()
+        assert type(baseline) is ObservationCompositionFact
+        assert baseline.semantic_configured is False
+        assert provider_rules(baseline) == set()
+        policy_app = app.privacy.policy_application
+        assert policy_app is not None
+        current_policy = replace(
+            minimal_external_policy(),
+            effective_scope=AuthorizationScope(AuthorizationScopeKind.MACHINE, _INSTALLATION_ID),
+        )
+
+        async def effective_policy(
+            store: object, scope: AuthorizationScope
+        ) -> EffectivePrivacyPolicy:
+            assert store is policy_app.policy_store
+            assert scope == current_policy.effective_scope
+            return EffectivePrivacyPolicy(current_policy, 2, current_policy.policy_digest)
+
+        monkeypatch.setattr(type(policy_app.policy_store), "effective_policy", effective_policy)
+        intended = provider_bound and review_enabled
+
         # Genuinely missing credential: the advice stays visible.
         fact = await composition()
         assert type(fact) is ObservationCompositionFact
-        assert fact.semantic_configured is True
+        assert fact.semantic_configured is intended
         assert fact.semantic_ready is False
-        assert "provider_not_ready" in provider_rules(fact)
+        assert ("provider_not_ready" in provider_rules(fact)) is intended
 
         # Credential ceremony lands mid-generation: the next build sees it and
         # the connect_provider recommendation becomes inapplicable, even though
@@ -2025,7 +2850,7 @@ async def test_observation_provider_fact_tracks_live_credential_within_one_gener
 
         connected = await composition()
         assert type(connected) is ObservationCompositionFact
-        assert connected.semantic_ready is True
+        assert connected.semantic_ready is provider_bound
         assert "fireworks" not in connected.connected_provider_ids
         assert provider_rules(connected) == set()
 
@@ -2034,7 +2859,25 @@ async def test_observation_provider_fact_tracks_live_credential_within_one_gener
         revoked = await composition()
         assert type(revoked) is ObservationCompositionFact
         assert revoked.semantic_ready is False
-        assert "provider_not_ready" in provider_rules(revoked)
+        assert ("provider_not_ready" in provider_rules(revoked)) is intended
+
+        # A policy tightening in the same generation immediately silences repair
+        # advice, even with a configured provider and now-revoked credential.
+        current_policy = replace(
+            local_only_policy(), effective_scope=current_policy.effective_scope
+        )
+        private = await composition()
+        assert type(private) is ObservationCompositionFact
+        assert private.semantic_configured is False
+        assert provider_rules(private) == set()
+
+        async def unavailable_policy(
+            store: object, scope: AuthorizationScope
+        ) -> EffectivePrivacyPolicy:
+            raise RuntimeError("policy unavailable")
+
+        monkeypatch.setattr(type(policy_app.policy_store), "effective_policy", unavailable_policy)
+        assert await composition() is None
     finally:
         if app is not None:
             await app.close()

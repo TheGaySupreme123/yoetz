@@ -53,13 +53,11 @@ type McpRouteProfile = Literal["policy", "strict"]
 _HOST_PROFILES: Final[frozenset[str]] = frozenset({"generic", "codex", "claude", "cursor"})
 
 _SCHEMA_VERSION: Final = "1.0.0"
-_TOOL_INPUT_SCHEMA_VERSIONS: Final = MappingProxyType({"publish_work": "1.1.0", "status": "1.1.0"})
+_TOOL_INPUT_SCHEMA_VERSIONS: Final = MappingProxyType(
+    {"start": "1.1.0", "publish_work": "1.2.0", "check": "1.1.0", "status": "1.2.0"}
+)
 _TOOL_OUTPUT_SCHEMA_VERSIONS: Final = MappingProxyType(
-    {
-        "check": "1.2.0",
-        "receipt": "1.2.0",
-        "status": "1.3.0",
-    }
+    {"start": "1.1.0", "check": "1.3.0", "status": "1.4.0", "receipt": "1.3.0"}
 )
 
 
@@ -103,6 +101,15 @@ ORDINARY_MCP_PUBLISH_EVENT_FAMILIES: Final[frozenset[str]] = frozenset(
         "evidence_recorded",
         "claim_recorded",
         "plan_revised",
+        "child_accepted",
+        "child_rejected",
+        "child_written_off",
+        "delegation_cancelled",
+        "work_closed",
+        "work_cancelled",
+        "work_written_off",
+        "coordination_disposition_recorded",
+        "coordination_obligation_declared",
     }
 )
 
@@ -113,9 +120,9 @@ _COMMON_INLINE_SCHEMA_IDS: Final[frozenset[str]] = frozenset(
         f"{SCHEMA_NAMESPACE}common/frontier-1.0.0.schema.json",
     }
 )
-_EVENT_DRAFT_SCHEMA_ID: Final = f"{SCHEMA_NAMESPACE}events/event-draft-1.1.0.schema.json"
+_EVENT_DRAFT_SCHEMA_ID: Final = f"{SCHEMA_NAMESPACE}events/event-draft-1.2.0.schema.json"
 _OPAQUE_EVENT_DRAFT_SCHEMA_ID: Final = (
-    f"{SCHEMA_NAMESPACE}events/opaque-unknown-event-draft-1.1.0.schema.json"
+    f"{SCHEMA_NAMESPACE}events/opaque-unknown-event-draft-1.2.0.schema.json"
 )
 
 # Reviewed keyword budgets for tools/list presentation schemas (agent-usability guardrails).
@@ -129,18 +136,18 @@ PRESENTATION_INPUT_SCHEMA_BUDGETS: Final[Mapping[str, Mapping[str, int]]] = Mapp
                 "max_conditional_nodes": 0,
                 "max_defs_count": 8,
                 "max_defs_nest_depth": 1,
-                "max_encoded_bytes": 4_000,
+                "max_encoded_bytes": 5_000,
             }
         ),
         "publish-work-request": MappingProxyType(
             {
                 "max_oneof_nodes": 8,
-                "max_oneof_branches": 28,
+                "max_oneof_branches": 36,
                 "max_ref_nodes": 0,
                 "max_conditional_nodes": 0,
-                "max_defs_count": 20,
+                "max_defs_count": 21,
                 "max_defs_nest_depth": 1,
-                "max_encoded_bytes": 34_000,
+                "max_encoded_bytes": 49_000,
             }
         ),
         "check-request": MappingProxyType(
@@ -270,13 +277,18 @@ CLAUDE_CODE_INITIALIZE_INSTRUCTIONS: Final = (
 # the total still doubles. `instructions_copies_per_tool` is descriptive, not a knob: it records the
 # worst observed host behavior, one full copy of the instructions block charged to each of the
 # seven advertised tools, which is what the total is computed against.
+# The 0.3 surface retains the 18 ordinary lifecycle/coordination event families and the expanded
+# current-main initialize guidance, including the #789 late-start rule carried from the 0.2 line.
+# That makes the measured generic-host packaged surface about 221 KB; the reviewed 224 KB ceiling
+# leaves bounded headroom without dropping an admitted family, example, or startup rule. Claude
+# Code receives the compact initialize body instead and is bounded separately above.
 # The aggregate likewise carries the packaged bound plus one disclosure allowance per advertised
 # tool, because the host that inlines the instructions inlines the disclosure with them.
 ADVERTISED_SURFACE_BUDGET: Final[Mapping[str, int]] = MappingProxyType(
     {
         "instructions_copies_per_tool": 1,
-        "packaged_max_encoded_bytes": 205_000,
-        "max_encoded_bytes": 205_000
+        "packaged_max_encoded_bytes": 224_000,
+        "max_encoded_bytes": 224_000
         + len(YOETZ_WORKFLOW_TOOL_NAMES) * MAX_DISCLOSURE_ENCODED_BYTES,
     }
 )
@@ -348,6 +360,7 @@ def _example_draft(
     payload: dict[str, JsonValue],
     *,
     version: str = "1.0.0",
+    evidence_refs: list[JsonValue] | None = None,
 ) -> dict[str, JsonValue]:
     """One minimal valid draft envelope for a family, so agents copy shape rather than guess it.
 
@@ -362,7 +375,7 @@ def _example_draft(
         "causal_parents": [],
         "payload": payload,
         "artifact_refs": [],
-        "evidence_refs": [],
+        "evidence_refs": [] if evidence_refs is None else evidence_refs,
     }
 
 
@@ -378,6 +391,26 @@ _EXAMPLE_CLIENT: Final[dict[str, JsonValue]] = {
 # A syntactically valid non-genesis head. Read the real one from status; never reuse this value.
 _EXAMPLE_HEAD_DIGEST: Final = "sha256:" + "0" * 64
 
+
+def _lifecycle_example(ordinal: int, family: str) -> dict[str, JsonValue]:
+    """Separate requests keep mutually exclusive work transitions out of one example batch."""
+
+    payload: dict[str, JsonValue] = (
+        {"child_task_id": _example_id("task", 2)} if not family.startswith("work_") else {}
+    )
+    return {
+        "protocol_version": "0.1",
+        "schema_version": "1.0.0",
+        "request_id": _example_id("request", ordinal),
+        "session_id": _example_id("session", 1),
+        "writer_id": _example_id("writer", 1),
+        "expected_frontier": {"sequence": "1", "head_digest": _EXAMPLE_HEAD_DIGEST},
+        "event_drafts": [_example_draft(ordinal, family, payload)],
+        "actor": dict(_EXAMPLE_ACTOR),
+        "client": dict(_EXAMPLE_CLIENT),
+    }
+
+
 _INPUT_SCHEMA_EXAMPLES: Final[Mapping[str, tuple[dict[str, JsonValue], ...]]] = MappingProxyType(
     {
         "start-request": (
@@ -387,6 +420,45 @@ _INPUT_SCHEMA_EXAMPLES: Final[Mapping[str, tuple[dict[str, JsonValue], ...]]] = 
                 "request_id": _example_id("request", 1),
                 "mode": "create",
                 "task_title": "Example task",
+                "requested_view": "compact",
+                "actor": dict(_EXAMPLE_ACTOR),
+                "client": dict(_EXAMPLE_CLIENT),
+            },
+            {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "request_id": _example_id("request", 30),
+                "mode": "delegate",
+                "session_id": _example_id("session", 1),
+                "task_title": "Example child task",
+                "requested_view": "compact",
+                "actor": dict(_EXAMPLE_ACTOR),
+                "client": dict(_EXAMPLE_CLIENT),
+            },
+            {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "request_id": _example_id("request", 31),
+                "mode": "attach",
+                "attach_handle": {
+                    "handle": "illustrative-only-replace-with-returned-handle",
+                    "child_task_id": _example_id("task", 2),
+                    "expires_at": "2026-01-01T00:10:00.000Z",
+                },
+                "task_title": "Example child task",
+                "requested_view": "compact",
+                "actor": dict(_EXAMPLE_ACTOR),
+                "client": dict(_EXAMPLE_CLIENT),
+            },
+            {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "request_id": _example_id("request", 32),
+                "mode": "create_or_attach",
+                "parent_session_id": _example_id("session", 1),
+                "workspace_ref": "/workspace/project",
+                "external_ref": "example-child-review",
+                "task_title": "Example self-registered child",
                 "requested_view": "compact",
                 "actor": dict(_EXAMPLE_ACTOR),
                 "client": dict(_EXAMPLE_CLIENT),
@@ -677,6 +749,69 @@ _INPUT_SCHEMA_EXAMPLES: Final[Mapping[str, tuple[dict[str, JsonValue], ...]]] = 
                             "resolution_evidence_refs": [_example_id("evidence", 2)],
                         },
                     ),
+                ],
+                "actor": dict(_EXAMPLE_ACTOR),
+                "client": dict(_EXAMPLE_CLIENT),
+            },
+            *(
+                _lifecycle_example(40 + index, family)
+                for index, family in enumerate(
+                    (
+                        "child_accepted",
+                        "child_rejected",
+                        "child_written_off",
+                        "delegation_cancelled",
+                        "work_closed",
+                        "work_cancelled",
+                        "work_written_off",
+                    )
+                )
+            ),
+            {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "request_id": _example_id("request", 50),
+                "session_id": _example_id("session", 1),
+                "writer_id": _example_id("writer", 1),
+                "expected_frontier": {"sequence": "1", "head_digest": _EXAMPLE_HEAD_DIGEST},
+                "event_drafts": [
+                    _example_draft(
+                        50,
+                        "coordination_disposition_recorded",
+                        {
+                            "detection_id": _example_id("event", 49),
+                            "project_id": "prj_00000000-0000-4000-8000-000000000001",
+                            "membership_generation": "1",
+                            "recipient_task_id": _example_id("task", 1),
+                            "obligation_id": _example_id("obligation", 1),
+                            "disposition": "shared_work",
+                            "evidence_refs": [_example_id("evidence", 1)],
+                        },
+                        evidence_refs=[_example_id("evidence", 1)],
+                    )
+                ],
+                "actor": dict(_EXAMPLE_ACTOR),
+                "client": dict(_EXAMPLE_CLIENT),
+            },
+            {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "request_id": _example_id("request", 51),
+                "session_id": _example_id("session", 1),
+                "writer_id": _example_id("writer", 1),
+                "expected_frontier": {"sequence": "1", "head_digest": _EXAMPLE_HEAD_DIGEST},
+                "event_drafts": [
+                    _example_draft(
+                        51,
+                        "coordination_obligation_declared",
+                        {
+                            "detection_id": _example_id("event", 49),
+                            "project_id": "prj_00000000-0000-4000-8000-000000000001",
+                            "membership_generation": "1",
+                            "recipient_task_id": _example_id("task", 1),
+                            "obligation_id": _example_id("obligation", 1),
+                        },
+                    )
                 ],
                 "actor": dict(_EXAMPLE_ACTOR),
                 "client": dict(_EXAMPLE_CLIENT),
@@ -1542,20 +1677,19 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "task. task_title and requested_view are required. Attach selectors are exactly one of: "
         "(1) session_id for the session you hold, or "
         "(2) workspace_ref + external_ref as a pair with no session_id — mode=create_or_attach "
-        "creates on first use and attaches on later conversations; a different complete pair "
-        "creates independent work even beside a dormant task. task_id is not an accepted field. "
-        "workspace_ref is the canonical absolute repository root (never a remote URL; the value "
-        "hook observation auto-attaches with); external_ref is the stable task identity within "
-        "that project (branch, issue, or plan slug). When the session-start context names a mapped "
-        "task, use mode=attach with its session_id. Hooks preflight a unique ended local "
-        "mapping and issue that attach with the new pair before creating; ambiguous candidates fail "
-        "closed with a bounded count only. Explicit session-plus-new-pair recovery requires an "
-        "active non-quarantined selector with matching workspace and repository binding; unrelated "
-        "workspace tasks do not block it. A pair bound to another task remains a conflict. "
-        "An explicit mode=create collision "
-        "is SESSION_CONFLICT; older results may retain the workspace_task_exists compatibility "
-        "detail. Both refs are redacted one-shot values; only HMAC commitments are persisted, "
-        "so do not self-censor into unstable refs. After resume or compaction, use status "
+        "creates on first use and attaches on later conversations. task_id is not an accepted "
+        "field. workspace_ref is the canonical absolute repository root (never a remote URL; "
+        "the value hook observation auto-attaches with); external_ref is the stable task "
+        "identity within that project (branch, issue, or plan slug). When the session-start "
+        "context names a mapped task, use mode=attach with its session_id. A session-plus-new-pair "
+        "recovery requires an active, non-quarantined root-task selector with matching workspace "
+        "and repository binding; unrelated workspace tasks do not block it, while a pair bound to "
+        "another task remains a conflict. Delegated child routes require an attach_handle or "
+        "internal target selector. Both refs are "
+        "redacted one-shot values; only HMAC commitments are persisted. mode=delegate takes the "
+        "parent session_id and returns an attach_handle for the child; self-registration uses "
+        "parent_session_id and remains pending until accepted. Do not self-censor into unstable "
+        "refs. After resume or compaction, use status "
         "view=obligations to recover exact requested_items and unattempted_items rather than "
         "searching transcripts or source. Author the request from this input schema plus "
         "the guidance below, never from memory. Guidance: yoetz://guidance/workflow.md.",
@@ -1565,46 +1699,33 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
     _descriptor(
         "publish_work",
         "Publish recorded work",
-        "Before evidence or a completion claim, paginate status view=evidence at one frontier "
-        "and reuse matching available IDs. Include feedback and requested delivery in the "
-        "effective plan via a supported revision. Accepted records are assertions, not repair proof. "
+        "Before evidence or a completion claim, read status view=evidence at one frontier and "
+        "reuse matching IDs. Put feedback and requested delivery in the effective "
+        "plan via a revision. Accepted records are assertions, not repair proof. "
         "Records a bounded batch of agent-published work events and returns the accepted event "
-        "range and coverage. When `dry_run` is false, this appends records to the local Yoetz "
-        "ledger; it "
-        "does not publish to GitHub or run an AI-powered evaluation. It has no information about "
-        "work outside that batch. Every set-valued "
-        "reference list in a draft envelope or payload (obligation_refs, obligation_ids, "
-        "supporting_refs, and the other canonical set fields) is admitted only when its members "
-        "are unique and already in ascending ASCII order; uniqueItems does not express order, and "
-        "a rejection names unsorted_set_field at the owning field. Field ownership "
-        "is exact: attempted_items is admitted only by the action_recorded payload — copy each "
-        "attempted obligation requested_items value string exactly, and never place the field on "
-        "claim_recorded. decision_recorded authority is a structural actor id such as "
-        "harness:cli, never approval prose; the approval story belongs in rationale. action_kind "
-        "is a closed enum of command, edit, research, review, and other; a source or file change "
-        "is edit, and command additionally requires the command field. "
-        "claim_recorded at schema 1.1.0 keeps admissible supporting_refs separate from partial or "
-        "failed limitation_refs; a correction names only exact prior effective claim ids in "
-        "supersedes_claim_refs. Dry-run validates target and limitation existence, result outcome, "
-        "scope overlap, replacement effectiveness, and complete limitation linkage before append. "
-        "Read candidate_findings, history, and results to author the correction; disputes_refs "
-        "and decision supersedes_event_id keep their existing meanings and do not replace a claim. "
-        "Each draft "
-        "occurred_at is a caller-asserted RFC 3339 UTC time with millisecond precision: use the "
-        "best real time available and do not copy the illustrative example timestamp. Ledger order "
-        "follows ingestion sequence; receipt freshness is frontier-bound. Service accepted_at is "
-        "independent acceptance metadata, not a freshness or ordering key. Set dry_run true to "
-        "validate a batch and preview what would be accepted without appending; the preview is not "
-        "evidential and is not citable as a check, publication, or coverage source. Read exact "
-        "unattempted_items in status view=obligations before resolution. After "
-        "publishing repair, claim and evidence, disposition older findings before the final check; "
-        "respond to its new findings, read actual resolution state, then call receipt before "
-        "claiming completion. "
-        "Cadence: one batch per "
-        "material transition, usually one to eight events and never one batch per file, per tool "
-        "call, or per message; a batch admits up to 100 drafts, so keep one transition together "
-        "rather than splitting it. Reading, searching, formatting, and unchanged state are not "
-        "publishable. Guidance: yoetz://guidance/publication-policy.md.",
+        "range and coverage. When dry_run is false, this appends records to the local Yoetz ledger; "
+        "it does not publish to GitHub or run an AI-powered evaluation; it knows nothing outside "
+        "that batch. Every set-valued reference list must be unique and already in "
+        "ascending ASCII order; rejection names unsorted_set_field. attempted_items belongs only on the "
+        "action_recorded payload; copy each requested_items value exactly and never place it on "
+        "claim_recorded. decision_recorded.authority is a structural actor id, not approval prose; "
+        "action_kind is one of command, edit, research, review, or other; command also requires "
+        "command. claim_recorded at schema 1.1.0 separates supporting_refs from "
+        "limitation_refs and corrections name exact prior effective claims in supersedes_claim_refs. "
+        "Dry-run checks references, outcome, scope, replacement, and limitation linkage; author "
+        "corrections from candidate_findings, history, and results. Each occurred_at is a "
+        "caller-asserted RFC 3339 UTC time with milliseconds; use the real time and do not copy "
+        "the illustrative example timestamp. Ledger order follows ingestion sequence, Service "
+        "accepted_at is independent metadata, and receipt freshness is "
+        "frontier-bound. Dry-run previews are not evidential or citable. Read status "
+        "view=obligations for exact unattempted_items before resolution; after publishing repair, "
+        "claim and evidence, disposition older findings, call check, respond, then call receipt "
+        "before claiming completion. Batch material transitions together, usually one to eight "
+        "events and never one batch per file, tool call, or message; reading, searching, formatting, "
+        "and unchanged state are not publishable. Lifecycle events record acceptance, cancellation, "
+        "write-off, or explicit closure; receipts never close work. Coordination dispositions "
+        "link an existing obligation and evidence; a later qualifying check resolves the finding. "
+        "Guidance: yoetz://guidance/publication-policy.md.",
         read_only=False,
         idempotent=True,
     ),
@@ -1674,11 +1795,10 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "Respond to a finding",
         "Records an acknowledgement, provenance dispute, or rejection for one finding at the "
         "result frontier of the check that returned it, not its subject_frontier. This appends one "
-        "finding-response record to the local Yoetz ledger; it does not publish to "
-        "GitHub or run an AI-powered evaluation. It does not resolve other findings or establish "
-        "that underlying work changed. "
-        "A provenance_disputed response contests the finding's authorship or provenance premise "
-        "rather than its conclusion, requires a reason, and never resolves the finding. "
+        "finding-response record to the local Yoetz ledger; it does not publish to GitHub or run an "
+        "AI-powered evaluation. It does not resolve other findings or establish that underlying work "
+        "changed. A provenance_disputed response contests the finding's authorship or provenance "
+        "premise rather than its conclusion, requires a reason, and never resolves the finding. "
         "Bounded waiver is reserved for an authorized local-CLI human and is not an agent option. "
         "A readable response removes that finding from unanswered_finding_count without reducing "
         "receipt_blocking_finding_count, erasing its historical record, or closing an independent "
@@ -1694,23 +1814,28 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "status",
         "Read recorded status",
         "Reads bounded, paginated state when uncertain what you already did or committed to, "
-        "with advice naming recommended_next_action. "
-        "History pairs caller-asserted occurred_at beside the service-stamped accepted_at; "
-        "forward-skew classification compares clocks, not truth. Order follows ingestion sequence. "
-        "view=operation with filter.operation_request_id recovers the stored outcome. "
-        "Before evidence publication or completion claims, paginate view=evidence at one frontier "
-        "with the same limit "
-        "and filter. Match identity and state; reuse suitable IDs in supporting_refs. Capture, "
-        "selection and clipping limits are per item, not absence of all content. "
-        "Obligations expose requested_items, unattempted_items and command_attempts; the latter "
-        "separates observed attempts, mismatch and unknown, without establishing success. "
-        "Results map res_ IDs to action, outcome and evidence. After repair, read view=findings "
-        "with filter.include_resolved=true and resolved state: absent from a check but "
-        "resolved=false means not returned but unproven. "
-        "Finding detail explains qualification. Only qualifying checks resolve "
-        "findings; responses do not. Read closure_readiness: unanswered_finding_count needs responses; "
-        "receipt_blocking_finding_count needs repair or a limited receipt, not unchanged rechecks. "
-        "Guidance: "
+        "with advice naming recommended_next_action. Views are advice, assignment, "
+        "candidate_findings, compact, evidence, findings, history, lineage, obligations, operation, "
+        "project, results, and versions. Lineage is a live preview; parent receipts use recorded "
+        "child manifests. Project shows generation-bound membership and coordination. "
+        "History pairs caller-asserted occurred_at beside the service-stamped "
+        "accepted_at; forward-skew classification compares clocks, not truth, and order follows "
+        "ingestion sequence. view=operation with filter.operation_request_id recovers the stored "
+        "outcome without resending the body; for a running or finished check it adds structural "
+        "semantic_progress (phase, elapsed time, deadline). Before evidence publication or completion claims, "
+        "paginate view=evidence at one frontier with the same limit and filter; match identity and "
+        "state, then reuse suitable IDs in supporting_refs. Capture, selection and clipping limits "
+        "are per item, not absence of all content. Obligations expose exact requested_items, "
+        "unattempted_items and command_attempts; the latter separates observed attempts, mismatch "
+        "and unknown without establishing success. Results map res_ IDs to bounded structural facts "
+        "without result prose. After repair, read view=findings with filter.include_resolved=true "
+        "and resolved state: absent from a check but resolved=false means not returned but unproven. "
+        "Finding detail explains qualification. Read closure_readiness before spending a check or "
+        "receipt: unanswered_finding_count needs responses, while receipt_blocking_finding_count "
+        "needs repair or a limited receipt; only a later qualifying check resolves one, never a "
+        "response. Answer findings_unanswered; repair and recheck receipt_findings_unresolved once, "
+        "then disclose if unchanged state still limits coverage. Call after resume, compaction, or "
+        "delegate handoff and before a completion claim. Guidance: "
         "yoetz://guidance/workflow.md.",
         read_only=True,
         idempotent=True,
@@ -1733,12 +1858,10 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
     _descriptor(
         "read_guidance",
         "Read guidance",
-        "Read one registered Yoetz guidance document and return the full markdown as tool "
-        "text. The request names one registered guidance URI such as "
-        "yoetz://guidance/workflow.md. The result is the document text, not a 512-byte "
-        "summary. This tool is not a ledger operation and does not write the ledger. Extra "
-        "argument keys are rejected. An unknown URI is rejected without echoing the "
-        "requested value. Guidance: yoetz://guidance/agent-instructions.md.",
+        "Reads one registered Yoetz guidance URI and returns its full markdown as tool text. The "
+        "result is document text, not a 512-byte summary; this is not a ledger operation and does "
+        "not write the ledger. Extra keys and unknown URIs are rejected without echoing the value. "
+        "Guidance: yoetz://guidance/agent-instructions.md.",
         read_only=True,
         idempotent=True,
     ),
@@ -1790,32 +1913,32 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
     {
         "policy": MappingProxyType(
             {
-                "start": "sha256:5288bf39a1f981ae658a9d940a0e9f5dc6b1173ca00dee27678b1615fa2cef5e",
-                "publish_work": "sha256:f4c4145eb92be5a2f57326138d1c0018b336a2d11cb7cc83f0c48dcde3bb4ec6",
-                "check": "sha256:60cc2a7b08cc694d563a45c72ed9e0afc2b255cf87e7a13ad22e7c994fbebae4",
+                "start": "sha256:3a2186a2db53b91fcf7a8f3117cb8ff6a2b8bad6bc78e3e796e5e611e8598405",
+                "publish_work": "sha256:8e5261e9d30677fe5741284a653b530d62acb08f3367a506f243523b131bd117",
+                "check": "sha256:9befe13b257acf10535009c1dd69d9a933f3d94f5cd2aaac1655d4867596f89e",
                 "respond": "sha256:8b5dc94f431a411ef332021af01050a4b0c248a800e46d5b3bdb567f770d25a5",
-                "status": "sha256:31f9fc04fd8437d6ede3e58035ed463a2f97b399904497815bc8daafa7c14fa6",
-                "receipt": "sha256:5af0465a90f7fdc8b95f3287066c06ab19a0cb0f3ccb852de05fca1c401581f9",
-                "read_guidance": "sha256:737b75bde002ab35255e19169d29f38d40a29d580b8165c759b1bc2373dd28bd",
+                "status": "sha256:517eb05aa015834d98bd96ed59d4b647a95e6c42a13013803caf19b9b4b07875",
+                "receipt": "sha256:c7676e1ca9afd96d9d7e74503edd5b31a758a05d7e7e1cf0d62c763611ffcecb",
+                "read_guidance": "sha256:4198e5fd133f7b37cc25c0c1a63161657c5d4396a1718f1f4f1f3db7c302a13d",
             }
         ),
         "strict": MappingProxyType(
             {
-                "start": "sha256:5288bf39a1f981ae658a9d940a0e9f5dc6b1173ca00dee27678b1615fa2cef5e",
-                "publish_work": "sha256:f4c4145eb92be5a2f57326138d1c0018b336a2d11cb7cc83f0c48dcde3bb4ec6",
-                "check": "sha256:bd2cf70138107a82ee02e4b3dd89adc9a40bf91da0a3a6d55a6701fc46d474eb",
+                "start": "sha256:3a2186a2db53b91fcf7a8f3117cb8ff6a2b8bad6bc78e3e796e5e611e8598405",
+                "publish_work": "sha256:8e5261e9d30677fe5741284a653b530d62acb08f3367a506f243523b131bd117",
+                "check": "sha256:2bd9947abc7b60564474840a73d99a80bfa528b98af1a725d11fdfde5dac9795",
                 "respond": "sha256:8b5dc94f431a411ef332021af01050a4b0c248a800e46d5b3bdb567f770d25a5",
-                "status": "sha256:31f9fc04fd8437d6ede3e58035ed463a2f97b399904497815bc8daafa7c14fa6",
-                "receipt": "sha256:5af0465a90f7fdc8b95f3287066c06ab19a0cb0f3ccb852de05fca1c401581f9",
-                "read_guidance": "sha256:737b75bde002ab35255e19169d29f38d40a29d580b8165c759b1bc2373dd28bd",
+                "status": "sha256:517eb05aa015834d98bd96ed59d4b647a95e6c42a13013803caf19b9b4b07875",
+                "receipt": "sha256:c7676e1ca9afd96d9d7e74503edd5b31a758a05d7e7e1cf0d62c763611ffcecb",
+                "read_guidance": "sha256:4198e5fd133f7b37cc25c0c1a63161657c5d4396a1718f1f4f1f3db7c302a13d",
             }
         ),
     }
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:46d2a994e15ce5be2791be9169a4c78f2710d37686717165c559529120e0a3fd",
-        "strict": "sha256:de53fc45f23d15ac1fe7e755af782f060db8010bb8ee92e297054e95bf557331",
+        "policy": "sha256:5db0bcfd445438e977869b3f5fd0e88c3d877f875b87cc8dfcaa1126b866cccf",
+        "strict": "sha256:b505bf514d57b00fd7ce1fa7b1c679f550bea5bebfe114c6d4a66423c3eec69d",
     }
 )
 

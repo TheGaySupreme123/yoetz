@@ -1,6 +1,8 @@
 # ADR-006 — AI-powered review provider profiles behind the privacy gateway
 
-**Status:** Working decision revised 2026-08-30 (issue #404 external-runtime authority). Ratification requires the privacy/egress gates in
+**Status:** Working decision revised 2026-08-30 (issue #404 external-runtime authority). Amended
+2026-09-23 for issue #742 (adapter-boundary failure tokens, credential-retry exclusion, and
+attempt-status projection). Ratification requires the privacy/egress gates in
 ADR-009 plus recorded capability fixtures against every advertised provider/model/endpoint profile.
 **Implemented by:** `src/yoetz/ports/semantic.py`,
 `src/yoetz/ports/privacy.py`, `src/yoetz/application/egress.py`,
@@ -88,7 +90,12 @@ and AI-powered review/privacy capability and conformance tests.
    credential-handle identity, and no provider plaintext is retained. A second content-invalid
    answer is terminal and both attempts remain in accounting. `response_schema_invalid`,
    `semantic_judgment_rejected`, refusal, policy or human denial, invalid case, stale frontier,
-   quota exhaustion, secret or never-send detection, and exhausted authority are never retried.
+   quota exhaustion, secret or never-send detection, exhausted authority, and a rejected
+   credential (`failure_class=authentication` or `authorization`) are never retried. A rejected
+   credential may still surface as public reason `transport_unavailable` — the transport catch-all
+   — so retry consults the recorded `failure_class`, not the public reason alone (issue #742).
+   The same class also vetoes fallback engagement: a rejected primary credential ends the job
+   rather than dispatching the case to the fallback endpoint.
    One durable attempt and one
    privacy receipt, SDK client, custom transport, and credential handle are created per physical
    dispatch. For `confirm_every_request`, each physical retry also requires a fresh exact foreground
@@ -173,6 +180,24 @@ and AI-powered review/privacy capability and conformance tests.
     prove provider behavior. Unknown, known-broad, or stale status removes the recommendation badge
     and trips that guard; an informed user may explicitly turn the guard off through a custom policy,
     and a fork may change the rule without inheriting upstream privacy/support evidence.
+15. **Adapter classification and attempt-status projection (issue #742):** every provider
+    failure is classified at the adapter boundary into the closed `SemanticFailureClass` set.
+    Public `SemanticReason` values stay the existing closed pair vocabulary; renderers resolve
+    recovery through `continuation_for_semantic_outcome` from that pair plus `failure_class`.
+    A successful review with zero findings is `semantic_status=succeeded` /
+    `semantic_reason=semantic_completed` on the check path, and `semantic_state=ready` on
+    advice/status/history. That ready state is derived from the recorded attempt (an addon
+    whose `failure_reason` is absent), never from finding count. Absence of
+    `semantic_model_derived` advice items is not evidence that no attempt occurred.
+    `disabled` means no attempt was requested or configured; `unavailable` means a durable
+    attempt is still pending; `failed` means a terminal attempt finished without validated
+    output, including a succeeded attempt whose output failed advice-side validation and left
+    no usable finding. The state is an attempt fact only: advice coverage still adds
+    `semantic_model_derived` only for validated finding ids, so a zero-finding review is `ready`
+    without claiming that check type. A snapshot stored before this amendment has no recorded
+    state and reads as `ready` when it holds AI-powered items, otherwise `disabled`.
+    Predispatch configuration and policy outcomes carry no recovery directive. Frozen
+    check-result schemas are unchanged.
 
 ## Review packet and agent loop
 
@@ -330,6 +355,8 @@ configuration; swapping the primary keeps both bindings and both approvals.
    policy and human outcomes, and `outcome_unknown` never engage the fallback: the primary
    answered, or may have, and a second destination cannot repair a content answer. Once engaged,
    a job never returns to the primary.
+   A rejected primary credential (`failure_class=authentication` or `authorization`, issue #742)
+   does not engage the fallback either, even under a licensing reason: it ends the job.
 2. **Per-endpoint budgets.** Each endpoint keeps its own decision-5 retry budget (at most two
    retries) and its own configured timeout; primary failures never spend the fallback's budget.
    The overall deadline is the primary timeout plus the fallback timeout; primary dispatches
@@ -343,29 +370,29 @@ configuration; swapping the primary keeps both bindings and both approvals.
 3. **Replay-safe endpoint selection.** Which endpoint an attempt uses is a pure function of the
    durable attempt rows before it and the immutable execution snapshot in the encrypted
    `SEMANTIC_CASE` object (`yoetz.semantic-case/2`), never mutable provider readiness. The snapshot
-   binds exact endpoints, initial primary availability, retry budgets, and UTC cutoff times. Crash,
-   restart, and `awaiting_human` replay resume the endpoint the attempt was claimed for; changed
-   configuration cannot reinterpret earlier ordinals. Every attempt still checks current privacy
-   authority for that frozen binding. Legacy terminal cases retain stored-result recovery; pending
-   cases lacking the snapshot terminate without dispatch rather than acquiring a newly configured
-   pairing (`coordinator_failure` before dispatch or during a disclosure wait, an uncertain started
-   attempt retains `outcome_unknown` durably and reports the provenance-free public gap
-   `receipt_persistence_unknown`). The internal attempt projection exposes the existing durable
-   `started_at` timestamp; usage counters are an additive nullable bundle migration (0013), so
-   legacy rows remain readable. An expired resumed attempt without a disclosure wait preserves
-   `outcome_unknown`; a known undispatched expiry records `provider_timeout`. If provider-result
-   provenance is unavailable on recovery, the public result uses `receipt_persistence_unknown` while
-   retaining the original durable reason. Retained provider-result objects are recovered when their
-   status and reason match that row. **Lease/recovery amendment, 2026-09-07 (#616, #620):** live
-   AI-powered review operation and job leases use the authenticated execution snapshot's total
-   expiry plus five seconds for local cleanup, rather than a renewable heartbeat. The current
-   two-endpoint maximum makes that live bound at most 605 seconds; a crash can consequently delay
-   reclaim until that bound. Claim/reclaim retains an existing `started` or `response_durable`
-   attempt and its physical request identity. A saved response is selected and recovered before any
-   new attempt is considered. After the execution bound, an already reclaimed ordinary operation
-   lease may perform bounded local terminal recovery; it cannot renew AI-powered review execution or
-   dispatch after the immutable provider deadline. Provider deadlines and human approval expiry
-   remain separate from lease ownership.
+   binds exact endpoints, initial primary availability, retry budgets, and UTC cutoff times.
+   Crash, restart, and `awaiting_human` replay resume the endpoint the attempt was claimed for;
+   changed configuration cannot reinterpret earlier ordinals. Every attempt still checks current
+   privacy authority for that frozen binding. Legacy terminal cases retain stored-result recovery;
+   pending cases lacking the snapshot terminate without dispatch rather than acquiring a newly
+   configured pairing (`coordinator_failure` before dispatch or during a disclosure wait,
+   an uncertain started attempt retains `outcome_unknown` durably and reports the provenance-free
+   public gap `receipt_persistence_unknown`). The internal attempt projection
+   exposes the existing durable `started_at` timestamp; usage counters are an additive nullable
+   bundle migration (0013), so legacy rows remain readable. An expired
+   resumed attempt without a disclosure wait preserves `outcome_unknown`; a known undispatched
+   expiry records `provider_timeout`. If provider-result provenance is unavailable on recovery,
+   the public result uses `receipt_persistence_unknown` while retaining the original durable reason.
+   Retained provider-result objects are recovered when their status and reason match that row.
+   **Lease/recovery amendment, 2026-09-07 (#616, #620):** live AI-powered review operation and job leases
+   use the authenticated execution snapshot's total expiry plus five seconds for local cleanup,
+   rather than a renewable heartbeat. The current two-endpoint maximum makes that live bound
+   at most 7205 seconds; a crash can consequently delay reclaim until that bound. Claim/reclaim
+   retains an existing `started` or `response_durable` attempt and its physical request identity.
+   A saved response is selected and recovered before any new attempt is considered. After the
+   execution bound, an already reclaimed ordinary operation lease may perform bounded local
+   terminal recovery; it cannot renew AI-powered review execution or dispatch after the immutable provider
+   deadline. Provider deadlines and human approval expiry remain separate from lease ownership.
 4. **Every fallback attempt is a fresh physical attempt** under ADR-009: its own privacy
    evaluation against the exact fallback binding, authorization, dispatch identity, credential
    handle or `ExternalRuntimeAuthority`, and privacy receipt. Under `confirm_every_request` it
@@ -408,8 +435,135 @@ force. Irreducible required structure fails before job/attempt creation with
 `case_capacity_exceeded` and `semantic_case_capacity_exceeded` coverage. Narrowing scope creates new
 work; it does not replay a terminal check or imply that the reduced packet reviewed the whole task.
 
+A local finding wider than one case item's reference bound (16 subjects; findings may cite 64) is
+not irreducible structure and does not fail the case (#858). The builder omits that finding's prose
+and projected assessment as explicit `not_selected` omissions, declares
+`semantic_case_finding_refs_over_limit` on packet, check, status and receipt coverage, and
+dispatches the bounded case once. Subject references are never truncated to fit: a partial subject
+list would misstate the finding's identity. The finding itself remains a complete local check
+result and a citable `local_check_refs` entry.
+
 Exceptional attempts retain a request-joined stage/category before cleanup. Dispatch entry is an
 uncertain execution boundary; null provenance and missing diagnostics are not non-dispatch proof.
 Provider-return, mapping and persistence faults remain distinct. Diagnostics cannot change retry
 eligibility, durable-response recovery, cancellation or lease fencing. See `docs/INTERFACES.md` for
 the public reason, coverage and owner diagnostic lookup contracts.
+
+
+### Long external Codex reviews (2026-09-16, #496 / #746)
+
+The external Codex evaluator defaults to 900 seconds and accepts explicit values from 1 to 3600
+seconds. Existing explicit shorter values are preserved. Other provider kinds keep their existing
+limits. The primary and optional fallback each retain their own frozen budget, with a combined
+execution bound of 7200 seconds and five seconds of lease cleanup. Recovery never resets that clock
+or mints a new provider request after authority was consumed.
+
+A client wait timeout or disconnect leaves an admitted semantic check running under service
+ownership. At most eight such checks can be retained; same-identity retries report pending, and a
+changed body conflicts. An explicit attached control cancellation or service shutdown cancels and
+joins the work. This does not introduce parallel semantic scheduling; structural phase progress
+was added later (see the amendment below).
+
+### Phase-aware Codex review budgets (2026-09-22, #571 item A1)
+
+Each semantic check runs under exactly one closed **budget profile**. `final` applies when the
+frozen case carries an effective, readable completion claim (`claim_kind=completion`, not
+superseded by an ADR-025 correction); every other check is a `routine` checkpoint. The selection
+is a pure function of the frozen projection, so the same case always selects the same profile.
+It is frozen into the execution snapshot of the encrypted `SEMANTIC_CASE` object as the optional
+`execution.budget_profile` key when the job is created. Every physical attempt, including
+retries, disclosure-wait resume, and started-attempt recovery, dispatches under that frozen
+value; changed configuration or a later claim cannot re-select it. Snapshots written before
+this amendment lack the key and replay as `final`, which is the pre-amendment single-effort
+behavior. The `yoetz.semantic-case/2` reader ignores unknown execution keys, so no case-schema
+bump is needed. Dispatches outside a check (credential probes, observation advice) also use
+`final`.
+
+The Codex subscription binding (`[external_runtime]`) expresses the two profiles separately:
+
+- `reasoning_effort` (existing, required) is the final-profile effort.
+- `routine_reasoning_effort` (optional). New setups write the bounded recommendation `medium`.
+  When it is absent (every binding written before this amendment), routine checks keep the
+  single configured effort. A persisted choice is therefore never silently lowered. Re-running
+  setup keeps the existing binding's routine choice unless `--routine-reasoning-effort` is
+  given. An explicit flag or setup-screen selection always wins.
+- `routine_output_limit` and `final_output_limit` count output tokens. Both are bounded to
+  1–8192 and default to 4096 and 8192. They are carried over when setup is re-run.
+
+Readiness (`status`, setup) requires the exact model to list every configured profile effort. A
+single attempt requires only the effort its budget selected, and a missing effort still fails as
+`model_unavailable` before case disclosure.
+
+The pinned app-server v2 protocol has no per-turn output ceiling. Yoetz therefore enforces the
+selected output limit on the runtime's own cumulative `thread/tokenUsage/updated` counters.
+Only visible output counts (`output_tokens − reasoning_output_tokens`), because reasoning
+tokens are governed by the effort. The check is applied to each valid snapshot. A snapshot over
+the limit interrupts the turn and ends it as the existing closed `output_oversize` stage
+(`invalid/response_schema_invalid`). That outcome is content-shaped, like API-path
+`max_output_tokens` truncation: it is never retried and never engages the fallback. When the
+runtime reports no usage, the limit cannot be verified. The answer stays bounded by the
+constrained output schema and the 1 MiB message cap, and the absent `token_usage` in the
+evidence shows that the limit was not measured.
+
+Provenance records the exact selection per check without a wire change:
+
+- `semantic_provenance.model`
+- `runtime_evidence.reasoning_effort` (the selected effort, no longer the binding's single
+  value)
+- `sampling_params.max_output_tokens` (the selected output limit, replacing the constant 2048
+  that the Codex path previously copied from the API adapter and never enforced)
+
+`runtime_evidence.selection_sha256` now commits to
+`{"budget_profile","model","output_limit","reasoning_effort"}`. The profile name itself is
+recorded only in that commitment. Markdown and text receipts name the model, effort, and output
+limit beside the attempt usage. `yoetz provider status`, `yoetz provider codex-subscription
+status`, the setup preview, and the terminal interface show both profiles.
+
+The profile changes nothing else: deterministic checks, disclosure categories, the privacy
+gateway, retention, provider authority, deadlines (#746), retry eligibility, and fallback
+licensing are unchanged. A per-request override is not part of this amendment; a check can
+request the final profile only by carrying a completion claim. API-provider endpoints keep
+their existing fixed output limit. The installed Luna latency, output-size, and validity
+comparison per profile needs a live provider and remains a separate #571 acceptance item.
+
+### Structural review progress (2026-09-22, #571 A2)
+
+A durable AI-powered review job exposes bounded structural progress through
+`status view=operation`, and through every surface that renders that page (CLI text and JSON, the
+MCP structured result and its text summary, and the terminal interface). The page's optional
+`semantic_progress` object appears only for a pending or complete check with recorded progress.
+
+The phase vocabulary is closed and ordered by actual execution: `queued`, `case_admitted`,
+`runtime_starting`, `account_model_validation`, `provider_sampling`, `response_validation`,
+`cleanup`, `terminal`. `case_admitted` is the privacy audit's consumption of the egress
+authorization (the point after which no failure restores authority); because that happens before
+a runtime-backed provider is launched, it precedes `runtime_starting`. Runtime-backed providers
+(the Codex subscription runtime) report launch, account/model validation, turn acknowledgement,
+turn completion, and process cleanup. Direct endpoints report `provider_sampling` immediately after
+admission. The service reports `queued` when an attempt is claimed and `response_validation` when
+a provider response returned for validation and recording. Phases a provider cannot observe are
+skipped, never invented.
+
+Progress is monotonic: within an attempt by that order and across retries by attempt ordinal, so
+a retry restarts at `queued` with a higher ordinal. A resumed attempt that repeats an earlier step
+does not move the phase backward; the stored phase stays at the furthest observed step until the
+attempt advances past it or ends. Only the job's active attempt can write, and nothing can follow
+the terminal state, which is derived from the terminal job row (outcome `succeeded`, `failed`, or
+`quarantined` with its closed `SemanticReason`). `queued_at` and `deadline_at` are fixed when the
+job's progress begins; `deadline_at` is the frozen total execution expiry, never a client wait, and
+no replay resets either. The service derives `elapsed_ms`, `remaining_ms`, and `condition`
+(`active`, `overdue`, or `terminal`) at one observation time so all renderings agree. `overdue`
+means the deadline passed without a terminal row: the owner is finishing cleanup, or the service
+restarted and a same-request replay will reclaim and terminalize the job.
+
+The progress record carries no prompt, case or response text, token or delta text, token counts,
+reasoning, credential, account identity, plan type, model output digest, or path. Provider code
+reaches the store only through a task-local sink that accepts a closed phase value, bound by the
+service to exactly one claimed attempt. Recording is advisory: a failed write is a bounded
+diagnostic and never changes the attempt's outcome, retry, fallback, or provider authority.
+
+A check holds the service's maintenance and observation gates for its whole lifetime. While a
+service-owned check holds them, only `status view=operation` reads are admitted beside it; the
+check closes that window and drains admitted readers before it releases the gates, so maintenance,
+recovery, and observation sweeps remain excluded. Every other read still waits as before. A read
+from a different session or writer of the same task can still receive retryable `BUNDLE_BUSY`.

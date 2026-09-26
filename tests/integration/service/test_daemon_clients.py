@@ -53,12 +53,14 @@ from yoetz.ports.control import (
     RepositoryPrivacyContext,
     ServiceState,
 )
+from yoetz.ports.ledger import CheckAdmissionStage, check_admission_refused
 from yoetz.protocol.canonical import canonical_digest
 from yoetz.protocol.coverage import PublicationChannel, coverage_for_channel
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.models import (
     CheckRequest,
+    CheckResult,
     PublishWorkAcceptedEventModel,
     PublishWorkAcceptedProjectionUnavailableModel,
     PublishWorkRequest,
@@ -227,6 +229,7 @@ class _Application:
         self.publish_response_store_error: PublicOperationError | None = None
         self.privacy_setup_contexts: list[RepositoryPrivacyContext | None] = []
         self.observation_requests: list[JsonObject] = []
+        self.check_requests: list[CheckRequest] = []
 
     async def start(
         self,
@@ -262,6 +265,7 @@ class _Application:
     ) -> JsonObject:
         del route_profile, repository_privacy_context
         assert isinstance(request, CheckRequest)
+        self.check_requests.append(request)
         await asyncio.sleep(0)
         # Unprojected stand-in only. Projection is forced to fail in the dedicated correlation
         # tests before any public CheckResult is required.
@@ -1482,6 +1486,38 @@ async def test_connected_control_session_carries_trusted_presentation_to_daemon_
 
 
 @pytest.mark.anyio
+async def test_connected_service_client_accepts_coordination_check_pack() -> None:
+    """A current coordination check survives the real client and control-wire path."""
+
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+    client_stream, server_stream = _connected_control_pair()
+    server_task = asyncio.create_task(daemon._serve_control_connection(server_stream))  # pyright: ignore[reportPrivateUsage]
+    service_client = None
+    try:
+        session = await client_handshake(client_stream, ControlClientKind.CLI, "0.3.0")
+        service_client = _connected_client(  # pyright: ignore[reportPrivateUsage]
+            client_stream,  # pyright: ignore[reportArgumentType]
+            session,
+            ControlClientKind.CLI,
+        )
+        application.projection_error = RuntimeError("test_projection_failure")
+        request = _check_body().model_copy(update={"policy_packs": ("coordination/0.1.0",)})
+
+        with pytest.raises(ControlError) as caught:
+            await service_client.check(request, deadline_ms=3_000)
+
+        assert caught.value.reason == "response_projection_failed"
+        assert application.check_requests == [request]
+    finally:
+        if service_client is not None:
+            await service_client.close()
+        server_task.cancel()
+        await asyncio.gather(server_task, return_exceptions=True)
+        await daemon.close()
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("source", "session_id", "mapping_version", "structural_payload"),
     [
@@ -2342,6 +2378,163 @@ async def test_ready_maintenance_sweeps_immediately_repeats_and_cancels_before_c
     assert events.count("sweep") == count_after_lock
     assert events.index("application_close") < events.index("vault_lock")
     await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_ready_maintenance_recovers_lineage_before_and_during_observation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[str] = []
+    recovered_twice = asyncio.Event()
+
+    class Application(_Application):
+        observation_sweep: object
+        recovery_calls = 0
+
+        async def recover_lineage(self) -> object:
+            events.append("recovery")
+            self.recovery_calls += 1
+            if self.recovery_calls >= 2:
+                recovered_twice.set()
+            return (), ()
+
+    application = Application()
+
+    async def sweep() -> ObservationDrainSummary:
+        events.append("sweep")
+        return ObservationDrainSummary(
+            attempted=0,
+            acknowledged=0,
+            retry_pending=0,
+            quarantined=0,
+            reasons=(),
+        )
+
+    application.observation_sweep = sweep
+    vault = _Vault()
+    vault.ready = False
+    lifecycle = ServiceLifecycle(
+        _Clock(),
+        generation_store=_GenerationStore(),
+        process_start_identity_commitment="sha256:" + "2" * 64,
+        instance_id=_INSTANCE_ID,
+        singleton_lock_path=tmp_path / "service.lock",
+    )
+
+    async def factory(_service_generation: int, _vault_generation: int) -> _Application:
+        return application
+
+    daemon = ServiceDaemon(
+        _composition=ServiceComposition(
+            lifecycle=lifecycle,
+            control_listener=_Listener(),  # pyright: ignore[reportArgumentType]
+            secret_ingress_listener=None,
+            human_control_listener=None,
+            human_control_service=None,
+            session_monitor=None,
+            vault=vault,
+            ready_application_factory=factory,
+        )
+    )
+    monkeypatch.setattr(daemon_module, "_OBSERVATION_SWEEP_INTERVAL_SECONDS", 0.01)
+    await daemon.start()
+    await daemon.composition.lifecycle.transition(ServiceState.UNLOCKING)
+    vault.ready = True
+    await daemon.activate_ready_application(7, 3)
+
+    await asyncio.wait_for(recovered_twice.wait(), timeout=1)
+    assert events[0] == "recovery"
+    assert events.index("sweep") > events.index("recovery")
+    await daemon.lock()
+    await daemon.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("backlog_drains", [True, False])
+async def test_ready_maintenance_judges_contact_after_delivering_queued_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backlog_drains: bool
+) -> None:
+    """Queued host events are contact evidence, so ordinary recovery follows their delivery (#837).
+
+    While consecutive passes still resolve rows, a due recovery waits for the next pass; an
+    endless stream still yields to recovery once it is one interval overdue.
+    """
+
+    events: list[str] = []
+    recovered_after_turn = asyncio.Event()
+    resolving_passes = 3
+
+    class Application(_Application):
+        observation_sweep: object
+
+        async def recover_lineage(self) -> object:
+            events.append("recovery")
+            if events.count("recovery") >= 2:
+                recovered_after_turn.set()
+            return (), ()
+
+    application = Application()
+
+    async def sweep() -> ObservationDrainSummary:
+        ordinary = events.count("sweep") + events.count("sweep:resolved")
+        # The first (startup) pass is dry; later passes drain a backlog of queued rows.
+        resolving = ordinary >= 1 and (not backlog_drains or ordinary <= resolving_passes)
+        events.append("sweep:resolved" if resolving else "sweep")
+        return ObservationDrainSummary(
+            attempted=int(resolving),
+            acknowledged=int(resolving),
+            retry_pending=0,
+            quarantined=0,
+            reasons=(),
+        )
+
+    application.observation_sweep = sweep
+    vault = _Vault()
+    vault.ready = False
+    lifecycle = ServiceLifecycle(
+        _Clock(),
+        generation_store=_GenerationStore(),
+        process_start_identity_commitment="sha256:" + "2" * 64,
+        instance_id=_INSTANCE_ID,
+        singleton_lock_path=tmp_path / "service.lock",
+    )
+
+    async def factory(_service_generation: int, _vault_generation: int) -> _Application:
+        return application
+
+    daemon = ServiceDaemon(
+        _composition=ServiceComposition(
+            lifecycle=lifecycle,
+            control_listener=_Listener(),  # pyright: ignore[reportArgumentType]
+            secret_ingress_listener=None,
+            human_control_listener=None,
+            human_control_service=None,
+            session_monitor=None,
+            vault=vault,
+            ready_application_factory=factory,
+        )
+    )
+    # Three immediate passes fit well inside one interval; the endless stream outlasts it.
+    monkeypatch.setattr(daemon_module, "_OBSERVATION_SWEEP_INTERVAL_SECONDS", 0.2)
+    monkeypatch.setattr(daemon_module, "_OBSERVATION_SWEEP_PROGRESS_DELAY_SECONDS", 0.0)
+    await daemon.start()
+    await daemon.composition.lifecycle.transition(ServiceState.UNLOCKING)
+    vault.ready = True
+    await daemon.activate_ready_application(7, 3)
+
+    await asyncio.wait_for(recovered_after_turn.wait(), timeout=5)
+    await daemon.lock()
+    await daemon.close()
+    assert events[:2] == ["recovery", "sweep"]
+    second = events.index("recovery", 1)
+    # Recovery never precedes the pass of its own turn.
+    assert events[second - 1].startswith("sweep")
+    if backlog_drains:
+        # It waited out the backlog and ran right after the first dry pass.
+        assert events[1:second] == ["sweep", *(["sweep:resolved"] * resolving_passes), "sweep"]
+    else:
+        # A stream that never runs dry still cannot starve recovery.
+        assert events[second - 1] == "sweep:resolved"
 
 
 @pytest.mark.anyio
@@ -3220,6 +3413,68 @@ async def test_recommendation_deadline_includes_maintenance_gate_wait(
 
 
 @pytest.mark.anyio
+async def test_connected_check_wait_timeout_and_disconnect_preserve_admitted_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real client timeout must not send control cancellation for a long semantic check."""
+
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+    entered, release, finished, cancelled = (
+        asyncio.Event(),
+        asyncio.Event(),
+        asyncio.Event(),
+        asyncio.Event(),
+    )
+    original = application.check
+
+    async def held_check(*args: object, **kwargs: object) -> object:
+        entered.set()
+        try:
+            await release.wait()
+            return await original(*args, **kwargs)  # pyright: ignore[reportArgumentType]
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        finally:
+            finished.set()
+
+    async def project_completed(*_args: object, **_kwargs: object) -> object:
+        # This harness intentionally supplies no public CheckResult; exercise transport lifetime
+        # without treating its unprojected stand-in as a projection regression.
+        return JsonObject({"ok": True})
+
+    monkeypatch.setattr(application, "check", held_check)
+    monkeypatch.setattr(daemon, "_project_completed_response", project_completed)
+    client_stream, server_stream = _connected_control_pair()
+    server_task = asyncio.create_task(daemon._serve_control_connection(server_stream))  # pyright: ignore[reportPrivateUsage]
+    service_client = None
+    try:
+        session = await client_handshake(client_stream, ControlClientKind.CLI, "0.3.0")
+        service_client = _connected_client(client_stream, session, ControlClientKind.CLI)  # pyright: ignore[reportArgumentType]
+        request = _check_body().model_copy(update={"mode": "semantic_required"})
+        with pytest.raises(ControlError) as timeout:
+            await service_client.check(request, deadline_ms=50)
+        assert timeout.value.reason == "request_timeout"
+        assert entered.is_set() and not cancelled.is_set()
+        await service_client.close()
+        server_task.cancel()
+        await asyncio.gather(server_task, return_exceptions=True)
+        assert not cancelled.is_set()
+        release.set()
+        await finished.wait()
+        assert application.check_requests == [request]
+        assert not cancelled.is_set()
+    finally:
+        release.set()
+        if service_client is not None:
+            await service_client.close()
+        server_task.cancel()
+        await asyncio.gather(server_task, return_exceptions=True)
+        await daemon.close()
+
+
+@pytest.mark.anyio
 async def test_failed_response_write_is_a_recorded_transport_fact_not_frame_invalid(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3290,3 +3545,212 @@ async def test_failed_response_write_is_a_recorded_transport_fact_not_frame_inva
     found = lookup_diagnostic_records(correlation_id, root=tmp_path)
     assert [entry["reason"] for entry in found] == ["connection_failed"]
     assert [context.get("message") for context in contexts] == []
+
+
+def _operation_status_body() -> StatusRequest:
+    return StatusRequest.model_validate(
+        {
+            **_status_body().model_dump(mode="json", exclude_none=True),
+            "request_id": "req_00000000-0000-4000-8000-000000000043",
+            "view": "operation",
+            "limit": "1",
+            "filter": {"operation_request_id": "req_00000000-0000-4000-8000-000000000030"},
+        }
+    )
+
+
+@pytest.mark.anyio
+async def test_operation_status_reads_live_while_a_semantic_check_holds_the_gates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #571 A2: progress is readable during a long check; other reads still wait."""
+
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+    composition = daemon.composition
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = application.check
+    statuses: list[str] = []
+    original_status = application.status
+
+    async def held_check(*args: object, **kwargs: object) -> object:
+        entered.set()
+        await release.wait()
+        return await original(*args, **kwargs)  # pyright: ignore[reportArgumentType]
+
+    async def observed_status(request: object, **kwargs: object) -> object:
+        assert isinstance(request, StatusRequest)
+        # The admitted read runs while the check still owns both dispatch gates; record the view
+        # only after proving that, so a failed proof cannot satisfy the assertion below.
+        assert composition.maintenance_gate.locked()
+        assert composition.observation_gate.locked()
+        statuses.append(request.view)
+        return await original_status(request, **kwargs)  # pyright: ignore[reportArgumentType]
+
+    async def project_completed(*_args: object, **_kwargs: object) -> object:
+        return JsonObject({"ok": True})
+
+    monkeypatch.setattr(application, "check", held_check)
+    monkeypatch.setattr(application, "status", observed_status)
+    monkeypatch.setattr(daemon, "_project_completed_response", project_completed)
+    check_body = _check_body().model_copy(update={"mode": "semantic_required"})
+    check_task = asyncio.create_task(
+        daemon.dispatch(ControlClientKind.CLI, _request(daemon, ControlMethod.CHECK, check_body))
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5.0)
+        live = await asyncio.wait_for(
+            daemon.dispatch(
+                ControlClientKind.MCP_BRIDGE,
+                _request(daemon, ControlMethod.STATUS, _operation_status_body()),
+            ),
+            timeout=5.0,
+        )
+        # This harness supplies no public StatusResult, so the envelope itself is not the
+        # subject; the handler ran to completion while the check still held both gates.
+        assert not (isinstance(live.body, ControlError) and live.body.reason == "request_timeout")
+        assert statuses == ["operation"]
+        waiting = await daemon.dispatch(
+            ControlClientKind.CLI,
+            _request(daemon, ControlMethod.STATUS, _status_body(), deadline_ms=50),
+        )
+        assert waiting.outcome == "error"
+        assert isinstance(waiting.body, ControlError)
+        assert waiting.body.reason == "request_timeout"
+        assert statuses == ["operation"]
+        assert not check_task.done()
+    finally:
+        release.set()
+        await asyncio.wait_for(check_task, timeout=5.0)
+        assert application.check_requests == [check_body]
+        assert not composition.maintenance_gate.locked()
+        assert not composition.observation_gate.locked()
+        await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_operation_status_still_waits_behind_recovery_maintenance() -> None:
+    """Only a service-owned check opens the read window; recovery keeps full exclusion."""
+
+    daemon, _application, _vault, _listener = _daemon()
+    await daemon.start()
+    composition = daemon.composition
+    effects = daemon_module._LockedHumanEffects(  # pyright: ignore[reportPrivateUsage]
+        cast(ServiceLifecycle, SimpleNamespace()),
+        cast(VaultService, SimpleNamespace()),
+        daemon_module._PrivacyPolicyAppRelay(),  # pyright: ignore[reportPrivateUsage]
+        maintenance_gate=composition.maintenance_gate,
+        observation_gate=composition.observation_gate,
+    )
+    await effects._acquire_recovery_maintenance("recovery-gate")  # pyright: ignore[reportPrivateUsage]
+    try:
+        blocked = await daemon.dispatch(
+            ControlClientKind.CLI,
+            _request(daemon, ControlMethod.STATUS, _operation_status_body(), deadline_ms=50),
+        )
+        assert blocked.outcome == "error"
+        assert isinstance(blocked.body, ControlError)
+        assert blocked.body.reason == "request_timeout"
+    finally:
+        effects._release_recovery_maintenance("recovery-gate")  # pyright: ignore[reportPrivateUsage]
+        await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_capture_refused_check_wakes_the_observation_sweep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A check refused behind a capture handoff wakes the sweep that delivers it (issue #838).
+
+    The check held both dispatch gates, so the handoff's structural delivery could not run
+    during it. Without the wake the next sweep waits a full idle interval, longer than the
+    caller's bounded replay; other refusals leave the cadence alone.
+    """
+
+    import yoetz.observability.diagnostics as diagnostics
+
+    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
+    daemon, application, _vault, _listener = _daemon()
+    sweeps = 0
+    second_sweep = asyncio.Event()
+
+    async def sweep() -> ObservationDrainSummary:
+        nonlocal sweeps
+        sweeps += 1
+        if sweeps >= 2:
+            second_sweep.set()
+        return ObservationDrainSummary(
+            attempted=0, acknowledged=0, retry_pending=0, quarantined=0, reasons=()
+        )
+
+    refusal = CheckAdmissionStage.ACQUIRING
+
+    async def refuse(request: object, **_kwargs: object) -> JsonObject:
+        del request
+        raise check_admission_refused(refusal)
+
+    application.observation_sweep = sweep  # pyright: ignore[reportAttributeAccessIssue]
+    application.check = refuse  # type: ignore[method-assign]
+    await daemon.start()
+    wake = daemon._observation_sweep_wake  # pyright: ignore[reportPrivateUsage]
+
+    acquiring = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.CHECK, _check_body()),
+    )
+    assert isinstance(acquiring.body, CheckResult)
+    assert acquiring.body.root.ok is False
+    assert not wake.is_set()
+
+    refusal = CheckAdmissionStage.CAPTURE_HANDOFF_PENDING
+    refused = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.CHECK, _check_body()),
+    )
+    assert isinstance(refused.body, CheckResult)
+    assert refused.body.root.ok is False
+    error = refused.body.root.error
+    assert error.code is PublicErrorCode.OPERATION_PENDING
+    assert error.retryable is True
+    assert error.safe_details == {
+        "continuation": "check_admission_same_identity",
+        "reason_code": "check_admission_capture_pending",
+        "retry_after_ms": 5000,
+    }
+    # The typed stage reaches the durable diagnostic, so the correlation id names the stage.
+    records = lookup_diagnostic_records(error.correlation_id, root=tmp_path)
+    assert [record.get("reason_code") for record in records] == ["check_admission_capture_pending"]
+    # The idle interval is 60 s; only the wake can bring the second sweep this soon.
+    await asyncio.wait_for(second_sweep.wait(), timeout=5)
+    await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_observation_sweep_wake_survives_timeout_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wake arriving with the timeout result stays armed for the next sweep turn."""
+
+    daemon, _application, _vault, _listener = _daemon()
+    wake = daemon._observation_sweep_wake  # pyright: ignore[reportPrivateUsage]
+    timeout_started = asyncio.Event()
+    release_timeout = asyncio.Event()
+
+    async def timeout_barrier(awaitable: object, timeout: float) -> object:
+        del timeout
+        timeout_started.set()
+        await release_timeout.wait()
+        wake.set()
+        close = getattr(awaitable, "close", None)
+        if callable(close):
+            close()
+        raise TimeoutError
+
+    monkeypatch.setattr(daemon_module.asyncio, "wait_for", timeout_barrier)
+    waiting = asyncio.create_task(daemon._await_observation_sweep_turn(60.0))  # pyright: ignore[reportPrivateUsage]
+    await timeout_started.wait()
+    release_timeout.set()
+    await waiting
+
+    assert wake.is_set()
+    await daemon.close()

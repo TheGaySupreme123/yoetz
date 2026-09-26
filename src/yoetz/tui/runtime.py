@@ -42,16 +42,25 @@ from yoetz.tui.models import (
     ReadinessLayer,
     ReceiptSummary,
     StatusSnapshot,
+    TaskStatusPage,
     VaultPosture,
     WorkDetail,
     WorkItem,
 )
 
 if TYPE_CHECKING:  # Runtime imports stay lazy; annotations still type-check.
+    from yoetz.adapters.integrations.observation_local import LocalObservationStore
+    from yoetz.domain.observation_budget import CapacityRequest
+    from yoetz.domain.observation_settings import ObservationDetailProfile
     from yoetz.ports.harness_mcp import HarnessBinary
     from yoetz.service.confidential_protocol import ProviderCredentialTarget
 
-__all__ = ["RuntimeError_", "YoetzRuntime", "project_detection"]
+__all__ = [
+    "ObservationCapacityUnavailable",
+    "RuntimeError_",
+    "YoetzRuntime",
+    "project_detection",
+]
 
 _MCP_SERVER_NAME: Final = "yoetz"
 _HARNESS: Final = "codex"
@@ -125,6 +134,23 @@ class RuntimeError_(Exception):
         self.reason = reason
         self.message = message
         self.details = tuple(details)
+
+
+class ObservationCapacityUnavailable(RuntimeError_):
+    """A requested capacity the structural queue cannot support; nothing was changed.
+
+    ``lines`` is the owning explanation (the one human wording shared with the command
+    line) and ``alternative_command`` the largest supported finite choice.
+    """
+
+    def __init__(self, lines: Sequence[str], alternative_command: str) -> None:
+        super().__init__(
+            "capacity_no_cap_unsupported",
+            "No Yoetz cap is not available for this queue",
+            details=tuple(lines),
+        )
+        self.lines = tuple(lines)
+        self.alternative_command = alternative_command
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +334,10 @@ class YoetzRuntime:
         self._cwd = (cwd or Path.cwd()).resolve()
         self._sessions: dict[str, _WorkSession] = {}
         self._opened_titles: list[str] = []
+        self._pending_checks: dict[str, object] = {}
+        # The request id of the latest check per task, kept so its structural progress can be
+        # read while it runs and recovered after a client wait ends (issue #571 A2).
+        self._check_request_ids: dict[str, str] = {}
 
     # -- discovery ------------------------------------------------------
 
@@ -687,6 +717,13 @@ class YoetzRuntime:
         verified = registered and report.get("state") == "yoetz_owned"
         plugin_installed = plugin_map.get("presence") == "installed"
         consent_active = consent_map.get("outcome") == "granted"
+        kept_profiles = consent_map.get("content_capture_profiles")
+        consent_detail = (
+            "native content profiles kept: "
+            + ", ".join(str(profile) for profile in cast(list[object], kept_profiles))
+            if consent_active and isinstance(kept_profiles, list) and kept_profiles
+            else ""
+        )
         policy_trusted = policy_map.get("outcome") == "trusted"
         policy_absent = policy_map.get("outcome") == "absent" or not policy_map
 
@@ -717,6 +754,7 @@ class YoetzRuntime:
                 "project_consent",
                 "Project consent active",
                 LayerState.VERIFIED if consent_active else LayerState.NOT_CONFIGURED,
+                detail=consent_detail,
             ),
             ReadinessLayer(
                 "policy_digest_trusted",
@@ -771,13 +809,141 @@ class YoetzRuntime:
 
         try:
             store = LocalObservationStore()
-            commitment = store.workspace_commitment(str(self.project_root()))
+            commitment = store.workspace_commitment(self._selection_workspace_locator())
             raw = selection_status_payload(store, commitment)
             return cast(Mapping[str, object], raw)
         except (OSError, ValueError, RuntimeError) as error:
             raise RuntimeError_(
                 "observation_status_unavailable", "observation status is unavailable"
             ) from error
+
+    def _selection_workspace_locator(self) -> str:
+        """Return the workspace locator the command line would resolve for this project.
+
+        Selection reads and writes use the same canonicalization as
+        ``yoetz observe --workspace`` (the nearest safe Git root hooks use), so
+        the terminal interface and the command line address one workspace.
+        """
+
+        from yoetz.adapters.workspace_binding import canonical_workspace_locator
+
+        locator = canonical_workspace_locator(str(self.project_root()))
+        if locator is None:
+            raise ValueError("workspace_locator_invalid")
+        return locator
+
+    def _workspace_selection_inputs(
+        self,
+    ) -> tuple[LocalObservationStore, str, ObservationDetailProfile]:
+        """Open the local store and resolve the workspace selection's current detail.
+
+        The terminal interface has no host session, so a capacity change here is the
+        persisted workspace selection.  The current workspace detail is carried forward
+        unchanged: this surface changes capacity only.
+        """
+
+        from yoetz.adapters.integrations.observation_local import LocalObservationStore
+        from yoetz.domain.observation_settings import resolve_observation_selection
+
+        store = LocalObservationStore()
+        commitment = store.workspace_commitment(self._selection_workspace_locator())
+        resolution = resolve_observation_selection(store.selection_settings_for(commitment))
+        return store, commitment, resolution.selection.detail
+
+    async def preview_observation_selection(
+        self, capacity: CapacityRequest
+    ) -> Mapping[str, object]:
+        """Preview a workspace capacity change without changing local state.
+
+        A request for no Yoetz cap raises :class:`ObservationCapacityUnavailable`
+        carrying the owning explanation; nothing is changed in that case either.
+        """
+
+        try:
+            from yoetz.cli.observe import CapacityNoCapUnsupported, build_selection_preview
+        except ImportError as error:
+            raise RuntimeError_(
+                "observation_selection_unavailable",
+                "capacity changes are unavailable in this installation",
+            ) from error
+        from yoetz.protocol.errors import PublicOperationError
+
+        try:
+            store, commitment, detail = self._workspace_selection_inputs()
+            raw = build_selection_preview(
+                store,
+                commitment,
+                detail=detail,
+                capacity=capacity,
+                scope="workspace",
+                session_commitment=None,
+                expires_at=None,
+            )
+        except CapacityNoCapUnsupported as error:
+            raise ObservationCapacityUnavailable(
+                tuple(error.lines), error.alternative_command
+            ) from error
+        except PublicOperationError as error:
+            raise RuntimeError_(
+                "observation_selection_preview_failed",
+                "the capacity preview could not be built",
+                details=(error.message,),
+            ) from error
+        except (OSError, ValueError, RuntimeError) as error:
+            raise RuntimeError_(
+                "observation_selection_preview_failed",
+                "the capacity preview could not be built",
+            ) from error
+        return cast(Mapping[str, object], raw)
+
+    async def apply_observation_selection(
+        self, capacity: CapacityRequest, preview_digest: str
+    ) -> Mapping[str, object]:
+        """Apply exactly the previewed workspace capacity change.
+
+        The owning path re-derives the preview and refuses a digest that no longer
+        matches, so a setting changed elsewhere since the preview is never
+        overwritten silently.
+        """
+
+        try:
+            from yoetz.cli.observe import CapacityNoCapUnsupported, apply_selection_preview
+        except ImportError as error:
+            raise RuntimeError_(
+                "observation_selection_unavailable",
+                "capacity changes are unavailable in this installation",
+            ) from error
+        from yoetz.protocol.errors import PublicOperationError
+
+        try:
+            store, commitment, detail = self._workspace_selection_inputs()
+            raw = apply_selection_preview(
+                store,
+                commitment,
+                detail=detail,
+                capacity=capacity,
+                scope="workspace",
+                session_commitment=None,
+                expires_at=None,
+                preview_digest=preview_digest,
+                accept=True,
+            )
+        except CapacityNoCapUnsupported as error:
+            raise ObservationCapacityUnavailable(
+                tuple(error.lines), error.alternative_command
+            ) from error
+        except PublicOperationError as error:
+            raise RuntimeError_(
+                "observation_selection_apply_failed",
+                "the capacity change was not applied",
+                details=(error.message,),
+            ) from error
+        except (OSError, ValueError, RuntimeError) as error:
+            raise RuntimeError_(
+                "observation_selection_apply_failed",
+                "the capacity change was not applied",
+            ) from error
+        return cast(Mapping[str, object], raw)
 
     # -- service --------------------------------------------------------
 
@@ -960,8 +1126,20 @@ class YoetzRuntime:
         executable = "" if not binaries else binaries[0].executable_path
         return executable, str(default_codex_home()), default_codex_subscription_model(), "high"
 
+    def codex_subscription_routine_default(self) -> str | None:
+        """Routine effort setup applies by default; ``None`` keeps a legacy single effort."""
+
+        from yoetz.cli.codex_subscription import default_codex_subscription_routine_effort
+
+        return default_codex_subscription_routine_effort()
+
     def preview_codex_subscription(
-        self, executable: str, codex_home: str, model: str, reasoning_effort: str
+        self,
+        executable: str,
+        codex_home: str,
+        model: str,
+        reasoning_effort: str,
+        routine_reasoning_effort: str | None = None,
     ) -> Mapping[str, object]:
         """Validate and render the exact subscription cell without logging in or writing state."""
 
@@ -973,6 +1151,7 @@ class YoetzRuntime:
                 codex_home=Path(codex_home),
                 model=model,
                 reasoning_effort=reasoning_effort,
+                routine_reasoning_effort=routine_reasoning_effort,
             )
         except (OSError, ValueError) as error:
             from yoetz.cli.codex_subscription import subscription_failure_reason
@@ -990,6 +1169,7 @@ class YoetzRuntime:
         reasoning_effort: str,
         *,
         switch_account: bool = False,
+        routine_reasoning_effort: str | None = None,
     ) -> Mapping[str, object]:
         """Run Codex-owned login, then recompose the service around the exact binding."""
 
@@ -1005,6 +1185,7 @@ class YoetzRuntime:
                 codex_home=Path(codex_home),
                 model=model,
                 reasoning_effort=reasoning_effort,
+                routine_reasoning_effort=routine_reasoning_effort,
                 login_mode="browser",
                 open_browser=True,
                 switch_account=switch_account,
@@ -1515,22 +1696,23 @@ class YoetzRuntime:
     # -- the six canonical operations ----------------------------------
 
     async def open_task(self, title: str) -> WorkDetail:
-        """Attach to one task by title through ``start``, then read its views.
+        """Open an exact session selector, keeping display labels out of routing."""
 
-        There is no task-index operation in the control protocol and this
-        interface does not add one; a task is reached by the title the agent
-        used for it.
-        """
-
+        from yoetz.protocol.ids import IdKind, validate_id
         from yoetz.protocol.models import StartRequestModel
 
+        prior = self._sessions.get(title)
+        selector = title if prior is None else prior.session_id
+        try:
+            validate_id(IdKind.SESSION, selector)
+        except ValueError as exc:
+            raise RuntimeError_("session_selector_required", "enter the task's session ID") from exc
         request = StartRequestModel.model_validate(
             {
-                "protocol_version": "0.1",
-                "schema_version": "1.0.0",
-                "request_id": self._request_id(),
+                **self._workflow_identity(),
                 "mode": "attach",
-                "task_title": title,
+                "session_id": selector,
+                "task_title": "Terminal task view",
                 "requested_view": "compact",
             }
         )
@@ -1548,6 +1730,35 @@ class YoetzRuntime:
                 self._opened_titles.append(title)
             compact = success.compact
         return self._work_detail(title, session, compact)
+
+    async def task_status(
+        self, title: str, view: Literal["lineage", "project"], *, cursor: str | None = None
+    ) -> TaskStatusPage:
+        """Render the same service projection used by MCP and the CLI."""
+
+        from yoetz.cli.render import render_human_status
+        from yoetz.protocol.models import StatusRequestModel
+
+        session = self._sessions.get(title)
+        if session is None:
+            raise RuntimeError_("task_not_open", "open the task first")
+        request = StatusRequestModel.model_validate(
+            {
+                **self._workflow_identity(),
+                "session_id": session.session_id,
+                "writer_id": session.writer_id,
+                "view": view,
+                "limit": "50",
+                "cursor": cursor,
+            }
+        )
+        async with self._client() as client:
+            result = await client.status(request)
+        success = self._unwrap(result, "the task view could not be read")
+        session.frontier = success.head_frontier
+        return TaskStatusPage(
+            tuple(render_human_status(success).splitlines()), success.page.next_cursor
+        )
 
     def _work_detail(self, title: str, session: _WorkSession, compact: object) -> WorkDetail:
         coverage = getattr(compact, "coverage", None)
@@ -1569,33 +1780,72 @@ class YoetzRuntime:
             receipt_available=False,
         )
 
-    async def run_check(self, title: str, mode: CheckMode) -> tuple[str, tuple[str, ...]]:
-        """Run one check in the requested mode and report it without softening."""
+    async def check_progress(self, title: str) -> TaskStatusPage:
+        """Read the latest check's operation page, including structural review progress."""
 
-        from yoetz.protocol.models import CheckRequestModel
+        from yoetz.cli.render import render_human_status
+        from yoetz.protocol.models import StatusRequestModel
 
         session = self._sessions.get(title)
         if session is None:
             raise RuntimeError_("task_not_open", "open the task first")
-        request = CheckRequestModel.model_validate(
+        request_id = self._check_request_ids.get(title)
+        if request_id is None:
+            raise RuntimeError_("check_not_started", "run a check for this task first")
+        request = StatusRequestModel.model_validate(
             {
-                "protocol_version": "0.1",
-                "schema_version": "1.0.0",
-                "request_id": self._request_id(),
+                **self._workflow_identity(),
                 "session_id": session.session_id,
                 "writer_id": session.writer_id,
-                "expected_frontier": self._frontier(session),
-                "mode": mode.value,
+                "view": "operation",
+                "limit": "1",
+                "filter": {"operation_request_id": request_id},
             }
         )
         async with self._client() as client:
+            result = await client.status(request)
+        success = self._unwrap(result, "the check progress could not be read")
+        return TaskStatusPage(tuple(render_human_status(success).splitlines()), None)
+
+    async def run_check(self, title: str, mode: CheckMode) -> tuple[str, tuple[str, ...]]:
+        """Run one check in the requested mode and report it without softening."""
+
+        from yoetz.protocol.models import CheckAwaitingHumanModel, CheckRequestModel
+
+        session = self._sessions.get(title)
+        if session is None:
+            raise RuntimeError_("task_not_open", "open the task first")
+        pending = self._pending_checks.get(title)
+        request = (
+            pending
+            if isinstance(pending, CheckRequestModel)
+            else CheckRequestModel.model_validate(
+                {
+                    **self._workflow_identity(),
+                    "session_id": session.session_id,
+                    "writer_id": session.writer_id,
+                    "expected_frontier": self._frontier(session),
+                    "mode": mode.value,
+                }
+            )
+        )
+        self._check_request_ids[title] = str(request.request_id)
+        async with self._client() as client:
             result = await client.check(request)
         success = self._unwrap(result, "the check could not be completed")
-        from yoetz.cli.render import render_human_check
+        session.frontier = success.result_frontier
+        from yoetz.cli.render import render_human_awaiting_human, render_human_check
 
+        if isinstance(success, CheckAwaitingHumanModel):
+            self._pending_checks[title] = request
+            return "awaiting_human", tuple(render_human_awaiting_human(success).splitlines())
+        self._pending_checks.pop(title, None)
         return str(success.verdict), tuple(render_human_check(success).splitlines())
 
     async def build_receipt(self, title: str, output_format: str) -> ReceiptSummary:
+        from yoetz.cli.render import render_human_receipt
+        from yoetz.protocol.canonical import canonical_encode
+        from yoetz.protocol.coverage import CheckType
         from yoetz.protocol.models import ReceiptRequestModel
 
         session = self._sessions.get(title)
@@ -1603,31 +1853,36 @@ class YoetzRuntime:
             raise RuntimeError_("task_not_open", "open the task first")
         request = ReceiptRequestModel.model_validate(
             {
-                "protocol_version": "0.1",
-                "schema_version": "1.0.0",
-                "request_id": self._request_id(),
+                **self._workflow_identity(),
                 "task_id": session.task_id,
                 "session_id": session.session_id,
                 "writer_id": session.writer_id,
                 "expected_frontier": self._frontier(session),
                 "format": output_format,
-                "include": "summary",
-                "redaction_profile": "standard",
+                "include": "standard",
+                "redaction_profile": "default_local_export",
             }
         )
         async with self._client() as client:
             result = await client.receipt(request)
         success = self._unwrap(result, "the receipt could not be built")
+        session.frontier = success.result_frontier
         coverage = getattr(success, "coverage", None)
         gaps = tuple(str(item) for item in getattr(coverage, "known_gaps", ()) or ())
+        semantic = CheckType.SEMANTIC_MODEL_DERIVED in success.coverage.check_types
+        rendered = (
+            canonical_encode(success.document).decode("utf-8")
+            if success.document is not None
+            else render_human_receipt(success)
+        )
         return ReceiptSummary(
             subject_id=session.task_id,
             verdict=str(success.conclusion),
             coverage=gaps or ("no gaps recorded",),
-            open_findings=int(getattr(success, "suppressed_finding_count", 0)),
             limitations=gaps,
-            semantic_available=False,
+            semantic_available=semantic,
             freshness=str(getattr(coverage, "ledger_freshness", "unknown")),
+            rendered_lines=tuple(rendered.splitlines()),
             verified=("local checks recorded in this receipt",),
             not_verified=("external AI-powered review did not contribute to this receipt",),
         )
@@ -1635,8 +1890,19 @@ class YoetzRuntime:
     def _frontier(self, session: _WorkSession) -> object:
         frontier = session.frontier
         return {
-            "sequence": getattr(frontier, "sequence", 0),
-            "digest": getattr(frontier, "digest", None),
+            "sequence": str(getattr(frontier, "sequence")),
+            "head_digest": getattr(frontier, "head_digest"),
+        }
+
+    def _workflow_identity(self) -> dict[str, object]:
+        from yoetz import __version__
+
+        return {
+            "protocol_version": "0.1",
+            "schema_version": "1.0.0",
+            "request_id": self._request_id(),
+            "actor": {"actor_id": "yoetz:tui", "actor_type": "human"},
+            "client": {"kind": "yoetz_cli", "version": __version__, "integration": "local_cli"},
         }
 
     def _request_id(self) -> str:
@@ -1645,7 +1911,7 @@ class YoetzRuntime:
         return new_id(IdKind.REQUEST)
 
     def _unwrap(self, result: object, message: str) -> Any:
-        payload = getattr(result, "result", result)
+        payload = getattr(result, "root", getattr(result, "result", result))
         if getattr(payload, "ok", False) is not True:
             error = getattr(payload, "error", None)
             reason = str(getattr(error, "code", "operation_failed"))

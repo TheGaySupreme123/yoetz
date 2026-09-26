@@ -11,6 +11,7 @@ from enum import StrEnum
 from typing import Final, Literal, cast
 
 from yoetz.domain.events import (
+    FINDING_EVENT_SCHEMA_VERSION,
     SEMANTIC_EVENT_SCHEMA_VERSION,
     AcceptedEvent,
     ActionRecordedPayload,
@@ -58,6 +59,7 @@ from yoetz.domain.findings import (
     rank_key,
     semantic_provenance_to_json,
 )
+from yoetz.domain.receipts import CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP
 from yoetz.domain.values import (
     Actor,
     ActorType,
@@ -107,6 +109,7 @@ from yoetz.kernel.receipt_capacity import (
 )
 from yoetz.kernel.reducers import (
     invalidates_recorded_check,
+    is_material_event_family,
     replay,
     replay_extension_with_index,
     replay_with_index,
@@ -115,6 +118,8 @@ from yoetz.observability.logging import record_unexpected_exception_without_rais
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.ids import IdPort
 from yoetz.ports.ledger import (
+    CHECK_ACQUISITION_RESERVATION_SECONDS,
+    CHECK_ADMISSION_RETRY_AFTER_MS,
     AcceptedEventSummary,
     AppendCommand,
     AppendEntry,
@@ -122,6 +127,8 @@ from yoetz.ports.ledger import (
     AppendWarning,
     AssignmentProjectionFilter,
     AttemptOutcome,
+    CheckAdmissionRecord,
+    CheckAdmissionStage,
     CheckCommitResult,
     CheckPhase,
     CheckPolicyExecution,
@@ -151,7 +158,10 @@ from yoetz.ports.ledger import (
     SemanticAttemptRecord,
     SemanticDisclosureWait,
     SemanticJobRecord,
+    SemanticProgressRecord,
     StoredProjection,
+    check_admission_refused,
+    check_admission_stage,
 )
 from yoetz.ports.objects import (
     ObjectKind,
@@ -170,6 +180,7 @@ from yoetz.protocol.canonical import (
 from yoetz.protocol.coverage import (
     AuthorshipAssurance,
     Coverage,
+    LedgerFreshness,
     PublicationChannel,
     coverage_for_channel,
     coverage_to_json,
@@ -178,10 +189,12 @@ from yoetz.protocol.coverage import (
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind
 from yoetz.protocol.models import (
+    SEMANTIC_PROGRESS_PHASE_RANK,
     CheckPolicyExecutionModel,
     CheckScopeModel,
     CoverageModel,
     FrontierModel,
+    SemanticProgressPhase,
     SemanticReason,
     SemanticStatus,
     StatusAssignmentItemModel,
@@ -201,12 +214,22 @@ from yoetz.version import build_status_version_slice_facts
 __all__ = ["MemoryLedgerAdapter", "MemoryLedgerState", "compact_status_coverage"]
 
 _GENESIS: Final = Frontier.genesis()
+_REPLAY_SAFE_IMMATERIAL_FAMILIES: Final = frozenset({"receipt_recorded"})
 type _SummaryCode = Literal[
     "action_recorded",
     "assignment_recorded",
     "check_recorded",
+    "child_accepted",
+    "child_dependencies_recorded",
+    "child_rejected",
+    "child_written_off",
     "claim_recorded",
+    "coordination_context_recorded",
+    "coordination_disposition_recorded",
+    "coordination_obligation_declared",
     "decision_recorded",
+    "delegation_cancelled",
+    "delegation_declared",
     "evidence_recorded",
     "finding_recorded",
     "obligation_published",
@@ -219,6 +242,10 @@ type _SummaryCode = Literal[
     "result_recorded",
     "session_opened",
     "session_resumed",
+    "work_abandoned",
+    "work_cancelled",
+    "work_closed",
+    "work_written_off",
 ]
 
 
@@ -325,6 +352,16 @@ class _CheckReservation:
     expires_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class _CheckAdmissionRefusal:
+    """One exact check key's recent pre-admission refusals; transient and structural only."""
+
+    stage: CheckAdmissionStage
+    first_refused_at: datetime
+    last_refused_at: datetime
+    refusal_count: int
+
+
 @dataclass(slots=True)
 class MemoryLedgerState:
     """Copy-on-write task state shared by the reference adapters."""
@@ -344,8 +381,17 @@ class MemoryLedgerState:
     # Keyed by job_id: at most one disclosure wait per AI-powered review job.
     disclosure_waits: dict[str, SemanticDisclosureWait] = field(default_factory=lambda: {})
     object_refs: dict[str, ObjectRef] = field(default_factory=lambda: {})
+    # Keyed by job_id: the last non-terminal structural progress row (issue #571 A2). The
+    # terminal phase is derived from the job row itself, never stored here.
+    semantic_progress: dict[str, SemanticProgressRecord] = field(default_factory=lambda: {})
     # Transient freeze-acquisition holds: never persisted; a crash mid-freeze must drop them.
     check_reservations: dict[tuple[str, str], _CheckReservation] = field(default_factory=lambda: {})
+    # Transient, bounded pre-admission refusals keyed by exact (writer, request) (issue #838).
+    # Never persisted, cloned, or adopted: only the outermost ledger layer that answered the
+    # caller records here, and admission of the key clears its entry.
+    check_admissions: dict[tuple[str, str], _CheckAdmissionRefusal] = field(
+        default_factory=lambda: {}
+    )
 
     # Transient, bounded exact-snapshot row indexes; never persisted or shared across clones.
     query_records: tuple[LedgerRecord, ...] = ()
@@ -381,7 +427,7 @@ def _case_dependency_digest(case: DeterministicCase) -> str:
 
 _OPERATION_LEASE_SECONDS: Final = 60
 _SEMANTIC_EXECUTION_CLEANUP_GRACE_SECONDS: Final = 5
-_SEMANTIC_EXECUTION_MAX_SECONDS: Final = 600
+_SEMANTIC_EXECUTION_MAX_SECONDS: Final = 7200
 
 
 async def _open_exact_object(objects: ObjectStorePort, expected: ObjectRef) -> bytes:
@@ -604,6 +650,84 @@ def quarantine_resume_object_invalid(
         suspension_kind=None,
     )
     return quarantined, error
+
+
+_CHECK_ADMISSION_JOURNAL_LIMIT: Final = 64
+_CHECK_ADMISSION_JOURNAL_TTL: Final = timedelta(minutes=15)
+_CHECK_ADMISSION_MAX_REFUSALS: Final = 2**53 - 1
+
+
+def _prune_check_admissions(state: MemoryLedgerState, now: datetime) -> None:
+    journal = state.check_admissions
+    for key in tuple(journal):
+        if now - journal[key].last_refused_at > _CHECK_ADMISSION_JOURNAL_TTL:
+            del journal[key]
+
+
+def note_check_admission_refusal(
+    state: MemoryLedgerState,
+    key: tuple[str, str],
+    stage: CheckAdmissionStage,
+    now: datetime,
+) -> None:
+    """Remember one pre-admission refusal for an exact check key (issue #838).
+
+    The journal is what lets ``status view=operation`` tell a refused admission apart from a
+    request this service never saw. It is bounded by entry count and age, holds only closed
+    stage tokens and service timestamps, and is never persisted.
+    """
+
+    _prune_check_admissions(state, now)
+    journal = state.check_admissions
+    prior = journal.pop(key, None)
+    journal[key] = (
+        _CheckAdmissionRefusal(stage, now, now, 1)
+        if prior is None
+        else _CheckAdmissionRefusal(
+            stage,
+            prior.first_refused_at,
+            max(now, prior.last_refused_at),
+            min(prior.refusal_count + 1, _CHECK_ADMISSION_MAX_REFUSALS),
+        )
+    )
+    while len(journal) > _CHECK_ADMISSION_JOURNAL_LIMIT:
+        del journal[next(iter(journal))]
+
+
+def check_admission_record(
+    state: MemoryLedgerState, key: tuple[str, str], now: datetime
+) -> CheckAdmissionRecord | None:
+    """Project the live reservation and recent refusals for one key; ``None`` once admitted."""
+
+    if key in state.operations:
+        return None
+    _prune_check_admissions(state, now)
+    refusal = state.check_admissions.get(key)
+    reservation = cast(object | None, state.check_reservations.get(key))
+    expires_at = getattr(reservation, "expires_at", None)
+    if type(expires_at) is datetime and expires_at > now:
+        armed_at = min(now, expires_at - timedelta(seconds=CHECK_ACQUISITION_RESERVATION_SECONDS))
+        first = armed_at if refusal is None else min(armed_at, refusal.first_refused_at)
+        return CheckAdmissionRecord(
+            key[0],
+            key[1],
+            CheckAdmissionStage.ACQUIRING,
+            0 if refusal is None else refusal.refusal_count,
+            first,
+            now,
+            CHECK_ADMISSION_RETRY_AFTER_MS[CheckAdmissionStage.ACQUIRING],
+        )
+    if refusal is None:
+        return None
+    return CheckAdmissionRecord(
+        key[0],
+        key[1],
+        refusal.stage,
+        refusal.refusal_count,
+        refusal.first_refused_at,
+        refusal.last_refused_at,
+        CHECK_ADMISSION_RETRY_AFTER_MS[refusal.stage],
+    )
 
 
 def _now(clock: ClockPort | None) -> datetime:
@@ -903,7 +1027,27 @@ def compact_status_coverage(
         for record in records
     ):
         return baseline
-    return weakest(baseline, check_record.payload.coverage)
+    coverage = weakest(baseline, check_record.payload.coverage)
+    if any(
+        is_material_event_family(record.schema.name)
+        and record.ledger.ingestion_sequence > check_record.ledger.ingestion_sequence
+        for record in records
+    ):
+        # The same attributable suffix that the receipt builder discloses still leaves the check
+        # useful, but only as of its tested subject frontier. Keep the current observation
+        # records visible in status and add the bounded qualification instead of manufacturing
+        # ``check_not_applicable`` or stale-after-material-change.
+        gaps = tuple(
+            sorted(
+                set(coverage.known_gaps) | {CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP},
+                key=str.encode,
+            )
+        )
+        freshness = coverage.ledger_freshness
+        if freshness is LedgerFreshness.CURRENT:
+            freshness = LedgerFreshness.PARTIAL
+        coverage = replace(coverage, ledger_freshness=freshness, known_gaps=gaps)
+    return coverage
 
 
 def _obligation_item(
@@ -1239,6 +1383,14 @@ def _projection_items(
         # `current`, so reporting the projection scalar raw lets the headline read cleaner than
         # the coverage it summarizes. Report the weaker of the two (issue #307).
         item_freshness = min(projection.freshness, item_coverage.ledger_freshness)
+        item_gaps = tuple(
+            sorted(
+                set(_status_gap_codes(projection.coverage_gaps))
+                | set(completion_scope_codes(projection))
+                | set(item_coverage.known_gaps),
+                key=str.encode,
+            )
+        )
         return (
             StatusCompactItemModel(
                 task_id=task,
@@ -1258,12 +1410,7 @@ def _projection_items(
                 unanswered_findings=unanswered_findings[:10],
                 freshness=item_freshness.value,
                 coverage=CoverageModel.model_validate(coverage_to_json(item_coverage)),
-                gaps=tuple(
-                    sorted(
-                        set(_status_gap_codes(projection.coverage_gaps))
-                        | set(completion_scope_codes(projection))
-                    )
-                ),
+                gaps=item_gaps,
             ),
         )
     if view is ProjectionView.VERSIONS:
@@ -1416,6 +1563,13 @@ class MemoryLedgerAdapter:
         A standing-grant park expires the lease and may never resume, so
         ``suspension_kind=repository_grant`` is not a barrier: observation
         continues and the same request re-acquires the barrier on replay.
+
+        The same holds for any pending check whose lease is no longer live under this owner: an
+        invocation that was abandoned (its caller went away, or a previous service generation
+        died holding it) renews nothing and may never be replayed. Deferring observation behind
+        it stranded the native capture handoffs that every new check on the task must wait for,
+        so neither could ever proceed (issue #838). Commit already tolerates an
+        observation-only suffix, and an exact replay re-installs the barrier when it reclaims.
         """
 
         now = _now(self._clock)
@@ -1424,6 +1578,7 @@ class MemoryLedgerAdapter:
             for reservation in self._state.check_reservations.values()
         ):
             return True
+        owner_generation = str(self._fence.owner_generation)
         return any(
             (writer := self._state.writers.get(case_writer_id)) is not None
             and writer.session_id == session_id
@@ -1431,6 +1586,9 @@ class MemoryLedgerAdapter:
             is not None
             and operation[0].state is OperationState.PENDING
             and operation[0].suspension_kind is not CheckSuspensionKind.REPOSITORY_GRANT
+            and operation[0].owner_generation == owner_generation
+            and operation[0].lease_expires_at is not None
+            and operation[0].lease_expires_at > now
             for case_writer_id, operation_id in self._state.frozen_cases
         )
 
@@ -1449,6 +1607,28 @@ class MemoryLedgerAdapter:
 
         return all(
             is_observation_authored(record)
+            and not (finding_free and record.schema.name == "finding_recorded")
+            for record in self._state.records
+            if record.ledger.ingestion_sequence > sequence
+        )
+
+    def _receipt_prefix_suffix_safe_unlocked(
+        self, sequence: int, *, finding_free: bool = False
+    ) -> bool:
+        """True when a pinned receipt prefix only gained immaterial records.
+
+        A second rendering of one checked receipt may follow an engine-derived
+        ``receipt_recorded`` event. That suffix changes the ledger frontier and receipt history,
+        but it does not change the deterministic case. Observation records remain allowed under
+        the existing observation rule; all other event families, including child manifests, are
+        treated as material so a stale prefix cannot launder newer work.
+        """
+
+        return all(
+            (
+                is_observation_authored(record)
+                or record.schema.name in _REPLAY_SAFE_IMMATERIAL_FAMILIES
+            )
             and not (finding_free and record.schema.name == "finding_recorded")
             for record in self._state.records
             if record.ledger.ingestion_sequence > sequence
@@ -1556,7 +1736,7 @@ class MemoryLedgerAdapter:
                 and command.expected_frontier != subject.sequence
                 and not (
                     command.expected_frontier < subject.sequence
-                    and self._observation_only_since_unlocked(
+                    and self._receipt_prefix_suffix_safe_unlocked(
                         command.expected_frontier,
                         finding_free=command.operation_kind is OperationKind.RECEIPT,
                     )
@@ -1787,14 +1967,17 @@ class MemoryLedgerAdapter:
             if not any(row.session_id == session_id for row in self._state.records):
                 raise _frontier_conflict(live)
             # A case pinned to a past frontier stays valid while the live chain only extends it
-            # with observation-authored, finding-free records. Replaying and comparing the exact
-            # prefix is required: its head digest authenticates the ledger prefix, not an arbitrary
-            # caller-supplied ProjectionState that happens to repeat that frontier. Anything else
-            # is a real conflict.
+            # with observation-authored or receipt-only, finding-free records. Replaying and
+            # comparing the exact prefix is required: its head digest authenticates the ledger
+            # prefix, not an arbitrary caller-supplied ProjectionState that happens to repeat that
+            # frontier. Anything else is a real conflict.
             if projection != self._state.projection and not (
                 projection.frontier < live.sequence
                 and self._projection_anchored_unlocked(projection)
-                and self._observation_only_since_unlocked(projection.frontier, finding_free=True)
+                and self._receipt_prefix_suffix_safe_unlocked(
+                    projection.frontier,
+                    finding_free=True,
+                )
             ):
                 raise _frontier_conflict(live)
             by_event = {row.event_id: row for row in self._state.records}
@@ -2027,12 +2210,27 @@ class MemoryLedgerAdapter:
         status_gaps = tuple(
             sorted(
                 set(_status_gap_codes(effective_projection.coverage_gaps))
-                | set(completion_scope_codes(effective_projection))
+                | set(completion_scope_codes(effective_projection)),
+                key=str.encode,
             )
         )
-        coverage = with_completion_scope_coverage(
-            replace(prefix[-1].coverage, known_gaps=status_gaps), effective_projection
-        )
+        if view is ProjectionView.COMPACT:
+            # Compact status exposes the same applicable-check fold as the item and as the
+            # receipt. In particular, an observation-only suffix keeps the check attributable
+            # while qualifying it at its earlier tested frontier; do not let the page-level
+            # coverage silently drop that qualification.
+            compact_coverage = compact_status_coverage(prefix, effective_projection)
+            status_gaps = tuple(
+                sorted(
+                    set(status_gaps) | set(compact_coverage.known_gaps),
+                    key=str.encode,
+                )
+            )
+            coverage = replace(compact_coverage, known_gaps=status_gaps)
+        else:
+            coverage = with_completion_scope_coverage(
+                replace(prefix[-1].coverage, known_gaps=status_gaps), effective_projection
+            )
         page = ProjectionPage(
             query.view,
             selected,
@@ -2120,10 +2318,40 @@ class MemoryLedgerAdapter:
         request_digest: str,
     ) -> FrozenCase | CheckCommitResult:
         key = (writer_id, request_id)
+        try:
+            result = await self._freeze_case_unrecorded(
+                session_id, writer_id, expected_frontier, request_id, request_digest
+            )
+        except PublicOperationError as exc:
+            stage = check_admission_stage(exc)
+            if stage is not None:
+                # Synchronous on purpose: no await may separate the answer from its note, and a
+                # cancelled lock wait must never discard an admission that already happened.
+                note_check_admission_refusal(self._state, key, stage, _now(self._clock))
+            raise
+        self._state.check_admissions.pop(key, None)
+        return result
+
+    async def lookup_check_admission(
+        self, writer_id: str, operation_id: str
+    ) -> CheckAdmissionRecord | None:
+        async with self._lock:
+            return check_admission_record(self._state, (writer_id, operation_id), _now(self._clock))
+
+    async def _freeze_case_unrecorded(
+        self,
+        session_id: str,
+        writer_id: str,
+        expected_frontier: int | None,
+        request_id: str,
+        request_digest: str,
+    ) -> FrozenCase | CheckCommitResult:
+        key = (writer_id, request_id)
         prior_record: OperationRecord | None = None
         projection: ProjectionState | None = None
         frontier: Frontier | None = None
         records: tuple[LedgerRecord, ...] | None = None
+        object_refs: dict[str, ObjectRef] | None = None
         acquisition_reservation: _CheckReservation | None = None
         async with self._lock:
             prior = self._state.operations.get(key)
@@ -2164,7 +2392,7 @@ class MemoryLedgerAdapter:
                 prior_record = record
             else:
                 if self._pending_import(session_id):
-                    raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+                    raise check_admission_refused(CheckAdmissionStage.IMPORT_PENDING)
                 projection = self._state.projection
                 frontier = Frontier(projection.frontier, projection.head_digest)
                 # Observation-only motion past the caller's frontier is tolerated by freezing at
@@ -2179,6 +2407,7 @@ class MemoryLedgerAdapter:
                 ):
                     raise _frontier_conflict(frontier)
                 records = self._state.records
+                object_refs = dict(self._state.object_refs)
                 writer = self._state.writers.get(writer_id)
                 if writer is None or writer.session_id != session_id:
                     raise _error(PublicErrorCode.SESSION_NOT_FOUND)
@@ -2186,9 +2415,10 @@ class MemoryLedgerAdapter:
                 # that stayed active through acquisition would race the freeze it just tolerated.
                 reservation = self._state.check_reservations.get(key)
                 if reservation is not None and reservation.expires_at > _now(self._clock):
-                    raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+                    raise check_admission_refused(CheckAdmissionStage.ACQUIRING)
                 acquisition_reservation = _CheckReservation(
-                    session_id, _now(self._clock) + timedelta(seconds=60)
+                    session_id,
+                    _now(self._clock) + timedelta(seconds=CHECK_ACQUISITION_RESERVATION_SECONDS),
                 )
                 self._state.check_reservations[key] = acquisition_reservation
         if prior_record is not None:
@@ -2212,6 +2442,7 @@ class MemoryLedgerAdapter:
                 _, renewed = self._replace_pending_record(prior_record)
                 return FrozenCase(case, renewed)
         assert projection is not None and frontier is not None and records is not None
+        assert object_refs is not None
         try:
             availability = await self.load_case_availability(session_id, frontier, projection)
             try:
@@ -2250,12 +2481,32 @@ class MemoryLedgerAdapter:
             resume_ref = await self._objects.finalize(staged)
             async with self._lock:
                 if key in self._state.operations:
-                    raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+                    # Another invocation admitted this exact key after this one's reservation
+                    # lapsed; the replay converges on that operation.
+                    raise check_admission_refused(CheckAdmissionStage.ACQUIRING)
+                current_reservation = self._state.check_reservations.get(key)
+                if (
+                    acquisition_reservation is not None
+                    and current_reservation is not acquisition_reservation
+                ):
+                    # A successor may replace an expired reservation while this invocation is
+                    # staging.  Its exact token owns the admission; this stale attempt must not
+                    # overwrite the successor or win the race itself.
+                    raise check_admission_refused(
+                        CheckAdmissionStage.ACQUIRING
+                        if current_reservation is not None
+                        else CheckAdmissionStage.ACQUISITION_CONTENDED
+                    )
                 current = Frontier(
                     self._state.projection.frontier, self._state.projection.head_digest
                 )
                 if current != frontier or self._pending_import(session_id):
                     raise _frontier_conflict(current)
+                if self._state.object_refs != object_refs:
+                    # Case availability includes the object inventory.  A concurrent inventory
+                    # refresh can change that input without moving the ledger frontier, so the
+                    # staged case must be retried instead of admitting stale availability.
+                    raise check_admission_refused(CheckAdmissionStage.ACQUISITION_CONTENDED)
                 operation = OperationRecord(
                     writer_id,
                     request_id,
@@ -2754,6 +3005,85 @@ class MemoryLedgerAdapter:
             self._state.disclosure_waits[job_id] = resolved
             return resolved
 
+    async def begin_semantic_progress(
+        self, job_id: str, queued_at: datetime, deadline_at: datetime
+    ) -> None:
+        progress = SemanticProgressRecord(
+            job_id, 0, SemanticProgressPhase.QUEUED, queued_at, queued_at, deadline_at
+        )
+        async with self._lock:
+            job = self._state.jobs.get(job_id)
+            if (
+                job is None
+                or job.state not in {"queued", "leased"}
+                or job_id in self._state.semantic_progress
+            ):
+                return
+            self._state.semantic_progress[job_id] = progress
+
+    async def advance_semantic_progress(
+        self,
+        handle: SemanticAttemptHandle,
+        phase: SemanticProgressPhase,
+        observed_at: datetime,
+    ) -> bool:
+        if (
+            type(handle) is not SemanticAttemptHandle
+            or type(phase) is not SemanticProgressPhase
+            or phase is SemanticProgressPhase.TERMINAL
+            or type(observed_at) is not datetime
+        ):
+            raise _error(PublicErrorCode.INVALID_REQUEST)
+        async with self._lock:
+            job = self._state.jobs.get(handle.job_id)
+            current = self._state.semantic_progress.get(handle.job_id)
+            if (
+                job is None
+                or current is None
+                or job.state != "leased"
+                or job.active_attempt_id != handle.attempt_id
+            ):
+                return False
+            rank = SEMANTIC_PROGRESS_PHASE_RANK
+            if (handle.attempt_ordinal, rank[phase]) <= (
+                current.attempt_ordinal,
+                rank[current.phase],
+            ):
+                return False
+            self._state.semantic_progress[handle.job_id] = replace(
+                current,
+                attempt_ordinal=handle.attempt_ordinal,
+                phase=phase,
+                phase_entered_at=max(observed_at, current.phase_entered_at),
+            )
+            return True
+
+    async def load_semantic_progress(
+        self, writer_id: str, operation_id: str
+    ) -> SemanticProgressRecord | None:
+        async with self._lock:
+            matches = tuple(
+                job
+                for job in self._state.jobs.values()
+                if job.writer_id == writer_id and job.operation_id == operation_id
+            )
+            if not matches:
+                return None
+            job = max(matches, key=lambda item: (item.attempt_count, item.job_id))
+            current = self._state.semantic_progress.get(job.job_id)
+            if current is None:
+                return None
+            if job.state in {"queued", "leased"}:
+                return current
+            assert job.terminal_at is not None
+            return replace(
+                current,
+                phase=SemanticProgressPhase.TERMINAL,
+                phase_entered_at=max(job.terminal_at, current.phase_entered_at),
+                terminal_outcome=cast(Literal["succeeded", "failed", "quarantined"], job.state),
+                terminal_reason=job.terminal_code,
+            )
+
     async def renew_leases(self, lease: OperationLease) -> OperationLease:
         async with self._lock:
             record = self._require_lease(lease)
@@ -2949,7 +3279,9 @@ class MemoryLedgerAdapter:
             payload_ref = await self._objects.finalize(staged)
             schema = EventSchema(
                 "finding_recorded" if type(payload) is FindingRecordedPayload else "check_recorded",
-                SEMANTIC_EVENT_SCHEMA_VERSION,
+                FINDING_EVENT_SCHEMA_VERSION
+                if type(payload) is FindingRecordedPayload
+                else SEMANTIC_EVENT_SCHEMA_VERSION,
             )
             entries.append(
                 AppendEntry(

@@ -70,7 +70,16 @@ Host recovery follows that integration's reported continuation; installed plugin
 live MCP runtime. Read the Recovery section of
 [coverage-and-receipts.md](references/coverage-and-receipts.md) when a route or binding fails.
 A host auto-review hold is not a Yoetz result; preserve the exact proposed
-request and do not switch to local-only while required approval is pending.
+request and do not switch to local-only while required approval is pending. A hold does not establish
+the Yoetz grant state. State existing repository authorization only after a current first-hand
+read confirms it; configured routing alone is not consent, and host approval remains separate.
+
+Capacity and cost changes need a disclosed choice: never choose a larger or uncapped local
+observation capacity for an ordinary task. When the user asks, run `yoetz observe
+selection-preview`, relay its scope, current and requested values, local-hardware consequences,
+remaining limits, and lower/pause/resume path, and apply only after the user accepts that preview.
+A no-cap request returns `capacity_no_cap_unsupported`; relay it with the largest supported
+alternative. See "Change local retention capacity" in [workflow.md](references/workflow.md).
 
 Same-task recovery comes before a new task. On an ambiguous write, use `status view=operation` with
 `filter.operation_request_id` set to the exact write request ID. Replay the exact original body with

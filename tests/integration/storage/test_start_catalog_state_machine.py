@@ -12,6 +12,7 @@ from pathlib import Path
 import apsw
 import pytest
 
+from yoetz.adapters.sqlite.migrations import initialize_catalog
 from yoetz.adapters.sqlite.start_catalog import SqliteStartCatalog
 from yoetz.domain.values import Frontier
 from yoetz.ports.runtime import StartCompletionEvidence, StartMilestone
@@ -334,6 +335,49 @@ async def test_workspace_ref_groups_sibling_tasks_and_pair_attaches() -> None:
 
 
 @pytest.mark.anyio
+async def test_prebirth_auto_grouping_preference_is_durable_without_project_birth() -> None:
+    installation_id = _id(IdKind.INSTALLATION, 850)
+    database = apsw.Connection(":memory:")
+    initialize_catalog(database)
+    database.executemany(
+        "INSERT INTO catalog_meta(key, value) VALUES(?, ?)",
+        (("installation_id", installation_id), ("owner_generation", "1")),
+    )
+    clock = _Clock(datetime(2026, 7, 19, 12, 0, tzinfo=UTC))
+    catalog = SqliteStartCatalog(
+        database,
+        installation_id=installation_id,
+        lookup=_Lookup(),
+        clock=clock,
+        ids=_Ids(),
+    )
+    repository = "hmac-sha256:" + "a" * 64
+
+    assert await catalog.repository_auto_grouping_enabled(repository) is True
+    assert await catalog.set_project_auto_grouping(repository, enabled=False) is None
+    assert await catalog.repository_auto_grouping_enabled(repository) is False
+    assert database.execute("SELECT COUNT(*) FROM projects").fetchone() == (0,)
+    assert database.execute(
+        "SELECT auto_grouping FROM repository_grouping_preferences WHERE repository_commitment = ?",
+        (repository,),
+    ).fetchone() == (0,)
+
+    assert await catalog.ensure_repository_project_if_auto_grouping_enabled(repository) is None
+    assert database.execute("SELECT COUNT(*) FROM projects").fetchone() == (0,)
+    project = await catalog.ensure_repository_project(repository)
+    assert project.auto_grouping is False
+    assert database.execute("SELECT COUNT(*) FROM projects").fetchone() == (1,)
+
+    updated = await catalog.set_project_auto_grouping(repository, enabled=True)
+    assert updated is not None and updated.auto_grouping is True
+    assert await catalog.repository_auto_grouping_enabled(repository) is True
+    assert database.execute(
+        "SELECT auto_grouping FROM repository_grouping_preferences WHERE repository_commitment = ?",
+        (repository,),
+    ).fetchone() == (1,)
+
+
+@pytest.mark.anyio
 async def test_pending_operation_recovery_preserves_workspace_before_explicit_sibling() -> None:
     """A pending pair can recover while a different pair creates one workspace sibling."""
 
@@ -415,6 +459,7 @@ async def test_pending_operation_recovery_preserves_workspace_before_explicit_si
     with pytest.raises(PublicOperationError) as conflict:
         await harness.catalog.reserve_or_resume(explicit_sibling)
     assert conflict.value.code is PublicErrorCode.SESSION_CONFLICT
+    assert conflict.value.safe_details == {"reason_code": "workspace_task_exists"}
     assert await harness.catalog.list_workspace_task_ids(workspace) == tuple(
         sorted((pending.task_id, sibling.task_id))
     )
@@ -437,6 +482,7 @@ async def test_pending_operation_recovery_preserves_workspace_before_explicit_si
     with pytest.raises(PublicOperationError) as completed_conflict:
         await harness.catalog.reserve_or_resume(explicit_sibling)
     assert completed_conflict.value.code is PublicErrorCode.SESSION_CONFLICT
+    assert completed_conflict.value.safe_details == {"reason_code": "workspace_task_exists"}
     assert await harness.catalog.list_workspace_task_ids(workspace) == tuple(
         sorted((pending.task_id, sibling.task_id))
     )

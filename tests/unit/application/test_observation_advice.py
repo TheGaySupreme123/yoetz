@@ -6,6 +6,7 @@ import asyncio
 import io
 import json
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import get_args
 
@@ -21,6 +22,7 @@ from yoetz.application.observation_advice import (
     minimized_semantic_evidence_packet,
     select_advice_item,
     select_standing_item,
+    semantic_state_from_addon,
     should_reissue_advice,
 )
 from yoetz.application.observation_coordinator import (
@@ -94,6 +96,62 @@ def test_zero_cooperative_publications_still_yields_advice() -> None:
     assert snapshot.ranked_items[0].summary
     assert snapshot.recommended_next_action == "resolve_failed_command"
     assert "SECRET" not in snapshot.recommended_next_action
+
+
+def _stale_finding_ids(envelopes: tuple[ObservationEnvelope, ...]) -> list[object]:
+    snapshot = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=envelopes,
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            has_real_observation=True,
+        )
+    )
+    assert snapshot is not None
+    return [
+        item.finding_id
+        for item in _materialized_advice_items(snapshot.ranked_items)
+        if item.rule_code == "edit_after_successful_check"
+    ]
+
+
+def test_paired_edit_mints_one_stable_advice_finding_id() -> None:
+    """Issue #680: a paired host edit is one receipt-blocking condition."""
+
+    check = _envelope(
+        "hook:check",
+        {"tool_name": "pytest", "exit_status": 0, "correlation_id": "check-1"},
+        pos=1,
+    )
+    pre = replace(
+        _envelope(
+            "hook:write-pre",
+            {
+                "tool_name": "Write",
+                "tool_call_id": "call-1",
+                "action": "claude_tool_pending",
+                "changed_paths_digest": "sha256:" + "b" * 64,
+            },
+            pos=2,
+        ),
+        event_kind="PreToolUse",
+    )
+    post = _envelope(
+        "hook:write-post",
+        {
+            "tool_name": "Write",
+            "tool_call_id": "call-1",
+            "action": "claude_tool_success",
+            "success": True,
+            "changed_paths_digest": "sha256:" + "b" * 64,
+        },
+        pos=3,
+    )
+    paired = _stale_finding_ids((check, pre, post))
+    assert len(paired) == 1
+    # The later phase and the wider evidence window keep the same identity, so
+    # the coordinator appends one ``finding_recorded`` event for this edit.
+    assert _stale_finding_ids((check, pre)) == paired
 
 
 def test_completion_without_verification_is_clear() -> None:
@@ -372,6 +430,127 @@ def test_semantic_text_clipping_is_an_explicit_coverage_gap() -> None:
             "semantic_evidence": "sha256:" + "a" * 64,
         },
     )
+
+
+def test_semantic_state_from_addon_uses_attempt_status_not_finding_count() -> None:
+    assert semantic_state_from_addon(None) == "disabled"
+    pending = ObservationAdviceSemanticAddon(
+        finding_ids=(),
+        evidence_digest=None,
+        failure_reason="pending",
+    )
+    failed = ObservationAdviceSemanticAddon(
+        finding_ids=(),
+        evidence_digest=None,
+        failure_reason="transport_unavailable",
+    )
+    succeeded_empty = ObservationAdviceSemanticAddon(
+        finding_ids=(),
+        evidence_digest="sha256:" + "b" * 64,
+        summaries=(),
+        details=(),
+    )
+    succeeded_with_findings = ObservationAdviceSemanticAddon(
+        finding_ids=(finding_id("fnd_00000000-0000-4000-8000-000000000009"),),
+        evidence_digest="sha256:" + "c" * 64,
+        summaries=("note",),
+        details=("detail",),
+    )
+    assert semantic_state_from_addon(pending) == "unavailable"
+    assert semantic_state_from_addon(failed) == "failed"
+    assert semantic_state_from_addon(succeeded_empty) == "ready"
+    assert semantic_state_from_addon(succeeded_with_findings) == "ready"
+
+
+def test_successful_empty_review_is_ready_not_disabled() -> None:
+    envelope = _envelope(
+        "hook:fail", {"tool_name": "shell", "exit_status": 2, "correlation_id": "x1"}
+    )
+    disabled = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=(envelope,),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            has_real_observation=True,
+        )
+    )
+    ready = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=(envelope,),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            has_real_observation=True,
+            semantic_addon=ObservationAdviceSemanticAddon(
+                finding_ids=(),
+                evidence_digest="sha256:" + "b" * 64,
+                summaries=(),
+                details=(),
+            ),
+        )
+    )
+    assert disabled is not None
+    assert ready is not None
+    assert disabled.semantic_attempt_state == "disabled"
+    assert ready.semantic_attempt_state == "ready"
+    assert not any(item.origin == "semantic_model_derived" for item in ready.ranked_items)
+    # The attempt state is not coverage: only validated finding ids add the AI-powered check type
+    # (docs/INTERFACES.md), so a zero-finding review stays an honest receipt, not a finding.
+    assert "semantic_model_derived" not in {
+        check.value for check in ready.confidence_coverage.check_types
+    }
+    assert should_reissue_advice(disabled, ready)
+
+
+def test_attempt_state_change_reissues_even_with_unchanged_suppression_identity() -> None:
+    envelope = _envelope(
+        "hook:fail", {"tool_name": "shell", "exit_status": 2, "correlation_id": "x1"}
+    )
+    disabled = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=(envelope,),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            has_real_observation=True,
+        )
+    )
+    assert disabled is not None
+    # A review that completes with no findings and no evidence digest changes neither the basis
+    # nor the suppression identity; only the recorded attempt state moves.
+    ready = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=(envelope,),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            has_real_observation=True,
+            prior_snapshot=disabled,
+            semantic_addon=ObservationAdviceSemanticAddon(finding_ids=(), evidence_digest=None),
+        )
+    )
+    assert ready is not None
+    assert ready.suppression_identity == disabled.suppression_identity
+    assert ready.semantic_attempt_state == "ready"
+
+
+def test_invalid_semantic_only_output_is_a_failed_attempt_without_coverage() -> None:
+    snapshot = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=(),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            semantic_addon=ObservationAdviceSemanticAddon(
+                finding_ids=("invalid-finding-id",),  # type: ignore[arg-type]
+                evidence_digest="sha256:" + "f" * 64,
+                summaries=("Provider note",),
+                details=("Provider detail",),
+            ),
+        )
+    )
+    assert snapshot is not None
+    assert "advice_semantic_output_invalid" in snapshot.confidence_coverage.known_gaps
+    assert "semantic_model_derived" not in {
+        check.value for check in snapshot.confidence_coverage.check_types
+    }
+    assert snapshot.semantic_attempt_state == "failed"
 
 
 def test_empty_semantic_result_does_not_create_deterministic_fallback() -> None:
@@ -1165,3 +1344,119 @@ def test_secret_like_command_output_absent_from_advice_surfaces(tmp_path: Path) 
     assert "AWS_SECRET" not in encoded
     assert "hunter2" not in encoded
     assert "password" not in encoded
+
+
+def _attention_snapshot(token: str) -> AdviceSnapshot:
+    snapshot = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=(_envelope("hook:one", {"tool_name": "shell"}),),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            composition=ObservationCompositionFact(
+                semantic_configured=True,
+                semantic_ready=True,
+                provider_factory_ids=("openai-codex",),
+                connected_provider_ids=("openai-codex",),
+                semantic_attention=token,
+                semantic_attention_provider="openai-codex",
+            ),
+            has_real_observation=True,
+        )
+    )
+    assert snapshot is not None
+    return snapshot
+
+
+def test_codex_sign_in_attention_tells_the_agent_to_involve_the_user() -> None:
+    """An expired Codex login reaches the agent as actionable standing advice (#819)."""
+
+    snapshot = _attention_snapshot("sign_in_required")
+    item = select_standing_item(snapshot)
+    assert item is not None
+    assert item.rule_code == "semantic_sign_in_required"
+    assert item.recommended_next_action == "renew_provider_sign_in"
+    # Standing machine conditions never ride the per-tool channel or the task ledger.
+    assert select_advice_item(snapshot, allow_standing=False) is not item
+    assert item not in _materialized_advice_items(snapshot.ranked_items)
+
+    text = hook_advice_context(snapshot, item=item)
+    assert len(text) <= 512
+    assert text.startswith("Yoetz: AI-powered review needs the user to sign in to Codex again.")
+    assert "Next: renew_provider_sign_in. Tell the user now." in text
+    assert "subagent" in text
+    assert "`yoetz provider codex-subscription setup`" in text
+    assert "`--device-code`" in text
+    assert "the user completes sign-in" in text
+    assert text.endswith("Evidence: openai-codex.")
+
+
+def test_each_repairable_cause_renders_its_own_reason_and_repair() -> None:
+    expectations = {
+        "credential_rejected": ("stored credential", "`yoetz provider status`"),
+        "access_denied": ("account or plan", "`yoetz provider status`"),
+        "quota_exhausted": ("usage quota exhausted", "`yoetz provider status`"),
+        "model_unavailable": ("no longer offered", "`yoetz provider status`"),
+        "runtime_update_required": (
+            "newer Yoetz release",
+            "restart Codex, Claude Code, or Cursor",
+        ),
+    }
+    texts: set[str] = set()
+    for token, (reason, repair) in expectations.items():
+        snapshot = _attention_snapshot(token)
+        item = select_standing_item(snapshot)
+        assert item is not None and item.rule_code == "semantic_provider_attention"
+        text = hook_advice_context(snapshot, item=item)
+        assert len(text) <= 512
+        assert reason in item.detail
+        assert repair in text
+        assert "Tell the user now." in text
+        texts.add(advice_delivery_identity(snapshot, item=item))
+    # A changed cause is a changed condition, so it is delivered again rather than suppressed.
+    assert len(texts) == len(expectations)
+
+
+def test_connect_provider_keeps_its_token_and_gains_a_user_facing_repair() -> None:
+    snapshot = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=(),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            composition=ObservationCompositionFact(
+                semantic_configured=True,
+                semantic_ready=False,
+                provider_factory_ids=("fireworks",),
+                connected_provider_ids=(),
+            ),
+        )
+    )
+    assert snapshot is not None
+    text = hook_advice_context(snapshot, item=select_standing_item(snapshot))
+    assert "Next: connect_provider. Tell the user now." in text
+    assert "`yoetz provider status`" in text
+
+
+def test_model_derived_advice_cannot_claim_an_attempt_derived_repair() -> None:
+    """Only the service's own attempt outcomes may tell the user to sign in or update."""
+
+    finding = finding_id("fnd_00000000-0000-4000-8000-000000000819")
+    snapshot = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=(),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            semantic_addon=ObservationAdviceSemanticAddon(
+                finding_ids=(finding,),
+                evidence_digest="sha256:" + "e" * 64,
+                next_action="renew_provider_sign_in",
+                summaries=("Provider note",),
+                details=("Provider detail",),
+            ),
+        )
+    )
+    assert snapshot is not None
+    assert snapshot.recommended_next_action == "reground_status"
+    assert all(
+        item.recommended_next_action != "renew_provider_sign_in" for item in snapshot.ranked_items
+    )
+    assert "advice_semantic_output_invalid" in snapshot.confidence_coverage.known_gaps

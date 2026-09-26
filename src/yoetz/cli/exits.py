@@ -9,10 +9,13 @@ from yoetz.protocol.errors import PublicErrorCode
 
 __all__ = [
     "CEREMONY_REFUSAL_MESSAGES",
+    "CONFIG_CONSTRAINT_REASONS",
     "INSTANCE_PUBLIC_CODES",
     "LIFECYCLE_PUBLIC_CODES",
+    "LOCAL_REASONS",
     "PUBLIC_EXIT_CODES",
     "REMEDIATION_MESSAGES",
+    "VAULT_RESULT_REASON_PREFIX",
     "ceremony_refusal_message",
     "exit_code_for",
     "lifecycle_public_code",
@@ -400,11 +403,11 @@ REMEDIATION_MESSAGES: Final = MappingProxyType(
 )
 
 
-def remediation_message(reason: str) -> str | None:
-    """Return the next-step half of an operator-facing line for a bounded token, or None."""
-
-    message = REMEDIATION_MESSAGES.get(reason)
-    if message is None and reason in {
+# Profile and field constraints the configuration model refuses as a family: one remediation
+# answers all of them, and the token names which constraint was violated. Held as a named
+# constant rather than inline so the coverage ratchet below can range over it.
+CONFIG_CONSTRAINT_REASONS: Final[frozenset[str]] = frozenset(
+    {
         "external_profile_forbids_local_model",
         "external_runtime_forbids_local_model",
         "external_runtime_forbids_provider",
@@ -421,12 +424,24 @@ def remediation_message(reason: str) -> str | None:
         "strict_local_forbids_provider",
         "test_fake_forbids_local_model",
         "test_fake_forbids_provider",
-    }:
+    }
+)
+
+# The one generated local family. Every ``vault_result_<condition>`` names an exact service
+# condition, and they share one remediation and one recovery directive.
+VAULT_RESULT_REASON_PREFIX: Final = "vault_result_"
+
+
+def remediation_message(reason: str) -> str | None:
+    """Return the next-step half of an operator-facing line for a bounded token, or None."""
+
+    message = REMEDIATION_MESSAGES.get(reason)
+    if message is None and reason in CONFIG_CONSTRAINT_REASONS:
         return (
             "the selected Yoetz configuration violates the named profile or field constraint; "
             "correct that profile/section in config.toml, then retry"
         )
-    if message is None and reason.startswith("vault_result_"):
+    if message is None and reason.startswith(VAULT_RESULT_REASON_PREFIX):
         # One remediation for the whole family: the token names the exact service condition,
         # and the consent approval was consumed as failed, never recorded as approved.
         return (
@@ -435,3 +450,40 @@ def remediation_message(reason: str) -> str | None:
             "named condition, then run 'yoetz consent prepare <operation>' and authorize again"
         )
     return message
+
+
+# Every bounded reason this module can put in front of an operator. ``REMEDIATION_MESSAGES`` and
+# ``CEREMONY_REFUSAL_MESSAGES`` hold the per-reason remedy; the public-code tables hold reasons
+# that reach an operator through an exit code with no remedy of their own. The ratchet below
+# ranges over the union, so widening any of them is what trips the gate.
+LOCAL_REASONS: Final[frozenset[str]] = frozenset(
+    set(REMEDIATION_MESSAGES)
+    | set(CEREMONY_REFUSAL_MESSAGES)
+    | set(LIFECYCLE_PUBLIC_CODES)
+    | set(INSTANCE_PUBLIC_CODES)
+    | CONFIG_CONSTRAINT_REASONS
+)
+
+
+def _check_local_reason_coverage() -> None:
+    """Fail at import when a local CLI reason has nothing to tell an agent to do (issue #741).
+
+    The mirror of the protocol-side ratchet in ``yoetz.protocol.recovery``, applied to the second,
+    disjoint reason vocabulary this module owns. Before ADR-030 reached the CLI, forty of these
+    reasons carried a remediation sentence and no typed directive, so the same condition that got
+    a directive over MCP got none in a shell. A reason is answered when it resolves through
+    ``continuation_for_local_reason``, or when it is also a protocol reason code whose disposition
+    was already recorded on that side -- ``service_draining`` is the one member in that state, and
+    its directive is owned by a later sub-issue of #739.
+    """
+
+    from yoetz.protocol.recovery import local_reason_has_disposition
+
+    for reason in LOCAL_REASONS:
+        if not local_reason_has_disposition(reason):
+            raise RuntimeError("local_reason_without_recovery_disposition")
+    if not local_reason_has_disposition(f"{VAULT_RESULT_REASON_PREFIX}keyring_unavailable"):
+        raise RuntimeError("local_reason_without_recovery_disposition")
+
+
+_check_local_reason_coverage()

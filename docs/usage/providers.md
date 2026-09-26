@@ -23,6 +23,13 @@ yoetz provider endpoint --provider openai            # or: fireworks, anthropic,
 
 Shorthands: `--official`, `--fireworks`, and `--grok` (Grok / xAI).
 
+The Grok / xAI preset binds xAI's OpenAI-compatible Chat Completions endpoint. xAI documents that
+endpoint as legacy and says new features reach its Responses API first; it publishes no sunset
+date. Yoetz keeps the preset on Chat Completions: the route is still documented and served, and it
+is the route whose data-use posture Yoetz reviewed. Giving the preset a Responses route would
+change the endpoint it binds, so that is a separate change with its own review — refreshing the
+suggested models does not depend on it.
+
 Reviewed presets use each provider's documented compatible wire style where applicable. **Every
 reviewed preset resolves to a real runtime factory** — a preset you can select is a preset Yoetz can
 dispatch.
@@ -41,9 +48,19 @@ setup, the prompt-loop provider menu, `/provider`, or run:
 yoetz provider codex-subscription setup --executable /absolute/path/to/codex
 ```
 
-New setups preselect `gpt-5.6-luna` with reasoning effort `high`. When an existing subscription
-binding is targeted, omitting `--model` preserves its exact model, including during account
-switching. Pass `--model` to change it intentionally.
+New setups preselect `gpt-5.6-luna` with reasoning effort `high` for final reviews and `medium`
+for routine checkpoints. A check counts as final when your task has recorded a completion claim;
+every earlier check is a routine checkpoint, which can use a lower effort than final reviews. Use
+`--reasoning-effort` and `--routine-reasoning-effort` to choose each one. When an existing
+subscription binding is targeted, omitting `--model` preserves its exact model, and omitting
+`--routine-reasoning-effort` preserves its routine choice, including during account switching. A
+binding created before routine checkpoints existed keeps using its single effort for every check
+until you choose a routine effort. Pass `--model` to change the model intentionally.
+
+Each profile also has an output limit in tokens: 4096 for routine checkpoints and 8192 for final
+reviews, adjustable from 1 to 8192. A review whose answer exceeds its limit is stopped and
+reported as an invalid answer, and it is not retried. The check result and receipt name the
+exact model, reasoning effort, and output limit each review used.
 
 The selected executable can be an npm wrapper with the matching native package nested below that
 wrapper (`@openai/codex-darwin-arm64` on macOS arm64 or `@openai/codex-linux-x64` on Linux x86_64),
@@ -191,19 +208,24 @@ previous Enter-to-accept behavior. The remaining entries are a repository-review
 recent provider-recommended/current model families, never more than ten total, followed by an
 explicit **Custom model ID** option. No popularity ranking is claimed.
 
-The catalog was reviewed on 2026-08-10 against the provider-owned model sources: OpenAI [model
-guidance](https://developers.openai.com/api/docs/guides/latest-model), Fireworks [Responses API
-documentation](https://docs.fireworks.ai/guides/response-api), Anthropic [models
-overview](https://platform.claude.com/docs/en/about-claude/models/overview), Google [latest Gemini
-models](https://ai.google.dev/gemini-api/docs/latest-model), OpenRouter's [model catalog
-contract](https://openrouter.ai/docs/guides/overview/models), xAI's [model
-list](https://docs.x.ai/developers/models), and Vercel's [AI Gateway model
-catalog](https://vercel.com/ai-gateway/models). The Fireworks list also retains
-`accounts/fireworks/models/minimax-m3`, which has prior repository-recorded live AI-powered review
-provenance. The lists are static so setup stays deterministic and opens no new network or credential
-channel; they can age, may not match account entitlements, and do not establish Yoetz's exact
-structured-output compatibility. Use the custom entry for any new, private, preview,
-region-specific, or omitted model.
+The catalog was reviewed on 2026-08-10 against the provider-owned model sources: OpenAI
+[model guidance](https://developers.openai.com/api/docs/guides/latest-model), Fireworks
+[Responses API documentation](https://docs.fireworks.ai/guides/response-api), Anthropic
+[models overview](https://platform.claude.com/docs/en/about-claude/models/overview), Google
+[latest Gemini models](https://ai.google.dev/gemini-api/docs/latest-model), OpenRouter's
+[model catalog contract](https://openrouter.ai/docs/guides/overview/models), xAI's
+[model list](https://docs.x.ai/developers/models), and Vercel's
+[AI Gateway model catalog](https://vercel.com/ai-gateway/models).
+The Grok / xAI entry was re-reviewed on 2026-09-17 against the same xAI model list: `grok-4.6` is
+the model xAI now recommends, so it is the preset default and heads the list, and the older Grok
+models stay listed while xAI lists them. The Grok entries inside the OpenRouter and Vercel AI
+Gateway lists were re-reviewed against those gateways' own published catalogs on the same day and
+follow the identifier each gateway publishes today, which is not always the identifier xAI uses.
+The Fireworks list also retains `accounts/fireworks/models/minimax-m3`, which has prior
+repository-recorded live AI-powered review provenance. The lists are static so setup stays deterministic
+and opens no new network or credential channel; they can age, may not match account entitlements,
+and do not establish Yoetz's exact structured-output compatibility. Use the custom entry for any
+new, private, preview, region-specific, or omitted model.
 
 Scripts remain explicit and noninteractive:
 
@@ -275,6 +297,10 @@ endpoint_profile_version = "1.0.0"
 credential_authority = "external_runtime_oauth"
 # exact executable/home paths, SHA-256 commitments, runtime/source/capability identities,
 # model, reasoning effort, timeout, and retry cap follow; no OAuth value is valid here
+# optional routine/final review budgets (output limits count tokens, 1-8192):
+# routine_reasoning_effort = "medium"
+# routine_output_limit = 4096
+# final_output_limit = 8192
 ```
 
 Primary/fallback pairing (issue #582): both tables above stay bound and a nonsecret selector names

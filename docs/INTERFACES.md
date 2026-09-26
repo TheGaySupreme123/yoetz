@@ -54,7 +54,12 @@ CSPRNG. Opaque, case-sensitive, never parsed for order or meaning.
 | `egress_authorization` | `aut_` | trusted local service privacy audit authority |
 | `egress_dispatch` | `dsp_` | trusted local service immediately before physical dispatch |
 | `egress_receipt` | `egr_` | trusted local service privacy audit |
+| `project` | `prj_` | trusted local service project coordinator |
 | `actor` | `agt_` (convention) | caller-asserted; format-validated only |
+
+`IdKind.project` uses prefix `prj_` and is server-generated under the same
+`<prefix>_<lowercase UUIDv4>` rule. Catalog minting and `new_id(IdKind.PROJECT)` use the shared
+identifier registry; membership commitments never substitute for a project identifier.
 
 For `publish_work`, public event IDs are caller-generated and stable across retry. The lifecycle,
 response, check, finding, and receipt events created by the engine receive IDs from the injected
@@ -115,19 +120,25 @@ keys. `SESSION_NOT_FOUND` with
 repository_identity_required` (the control handshake carried no workspace locator) or
 `repository_identity_mismatch` (the locator resolved to a different repository than the route, or
 the route holds no repository binding); neither discloses a commitment, and a hook uses the reason
-to keep a live mapping out of the `mapping_stale` class (issue #578). The
-repository-fence message names missing context or the current closed identity kind
+to keep a live mapping out of the `mapping_stale` class (issue #578).
+The repository-fence message names missing context or the current closed identity kind
 (`git_common_root` or `directory`) and directs the operator to the original workspace. It exposes
 no path or commitment. Read-only operation status retains the same fence: when that workspace is
-unavailable, the task workflow cannot inspect the operation (issue #444). The separate
-The legacy `workspace_task_exists` detail may appear in older results and recovery records; the
-limited admission path does not use a workspace-wide guard. An explicit `mode=create` colliding
-with an identical workspace/external pair remains a generic `SESSION_CONFLICT` with no task
-selector or count. Possession of a workspace reference alone is not authority to discover or attach
-another task. A host hook preflights a validated selector it already holds in the private local
-lifecycle store instead of waiting for an admission conflict; any attach still requires that
-selector, and the public error reveals no binding. Other `SESSION_CONFLICT` boundaries remain in
-force, including a repository-fence refusal and a conflicting session/pair selector. For MCP
+unavailable, the task workflow cannot inspect the operation (issue #444).
+`workspace_task_exists` identifies an explicit `mode=create` colliding with an identical
+workspace/external pair. It never refuses a new pair on the automatic admission path. The conflict
+deliberately carries no task selector or count: possession of a workspace reference alone is not
+authority to discover or attach another task. Automatic host hooks preflight a validated selector
+from the private local lifecycle store instead of waiting for this conflict; any attach still
+requires that selector, and the public error remains unchanged and reveals no binding.
+Workspace membership alone never authorizes discovery,
+attachment, or task selection. A live, consented project status may disclose bounded sibling
+identity and state; attachment still requires a held session selector or the exact identity pair.
+Conflicting START selectors return `SESSION_CONFLICT` with `reason_code: selector_conflict`
+before consuming a handle or creating a child. An optional session accompanying an attach handle
+must select that handle's child, and a self-registration request cannot simultaneously select an
+existing session for attachment.
+For MCP
 `INVALID_REQUEST` validation failures, `safe_details` may also carry parallel `fields` and
 `reasons` arrays: each entry is an allowlisted JSON pointer and a closed reason token for that
 location (same index order; at most eight locations). `reason_code` may co-occur with
@@ -236,15 +247,55 @@ A coverage ratchet requires every member of `PROTOCOL_REASON_CODES` to resolve t
 carry an explicit exemption, so a newly registered reason code cannot reach an agent as a bare
 token with nothing to do about it.
 
+The local vocabulary ratchets the same way (issue #741). `yoetz.cli.exits` fails at import unless
+every reason it can put in front of an operator — the keys of `REMEDIATION_MESSAGES`,
+`CEREMONY_REFUSAL_MESSAGES`, `LIFECYCLE_PUBLIC_CODES`, and `INSTANCE_PUBLIC_CODES`, plus the named
+configuration-constraint set — resolves to a directive. The gate lives there rather than in
+`yoetz.protocol.recovery` because the protocol package may not import the CLI. A local reason is
+answered through `continuation_for_local_reason`, or, for the one reason that belongs to both
+namespaces (`service_draining`), through the protocol disposition already recorded for it. The one
+generated family, `vault_result_*`, is matched by the prefix registered in
+`LOCAL_REASON_CONTINUATION_PREFIXES`; every other local reason is enumerated. Thirteen tokens are
+reachable only through the local vocabulary, and no reason code attaches them to a public error.
+
+`REMEDIATION_MESSAGES` remains the per-reason remedy half and is not folded into the registry: the
+registry is keyed by continuation token and its token set must equal the wire-admitted set, its
+directives are bounded at 232 ASCII bytes, and several remedy sentences are byte-locked by CLI
+tests. The remedy names which condition was hit and its exact local command; the directive names
+the recovery rule for that shape. Both render, remedy first.
+
 On the 512-byte MCP text channel the directive is budgeted after the identity and reason clauses,
 and optional parts are dropped from the least load-bearing end — nudge, then guidance pointer, then
 carried commands. The error identity is never dropped to fit advice. The CLI has no such ceiling
 and renders `Continuation:`, `Next:`, `Commands:`, `Guidance:`, and the nudge on separate lines
 beneath the existing `CODE: message` line, and appends the same lines to a bounded lifecycle,
-instance, or ceremony refusal line whose local reason has a registered directive. Frozen command
+instance, or ceremony refusal line whose local reason has a registered directive. Every
+human-rendered CLI error path goes through one of `render_human_error`, `bounded_failure_line`, or
+`ceremony_refusal_line` in `yoetz.cli.render`, so the public-error renderer, the trusted-ceremony
+mapper, the interactive menu, the instance and path refusal line, the observe verbs, and the
+resource-integrity branch of `version` all render the same directive for the same reason. A
+coordination control refusal appends the directive its reason code maps to beneath its remedy line.
+Frozen command
 literals already allowlisted on `safe_details` (`prepare_command`, `review_command`,
 `authorize_command`) are rendered in that fixed order; which of them travel is decided upstream, so
 the clause reports what is present.
+
+JSON renderings carry the continuation token where they already carry `safe_details`. A JSON error
+body the CLI owns (the observe verbs' typed `error` object and the control-failure payload with
+`ok: false`) also carries a `recovery` object whenever the error resolves to a directive (ADR-030,
+issue #741). Its fields mirror the human lines one to one: `continuation`, `directive`, and, when
+present, `commands`, `guidance_uri`, and `nudge`. A claim-revision rejection carries `invariant` and
+`correction` instead of, or alongside, those fields. The CLI resolves the text itself from the
+checked-in registry, the same resolver its human lines use; nothing is read from the wire or from
+the error message. `recovery.continuation` is the stable key. The prose fields are advisory, may be
+reworded in any release without a schema change, and are never accepted back as input. A body with
+no resolvable directive has no `recovery` key.
+
+The workflow commands (`start`, `publish-work`, `check`, `respond`, `status`, `receipt`) print the
+frozen `operation-result-1.0.0` failure body on stdout in JSON or non-TTY mode. That schema admits no
+additional property, so stdout stays byte-identical to the wire result, and the CLI writes the same
+directive lines a terminal would show (`Continuation:`, `Next:`, …) to stderr. Exit codes are
+unchanged throughout.
 
 For `claim_revision_mismatch`, `safe_details` carries an allowlisted `invariant` naming the closed
 domain rule that rejected the draft, and both the MCP text projection and the CLI render an
@@ -262,6 +313,34 @@ Until ADR-030 the invariant travelled only inside the public error message, and 
 recovered it by matching that whole sentence with a regex — so a reworded message silently cost the
 agent the correction. The clause is now independent of message wording, and the projector still
 never echoes the message.
+
+Provider and AI-powered review outcomes (issue #742) resolve through
+`continuation_for_semantic_outcome`. The adapter classifies the physical attempt into the closed
+`SemanticFailureClass` set and discards raw provider text there. Renderers look up a frozen
+directive from the recorded `(semantic_status, semantic_reason)` pair and, when present, that
+`failure_class`. A rejected credential (`authentication` / `authorization`) maps to
+`semantic_credential_rejected` even when the public reason remains the `transport_unavailable`
+catch-all; truncated or overlong output maps to `semantic_response_truncated` from
+`response_content_invalid`; schema-invalid and rejected-judgment answers map to
+`semantic_response_invalid`; capacity and quota map to `semantic_capacity_exceeded`; and
+`retry_budget_exhausted` and `outcome_unknown`, which name how a job ended rather than why, map to
+`semantic_no_judgment`. Every directive follows the check-mode coverage guidance: it never tells an
+agent to downgrade a required review, and it never offers a second job for a truncated answer.
+Predispatch configuration and policy outcomes (`not_configured`, `credential_unavailable`,
+`blocked_by_policy`, and the rest) carry no directive. These tokens
+are admitted continuation tokens and live in the same registry. They are not new public
+`SemanticReason` values and do not change frozen check-result schemas. CLI check rendering and the
+MCP check text summary project the resolved directive (the MCP channel drops the sentence when the
+512-byte budget cannot hold it, keeping the token). Hook advisories never carry a provider-outcome
+token: a hook token is resolved from the hook's own exact reason (`render_hook_recovery_suffix`),
+and today only SessionStart's vault-locked advisory has one (`vault_unlock_required`). Hook contexts
+shared by several reasons (the status-read retry class), the service's retryable `storage_unsafe`
+fault, and a timed-out attachment keep their own instruction without a token. The TUI blocked report
+and receipt human text project the full directive lines from the registry. Compact receipt sentences
+stay frozen. Advice and status `semantic_state` is the recorded attempt status (`ready` / `disabled`
+/ `unavailable` / `failed`), not finding presence: a successful review with zero findings is
+`ready`, and `disabled` means no attempt was requested or configured. The state does not widen
+coverage: only validated AI-powered finding ids add `semantic_model_derived` to advice coverage.
 
 Every MCP result also carries a bounded ASCII text projection (at most 512 bytes) for hosts that
 drop `structuredContent`. A successful projection includes the first valid returned frontier's
@@ -350,8 +429,12 @@ ids/digests; `pending`/`quarantined` report kind without those fields; `absent` 
 them; non-publish completions report kind without append-shaped event detail. A pending check that
 is awaiting repository setup or a one-use disclosure decision reconstructs its typed continuation
 from the routed task ledger using the operation's recorded writer, so a same-task session/writer
-rotation does not strand the decision. Lookups are scoped to the authenticated task. A request
-from another task is reported as absent.
+rotation does not strand the decision. A pending or complete check may also carry structural
+`semantic_progress` (see "Structural semantic progress"). An `absent` page for a check that this
+service is admitting, or recently refused before admission, carries a structural `admission` stage
+(see "Check admission stage"); an `absent` page without it is a request this service knows nothing
+about. Lookups are scoped to the authenticated task. A request from another task is reported as
+absent.
 MCP `publish_work` performs the same envelope-first operation lookup when the supplied body fails
 schema validation (so a malformed retry body can still recover a committed operation) — except
 under a declared `dry_run: true`, which appends nothing, so no prior-operation lookup can change
@@ -434,6 +517,20 @@ free text from input. CLI exit classes (0/2/10/11/20/30/40/70/130) map from code
   `MAX_ORDINARY_CONTROL_FRAME_BYTES = 1_048_576` for every frame except the exact closed
   `import_codex_jsonl` call. That one branch may exceed the ordinary cap only when its canonical
   base64 decodes to at most `MAX_IMPORT_SOURCE_BYTES`; no other method inherits the larger bound.
+- Host hook ingress (`cli/hook_io.py`): `MAX_HOOK_STDIN_BYTES = 262_144` (256 KiB) is the trusted
+  full-parse cap for every host's hook stdin body and is shared by `cli/hooks.py`. A body at or
+  under that cap is parsed in full. Codex, Claude Code, and Cursor's pure
+  `read_cursor_hook_payload` replay raise `payload_too_large` before the NUL scan, the UTF-8
+  decode, and the JSON parse when the body is over that cap; an empty body still raises
+  `invalid_event_value_type`. Cursor observation (`read_cursor_hook_ingress`) may read a complete
+  body up to `MAX_HOOK_SKIM_BYTES = 1_048_576` (1 MiB), the ordinary local-control frame cap. Inside
+  that skim cap the same safety rules parse the document and the handler keeps a closed identity
+  view: session, tool, call id, bounded path text used only for a path commitment, scalar
+  outcome fields, and whether an `error` value was set (never its text). A `workspace_roots`
+  value the view cannot keep becomes `null`, so the workspace resolver refuses it exactly as it
+  does at full size. File contents, edits, prompts, and command text are not retained. A body over
+  the skim cap raises `payload_too_large` before any parse. A complete oversized body that fails
+  the NUL, UTF-8, duplicate-key, or JSON checks yields no identity view (issue #667).
 - Digests render as `sha256:<64 lowercase hex>`; commitments as `hmac-sha256:<64 lowercase hex>`.
 - Writer/ledger sequences and frontier sequences cross the wire as canonical base-10 integer
   strings (`"0" | [1-9][0-9]*`, with writer/ledger sequences positive). This is not a blanket
@@ -857,6 +954,12 @@ Research/evidence-assessment kinds: `evidence_does_not_support_claim`, `diff_doe
 `material_limitation_omitted`, `questionable_finding_rejection` (flags a current hollow
 rejection/waiver of a local finding).
 
+Project coordination adds the local-only `coordination_overlap` kind under the
+`coordination/0.1.0` runtime policy. It is generated from an admitted coordination projection and
+is deliberately excluded from the external semantic case and the frozen
+`provider-judgment-1.0.0` wire under D7. Adding it to an external provider requires a new
+versioned provider contract; the historical 1.0 artifact remains unchanged.
+
 Those two response predicates overlap on one case: a current rejection or waiver of a
 local finding whose support is inadmissible under both packs' evidence criteria. Each pack
 is a closed rule table that cannot observe the other, so both still report it. The check
@@ -871,8 +974,9 @@ lost to a pack that did not run. Selecting a single pack therefore yields that p
 
 The ownership partition is exhaustive and disjoint: the first ten kinds belong to the built-in
 `work-integrity/0.1.0` pack, and the latter four belong to the built-in
-`research-evidence/0.1.0` pack. `semantic-review` is only a review-context / recipe label; it is
-not a `PolicyPack` value and it never appears as `Finding.policy_id`.
+`research-evidence/0.1.0` pack. `coordination_overlap` belongs to the local coordination runtime,
+not either built-in pack. `semantic-review` is only a review-context / recipe label; it is not a
+`PolicyPack` value and it never appears as `Finding.policy_id`.
 
 Finding kind identifies the problem, not who detected it. The research-evidence pack may produce
 the latter four as local checks, and an AI-powered reviewer may propose the same kinds. `origin`
@@ -901,6 +1005,7 @@ inferable from the frozen case.
 | `diff_does_not_match_account` | 1 | true |
 | `material_limitation_omitted` | 1 | true |
 | `questionable_finding_rejection` | 2 | true |
+| `coordination_overlap` | 2 | true |
 
 Ranking uses no prose or implementation-defined scoring. The evidence-strength bucket is the
 lexicographic pair `(artifact_observation ordinal, evidence_immutability ordinal)` using the
@@ -1010,7 +1115,7 @@ the readable effective current plan declares zero obligations, exactly one appli
 Both force `coverage_incomplete`, `insufficient_coverage`, and an insufficient-coverage receipt.
 The typed declaration records the participant's scope decision but never purchases a clean verdict.
 
-Three further codes describe a review that did run but could not deliver everything it produced:
+Four further codes describe a review that did run but could not deliver everything it produced:
 
 - `semantic_review_context_withheld` — the review ran without categories its own profile selected;
 - `semantic_challenges_rejected` — the reviewer returned challenges and post-validation dropped at
@@ -1020,6 +1125,13 @@ Three further codes describe a review that did run but could not deliver everyth
   the case shortened it or replaced the payload with a `yoetz.bounded-content-omission/1` marker.
   The marker's `reason` is `over_case_item_limit`, distinguishing a size drop from the
   `not_selected` omission the selection policy raises for material it declined to carry.
+- `semantic_case_finding_refs_over_limit` — a local finding cites more subjects than one case
+  item may link (`MAX_SEMANTIC_ITEM_SUBJECT_REFS`, 16; a finding may cite up to 64). The finding
+  keeps its identity in `local_check_refs` and in the check result, but the case carries neither
+  its prose nor its projected assessment: both appear as explicit `not_selected` omissions
+  (`finding_summary` and `bounded_structural_metadata`) and this gap names the capacity reason.
+  References are never sliced to fit; a partial subject list presented as the finding's own would
+  be a different finding. The review still dispatches once with the other findings.
 
 Post-validation fences each challenge independently: a rejected challenge costs only itself, the
 challenges beside it still become findings, and the drop is declared through this gap. A judgment
@@ -1531,10 +1643,14 @@ actor-id, actor-type, assurance, and channel predicate. The accepted batch still
 reports the real head. For `operation_kind=receipt`, that suffix must additionally contain no
 `finding_recorded` event, so the pinned receipt cannot append past a finding it did not cover. Any
 other intervening record conflicts. Observation appends receive retryable `OPERATION_PENDING` while
-a check-acquisition reservation or an *active* frozen case for their session is present. A pending
-check whose `suspension_kind` is `repository_grant` is not an active barrier: the standing-grant
-ceremony may never complete, so observation continues and the same request re-installs the barrier
-on replay. Check commit keeps the frozen subject frontier and tolerates an observation-authored
+a check-acquisition reservation or an *active* frozen case for their session is present. A frozen
+case is active only while its pending check holds a live lease under the current owner generation.
+A pending check whose `suspension_kind` is `repository_grant`, whose lease has expired, or whose
+lease belongs to an earlier service generation is not an active barrier: nothing renews it and it
+may never be replayed, so observation continues and the same request re-installs the barrier when
+its replay reclaims the operation (issues #445, #838). Before #838 an abandoned check kept deferring
+the structural delivery of its task's native capture handoffs indefinitely, and every new check on
+the task waited on those handoffs. Check commit keeps the frozen subject frontier and tolerates an observation-authored
 suffix after that frontier the same way acquisition and `append_batch` do; cooperative or importer
 motion still conflicts. The verdict is never retargeted to a frontier the case did not inspect.
 
@@ -1619,7 +1735,8 @@ AI-powered review absence/weakness codes
 semantic_relevance_review_not_run|optional_semantic_review_blocked_by_policy|
 optional_semantic_review_registration_drift|
 semantic_review_context_withheld|semantic_challenges_rejected|
-semantic_case_content_over_item_limit`) plus the evidence-strength codes
+semantic_case_content_over_item_limit|semantic_case_finding_refs_over_limit`) plus the
+evidence-strength codes
 (`evidence_content_digest_only|evidence_content_withheld|evidence_digest_subject_legacy_unknown`)
 and the host-observation codes (`captured_object_unavailable|content_unselected|
 host_outcome_unavailable|unpaired_event`). Those host codes remain receipt coverage limitations;
@@ -1701,6 +1818,7 @@ historical session of the same task),
 `list_workspace_task_ids(workspace_ref_commitment) -> tuple[str, ...]` (task ids only, ascending,
 non-quarantined; no public MCP surface yet),
 `advance_phase(allocation, phase, result: EncryptedResultRef | None = None) -> StartAllocation`,
+`yield_lease(allocation) -> None`,
 `complete(allocation,
 EncryptedResultRef, StartCompletionEvidence)`, and `quarantine(allocation, SafeReason)`. `StartPhase` is
 `route_reserved`, `bundle_ready`, `lifecycle_committed`, `result_published`, `terminal`. IDs and
@@ -1730,46 +1848,385 @@ quarantines the allocation as `STORAGE_CORRUPT`; environmental object I/O remain
 returned as retryable `STORAGE_UNSAFE` so the same request can retry without losing the pinned
 result.
 
+An ordinary start that returns `BUNDLE_BUSY` after reservation attempts the shielded
+`CatalogLeaseYield` transition. `yield_lease` compares the pending row's exact owner generation,
+lease owner, lease generation, and unexpired expiry inside the catalog transaction, then sets
+only the expiry and update time to the current clock. It preserves the request digest, all
+allocated identities, phase, lifecycle event and pinned result. An exact replay reclaims that
+same allocation with a higher lease generation; a changed body still conflicts. Completed,
+quarantined, expired, and superseded leases cannot be yielded. Cancellation and ambiguous failures
+do not take this path, because they do not establish a stopped attempt. If yielding itself fails,
+the original busy error remains and no immediate-replay guarantee is made.
+
+`LocalBundleRuntime.provision_start` waits at most five seconds for a same-bundle, same-authority
+session rebind to drain active usages and pending fence validations. This is below the 60-second
+start lease. The condition releases the cache lock while waiting, bounds waiter admission by
+`max_pending_leases_per_task`, rejects new ordinary acquisitions of the old session while a start
+waits, and keeps waited entries out of idle eviction. Release, failed pending validation and
+shutdown wake the waiters; cancellation removes only the affected waiter. On wake, ordinary
+service readiness, route identity and ownership-fence checks still apply. Other route/authority
+conflicts retain their existing immediate refusal. `runtime_rebind_busy` identifies exhaustion of
+this wait or an ordinary acquisition held back by it; `catalog_busy` identifies an actual SQLite
+transaction lock and `catalog_maintenance_busy` identifies exclusive maintenance admission.
+After successful yield the reason becomes `start_runtime_rebind_retry_ready`,
+`start_catalog_retry_ready`, or conservatively `start_busy_retry_ready` for another producer.
+`start_lease_pending` identifies an exact replay while the same-generation lease is still live.
+These closed tokens support public recovery without publishing paths or caller content. They
+identify reproduced producers; they do not establish which producer caused historical native
+failures recorded in issue #744.
+
 `StartIdentityInput(task_title, workspace_ref?, external_ref?)` is a redacted one-shot value;
 `StartIdentityCommitments(title_commitment, workspace_ref_commitment?,
 external_ref_commitment?)` contains only domain-separated installation-keyed HMAC commitments.
 The application builds the start `request_digest` from those commitments plus nonsecret logical
 fields. `reserve_or_resume` recomputes/verifies them before idempotency or route lookup, preventing
 low-entropy plaintext from leaking through an unkeyed structural request digest. `workspace_ref`
-is the caller-declared project identity and `external_ref` the stable task identity within that project;
+is the caller-declared workspace or working-tree identity and `external_ref` the stable task identity within that workspace;
 together they are the attach selector when `session_id` is absent (`mode=create_or_attach` or
 `attach` with the pair). The `workspace_ref_commitment` is a keyed HMAC of the exact caller
-string, so selector identity is per spelling, not per repository: hook auto-attach on every host
-commits the canonical absolute repository root (a linked worktree is its own root), the packaged
-guidance and the `start` tool description tell agents to use that same root and never a remote URL,
-and the SessionStart context names the mapped `session_id` and `writer_id` so an agent attaches to
-the hook-mapped task by session selector instead of guessing the hook's pair. A differently spelled
-`workspace_ref` is a distinct selector and can create independent work. An identical pair attaches
-and rotates to a fresh session/writer; the historical session remains a valid `mode=attach` selector
-even though ordinary task routing accepts only the active session, and a routed request on the
-retired session receives the typed current binding. A new complete pair on `mode=create_or_attach`
-creates an independent task, including beside a dormant or initializing task. The limited 0.2
-reattachment path does not add lineage, project, parent, or new wire-schema fields: automatic host
-admission first checks the private local lifecycle store for a unique valid same-host mapping whose
-`SessionEnd` was received, every other bound host session is ended, and every eligible mapping
-names one task. It then holds the workspace and predecessor lifecycle locks, revalidates ownership
-and state, and issues `mode=attach` with the known Yoetz session selector plus the new paired host
-identity before any create attempt. The explicit session-plus-new-pair recovery remains admitted
-only when that selector is active and non-quarantined, its canonical workspace and trusted
-repository-privacy binding match, and no start for that selected route is pending. Other tasks in
-the workspace do not make a held selector ambiguous and are neither attached nor changed (#814).
-The new pair must not already select a different task. This permits independent tasks to coexist;
-it does not grant task interaction, delegation, lineage, or shared project authority.
-If eligible mappings name more than one task, admission fails closed with the bounded
-`auto_attach_binding_ambiguous` reason and a candidate count only; it never guesses from workspace
-membership or age. With no usable persisted selector, ordinary `create_or_attach` admits the new
-pair as independent work. An explicit `mode=create` colliding with an identical pair remains a
-generic `SESSION_CONFLICT`; older results may retain the `workspace_task_exists` compatibility
-detail. Other `SESSION_CONFLICT` cases, including selector, repository-fence, and active-route
-conflicts, remain possible. Raw refs never land in durable state — only the
-commitments do. This
-model/agent-controlled `workspace_ref_commitment` is an attachment selector, not a
-repository-privacy commitment, and cannot select or inherit disclosure authority.
+string. Hook auto-attach on every host commits the canonical absolute repository root (a linked
+worktree is its own root), and guidance uses the same root rather than a remote URL. The
+SessionStart context names the mapped `session_id` and `writer_id`; an agent continues that task
+with the held session selector. With no selector or stored binding, a new pair creates new work,
+even beside a dormant task. An identical pair attaches and rotates to a fresh session and writer.
+Concurrent requests for one new pair converge on one task; without a host-recovery selector,
+different pairs admit separate tasks.
+An initializing route reserves its exact pair while recovery remains possible.
+
+Historical sessions remain valid `mode=attach` selectors, while ordinary routing accepts only the
+active session and returns the typed current binding for a retired session. Disagreeing selectors
+produce `selector_conflict`; membership never resolves that disagreement. The observation hook
+checks its private persisted predecessor bindings before admitting a new task. It resumes only a
+unique task selected by eligible, durably ended same-host mappings, held stable under the shared
+workspace and lifecycle locks. A lost lock or ambiguous binding is a typed retry/refusal, not
+permission to create a replacement task. An ambiguous refusal reports only the number of candidate
+tasks beside its closed reason; it never includes their task, session, or host-binding identities.
+No stored selector means new work. Successful recovery
+rewrites eligible predecessor mappings and preserves their pending rows for delivery on the
+successor route. Age alone does not establish a host session's end.
+
+Host-session mapping writes are durable lifecycle operations. A cancelled or interrupted start
+may leave a validated `.pending` or claimed `.applying` operation; the next lock owner replays a
+bounded sequence of residual operations after queueing its latest mapping store or clear intent. The
+pending file is the durable last-write queue: an owner operation coalesces an older pending loser
+before apply, while a later producer remains the later operation. While that fence cannot be
+completed, SessionStart and hook delivery defer service access and retain the operation for a later
+retry. Claude and Cursor SessionStart wrappers preserve the reviewed closed lifecycle meaning
+through their structural action, including `clear`; unknown source values are discarded.
+
+Raw refs never enter structural durable state; only their commitments do. The caller-controlled
+`workspace_ref_commitment` is an attachment selector, not a repository-privacy commitment, and
+cannot select or inherit disclosure authority.
+
+### Task lineage and project scope (ADR-027)
+
+Project admission distinguishes `coordination_consent_required` (missing source-workspace
+observation consent) from `coordination_source_policy_denied` (source disclosure policy refusal or
+unavailable policy evaluation). Both refuse disclosure; the latter never recommends obtaining
+workspace consent as sufficient authority. The additive control 2.7 error vocabulary preserves
+this distinction, while older control schemas remain frozen.
+
+The 0.3 implementation adds the wire, catalog, runtime, host-correlation, and presentation
+contracts below. `AuthorizationScopeKind` and structural `contains()` retain their existing four
+kinds; lineage and project membership are separate authority facts and never add an egress scope.
+The storage ownership boundaries are recorded in [storage-ownership.md](storage-ownership.md).
+
+**Project identifier.** Accepted `IdKind.project` uses prefix `prj_` (see Identifiers). A project
+is host-agnostic and is a grouping object, not an egress scope. Its initial kinds are `repository`
+(implicit) and `general` (explicit, amendable); membership kinds are `repository`, `workspace`,
+and `task`. Membership rows carry append-only generations. Repository or workspace commitments
+are membership facts and never the project's identity.
+
+**Lineage names and facts.** A child is a real task (`tsk_`) with its own bundle. The catalog holds
+`parent_task_id`, `depth`, `lineage_digest`, `origin`, `acceptance`, and `work_state`; nesting is
+recorded to any supported depth within #499's configured depth and fan-out ceilings (with typed
+refusals), while presentation remains one level and session health remains per session.
+Work lifecycle is `open | closed | cancelled | abandoned | written_off`; session health is
+`active | contact_lost | ended`; receipt history is service-owned by receipt finalization and
+records the latest receipt and its frontier. The task's explicit work publication owns `closed`, a
+parent action on accepted work owns `cancelled` and
+`written_off`, and the recorded service abandonment policy owns `abandoned`; a receipt request
+never closes work. The service records `active` for a held lease, `contact_lost` when it expires
+without a host end event, and `ended` only for a host end event or explicit end. A missing host end
+event never establishes permanent liveness. A live task is work `open` with at least one active
+session.
+
+Successful routed activity renews session health and clears any previous contact-loss deadline;
+it does not reopen terminal work. After lease loss, work remains open for
+`lineage.contact_lost_recovery_seconds` (default 300 seconds). The policy applies to root and child
+tasks alike. Expiry appends one authenticated, service-stamped `work_abandoned` event to that task's
+own ledger before updating the catalog. Recovery
+replays that event idempotently after interruption. A parent-minted child whose handle expires
+without any attach is abandoned with reason `attach_handle_expired`; its session health stays
+`ended`, since no attached session lost contact. Cancellation and write-off preserve the accepted
+edge. Evidence arriving after abandonment stays in the ledger and retains the incomplete outcome.
+An already consumed handle can replay its original start operation after the handle expiry;
+another request cannot reuse it, and revocation still fences replay. The same exact-request rule
+covers the crash window between a committed child start and handle consumption: after expiry,
+only the request whose start operation the catalog already recorded as complete for that child
+may finish consuming the still-unconsumed handle. Every other request is refused as expired
+before any callback can rotate the child route.
+
+Admitted native hook activity is contact evidence at its own receipt timestamp, not at the time a
+hook drain, the sweeper, or a retry delivers it (#837). One piece of evidence holds its current
+task session active until that receipt time plus the 60-second session lease
+(`SESSION_LEASE_SECONDS`). If that end is still ahead, the session is active until then and any
+contact-loss deadline is cleared. If it has already passed, the evidence can only move a recorded
+contact loss that began earlier to the point where the evidence ran out, restarting the recovery
+window from there; it never makes a session active after the fact. Renewal is monotonic and
+idempotent, so a duplicate delivery re-offers the same evidence without extending it, and a lease
+already recorded by a newer call is never shortened. Every hook event except `SessionEnd` counts,
+including `Stop` and `SubagentStop`, which prove the host was alive when they fired. Session-stream
+history, future timestamps, predecessor routes, and evidence older than the lease plus the longest
+configurable recovery window are not offered. The catalog binding is revalidated before renewal;
+an ended session is not revived by observation replay, and terminal work is never reopened.
+
+A host-declared child operation also holds contact. While the host lineage registry records a
+native subagent start under a parent task without its stop, the recovery sweep renews the parent's
+session for one lease per sweep instead of expiring it, because the host emits no parent event for
+the whole run. The hold ends when the stop is recorded, and is bounded by the service policy
+`LineageConfig.native_operation_hold_seconds` (3,600 seconds; not user configuration) for a host
+that dies before reporting the stop. The hold publishes no event and never touches terminal or
+ended work. The READY maintenance loop delivers queued host events before each ordinary recovery
+turn and defers a due recovery while consecutive passes are still resolving rows, for at most one
+extra interval.
+
+Terminal work stays terminal. Resuming a task whose work is `closed`, `cancelled`, `abandoned`, or
+`written_off` (`start` attach by session, attach or `create_or_attach` by pair) is refused inside
+the start-catalog transaction with `SESSION_CONFLICT` reason `lineage_resume_work_terminal`, before
+any session is reserved or the route rotates, so a session the caller still holds keeps reading
+and publishing that task's history. A parent whose work is terminal is refused new child work
+(delegation or self-registration) with reason `lineage_parent_work_terminal`, even when late
+activity has restored its session. Both reasons carry continuation `lineage_successor_task`: keep
+the held session for status, late publications, checks, and receipts, and start one successor
+task with `mode=create`, a new `external_ref`, and a bounded handoff naming the predecessor for new
+work and delegation. `lineage_parent_session_invalid` (the parent's own session is not current)
+now maps to `lineage_state_refresh`. A replayed start whose route already names its session still
+returns its recorded result after the task's work became terminal.
+
+**Origin, acceptance, and creation.** `origin` is immutable: `parent_minted | self_registered |
+host_observed`. Acceptance is parent-controlled: `pending → accepted` or `pending → rejected`,
+and accepted relationships cannot later be rejected. `mode=delegate` creates `parent_minted` plus
+`accepted` atomically. A host-observed signal is first a provisional annotation under one
+correlation identity with pending acceptance and no bundle; it becomes one child only when accepted
+delegation or cooperative self-registration binds to it. Host mapping remains evidence-gated in
+#506–#508. The service owns child-dependency manifest stamping; host-observation inputs can enter
+only through that service path, and ordinary client publication cannot self-award a manifest.
+
+**Frozen rollup.** Before a parent check or receipt uses a child, the parent ledger records a
+`child-dependencies-recorded` manifest containing child identity, origin, acceptance, frontier,
+check/receipt identity, coverage, findings state, `lineage_authority_revision`, and optional
+`membership_generation`. The lineage coordinator records changed child facts; receipt generation
+only reuses recorded manifests and never records or refreshes one (#500). The parent receipt
+projects direct children one level: current actionable findings on accepted children block
+clean-completion wording, while the receipt is still produced and names the child and finding.
+Pending-acceptance children and informational findings annotate only; accepted live children are
+open gaps and accepted abandoned children are incomplete gaps. An unresolved informational
+finding stays on the child row and does not replace an accepted lifecycle gap or a coverage or
+verification blocker. The only informational kind, `ledger_stale_or_incomplete`, is emitted from
+recorded ledger gaps, so a public child that carries it also carries an independent coverage
+blocker. The no-gap lifecycle precedence is a kernel invariant. A grandchild is visible only through
+its parent. Only a new manifest and qualifying recheck can clear a live-child gap in a later receipt.
+
+**Lineage disclosure authority.** An accepted edge authorizes only (1) a service-side child read
+to build the frozen manifest, (2) disclosure of bounded structural manifest facts into the parent
+agent context, and (3) child-derived structural input to a parent semantic check. Each channel
+keeps the child's provenance, category, never-send, task-scope, minimization, and authorization
+restrictions. Project membership is unnecessary for lineage; cross-repository lineage is
+prohibited in increment A. The candidate's Increment-B cross-repository path requires an explicit
+current project-generation coordination grant at admission and delivery; `AuthorizationScope.contains()`
+stays unchanged.
+
+`HostLineageRegistryPort.latest_open_host_operation(parent_task_id, not_before, session_commitment)`
+returns the newest first-observation time of a recorded start without its stop under that parent,
+bound or provisional, only when the annotation's `last_session_commitment` exactly matches the
+currently bound host session commitment. It ignores starts before `not_before`; it is the only
+input to the in-flight contact hold and never mints, binds, or accepts a child. The service records
+the commitment from an admitted event routed to the exact current session. A missing or stale
+binding fails closed; after restart, the service may bootstrap the commitment only from the
+durable observation route for that exact task/session pair. Task or project membership never
+selects a host session. Native lifecycle events persist that route at admission, before optional
+verification or advice work. An ended or rerouted predecessor remains structural evidence only;
+its event cannot bind the successor, and a durable route's host-session commitment is a
+compare-and-set fence that a later envelope cannot replace.
+
+Session lease extension is an atomic, monotonic catalog operation. A newer observation, an ended
+session, or a rotated session fence wins over a delayed renewal and cannot be overwritten by its
+stale read. Callers revalidate the clock after awaited catalog or adapter work before committing
+an active state.
+
+`HostLineageRegistryPort.find_host_lineage_observation` resolves an already recorded host
+observation within its installation, parent task, and host. It returns the persisted annotation,
+refuses conflicting or ambiguous aliases, and never updates observation timestamps or session
+ownership. Observation advice uses its bound child task ID, or its keyed correlation ID, alongside
+the original envelope reference. Rebuilding advice cannot manufacture lineage or refresh children.
+
+Explicit cooperative correlation selectors receive read-only registry validation before a child
+attach consumes its handle. Contradictory or ambiguous selectors return a typed refusal without
+rotating the child route. A transient final binding failure can replay the same durable start
+operation and consumed handle; it never creates another child. A supplied parent-call selector
+without the child identity needed to verify its commitment is refused.
+
+Codex's admitted successful native child-start callback may bridge handle-only attachment to the
+host annotation. It carries bounded child task/session/writer and parent task IDs; the service
+checks them against the mapped child route and persisted parent relation before binding the native
+subagent identity. This can record the correlation before the separate lifecycle hook arrives;
+later hooks reconcile through the same aliases. It never mints a task or redirects parent advice.
+Missing or contradictory identities remain coverage gaps. The observation mapping revision
+`obs-ledger/1.7.0` includes an available parent tool-call discriminator in materialized subagent
+identity. Incomplete hook/stream copies can retain separate evidence while the registry reconciles
+one unambiguous annotation; two distinct parent calls must not collapse into one evidence event.
+Historical mapping revisions keep their existing identity semantics. New subagent observations
+do not implicitly reuse an old child-only operation whose missing parent-call discriminator
+cannot prove equivalence; retained historical evidence is not rewritten.
+The callback fields are additive in control `2.8.0`; frozen control `2.7.0` and earlier retain
+their original shapes and reject those fields.
+
+**Codex multi-agent v2 child identity (#754).** Under `multi_agent_version=v2` a delegated child's
+own rollout header is an identity source: a `session_meta` whose `thread_source` is `subagent`
+maps to a `SubagentStart` whose `subagent_id` is that header's `id` — the child thread. The
+header's `session_id` is the *parent* thread and is never the child key; both spellings of the
+spawning thread (`parent_thread_id` and `source.subagent.thread_spawn.parent_thread_id`) must
+agree, and a header naming itself is refused. Only a header that declares `thread_source:
+subagent` without a usable distinct identity earns `missing_subagent_identity`. That observation
+belongs to the child's own session, so the annotation is filed under the parent task named by
+admitted catalog lineage — never by the host's `parent_thread_id`, which cannot select a task —
+and then bound to the observing child task, the same shape as the native child-start callback.
+With no admitted lineage the observation keeps a bounded `host_lineage_child_not_found` gap. The
+parent-side signal is unchanged: a `SubAgentActivity` item's `agent_thread_id` is the same child
+thread, so the two sources reconcile into one annotation. `agent_path`, `agent_nickname`, and
+`agent_message` `author`/`recipient` name an agent definition rather than a delegation instance;
+they are never lineage identity or aliases. A `SubAgentActivity` `kind` of `interacted` is a known
+non-lifecycle kind: it carries no phase and is not a coverage gap.
+
+**Codex v2 child lanes under the shared root session (#841).** v2 writes one root `session_id`
+into every thread of a delegation tree, so a delegated child's callbacks carry the parent's
+session and its rollout is named by the child thread. A Codex tool, permission, prompt, `Stop`, or
+compaction callback whose `transcript_path` (or `session_file`) is not the session's own rollout
+may take its host child identity from that file's first line: only a safe owner-private `.jsonl`
+beneath the Codex home's `sessions` root, whose v2 header declares a delegated child, whose
+filename carries that child thread, and whose header names the callback's session as spawning
+root. That identity is equivalent to a native `agent_id`: it publishes the child lane only through
+a validated attach result and never selects a task, route, or annotation by itself. A transcript
+that proves a delegated child but cannot name it for the session, or that contradicts a host
+alias, makes the callback an explicit attribution gap and records the payload-free hook reason
+`child_transcript_identity_conflict`. Session lifecycle and `SubagentStart`/`SubagentStop`
+callbacks are never re-attributed. A callback on a validated host-identity child lane reconciles
+that child's own rollout into the lane, so its header reaches the child-observed binding above.
+`observe reconcile` resolves a child rollout through its header to the single lane derived from a
+spawning session bound to the selected workspace alone and already mapped to another task, and
+reports `mode: recovery_child_lane`. It never creates a mapping, task, or annotation; an
+unprovable child rollout exits 20 with `observation_reconcile_failed:<reason>` for the closed
+reasons `child_identity_invalid`, `child_parent_unmapped`, `child_route_missing`, and
+`child_route_ambiguous`. Workspace-wide stream state and annotation counts are never binding
+evidence.
+
+**Project birth and coordination.** With `projects.auto_grouping` enabled, the second concurrent
+live task in one repository materializes an implicit repository project. When disabled, the task
+is admitted without creating a project row (#497). General or multi-repository projects are explicit
+and amendable; implicit projects persist when concurrency drops to one. A repository may opt out through
+`projects.auto_grouping` of automatic grouping and cross-task disclosure without erasing accepted
+delegations, obligations, or receipt
+dependencies. A fact enters coordination only when its source workspace's workspace-level
+observation consent is active; consent for one worktree never covers another. General or
+cross-repository coordination requires a
+generation-bound `coordination_grants` authorization checked at admission and delivery. External
+semantic dispatch bundling content from two repositories is outside this series.
+
+`project dissolve` retires a general project and preserves its historical dependencies. Implicit
+repository projects use `project opt-out` and `project opt-in`; attempting to dissolve one returns
+`implicit_project_requires_opt_out` before any membership or generation changes.
+
+**Superseded coordination context (#842).** A generation is superseded once the project records any
+later membership generation or is dissolved. Before a new check that selects `coordination/0.1.0`,
+the service closes each declared recipient context whose generation is superseded. It appends to
+that recipient's own ledger one observation-authored, engine-derived
+`coordination_context_recorded/1.0.0` for the same `detection_id`, `project_id`,
+`membership_generation`, `recipient_task_id`, and `counterpart_task_id`. It carries
+`gap_codes=["revoked"]`, empty `resource_identities`, `resource_count="0"`,
+`source_attributable_paths=false`, and no `detail_ref`. Its event and operation identities follow
+the ordinary context rule, so a retry replays. A replayed check operation skips this reconciliation,
+and a failure before the closure append leaves the ledger unchanged for the next check. The closure
+performs no project admission, disclosure, or delivery, and needs no current consent, grant, or
+membership. The retired detector row becomes `generation_valid=false` in a separate durable
+transition. If that transition fails after the closure commits, the next reconciliation retries it
+from the recorded closure without appending a duplicate marker. In a frozen check, a delivery with a
+`revoked` closure derives no `coordination_overlap` finding in any scope. The earlier finding
+resolves under the ordinary qualifying-check rule, and its status and receipt resolution explanation
+names the superseded generation instead of a disposition. A `coordination_obligation_declared` or
+`coordination_disposition_recorded` publication naming a superseded generation is refused with
+`INVALID_REQUEST` and `reason_code=coordination_generation_superseded`, continuation
+`coordination_superseded_recheck`. The refusal appends nothing; `coordination_admission_required`
+remains for a current generation that fails admission.
+
+When an admitted task has no revealable attributable path, coordination records one bounded
+per-task coverage row with `coverage=unobservable` and `gap_code=not_observable`. The row carries
+only the task, project generation, and closed gap vocabulary. It is not a detection or delivery,
+and it contains no counterpart or resource identity; an unconsented, stale, dissolved, or
+out-of-project task produces no row.
+
+Coordination inputs are typed payload fields: file and source requested items, attempted edit
+items, obligation identities, and coordination declarations. `LedgerCoordinationInputProvider`
+admits the source under the same consent, source-policy, membership, and grant checks as delivery
+before it reads them. It then reads them through one `payload_read` lease, so a cold runtime entry
+yields the same input as a warm one. A task that is not currently admitted contributes no input
+and no row, and it does not abort the sweep for admitted tasks. This includes a task whose runtime
+cannot be opened to confirm its consent. If an admitted task's input read fails during a sweep,
+that task is kept out of pair detection and receives the same bounded coverage row. This also
+applies when the later payload lease used to revalidate declaration ownership fails; successful
+input loading alone does not establish that ownership can still be read. One diagnostic, `application.coordination`/`coordination_input_unavailable`, records only the
+exception-class token and a correlation ID. The other pairs are still detected, and the next
+sweep retries. A post-publish sweep that fails as a whole never fails the committed publication;
+it records `application.service`/`project_coordination_sweep` with the request ID.
+
+Optional project notes on a check use the same authority boundary. Missing consent, a missing or
+revoked grant, a changed generation, or a retired membership suppresses that project's notes without
+an internal-failure diagnostic or a fallback disclosure attempt. Independently admitted projects
+remain eligible; the optional note does not change the recorded check verdict.
+
+Detection detail is a separate encrypted object owned by one participant. A project status read
+may dereference it for either affected task only after both participants pass current-generation,
+workspace-consent, and source-policy checks; the recipient projection then applies its own sink
+policy to the relative-resource content. The typed project detection row carries either the
+approved repository-relative path tuple or a bounded omission. Catalog rows, delivery events, and
+MCP text summaries retain only identities, counts, digests, and allowlisted gap codes; they never
+carry raw paths.
+The ordinary advice view carries the counterpart task and an exact project/detection/generation
+selector; its resource field follows the same sink-bound hydration and omission rules.
+
+**Bounded reversal and retired guards.** Live, consented project membership may disclose bounded
+sibling task identity and state through the service status projection. It never authorizes attach,
+resume, or task selection. Possession of a workspace reference alone remains insufficient to
+discover or attach another task. When no usable persisted recovery selector applies, automatic
+`create_or_attach` admits a new pair beside an existing task. Task-owned inspection snapshots and
+session advice remain bundle-resident; installation coordination uses the catalog without
+transferring their content or authority.
+
+**No new tools and future boundaries.** The series adds no MCP tool. Its six workflow operations
+are `start`, `publish_work`, `check`, `status`, `receipt`, and `respond`, plus the existing
+read-only `read_guidance` support tool; lineage/project behavior composes those surfaces without
+adding another one. The 2026-09-05
+pre-trim snapshot was 204,404 bytes (policy) and 204,658 bytes (strict) against 205,000 bytes.
+After #504 step 0, the source baseline is 148,308 bytes (policy) and 148,562 bytes (strict),
+including 12,385/12,409-byte initialize instructions and 8,218/8,304 bytes of descriptions; it
+leaves 56,692/56,438 bytes for later schema growth. These are reviewed baselines, measured before
+later series changes. Installed host capability claims remain separately evidence-bounded.
+
+The earlier consolidated 0.3 descriptor measurement was 168,941 bytes (policy) and 169,195 bytes
+(strict), below the then-reviewed 205,000-byte ceiling. That is a historical pre-integration
+measurement: it predates the current-main guidance and descriptor text carried by the merge.
+
+The current 0.3 descriptors advertise `start-request/1.1.0`, `publish-work-request/1.2.0`,
+`check-request/1.1.0`, and `status-request/1.2.0`, including separate child attach,
+self-registration, lifecycle, and coordination declaration and disposition examples. The current
+packaged measurement after #499/#507 is 219,369 bytes (policy) and 219,623 bytes (strict), comprising 19,264/19,288
+bytes of initialize instructions, 12,958/13,044 bytes of tool descriptions, and 71,563 bytes of
+advertised input schemas. The reviewed aggregate ceiling is 220,000 bytes; the policy route's
+longest 1,000-byte destination disclosure measures 226,376 bytes and the derived disclosure ceiling
+is 227,000 bytes. Public lifecycle families are advertised; service-stamped delegation declarations
+and child manifests remain excluded from ordinary publication.
+The #499/#507 guidance consumes 3,850 aggregate bytes over the integrated 215,519/215,773-byte
+baseline; no MCP tool or advertised input-schema field is added by this repair.
 
 ### Immutable objects and keys
 
@@ -1783,7 +2240,12 @@ repository-privacy commitment, and cannot select or inherit disclosure authority
   bytes only while the caller can prove that its reference has not been submitted to a durable
   owner; a byte mismatch fails closed and an abandoned stage cannot be finalized later. Both
   locations are attempted even when one fails, so a temp-path fault cannot strand the finalized
-  copy; the first failure is raised and the stage stays un-abandoned so a retry re-attempts both;
+  copy; the first failure is raised and the stage stays un-abandoned so a retry re-attempts both.
+  A local captured-content manifest row is a durable owner. The observation coordinator abandons a
+  just-finalized captured-content object through `abandon_preappend_objects` only after a lookup
+  proves that row does not name it (ADR-003, #571 / #550). A committed row forbids abandon. A
+  failed lookup is not that proof. Abandon failure is logged as `observation_object_abandon_failed`
+  and does not replace the caller's store error; generation-fenced GC remains the fallback;
 - `resolve_verified(object_id, envelope_digest) -> ObjectRef` — bounded exact finalized-object
   resolution for catalog-pinned START crash resume; deterministic verification failures raise
   `ValueError("object_verification_failed")`, while environmental I/O re-raises `OSError` for the
@@ -1874,11 +2336,25 @@ privacy_pending_list|privacy_receipts_list|privacy_receipts_get`. The observatio
 `observation_ingest|observation_status|observation_pause|observation_resume|observation_revoke`
 (local CLI/UI only; never MCP tools — the public MCP surface remains the six workflow tools
 plus read-only `read_guidance`).
+Observation status uses a versioned body containing `schema_version`, `request_id`, and `query`;
+pause, resume, and revoke use `command` in place of `query`. Their successful control responses
+contain `schema_version`, the same `request_id`, and `status`. The support adapter translates these
+wire envelopes to the domain query or command; the observation-ingest envelope is separate.
 It has no privacy decision, unlock, secret, credential, key-handle, decrypted-object,
 operation-body arbitrary-path, or policy-loosening field or method. The versioned handshake locator
 below is the sole narrow path-bearing exception. `service_status` is available while locked;
 task operations are not. MCP cannot invoke lifecycle, privacy-control, or observation-control
 methods.
+
+`ServiceStatus` (wire schema `service-status-1.0.0`, closed to unknown fields) describes the
+singleton service holder only, and carries no approved-check sandbox field. Approved-check sandbox
+availability — `CheckSandboxAvailability(status, mechanism, reason, remediation)` with the closed
+reason set `ready|bwrap_missing|bwrap_unusable|sandbox_exec_missing|platform_unsupported` — is a
+live capability probe of the process that asks, not a property of that holder, so it is reported by
+the invoking client on exactly three surfaces: `yoetz observe checks status` (`sandbox`),
+`yoetz setup status --json` (`platform.check_sandbox`), and `/doctor`. This is the recorded revision of
+issue #720's "report it in `yoetz service status`"; the rationale and the Linux/WSL operator detail
+live in [`runbooks/linux-and-wsl.md`](runbooks/linux-and-wsl.md#approved-check-sandbox).
 
 The versioned ordinary-control hello may carry one optional trusted `workspace_locator` derived by
 the client itself: CLI/UI use their actual process working directory and the MCP bridge uses its
@@ -1949,9 +2425,17 @@ and `yoetz service restart` — treats an incompatible holder as an upgrade to c
 `service_supersede` diagnostic, sends the holder its ordinary bounded-shutdown signal, waits for the
 lock to be released inside the same 30-second budget, then spawns and connects to a successor of
 this installation. It never signals a process it cannot identify through the owner-only stamp, a
-holder whose stamped identity equals this installation's, or anything on Windows; those cases and a
-holder that outlives the budget surface as `service_incompatible` whose bridge message names
-`yoetz service restart`. Plain `connect_service` (ordinary CLI commands and hook drains) never starts or supersedes.
+holder whose stamped identity equals this installation's, a holder whose stamped `service_version`
+is newer than this installation's (only the explicit `yoetz service restart` may replace one), or
+anything on Windows; those cases and a holder that outlives the budget surface as
+`service_incompatible`. The bridge message names `yoetz service restart`, except for a newer holder,
+where it asks the user to reopen the session. The MCP bridge also retires a *compatible* holder
+whose hello reports an older package version than the bridge's, through the same stamped
+bounded-shutdown path, so the first session opened after an in-place `yoetz upgrade --accept`
+switches to the new package. Until that transition, already-open processes use retained runtime
+copies; the transition may require older incompatible sessions to reopen (ADR-007,
+2026-09-24 amendment). When no holder can be identified it keeps using the compatible service.
+Plain `connect_service` (ordinary CLI commands and hook drains) never starts or supersedes.
 Consented hook auto-attachment uses the same fixed on-demand launcher with
 `supersede_incompatible=False` and a one-second connection/startup budget. It reuses an
 already-stamped compatible starting holder only while an owner-only nonblocking flock probe
@@ -1967,8 +2451,11 @@ queued structural rows pending. SessionStart context distinguishes `service_unav
 material work, then its exact typed continuation. Hook exit zero is graceful degradation, not
 proof of service readiness or a mapped task. No transient content is reconstructed from queued
 structural envelopes. This path conveys no initialization, unlock, privacy, or takeover authority.
-Bridges of the stale installation reconnect and are refused in turn, which is the correct outcome
-of an upgrade: the one per-user endpoint belongs to the installation actually in use. The MCP bridge supplies a
+Bridges of the stale installation reconnect and are refused in turn until their session is
+reopened, and never replace the newer service: the one per-user endpoint belongs to the newest
+installation in use. Installed bridges and services run from retained release copies, including
+code, dependencies and resources, so package replacement does not change the bytes available to
+an open process (ADR-007). The MCP bridge supplies a
 **30-second** call deadline for `start`, `publish_work`, `respond`, `status`, and `receipt`, and a
 **300-second** deadline for `check`; these use the existing private `deadline_ms` envelope field and
 do not change the public workflow-tool schemas. A timed-out write has an unknown outcome: the bridge
@@ -2554,7 +3041,8 @@ The closed privacy enums are:
   `claim_text`, `obligation_text`, `decision_excerpt`, `evidence_excerpt`, `finding_summary`,
   `command_metadata`, `diff_metadata`, `repository_excerpt`, `transcript_excerpt`,
   `diagnostic_metadata`;
-- `AuthorizationScopeKind`: `machine`, `workspace`, `task`, `request`;
+- `AuthorizationScopeKind`: `machine`, `workspace`, `task`, `request`. Project membership is a
+  grouping and coordination boundary; it does not add an egress scope kind;
 - `RepositoryPrivacyAuthority.grant_state`: `granted`, `missing`;
 - `RepositoryPrivacyAuthority.migration_state`: `not_applicable`, `legacy_route_available`,
   `first_repository_available`, `consumed`;
@@ -2650,14 +3138,31 @@ different query is the same non-retryable rejection. Both audit adapters project
 egress receipts as well as local disclosure receipts, so a completed subscription review is
 retrievable by its recorded receipt ID and listable by `channel`, `provider_id`, or
 `endpoint_profile_id`.
-Local disclosure purposes use the domain grammar `^[a-z][a-z0-9_-]{0,127}$`, including the
-stored `client_result_projection` value. Network egress and policy purposes retain their
-hyphen-only vocabulary. The 0.2.3 repair adds control-result `2.6.1` to admit the existing local
-receipt values without rewriting stored receipts or the released `2.6.0` envelope. Hello and
-request envelopes remain `2.6.0`; no new control method or 0.3 project contract is introduced.
-CLI JSON, terminal output and the prompt-loop menu render decoded UTC receipt timestamps in
-canonical millisecond RFC3339 form (issues #731 and #732). The added schema inventory is reported
-by current version-manifest `2.2.4`; released `2.2.3` and earlier manifests retain their original bytes.
+
+A receipt's `purpose` has two owners, and they are deliberately not the same grammar. Anything
+crossing the privacy-policy boundary — every network egress receipt, every
+`ChannelPolicy.allowed_purposes` entry, the `privacy/egress-receipt-1.0.0` and
+`privacy/privacy-policy-1.0.0` schemas — uses the external vocabulary
+`^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$` (hyphenated, no underscores): `semantic-review`,
+`credential-probe`, `package-update-check`. Local disclosure receipts additionally carry the
+product's own sink-local purposes, which never reach a provider, are never policy-admitted, and
+whose canonical owner is `yoetz.domain.privacy`'s wider `^[a-z][a-z0-9_-]{0,127}$`. The
+agent-projection purpose `client_result_projection` is one of these: it is fixed by the
+`agent_projection` CHECK in `migrations/catalog/0001.sql` and is part of every stored receipt's
+canonical bytes and digest, so it cannot be renamed. Control result `2.6.1` (the 0.2.3 repair)
+and every later result envelope, including the 0.3 line's `2.7.0`, `2.8.0` and `2.9.0`, therefore
+validate `local_disclosure_receipt.purpose` against their own `local_disclosure_purpose` definition,
+mirroring that domain grammar, while network egress keeps the stricter external reference. Before
+`2.6.1` the local branch reused the external grammar, so every ordinary local receipt failed the
+result envelope and `privacy receipts list`/`get` answered `read_projection_failed` (issue #732);
+the frozen `2.6.0` and earlier envelopes keep their released bytes. Hello envelopes stayed `2.6.0`
+on the 0.2 line; the 0.3 line's `2.7.0`, `2.8.0` and `2.9.0` request and result envelopes derive
+from `2.6.1` and add no second grammar. CLI JSON, terminal output and the prompt-loop menu render
+decoded UTC receipt timestamps in canonical millisecond RFC3339 form (issues #731 and #732). The
+0.2.3 schema inventory is reported by version-manifest `2.2.1`, the 0.2.4 inventory by `2.2.2`,
+and the 0.2 line's setup-readiness and setup-status additions by `2.2.3` and `2.2.4`; the 0.3
+line reports its inventory, including both setup contracts and `isolation-report` `1.0.0`
+(issue #567), through `2.3.0`. Manifests carried from the 0.2 line retain their bytes.
 
 `PrivacyAuditPort.list_pending_disclosures(audience) -> PendingDisclosurePage` projects only
 `PendingDisclosureEntry(pending_id, task_id, expires_at)` for proposals in `awaiting_human` or
@@ -2819,7 +3324,7 @@ requires a fresh local-human policy transition and cannot activate dormant v0.1 
 Interactive-only structural DTO (`yoetz.application.package_update.PackageUpdateAdvisory`):
 `outcome` (`newer_available|up_to_date|skipped_policy|skipped_unavailable|skipped_unknown_version`),
 `installed_version`, `latest_version` (nullable), `is_newer`, `upgrade_command`
-(`uv tool upgrade yoetz`), `source` (`network|cache|none`). Setup reports may include a
+(`yoetz upgrade`), `source` (`network|cache|none`). Setup reports may include a
 `package_update` object with the same field names. Work receipts and ledger documents never carry
 these fields.
 
@@ -2915,9 +3420,12 @@ slice (`role`, identity, `attempted_count`, `terminal_reason_counts`, `last_term
 `codex-chatgpt-subscription@1` is the only v1 external-runtime profile. Its configuration is the
 closed `ExternalRuntimeProfileConfig`: exact absolute executable and dedicated-home paths;
 executable, app-server-schema, capability-cell, and isolated-config SHA-256 digests;
-runtime/source/capability identities; capability-evidence expiry; model; reasoning effort;
-timeout; and retry cap. It has no token, OAuth endpoint, generic provider URL, headers, or open
-options map. Expired capability evidence fails before child launch. `account/read`, model
+runtime/source/capability identities; capability-evidence expiry; model; reasoning effort
+(the final-profile effort); timeout; and retry cap. It also has the optional
+`routine_reasoning_effort` (absent means routine checks keep `reasoning_effort`) and
+`routine_output_limit`/`final_output_limit` (output tokens, 1–8192, defaults 4096/8192). The
+writer emits these three keys only when they carry an explicit choice. It has no token, OAuth
+endpoint, generic provider URL, headers, or open options map. Expired capability evidence fails before child launch. `account/read`, model
 discovery, login, and logout are structural app-server operations and never a task-content probe.
 
 `SemanticEvaluatorPort.evaluate(case: ApprovedProviderCase, deadline: Deadline) -> SemanticResult`
@@ -2949,6 +3457,17 @@ envelope and assembled packet. `semantic_reference_scope_reduced` marks the pack
 and receipt coverage as partial; selection grants no additional content/disclosure authority.
 Captured prose is not scanned to invent structural dependencies. The complete local-check case and
 its integrity checks remain unchanged.
+
+Recorded parent lineage enters the case as structural items only: identities, lifecycle, freshness,
+coverage tokens, and finding identities. A document that fits in one 16 KiB item stays
+`yoetz.lineage-semantic-input/1` with item id `lineage`. A larger legal fan-out is split into
+complete `yoetz.lineage-semantic-input/2` parts (`lineage-00`, `lineage-01`, ...) that together
+retain every child and gap plus the shared manifest digest. The review-text helper does not cut
+these items at 4 KiB. A single fact that cannot fit, a partition that would exceed the timeline
+item budget, or lineage plus retained parent content exceeding the 256 KiB complete-case budget
+raises before dispatch. Composition maps that to `failed/case_capacity_exceeded`
+with diagnostic operation `semantic_not_dispatched_lineage_capacity`: no job, no provider call,
+and the local result unchanged.
 
 If the retained required structure still exceeds 131,072 bytes, AI-powered review composition
 returns `failed/case_capacity_exceeded` before creating an AI-powered review job or invoking a
@@ -3032,6 +3551,26 @@ the literal `upstream_body_observability=unavailable`. Email, credential paths/b
 or workspace IDs, prompt/reasoning/event/stderr text, and an asserted upstream body digest are
 forbidden. `turn_acknowledged=true` plus ambiguous transport or cleanup maps to
 `unavailable/outcome_unknown` and is not retriable.
+
+**Semantic budget profile (issue #571, ADR-006 amendment).** `SemanticBudgetProfile` is the
+closed pair `routine | final` (`yoetz.ports.semantic_budget`).
+`select_semantic_budget_profile(projection)` returns `final` when the frozen projection holds an
+effective, readable `completion` claim, and `routine` otherwise. The selected value is frozen as
+`execution.budget_profile` in the `yoetz.semantic-case/2` snapshot. An absent key reads as
+`final`, and any other value is `semantic_execution_invalid`. It is exposed to the provider
+factory only for the duration of one physical dispatch, and dispatches outside a check see
+`final`. For `external_runtime_oauth`, the selected profile maps to the binding's configured
+effort and output limit:
+
+- `runtime_evidence.reasoning_effort` is the effort the attempt sent in `turn/start`.
+- `sampling_params.max_output_tokens` is the per-check output limit Yoetz enforced on the
+  runtime's visible output counters (`output_tokens − reasoning_output_tokens`).
+- `selection_sha256` is `canonical_digest({"budget_profile", "model", "output_limit",
+  "reasoning_effort"})`. Attempts recorded before #571 committed to
+  `{"model", "reasoning_effort"}`.
+
+A snapshot over the limit ends the turn as `output_oversize`. The provenance wire shape is
+unchanged.
 
 `semantic_required` means AI-powered review success is required for a complete verdict, not required
 for returning already-computed local truth. Missing approved external/local capability, privacy
@@ -3136,6 +3675,22 @@ and task-scoped
 `LedgerPort`, `ObjectStorePort`, and `ImporterPort` handles—never a path, SQLite connection, or raw
 key. Exact catalog routing and owner-generation fencing are mandatory; cwd/fuzzy/path fallback is
 forbidden.
+
+A `structural_read` lease carries no payload authority. A cold structural open loads no bundle
+keys, and the ready composition's object opener refuses it. A lease on a warm entry that was opened
+for payload or write access exposes only record envelopes, with `payload` absent, and the
+frontier; it exposes no object read and no payload-derived projection read. Code that reads a typed
+payload field routes `payload_read`. This includes coordination inputs, obligation ownership, and
+project advisory finding reads of an admitted sibling. It keeps a warm and a cold cache entry
+behaviorally identical (#839).
+
+`RuntimeCachePolicy` makes multiplicity bounds explicit: `max_open_bundle_tasks` covers warm
+entries plus in-flight openings, `max_opening_tasks` bounds concurrent open work, and
+`max_writer_connections` bounds task-bundle writer authorities. `max_pending_leases_per_task`
+prevents one task from filling the validation window. A ready composition may provide a typed
+`RuntimeScope` resolver and repository/project limits; a scope refusal is retryable `BUNDLE_BUSY`
+with bounded `count` and `limit` details. The cache retains task ownership and route-generation
+fencing, so an idle writer remains counted until eviction or service close.
 
 `StartCompletionEvidence` proves `bundle_ready`, `lifecycle_committed`, or `result_published`
 against the current bundle generation. Catalog completion consumes that evidence while the same
@@ -3330,7 +3885,19 @@ Shared closed types:
   rather than selecting a different action family. Rollout privacy filtering parses the valid JSON
   tree first and then redacts decoded string keys and values, preserving structural punctuation;
   any redaction-created duplicate key is rejected instead of silently merging fields.
-- `ObservationGapCode` — closed coverage tokens. `session_superseded` is a mapped host session
+- `ObservationGapCode` — closed coverage tokens. `payload_too_large` is one host hook event whose
+  body exceeded `MAX_HOOK_STDIN_BYTES` and was not admitted as a structural row. Codex and Claude
+  Code always stop there. Cursor stops there when the body does not fit `MAX_HOOK_SKIM_BYTES` or
+  the skim cannot validate a complete document. It is not `truncated_payload`, which is an
+  admitted payload clipped after parsing. Nothing about such an event is retained beyond the host
+  that ran it and the hook name that host named on its own command line, so it mints no structural
+  row and binds to the workspace through the command-line locator alone. A Cursor body parsed
+  inside the skim cap that still yields no row (no session, no resolvable workspace, an ambiguous
+  session, or an unknown event) records the same gap; the ordinary profile's deliberate
+  `afterMCPExecution` skip does not, because its paired `postToolUse` owns the call.
+  `payload_content_omitted` is the Cursor case that did validate: the structural row keeps the
+  closed identity and an empty content-reference list, and coverage must not treat the omitted
+  native bytes as captured. `session_superseded` is a mapped host session
   whose Yoetz route was retired and whose successor binding could not be followed; it is never
   `ledger_rejected` and never `mapping_missing` (issue #577). `unsupported_event` is an admitted profile with
   an unrecognized wrapper or nested item, or a known wrapper with an incompatible payload shape
@@ -3367,32 +3934,49 @@ Shared closed types:
   rename fencing and exposes records to the READY service. A stable spool UUID enters source
   identity, so crash replay is at-least-once and normal local ingest deduplicates it. Pending spool
   work projects `source_lag`; it is not an acknowledged observation.
-- `AdviceSnapshot` — ranked `AdviceItem` values (finding id, local rule code, priority, summary,
-  evidence-linked detail, next action, evidence refs, coverage, freshness) plus exact evidence
-  basis, confidence/coverage, recommended next action, freshness, and suppression identity. It
-  surfaces through nonblocking observation/ integration hooks and through ordinary public `status`
-  (and existing finding/coverage machinery); it is never a seventh MCP tool. Local
-  observation-advice policies derive the snapshot from retained envelopes (and optional
-  inspect/approved-check/composition facts) even with zero cooperative Yoetz MCP publications.
-  Optional AI-powered advice is additive only, through the privacy gateway, over minimized approved
-  packets. Local finding identity is condition- scoped over policy, kind, rule code, and
-  rule-specific cause; rolling or accumulating evidence refs never participate in identity.
-  Envelope-linked candidates use only their mapped ledger events as the first durable subject
-  anchors, while standing session conditions use the stable lifecycle event. Once a readable
-  condition finding exists, later evidence-window or frontier changes update the observation
-  snapshot and coverage/gap state without appending another `finding_recorded` event. Snapshot
-  construction is session-scoped: a mapped session's snapshot is built from that session's own
-  retained envelopes and session-scoped lifecycle/gap health (resolved from the ingest envelope's
-  session commitment or the durable workspace session route), never from every retained workspace
-  envelope. The workspace-wide aggregate remains the operator surface (`yoetz observe status`) and
-  the source of deliberately workspace-standing machine conditions; it is not an input to a mapped
-  task snapshot (ADR-022 decision 14). Hook-channel delivery is relevance-scoped: task-scoped
-  conditions come from the mapped Yoetz session snapshot when one exists, otherwise from the current
-  Codex session's retained envelopes. The workspace-wide snapshot is not a fallback for task-scoped
-  work. Deliberately workspace- standing machine conditions remain deliverable from that workspace
-  snapshot at the documented session-boundary cadence (`SessionStart` and `Stop`). The agent-visible
-  context carries only the bounded rule, action, and evidence token; deciding whether the advice
-  belongs to the current target never requires inspecting Yoetz storage. The snapshot's
+- `AdviceSnapshot` — ranked `AdviceItem` values (finding id, local rule code, priority,
+  summary, evidence-linked detail, next action, evidence refs, coverage, freshness) plus exact
+  evidence basis, confidence/coverage, recommended next action, freshness, and suppression
+  identity. It surfaces through nonblocking observation/
+  integration hooks and through ordinary public `status` (and existing finding/coverage machinery);
+  it is never a seventh MCP tool. Local observation-advice policies derive the snapshot
+  from retained envelopes (and optional inspect/approved-check/composition facts) even with zero
+  cooperative Yoetz MCP publications. Optional AI-powered advice is additive only, through the
+  privacy gateway, over minimized approved packets. Local finding identity is condition-
+  scoped over policy, kind, rule code, and rule-specific cause; rolling or accumulating evidence
+  refs never participate in identity. Envelope-linked candidates use only their mapped ledger
+  events as the first durable subject anchors, while standing session conditions use the stable
+  lifecycle event. Once a readable condition finding exists, later evidence-window or frontier
+  changes update the observation snapshot and coverage/gap state without appending another
+  `finding_recorded` event. When the rule-specific cause is one host tool call, that cause is the
+  logical call — source, session commitment, source generation, and the admitted
+  `correlation_id`/`tool_call_id`, or the envelope's source identity when neither is observed —
+  and never the observed phase or event position. `edit_after_successful_check` therefore reports
+  one condition for a paired `PreToolUse`/`PostToolUse` edit while retaining both phases in its
+  evidence refs; a post-only profile reports its single observed phase, two calls remain two
+  conditions, and a call id reused across a source, session, or generation boundary stays
+  separate.
+  The local verification baseline is typed: only a current `passed` approved-check fact,
+  or an explicit success from a dedicated verification tool (`test`, `pytest`, `cargo_test`,
+  `npm_test`, `uv_run_pytest`), establishes or advances it. A successful generic host shell
+  (`shell`, `Bash`, `bash`) and any routine read prove a tool outcome, never a check, so they
+  neither create a baseline, nor move one past a later edit, nor satisfy
+  `completion_without_verification` or the live arm of `static_test_for_live_claim`. Check
+  identity is never inferred from command text or a host-supplied `action` label. The failed and
+  unresolved-command rules continue to read every command-bearing tool including generic shells.
+  Snapshot construction is session-scoped: a mapped session's snapshot is built from that
+  session's own retained envelopes and session-scoped lifecycle/gap health (resolved from the
+  ingest envelope's session commitment or the durable workspace session route), never from every
+  retained workspace envelope. The workspace-wide aggregate remains the operator surface
+  (`yoetz observe status`) and the source of deliberately workspace-standing machine conditions;
+  it is not an input to a mapped task snapshot (ADR-022 decision 14).
+  Hook-channel delivery is relevance-scoped: task-scoped conditions come from the mapped Yoetz
+  session snapshot when one exists, otherwise from the current Codex session's retained envelopes.
+  The workspace-wide snapshot is not a fallback for task-scoped work. Deliberately workspace-
+  standing machine conditions remain deliverable from that workspace snapshot at the documented
+  session-boundary cadence (`SessionStart` and `Stop`). The agent-visible context carries only
+  the bounded rule, action, and evidence token; deciding whether the advice belongs to the
+  current target never requires inspecting Yoetz storage. The snapshot's
   `recommended_next_action` remains the kernel token, including `refresh_observation`. Hook
   `additionalContext` maps that machine-condition token to a host-shell next step (`yoetz observe
   status`) rather than naming a nonexistent MCP tool or CLI verb. Codex hook stdout is
@@ -3402,19 +3986,32 @@ Shared closed types:
   plus `decision`/`reason`, and documents `decision: block` as a continuation prompt;
   `stop_hook_active` plus delivery identity are the loop guard); `SessionEnd` always emits `{}`
   because the host discards its stdout and a peek/commit there would consume undelivered advice.
-  Claude Code hook stdout uses `hookSpecificOutput.additionalContext` for every advice-bearing event
-  in the installed profile: `SessionStart`, `PostToolUse`, `PostToolUseFailure`, and `Stop`. The raw
-  host event is retained in `hookEventName` even though `PostToolUseFailure` shares Yoetz's internal
-  `PostToolUse` advice cadence. At `Stop`, Claude Code documents `additionalContext` as non-error
-  feedback that continues through the same loop guard; the Claude ingress therefore never emits
-  `decision: block`, and its `SessionEnd` emits `{}`. The renderer also knows Claude's
-  `SubagentStart` / `SubagentStop` output shapes, but the current native hook profile does not
-  advertise either event; adding them requires a separately reviewed profile expansion and proof.
+  Claude Code hook stdout uses `hookSpecificOutput.additionalContext` for every advice-bearing
+  event in the installed profile: `SessionStart`, `PostToolUse`, `PostToolUseFailure`, and `Stop`.
+  The raw host event is retained in `hookEventName` even though `PostToolUseFailure` shares Yoetz's
+  internal `PostToolUse` advice cadence. At `Stop`, Claude Code documents `additionalContext` as
+  non-error feedback that continues through the same loop guard; the Claude ingress therefore
+  never emits `decision: block`, and its `SessionEnd` emits `{}`. The renderer also knows Claude's
+  `SubagentStart` / `SubagentStop` output shapes. The conservative 0.2 structural profile does not
+  advertise either event; the 0.3 capability profile may add them only with an exact reviewed cell
+  and native evidence. An observed neighboring Claude version never upgrades that profile claim.
   Cursor has a separate native contract: raw `sessionStart` emits `additional_context`; raw `stop`
   advice is disabled because `followup_message` auto-submits a user message; and `afterFileEdit`,
   `afterMCPExecution`, and `sessionEnd` emit `{}`. Cursor leases and commits advice only for a
   nonempty `sessionStart` object after its bytes are written successfully. Output-less events never
-  lease or consume advice or frontier-motion notices. Advice projection is bounded by the domain
+  lease or consume advice or frontier-motion notices. Provider-repair advice is standing advice and
+  uses only the session-boundary channels (#844). Service composition sets `semantic_configured`
+  only when verification is not disabled, a provider endpoint is bound, network egress is permitted,
+  and an LLM inference channel is enabled. The verification default, including absent config, is not
+  that intent. A private or no-egress install, an install with no provider endpoint, and a disabled
+  verification setting do not receive `connect_provider`, `renew_provider_sign_in`, or
+  `repair_semantic_provider`. When that intent is recorded and the provider is structurally unusable,
+  `connect_provider` is still produced, including when no factory id is available
+  (`semantic:not_ready`). Codex `SessionStart` places that text in `additionalContext`; Codex `Stop`
+  places it in `reason` with `decision: block`. Claude Code places it in `additionalContext` on
+  `SessionStart` and `Stop` and still does not emit `decision`. `PostToolUse` does not carry it on
+  either host. Cursor places it in `sessionStart` `additional_context`; `stop` still does not submit
+  a `followup_message` and does not consume the pending delivery. Advice projection is bounded by the domain
   wire limits: each item carries at most 16 evidence refs and a snapshot carries at most 64 ranked
   findings. The evidence-basis digest still commits to every policy candidate, ref, AI-powered
   review coverage input, and discarded condition. When a projection limit is reached, the visible
@@ -3467,10 +4064,12 @@ Independent verification support (local control, not MCP):
 - `.yoetz/checks.toml` — fixed schema `yoetz.approved-check-policy/1`; raw bytes produce the trust
   digest. Repository content proposes no authority. One trusted-local exact-digest confirmation is
   retained as an encrypted workspace-scoped record. Any byte change is untrusted.
-- `ObservationVerificationWorker` plus its repository — one generation-fenced lease per workspace;
-  newer subject digests stale older pending work, identical workspace/policy/approval/state tuples
-  are cached, abandoned running work returns to pending, and immutable results record whether the
-  post-run state is still current.
+- `ObservationVerificationWorker` plus its repository — one generation-fenced lease per task
+  bundle/workspace lane; newer subject digests stale older pending work, identical
+  workspace/policy/approval/state tuples are cached, abandoned running work returns to pending,
+  and immutable results record whether the post-run state is still current. A repository can have
+  multiple task lanes observing the same workspace; their schedulers may run concurrently while
+  each lane keeps its own durable job/result rows.
 - Each completed approved check materializes a service-owned action/evidence/result graph. The
   captured evidence is a bounded canonical receipt binding approval commitment, result digest,
   output digest/byte count and encrypted output-object identity, subject state before/after, and
@@ -3492,8 +4091,10 @@ Independent verification support (local control, not MCP):
   prefix adds `truncated_payload`. Capture never upgrades to `artifact_verified` or
   `independently_reproduced`.
 - `ObservationVerificationSupervisor` — ready-lifecycle background owner that wakes on enqueue,
-  discovers pending work at startup, drains one serialized check per workspace through the
-  enforcing sandbox, reclaims expired leases, and stops before vault/runtime closure. Hook ingest
+  discovers pending work at startup, drains one serialized check per task/workspace lane through
+  the enforcing sandbox, and gives each registered lane one fair round before revisiting a busy
+  lane. Unrelated sibling lanes may run concurrently; each lane still has at most one active
+  worker lease. It reclaims expired leases and stops before vault/runtime closure. Hook ingest
   never executes approved checks inside the hook RPC budget.
 - `ObservationAdviceSemanticSupervisor` / `ObservationAdviceSemanticWorker` — the same shape for
   observation AI-powered advice (issue #619). The coordinator registers a per-workspace drain when
@@ -3504,7 +4105,8 @@ Independent verification support (local control, not MCP):
   outcome, and re-runs advice for that workspace. A lease held by a previous service generation
   or past its expiry is reclaimed as `pending` and re-attempted; a row reclaimed three times
   terminates as `failed` / `interrupted`. An interrupted, cancelled, or unattempted row is never
-  an AI-powered review success. Pure-ingress hook handlers declare
+  an AI-powered review success. The advice worker is separate from approved-check workers and
+  does not execute AI-powered review work inside a hook RPC budget. Pure-ingress hook handlers declare
   `"async": true` only when the exact probed Codex version supports registration; older or unknown
   hosts run them synchronously with the declared 10-second budget so no event is dropped. Handlers
   that return `additionalContext` or a Stop `decision: block` stay synchronous with the same bound,
@@ -3534,7 +4136,7 @@ Native ordinary-work capture adds a separate, closed profile selection to that w
 `LocalObservationConsent.content_capture_profiles` is a sorted set containing at most
 `claude-code-ordinary-observation-v1` and `cursor-ordinary-observation-v1`; absent legacy fields
 mean no native content authorization. `ObservationIngestRequest.content_capture_profile` is an
-optional selector in current control-request `2.4.0`, bound to the envelope's host source. The
+optional selector in current control-request `2.6.0`, bound to the envelope's host source. The
 selector cannot grant capture: ingress requires the active local selection and synchronizes its
 bounded profile set to the mapped task store. Structural subscriptions and native content consent
 are independent. The source-qualified `codex_hook` capture arm is deliberately profileless: it
@@ -3555,6 +4157,19 @@ content fence combines a durable per-workspace epoch with a persisted runtime-ga
 consent or runtime transition advances it, including pause/resume and off/on ABA cycles, and legacy
 state receives a fresh epoch before authority is accepted. Pause, disable, and revoke must fence
 retained native content reads and subsequent AI-powered review disclosure as well as future capture.
+A structural grant (`LocalObservationStore.grant_consent` with no explicit profile set: Codex setup,
+the host-connection and terminal-interface Codex apply, and `yoetz observe grant`) over a live,
+unrevoked consent continues that consent. It keeps the original `granted_at` and every approved
+ordinary profile, and leaves selection and capacity settings untouched. Repeating an effective grant
+is not a transition: it neither advances the epoch nor invalidates an in-flight content fence,
+read-protection scope, or selection preview (issue #835). A structural grant over paused consent
+resumes it exactly as `resume` does. With no prior consent, or after revocation completes its project
+fence, a grant starts fresh with no ordinary profile; while that fence is pending, the grant is refused.
+Only an explicit profile set, `content-disable`, or revoke removes an arm. The call returns a
+`LocalConsentGrant` (`transition`: `granted`, `resumed`, `updated`, or `unchanged`, plus the
+resulting consent). The setup report's `observation_consent` block adds that `transition` and the
+retained `content_capture_profiles` beside the existing `outcome: granted`. `observe grant` prints
+`observation_content_capture_kept:<profiles>` when it kept an arm.
 A task-store snapshot is not independent authority after a local consent change. Selection into an
 AI-powered review case additionally requires authenticated captured-object provenance, case
 membership, source/session/phase binding, and the effective privacy selection. Captured bytes remain
@@ -3570,14 +4185,18 @@ privacy commitment cannot substitute for the observation workspace. The coordina
 accepted completed-tool session route before optional verification policy setup. Native
 captured-content selection does not require an approved-check policy.
 
-Observation consent is one project-level confirmation recorded as a private workspace commitment.
+Observation consent is one workspace-level confirmation recorded as a private workspace commitment.
 Consent, status, pause, resume, revoke, setup probes, and hook ingress all canonicalize an explicit
 Git subdirectory to the same nearest safe Git project root; a non-Git directory remains its exact
 safe locator. There is no ancestor-commitment fallback. A legacy grant recorded against an exact
 Git subdirectory does not authorize its ancestor and must be explicitly granted again.
 The normalized locator is authenticated encrypted content; plaintext keeps only commitment and
 object ID. Revocation disables/removes the active locator and trust binding while retaining already
-encrypted evidence. Visible task messages, tool input/result, task-linked terminal output,
+encrypted evidence. The service first records a bounded private revocation token, then advances
+every active project generation selected by the affected task routes; queued detections from the
+older generation are permanently ineligible for delivery. An interrupted fence remains pending
+and blocks re-consent until recovery completes, so a later grant cannot revive an old detection.
+Visible task messages, tool input/result, task-linked terminal output,
 changed-file/diff material, approved-check output, lifecycle, and readiness facts may be captured.
 Hidden reasoning, system/platform/developer prompts, credentials, detected secrets, unrelated files,
 and untethered logs are excluded before storage. Every byte that reaches encrypted observation
@@ -3628,18 +4247,41 @@ independently of AI-powered review. A terminal structural rejection retires only
 capture ticket so it cannot permanently block later checks; retryable coordination retains that
 ticket for the next attempt.
 
+Only the structural row a handoff was staged for can consume it, so that row's delivery also
+retires a handoff it leaves behind (issue #836). After the row commits without consuming its
+matched ticket (content fenced, blocked, or unauthorized at delivery), or after a terminal refusal
+(`ledger_rejected`, `dedup_conflict`, `session_superseded`, `observation_storage_corrupt`, or a
+terminal store refusal), the coordinator re-reads the durable ticket under the capture lock and
+tombstones it only when its task, host session, source, source identity, and cursor match that row.
+The same step retires a handoff that a capture-only request staged while the row was already past
+its capture fence. A capture-only request whose structural envelope the task store has already
+accepted, and which no outbox row or selected input can deliver again, stages nothing and returns
+`content_capture_unavailable` with that coverage gap; a row still queued after an interrupted
+delivery can still receive a handoff and consume it on retry. A hook drain delivers every mapped
+lane in the shared workspace, but sends its content profile only with rows from its own host: a
+Claude Code or Cursor hook delivers a queued Codex or other-host row without a profile, and the
+service resolves that row's profile from its own ticket, instead of refusing it as the terminal
+`content_capture_profile_mismatch`.
+
 `content_capture_pending` means encrypted staging is durable while structural ledger ingest is still
 pending. It is separate from `operation_pending`, which is generic observation back-pressure and
 makes no claim that content was retained. Up to 512 `staging`/`pending` tickets may be outstanding
 per workspace; revoked tombstones are excluded from that quota but retained to fence ABA reuse. A
 new check/frozen-case acquisition sees an outstanding ticket in the same bundle transaction and
-returns retryable `OPERATION_PENDING`; retrying the same request is idempotent. When a new CHECK
+returns retryable `OPERATION_PENDING` with `reason_code: check_admission_capture_pending`,
+`retry_after_ms`, and the `check_admission_same_identity` continuation; retrying the same request
+is idempotent. When a new CHECK
 encounters this barrier, READY performs a bounded listing for the exact routed task and reconciles
 each ticket against current local content authority before one freeze retry. This task-local
 preflight retires tickets whose authority is absent, inactive, revoked, runtime-disabled,
 profile-unselected, or from an old authority generation, including tickets left without a structural
-outbox row; matching active tickets retain the retryable barrier. A completed same-request replay
-returns without inspecting newer tickets. It does not rewrite captured history or encrypted objects.
+outbox row. When the capture lock is free it then also retires an active ticket at least
+`CAPTURE_HANDOFF_RECONCILE_AGE_MS` (30 seconds) old whose structural row is neither in the outbox nor
+in the selected-admission buffer (issue #836); a younger ticket, or one whose row is still queued,
+retains the retryable barrier. A CHECK never waits for the capture lock. A completed same-request
+replay returns without inspecting newer tickets. It does not rewrite captured history or encrypted
+objects. The refused check held both dispatch gates; the daemon wakes the observation sweep
+as the refusal leaves so pending structural delivery can run before the bounded replay (#838).
 The capture lane can stage while a heavy append runs, while its bounded object/manifest writes stay
 serialized. This boundary provides local encrypted durability only: there is no plaintext spool or
 offline guarantee, and a host kill or service failure before authenticated staging may leave the
@@ -3663,14 +4305,64 @@ The service callback verifies opened runtime task/session identities and supplie
 `proof_guard` to `bootstrap_capture_reservations`; it rechecks the READY service/vault generation
 under the local-store publication lock. A false or failed guard leaves accounting unknown.
 
+A stranded native handoff is the same kind of admission-independent maintenance demand (issue
+#836). `LocalObservationStore.capture_handoff_candidates(workspace, older_than_ms=30_000)` returns,
+oldest first, the task routes whose central reservation or cached task snapshot is at least that
+old; it also returns routes with pending retirement confirmation so restart cleanup is retried;
+`pending_workspaces()` includes such a workspace even with an empty outbox. After inventory is
+known, `recover_capture_inventory(workspace)` reconciles at most eight of those tasks per turn under
+the shared capture lock, and returns a tuple when both steps report. READY supplies
+`ObservationCoordinator.capture_handoff_reconcile`, which opens each named task through its active
+catalog route and session binding rather than a host-session mapping, so a handoff left by an ended
+session stays reachable; without it only mapped routes are reconciled. For each task the
+coordinator reads `capture_handoff_structural_state(workspace)` (outbox rows and selected inputs
+that can still be delivered, and quarantined rows with their reason) before listing tickets, then
+tombstones a ticket whose authority fails the CHECK-preflight rules, or which is at least 30 seconds
+old and has no deliverable row. The ordering is sound under the capture lock: no handoff can be
+staged during the pass, and a delivery deletes its ticket before the drain acknowledges or
+quarantines the row. Each visited task's backlog is republished, which also releases a reservation
+that outlived its completed or tombstoned ticket. A handoff kept by current authority and a queued
+row is retained and still counts toward the unchanged pending-age limit. The coordinator keeps a
+bounded per-workspace cursor after the last attempted task route; each turn rotates the deterministic
+oldest-first candidate list from that cursor before taking eight routes. An unavailable prefix
+therefore cannot starve a later owning route, and the cursor changes scheduling only, never task or
+capture authority.
+
 The closed internal recovery outcomes are `capture_inventory_recovered`,
 `capture_inventory_mapping_missing`, `capture_inventory_route_unavailable`,
-`capture_inventory_unknown`, `capture_inventory_disabled`, `capture_inventory_busy`, and
-`capture_inventory_timeout`. They contribute only fixed reason counts to
+`capture_inventory_unknown`, `capture_inventory_disabled`, `capture_inventory_busy`,
+`capture_inventory_timeout`, `capture_handoff_retired`, and `capture_handoff_unavailable`
+(an owning task could not be opened or read; the next sweep retries). A turn that retains every
+aged handoff reports nothing. They contribute only fixed reason counts to
 `ObservationDrainSummary.reasons`, not row delivery/attempt counts, coverage gaps, or raw
-exception text. No new diagnostic/RPC or event schema is introduced. `recovery_routes()` owns a separate
+exception text. No new RPC or event schema is introduced. `recovery_routes()` owns a separate
 read-only connection for each file-backed complete scan and joins its worker on cancellation.
 The shared writable catalog connection never crosses to that worker.
+
+Every stranded-handoff retirement is also named locally. `record_capture_handoff_retirement`
+records `content_capture_unavailable`, increments `capture_handoff_retired_count`, and keeps the
+last 16 entries in the owner-private workspace state as `capture_handoff_retirements`. An entry
+holds the opaque `ticket_id`, `stage` (`structural_committed`, `structural_refused`, `sweep`, or
+`check_preflight`),
+`reason` (`content_not_admitted`, `terminal_refusal`, `structural_row_absent`,
+`structural_row_quarantined`, `authority_absent`, `authority_inactive`, `runtime_disabled`,
+`authority_generation_changed`, or `profile_unselected`), `ticket_state` (`staging` or `pending`),
+`source`, `task_id`, `age_ms`, the closed `quarantine_reason` of a quarantined row or null, and
+`retired_at`. It carries no source identity, content, path, or exception text. `yoetz observe
+status` reports the account as `capture_handoff_retirements` (`retired_count` and `recent`); it is
+local-only and outside the frozen control-result schema, like `summary_refusals`. The account is
+committed before the ticket is tombstoned or its central reservation is released. Its ticket
+identity makes a replay after cancellation, crash, or a later store failure idempotent; if the
+account cannot be committed, the ticket and reservation remain active for retry. Accounted
+identities whose reservations are still active are pinned within the outstanding-reservation bound,
+so repeated retirement failures cannot evict their replay key and inflate the loss count.
+The store also keeps up to 512 pending ticket-to-task accounting bindings until destructive
+retirement and reservation release are confirmed; this covers legacy tickets that have no central
+reservation to pin. A full pending set fails closed and leaves the ticket active for retry. On a
+restart or uncertain confirmation, reconciliation compares each binding with the complete active
+ticket listing for its task and drops only bindings whose tickets are absent. A task bundle must
+report the native-ticket schema as available and return fewer than the 512-row listing cap; an
+unavailable schema or capped listing preserves every pending binding and retries later.
 
 `LocalObservationStore.pending_selection_losses(workspace)` returns at most 64 retained,
 fully validated and routed lanes; `selection_loss_workspaces(task_id)` filters the returned
@@ -3782,35 +4474,43 @@ the bound, so a producer is still adding them). `yoetz observe status` reports
 `create_or_attach` mode whose selector is the paired identity the start contract requires: the
 canonical workspace locator the hook already bound consent to as `workspace_ref`, and the
 host-session identity as `external_ref`; the service persists only HMAC commitments of both, and a
-hook that reached consent through the legacy session→workspace map without a canonical locator never
-sends an unpaired request (issue #459). The request validates through the public `StartRequest`
-contract before dispatch. Before creating a new pair, the shared Claude Code/Codex/Cursor hook path
-checks the private local store for a unique valid same-host mapping from a received, durably recorded
-`SessionEnd`, with every other bound host session ended and every candidate bound only to the
-consented workspace. All eligible mappings must name one task; within that task, the newest
-mapping-file write wins and the host session ID breaks timestamp ties. A unique candidate is held
-under the workspace and predecessor lifecycle locks, revalidated, and sent as one `mode=attach`
-request carrying that selector plus the new host pair. The control handshake carries the canonical
-workspace for repository privacy. The catalog still requires the selector to remain active and
-non-quarantined, its workspace and repository binding to match, and no start for that selected
-route to be pending. Unrelated workspace tasks, including their pending starts, do not block this
-exact-selector recovery (#814). A pair already bound to another task remains a conflict. The request
-uses one five-second deadline, and the response must retain the candidate's task ID. If eligible
-mappings name more than one task, the hook returns `auto_attach_binding_ambiguous` with only a
-bounded candidate count and does not create or choose among them. With no usable selector, ordinary
-`create_or_attach` admits the new pair as independent work. Recovery first takes a nonblocking
-workspace reservation and then holds ordered locks for every eligible ended same-host session through
-full candidate revalidation, the service RPC, authorized rewrites, and pruning; no observation-store
-lock spans the RPC. The revalidation includes unmapped sessions, cross-workspace ownership, mapping
-identities, and mapping recency. A busy workspace reservation returns `auto_attach_recovery_busy`
-without a service request; a busy candidate session lock or changed snapshot remains a typed
-recovery boundary rather than guessing or silently creating. A successful recovery records the new
-mapping, rewrites every ended same-host predecessor mapping for that task to the rotated session and
-writer, and drains pending rows without publishing an intermediate conflict as a diagnostic.
-Predecessor rows still pending at rotation follow the `session_superseded` binding on ingest (the
-current task session and the observation writer derived for it) so they are acknowledged on the
-successor route rather than quarantined. With no eligible local selector, or when that attach fails,
-the ordinary typed failure path remains. Every failed attempt records a closed hook-diagnostic
+hook that reached consent through the legacy session→workspace map without a canonical locator
+never sends an unpaired request (issue #459). The request validates through the public
+`StartRequest` contract before dispatch. Before automatic new-pair admission, the shared Claude
+Code/Codex/Cursor hook path checks the private local store for a held mapping from a durably recorded
+same-host `SessionEnd`. A unique eligible mapping is the only automatic recovery selector: the hook
+holds the workspace and predecessor lifecycle locks, revalidates ownership and state, and sends one
+`mode=attach` request carrying that selector together with the new host pair. Every eligible mapping
+must name one task; within it, the newest mapping-file write wins and the host session ID breaks
+timestamp ties. The trusted control handshake carries the canonical workspace for repository privacy.
+The catalog requires the selected root task to remain active and non-quarantined, its canonical
+workspace and trusted repository-privacy binding to match, and no start for that selected route to
+be pending.
+Other tasks in the workspace do not make a held selector ambiguous and are neither attached nor
+changed (#814). The new pair must not already select a different task. Delegated child routes
+remain authenticated-handle/target-selector paths and are never discovered by generic session
+recovery. This permits independent tasks to coexist; it does not grant task interaction, delegation,
+lineage, or shared project authority.
+Both calls share one five-second deadline. The response must retain the candidate task ID. Recovery first takes a nonblocking
+workspace reservation and then holds ordered locks for every eligible ended same-host session
+through full candidate revalidation, the service RPC, authorized rewrites, and pruning; no
+observation-store lock spans the RPC. Revalidation includes unmapped sessions, cross-workspace
+ownership, mapping identities, and mapping recency. A busy workspace reservation returns
+`auto_attach_recovery_busy` without a service request; a busy candidate lock or changed snapshot
+returns the same closed `auto_attach_recovery_busy` boundary rather than creating work while the
+selector is unstable. If eligible mappings name more than one task, admission returns the closed
+`auto_attach_binding_ambiguous` reason with only a bounded candidate count and does not guess. A
+successful recovery records the new mapping, rewrites every ended same-host predecessor mapping for
+that task to the rotated session and writer, and drains pending rows without publishing an
+intermediate conflict. With no usable persisted selector, automatic `create_or_attach` admits the
+new pair as independent work, including beside a dormant task. `workspace_task_exists` identifies
+only explicit `mode=create` colliding with an identical pair; workspace membership never supplies a
+selector. Predecessor rows still pending
+at rotation follow the `session_superseded` binding on ingest (the current task session and the
+observation writer derived for it) so they are acknowledged on the successor route rather than
+quarantined. When no eligible local selector exists, the ordinary `create_or_attach` path admits
+new work; when recovery attach fails, the ordinary typed failure path remains. Every failed attempt records a
+closed hook-diagnostic
 reason instead of a silent absent mapping: `auto_attach_workspace_unbound`,
 `auto_attach_request_invalid`, `auto_attach_binding_ambiguous` (candidate count only),
 `auto_attach_conflict` (session, idempotency, or request-identity conflict), `auto_attach_refused`,
@@ -3870,7 +4570,13 @@ as recent, so a fixed historical failure cannot masquerade as live degradation (
 Workspace-global rejections (`vault_locked`, disabled, paused) end the pass. A host's automatic
 reviewer holding a scoped AI-powered `check` before Yoetz receives it is recorded on the
 `PermissionDenied` event as `host_auto_review_denied` or `host_permission_rule_denied` (issue #467);
-it is host tool-call authorization, so no AI-powered review status is ever inferred from it. Every
+it is host tool-call authorization, so no AI-powered review status is ever inferred from it. The
+same event records what the hook then said about the hold (issue #857): `host_denial_retry_offered`
+(grant confirmed first-hand, the session's one `retry` emitted), `host_denial_retry_exhausted`
+(grant confirmed but the retry was already spent, the owner's own rule held the call, or the host
+produced no verdict), `host_denial_retry_unrecorded` (the retry ledger was full, unsafe, damaged, contended or unwritable, so no
+retry was emitted), or `host_denial_grant_unconfirmed` (the grant could not be read inside the hook
+deadline). Every
 host ingress (Codex, Claude Code, Cursor) that ingests nothing because of workspace binding records
 one payload-free diagnostic naming the dropped layer: `workspace_unresolvable` when an explicit
 `--workspace` locator cannot be canonicalized (an empty value from an unset `CLAUDE_PROJECT_DIR`, a
@@ -3911,14 +4617,16 @@ when that save evicts nothing and leaves one-eighth of the state budget free. Me
 the cap cannot clear the same loss it just recorded; the durable gap history remains after recovery,
 and renewed shedding reactivates it (issue #310).
 
-Public ingest failures use their `retryable` contract, not a spelling fallback. A non-retryable
-failure that is not already a narrower terminal class (`dedup_conflict` or
-`observation_storage_corrupt`) becomes `ledger_rejected`; drain and sweep quarantine that one row,
-record the reason once, and continue its lane. `SESSION_CONFLICT` and a `SESSION_NOT_FOUND` that
-carries no followable binding are in that class: every route, catalog, and ledger authority in this
-repository raises them non-retryable, so ingest keeps no separate `service_unavailable` or
-`mapping_missing` rendering for either code (issue #554). A retryable public failure outside the
-designed back-pressure set and `VAULT_LOCKED` is `service_unavailable`. `SESSION_NOT_FOUND` with
+Public ingest failures use their `retryable` contract and the stage that refused the request.
+A non-retryable `SESSION_CONFLICT` while acquiring the task runtime becomes `mapping_missing`:
+the envelope stays pending so a later drain can recover its lifecycle mapping, subject to the
+same route ownership checks. A non-retryable conflict after runtime acquisition, or a
+`SESSION_NOT_FOUND` without a followable binding, becomes `ledger_rejected`. Other non-retryable
+failures outside the narrower `dedup_conflict` and `observation_storage_corrupt` classes take
+that same terminal path: drain and sweep quarantine the row, record the reason once, and continue
+its lane (issue #554). A retryable public failure outside the designed back-pressure set and
+`VAULT_LOCKED`, including a retryable session-route conflict, is `service_unavailable` and stays
+pending. `SESSION_NOT_FOUND` with
 `reason_code: session_superseded` is not that class: ingest follows the current binding carried in
 `safe_details` (same task, successor session, observation writer derived for it), persists the
 updated lifecycle mapping on each hop only while holding the lifecycle lock and the stored
@@ -3959,7 +4667,50 @@ Summary delivery creates one metadata-only evidence record with `routine_read_de
 coverage, not a per-call content or verification claim. A changed task route is rejected before
 the observation cursor advances.
 
-`ObservationSelection` separates Focused/Detailed from the 512/2,048/8,192 count profiles.
+There is one definition of a proven routine success. `classify_observation` resolves it from the
+host payload, its bounded nested result carriers, and the native post-hook fallback, and the
+ingress records that decision on the envelope. A caller holding an envelope rather than a payload
+re-derives the same state with `envelope_outcome_state` over the fields the envelope retains, with
+the recorded `hook_name` standing in for the host's `hook_event_name` echo; a stream envelope
+records no `hook_name` and still requires an explicit outcome fact. A second, stricter rule over
+the lossy structural copy accepted only a top-level `exit_status`/`success`/`result_status` fact,
+so it refused every Codex-shaped post the planner had already buffered as a success (issue #753).
+
+Refusing to summarize one buffered lane is an accounting loss for that lane, never a stop. The
+flush admits that lane's members individually with the durable `routine_summary_invalid` coverage
+gap — distinct from `routine_read_summary_invalid`, which describes a delivered summary envelope
+that materialization refused — commits the remaining lanes, and drains the buffer. The workspace
+retains one bounded, deduplicated refusal account per refused lane (source, session commitment,
+source generation, the lane head's native identity and cursor, input count, and the protocol reason
+code). `observe status` reports that account beside the `routine_summary_invalid` coverage gap — it
+is a local cause record, separate from the selection-accounting projection whose shape the local
+control-result schema freezes — so the cause is named once instead of an anonymous sweep exception
+repeating every minute. A hook whose own pre-flush still fails structurally records the bounded
+`admission_flush_invalid` reason, and a hook that observed a refusal records
+`routine_summary_invalid`; neither degrades to the bare `observe` token.
+
+A `SessionEnd` hook whose local session end cannot persist stays fail-open for the host. It
+prints `hook_observe_degraded: session_end_unrecorded` and records the bounded
+`session_end_unrecorded` reason, because the session and any temporary selection override stay
+active until a later end or expiry (#843). The end is saved with the hook's capture batch. If
+that batch fails to commit, the hook reports the reason beside the generic `observe` reason. A
+fault after the batch committed does not report it. Before this reason, a failed end was either
+discarded or reported only as `observe`.
+
+A host body refused at stdin ingress for its size is accounted the same way, per host:
+`codex_payload_too_large`, `claude_payload_too_large`, and `cursor_payload_too_large` are the
+bounded hook reasons, recorded against the hook event name the host supplied on the command line.
+Codex and Claude Code never parse that body, so the hook name is their only identity, and each
+notes the `payload_too_large` coverage gap on the consented workspace. Cursor notes that same
+no-row gap when the body exceeds `MAX_HOOK_SKIM_BYTES` or fails validation inside it. When Cursor
+does validate a complete body inside the skim cap, the reason is `cursor_payload_content_omitted`
+and the structural row carries `payload_content_omitted` instead of `payload_too_large`. Before
+these, an oversized Cursor write recorded the generic `cursor_payload_invalid`, an oversized Codex
+event degraded to the bare `observe` token, and an oversized Claude Code event recorded nothing at
+all (issue #667).
+
+`ObservationSelection` separates Focused/Detailed from the queue-count capacity (the
+512/2,048/8,192 profiles or a custom count; see below).
 `ObservationSelectionSettings` resolves a live session override, then an explicit workspace
 selection, then the default. Each profile also has finite queue/state byte bounds and protected
 reserves. `PressureSnapshot` drives future optional-content reduction and temporary Detailed to
@@ -3979,6 +4730,71 @@ run the `2.6.0` manifest to exchange the new projection; the service does not si
 down-convert it to `2.5.0`. Selection state upgrades preserve pending delivery and default
 historical counters to zero, so the new accounting describes locally ingested inputs since the
 selection upgrade and never estimates older traffic.
+
+Configurable capacity follows the ADR-029 #828 amendment. `CapacityProfile` (512/2,048/8,192) is
+unchanged; `ObservationCapacity` is the owner-selected finite queue count, either one of those
+profiles or a custom count from 64 to 8,192 (`MIN_CUSTOM_QUEUE_COUNT`,
+`LARGEST_SUPPORTED_QUEUE_COUNT`), with the closed label `standard`, `larger`, `largest` or
+`custom`. `ObservationSelection.capacity` and `ObservationSelectionSettings.aggregate_capacity()`
+carry it; the settings document keeps the capacity as an integer queue count, and an
+out-of-range integer is a malformed setting that falls back to the safe default. The shared
+workspace aggregate is the largest of the active workspace setting's count (or the 512 default
+when none is active) and every active session selection's count. A session selection can raise
+that aggregate but never lower it: a session-scoped custom count below 512 lowers only that
+session's own admission, never a sibling's. `BudgetLimits.for_capacity` derives every limit from
+the count: queue bytes are 1 KiB per row, state bytes are `max(1 MiB, 2 × queue bytes)`, protected
+reserve rows and bytes are a quarter of the count and queue bytes with their existing floors
+(64 rows / 128 KiB), each capped at half the queue, session fair share is a quarter of the count
+and queue bytes, and pending attempts (256) and capture (512 tickets / 128 MiB) are fixed. For
+the three named profiles `for_capacity` delegates to `BudgetLimits.for_profile`, which keeps
+their unchanged limits. `STATE_DOCUMENT_CEILING_BYTES` (16 MiB) is the single definition of the
+local state-document safety ceiling that the store enforces.
+
+`CapacityRequest` is the parsed owner request (`kind` `profile`, `custom` or `no_cap`), produced
+by `parse_capacity_request` from the `--capacity` word or a decimal count plus the optional
+`--queue-count`. A no-cap request is valid input whose only answer is the non-retryable
+`invalid_request` reason `capacity_no_cap_unsupported`: the structural queue has no uncapped mode
+in this storage revision because of the state-document ceiling (`no_cap.reason:
+state_document_ceiling`), and the outcome names the largest supported finite capacity. Preview and
+apply both refuse it and change nothing. The reason maps to the admitted continuation
+`capacity_request_correction` (ADR-030 registry), whose directive tells the agent to have the
+owner choose a supported finite capacity, preview it, and apply only that exact accepted
+preview; the CLI failure body carries `error.capacity` beside `error.recovery`. The selection
+preview payload is
+`yoetz.observation-selection-preview/2`; it carries the parsed `capacity_request`, the current
+effective budget, and the closed `yoetz.capacity-change-disclosure/1` record (scope, change token,
+current and requested limits, closed consequence tokens, limits that still apply, unchanged
+authority, lower/revoke/pause/resume commands, `validation_status`). An increase carries the
+consequence token `workspace_aggregate_raised` because the shared workspace queue follows the
+largest active selection. Every command in the disclosure (`lower_command`, `revoke_command`,
+`pause_command`, `resume_command`) and every `next_command` uses the literal `<workspace>` and
+`<session-id>` placeholders, never the typed path or session id. Human CLI output and the terminal
+interface render that record with one shared renderer and never interpolate user-controlled text.
+The preview digest binds the requested count and change token, not live pressure. The CLI no-cap
+failure is a standard ADR-030 failure: `error.recovery` carries the continuation and directive,
+and `error.capacity` carries the facts as `{no_cap, alternative_command}`.
+
+`ObservationSelectionRuntimeStatus` adds `selected_capacity_label`, `effective_capacity_label` and
+the `yoetz.observation-effective-budget/1` record: scope, selected and effective counts and
+labels, `effective_reason` (`selected` or `workspace_aggregate`), every finite limit including
+`state_document_ceiling_bytes`, the limiting dimension, utilization in basis points, and the
+closed `no_cap` availability object. `effective_budget.limits.state_bytes` is the ladder value
+for the effective count. While a lowered selection drains, the store never enforces less than the
+existing state document's size. While accepted rows still exceed the lowered selection (row count
+above its queue count, or admission bytes above its queue bytes), a write that does not fit that
+occupancy bound may use the finite over-target bound (ADR-029, #843 amendment): the selected state
+bytes, plus the persisted bytes of accepted pending and buffered rows above the selected queue
+bytes, plus a fixed 128 KiB accounting reserve, never above `STATE_DOCUMENT_CEILING_BYTES`. That
+keeps refused-input accounting, delivery attempts and session ends writable. The bound follows
+only the accepted rows, shrinks as they drain, and is unused outside an over-target transition.
+The status record does not report this bound; the transition shows as over-100% utilization with
+`pressure_state: hard_limit`. Local control schema `2.9.0`
+carries custom counts, the
+labels and that record. A client and service with different manifests are rejected at the
+authenticated handshake, so both peers must run the `2.9.0` manifest to exchange them; there is
+no down-conversion to `2.8.0`, whose status keeps the three-profile enum. An older revision that
+reads a saved custom count treats it as malformed and drops that selection to the default without
+reporting it. MCP status remains read-only and does not expose or change capacity.
 
 `protect_next_reads` is a bounded request to retain read evidence linked to an obligation, claim
 or finding; it grants no content or disclosure authority. `promote_buffered_observation` can retain
@@ -4001,12 +4817,23 @@ bounded local observation store but is enqueued for delivery only as distinct ev
 host failure or denial in either phase, or the post-event of `start`, `publish_work`, `check`, or
 `respond`. The pre-event of every Yoetz-owned call and the post-event of a non-failed `status`,
 `receipt`, or `read_guidance` stay local, and Yoetz-owned tool input/output is never captured as
-content. Local pairing is unaffected, so a delivered post-event carries no `unpaired_event` gap and
+content. Codex hooks are the paired carrier: `tool_call_id` is scoped to source, session, and
+generation, and an orphan post retains `unpaired_event` until explicitly repaired. The currently
+installed Claude and Cursor native profiles are post-only carriers: their post observations never
+diagnose a missing pre-event. A post with an actual tool-call identity, such as Claude's
+`tool_use_id`, can materialize an observed action/result pair with a distinct post-only action
+identity; it does not assert that a pre-event was observed. A generation-only Cursor post
+materializes metadata-only evidence. Cursor `generation_id` is retained as metadata only and
+never serves as a tool identity. A legacy false `unpaired_event` from a post-only profile may be
+retired from the current projection only when retained history is complete and contains no true paired orphan; its gap
+history remains auditable.
+For Yoetz-owned calls, local pairing is unaffected, so a delivered post-event carries no
+`unpaired_event` gap and
 the service materializes its action from the post alone. No coverage gap is recorded: the service
 already holds the authoritative record of every Yoetz-owned call it served. The same complete
-host-spelling set gates advice delivery, so a Yoetz-owned hook does not lease pending frontier or
-recommendation context for the call that is being observed. This advice guard does not change
-local retention or the delivery of explicit self-call failures.
+host-spelling set gates advice delivery: without an explicit failure, a Yoetz-owned hook does not
+lease pending frontier or recommendation context for the call being observed. An explicit
+self-call failure remains eligible for pending advice as well as retention and delivery.
 
 The local observation state also owns a sparse, one-shot `FrontierMotionNotice` per Codex session:
 `from_sequence`, `to_sequence`, final `head_digest`, and exact accepted observation-record count.
@@ -4272,7 +5099,18 @@ serve command, refuse an observed foreign replacement, and treat an already-abse
 `host_remove_not_compare_and_swap`; callers must quiesce concurrent host configuration writers,
 and the port does not claim atomic exclusion inside the final host subprocess window. The same
 positive-absence fallback is required after removal, so a generic failed named lookup never proves
-success. The interactive approval surface prints the exact command, route, isolated root, warnings,
+success. After a returned nonzero remove exit, the adapter still performs that bounded read-only
+probe once. Verified absence returns `UNREGISTER` with the fixed warning
+`host_remove_returned_nonzero`; no mutation is retried. `McpRegistrationResult.warnings` carries
+that token to the CLI and setup disconnect. Their nested `removal` / `status.mcp_removal` report
+uses `yoetz.mcp-removal/1` (`schemas/integrations/mcp-removal-1.0.0.schema.json`): `completed`
+requires `state_after=absent`; `unverified` carries an observed present state or null and
+`next_action=inspect_registration`. A mutating command exception or unreadable post-state remains
+`REGISTRATION_FAILED`. The CLI retains exit 20 and emits an exact runtime/home/binary-bound status
+continuation; it does not treat a failed lookup as absence. Only verified absence clears applied-route
+bookkeeping and permits subsequent cleanup. Successful zero-exit removal has no result warning.
+This is a client-local report; it adds no MCP tool, hook event, ledger receipt field, or TUI operation.
+The interactive approval surface prints the exact command, route, isolated root, warnings,
 and preview digest. The preview binds the exact command, `policy|strict` route profile, and exact
 ADR-026 isolated root when present. Ambient external registrations carry no environment. Isolated
 external Codex registrations carry exactly one native `--env` pair,
@@ -4408,6 +5246,10 @@ current-session repository binding's `repository_grant_state == "granted"`. `end
 service's `fallback_provider` capability), and a separate `fallback_provider_credential`
 blocker (`not_connected` with its own next command, or `unknown`); the fallback is never an
 input to `semantic_ready`, and a single-endpoint install omits the fallback fields entirely.
+A Codex-subscription endpoint (primary or fallback) adds `review_budgets`. It is shaped
+`{"routine"|"final": {"reasoning_effort", "output_limit", "effort_source"}}`, where
+`effort_source` is `configured` or `legacy_single_effort`. `yoetz provider codex-subscription
+status` (`yoetz.codex-subscription-status/1`) carries the same object.
 `repository_grant_state` and `repository_migration_state` expose the separate repository-authority
 inputs without inventing another readiness verdict. `agent_route_semantic_ready` is
 `semantic_ready` **and** one exclusive observed owner (`external|plugin`) with
@@ -4824,7 +5666,12 @@ duration, capability profile, and an installation-keyed HMAC changed-path commit
 `afterMCPExecution` duration is admitted as a finite decimal millisecond value only at this host
 boundary and truncated to the canonical integer `duration_ms`; the canonical parser remains
 float-free. Discarded vendor-field floats are replaced transiently, and malformed or unsafe Cursor
-envelopes remain fail-open while recording the payload-free `cursor_payload_invalid` diagnostic.
+envelopes remain fail-open while recording the payload-free `cursor_payload_invalid` diagnostic; a
+body over the shared 256 KiB hook ingress cap is separated from that vendor-shape refusal. A
+complete body that also fits the 1 MiB skim cap is admitted as a structural row with
+`payload_content_omitted` and `cursor_payload_content_omitted`. A larger body, or a complete
+oversized body that fails validation, records `cursor_payload_too_large` with the
+`payload_too_large` coverage gap and no structural row.
 The `model` spelling from execution/file-edit events normalizes to `model_id`; a valid `model_id`
 spelling wins when both are present. It discards
 prompt, reasoning, response text, paths, file contents/edits, MCP/tool inputs/results, transcripts,
@@ -4965,7 +5812,21 @@ matched to exactly the external `mcp__yoetz__check` and plugin-owned
 `mcp__plugin_yoetz_yoetz__check` names. It produces no observation and records
 one payload-free `hook_diagnostics` reason, `host_auto_review_denied` (`source` `auto_mode` or
 absent) or `host_permission_rule_denied` (`permission_rule|hook`), on the `PermissionDenied`
-event (issue #467), and any other tool name records nothing. But the
+event (issue #467), and any other tool name records nothing and emits `{}`. For the scoped
+`check` its stdout is the **host-hold advisory** (`cli/host_hold_advisory.py`, issue #857):
+`hookSpecificOutput.{hookEventName, retry}` and `systemMessage` (user-visible fixed text from
+closed tokens only, ≤ 2 000 chars). Claude Code 2.1.281 drops `additionalContext` on this event;
+the model receives only the host's retry cue. `read_host_hold_facts` reads the repository grant
+through the bound service with one `GRANT_READ_DEADLINE_MS` = 2 500 ms budget covering connection,
+`privacy_get_setup`, and cleanup. `GrantReadReason` is `grant_confirmed` only when `grant_state =
+granted` and `llm_inference` is enabled; other outcomes remain closed unconfirmed reasons.
+`note_retry_offer` uses an owner-only `observation/host-hold-retries.json` ledger of up to 64
+session digests and answers `first|repeat|unrecorded`. Full or damaged ledgers never forget a
+prior offer; unsafe files and lock contention fail closed. `classifier_verdict_present` rejects
+unknown sources, missing reasons, legacy `no_verdict`, the current no-verdict reason prefix and
+`Classifier unavailable`. `compose_host_hold_advisory` emits retry only for a confirmed grant,
+a recognized verdict and a durably recorded first offer. The hook emits no
+permission decision and edits no host file. But the
 `CLAUDE_CODE_HARNESS_PROFILE` hook capability cell advertises no observation events: the recorded
 evidence case observed no accepted observation, so the cell stays unpopulated until each event has
 installed-host delivery, privacy, and accepted-observation evidence. `ObservationSource` adds
@@ -5003,6 +5864,13 @@ kind, and defaults fail-safe to machine-readable/non-TTY when trusted presentati
 absent. The daemon first obtains catalog-backed `Application.projection_binding_facts(...)`, then
 `Application.project_result_for_client(context, binding, result)` is the only route from a
 content-capable internal result to an ordinary serialized success.
+Project title and description hydration checks the exact source-owned text reference, route,
+membership generation, and source disclosure policy before loading text, then revalidates after
+the recipient projection decision. A source denial contributes a content-free candidate with
+`source_disclosure_permitted=false`; this trusted internal restriction can only remove authority.
+The ordinary privacy classifier and audit record the blocked category and exact omission pointer.
+Recipient policy, including self-authorship, cannot override this source restriction. The service
+does not manufacture additional omissions or alter the recorded disclosure receipt after approval.
 For repository privacy setup/effective/propose, `ControlProjectionBinding` additionally carries the
 installation-keyed repository commitment from `ControlSession.repository_privacy_context`; the
 scope resolver uses that trusted commitment to select the workspace policy and receipt scope.
@@ -5030,8 +5898,15 @@ The compact singleton carries the same two completion-scope fields beside its cu
 both counters, and an `unanswered_findings` preview. Its `blocking_conditions` are exactly
 `obligations_open|findings_unanswered|receipt_findings_unresolved|no_plan_published|
 no_obligations_declared|projection_stale|coverage_gaps_declared|readiness_unknown`. It is derived
-per request from the compact projection: reading it records nothing, creates no verdict or IDs, and
-never strengthens coverage. `findings_unanswered` identifies response work still to do;
+per request from the compact projection and a current, read-only comparison of accepted catalog
+children with the parent's recorded dependency manifest. Child blockers, including
+`lineage_manifest_not_recorded` and `lineage_manifest_state_changed`, appear in the status envelope's
+`gaps` and coverage and set `coverage_gaps_declared` on every view, including compact. An unavailable
+comparison contributes `lineage_readiness_unavailable`; it cannot make the parent look ready.
+Pending child annotations do not block. These current advisory facts never refresh a manifest,
+open a child bundle, change a recorded check, or strengthen a receipt. Reading readiness records
+nothing, creates no verdict or IDs, and never strengthens coverage.
+`findings_unanswered` identifies response work still to do;
 `receipt_findings_unresolved` is a persistent conclusion bound, not an instruction to respond
 again. Once every readable finding is answered, the latter condition remains and tells the caller
 that a receipt may be requested but cannot conclude `no_unresolved_deterministic_findings`.
@@ -5248,8 +6123,14 @@ facade and are never MCP tools.
   Includes the ADR-012 `setup` sub-app and `integrate <harness> mcp` sub-app; bare invocation
   prints help except the bounded interactive first-run case, which launches the wizard once.
 - `cli/exits.py`: `exit_code_for(PublicErrorCode | success) -> int`.
-- `config/models.py`: service-owned nonsecret service/storage/verification/logging defaults plus a
+- `config/models.py`: service-owned nonsecret service/storage/verification/logging and bounded
+  lineage/delegation defaults plus a
   one-time denied first-run privacy seed and exact provider/local-model profile identifiers. The
+  `[lineage]` settings are bounded `start_lease_seconds=60`, `attach_handle_ttl_seconds=300`,
+  `contact_lost_recovery_seconds=300`, `max_depth=8`, and `max_fanout=32`; typed admission
+  refusals enforce the depth and fan-out ceilings.  `max_fanout` accepts values through 64,
+  matching the bounded child-manifest, check-preview, and receipt-child sections; larger values
+  are rejected at configuration load rather than silently truncating lineage state.
   durable policy store—not config—owns the machine policy/ancestor ceilings. Privacy profiles are
   the `PrivacyProfile` enum; provider credentials and unlock/recovery material cannot be represented
   by config or environment. Ordinary clients never load this object. `release-probe` is available
@@ -5281,7 +6162,24 @@ facade and are never MCP tools.
   `storage.data_dir` alone are storage relocation, not isolation. The connection-free proof
   surface is `yoetz service isolation --json` (`cli/isolation_status.py`), digest-only; it also
   reports `binding` (`IsolationBinding` = `ambient|environment|runtime_pin|environment_and_pin`)
-  and `lifecycle` (`ReportedLifecycle` = `permanent|persistent|disposable|unlabeled`).
+  and `lifecycle` (`ReportedLifecycle` = `permanent|persistent|disposable|unlabeled`). Its JSON is
+  `yoetz.isolation-report/1` (`protocol/isolation_report.py` `IsolationReportContract`, wire
+  schema `service/isolation-report-1.0.0.schema.json`, golden vector
+  `fixtures/service/isolation-report.case.json`; issue #567), which names two digest kinds
+  apart. `path_identity` (`IsolationPathIdentity`) holds **path-identity digests** —
+  `state_path_digest`, `endpoint_path_digest`, `storage_path_digest`, `config_path_digest`,
+  `executable_path_digest`, each `path_identity_digest()` = SHA-256 over the canonical resolved
+  path — which prove which target a runtime uses and never bind bytes. `config_content` is `null`
+  unless `--content-digests` is passed; it is then one **byte-content observation**
+  (`ContentObservation` = `PresentContentObservation | AbsentContentObservation`, produced by
+  `observe_file_content()`): `path_digest`, `presence`
+  (`ContentPresence` = `present|absent|not_regular|oversized|unreadable|unstable`),
+  `content_digest` (SHA-256 of the bytes, `present` only), `size_bytes` (`present` only, at most
+  `CONTENT_OBSERVATION_BYTE_LIMIT` = 16 MiB), and `observed_at` (RFC 3339 ms) — never content.
+  Symlinks are followed, so `path_digest` is the target's identity; a read the file changes under
+  is retried (`_STABLE_ATTEMPTS` = 3) and otherwise reported `unstable` without a digest. The
+  untagged 0.2 output (an `identity` block whose `config_digest` was a path digest) is not a
+  schema version and is no longer emitted; consumers detect it by the absent `schema` key.
   The runtime pin (ADR-028, issue #604) is the second, executable-bound source of the same root:
   `read_runtime_pin()` reads `RUNTIME_PIN_NAME` = `yoetz-instance-pin.json`
   (`RUNTIME_PIN_SCHEMA` = `yoetz.runtime-instance-pin/1`: exact `isolated_root` plus
@@ -5312,7 +6210,7 @@ facade and are never MCP tools.
   creates one owner-only root (parent must exist; same path-safety gate; socket path bound
   `MAX_SOCKET_PATH_BYTES` = 100), seals the marker, and with `--bind-runtime` pins `sys.prefix`;
   it echoes the exact root once. `instance_status()` is connection-free and digest-only: mode,
-  binding, lifecycle, marker fields, `expired`, `runtime_provenance`
+  binding, lifecycle, the isolation report's `path_identity` block, marker fields, `expired`, `runtime_provenance`
   (`matched|drifted|unrecorded`), `runtime_pin` (`bound|none`), and the lock-stamped
   `service_holder`. `dispose_instance()` removes exactly one marked persistent/disposable root:
   flock probe, SIGTERM to the stamped holder only, bounded wait (`STOP_WAIT_SECONDS` = 35),
@@ -5332,14 +6230,17 @@ facade and are never MCP tools.
 `version.py` exposes `VersionManifest`: package, protocol (`0.1`), local control protocol (`1.0`),
 privacy-policy schema (`1.1.0`), egress-receipt schema (`1.0.0`), engine (`0.1.0`), policy pack
 versions, projection (`yoetz/0.1.0`), object format (`yoetz-object/1`), storage schema identities
-(`catalog_schema_version` `4`, `bundle_schema_version` `2` — hand-versioned positive-decimal
+(`catalog_schema_version` `5`, `bundle_schema_version` `14` — hand-versioned positive-decimal
 counters stamped into every receipt's version block and pinned as `const` in the current
 version-manifest schema), Python, APSW/SQLite source ID, MCP SDK, provider adapter versions.
 Those two identities are not the SQLite `user_version`: that axis is owned by the ordered migration
 registries under `migrations/` (`catalog/` and `bundle/`, one file per step), and
 `adapters/sqlite/connection.py` compares a file's `user_version` against the registry head it was
-built with — currently catalog 3 and bundle 9 — reporting `migration_required` when the file is
-older and refusing `schema_newer_than_binary` when it is newer.
+built with — currently catalog 5 and bundle 14 — reporting `migration_required` when the file is
+older and refusing `schema_newer_than_binary` when it is newer. A compatible package update runs
+the storage-owned `BundleUpgradeCoordinator.run_before_ready` phase before READY; the existing
+catalog `maintenance_operations` row records the `package_upgrade_migration` operation and its
+backup/replay phases. Lazy bundle opening remains fail-closed until that phase completes.
 Its shared support values are frozen `ResourceIdentity(name, media_type, size_bytes,
 sha256_digest)` and `CapabilitySet(name, supported_versions, tested_versions, denied_versions)`.
 Every capability collection is an exact ASCII-sorted set: membership is literal, with no SemVer
@@ -5393,6 +6294,49 @@ best-effort; absence can mean that the sink was unavailable, and never licenses 
 returned by check/operation status. `--correlation-id err_…` remains supported; exactly one selector
 is required. Both use the same bounded, payload-free record projection and require no ledger
 inspection. No new retry, lease, cancellation, network or credential authority is introduced.
+
+### Status fault classification and project member containment (issue #840)
+
+A status request reaches the application already validated against its frozen schema.
+`INVALID_REQUEST` is therefore returned only from the explicit caller-shape sites: cursor decoding
+and binding, the requested frontier, selector and view consistency, and the translation of the
+caller's view, filter, and cursor position into a projection query. Any other `TypeError` or
+`ValueError` raised while serving the read — including a pydantic `ValidationError` and the
+`CoordinationError`/`ProjectCommandError` family, which subclass `ValueError` — is a fault in stored
+state or in the service's own projection, and `application/status_faults.py` classifies it once by
+the stage that raised it:
+
+| Stage | Raised while | Public code |
+|---|---|---|
+| `replay` | decoding a recorded ledger, lineage manifest, host-lineage registry row, or stored operation result | `STORAGE_CORRUPT` |
+| `model` | validating a projected row against its closed public wire model | `INTERNAL_ERROR` |
+| `digest` | computing the task/project snapshot identity | `INTERNAL_ERROR` |
+| `projection` | any other internal step (the untagged residual) | `INTERNAL_ERROR` |
+
+All are non-retryable. Sites that already had specific fixed wording keep it (`The task ledger is
+unreadable.`, `The status case is unreadable.`, `The stored operation result is invalid.`, `Host
+lineage status is inconsistent.`). Each classification records one diagnostic with component
+`application.status`, operation `status_<view>_<stage>_failed`, the reviewed exception-class
+reason token, the innermost `yoetz` source `origin` of the original exception (never the stage
+boundary), and the request id. The public error carries that record's correlation id, so the
+daemon and MCP bridge reuse it and mint no second `status_public_error` record; `yoetz service
+diagnostics --correlation-id` or `--request-id` resolves the failure. The record never contains an
+exception message, a validation payload, a path, or user content. `CoordinationError` and
+`ProjectCommandError` are reviewed exception-class tokens (`exception_coordination_error`,
+`exception_project_command_error`, and `exception_host_lineage_registry_error`).
+
+The project view contains faults to the member that raised them. A member that cannot be routed,
+replayed, or projected contributes no lineage or receipt rows, the response `gaps` carry
+`project_member_unavailable`, and a diagnostic joined by request id records the stage (or, for an
+uncorrelated member public error, `status_project_member_unavailable` with its lowercase code).
+One member's rows are admitted together only after both were read. Project-level detection and
+coverage rows, the snapshot digest, and the page model still fail the read with a correlated
+error. Member receipt rows carry the receipt's recorded `subject_frontier`; the frozen `Frontier`
+wire object is normalized to a plain mapping at the strict `FrontierModel` boundary. Passing the
+frozen object directly rejected every member with a recorded receipt, which failed every root's
+project view as `INVALID_REQUEST` in the two-host 0.3.0 dogfood. The multi-agent MCP text summary
+also carries the allowlisted gap codes within its bounded fallback so a generic client can see a
+member omission without receiving private row content.
 
 
 ### Evidence-aware closure preparation (issues #569, #618, #657, #660, #666)
@@ -5459,6 +6403,134 @@ stage is unknown unless independently evidenced; local encode/decode stages are 
 The CLI's bounded diagnostic projection uses opaque session/source commitments and cursor
 positions, with null absent correlation and explicit incomplete-history coverage.
 
+### 0.3 integration with the 0.2.1 contracts
+
+Released artifacts remain byte-identical. The current lineage extensions use finding and
+finding-recorded `1.3.0`, check-result `1.3.0`, status-result `1.4.0`, receipt-document and
+receipt-result `1.3.0`, and version-manifest `2.3.0`. Receipt documents retain optional semantic
+provenance and provider usage alongside their required child-outcome section. Older receipt
+documents keep their original shape when decoded and serialized.
+
+ADR-030 recovery coverage includes every 0.3 lineage/project reason: invalid attach capabilities
+require parent review, pending operations preserve their request identity, authority refusals
+require explicit owner review, and terminal or invalid stored state is never automatically
+replaced. These reasons have registered directives and are not coverage exemptions.
+
+
+### Long semantic check waits on the 0.3 line (#746)
+
+`external_runtime.timeout_seconds` defaults to 900 seconds and accepts 1–3600. Explicit existing
+values remain effective. Primary/fallback execution deadlines are frozen before dispatch; the
+lease follows their authenticated bound plus five seconds of cleanup, never the caller's wait.
+A reclaimed started attempt keeps its physical provider request identity and reconciles exact
+admission before dispatch. Already consumed authority is not retried. An authenticated durable
+response is recovered without another provider call; missing outcome evidence stays unknown.
+
+For checks that may use semantic review, `deadline_ms` bounds a control client's wait and initial
+maintenance-gate acquisition. Once admitted, the check survives that wait or a disconnected client.
+Retry the unchanged request and `request_id`: an active handler reports `OPERATION_PENDING`, while
+a completed operation replays from its ledger with current client disclosure projection. Explicit
+control cancellation while attached and service shutdown cancel the owned work. Local coroutine
+cancellation merely stops waiting for a check. Other workflow cancellation behavior is unchanged.
+The existing maintenance gate may delay other task reads while a check runs; this change supplies
+pending/replay continuity, not concurrent-check scheduling. Structural progress for the running
+check is readable through `status view=operation` (next section).
+
+### Check admission stage (#838)
+
+Every branch that refuses a new check before an operation record exists raises retryable
+`OPERATION_PENDING` with a closed `reason_code`, an integer `retry_after_ms`, and the
+`check_admission_same_identity` continuation, attached at construction:
+
+| Stage | `reason_code` | `retry_after_ms` | Meaning |
+| --- | --- | --- | --- |
+| `acquiring` | `check_admission_in_progress` | 2000 | A live acquisition reservation already holds the exact (writer, request) key, or another invocation admitted it first. |
+| `capture_handoff_pending` | `check_admission_capture_pending` | 5000 | A native capture handoff for the task is outstanding, before staging or landing during it. |
+| `acquisition_contended` | `check_admission_contended` | 1000 | Concurrent motion in the case's own inputs, or a lapsed reservation, left nothing admitted. |
+| `import_pending` | `check_admission_import_pending` | 5000 | A Codex import for the session is still being published. |
+
+Nothing is recorded under the request identity at any stage, so the exact replay after
+`retry_after_ms` converges on the one operation admission eventually creates. `execute_check`
+retries once inside the call for `capture_handoff_pending` (after the task-local capture preflight)
+and `acquisition_contended`; it returns `acquiring` and `import_pending` directly. The daemon records
+each refusal's `reason_code` in its durable public-error diagnostic, so the correlation id names the
+stage. An admitted pending check with a live lease keeps the untyped `OPERATION_PENDING` and a
+`found=true` operation page.
+
+SQLite acquisition stages its resume object with the repository lock released. When only
+lifecycle state that moved no ledger record changed meanwhile (another operation's lease, phase, or
+AI-powered review bookkeeping), SQLite carries this acquisition's own operation row and frozen case
+over that motion instead of discarding it. A change to the projection, writers, object inventory, or
+this key refuses as `acquisition_contended`; a moved ledger head still returns `FRONTIER_CONFLICT`.
+
+`status view=operation` for an `absent` page adds an optional `admission` object (status result
+schema 1.4.0; omitted, never null, otherwise) while the service holds a live acquisition reservation
+or a recent refusal for the exact (writer, request) key: `stage` (the closed stage above),
+`refusal_count` (canonical uint; `0` only while `acquiring`), `first_observed_at`,
+`last_observed_at`, `observed_at` (timestamps), `elapsed_ms` (canonical uint, from
+`first_observed_at` to `observed_at`), and `retry_after_ms`. The page keeps `found=false` and
+`state=absent`: replaying the exact body is still the recovery. The ledger port method is
+`lookup_check_admission(writer_id, operation_id) -> CheckAdmissionRecord | None`, exposed on the
+read-only runtime facade. The journal behind it is in-memory, bounded to 64 keys and 15 minutes,
+never persisted, and cleared when the key is admitted; a service restart or runtime eviction forgets
+it and the page reads as plainly absent again. It carries no payload and never names another
+request or writer. The CLI human status rendering prints `Check admission: …` lines; the MCP text
+summary adds `admission stage`, `refusals`, `elapsed ms`, and `retry after ms`.
+
+### Structural semantic progress (#571 A2)
+
+`status view=operation` for a pending or complete check whose AI-powered review job recorded
+progress adds an optional `semantic_progress` object to the page (status result schema 1.4.0; it
+is omitted, never null, otherwise). Fields: `phase` (closed: `queued`, `case_admitted`,
+`runtime_starting`, `account_model_validation`, `provider_sampling`, `response_validation`,
+`cleanup`, `terminal`), `attempt_ordinal` (canonical uint; `0` until the first attempt is
+claimed), `queued_at`, `phase_entered_at`, `deadline_at`, `observed_at` (timestamps), `elapsed_ms`
+(canonical uint), and `condition` (`active`, `overdue`, `terminal`). A non-terminal object also has
+`remaining_ms`; a terminal one has `terminal_outcome` (`succeeded`, `failed`, `quarantined`) and
+`terminal_reason` (a `SemanticReason`) and no `remaining_ms`. `condition` is `active` exactly when
+`remaining_ms` is positive. Durations are computed by the service at `observed_at`; terminal
+`elapsed_ms` is frozen at the terminal time. `deadline_at` is the frozen execution expiry.
+
+Phases move forward only (by phase order within an attempt, then by attempt ordinal); a retry
+restarts at `queued` with the next ordinal. The terminal phase is derived from the terminal
+`semantic_jobs` row, so exactly one terminal state exists and survives restart. Storage is bundle
+table `semantic_progress` (bundle schema 15, migration `0015`); ledger port methods are
+`begin_semantic_progress(job_id, queued_at, deadline_at)` (insert once; replay is a no-op),
+`advance_semantic_progress(handle, phase, observed_at) -> bool` (only the active attempt of a
+leased job, only forward, never `terminal`), and `load_semantic_progress(writer_id, operation_id)`.
+The read-only runtime facade exposes the load. Provider and gateway code report phases through
+`yoetz.observability.semantic_context.report_semantic_progress(phase)`; the service binds the
+`semantic_progress_sink` context variable to exactly one claimed attempt, and a recording failure
+is a bounded `semantic_progress` diagnostic that never changes the attempt.
+
+While a service-owned check holds the maintenance and observation gates, the daemon admits
+`status view=operation` reads beside it through `CheckReadWindow`; the check drains admitted
+readers before releasing the gates. All other ordinary calls keep waiting on the gates. The CLI
+human status rendering prints `Semantic review …` lines; the MCP text summary adds `operation
+state`, `semantic phase`, `attempt`, `condition`, `elapsed ms`, and either `remaining ms` or the
+terminal outcome; the terminal interface polls the page while its own check runs and offers
+`/progress`. Receipts are unchanged: progress is live telemetry, not a coverage fact.
+
+
+`FinalSemanticEvaluation.case_content_gaps` carries bounded native-resolution omissions from the
+semantic packet into check and receipt coverage, even when the provider succeeds. Native capture
+metadata is not an excerpt: without an authenticated captured group, the builder omits the excerpt
+and retains `captured_object_unavailable`, including when the omission list limit is zero. The
+current consent-generation fence is still checked immediately before disclosure or recovered
+admission; larger review budgets do not change that authority.
+
+ADR-030 recovery also applies to first-start contention. The three `start_*_retry_ready` reasons
+carry `start_busy_same_identity` only after the catalog lease was yielded; `start_lease_pending`
+carries `start_pending_same_identity`. These are the continuation tokens the 0.2.3 line released;
+the 0.3 line keeps the same names and adds their nudges. Internal busy labels alone do not
+establish either condition.
+
+The native resolver reads at most the latest 256 retained envelopes from its mapped session.
+`list_envelopes_for_session(workspace, session_commitment, limit=None)` and
+`list_envelopes(workspace, limit=None)` preserve unbounded historical reader defaults for other
+callers; a supplied integer in `1..256` bounds the SQL query before decoding and returns the window
+in chronological order. Evidence outside that window cannot become an authenticated excerpt.
+
 ### Explicit Codex home in setup (issue #786)
 
 The local MCP registration and unregistration preview commitments use revision 4 when an
@@ -5487,12 +6559,16 @@ Control request 2.6.1 carries the existing ADR-029 selection route identifiers, 
 generation, subject-state digest, and protected-read reference. Selection route fields are
 all present or all absent. Routine summaries use the existing closed summary schema; individual
 observations remain closed to unknown fields. Domain and service route/authority validation
-remain mandatory. Released request 2.6.0 bytes and the hello contract remain unchanged.
+remain mandatory. Released request 2.6.0 bytes and the hello contract remain unchanged. The 0.3
+line's request contracts (`2.7.0`, `2.8.0`, `2.9.0`) derive from `2.6.1` and carry the same fields
+and summary branch, so an envelope the 0.2.3 service admits is admitted unchanged after upgrade.
 
 Routine-read classification persists its proven success bit when the native outcome was nested.
 Summary construction still revalidates that bit. A legacy buffered group that cannot prove a
 summary is delivered as its original individual observations, in source order, without inventing
 success or dropping accepted records. One invalid summary no longer blocks later hook ingestion.
+On the 0.3 line each such record additionally carries the `routine_summary_invalid` coverage gap
+and the lane records one bounded summary refusal (#764); the record itself is otherwise unchanged.
 
 ### Explicit Cursor Agent CLI project binding (issue #786)
 
@@ -5510,10 +6586,12 @@ clientInfo cannot select or switch it. There is no automatic fallback when deskt
 No content-capture permission, privacy grant, egress ceiling or service-instance boundary changes.
 Removal is the existing accepted project-registration removal lifecycle.
 
-### Bounded first-start recovery on 0.2
+### Bounded first-start recovery (0.2.3, issue #786)
 
 A same-bundle session rebind waits at most five seconds for existing runtime users to retire.
-At most 64 foreground rebind waiters are admitted per cached bundle. Waiting releases the cache
+At most 64 foreground rebind waiters are admitted per cached bundle on the 0.2 line; on the 0.3
+line that bound is the runtime policy's `max_pending_leases_per_task` (default 64), and the
+waiting start must also match the cached entry's scope. Waiting releases the cache
 lock, protects the entry from eviction, and blocks new old-session leases. A definitively returned
 retryable busy attempt yields only its fenced pending start-catalog lease; durable identity, phase
 and milestones remain. Cancellation and ambiguous response loss do not yield that lease.

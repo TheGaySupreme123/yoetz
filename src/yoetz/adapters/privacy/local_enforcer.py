@@ -224,7 +224,9 @@ class LocalPrivacyEnforcer:
                 if item.origin_ref.startswith(prefix)
             }
             source_findings.update(scan_exact_bytes(item.plaintext))
-            scope_valid = candidate.scope.contains(item.source_scope)
+            scope_valid = item.source_disclosure_permitted and candidate.scope.contains(
+                item.source_scope
+            )
             data_class = (
                 DataClass.SECRET_OR_CRYPTOGRAPHIC
                 if source_findings

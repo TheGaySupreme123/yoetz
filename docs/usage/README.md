@@ -13,8 +13,11 @@ the decisions behind it see [`docs/adr/`](../adr/).
   vocabulary, keys, and slash commands.
 - [The six operations](six-operations.md) — `start`, `publish_work`, `check`, `respond`, `status`,
   `receipt`, end to end.
+- [Working with several agents](multi-agent-work.md) — child tasks, dependency receipts, projects,
+  and consented coordination.
 - [Observation selection](observation-selection.md) — Focused and Detailed retention, independent
-  capacity profiles, evidence protection, promotion, and bounded content limits.
+  and custom capacity with its disclosure, why No Yoetz cap is unavailable, evidence protection,
+  promotion, and bounded content limits.
 - [Importing bounded Codex JSONL](importing-codex-jsonl.md) — stage, review, authorize, and resume
   one exact local `codex exec --json` import.
 - [Privacy and AI-powered review](privacy-and-semantic-review.md) — the zero-egress default, the
@@ -23,6 +26,8 @@ the decisions behind it see [`docs/adr/`](../adr/).
   cannot request external AI-powered review.
 - [Providers and credentials](providers.md) — reviewed presets, owner-declared endpoints, and the
   credential ceremony.
+- [Upgrade Yoetz](upgrading.md) — update the package while preserving existing tasks, settings,
+  permissions, host integrations, and compatible bundle data.
 - [Receipts and coverage](receipts-and-coverage.md) — how to read a receipt and why the wording is
   deliberately narrow.
 

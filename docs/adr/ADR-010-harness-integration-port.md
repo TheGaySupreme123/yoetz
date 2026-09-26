@@ -362,6 +362,17 @@ tokens, and `yoetz observe` verbs report pre-store conditions as typed public ou
 `internal_error`. Cursor's reference states `session_id` is "the same as `conversation_id`"; the
 alias persisted at `sessionStart` is therefore a defensive bound, not a required join.
 
+**Amendment (2026-09-26, issue #844):** `connect_provider` is standing advice only when service
+composition records effective review intent: verification is not disabled, a provider endpoint is
+bound, network egress is permitted, and an LLM inference channel is enabled. The verification
+default alone, including absent config, does not intend a provider. A private or no-egress install,
+an install with no provider endpoint, and a disabled verification setting do not ask Codex, Claude
+Code, or Cursor to connect, sign in, or repair one. When intent is recorded and the provider is
+structurally unusable, `connect_provider` is still produced, including when the fact has no factory
+id. Delivery stays on the standing session-boundary channels: Codex and Claude Code `SessionStart`
+and `Stop`, and Cursor `sessionStart`. `PostToolUse` does not carry it. Cursor `stop` still does
+not emit `followup_message`. No privacy widening, provider connection, or credential action is implied.
+
 **Amendment (2026-08-14):** Hook advice delivery no longer falls back to the workspace-wide
 `advice_snapshot` for task-scoped conditions. Before a Codex session is mapped, task-scoped
 advice is selected only from that Codex session's retained envelopes. After mapping, delivery
@@ -383,7 +394,7 @@ current advice without rewriting `0003`. Migration `0009` rebuilds the `0002` cu
 tables so their source CHECK admits `claude_hook` and `cursor_hook` beside the Codex sources: the
 domain enum is the closed set and the DDL follows it, never the reverse (issue #576). Repositories own those tables; coordinators do not issue
 private SQL.
-Observation consent is project-level and separate from egress consent. The plaintext local boundary
+Observation consent is workspace-level and separate from egress consent. The plaintext local boundary
 records a private workspace commitment, structural outbox/quarantine evidence, and encrypted object
 identities—never raw task content or a raw path in logs/status/SQLite.
 AI-powered review composition keeps this observation workspace commitment separate from the

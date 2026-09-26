@@ -27,6 +27,7 @@ from yoetz.tui.models import (
     ReadinessLayer,
     ReceiptSummary,
     StatusSnapshot,
+    TaskStatusPage,
     VaultPosture,
     WorkDetail,
     WorkItem,
@@ -150,8 +151,10 @@ class FakeRuntime:
     bindings: list[tuple[str, str]] = field(default_factory=lambda: [])
     subscription_actions: list[str] = field(default_factory=lambda: [])
     subscription_setups: list[tuple[str, str, str, str, bool]] = field(default_factory=lambda: [])
+    subscription_routine_efforts: list[str | None] = field(default_factory=lambda: [])
     checks: list[tuple[str, CheckMode]] = field(default_factory=lambda: [])
     opened: list[str] = field(default_factory=lambda: [])
+    progress_reads: list[str] = field(default_factory=lambda: [])
 
     def project_root(self) -> Path:
         return Path("/tmp/project")
@@ -341,8 +344,18 @@ class FakeRuntime:
     def codex_subscription_defaults(self) -> tuple[str, str, str, str]:
         return "/opt/codex/codex", "/var/lib/yoetz/codex-home", "gpt-5.6-luna", "high"
 
+    subscription_routine_default: str | None = "medium"
+
+    def codex_subscription_routine_default(self) -> str | None:
+        return self.subscription_routine_default
+
     def preview_codex_subscription(
-        self, executable: str, codex_home: str, model: str, reasoning_effort: str
+        self,
+        executable: str,
+        codex_home: str,
+        model: str,
+        reasoning_effort: str,
+        routine_reasoning_effort: str | None = None,
     ) -> dict[str, object]:
         return {
             "executable_path": executable,
@@ -353,6 +366,7 @@ class FakeRuntime:
             "codex_home": codex_home,
             "model": model,
             "reasoning_effort": reasoning_effort,
+            "routine_reasoning_effort": routine_reasoning_effort,
         }
 
     subscription_login_reused: bool = False
@@ -365,8 +379,10 @@ class FakeRuntime:
         reasoning_effort: str,
         *,
         switch_account: bool = False,
+        routine_reasoning_effort: str | None = None,
     ) -> dict[str, object]:
         action = "switch" if switch_account else "setup"
+        self.subscription_routine_efforts.append(routine_reasoning_effort)
         self.subscription_actions.append(action)
         self.subscription_setups.append(
             (executable, codex_home, model, reasoning_effort, switch_account)
@@ -385,7 +401,20 @@ class FakeRuntime:
         return {
             "auth_mode": "chatgpt",
             "plan_type": "plus",
+            "model": "gpt-5.6-luna",
             "model_available": True,
+            "review_budgets": {
+                "routine": {
+                    "reasoning_effort": "medium",
+                    "output_limit": 4096,
+                    "effort_source": "configured",
+                },
+                "final": {
+                    "reasoning_effort": "high",
+                    "output_limit": 8192,
+                    "effort_source": "configured",
+                },
+            },
             "process_cleanup": "terminated",
         }
 
@@ -455,6 +484,18 @@ class FakeRuntime:
     async def run_check(self, title: str, mode: CheckMode) -> tuple[str, tuple[str, ...]]:
         self.checks.append((title, mode))
         return "pass", ("Verdict: pass",)
+
+    async def check_progress(self, title: str) -> TaskStatusPage:
+        self.progress_reads.append(title)
+        return TaskStatusPage(
+            (
+                "Operation: req_00000000-0000-4000-8000-000000000571 (pending)",
+                "Semantic review phase: provider_sampling (attempt 1, active)",
+                "Semantic review elapsed: 42s; remaining 858s; deadline 2026-09-22T12:15:00.000Z",
+                "Gaps: none",
+            ),
+            None,
+        )
 
     async def build_receipt(self, title: str, output_format: str) -> ReceiptSummary:
         return ReceiptSummary(subject_id="task_01", verdict="no_unresolved_deterministic_findings")

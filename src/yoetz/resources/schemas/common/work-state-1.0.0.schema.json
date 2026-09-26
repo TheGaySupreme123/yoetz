@@ -1,0 +1,1 @@
+{"$id":"https://schemas.yoetz.dev/0.1/common/work-state-1.0.0.schema.json","$schema":"https://json-schema.org/draft/2020-12/schema","enum":["abandoned","cancelled","closed","open","written_off"],"title":"work-state","type":"string"}

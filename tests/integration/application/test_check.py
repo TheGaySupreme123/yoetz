@@ -51,6 +51,7 @@ from yoetz.domain.findings import (
 from yoetz.domain.receipts import (
     COMPLETION_SCOPE_DECLARED_NONE_GAP,
     COMPLETION_SCOPE_UNDECLARED_GAP,
+    SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
 )
 from yoetz.domain.values import Frontier, disclosure_continuation
 from yoetz.kernel import deterministic_checks as deterministic_checks_module
@@ -148,6 +149,17 @@ class _Ledger:
         self.last_ranked: RankedFindings | None = None
         self.last_executions: tuple[CheckPolicyExecution, ...] | None = None
         self.operation: OperationRecord | None = None
+
+    async def load_events(
+        self,
+        session_id: str,
+        *,
+        after: int = 0,
+        through: int | None = None,
+    ) -> Any:
+        del session_id, after, through
+        if False:
+            yield None
 
     async def freeze_case(self, *args: object) -> FrozenCase | CheckCommitResult:
         if self.failure is not None:
@@ -353,8 +365,9 @@ class _App:
         frozen: FrozenCase,
         deterministic_findings: tuple[Finding, ...],
         runtime: object | None = None,
+        lineage_evaluation: object | None = None,
     ) -> FinalSemanticEvaluation:
-        _ = (frozen, deterministic_findings, runtime)
+        _ = (frozen, deterministic_findings, runtime, lineage_evaluation)
         self.semantic_calls += 1
         if self.crash_semantic:
             raise RuntimeError("semantic_evaluator_crashed")
@@ -469,6 +482,7 @@ async def test_empty_completion_scope_gap_reaches_check_verdict(
     assert checked.verdict.value == "insufficient_coverage"
     assert expected_gap in checked.coverage.known_gaps
     assert checked.policy_executions == (
+        CheckPolicyExecution("coordination", "0.1.0", "skipped", "not_applicable"),
         CheckPolicyExecution("research-evidence", "0.1.0", "run", "completed"),
         CheckPolicyExecution("work-integrity", "0.1.0", "run", "completed"),
     )
@@ -1198,3 +1212,42 @@ async def test_capacity_failure_preserves_deterministic_result_and_precise_recei
     )
     assert result.verdict.value == "incomplete_check"
     assert result.findings
+
+
+@pytest.mark.anyio
+async def test_wide_finding_prose_gap_reaches_the_committed_check_coverage() -> None:
+    """A finding wider than one case item is a coverage fact, not a failed review (issue #858).
+
+    The case builder omits the finding's prose and declares the gap on the packet; composition
+    carries it here as a case-content gap. The committed check result is the single source the
+    MCP response, CLI output, status and receipt all render, so folding it once here is what makes
+    those surfaces agree.
+    """
+
+    app = _App(semantic=True)
+    app.semantic_result = replace(
+        _succeeded(SemanticJudgment("no_material_discrepancy", ())),
+        case_content_gaps=(SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,),
+    )
+    result = await execute_check_commit(app, _request("semantic_required"))
+    assert result.semantic_status is SemanticStatus.SUCCEEDED
+    assert SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP in result.coverage.known_gaps
+    assert result.coverage.ledger_freshness.value == "partial"
+    # Local findings are retained whatever the review could carry.
+    assert result.findings
+
+
+@pytest.mark.anyio
+async def test_native_resolution_omission_survives_successful_semantic_check() -> None:
+    app = _App(semantic=True)
+    app.semantic_result = replace(
+        _succeeded(SemanticJudgment("no_material_discrepancy", ())),
+        case_content_gaps=(
+            "captured_object_unavailable",
+            "content_capture_unavailable",
+            "content_unselected",
+        ),
+    )
+    result = await execute_check_commit(app, _request("semantic_if_configured"))
+    assert {"captured_object_unavailable", "content_unselected"} <= set(result.coverage.known_gaps)
+    assert result.verdict.value != "no_issue_detected"

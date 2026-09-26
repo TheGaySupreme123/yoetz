@@ -907,6 +907,7 @@ def test_guided_setup_offers_account_switch(
             str(tmp_path / "home"),
             "gpt-5.6-luna",
             "high",
+            "medium",
             "browser",
         ]
     )
@@ -951,7 +952,7 @@ def test_guided_setup_offers_account_switch(
     anyio.run(module.prompt_codex_subscription_setup)
 
     assert prompt_defaults["Exact model"] == "gpt-5.6-luna"
-    assert prompt_defaults["Reasoning effort"] == "high"
+    assert prompt_defaults["Final review reasoning effort"] == "high"
     assert any(item.startswith("Continue to Codex sign-in") for item in confirms)
     assert any("switch ChatGPT account" in item for item in confirms)
     assert captured == [True]
@@ -965,6 +966,7 @@ def test_guided_setup_preserves_existing_model_when_switching_accounts(
             str(tmp_path / "codex"),
             str(tmp_path / "home"),
             "high",
+            "medium",
             "browser",
         ]
     )
@@ -1021,6 +1023,7 @@ def test_guided_setup_discloses_login_reuse_before_the_confirmation(
             str(tmp_path / "home"),
             "gpt-5.6-luna",
             "high",
+            "medium",
             "browser",
         ]
     )
@@ -1621,3 +1624,175 @@ def test_default_subscription_model_recommends_luna_or_preserves_existing_bindin
 
     target = _bound_config_file(tmp_path, _binding(tmp_path / "codex", tmp_path / "home"))
     assert module.default_codex_subscription_model(target) == "gpt-5.6-sol"
+
+
+# --- issue #571: routine/final budget choices survive setup -------------------------------------
+
+
+def _budget_setup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    existing: ExternalRuntimeProfileConfig | None,
+) -> list[ExternalRuntimeProfileConfig]:
+    written: list[ExternalRuntimeProfileConfig] = []
+    template = _binding(tmp_path / "codex", tmp_path / "dedicated-home")
+
+    def preview(**kwargs: object) -> dict[str, object]:
+        return {
+            "executable_path": template.executable_path,
+            "executable_sha256": template.executable_sha256,
+            "runtime_source_identity": template.source_identity,
+            "app_server_schema_sha256": template.app_server_schema_sha256,
+            "capability_cell_sha256": template.capability_cell_sha256,
+            "isolated_config_sha256": template.isolated_config_sha256,
+            "capability_profile": template.capability_profile,
+            "capability_evidence_expires_at": template.capability_evidence_expires_at,
+            **kwargs,
+        }
+
+    def snapshot(_path: Path) -> tuple[YoetzConfig, bytes | None]:
+        if existing is None:
+            return YoetzConfig(), None
+        return YoetzConfig(profile="codex-subscription", external_runtime=existing), None
+
+    def write_binding(config: YoetzConfig, **_kwargs: object) -> Path:
+        assert config.external_runtime is not None
+        written.append(config.external_runtime)
+        return tmp_path / "config.toml"
+
+    async def ready(_profile: object) -> CodexRuntimeStatus:
+        return CodexRuntimeStatus(True, "chatgpt", "plus", True, "terminated")
+
+    def preflight(*_args: object, **_kwargs: object) -> Path:
+        return tmp_path / "config.toml"
+
+    def prepare(_home: Path) -> None:
+        return None
+
+    def build_profile(_binding: ExternalRuntimeProfileConfig) -> object:
+        return object()
+
+    monkeypatch.setattr(module, "codex_subscription_preview", preview)
+    monkeypatch.setattr(module, "_config_snapshot", snapshot)
+    monkeypatch.setattr(module, "preflight_config_write", preflight)
+    monkeypatch.setattr(module, "prepare_codex_home", prepare)
+    monkeypatch.setattr(module, "_profile", build_profile)
+    monkeypatch.setattr(module, "codex_account_status", ready)
+    monkeypatch.setattr(module, "write_config_toml_if_unchanged", write_binding)
+    return written
+
+
+async def _setup_with_routine(tmp_path: Path, routine: str | None) -> Mapping[str, object]:
+    return await module.codex_subscription_setup(
+        executable=tmp_path / "codex",
+        codex_home=tmp_path / "dedicated-home",
+        model="gpt-5.6-sol",
+        reasoning_effort="high",
+        login_mode="browser",
+        open_browser=False,
+        switch_account=False,
+        routine_reasoning_effort=routine,
+    )
+
+
+@pytest.mark.anyio
+async def test_new_binding_receives_the_bounded_routine_recommendation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    written = _budget_setup(monkeypatch, tmp_path, None)
+
+    result = await _setup_with_routine(tmp_path, None)
+
+    assert [item.routine_reasoning_effort for item in written] == ["medium"]
+    assert (written[0].routine_output_limit, written[0].final_output_limit) == (4096, 8192)
+    assert result["reasoning_effort"] == "high"
+    assert result["review_budgets"] == {
+        "routine": {
+            "reasoning_effort": "medium",
+            "output_limit": 4096,
+            "effort_source": "configured",
+        },
+        "final": {"reasoning_effort": "high", "output_limit": 8192, "effort_source": "configured"},
+    }
+
+
+@pytest.mark.anyio
+async def test_resetup_preserves_a_legacy_single_effort_and_explicit_output_limits(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    legacy = _binding(tmp_path / "codex", tmp_path / "dedicated-home").model_copy(
+        update={"routine_output_limit": 2048, "final_output_limit": 6000}
+    )
+    written = _budget_setup(monkeypatch, tmp_path, legacy)
+
+    await _setup_with_routine(tmp_path, None)
+
+    assert written[0].routine_reasoning_effort is None
+    assert written[0].effective_routine_reasoning_effort == "high"
+    assert (written[0].routine_output_limit, written[0].final_output_limit) == (2048, 6000)
+
+
+@pytest.mark.anyio
+async def test_explicit_routine_choice_wins_over_an_existing_binding(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    existing = _binding(tmp_path / "codex", tmp_path / "dedicated-home").model_copy(
+        update={"routine_reasoning_effort": "low"}
+    )
+    written = _budget_setup(monkeypatch, tmp_path, existing)
+
+    await _setup_with_routine(tmp_path, "xhigh")
+
+    assert written[0].routine_reasoning_effort == "xhigh"
+
+
+def test_routine_default_follows_the_existing_binding(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    assert module.default_codex_subscription_routine_effort() == "medium"
+    legacy = _binding(tmp_path / "codex", tmp_path / "home")
+    selected: list[ExternalRuntimeProfileConfig] = [legacy]
+
+    def base_config(_path: Path | None = None) -> YoetzConfig:
+        return YoetzConfig(profile="codex-subscription", external_runtime=selected[0])
+
+    monkeypatch.setattr(module, "_base_config", base_config)
+    assert module.default_codex_subscription_routine_effort() is None
+    selected[0] = legacy.model_copy(update={"routine_reasoning_effort": "low"})
+    assert module.default_codex_subscription_routine_effort() == "low"
+
+
+def test_preview_rejects_an_unsupported_routine_effort(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import platform
+    import sys
+
+    from yoetz.adapters.providers.codex_app_server import codex_evaluator_cell_for_platform
+
+    try:
+        cell = codex_evaluator_cell_for_platform(sys.platform, platform.machine())
+    except ValueError:
+        pytest.skip("no supported Codex cell on this platform")
+    native = tmp_path / "codex"
+
+    def resolve(_path: Path) -> tuple[Path, str, str]:
+        return native, cell.executable_sha256, cell.source_identity
+
+    monkeypatch.setattr(module, "resolve_supported_codex_executable", resolve)
+    preview = module.codex_subscription_preview(
+        executable=native,
+        codex_home=tmp_path / "home",
+        model="gpt-5.6-sol",
+        reasoning_effort="high",
+        routine_reasoning_effort="low",
+    )
+    assert (preview["reasoning_effort"], preview["routine_reasoning_effort"]) == ("high", "low")
+    with pytest.raises(ValueError, match="codex_runtime_model_invalid"):
+        module.codex_subscription_preview(
+            executable=tmp_path / "missing-codex",
+            codex_home=tmp_path / "home",
+            model="gpt-5.6-sol",
+            reasoning_effort="high",
+            routine_reasoning_effort="turbo",
+        )

@@ -193,7 +193,7 @@ def test_the_local_purpose_grammar_is_the_one_the_domain_produces() -> None:
     """Reconciliation, not a one-off widening: the wire mirrors its canonical owner."""
 
     document = json.loads(
-        (_SCHEMA_ROOT / "service" / "control-result-2.6.1.schema.json").read_bytes()
+        (_SCHEMA_ROOT / "service" / "control-result-2.7.0.schema.json").read_bytes()
     )
     definition = cast(dict[str, Any], document["$defs"]["local_disclosure_purpose"])
 
@@ -227,7 +227,7 @@ def test_external_egress_purposes_keep_the_stricter_released_vocabulary() -> Non
 
 
 def test_the_frozen_2_6_envelope_is_untouched() -> None:
-    """2.6 is released bytes; only the active 2.6.1 contract moves."""
+    """2.6 is released bytes; only the active 2.7 contract moves."""
 
     document = json.loads(
         (_SCHEMA_ROOT / "service" / "control-result-2.6.0.schema.json").read_bytes()
@@ -262,7 +262,7 @@ def test_the_wire_still_refuses_purposes_the_domain_refuses(purpose: str) -> Non
     with pytest.raises(ProtocolValueError):
         validate_schema_instance(
             "control-result",
-            "2.6.1",
+            "2.7.0",
             {
                 "protocol_version": "1.0",
                 "rpc_id": _RPC_ID,

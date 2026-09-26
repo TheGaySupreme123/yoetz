@@ -110,6 +110,12 @@ class _World:
             clock=self.coordinator.clock,
             generation_is_current=generation_is_current,
         )
+        self.coordinator.capture_handoff_reconcile = partial(
+            ready_module._reconcile_capture_handoffs,  # pyright: ignore[reportPrivateUsage]
+            catalog=cast(StartCatalogPort, self.catalog),
+            runtime=cast(BundleRuntimePort, self.routes),
+            generation_is_current=generation_is_current,
+        )
 
     def sweep(self, *, capture_recovery_budget_seconds: float = 5.0) -> ObservationOutboxSweeper:
         return ObservationOutboxSweeper(
@@ -637,18 +643,23 @@ async def test_unmapped_parent_worker_candidates_do_not_starve_a_usable_mapping(
 
 
 @pytest.mark.anyio
-async def test_ambiguous_host_session_cannot_publish_an_inventory(tmp_path: Path) -> None:
+async def test_duplicate_host_session_binding_is_refused_before_inventory_change(
+    tmp_path: Path,
+) -> None:
     world = await _world(tmp_path)
     unrelated = tmp_path / "unrelated-project"
     unrelated.mkdir()
     other_workspace = world.local.workspace_commitment(str(unrelated))
     world.local.grant_consent(other_workspace)
-    world.local.bind_codex_session(other_workspace, world.host_session)
     try:
-        result = await world.coordinator.recover_capture_inventory(world.workspace)
-        assert result is ObservationCaptureRecoveryOutcome.MAPPING_MISSING
+        from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
+
+        with pytest.raises(PublicOperationError) as refused:
+            world.local.bind_codex_session(other_workspace, world.host_session)
+        assert refused.value.code is PublicErrorCode.SESSION_CONFLICT
+        assert world.local.find_workspace_for_codex_session(world.host_session) == world.workspace
         assert world.routes.calls == []
-        assert not world.local.capture_reservation_bootstrap_ready(world.workspace)
+        assert not world.local.capture_reservation_bootstrap_ready(other_workspace)
     finally:
         world.coordinator.close()
 
@@ -699,6 +710,10 @@ async def test_recovered_inventory_preserves_real_pending_ticket_pressure(
 
     monkeypatch.setattr(BudgetLimits, "for_profile", classmethod(small_capture_budget))
     stamp = timestamp_from_datetime(world.coordinator.clock.now_utc())
+    # Genuinely pending handoffs carry the current content authority; a stale
+    # generation could never be consumed and is retired as stranded (#836).
+    authority = world.local.content_capture_authority(world.workspace)
+    assert authority is not None
     for number, (current, store) in enumerate(
         (
             (world.runtime, world.observation),
@@ -717,7 +732,7 @@ async def test_recovered_inventory_preserves_real_pending_ticket_pressure(
                 cursor=ObservationCursor(1, 0, number, "hmac-sha256:" + "a" * 64, "fixture-v1"),
                 logical_identity=f"retained-{number}",
                 content_capture_profile=CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
-                authority_generation="sha256:" + "0" * 64,
+                authority_generation=authority.generation,
                 object_ids=(),
                 captured_at=stamp,
             )
@@ -781,6 +796,20 @@ async def test_blocking_task_metadata_read_leaves_control_loop_responsive(
             with pytest.raises(asyncio.CancelledError):
                 await operation
         world.coordinator.close()
+
+
+async def _observe_outbox_drain(world: _World, sweeper: ObservationOutboxSweeper) -> None:
+    """Drive the sweeper until the local outbox is empty, or fail on a deadline.
+
+    A hook pass drains its own rows within a bounded budget. On a loaded runner
+    that budget can expire with rows still pending, and the next pass then
+    counts a real admission loss against the stalled, ageing rows (issue #775).
+    Observe the drain instead of assuming each pass landed before the next write.
+    """
+
+    async with asyncio.timeout(10):
+        while world.local.pending_outbox_count(world.workspace) > 0:
+            await sweeper.sweep()
 
 
 @pytest.mark.anyio
@@ -861,6 +890,7 @@ async def test_parent_worker_routes_recover_and_keep_encrypted_content_task_scop
                     )
                     == 0
                 )
+                await _observe_outbox_drain(world, sweeper)
         after = world.local.selection_accounting(world.workspace)
         assert after["unrecoverable_input_count"] == 2
         assert after["loss_identity_commitment"] == before["loss_identity_commitment"]
@@ -970,7 +1000,10 @@ async def test_partial_ticket_ids_do_not_release_an_unlisted_reservation(
         world.workspace, "sha256:" + "c" * 64, world.runtime.task_id, 17
     )
     world.local.mark_capture_backlog_scope_unknown(world.workspace)
-    stamp = timestamp_from_datetime(world.coordinator.clock.now_utc())
+    # A fresh aggregate keeps this test on the bootstrap step. An aged handoff
+    # would also be reconciled against the durable listing (#836), which is
+    # covered by tests/integration/service/test_capture_handoff_recovery.py.
+    stamp = world.local._wall_timestamp()  # pyright: ignore[reportPrivateUsage]
 
     def retained_without_complete_ids(workspace: str) -> ObservationCaptureBacklog:
         assert workspace == world.workspace

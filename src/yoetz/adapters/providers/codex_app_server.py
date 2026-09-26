@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import os
 import platform
+import re
 import shutil
 import signal
 import stat
@@ -29,12 +30,16 @@ from urllib.parse import urlsplit
 from yoetz.adapters.providers.data_use_catalog import data_use_record_for_endpoint
 from yoetz.adapters.providers.openai_responses import (
     JUDGMENT_JSON_SCHEMA,
-    OPENAI_MAX_OUTPUT_TOKENS,
     SEMANTIC_REVIEW_INSTRUCTION,
     JudgmentValidationError,
     normalize_judgment,
 )
-from yoetz.config.models import ExternalRuntimeProfileConfig
+from yoetz.config.models import (
+    CODEX_FINAL_OUTPUT_LIMIT_DEFAULT,
+    CODEX_OUTPUT_LIMIT_MAX,
+    CODEX_ROUTINE_OUTPUT_LIMIT_DEFAULT,
+    ExternalRuntimeProfileConfig,
+)
 from yoetz.config.paths import ensure_owner_only_dir, verify_private_local_bundle
 from yoetz.domain.findings import (
     RUNTIME_FAILURE_STAGES,
@@ -51,6 +56,7 @@ from yoetz.domain.privacy import (
     RequestCommitment,
 )
 from yoetz.domain.values import validate_sha256_digest
+from yoetz.observability.semantic_context import report_semantic_progress
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.secret_memory import ProviderAttemptAuthBinding
 from yoetz.ports.semantic import (
@@ -65,6 +71,12 @@ from yoetz.ports.semantic import (
     SemanticResultTimeout,
     SemanticResultUnavailable,
 )
+from yoetz.ports.semantic_budget import (
+    LEGACY_SEMANTIC_BUDGET_PROFILE,
+    SEMANTIC_BUDGET_PROFILES,
+    SemanticBudgetProfile,
+    current_semantic_budget_profile,
+)
 from yoetz.protocol.canonical import (
     JsonValue,
     canonical_digest,
@@ -72,7 +84,7 @@ from yoetz.protocol.canonical import (
     strict_json_parse,
 )
 from yoetz.protocol.errors import ProtocolValueError
-from yoetz.protocol.models import SemanticStatus
+from yoetz.protocol.models import SemanticProgressPhase, SemanticStatus
 
 __all__ = [
     "CODEX_APP_SERVER_SCHEMA_SHA256",
@@ -89,6 +101,7 @@ __all__ = [
     "CodexAppServerProfile",
     "CodexEvaluatorCell",
     "CodexLoginChallenge",
+    "CodexReviewBudget",
     "CodexRuntimeStatus",
     "codex_account_status",
     "codex_binding_from_config",
@@ -297,6 +310,7 @@ _MAX_MESSAGE_BYTES: Final = 1_048_576
 # judgment can legitimately cross several hundred events. Every event is still bounded by
 # ``_MAX_MESSAGE_BYTES`` and the attempt deadline; this cap only stops an unbounded stream.
 _MAX_EVENT_COUNT: Final = 4096
+_EFFORT_PATTERN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,63}$", re.ASCII)
 _MAX_STDERR_BYTES: Final = 65_536
 _CLEANUP_GRACE_SECONDS: Final = 2.0
 # The AI-powered evaluator's request deadline is carried by ``Deadline`` and is intentionally
@@ -437,6 +451,45 @@ class CodexLoginChallenge:
 
 
 @dataclass(frozen=True, slots=True)
+class CodexReviewBudget:
+    """The exact per-check effort and output limit selected for one review profile.
+
+    ``output_limit`` counts output tokens. The pinned app-server protocol has no per-turn output
+    ceiling, so Yoetz enforces it against the runtime's reported visible (non-reasoning) output
+    tokens and records it as ``sampling_params.max_output_tokens``.
+    """
+
+    budget_profile: SemanticBudgetProfile
+    reasoning_effort: str
+    output_limit: int
+
+    def __post_init__(self) -> None:
+        if self.budget_profile not in SEMANTIC_BUDGET_PROFILES:
+            raise ValueError("codex_budget_profile_invalid")
+        if (
+            type(self.reasoning_effort) is not str
+            or _EFFORT_PATTERN.fullmatch(self.reasoning_effort) is None
+        ):
+            raise ValueError("codex_runtime_effort_invalid")
+        if type(self.output_limit) is not int or not 1 <= self.output_limit <= (
+            CODEX_OUTPUT_LIMIT_MAX
+        ):
+            raise ValueError("codex_runtime_output_limit_invalid")
+
+    def selection_sha256(self, model: str) -> str:
+        """Commit to the exact model, effort, output limit, and profile of one attempt."""
+
+        return canonical_digest(
+            {
+                "budget_profile": self.budget_profile,
+                "model": model,
+                "output_limit": self.output_limit,
+                "reasoning_effort": self.reasoning_effort,
+            }
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class CodexAppServerProfile:
     provider_id: str
     endpoint_profile_id: str
@@ -455,6 +508,9 @@ class CodexAppServerProfile:
     reasoning_effort: str
     timeout_seconds: int
     data_use_profile: ProviderDataUseProfile
+    routine_reasoning_effort: str | None = None
+    routine_output_limit: int = CODEX_ROUTINE_OUTPUT_LIMIT_DEFAULT
+    final_output_limit: int = CODEX_FINAL_OUTPUT_LIMIT_DEFAULT
 
     @classmethod
     def from_config(cls, config: ExternalRuntimeProfileConfig) -> CodexAppServerProfile:
@@ -478,6 +534,9 @@ class CodexAppServerProfile:
             reasoning_effort=config.reasoning_effort,
             timeout_seconds=config.timeout_seconds,
             data_use_profile=data_use_record_for_endpoint(config.endpoint_profile_id).profile,
+            routine_reasoning_effort=config.routine_reasoning_effort,
+            routine_output_limit=config.routine_output_limit,
+            final_output_limit=config.final_output_limit,
         )
 
     def __post_init__(self) -> None:
@@ -500,10 +559,49 @@ class CodexAppServerProfile:
             validate_sha256_digest(digest)
         if not self.executable_path.is_absolute() or not self.codex_home.is_absolute():
             raise ValueError("codex_runtime_path_invalid")
-        if type(self.timeout_seconds) is not int or not 1 <= self.timeout_seconds <= 300:
+        if type(self.timeout_seconds) is not int or not 1 <= self.timeout_seconds <= 3600:
             raise ValueError("codex_runtime_timeout_invalid")
         if type(self.data_use_profile) is not ProviderDataUseProfile:
             raise ValueError("codex_runtime_data_use_invalid")
+        for effort in (self.reasoning_effort, self.routine_reasoning_effort):
+            if effort is not None and (
+                type(effort) is not str or _EFFORT_PATTERN.fullmatch(effort) is None
+            ):
+                raise ValueError("codex_runtime_effort_invalid")
+        for limit in (self.routine_output_limit, self.final_output_limit):
+            if type(limit) is not int or not 1 <= limit <= CODEX_OUTPUT_LIMIT_MAX:
+                raise ValueError("codex_runtime_output_limit_invalid")
+
+    def review_budget(self, budget_profile: SemanticBudgetProfile) -> CodexReviewBudget:
+        """Select the exact effort and output limit for one check's budget profile.
+
+        Final reviews use the configured ``reasoning_effort``. Routine reviews use the explicit
+        routine effort when the owner set one; a legacy binding without it keeps its single
+        configured effort, so no persisted choice is silently lowered.
+        """
+
+        if budget_profile == "final":
+            return CodexReviewBudget("final", self.reasoning_effort, self.final_output_limit)
+        if budget_profile == "routine":
+            effort = (
+                self.reasoning_effort
+                if self.routine_reasoning_effort is None
+                else self.routine_reasoning_effort
+            )
+            return CodexReviewBudget("routine", effort, self.routine_output_limit)
+        raise ValueError("codex_budget_profile_invalid")
+
+    @property
+    def required_reasoning_efforts(self) -> tuple[str, ...]:
+        """Every effort a check under this binding may request, final first, deduplicated."""
+
+        efforts = [self.reasoning_effort]
+        if (
+            self.routine_reasoning_effort is not None
+            and self.routine_reasoning_effort != self.reasoning_effort
+        ):
+            efforts.append(self.routine_reasoning_effort)
+        return tuple(efforts)
 
     def verify_capability_evidence(self, now: datetime) -> None:
         if now.tzinfo is None or now.utcoffset() is None:
@@ -891,8 +989,18 @@ def _account(result: Mapping[str, object]) -> tuple[Literal["chatgpt"], str | No
 
 
 async def _require_model(
-    runtime: _CodexProcess, profile: CodexAppServerProfile, timeout: float
+    runtime: _CodexProcess,
+    profile: CodexAppServerProfile,
+    timeout: float,
+    required_efforts: tuple[str, ...] | None = None,
 ) -> None:
+    """Prove the exact model lists every effort this probe or attempt may request.
+
+    Readiness probes require every configured profile effort; one evaluation attempt requires
+    only the effort its budget selected.
+    """
+
+    required = profile.required_reasoning_efforts if required_efforts is None else required_efforts
     deadline = asyncio.get_running_loop().time() + timeout
     cursor: object = None
     for page in range(8):
@@ -917,12 +1025,12 @@ async def _require_model(
             if not isinstance(efforts, list | tuple):
                 raise ValueError("codex_model_catalog_invalid")
             effort_items = cast(list[object] | tuple[object, ...], efforts)
-            if any(
-                isinstance(item, Mapping)
-                and cast(Mapping[str, object], item).get("reasoningEffort")
-                == profile.reasoning_effort
+            supported = {
+                cast(Mapping[str, object], item).get("reasoningEffort")
                 for item in effort_items
-            ):
+                if isinstance(item, Mapping)
+            }
+            if all(effort in supported for effort in required):
                 return
             raise ValueError("codex_reasoning_effort_unavailable")
         cursor = result.get("nextCursor")
@@ -1656,6 +1764,12 @@ _FAILURE_STAGE_BY_TOKEN: Final[Mapping[str, str]] = {
 }
 
 
+def _visible_output_tokens(usage: RuntimeTokenUsage) -> int:
+    """Output tokens outside the reasoning subset: the judgment the runtime emitted."""
+
+    return usage.output_tokens - usage.reasoning_output_tokens
+
+
 def _failure_stage(error: Exception, *, turn_acknowledged: bool, launched: bool) -> str:
     """Name the closed stage at which one attempt stopped, from the exception family only.
 
@@ -1730,6 +1844,8 @@ class CodexAppServerEvaluator:
     binding: ProviderAttemptAuthBinding
     authority: ExternalRuntimeAuthority
     clock: ClockPort
+    # ``None`` is the legacy single-effort selection (the final profile).
+    budget: CodexReviewBudget | None = None
 
     async def evaluate(self, case: ApprovedProviderCase, deadline: Deadline) -> SemanticResult:
         if (
@@ -1742,6 +1858,13 @@ class CodexAppServerEvaluator:
             or self.binding.monotonic_deadline != self.authority.monotonic_deadline
             or deadline.monotonic_deadline != self.authority.monotonic_deadline
         ):
+            raise ValueError("codex_runtime_attempt_binding_invalid")
+        budget = (
+            self.profile.review_budget(LEGACY_SEMANTIC_BUDGET_PROFILE)
+            if self.budget is None
+            else self.budget
+        )
+        if type(budget) is not CodexReviewBudget:
             raise ValueError("codex_runtime_attempt_binding_invalid")
 
         started = self.clock.monotonic_seconds()
@@ -1763,6 +1886,7 @@ class CodexAppServerEvaluator:
         raw_size = 0
         try:
             self.profile.verify_capability_evidence(self.clock.now_utc())
+            await report_semantic_progress(SemanticProgressPhase.RUNTIME_STARTING)
             runtime = await _launch(self.profile)
             initialize = await runtime.request(
                 0,
@@ -1783,6 +1907,7 @@ class CodexAppServerEvaluator:
             )
             _validate_initialize(self.profile, initialize)
             await runtime.send({"method": "initialized"})
+            await report_semantic_progress(SemanticProgressPhase.ACCOUNT_MODEL_VALIDATION)
             account_result = await runtime.request(
                 1,
                 "account/read",
@@ -1790,7 +1915,12 @@ class CodexAppServerEvaluator:
                 _remaining(deadline, self.clock),
             )
             auth_mode, plan_type = _account(account_result)
-            await _require_model(runtime, self.profile, _remaining(deadline, self.clock))
+            await _require_model(
+                runtime,
+                self.profile,
+                _remaining(deadline, self.clock),
+                (budget.reasoning_effort,),
+            )
             thread_result = await runtime.request(
                 30,
                 "thread/start",
@@ -1819,7 +1949,7 @@ class CodexAppServerEvaluator:
                 {
                     "approvalPolicy": "never",
                     "approvalsReviewer": "user",
-                    "effort": self.profile.reasoning_effort,
+                    "effort": budget.reasoning_effort,
                     "input": [{"type": "text", "text": case_text}],
                     "model": self.profile.model,
                     "outputSchema": _CODEX_JUDGMENT_JSON_SCHEMA,
@@ -1835,6 +1965,7 @@ class CodexAppServerEvaluator:
             if type(turn_id) is not str or not turn_id or turn.get("status") != "inProgress":
                 raise ValueError("codex_turn_ack_invalid")
             turn_acknowledged = True
+            await report_semantic_progress(SemanticProgressPhase.PROVIDER_SAMPLING)
 
             # Codex tags each agent message as interim ``commentary`` or the ``final_answer``.
             # Commentary is narration the constrained-output schema never governs; it is
@@ -1903,6 +2034,11 @@ class CodexAppServerEvaluator:
                                 failure_stage = "token_usage_invalid"
                             else:
                                 token_usage = observed_usage
+                                if _visible_output_tokens(token_usage) > budget.output_limit:
+                                    # The pinned protocol has no per-turn output ceiling, so
+                                    # the selected limit is enforced on the runtime's own
+                                    # cumulative counters; the turn is interrupted below.
+                                    raise ValueError("codex_app_server_output_oversize")
                     continue
                 if method == "warning":
                     raise _runtime_warning(message)
@@ -1929,6 +2065,7 @@ class CodexAppServerEvaluator:
                         (final_texts if phase == "final_answer" else untagged_texts).append(text)
                 if method != "turn/completed":
                     continue
+                await report_semantic_progress(SemanticProgressPhase.RESPONSE_VALIDATION)
                 params = _object(message.get("params"))
                 completed = _object(params.get("turn"))
                 if params.get("threadId") != thread_id or completed.get("id") != turn_id:
@@ -1957,13 +2094,17 @@ class CodexAppServerEvaluator:
             )
         finally:
             try:
-                if (
-                    runtime is not None
-                    and thread_id is not None
-                    and turn_id is not None
-                    and failure
-                ):
-                    await _interrupt(runtime, thread_id, turn_id)
+                try:
+                    if runtime is not None:
+                        await report_semantic_progress(SemanticProgressPhase.CLEANUP)
+                finally:
+                    if (
+                        runtime is not None
+                        and thread_id is not None
+                        and turn_id is not None
+                        and failure
+                    ):
+                        await _interrupt(runtime, thread_id, turn_id)
             finally:
                 cleanup = await _cleanup_guaranteed(runtime)
 
@@ -1986,13 +2127,11 @@ class CodexAppServerEvaluator:
             disclosed_case_sha256=_sha256_bytes(case.payload),
             instruction_sha256=_INSTRUCTION_SHA256,
             output_schema_sha256=_OUTPUT_SCHEMA_SHA256,
-            selection_sha256=canonical_digest(
-                {"model": self.profile.model, "reasoning_effort": self.profile.reasoning_effort}
-            ),
+            selection_sha256=budget.selection_sha256(self.profile.model),
             upstream_body_observability="unavailable",
             auth_mode=auth_mode,
             plan_type=plan_type,
-            reasoning_effort=self.profile.reasoning_effort,
+            reasoning_effort=budget.reasoning_effort,
             thread_id=thread_id,
             turn_id=turn_id,
             final_output_sha256=final_output_sha256,
@@ -2028,7 +2167,7 @@ class CodexAppServerEvaluator:
             schema_digest=_OUTPUT_SCHEMA_SHA256,
             policy_digest=case.policy_digest,
             privacy_policy_digest=case.policy_digest,
-            sampling_params=SamplingParams(OPENAI_MAX_OUTPUT_TOKENS),
+            sampling_params=SamplingParams(budget.output_limit),
             latency_ms=latency_ms,
             status=status,
             provider_request_id=turn_id,
@@ -2083,7 +2222,10 @@ class CodexAppServerExternalFactory:
             or request_commitment.commitment != credential.request_commitment
         ):
             raise ValueError("codex_runtime_factory_render_required")
-        return CodexAppServerEvaluator(self.profile, binding, credential, self.clock)
+        # The service composition exposes the check's frozen budget profile for exactly this
+        # dispatch; anything dispatched outside a check keeps the legacy final selection.
+        budget = self.profile.review_budget(current_semantic_budget_profile())
+        return CodexAppServerEvaluator(self.profile, binding, credential, self.clock, budget)
 
 
 def codex_factory_builders_from_config(

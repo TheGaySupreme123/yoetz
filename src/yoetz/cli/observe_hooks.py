@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import io
 import os
 import re
 import sys
@@ -19,11 +20,13 @@ from yoetz.adapters.integrations.codex_lifecycle import (
     acquire_session_lock,
     acquire_workspace_recovery_lock,
     apply_pending_mapping,
-    clear_mapping,
+    is_scoped_child_session_id,
     load_mapping,
     mapping_from_start_ids,
     mapping_path,
     queue_mapping_clear,
+    queue_mapping_store,
+    scoped_child_session_id,
     store_mapping,
     validate_codex_session_id,
 )
@@ -43,6 +46,13 @@ from yoetz.adapters.workspace_binding import canonical_workspace_locator, resolv
 from yoetz.cli import hook_io
 from yoetz.cli.hook_diagnostics import record_hook_diagnostic, record_hook_timing
 from yoetz.cli.hook_io import (
+    MAX_HOOK_SKIM_BYTES,
+    MAX_HOOK_STDIN_BYTES,
+    CursorOversizedPayloadError,
+    read_cursor_hook_ingress,
+    read_hook_payload,
+)
+from yoetz.cli.hook_io import (
     claude_context_output as _claude_context_output,
 )
 from yoetz.cli.hook_io import (
@@ -50,10 +60,6 @@ from yoetz.cli.hook_io import (
 )
 from yoetz.cli.hook_io import (
     cursor_context_output as _cursor_context_output,
-)
-from yoetz.cli.hook_io import (
-    read_cursor_hook_payload,
-    read_hook_payload,
 )
 from yoetz.cli.hook_io import (
     stderr_line as _stderr_line,
@@ -87,6 +93,7 @@ from yoetz.domain.observation_selection import (
 from yoetz.domain.observation_selection import (
     ObservationClassification,
     classify_observation,
+    is_edit_tool_name,
     is_routine_read_candidate,
 )
 from yoetz.domain.values import (
@@ -108,8 +115,10 @@ from yoetz.protocol.canonical import (
     strict_json_parse,
 )
 from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode
+from yoetz.protocol.ids import IdKind, is_valid_id
 
 if TYPE_CHECKING:
+    from yoetz.adapters.integrations.codex_session_stream import CodexSessionStreamLocator
     from yoetz.cli import hooks as hooks_cli
     from yoetz.ports.control import ControlClientKind, WorkspaceLocator
 
@@ -122,6 +131,7 @@ __all__ = [
     "handle_observe",
     "handle_spool",
     "map_hook_payload_to_envelope",
+    "note_payload_too_large",
 ]
 
 SUPPORTED_HOOK_EVENTS: Final = frozenset(
@@ -211,6 +221,19 @@ _TIMING_REPORT_EVENTS: Final = frozenset({"SessionStart", "Stop", "SessionEnd"})
 # deliberately outside the local capture batch, so it is accounted for as its
 # own stage rather than being hidden in the store duration.
 _PASS_PARTITION_STAGES: Final = ("import", "resolve", "store", "advice", "drain", "deliver")
+_ROUTINE_READ_TOOLS: Final = frozenset(
+    {
+        "glob",
+        "grep",
+        "list_files",
+        "read",
+        "read_file",
+        "search",
+        "view_file",
+    }
+)
+_READ_ONLY_COMMANDS: Final = frozenset({"head", "ls", "pwd", "rg", "tail", "wc"})
+_SESSION_START_SOURCES: Final = frozenset({"startup", "resume", "clear", "compact", "fork"})
 _STRUCTURAL_ALLOW: Final = frozenset(
     {
         "tool_name",
@@ -251,6 +274,9 @@ _CURSOR_SESSION_PREFIX: Final = "cursor:"
 _CURSOR_ALIAS_FILE: Final = "cursor-session-aliases.json"
 _CURSOR_ALIAS_LOCK: Final = "cursor-session-aliases.lock"
 _MAX_CURSOR_ALIASES: Final = 64
+_CURSOR_NON_EDIT_ACTIONS: Final = frozenset(
+    {"cursor_tool_denied", "cursor_tool_failure", "routine_read"}
+)
 _CURSOR_UNTESTED_PROFILE_ID: Final = "untested"
 _CURSOR_VERSION_TO_PROFILE: Final = {
     "3.17.8": "cursor-ide-3.17.8",
@@ -418,6 +444,9 @@ def _attachment_recovery_context(reason: str) -> str:
             "incompatible holder; the hook did not replace it. Call start and follow its exact "
             "service recovery continuation. "
         )
+    # A timed-out attachment may have sent start under the hook's own request identity, which
+    # the agent never sees, so no timeout replay token applies: the agent's own start is the
+    # recovery (issue #739).
     if reason in {"service_unavailable", "timeout"}:
         return (
             "Yoetz attachment pending: service_unavailable. The bounded service connection "
@@ -449,6 +478,40 @@ def _token_or_none(value: object) -> str | None:
     if value[0] in "._:/+-":
         return None
     return value
+
+
+def _consistent_alias_token(
+    payload: Mapping[str, JsonValue], names: tuple[str, ...]
+) -> tuple[str | None, bool]:
+    """Normalize one host alias family without choosing through a conflict.
+
+    Native child hooks have used several spellings for the same identity.  A
+    malformed or contradictory spelling is deliberately treated as absent so
+    the downstream host-lineage normalizer can report an attribution gap;
+    selecting the first alias would let one source hide another.
+    """
+
+    values: list[str] = []
+    supplied = False
+    nested = payload.get("tool_input")
+    nested_payload = nested if isinstance(nested, Mapping) else None
+    for aliases in (payload, nested_payload):
+        if aliases is None:
+            continue
+        for name in names:
+            if name not in aliases:
+                continue
+            supplied = True
+            raw = aliases.get(name)
+            if raw is None:
+                continue
+            token = _token_or_none(raw)
+            if token is None:
+                return None, False
+            values.append(token)
+    if any(value != values[0] for value in values[1:]):
+        return None, False
+    return (values[0] if values else None), supplied
 
 
 def _int_or_none(value: object) -> int | None:
@@ -571,6 +634,26 @@ def _cursor_capability_profile_id(cursor_version: object) -> str | None:
     return _CURSOR_VERSION_TO_PROFILE.get(version, _CURSOR_UNTESTED_PROFILE_ID)
 
 
+def _cursor_nested_edit_path(payload: Mapping[str, JsonValue]) -> str | None:
+    """Return one bounded edit path from a Cursor tool input, or nothing.
+
+    The string is used only to derive a path commitment. It is not stored.
+    A value over the workspace-locator bound is omitted rather than clipped.
+    """
+
+    nested = payload.get("tool_input")
+    if not isinstance(nested, Mapping):
+        return None
+    for key in ("path", "file_path", "target_file", "filePath"):
+        value = nested.get(key)
+        if type(value) is not str or not value:
+            continue
+        if len(value.encode("utf-8")) > 8_192 or "\n" in value or "\r" in value:
+            return None
+        return value
+    return None
+
+
 def _resolve_cursor_workspace(
     payload: Mapping[str, JsonValue], explicit_workspace: str | None
 ) -> str | None:
@@ -622,7 +705,6 @@ def _extract_structural(
         "permission_kind",
         "decision_reason_code",
         "result_status",
-        "subagent_id",
         "claim_kind",
         "action",
         "changed_paths_digest",
@@ -643,16 +725,45 @@ def _extract_structural(
             continue
         if token is not None and key in _STRUCTURAL_ALLOW:
             fields[key] = token
+    # Host child hooks use ``subagent_id`` (Codex), ``agent_id`` (Claude), or
+    # ``agent_thread_id`` (some stream records).  Keep one canonical structural
+    # key and fail closed when a payload supplies contradictory aliases.
+    subagent_id, subagent_supplied = _consistent_alias_token(
+        payload, ("subagent_id", "agent_id", "agent_thread_id")
+    )
+    if subagent_supplied and subagent_id is not None:
+        fields["subagent_id"] = subagent_id
     # Codex names the host tool-call id ``tool_use_id``. Normalize it to the
     # canonical structural key here, with the host spelling taking precedence
     # over legacy aliases exactly as it does in the pairing path. The wire
     # schema enumerates structural fields, so the identity must land under
     # ``tool_call_id`` or it is discarded at the boundary (#274).
-    tool_call_id = _token_or_none(payload.get("tool_use_id")) or _token_or_none(
-        payload.get("tool_call_id")
-    )
-    if tool_call_id is not None:
-        fields["tool_call_id"] = tool_call_id
+    if event_name in {"SubagentStart", "SubagentStop"}:
+        # For child events these are parent-call aliases.  Use the canonical
+        # parent key so hook and stream ingress share the same registry alias;
+        # an invalid/conflicting family remains absent and is handled as a gap.
+        parent_tool_aliases_present = any(
+            name in payload for name in ("parent_tool_call_id", "tool_call_id", "tool_use_id")
+        )
+        parent_tool_call_id, _parent_tool_aliases_valid = _consistent_alias_token(
+            payload, ("parent_tool_call_id", "tool_call_id", "tool_use_id")
+        )
+        if parent_tool_aliases_present and parent_tool_call_id is not None:
+            fields["parent_tool_call_id"] = parent_tool_call_id
+            fields.pop("tool_call_id", None)
+        elif parent_tool_aliases_present:
+            # The initial allowlist pass may have copied a valid-looking
+            # ``parent_tool_call_id`` before the complete alias family was
+            # checked.  Remove it on an invalid/conflicting family.
+            fields.pop("parent_tool_call_id", None)
+            fields.pop("tool_call_id", None)
+            fields.pop("subagent_id", None)
+    else:
+        tool_call_id = _token_or_none(payload.get("tool_use_id")) or _token_or_none(
+            payload.get("tool_call_id")
+        )
+        if tool_call_id is not None:
+            fields["tool_call_id"] = tool_call_id
     # Nested tool_input / tool_response never contribute prose — only structural scalars.
     tool_input = payload.get("tool_input")
     if isinstance(tool_input, Mapping):
@@ -666,6 +777,27 @@ def _extract_structural(
         digest = _token_or_none(nested.get("changed_paths_digest"))
         if digest is not None and "changed_paths_digest" not in fields:
             fields["changed_paths_digest"] = digest
+    if event_name == "PostToolUse":
+        from yoetz.cli.hooks import cooperative_start_identity
+
+        child_start = cooperative_start_identity(payload)
+        fields.update(child_start)
+        if child_start:
+            # Attach-call aliases must agree with each other, but the parent spawn call is
+            # a different identity. An invalid supplied family cannot weaken to child-only.
+            for names in (("tool_use_id", "tool_call_id"), ("parent_tool_call_id",)):
+                call_id, _valid = _consistent_alias_token(payload, names)
+                values = [
+                    source[name]
+                    for source in (payload, tool_input)
+                    if isinstance(source, Mapping)
+                    for name in names
+                    if name in source
+                ]
+                if values and (
+                    call_id is None or any(_token_or_none(value) is None for value in values)
+                ):
+                    fields.pop("subagent_id", None)
     selected = classification or classify_observation(payload, event_name)
     if selected.routine_candidate and (
         event_name in {"PreToolUse", "preToolUse"} or selected.proven_routine_success
@@ -776,6 +908,326 @@ def _is_pre_event(event_name: str) -> bool:
 
 def _is_post_event(event_name: str) -> bool:
     return event_name in {"PostToolUse", "PostCompact", "SubagentStop"}
+
+
+@dataclass(frozen=True, slots=True)
+class _ObservationLane:
+    """The host lane and the effective service lane for one hook event."""
+
+    host_session_id: str
+    effective_session_id: str
+    is_child: bool = False
+    attribution_gap: bool = False
+
+
+def _narrow_tool_result(payload: Mapping[str, JsonValue]) -> Mapping[str, JsonValue] | None:
+    """Parse only a scoped Yoetz result for child-route reconciliation."""
+
+    tool_name = _token_or_none(payload.get("tool_name"))
+    if tool_name not in YOETZ_OWNED_TOOL_NAMES:
+        return None
+    from yoetz.cli.hooks import _extract_start_result  # pyright: ignore[reportPrivateUsage]
+
+    return _extract_start_result(payload.get("tool_response"))
+
+
+def _validated_result_task_id(result: Mapping[str, JsonValue] | None) -> str | None:
+    """Return a service result task id only when the narrow result shape validates it."""
+
+    if result is None:
+        return None
+    task_id = result.get("task_id")
+    return task_id if type(task_id) is str and is_valid_id(IdKind.TASK, task_id) else None
+
+
+def _result_task_id_is_malformed(result: Mapping[str, JsonValue] | None) -> bool:
+    """Return whether a narrow result supplied a task field that failed validation."""
+
+    return result is not None and "task_id" in result and _validated_result_task_id(result) is None
+
+
+def _nested_service_session_fact(
+    payload: Mapping[str, JsonValue],
+) -> tuple[str | None, bool, bool]:
+    """Read a nested Yoetz request session without confusing it with the host session."""
+
+    nested = payload.get("tool_input")
+    if not isinstance(nested, Mapping) or "session_id" not in nested:
+        return None, False, True
+    raw = nested.get("session_id")
+    if raw is None:
+        return None, True, True
+    if type(raw) is not str or not is_valid_id(IdKind.SESSION, raw):
+        return None, True, False
+    return raw, True, True
+
+
+def _task_lane_for_result(
+    payload: Mapping[str, JsonValue],
+    *,
+    host_session_id: str,
+    harness_id: Literal["claude", "codex", "cursor"],
+    _state: Path | None,
+) -> _ObservationLane | None:
+    """Resolve a child lane from a service-authored result, if one is already bound."""
+
+    result = _narrow_tool_result(payload)
+    if result is None:
+        return None
+    if _result_task_id_is_malformed(result):
+        return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+    task_id = _validated_result_task_id(result)
+    if task_id is None:
+        return None
+    nested_session_id, nested_session_supplied, nested_session_valid = _nested_service_session_fact(
+        payload
+    )
+    if nested_session_supplied and not nested_session_valid:
+        return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+    parent_task_id = result.get("parent_task_id")
+    if parent_task_id is not None and (
+        type(parent_task_id) is not str or not is_valid_id(IdKind.TASK, parent_task_id)
+    ):
+        return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+    parent_mapping = load_mapping(host_session_id, _state=_state)
+    if parent_mapping is not None and task_id == parent_mapping.yoetz_task_id:
+        if nested_session_id is not None and nested_session_id != parent_mapping.yoetz_session_id:
+            return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+        return _ObservationLane(host_session_id, host_session_id)
+    if (
+        result.get("outcome") == "delegated"
+        and parent_mapping is not None
+        and type(parent_task_id) is str
+        and parent_task_id == parent_mapping.yoetz_task_id
+    ):
+        # A delegation result reserves a child but is still authored by the current owner.
+        if nested_session_id is not None and nested_session_id != parent_mapping.yoetz_session_id:
+            return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+        return _ObservationLane(host_session_id, host_session_id)
+    try:
+        task_lane = scoped_child_session_id(
+            host_session_id,
+            host=harness_id,
+            identity=task_id,
+            identity_kind="task",
+        )
+    except ProtocolValueError, TypeError, ValueError:
+        return None
+    child_mapping = load_mapping(task_lane, _state=_state)
+    if child_mapping is not None and child_mapping.yoetz_task_id == task_id:
+        if nested_session_id is not None and nested_session_id != child_mapping.yoetz_session_id:
+            return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+        return _ObservationLane(host_session_id, task_lane, is_child=True)
+    # An explicit lineage result with no matching task lane is known child work, but it cannot be
+    # safely leased to the parent. Keep the structural event on the host lane and let the caller
+    # record a mapping gap without sending it to the parent's service route.
+    if parent_mapping is not None and task_id != parent_mapping.yoetz_task_id:
+        return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+    if type(parent_task_id) is str and task_id != parent_task_id:
+        # The result explicitly names a parent lineage even when the raw host
+        # mapping is still queued or has been removed. It cannot be leased to
+        # the raw session without a validated child alias.
+        return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+    if parent_mapping is None:
+        # A valid service result without any held parent route is still foreign
+        # to this host lane. Keep it out of a future parent auto-attach path.
+        return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+    return None
+
+
+def _child_lane_rollout(
+    payload: Mapping[str, JsonValue],
+    *,
+    lane: _ObservationLane,
+    locator: CodexSessionStreamLocator,
+    hook_provided_path: str | None,
+) -> Path | None:
+    """Return the delegated child's own rollout for one validated host-identity child lane.
+
+    Only a lane derived from this callback's host session and its host child identity may read a
+    child rollout, and only when that rollout's v2 header names the same child thread and this
+    session as its spawner (#841). Task-derived and explicit lanes carry no host child thread, so
+    they never select a file. The returned path is local-only.
+    """
+
+    from yoetz.cli.hooks import _child_identity_from_payload  # pyright: ignore[reportPrivateUsage]
+
+    child_id, _supplied, valid = _child_identity_from_payload(payload)
+    if not valid or child_id is None:
+        return None
+    try:
+        expected_lane = scoped_child_session_id(
+            lane.host_session_id,
+            host="codex",
+            identity=child_id,
+            identity_kind="host",
+        )
+    except ProtocolValueError, TypeError, ValueError:
+        return None
+    if expected_lane != lane.effective_session_id:
+        return None
+    path, result = locator.resolve_child_rollout(hook_provided_path, child_thread_id=child_id)
+    header = result.header
+    if path is None or header is None or lane.host_session_id not in header.spawning_sessions:
+        return None
+    return path
+
+
+def _pairing_harness(source: ObservationSource) -> Literal["claude", "codex", "cursor"]:
+    if source is ObservationSource.CLAUDE_HOOK:
+        return "claude"
+    if source is ObservationSource.CURSOR_HOOK:
+        return "cursor"
+    return "codex"
+
+
+def _resolve_observation_lane(
+    payload: Mapping[str, JsonValue],
+    *,
+    event_name: str,
+    source: ObservationSource,
+    _state: Path | None,
+    explicit_session_id: str | None = None,
+    explicit_attribution_gap: bool = False,
+) -> _ObservationLane:
+    """Select a validated child lane while preserving ordinary parent callbacks."""
+
+    try:
+        host_session_id = validate_codex_session_id(payload.get("session_id"))
+    except ProtocolValueError:
+        # The caller performs the public invalid-session diagnostic. This fallback only keeps
+        # this helper total for tests and degraded ingress.
+        return _ObservationLane("invalid-session", "invalid-session")
+
+    # A derived child lane is an internal namespace.  It must never be accepted
+    # as a new parent host session when its mapping has been removed or its
+    # service result names a different task.  The normal parent session is
+    # handled below, where optional host aliases remain ordinary unless they
+    # establish a validated child route.
+    reserved_mapping = None
+    if is_scoped_child_session_id(host_session_id):
+        reserved_mapping = load_mapping(host_session_id, _state=_state)
+        if reserved_mapping is None:
+            return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+        if event_name in {"SubagentStart", "SubagentStop"}:
+            return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+        nested_session_id, nested_session_supplied, nested_session_valid = (
+            _nested_service_session_fact(payload)
+        )
+        if nested_session_supplied and not nested_session_valid:
+            return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+        if nested_session_id is not None and nested_session_id != reserved_mapping.yoetz_session_id:
+            return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+        reserved_result = _narrow_tool_result(payload)
+        if _result_task_id_is_malformed(reserved_result):
+            return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+        result_task_id = _validated_result_task_id(reserved_result)
+        if result_task_id is not None and result_task_id != reserved_mapping.yoetz_task_id:
+            return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+        return _ObservationLane(host_session_id, host_session_id, is_child=True)
+    if event_name in {"SubagentStart", "SubagentStop"}:
+        # Native lifecycle hooks describe the parent lineage commitment. They never lease the
+        # child work lane, even when a child identity is present on the event.
+        return _ObservationLane(host_session_id, host_session_id)
+
+    harness_id = _pairing_harness(source)
+    if explicit_session_id is not None:
+        try:
+            candidate = validate_codex_session_id(explicit_session_id)
+        except ProtocolValueError:
+            candidate = host_session_id
+        if candidate != host_session_id and load_mapping(candidate, _state=_state) is not None:
+            return _ObservationLane(
+                host_session_id,
+                candidate,
+                is_child=True,
+                attribution_gap=explicit_attribution_gap,
+            )
+        if explicit_attribution_gap:
+            return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+
+    from yoetz.cli.hooks import _child_identity_from_payload  # pyright: ignore[reportPrivateUsage]
+
+    child_id, aliases_supplied, aliases_valid = _child_identity_from_payload(payload)
+    result = _narrow_tool_result(payload)
+    nested_session_id, nested_session_supplied, nested_session_valid = _nested_service_session_fact(
+        payload
+    )
+    if nested_session_supplied and not nested_session_valid:
+        return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+    if _result_task_id_is_malformed(result):
+        return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+    result_task_id = _validated_result_task_id(result)
+    if aliases_supplied and not aliases_valid:
+        return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+    if child_id is not None:
+        try:
+            child_lane = scoped_child_session_id(
+                host_session_id,
+                host=harness_id,
+                identity=child_id,
+                identity_kind="host",
+            )
+        except ProtocolValueError, TypeError, ValueError:
+            child_lane = None
+        if child_lane is not None:
+            child_mapping = load_mapping(child_lane, _state=_state)
+            if child_mapping is not None:
+                if (result_task_id is None or result_task_id == child_mapping.yoetz_task_id) and (
+                    nested_session_id is None or nested_session_id == child_mapping.yoetz_session_id
+                ):
+                    return _ObservationLane(host_session_id, child_lane, is_child=True)
+                # A stale host alias must not win over a service result naming
+                # another child.  A separately validated task alias may still
+                # route that result; otherwise keep it as an explicit gap.
+                result_lane = _task_lane_for_result(
+                    payload,
+                    host_session_id=host_session_id,
+                    harness_id=harness_id,
+                    _state=_state,
+                )
+                if result_lane is not None and result_lane.is_child:
+                    return result_lane
+                return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+
+        # A valid host child id without a matching lane is known child-shaped
+        # input.  It cannot safely inherit the parent route.  A narrow service
+        # result can rescue it only through an already-owned task lane.
+        result_lane = _task_lane_for_result(
+            payload,
+            host_session_id=host_session_id,
+            harness_id=harness_id,
+            _state=_state,
+        )
+        if result_lane is not None and result_lane.is_child:
+            return result_lane
+        return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+
+    result_lane = _task_lane_for_result(
+        payload,
+        host_session_id=host_session_id,
+        harness_id=harness_id,
+        _state=_state,
+    )
+    if result_lane is not None:
+        return result_lane
+
+    parent_mapping = load_mapping(host_session_id, _state=_state)
+    if nested_session_id is not None and (
+        parent_mapping is None or nested_session_id != parent_mapping.yoetz_session_id
+    ):
+        # A nested Yoetz request names a service session different from the
+        # held parent binding. Without a validated child lane this is foreign
+        # work and cannot inherit the parent's route.
+        return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+
+    # With no child alias and no service-authored child result, retain the ordinary
+    # parent route. A present-but-null alias is treated as absent; malformed or
+    # contradictory aliases returned early above as an explicit gap.
+    if explicit_attribution_gap:
+        return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
+    del aliases_supplied
+    return _ObservationLane(host_session_id, host_session_id)
 
 
 def _event_ordinal_from_payload(payload: Mapping[str, JsonValue]) -> int | None:
@@ -1062,11 +1514,20 @@ def _cached_recommendation_context(*, _state: Path | None) -> str:
         return ""
     item = pending[0]
     suffix = f" --release-version {item.release_version}" if item.release_version else ""
-    return (
+    text = (
         f"Yoetz recommends: {item.title}. {item.summary} Explain this to the user and ask "
         f"for approval; if approved run 'yoetz recommend accept {item.id}{suffix}', "
         f"otherwise 'yoetz recommend decline {item.id}{suffix}'."
-    )[:_MAX_ADVICE_CONTEXT]
+    )
+    if item.kind == "package_update":
+        # The agent is the messenger (ADR-021): tell the user now, offer to do the mechanical
+        # upgrade steps, and make the restart that activates the new version explicit (#819).
+        text += (
+            " Tell the user now. If they approve, offer a subagent that follows "
+            "'yoetz upgrade' and reports each step. Existing sessions keep their version; "
+            "start a fresh session afterwards. Fully restart the host only if activation requires it."
+        )
+    return text[:_MAX_ADVICE_CONTEXT]
 
 
 def _frontier_motion_context(notice: FrontierMotionNotice) -> str:
@@ -1463,6 +1924,20 @@ async def _drain_outbox_leased(
                 or row.envelope.source_identity in staged_content_sources
                 else content_by_source_identity.get(row.envelope.source_identity, ())
             )
+            # A drain delivers every mapped lane in the shared workspace. The
+            # hook's content profile names only its own host's rows: sending it
+            # with a Codex or other-host row made the service refuse that row as
+            # content_capture_profile_mismatch, a terminal quarantine that also
+            # stranded the row's durable capture handoff (#836). The service
+            # resolves a foreign row's profile from its own ticket.
+            row_profile = (
+                content_capture_profile
+                if content_capture_profile is not None
+                and content_capture_profile_matches_source(
+                    row.envelope.source.value, content_capture_profile
+                )
+                else None
+            )
             try:
                 result = await asyncio.wait_for(
                     _try_service_ingest(
@@ -1470,7 +1945,7 @@ async def _drain_outbox_leased(
                         row.codex_session_id,
                         row.envelope,
                         content_chunks=chunks,
-                        content_capture_profile=content_capture_profile,
+                        content_capture_profile=row_profile,
                         deadline_ms=max(1, int(remaining * 1_000)),
                     ),
                     timeout=remaining,
@@ -1594,13 +2069,15 @@ async def _try_auto_start(
     workspace_locator: str | None,
     recovery_mapping: LifecycleMapping | None = None,
     connect: HookStartConnector | None = None,
+    _session_lock_owned: bool = False,
+    _recovery_session_lock_owned: bool = False,
     service_start_timeout_seconds: float | None = None,
 ) -> AutoAttachOutcome:
     """Service `start` for consented SessionStart auto-attach, or a typed reason.
 
     The request carries the paired identity the start contract requires:
     ``workspace_ref`` is the canonical workspace locator the hook already bound
-    consent to (the stable project identity), and ``external_ref`` is the
+    consent to (the working-tree identity), and ``external_ref`` is the
     host-session identity. The service persists only HMAC commitments of both;
     nothing here writes the raw locator. Without a locator there is no legal
     request, so the attempt stops before any service call (#459).
@@ -1725,7 +2202,12 @@ async def _try_auto_start(
     except Exception:
         return AutoAttachOutcome(None, "auto_attach_result_invalid")
     try:
-        store_mapping(mapping, _state=_state)
+        if not _queue_and_reconcile_mapping(
+            mapping,
+            _state=_state,
+            _session_lock_owned=_session_lock_owned,
+        ):
+            return AutoAttachOutcome(None, "auto_attach_recovery_busy")
     except Exception:
         return AutoAttachOutcome(None, "auto_attach_mapping_write_failed")
     if (
@@ -1733,17 +2215,22 @@ async def _try_auto_start(
         and recovery_mapping is not None
         and recovery_mapping.codex_session_id != mapping.codex_session_id
     ):
-        with contextlib.suppress(Exception):
-            store_mapping(
-                mapping_from_start_ids(
-                    codex_session_id=recovery_mapping.codex_session_id,
-                    yoetz_task_id=mapping.yoetz_task_id,
-                    yoetz_session_id=mapping.yoetz_session_id,
-                    yoetz_writer_id=mapping.yoetz_writer_id,
-                    last_frontier=recovery_mapping.last_frontier,
-                ),
+        predecessor_mapping = mapping_from_start_ids(
+            codex_session_id=recovery_mapping.codex_session_id,
+            yoetz_task_id=mapping.yoetz_task_id,
+            yoetz_session_id=mapping.yoetz_session_id,
+            yoetz_writer_id=mapping.yoetz_writer_id,
+            last_frontier=recovery_mapping.last_frontier,
+        )
+        try:
+            if not _queue_and_reconcile_mapping(
+                predecessor_mapping,
                 _state=_state,
-            )
+                _session_lock_owned=_recovery_session_lock_owned,
+            ):
+                return AutoAttachOutcome(None, "auto_attach_recovery_busy")
+        except Exception:
+            return AutoAttachOutcome(None, "auto_attach_mapping_write_failed")
     return AutoAttachOutcome(mapping, None, recovered=recovered_task_id is not None)
 
 
@@ -1766,6 +2253,47 @@ def _host_session_matches(
 # workspace's whole history (#549). Ranked by mapping recency so the selectors
 # recovery would pick survive; ended sessions without a mapping go first.
 _MAX_ENDED_SESSION_BINDINGS: Final = 32
+
+
+def _queue_and_reconcile_mapping(
+    mapping: LifecycleMapping,
+    *,
+    _state: Path | None,
+    _session_lock_owned: bool = False,
+) -> bool:
+    """Queue one lifecycle write, replay the lane, and verify its exact route.
+
+    A producer that loses the session lock may still leave a durable pending
+    operation. The owner therefore queues its result before replaying residual
+    work, then re-reads both the materialized mapping and the pending fence.
+    A concurrent newer producer makes this operation ineligible to report as
+    the active route; the next hook owns that newer operation.
+    """
+
+    lifecycle_lock = (
+        contextlib.nullcontext(True)
+        if _session_lock_owned
+        else acquire_session_lock(mapping.codex_session_id, _state=_state)
+    )
+    with lifecycle_lock as owned:
+        queue_mapping_store(mapping, _state=_state)
+        if not owned:
+            return False
+        from yoetz.cli.hooks import recover_pending_start_mapping
+
+        if recover_pending_start_mapping(
+            mapping.codex_session_id,
+            _state=_state,
+            _session_lock_owned=True,
+        ).pending:
+            return False
+        pending = mapping_path(mapping.codex_session_id, _state=_state).with_name(
+            f".{mapping.codex_session_id}.pending.json"
+        )
+        applying = pending.with_name(pending.name + ".applying")
+        return load_mapping(mapping.codex_session_id, _state=_state) == mapping and not (
+            pending.exists() or pending.is_symlink() or applying.exists() or applying.is_symlink()
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1844,6 +2372,14 @@ def _scan_ended_workspace_recovery(
 
     if lifecycles is None:
         lifecycles = store.codex_session_lifecycles_for_workspace(workspace_commitment)
+    # Scoped child lanes have no native SessionEnd in the shared-session host contract. They
+    # must not keep the parent workspace ineligible for recovery or be selected as a parent
+    # predecessor. Their own mapping remains available for direct child callbacks.
+    lifecycles = tuple(
+        (session_id, ended)
+        for session_id, ended in lifecycles
+        if not is_scoped_child_session_id(session_id)
+    )
     if any(session_id != codex_session_id and not ended for session_id, ended in lifecycles):
         return _RecoveryScan(None, lifecycles)
     eligible = tuple(
@@ -1949,7 +2485,12 @@ def _recovery_scan_still_valid(
 
     if scan.mapping is None:
         return False
-    if store.codex_session_lifecycles_for_workspace(workspace_commitment) != scan.lifecycles:
+    current_lifecycles = tuple(
+        (session_id, ended)
+        for session_id, ended in store.codex_session_lifecycles_for_workspace(workspace_commitment)
+        if not is_scoped_child_session_id(session_id)
+    )
+    if current_lifecycles != scan.lifecycles:
         return False
     unambiguous = frozenset(store.unambiguous_codex_sessions_for_workspace(workspace_commitment))
     current = tuple(
@@ -2009,6 +2550,7 @@ def _rewrite_one_ended_predecessor_mapping(
     successor: LifecycleMapping,
     *,
     _state: Path | None,
+    _session_lock_owned: bool = False,
 ) -> bool:
     """Rewrite one ended predecessor if it still maps the recovered task.
 
@@ -2027,17 +2569,21 @@ def _rewrite_one_ended_predecessor_mapping(
         and predecessor.yoetz_writer_id == successor.yoetz_writer_id
     ):
         return True
-    store_mapping(
-        mapping_from_start_ids(
-            codex_session_id=predecessor.codex_session_id,
-            yoetz_task_id=successor.yoetz_task_id,
-            yoetz_session_id=successor.yoetz_session_id,
-            yoetz_writer_id=successor.yoetz_writer_id,
-            last_frontier=predecessor.last_frontier,
-        ),
-        _state=_state,
+    rewritten = mapping_from_start_ids(
+        codex_session_id=predecessor.codex_session_id,
+        yoetz_task_id=successor.yoetz_task_id,
+        yoetz_session_id=successor.yoetz_session_id,
+        yoetz_writer_id=successor.yoetz_writer_id,
+        last_frontier=predecessor.last_frontier,
     )
-    return True
+    try:
+        return _queue_and_reconcile_mapping(
+            rewritten,
+            _state=_state,
+            _session_lock_owned=_session_lock_owned,
+        )
+    except Exception:
+        return False
 
 
 def _rewrite_ended_predecessor_mappings(
@@ -2085,7 +2631,12 @@ def _rewrite_ended_predecessor_mappings(
                 ):
                     continue
                 aligned = _rewrite_one_ended_predecessor_mapping(
-                    store, workspace_commitment, session_id, successor, _state=_state
+                    store,
+                    workspace_commitment,
+                    session_id,
+                    successor,
+                    _state=_state,
+                    _session_lock_owned=True,
                 )
             else:
                 with acquire_session_lock(session_id, _state=_state) as owned:
@@ -2096,7 +2647,12 @@ def _rewrite_ended_predecessor_mappings(
                     ):
                         continue
                     aligned = _rewrite_one_ended_predecessor_mapping(
-                        store, workspace_commitment, session_id, successor, _state=_state
+                        store,
+                        workspace_commitment,
+                        session_id,
+                        successor,
+                        _state=_state,
+                        _session_lock_owned=True,
                     )
         except Exception:
             continue
@@ -2115,6 +2671,7 @@ async def _try_workspace_auto_start(
     _state: Path | None,
     connect: HookStartConnector | None,
     prune_surplus: bool = False,
+    _session_lock_owned: bool = False,
     service_start_timeout_seconds: float | None = None,
 ) -> AutoAttachOutcome:
     """Auto-start, holding every eligible predecessor stable through recovery.
@@ -2186,6 +2743,8 @@ async def _try_workspace_auto_start(
                                     workspace_locator=workspace_locator,
                                     recovery_mapping=recovery,
                                     connect=connect,
+                                    _session_lock_owned=_session_lock_owned,
+                                    _recovery_session_lock_owned=True,
                                 )
                             else:
                                 outcome = await _try_auto_start(
@@ -2195,6 +2754,8 @@ async def _try_workspace_auto_start(
                                     workspace_locator=workspace_locator,
                                     recovery_mapping=recovery,
                                     connect=connect,
+                                    _session_lock_owned=_session_lock_owned,
+                                    _recovery_session_lock_owned=True,
                                     service_start_timeout_seconds=service_start_timeout_seconds,
                                 )
                             if outcome.mapping is not None and outcome.recovered:
@@ -2233,6 +2794,7 @@ async def _try_workspace_auto_start(
             harness_id=harness_id,
             workspace_locator=workspace_locator,
             connect=connect,
+            _session_lock_owned=_session_lock_owned,
         )
     return await _try_auto_start(
         codex_session_id,
@@ -2240,6 +2802,7 @@ async def _try_workspace_auto_start(
         harness_id=harness_id,
         workspace_locator=workspace_locator,
         connect=connect,
+        _session_lock_owned=_session_lock_owned,
         service_start_timeout_seconds=service_start_timeout_seconds,
     )
 
@@ -2305,6 +2868,89 @@ def _note_dropped_event_gap(
     store.note_coverage_gap(commitment, ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value)
 
 
+_PAYLOAD_TOO_LARGE_REASONS: Final[Mapping[ObservationSource, str]] = MappingProxyType(
+    {
+        ObservationSource.CLAUDE_HOOK: "claude_payload_too_large",
+        ObservationSource.CODEX_HOOK: "codex_payload_too_large",
+        ObservationSource.CURSOR_HOOK: "cursor_payload_too_large",
+    }
+)
+
+
+def _note_payload_too_large_gap(
+    *,
+    source: ObservationSource,
+    workspace: str | None,
+    _state: Path | None,
+) -> None:
+    """Bind the oversize loss to a consented workspace without reading the body.
+
+    The command-line locator is the only binding available: the session id,
+    tool name, and changed paths all live inside the bytes this pass refused to
+    parse. Cursor resolves its locator through the host resolver with an empty
+    payload, which keeps ``CURSOR_PROJECT_DIR`` and the explicit argument in
+    their usual precedence while forwarding no host field at all.
+    """
+
+    locator = (
+        resolve_workspace_locator(explicit=workspace, payload={}, env=os.environ)
+        if source is ObservationSource.CURSOR_HOOK
+        else (None if workspace is None else canonical_workspace_locator(workspace))
+    )
+    if type(locator) is not str or not locator:
+        return
+    store = LocalObservationStore(_state=_state)
+    commitment = store.workspace_commitment(locator)
+    consent = store.consent_for(commitment)
+    if consent is None or not consent.active:
+        return
+    store.note_coverage_gap(commitment, ObservationGapCode.PAYLOAD_TOO_LARGE.value)
+
+
+def note_payload_too_large(
+    event: str,
+    *,
+    source: ObservationSource,
+    workspace: str | None,
+    _state: Path | None = None,
+) -> None:
+    """Name one oversized hook event that produced no structural row.
+
+    Usually the body was never parsed, so the only identity this pass can
+    honestly claim is the host that ran it, the hook name that host named on
+    its own command line, and the bound itself. Even the true size is unknown
+    by construction: the ingress reads at most cap-plus-one bytes and stops.
+    Cursor may parse a body up to its skim cap and still find no row to keep
+    (invalid, no session, or no resolvable workspace); that loss lands here too.
+    Nothing is inferred from unread bytes, and no structural row is minted.
+
+    Two records, because there are two audiences. The bounded owner-only
+    diagnostic tells an operator which host lost which event; the workspace
+    coverage gap makes the same loss reach ``observe status``. It does not yet
+    reach task receipts, which read only the ledger; there the dropped edit has
+    no evidence at all, so it can never read as captured work (issue #667).
+    """
+
+    # Cursor reaches this after its 1 MiB skim cap or a parsed body that kept
+    # no row, so it does not name the shared 256 KiB bound.
+    detail = (
+        "hook_cursor_observe_degraded: payload_too_large; host event over the hook ingress cap"
+        if source is ObservationSource.CURSOR_HOOK
+        else "hook_observe_degraded: payload_too_large; host event over the "
+        f"{MAX_HOOK_STDIN_BYTES}-byte hook ingress cap"
+    )
+    with contextlib.suppress(BaseException):
+        _stderr_line(f"{detail}; not observed; see observe status")
+    with contextlib.suppress(BaseException):
+        record_hook_diagnostic(
+            _PAYLOAD_TOO_LARGE_REASONS.get(source, "codex_payload_too_large"),
+            event,
+            _state=_state,
+        )
+    with contextlib.suppress(BaseException):
+        _note_payload_too_large_gap(source=source, workspace=workspace, _state=_state)
+
+
 def _consent_binding_diagnostic(consent: LocalObservationConsent | None) -> str:
     """Name why a resolved workspace admits no ingest: paused, or no active consent.
 
@@ -2315,6 +2961,33 @@ def _consent_binding_diagnostic(consent: LocalObservationConsent | None) -> str:
     if consent is not None and consent.revoked_at is None and consent.paused:
         return "paused"
     return "workspace_unconsented"
+
+
+def _session_start_source(payload: Mapping[str, JsonValue]) -> str | None:
+    """Resolve the closed SessionStart lifecycle source from a host envelope.
+
+    Codex carries ``source`` directly. Claude and Cursor wrappers encode the
+    same closed value in their already-admitted structural action so the
+    observation wire schema does not gain a free-form source field.
+    """
+
+    source = payload.get("source")
+    if type(source) is str and source in _SESSION_START_SOURCES:
+        return source
+    action = payload.get("action")
+    if type(action) is str:
+        if action == "claude_session_clear" or action == "cursor_session_clear":
+            return "clear"
+    return None
+
+
+def _report_session_end_unrecorded(event: str, *, _state: Path | None) -> None:
+    """Name a teardown whose local session end did not persist (#843)."""
+
+    _stderr_line(
+        "hook_observe_degraded: session_end_unrecorded; session end not recorded; see observe status"
+    )
+    record_hook_diagnostic("session_end_unrecorded", event, _state=_state)
 
 
 def handle_observe(
@@ -2333,8 +3006,11 @@ def handle_observe(
     source: ObservationSource = ObservationSource.CODEX_HOOK,
     _output_event_name: str | None = None,
     _session_lock_owned: bool = False,
+    _routing_session_id: str | None = None,
+    _child_attribution_gap: bool = False,
     _content_capture_profile: str | None = None,
     _content_payload: Mapping[str, JsonValue] | None = None,
+    _ingress_gap: str | None = None,
 ) -> int:
     """Bounded observation ingress for Codex lifecycle hooks. Always exits 0.
 
@@ -2373,6 +3049,9 @@ def handle_observe(
         with contextlib.suppress(BaseException):
             lease.__exit__(None, None, None)
 
+    # True from a SessionEnd's local end until its capture batch commits. The
+    # end is saved with that batch, so a failed batch loses it (#843).
+    session_end_uncommitted = False
     try:
         if source is ObservationSource.CODEX_HOOK:
             # Cold imports are pure preparation. Importing this runtime inside
@@ -2432,7 +3111,20 @@ def handle_observe(
                 )
             return _context_output(resolved_event, additional_context)
 
-        payload = read_hook_payload(stdin_bytes)
+        try:
+            payload = read_hook_payload(stdin_bytes)
+        except ProtocolValueError as exc:
+            if exc.reason_code != "payload_too_large":
+                raise
+            # An oversized host body is a coverage loss for exactly this event,
+            # not an unexplained hook fault. Letting it fall through to the
+            # outer handler recorded the bare `observe` reason, which named
+            # neither the cause nor the affected event (issue #667).
+            note_payload_too_large(
+                event_name or "observe", source=source, workspace=workspace, _state=_state
+            )
+            _stdout_json({}, stdout)
+            return 0
         harness_id: Literal["claude", "codex", "cursor"] = (
             "claude"
             if source is ObservationSource.CLAUDE_HOOK
@@ -2445,11 +3137,25 @@ def handle_observe(
             _stdout_json({}, stdout)
             return 0
         resolved_event = raw_event
+        if source is ObservationSource.CODEX_HOOK:
+            # A v2 delegated child's callbacks carry the root session; its own transcript is
+            # the host fact that names the child (#841). Resolve it before any lane decision.
+            from yoetz.cli.hooks import with_transcript_child_identity
+
+            identity_conflict: str | None = None
+            with contextlib.suppress(Exception):
+                payload, identity_conflict = with_transcript_child_identity(
+                    payload, event_name=resolved_event
+                )
+            if identity_conflict is not None:
+                with contextlib.suppress(Exception):
+                    record_hook_diagnostic(identity_conflict, resolved_event, _state=_state)
+        mapping_lifecycle_deferred = False
         # ``clear`` is a host lifecycle command, not an observation consent
         # decision. Apply or queue its mapping operation before the runtime
         # gate and workspace consent checks so a busy/disabled hook cannot
         # leave the integration route stale.
-        if resolved_event == "SessionStart" and payload.get("source") == "clear":
+        if resolved_event == "SessionStart" and _session_start_source(payload) == "clear":
             try:
                 clear_session_id = validate_codex_session_id(payload.get("session_id"))
                 clear_lock = (
@@ -2459,12 +3165,25 @@ def handle_observe(
                 )
                 with clear_lock as clear_owned:
                     if clear_owned:
-                        with contextlib.suppress(Exception):
-                            apply_pending_mapping(clear_session_id, _state=_state)
-                        clear_mapping(clear_session_id, _state=_state)
+                        # Make this clear the durable latest intent before
+                        # replaying any interrupted predecessor. A concurrent
+                        # loser may have queued an older store while this lock
+                        # owner was recovering; the queue write coalesces it.
+                        queue_mapping_clear(clear_session_id, _state=_state)
+                        from yoetz.cli.hooks import recover_pending_start_mapping
+
+                        recovery = recover_pending_start_mapping(
+                            clear_session_id,
+                            _state=_state,
+                            _session_lock_owned=True,
+                        )
+                        if recovery.pending:
+                            mapping_lifecycle_deferred = True
                     else:
                         queue_mapping_clear(clear_session_id, _state=_state)
+                        mapping_lifecycle_deferred = True
             except Exception:
+                mapping_lifecycle_deferred = True
                 pass
         capture_authority_known = True
         try:
@@ -2502,6 +3221,17 @@ def handle_observe(
             record_hook_diagnostic("invalid_session", resolved_event, _state=_state)
             _stdout_json({}, stdout)
             return 0
+        host_session_id = codex_session_id
+        lane = _resolve_observation_lane(
+            payload,
+            event_name=resolved_event,
+            source=source,
+            _state=_state,
+            explicit_session_id=_routing_session_id,
+            explicit_attribution_gap=_child_attribution_gap,
+        )
+        codex_session_id = lane.effective_session_id
+        child_attribution_gap = lane.attribution_gap
 
         workspace_commitment: str | None = None
         workspace_locator: str | None = None
@@ -2540,7 +3270,7 @@ def handle_observe(
             # A hook without an explicit locator may retain the legacy bound-session/single-active
             # lane. An explicit locator that failed canonical consent never falls back to a
             # different commitment, including a legacy exact-subdirectory grant.
-            workspace_commitment = store.find_workspace_for_codex_session(codex_session_id)
+            workspace_commitment = store.find_workspace_for_codex_session(host_session_id)
             workspace_locator = None
         consent = None if workspace_commitment is None else store.consent_for(workspace_commitment)
         if consent is None or not consent.active:
@@ -2562,6 +3292,11 @@ def handle_observe(
             return 0
 
         assert workspace_commitment is not None
+        # A SessionEnd must either mark the bound session ended or leave a
+        # durable deferred intent. Keep this set until the capture batch
+        # commits so failures before either lifecycle path are named too.
+        if resolved_event == "SessionEnd":
+            session_end_uncommitted = True
         native_content_reservation = (
             not skip_service
             and capture_authority_known
@@ -2624,6 +3359,7 @@ def handle_observe(
             session_lock_owned=_session_lock_owned,
         )
         with contextlib.ExitStack() as local_pass:
+            deferred_lifecycle_recorded = True
             binding_owned = local_pass.enter_context(binding_lock)
             local_pass.enter_context(store.batched(workspace_commitment))
             if binding_owned:
@@ -2653,7 +3389,7 @@ def handle_observe(
                         workspace_commitment, codex_session_id
                     )
                     latest = pending[-1] if pending else None
-                    clear_requested = payload.get("source") == "clear"
+                    clear_requested = _session_start_source(payload) == "clear"
                     if resolved_event == "SessionStart":
                         target_generation = source_generation
                         if latest is not None and latest.event_kind == "SessionEnd":
@@ -2683,7 +3419,7 @@ def handle_observe(
 
                         if not lifecycle_start_applied:
                             source_generation = target_generation
-                            store.record_pending_session_lifecycle(
+                            deferred_lifecycle_recorded = store.record_pending_session_lifecycle(
                                 workspace_commitment,
                                 codex_session_id,
                                 session_commitment,
@@ -2692,20 +3428,60 @@ def handle_observe(
                                 clear_mapping=clear_requested,
                             )
                     else:
-                        store.record_pending_session_lifecycle(
+                        deferred_end_already_present = any(
+                            intent.event_kind == "SessionEnd"
+                            and intent.session_commitment == session_commitment
+                            and intent.target_generation == source_generation
+                            for intent in pending
+                        )
+                        deferred_lifecycle_recorded = store.record_pending_session_lifecycle(
                             workspace_commitment,
                             codex_session_id,
                             session_commitment,
                             "SessionEnd",
                             source_generation,
                         )
+                        if not deferred_lifecycle_recorded:
+                            # No retry carrier was accepted (the bounded
+                            # pending-lifecycle queue is full). The hook can
+                            # still retain its structural event, but the
+                            # lifecycle end itself is not durable.
+                            session_end_uncommitted = False
+                            _report_session_end_unrecorded(resolved_event, _state=_state)
+                        elif deferred_end_already_present:
+                            # The exact retry intent was already durable before
+                            # this pass; a later failure cannot lose it.
+                            session_end_uncommitted = False
             gap_codes: list[str] = []
+            if _ingress_gap is not None:
+                gap_codes.append(_ingress_gap)
+            if not deferred_lifecycle_recorded:
+                gap_codes.append(ObservationGapCode.OUTBOX_OVERFLOW.value)
+                store.note_session_coverage_gap(
+                    workspace_commitment,
+                    session_commitment,
+                    ObservationGapCode.OUTBOX_OVERFLOW.value,
+                )
+
+            if child_attribution_gap:
+                # The host supplied child lineage, but no validated child lane was available.
+                # Retain the structural fact on the parent commitment while fencing it away from
+                # the parent's service route, advice, and frontier delivery.
+                gap_codes.append(ObservationGapCode.MAPPING_MISSING.value)
+                store.note_session_coverage_gap(
+                    workspace_commitment,
+                    session_commitment,
+                    ObservationGapCode.MAPPING_MISSING.value,
+                )
 
             # Pairing is selected by the host/profile contract.  Post-only
             # profiles never consult the pre-event map; a generation id is a
             # conversation/turn identity and is never accepted as a tool id.
             pairing_mode, correlation_kind = _pairing_contract(payload, source)
-            correlation = _pairing_correlation(payload, correlation_kind)
+            correlation = _pairing_correlation(
+                payload,
+                correlation_kind=correlation_kind,
+            )
 
             if resolved_event not in SUPPORTED_HOOK_EVENTS:
                 gap_codes.append(ObservationGapCode.UNSUPPORTED_EVENT.value)
@@ -2717,7 +3493,19 @@ def handle_observe(
             # receive frontier advice from the hook observing the same call.
             # This affects only advice delivery; explicit self-call failures
             # still follow ``self_observation_deliverable`` and remain queued.
-            skip_advice_loop = tool_name is not None and tool_name in YOETZ_OWNED_TOOL_NAMES
+            # A successful/unknown Yoetz call already has authoritative service-side evidence,
+            # so its own hook must not lease the shared advice channel. An explicit failure is
+            # new host evidence, however, and remains eligible to receive pending guidance. The
+            # all-owned-tool guard previously suppressed that failure path as well.
+            host_outcome = _native_outcome_facts(
+                payload,
+                force_failure=resolved_event == "PostToolUseFailure",
+            )
+            skip_advice_loop = (
+                tool_name is not None
+                and tool_name in YOETZ_OWNED_TOOL_NAMES
+                and host_outcome.success is not False
+            )
 
             supplied_ordinal = _event_ordinal_from_payload(payload)
             event_ordinal = (
@@ -2748,12 +3536,24 @@ def handle_observe(
             # A protected event is a conservative workspace subject-state
             # boundary. Flush earlier accounts before its individual identity.
             material_boundary = not classification.routine_candidate
-            flush_ok = store.flush_selected_admission(
-                workspace_commitment,
-                summary_builder=build_routine_read_summary,
-                force=material_boundary or resolved_event in {"SessionStart", "SessionEnd"},
-                material_boundary=material_boundary,
-            )
+            try:
+                flush_ok = store.flush_selected_admission(
+                    workspace_commitment,
+                    summary_builder=build_routine_read_summary,
+                    force=material_boundary or resolved_event in {"SessionStart", "SessionEnd"},
+                    material_boundary=material_boundary,
+                )
+            except ProtocolValueError:
+                # A refused routine-read summary now drains its own lane, so
+                # this is a residual structural defect in the buffered account.
+                # It must degrade this one hook with a bounded reason, never
+                # reach the outer handler as the opaque `observe` token that
+                # made a permanently wedged flush unreadable (issue #753).
+                flush_ok = False
+                _stderr_line(
+                    "hook_observe_degraded: admission_flush_invalid; observation durability unknown"
+                )
+                record_hook_diagnostic("admission_flush_invalid", resolved_event, _state=_state)
             envelope = map_hook_payload_to_envelope(
                 resolved_event,
                 payload,
@@ -2847,6 +3647,10 @@ def handle_observe(
                     )
                 if capture_authority_known and not content_authorized:
                     gap_codes.append(ObservationGapCode.CONTENT_UNSELECTED.value)
+            # An oversized Cursor skim already omitted native content. Do not
+            # re-read the identity view as a capture source (issue #667).
+            if _ingress_gap is not None:
+                content_authorized = False
             if not capture_authority_known:
                 gap_codes.append(ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
             if tuple(sorted(set(gap_codes), key=str.encode)) != envelope.gap_codes:
@@ -2966,8 +3770,10 @@ def handle_observe(
             # A Yoetz-owned tool call is delivered only when it carries evidence
             # the service does not already hold from serving it (#564); the
             # envelope itself is always retained locally above.
-            if local_result.disposition.value == "accepted" and self_observation_deliverable(
-                resolved_event, envelope.structural_payload
+            if (
+                not child_attribution_gap
+                and local_result.disposition.value == "accepted"
+                and self_observation_deliverable(resolved_event, envelope.structural_payload)
             ):
                 plan = store.prepare_selected_admission(
                     workspace_commitment,
@@ -3004,24 +3810,45 @@ def handle_observe(
                     )
             elif local_result.disposition.value == "accepted":
                 store.note_selection_omission(workspace_commitment)
+            if (
+                local_result.disposition.value == "accepted"
+                and store.consume_summary_refusal_notice(workspace_commitment)
+            ):
+                # The inputs were admitted individually; only the bounded
+                # summary account for that lane was lost.
+                _stderr_line(
+                    "hook_observe_degraded: routine_summary_invalid; "
+                    "reads admitted individually; see observe status"
+                )
+                record_hook_diagnostic("routine_summary_invalid", resolved_event, _state=_state)
 
             # Persist session end so lifecycle can report STOPPED once every bound
             # session has ended.
             if resolved_event == "SessionEnd" and binding_owned:
-                with contextlib.suppress(Exception):
+                try:
                     store.note_session_end(
                         workspace_commitment,
                         session_commitment,
                         generation=source_generation,
                     )
+                    session_end_uncommitted = True
+                except Exception:
+                    # Teardown stays fail-open, but an end that did not persist
+                    # leaves the session and any temporary override active. Name
+                    # it instead of letting the lifecycle write vanish (#843).
+                    session_end_uncommitted = False
+                    _report_session_end_unrecorded(resolved_event, _state=_state)
 
             # Cursor transcripts are outside its structural observation contract.
             # Only the Codex hook source may reconcile the secondary JSONL stream.
+            # A validated child lane reconciles that child's own rollout (#841); every other
+            # Codex lane keeps the host-session stream.
             if source is ObservationSource.CODEX_HOOK:
                 with contextlib.suppress(Exception):
                     from yoetz.adapters.integrations.codex_session_stream import (
                         CodexSessionStreamLocator,
                         reconcile_session_stream,
+                        reconcile_session_stream_path,
                         resolve_codex_home,
                         should_trigger_stream_reconcile,
                     )
@@ -3035,14 +3862,31 @@ def handle_observe(
                         session_source=session_source if type(session_source) is str else None,
                     ):
                         locator = CodexSessionStreamLocator(resolve_codex_home())
-                        reconcile_session_stream(
-                            store,
-                            workspace_commitment=workspace_commitment,
-                            session_commitment=session_commitment,
-                            codex_session_id=codex_session_id,
-                            locator=locator,
-                            hook_provided_path=hook_path_token,
-                        )
+                        if not lane.is_child:
+                            reconcile_session_stream(
+                                store,
+                                workspace_commitment=workspace_commitment,
+                                session_commitment=session_commitment,
+                                codex_session_id=codex_session_id,
+                                locator=locator,
+                                hook_provided_path=hook_path_token,
+                            )
+                        else:
+                            child_rollout = _child_lane_rollout(
+                                payload,
+                                lane=lane,
+                                locator=locator,
+                                hook_provided_path=hook_path_token,
+                            )
+                            if child_rollout is not None:
+                                reconcile_session_stream_path(
+                                    store,
+                                    workspace_commitment=workspace_commitment,
+                                    session_commitment=session_commitment,
+                                    codex_session_id=codex_session_id,
+                                    path=child_rollout,
+                                )
+        session_end_uncommitted = False
 
         stages["store"] = _elapsed_ms(store_started, _monotonic())
 
@@ -3094,10 +3938,29 @@ def handle_observe(
         additional = ""
         attach_reason: str | None = None
         attach_advisory_only = False
+        pending_mapping_deferred = mapping_lifecycle_deferred
         mapping: LifecycleMapping | None = load_mapping(codex_session_id, _state=_state)
+        if resolved_event != "SessionStart" or _session_start_source(payload) != "clear":
+            # A cancelled or lock-contended SessionStart can leave a validated
+            # start result in the durable pending file.  Recover that exact
+            # session before a later hook drains its outbox; otherwise the
+            # service sees a transient mapping_missing and the lane is
+            # needlessly retired for this pass.
+            from yoetz.cli.hooks import recover_pending_start_mapping
+
+            with contextlib.suppress(Exception):
+                pending_mapping_deferred = (
+                    pending_mapping_deferred
+                    or recover_pending_start_mapping(
+                        codex_session_id,
+                        _state=_state,
+                        _session_lock_owned=_session_lock_owned,
+                    ).pending
+                )
+            mapping = load_mapping(codex_session_id, _state=_state)
         drain_started = _monotonic()
         if resolved_event == "SessionStart":
-            session_source_value = payload.get("source")
+            session_source_value = _session_start_source(payload)
             if session_source_value != "clear":
                 # SessionStart-only status/attach helpers: they drag protocol.models
                 # and service.client, which no other event needs (#242).
@@ -3127,8 +3990,22 @@ def handle_observe(
                 )
                 with session_lifecycle_lock as owned:
                     if owned:
+                        from yoetz.cli.hooks import recover_pending_start_mapping
+
+                        pending_mapping_deferred = (
+                            pending_mapping_deferred
+                            or recover_pending_start_mapping(
+                                codex_session_id,
+                                _state=_state,
+                                _session_lock_owned=True,
+                            ).pending
+                        )
                         mapping = load_mapping(codex_session_id, _state=_state)
-                        if mapping is None and not skip_advice_loop:
+                        if (
+                            not pending_mapping_deferred
+                            and mapping is None
+                            and not skip_advice_loop
+                        ):
                             if not skip_service:
 
                                 async def _attach() -> AutoAttachOutcome:
@@ -3141,6 +4018,7 @@ def handle_observe(
                                         workspace_locator=workspace_locator,
                                         connect=cast(HookStartConnector | None, connect),
                                         prune_surplus=True,
+                                        _session_lock_owned=True,
                                     )
 
                                 attach_outcome = cast(AutoAttachOutcome, _resolve_runner()(_attach))
@@ -3167,7 +4045,11 @@ def handle_observe(
                                 attach_advisory_only = True
                             else:
                                 additional = _active_context(mapping, mapping.last_frontier)
-                        elif mapping is not None and not skip_service:
+                        elif (
+                            mapping is not None
+                            and not skip_service
+                            and not pending_mapping_deferred
+                        ):
                             active_mapping = mapping
                             # The consented locator when this hook named one. The legacy
                             # bound-session lane recovers a commitment by session id and
@@ -3256,29 +4138,54 @@ def handle_observe(
                                     record_hook_diagnostic(kind, resolved_event, _state=_state)
                             else:
                                 additional = _UNAVAILABLE_CONTEXT
-                        if not skip_service:
+            elif (
+                source is ObservationSource.CURSOR_HOOK
+                and mapping is None
+                and _token_or_none(payload.get("tool_name")) is None
+                and not pending_mapping_deferred
+            ):
+                # Cursor consumes the static startup guidance on its native ``sessionStart``
+                # channel even when the host marks the lifecycle as a clear. The clear fence
+                # remains local-only; this branch never opens a service connection or drains a
+                # mapping.
+                from yoetz.cli.hooks import (
+                    _STARTUP_RECOVERY_CONTEXT as startup_recovery_context,  # pyright: ignore[reportPrivateUsage]
+                )
 
-                            async def _drain() -> None:
-                                await _drain_outbox(
-                                    store,
-                                    workspace_commitment=workspace_commitment,
-                                    codex_session_id=codex_session_id,
-                                    content_by_source_identity=content_map,
-                                    content_capture_profile=service_content_profile,
-                                    connect=cast(HookDrainConnector | None, connect),
-                                    event_name=resolved_event,
-                                    _state=_state,
-                                    budget_seconds=native_content_drain_budget,
-                                    priority_source_identity=native_content_priority,
-                                    monotonic=_monotonic,
-                                    session_lock_owned=_session_lock_owned,
-                                    drain_lease_owned=native_drain_lease_owned,
-                                )
+                additional = (
+                    "Yoetz observation is consented for this workspace; "
+                    "no ledger task is mapped yet (observation-derived binding "
+                    "only). After guidance reads, tool/schema discovery, and "
+                    "necessary bootstrap clarification, call start to attach a task "
+                    "before substantive material work. " + startup_recovery_context
+                )
+                attach_advisory_only = True
+            if (
+                not child_attribution_gap
+                and not skip_service
+                and not pending_mapping_deferred
+                and session_source_value != "clear"
+            ):
 
-                            with contextlib.suppress(Exception):
-                                _resolve_runner()(_drain)
-                            _release_native_drain_lease()
+                async def _drain() -> None:
+                    await _drain_outbox(
+                        store,
+                        workspace_commitment=workspace_commitment,
+                        codex_session_id=codex_session_id,
+                        content_by_source_identity=content_map,
+                        content_capture_profile=service_content_profile,
+                        connect=cast(HookDrainConnector | None, connect),
+                        event_name=resolved_event,
+                        _state=_state,
+                        budget_seconds=native_content_drain_budget,
+                        priority_source_identity=native_content_priority,
+                        monotonic=_monotonic,
+                        session_lock_owned=_session_lock_owned,
+                        drain_lease_owned=native_drain_lease_owned,
+                    )
 
+                with contextlib.suppress(Exception):
+                    _resolve_runner()(_drain)
             # A clear SessionStart has no service drain; the regular SessionStart
             # path released its reservation immediately after the drain above.
             _release_native_drain_lease()
@@ -3295,6 +4202,7 @@ def handle_observe(
             not skip_service
             and not skip_advice_loop
             and mapping is None
+            and not pending_mapping_deferred
             and resolved_event in _AUTO_ATTACH_RETRY_EVENTS
         ):
             # Re-attempt auto-attach for a session that started while the service was
@@ -3322,6 +4230,7 @@ def handle_observe(
                                 harness_id=harness_id,
                                 workspace_locator=workspace_locator,
                                 connect=cast(HookStartConnector | None, connect),
+                                _session_lock_owned=True,
                                 service_start_timeout_seconds=(
                                     _AUTO_ATTACH_RETRY_SERVICE_START_BUDGET_SECONDS
                                 ),
@@ -3345,12 +4254,14 @@ def handle_observe(
                                 "auto_attach_retry_failed", resolved_event, _state=_state
                             )
 
-        # SessionEnd is teardown-only: its lifecycle and outbox intent are already durable in the
-        # local store, while a cold service preflight can consume the host's entire hard window.
-        # Leave the row pending for the next SessionStart or the service sweeper rather than
-        # risking host cancellation after local capture has committed.
+        # A pending lifecycle operation is a local fence, not a service
+        # mapping_missing result. Leave the captured rows pending until the
+        # next hook can acquire this exact session lock.
         if (
-            not skip_service
+            not child_attribution_gap
+            and not skip_service
+            and resolved_event != "SessionStart"
+            and not pending_mapping_deferred
             and resolved_event not in {"SessionStart", "SessionEnd"}
             and not defer_contentless_native_drain
         ):
@@ -3412,7 +4323,8 @@ def handle_observe(
         # (the delivery text is appended below) instead of being silently starved at the very
         # SessionStart that bootstraps an unmapped session (issues #241, #280).
         delivery_eligible = (
-            (not additional or attach_advisory_only)
+            not child_attribution_gap
+            and (not additional or attach_advisory_only)
             and resolved_event in ADVICE_SAFE_EVENTS
             and not skip_advice_loop
             and not stop_already_active
@@ -3453,10 +4365,11 @@ def handle_observe(
                     pending_delivery = delivery
 
             # Release recommendations are read from one bounded local cache only.
-            # Existing task/receipt advice always wins this shared context channel.
+            # Existing task/receipt advice keeps its place first on this shared context
+            # channel; the recommendation follows it only when both fit the bound, so an
+            # update notice is no longer starved by every session that has task context (#819).
             if (
-                not additional
-                and resolved_event == "SessionStart"
+                resolved_event == "SessionStart"
                 and not skip_advice_loop
                 and (
                     source is not ObservationSource.CURSOR_HOOK
@@ -3464,7 +4377,14 @@ def handle_observe(
                 )
             ):
                 with contextlib.suppress(Exception):
-                    additional = _cached_recommendation_context(_state=_state)
+                    recommendation = _cached_recommendation_context(_state=_state)
+                    if recommendation and not additional:
+                        additional = recommendation
+                    elif (
+                        recommendation
+                        and len(additional) + 1 + len(recommendation) <= _MAX_ADVICE_CONTEXT
+                    ):
+                        additional = f"{additional} {recommendation}"
 
             rendered_output = _render_context(additional) if additional else {}
             host_consumable = bool(rendered_output)
@@ -3524,6 +4444,9 @@ def handle_observe(
             _stderr_line("hook_observe_degraded: observe; observation durability unknown")
         with contextlib.suppress(BaseException):
             record_hook_diagnostic("observe", event_name or "observe", _state=_state)
+        if session_end_uncommitted:
+            with contextlib.suppress(BaseException):
+                _report_session_end_unrecorded("SessionEnd", _state=_state)
         emitted = False
         with contextlib.suppress(BaseException):
             emitted = hook_io.stdout_json({}, stdout)
@@ -3846,25 +4769,83 @@ def _native_outcome_facts(
 
 
 def _record_claude_permission_denied(
-    payload: Mapping[str, JsonValue], *, _state: Path | None
-) -> None:
-    """Record that a host reviewer held a scoped AI-powered ``check`` (issue #467).
+    payload: Mapping[str, JsonValue],
+    *,
+    _state: Path | None,
+    workspace: str | None = None,
+    connect: ServiceConnector | None = None,
+    run_async: AsyncRunner | None = None,
+    skip_service: bool = False,
+) -> dict[str, JsonValue]:
+    """Record that a host reviewer held a scoped AI-powered ``check`` and advise on it.
 
     ``source`` is Claude Code's closed origin token (``auto_mode`` | ``permission_rule`` |
     ``hook``). An absent source is attributed to auto mode, the only reviewer that produces a
-    ``classifier_denied`` / ``no_verdict`` reason. Any other tool name is ignored: the rendered
-    matcher is scoped to ``check`` and this ingress must not widen it.
+    ``classifier_denied`` / ``no_verdict`` reason (issue #467). Any other tool name is ignored:
+    the rendered matcher is scoped to ``check`` and this ingress must not widen it.
+
+    The returned object is the hook's stdout (issue #857): Yoetz's first-hand grant and
+    admission facts, read inside the hook deadline, decide whether the advisory confirms the
+    owner's standing authorization and offers the session's one ``retry``, or tells the agent to
+    stop and ask. It is advice plus the host's own documented retry flag, never an allow
+    decision, and it echoes nothing from the host payload.
     """
 
     if payload.get("tool_name") not in _CLAUDE_CHECK_TOOL_NAMES:
-        return
+        return {}
     source = payload.get("source")
-    reason = (
-        "host_permission_rule_denied"
-        if source in {"permission_rule", "hook"}
-        else "host_auto_review_denied"
+    held_by_rule = source in ("permission_rule", "hook")
+    record_hook_diagnostic(
+        "host_permission_rule_denied" if held_by_rule else "host_auto_review_denied",
+        "PermissionDenied",
+        _state=_state,
     )
-    record_hook_diagnostic(reason, "PermissionDenied", _state=_state)
+    tool_input = payload.get("tool_input")
+    if isinstance(tool_input, Mapping) and tool_input.get("mode") == "deterministic_only":
+        # This call explicitly opts out of external review; a semantic grant says nothing
+        # about why the host held it. Leave the ordinary host approval path intact.
+        return {}
+    from yoetz.cli.hooks import resolve_session_workspace
+    from yoetz.cli.host_hold_advisory import (
+        PrivacyConnector,
+        RetryOfferOutcome,
+        classifier_verdict_present,
+        compose_host_hold_advisory,
+        note_retry_offer,
+        read_host_hold_facts,
+    )
+
+    locator = resolve_session_workspace(workspace, payload).locator
+    facts = read_host_hold_facts(
+        locator,
+        connect=None if connect is None else cast(PrivacyConnector, connect),
+        run_async=run_async if run_async is not None else _default_runner(),
+        skip_service=skip_service,
+    )
+    session = _token_or_none(payload.get("session_id"))
+    retry_offer: RetryOfferOutcome = "unrecorded"
+    if facts.grant_confirmed and classifier_verdict_present(source, payload.get("reason")):
+        # The ledger is consulted only when a retry could actually be emitted, so a session
+        # whose first hold was unconfirmed or rule-held keeps its one retry for later.
+        retry_offer = "unrecorded" if session is None else note_retry_offer(session, _state=_state)
+    advisory = compose_host_hold_advisory(
+        facts,
+        source=source,
+        reason=payload.get("reason"),
+        retry_offer=retry_offer,
+    )
+    with contextlib.suppress(Exception):
+        record_hook_diagnostic(advisory.diagnostic, "PermissionDenied", _state=_state)
+    return hook_io.claude_permission_denied_output(
+        advisory.explanation,
+        retry=advisory.retry,
+    )
+
+
+def _default_runner() -> AsyncRunner:
+    import anyio
+
+    return cast(AsyncRunner, anyio.run)
 
 
 def handle_claude_observe(
@@ -3895,6 +4876,8 @@ def handle_claude_observe(
         "SessionEnd": "SessionEnd",
         "SessionStart": "SessionStart",
         "Stop": "Stop",
+        "SubagentStart": "SubagentStart",
+        "SubagentStop": "SubagentStop",
     }
     ordinary_profile = observation_profile == CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
     if observation_profile is not None and not ordinary_profile:
@@ -3929,14 +4912,47 @@ def handle_claude_observe(
         "fork": "claude_session_fork",
     }
     try:
-        payload = read_hook_payload(stdin_bytes)
-        raw_event = event_name or payload.get("hook_event_name")
-        if raw_event == "PermissionDenied" and not ordinary_profile:
-            # Not an observation of work: the host refused the call before Yoetz saw it. Retain
-            # only a closed reason token; tool input, reason prose, cwd, and ids are discarded.
-            _record_claude_permission_denied(payload, _state=_state)
+        try:
+            payload = read_hook_payload(stdin_bytes)
+        except ProtocolValueError as exc:
+            if exc.reason_code != "payload_too_large":
+                raise
+            # This host ingress swallowed every refusal into a bare `{}` with no
+            # record at all, so an oversized Claude Code event left no trace of
+            # the work it dropped (issue #667).
+            note_payload_too_large(
+                event_map.get(event_name or "", "unknown_event"),
+                source=ObservationSource.CLAUDE_HOOK,
+                workspace=workspace,
+                _state=_state,
+            )
             hook_io.stdout_json({}, stdout)
             return 0
+        raw_event = event_name or payload.get("hook_event_name")
+        denied_output: dict[str, JsonValue] | None = None
+        if raw_event == "PermissionDenied" and (
+            not ordinary_profile or payload.get("tool_name") in _CLAUDE_CHECK_TOOL_NAMES
+        ):
+            # Not an observation of work: the host refused the call before Yoetz saw it. Retain
+            # only a closed reason token; tool input, reason prose, cwd, and ids are discarded.
+            # The stdout object is the bounded hold advisory (issue #857), or `{}` for any other
+            # tool. Nothing here may raise past the write: a second object would corrupt stdout.
+            output: dict[str, JsonValue] = {}
+            try:
+                output = _record_claude_permission_denied(
+                    payload,
+                    _state=_state,
+                    workspace=workspace,
+                    connect=connect,
+                    run_async=run_async,
+                    skip_service=skip_service,
+                )
+            except Exception:
+                output = {}
+            if not ordinary_profile:
+                hook_io.stdout_json(output, stdout)
+                return 0
+            denied_output = output
         if type(raw_event) is not str or raw_event not in event_map:
             hook_io.stdout_json({}, stdout)
             return 0
@@ -3965,15 +4981,32 @@ def handle_claude_observe(
             # Keep the materialization cursor vocabulary stable while recording
             # the exact host mapping used by this opt-in profile separately.
             structural["mapping_hint"] = CLAUDE_CODE_ORDINARY_HOOK_MAPPING_VERSION
+        routing_session_id: str | None = None
+        child_attribution_gap = False
         if raw_event == "Stop" and payload.get("stop_hook_active") is True:
             structural["stop_hook_active"] = True
         if raw_event == "SessionStart":
             source = payload.get("source")
-            structural["action"] = (
-                start_actions[source]
-                if type(source) is str and source in start_actions
-                else "claude_session"
+            if type(source) is str and source in start_actions:
+                structural["action"] = start_actions[source]
+            else:
+                structural["action"] = "claude_session"
+        if raw_event in {"SubagentStart", "SubagentStop"}:
+            # Claude's native child hooks provide the child identity and
+            # transcript metadata, but no parent tool-call identifier. Keep
+            # the child-only signal usable for later parent-scoped binding;
+            # conflicting aliases stay absent and become an attribution gap.
+            structural["action"] = "claude_subagent"
+            subagent_id, _subagent_aliases_supplied = _consistent_alias_token(
+                payload, ("subagent_id", "agent_id", "agent_thread_id")
             )
+            if subagent_id is not None:
+                structural["subagent_id"] = subagent_id
+            parent_tool_call_id, _parent_aliases_supplied = _consistent_alias_token(
+                payload, ("parent_tool_call_id", "tool_call_id", "tool_use_id")
+            )
+            if parent_tool_call_id is not None:
+                structural["parent_tool_call_id"] = parent_tool_call_id
         if ordinary_profile and raw_event == "PermissionRequest":
             # Claude's documented PermissionRequest payload has no tool_use_id.
             # Retain the event and any bounded tool name without manufacturing
@@ -4090,6 +5123,15 @@ def handle_claude_observe(
             )
             if correlation is not None:
                 structural["tool_use_id"] = correlation
+            # Keep a validated child identity when Claude supplies one on a tool callback. The
+            # identity is structural only; route selection still requires a child mapping that a
+            # successful service start established. A parent callback carrying an optional
+            # agent_id therefore remains on the parent lane.
+            callback_subagent_id, _callback_aliases_supplied = _consistent_alias_token(
+                payload, ("subagent_id", "agent_id", "agent_thread_id")
+            )
+            if callback_subagent_id is not None:
+                structural["subagent_id"] = callback_subagent_id
             if not ordinary_profile:
                 result_status = _token_or_none(
                     payload.get("result_status") or payload.get("failure_type")
@@ -4114,25 +5156,63 @@ def handle_claude_observe(
                 # (issue #581): `observe status` can then say why observation
                 # kept routing to the previous task.
                 with contextlib.suppress(Exception):
+                    binding_payload: dict[str, JsonValue] = {
+                        "session_id": f"{_CLAUDE_SESSION_PREFIX}{session}",
+                        "tool_name": tool_token,
+                        "tool_response": payload.get("tool_response"),
+                    }
+                    for alias in ("subagent_id", "agent_id", "agent_thread_id"):
+                        value = payload.get(alias)
+                        if alias in payload:
+                            binding_payload[alias] = value
+                    tool_input = payload.get("tool_input")
+                    if isinstance(tool_input, Mapping):
+                        nested_aliases: dict[str, JsonValue] = {}
+                        for alias in ("subagent_id", "agent_id", "agent_thread_id"):
+                            if alias in tool_input:
+                                nested_aliases[alias] = cast(JsonValue, tool_input.get(alias))
+                        if nested_aliases:
+                            # Preserve the direct and nested namespaces independently.  A
+                            # contradictory pair must be rejected by the binder before it can
+                            # publish an alias; flattening nested values into the direct field
+                            # made ``agent_id=A`` plus ``tool_input.agent_id=B`` look consistent.
+                            binding_payload["tool_input"] = cast(JsonValue, nested_aliases)
                     record_start_bind_diagnostic(
                         bind_start_mapping_outcome(
-                            cast(
-                                Mapping[str, JsonValue],
-                                {
-                                    "session_id": f"{_CLAUDE_SESSION_PREFIX}{session}",
-                                    "tool_name": tool_name,
-                                    "tool_response": payload.get("tool_response"),
-                                },
-                            ),
+                            binding_payload,
                             _state=_state,
+                            host="claude",
                         ),
                         "PostToolUse",
                         _state=_state,
                     )
-        return handle_observe(
+
+            routing_payload = dict(payload)
+            routing_payload["session_id"] = f"{_CLAUDE_SESSION_PREFIX}{session}"
+            resolved_lane = _resolve_observation_lane(
+                cast(Mapping[str, JsonValue], routing_payload),
+                event_name="PostToolUse",
+                source=ObservationSource.CLAUDE_HOOK,
+                _state=_state,
+            )
+            if resolved_lane.is_child:
+                routing_session_id = resolved_lane.effective_session_id
+            elif resolved_lane.attribution_gap:
+                child_attribution_gap = True
+            elif any(
+                key in payload
+                for key in ("agent_transcript_path", "agent_type", "subagent_id", "agent_id")
+            ):
+                # Claude's child callback can omit every child identity and result body. Preserve
+                # the parent mapping but fence this observation from parent delivery; a later
+                # validated child result can drain it through the child alias. The same fence
+                # applies to a successful callback carrying child-only transcript metadata: a
+                # success bit does not authorize parent attribution.
+                child_attribution_gap = True
+        result = handle_observe(
             event_name=event_map[raw_event],
             stdin_bytes=canonical_encode(structural),
-            stdout=stdout,
+            stdout=io.BytesIO() if denied_output is not None else stdout,
             workspace=workspace,
             _state=_state,
             connect=connect,
@@ -4141,11 +5221,16 @@ def handle_claude_observe(
             _entry_monotonic=_entry_monotonic,
             source=ObservationSource.CLAUDE_HOOK,
             _output_event_name=raw_event,
+            _routing_session_id=routing_session_id,
+            _child_attribution_gap=child_attribution_gap,
             _content_capture_profile=(
                 CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID if ordinary_profile else None
             ),
             _content_payload=payload if ordinary_profile else None,
         )
+        if denied_output is not None:
+            hook_io.stdout_json(denied_output, stdout)
+        return result
     except BaseException:
         with contextlib.suppress(BaseException):
             hook_io.stdout_json({}, stdout)
@@ -4218,6 +5303,7 @@ def _bind_cursor_start(
                     "tool_response": cast(JsonValue, parsed) if parsed is not None else response,
                 },
                 _state=_state,
+                host="cursor",
             ),
             "PostToolUse",
             _state=_state,
@@ -4242,11 +5328,13 @@ def handle_cursor_observe(
 
     raw_event = event_name
     if event_name is None:
+        # Read the same bound the ingress reader applies, so an oversized body
+        # reaches it whole and can still keep its identity view (#667).
         stdin_bytes = (
-            sys.stdin.buffer.read(_MAX_CONTENT_CHUNK) if stdin_bytes is None else stdin_bytes
+            sys.stdin.buffer.read(MAX_HOOK_SKIM_BYTES + 1) if stdin_bytes is None else stdin_bytes
         )
         with contextlib.suppress(Exception):
-            candidate = read_cursor_hook_payload(stdin_bytes).get("hook_event_name")
+            candidate = read_cursor_hook_ingress(stdin_bytes)[0].get("hook_event_name")
             raw_event = candidate if isinstance(candidate, str) else None
     pre_tool = raw_event == "preToolUse"
     # PreToolUse has no advice delivery: buffer the internal observer's empty
@@ -4322,12 +5410,46 @@ def _handle_cursor_observe(
             }
         )
     try:
+        content_omitted = False
         try:
-            payload = read_cursor_hook_payload(stdin_bytes)
-        except ProtocolValueError:
+            payload, content_omitted = read_cursor_hook_ingress(stdin_bytes)
+        except CursorOversizedPayloadError as exc:
+            # The complete body fit the skim cap and failed a safety check.
+            # It must not become a structural row. Name the vendor-shape
+            # refusal and the size loss separately (issue #667).
+            if exc.reason_code != "payload_too_large":
+                with contextlib.suppress(BaseException):
+                    record_hook_diagnostic(
+                        "cursor_payload_invalid",
+                        event_map.get(event_name or "", "unknown_event"),
+                        _state=_state,
+                    )
+                with contextlib.suppress(BaseException):
+                    _stderr_line("hook_cursor_observe_degraded: invalid_payload")
+            note_payload_too_large(
+                event_map.get(event_name or "", "unknown_event"),
+                source=ObservationSource.CURSOR_HOOK,
+                workspace=workspace,
+                _state=_state,
+            )
+            with contextlib.suppress(BaseException):
+                hook_io.stdout_json({}, stdout)
+            return 0
+        except ProtocolValueError as exc:
             # Cursor emits vendor-shaped decimal durations. Keep malformed host
             # ingress fail-open, but make the dropped event visible through the
-            # bounded owner-only diagnostic stream.
+            # bounded owner-only diagnostic stream. A body over the skim cap is
+            # refused here, before any parse, as payload_too_large (issue #667).
+            if exc.reason_code == "payload_too_large":
+                note_payload_too_large(
+                    event_map.get(event_name or "", "unknown_event"),
+                    source=ObservationSource.CURSOR_HOOK,
+                    workspace=workspace,
+                    _state=_state,
+                )
+                with contextlib.suppress(BaseException):
+                    hook_io.stdout_json({}, stdout)
+                return 0
             with contextlib.suppress(BaseException):
                 record_hook_diagnostic(
                     "cursor_payload_invalid",
@@ -4339,9 +5461,20 @@ def _handle_cursor_observe(
             with contextlib.suppress(BaseException):
                 hook_io.stdout_json({}, stdout)
             return 0
+
+        def finish_without_row() -> int:
+            if content_omitted:
+                note_payload_too_large(
+                    event_map.get(event_name or "", "unknown_event"),
+                    source=ObservationSource.CURSOR_HOOK,
+                    workspace=workspace,
+                    _state=_state,
+                )
+            return 0 if hook_io.stdout_json({}, stdout) else 0
+
         raw_event = event_name or payload.get("hook_event_name")
         if type(raw_event) is not str or raw_event not in event_map:
-            return 0 if hook_io.stdout_json({}, stdout) else 0
+            return finish_without_row()
         session_token = _token_or_none(payload.get("session_id"))
         conversation_token = _token_or_none(payload.get("conversation_id"))
         # One host conversation must stay one Yoetz session (#417). sessionStart
@@ -4359,7 +5492,7 @@ def _handle_cursor_observe(
                     record_hook_diagnostic(
                         "cursor_session_ambiguous", event_map[raw_event], _state=_state
                     )
-                return 0 if hook_io.stdout_json({}, stdout) else 0
+                return finish_without_row()
             session = session_token
         elif session_token is None and conversation_token is not None:
             session = (
@@ -4368,7 +5501,7 @@ def _handle_cursor_observe(
         else:
             session = session_token
         if session is None or len(session) > _MAX_TOKEN_CHARS - len(_CURSOR_SESSION_PREFIX):
-            return 0 if hook_io.stdout_json({}, stdout) else 0
+            return finish_without_row()
         resolved_workspace = _resolve_cursor_workspace(payload, workspace)
         if resolved_workspace is None:
             # No structural envelope is created until the workspace locator
@@ -4378,10 +5511,12 @@ def _handle_cursor_observe(
                 record_hook_diagnostic(
                     "workspace_unresolvable", event_map[raw_event], _state=_state
                 )
-            return 0 if hook_io.stdout_json({}, stdout) else 0
+            return finish_without_row()
         _bind_cursor_start(payload, raw_event=raw_event, session=session, _state=_state)
         if ordinary_profile and raw_event == "afterMCPExecution":
             # No duplicate structural row, content capture, or advice delivery.
+            # This skip is deliberate at every size: the paired postToolUse
+            # owns the call, so an oversized body here is not a coverage loss.
             return 0 if hook_io.stdout_json({}, stdout) else 0
         cursor_version = _token_or_none(payload.get("cursor_version"))
         capability_profile_id = (
@@ -4438,6 +5573,12 @@ def _handle_cursor_observe(
         model_id = _token_or_none(payload.get("model_id")) or _token_or_none(payload.get("model"))
         if model_id is not None:
             structural["model_id"] = model_id
+        if raw_event == "sessionStart":
+            source = payload.get("source")
+            if type(source) is str and source in _SESSION_START_SOURCES:
+                # Preserve the closed lifecycle meaning in the existing
+                # structural action. Arbitrary host text remains omitted.
+                structural["action"] = f"cursor_session_{source}"
         duration = _int_or_none(payload.get("duration"))
         if duration is not None:
             structural["duration_ms"] = duration
@@ -4474,13 +5615,28 @@ def _handle_cursor_observe(
                 structural["action"] = "routine_read"
         elif ordinary_profile and raw_event == "preToolUse":
             structural["action"] = "cursor_tool_pending"
-        path_value = payload.get("file_path")
-        if raw_event == "afterFileEdit" and type(path_value) is str and path_value:
+        path_value = payload.get("file_path") if raw_event == "afterFileEdit" else None
+        if (
+            content_omitted
+            and not (type(path_value) is str and path_value)
+            and raw_event == "postToolUse"
+            and structural.get("action") not in _CURSOR_NON_EDIT_ACTIONS
+            and is_edit_tool_name(payload.get("tool_name"))
+        ):
+            # Only a completed edit tool commits its path. A read, a pending
+            # call, or a failed or denied edit changed nothing on disk.
+            path_value = _cursor_nested_edit_path(payload)
+        if (
+            type(path_value) is str
+            and path_value
+            and (raw_event == "afterFileEdit" or content_omitted)
+        ):
             store = LocalObservationStore(_state=_state)
             structural["changed_paths_digest"] = hook_source_commitment(
                 store.key_material(), f"cursor-path:{path_value}"
             )
-            structural.setdefault("tool_name", "cursor_file_edit")
+            if raw_event == "afterFileEdit":
+                structural.setdefault("tool_name", "cursor_file_edit")
         parameters = payload.get("model_params")
         if type(parameters) is list:
             for item in parameters:
@@ -4489,6 +5645,18 @@ def _handle_cursor_observe(
                     if effort is not None:
                         structural["model_effort"] = effort
                     break
+        if content_omitted:
+            with contextlib.suppress(BaseException):
+                _stderr_line(
+                    "hook_cursor_observe_degraded: payload_content_omitted; "
+                    "structural identity retained; native content omitted; see observe status"
+                )
+            with contextlib.suppress(BaseException):
+                record_hook_diagnostic(
+                    "cursor_payload_content_omitted",
+                    event_map[raw_event],
+                    _state=_state,
+                )
         return handle_observe(
             event_name=event_map[raw_event],
             stdin_bytes=canonical_encode(structural),
@@ -4504,7 +5672,10 @@ def _handle_cursor_observe(
             _content_capture_profile=(
                 CURSOR_ORDINARY_OBSERVATION_PROFILE_ID if ordinary_profile else None
             ),
-            _content_payload=payload if ordinary_profile else None,
+            _content_payload=None if content_omitted or not ordinary_profile else payload,
+            _ingress_gap=(
+                ObservationGapCode.PAYLOAD_CONTENT_OMITTED.value if content_omitted else None
+            ),
         )
     except BaseException:
         with contextlib.suppress(BaseException):
@@ -4541,7 +5712,16 @@ def handle_spool(
             workspace_locator = canonical_workspace_locator(workspace)
             if workspace_locator is None:
                 raise ValueError("workspace_locator_invalid")
-            spool_payload = dict(payload)
+            from yoetz.cli.hooks import with_transcript_child_identity
+
+            # Name a v2 delegated child while this hook still runs in the host's own
+            # environment; the service replays the spool later with its own Codex home (#841).
+            enriched, identity_conflict = with_transcript_child_identity(
+                payload, event_name=event_name
+            )
+            if identity_conflict is not None:
+                record_hook_diagnostic(identity_conflict, event_name, _state=_state)
+            spool_payload = dict(enriched)
             # Keep the safe classification, never the host command/input prose.
             if _routine_read_action(payload):
                 spool_payload["action"] = "routine_read"

@@ -228,9 +228,11 @@ does not claim" section, and the full changelog — and live versioned in
 
 ## Status
 
-Yoetz **0.2** is the current public-alpha release line. **0.2.2** makes the documented install
-paths work regardless of which Pythons a machine already has; see the
-[release notes](docs/releases/v0.2.2.md) for the fixes and remaining validation limits. Every public claim in
+Yoetz **0.3.0** is the next public-alpha release candidate. It lets several agents work in
+independent tasks within one repository, adds a backup-first upgrade path for 0.2 task data,
+and carries every 0.2.2 install fix. **0.2.2** remains the published release until the release
+gates pass; see the [0.3.0 notes](docs/releases/v0.3.0.md) for changes and validation limits.
+Every public claim in
 [`docs/public-claims.json`](docs/public-claims.json) is bound to real checked-in evidence: a claim flagged `evidenced` has concrete test or fixture coverage, with its non-live
 suites exercised in per-PR CI; a claim whose own wording names still-missing capability or drill
 evidence stays `not_yet_evidenced` and is not asserted as release evidence. Every reviewed provider

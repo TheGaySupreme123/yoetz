@@ -12,6 +12,7 @@ from typing import Final, Protocol, cast
 from yoetz.domain.findings import FINDING_KIND_TRAITS, FindingId, FindingKind, finding_id
 from yoetz.domain.observation import (
     AdviceItem,
+    AdviceSemanticState,
     AdviceSnapshot,
     ObservationEnvelope,
     ObservationLifecycle,
@@ -49,6 +50,7 @@ from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
 __all__ = [
     "ADVICE_SEMANTIC_PENDING_GAP",
     "ADVICE_SEMANTIC_UNAVAILABLE_GAP",
+    "semantic_state_from_addon",
     "SemanticAdviceScheduler",
     "STANDING_MACHINE_ACTIONS",
     "ObservationAdviceBuildInput",
@@ -95,9 +97,17 @@ _VALID_ADVICE_NEXT_ACTIONS: Final[frozenset[str]] = frozenset(
         "revise_plan_scope",
         "refresh_observation",
         "connect_provider",
+        "renew_provider_sign_in",
+        "repair_semantic_provider",
+        "update_yoetz",
         "attempt_semantic_dispatch",
         "reground_status",
     }
+)
+# Machine conditions derived from the service's own attempt outcomes (#819). Model-derived
+# advice may never name them: an AI-powered note cannot claim the user must sign in or update.
+_ATTEMPT_DERIVED_ACTIONS: Final[frozenset[str]] = frozenset(
+    {"renew_provider_sign_in", "repair_semantic_provider", "update_yoetz"}
 )
 
 _RULE_SUMMARIES: Final[Mapping[str, str]] = {
@@ -109,6 +119,8 @@ _RULE_SUMMARIES: Final[Mapping[str, str]] = {
     "change_outside_plan": "Observed change outside declared plan scope",
     "observation_gap_or_stale": "Observation coverage is incomplete or stale",
     "provider_not_ready": "Configured provider is not ready",
+    "semantic_sign_in_required": "AI-powered review needs the user to sign in to Codex again",
+    "semantic_provider_attention": "AI-powered review needs the user to fix its provider",
     "semantic_claim_without_attempt": "AI-powered review claim lacks a recorded attempt",
 }
 
@@ -121,13 +133,46 @@ _RULE_DETAILS: Final[Mapping[str, str]] = {
     "change_outside_plan": "Changed-path evidence falls outside the declared plan digests",
     "observation_gap_or_stale": "Source lag, mapping, or drain gaps prevent complete observation",
     "provider_not_ready": "AI-powered review or provider binding is configured but not ready",
+    "semantic_sign_in_required": "The last review attempt found the Codex evaluator signed out or its login expired",
+    "semantic_provider_attention": "The last review attempt stopped for a provider cause only the user can repair",
     "semantic_claim_without_attempt": "An AI-powered review claim was observed without a matching attempt receipt",
+}
+
+# Cause-specific reasons for the attempt-derived rules, keyed by the kernel's detail token (#819).
+_ATTENTION_DETAILS: Final[Mapping[str, str]] = {
+    "semantic-attention:credential_rejected": "The last review attempt was rejected because the provider no longer accepts the stored credential; the user must replace it",
+    "semantic-attention:access_denied": "The last review attempt was refused because this account or plan may not use the bound model or endpoint",
+    "semantic-attention:quota_exhausted": "The last review attempt found the provider usage quota exhausted; reviews resume after the limit resets or the plan is raised",
+    "semantic-attention:model_unavailable": "The last review attempt found the bound model or reasoning effort no longer offered to this account; setup must select an available one",
+    "semantic-attention:runtime_update_required": "The last review attempt found the pinned evaluator runtime evidence expired; a newer Yoetz release is needed before reviews can run",
 }
 
 _REFRESH_OBSERVATION_HOOK_NEXT: Final = (
     "Run `yoetz observe status` from the host shell, wait for drain to recover, "
     "then continue. If the gap remains at check time, disclose it."
 )
+# Machine conditions are the user's to repair: the agent tells them now, offers a bounded
+# subagent fix, and leaves sign-in, consent, and approval steps to the user (#819).
+_MACHINE_ACTION_HOOK_NEXT: Final[Mapping[str, str]] = {
+    "connect_provider": (
+        "Tell the user now. Offer a subagent that runs `yoetz provider status` and follows "
+        "its next command; the user approves any sign-in, credential, or privacy step."
+    ),
+    "renew_provider_sign_in": (
+        "Tell the user now. Offer a subagent that reads `yoetz provider codex-subscription "
+        "status --json`, then runs `yoetz provider codex-subscription setup` with its "
+        "executable_path, codex_home and `--device-code`; the user completes sign-in. "
+        "Then recheck."
+    ),
+    "repair_semantic_provider": (
+        "Tell the user now. Offer a subagent that runs `yoetz provider status` and follows "
+        "its next command; the user approves each step. Then recheck."
+    ),
+    "update_yoetz": (
+        "Tell the user now. Offer a subagent that follows `yoetz upgrade`, then tell the user "
+        "to start a fresh session; restart Codex, Claude Code, or Cursor only if activation requires it."
+    ),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +187,27 @@ class ObservationAdviceSemanticAddon:
     provider_identity: str | None = None
     attempt_receipt: str | None = None
     failure_reason: str | None = None
+
+
+def semantic_state_from_addon(
+    addon: ObservationAdviceSemanticAddon | None,
+    *,
+    output_usable: bool = True,
+) -> AdviceSemanticState:
+    """Project recorded attempt status, never finding count (issue #742).
+
+    ``output_usable`` is False when a succeeded attempt's output failed advice-side structural
+    validation and left no usable finding; ADR-006 records that as ``failed`` (a terminal attempt
+    without validated output), not ``ready``.
+    """
+
+    if addon is None:
+        return "disabled"
+    if addon.failure_reason is None:
+        return "ready" if output_usable else "failed"
+    if addon.failure_reason == _ADVICE_SEMANTIC_PENDING_REASON:
+        return "unavailable"
+    return "failed"
 
 
 class SemanticAdvicePort(Protocol):
@@ -237,6 +303,7 @@ class ObservationAdviceBuildInput:
     envelopes: tuple[ObservationEnvelope, ...]
     lifecycle: ObservationLifecycle
     gaps: tuple[str, ...]
+    lineage_refs: tuple[tuple[str, str], ...] = ()
     check_facts: tuple[ObservationCheckFact, ...] = ()
     inspect_fact: ObservationInspectFact | None = None
     composition: ObservationCompositionFact | None = None
@@ -283,6 +350,7 @@ class ObservationAdviceContextBuilder:
         *,
         yoetz_session_id: str | None = None,
         session_commitment: str | None = None,
+        lineage_refs: tuple[tuple[str, str], ...] = (),
     ) -> AdviceSnapshot | None:
         # Task-scoped conditions come from the mapped session's own evidence and
         # current health. The workspace-wide aggregate remains the operator
@@ -310,6 +378,7 @@ class ObservationAdviceContextBuilder:
                 envelopes=envelopes,
                 lifecycle=status.lifecycle,
                 gaps=status.gaps,
+                lineage_refs=lineage_refs,
                 check_facts=checks,
                 inspect_fact=inspect_fact,
                 composition=composition,
@@ -357,6 +426,7 @@ class ObservationAdviceContextBuilder:
                 envelopes=envelopes,
                 lifecycle=status.lifecycle,
                 gaps=status.gaps,
+                lineage_refs=lineage_refs,
                 check_facts=checks,
                 inspect_fact=inspect_fact,
                 composition=composition,
@@ -480,6 +550,11 @@ def should_reissue_advice(
 
     if prior is None:
         return True
+    # The attempt state is not part of the suppression identity or the evidence basis: a review
+    # that completes with no findings and no evidence digest leaves both unchanged, and the stale
+    # state would otherwise survive in the stored snapshot.
+    if prior.semantic_attempt_state != candidate.semantic_attempt_state:
+        return True
     if prior.suppression_identity == candidate.suppression_identity:
         return unresolved_after_work
     if prior.evidence_basis_digest != candidate.evidence_basis_digest:
@@ -521,7 +596,9 @@ def _item_from_candidate(
     freshness_frontier: str,
 ) -> AdviceItem:
     summary = _RULE_SUMMARIES.get(candidate.rule_code, "Observation advice finding")
-    detail = _RULE_DETAILS.get(candidate.rule_code, "Evidence-linked observation finding")
+    detail = _ATTENTION_DETAILS.get(candidate.detail_token) or _RULE_DETAILS.get(
+        candidate.rule_code, "Evidence-linked observation finding"
+    )
     return AdviceItem(
         finding_id=finding,
         rule_code=candidate.rule_code,
@@ -703,6 +780,7 @@ def build_observation_advice_snapshot(
         envelopes=input_value.envelopes,
         lifecycle=input_value.lifecycle,
         gaps=input_value.gaps,
+        lineage_refs=input_value.lineage_refs,
         check_facts=input_value.check_facts,
         inspect_fact=input_value.inspect_fact,
         composition=input_value.composition,
@@ -741,6 +819,7 @@ def build_observation_advice_snapshot(
         if semantic.next_action is not None and (
             type(semantic.next_action) is not str
             or semantic.next_action not in _VALID_ADVICE_NEXT_ACTIONS
+            or semantic.next_action in _ATTEMPT_DERIVED_ACTIONS
         ):
             semantic_invalid = True
         if type(semantic.finding_ids) is not tuple:
@@ -803,8 +882,13 @@ def build_observation_advice_snapshot(
     )
     # AI-powered output uses the same closed action vocabulary as local advice. Validate
     # before building the snapshot: item-level fallback alone cannot protect the snapshot's
-    # top-level recommended_next_action field.
-    if type(next_action) is not str or next_action not in _VALID_ADVICE_NEXT_ACTIONS:
+    # top-level recommended_next_action field. Without local candidates the action came from
+    # the model, which may never name an attempt-derived repair (#819).
+    if (
+        type(next_action) is not str
+        or next_action not in _VALID_ADVICE_NEXT_ACTIONS
+        or (not candidates and next_action in _ATTEMPT_DERIVED_ACTIONS)
+    ):
         next_action = "reground_status"
     observation_qualified = input_value.has_real_observation and (
         input_value.lifecycle is ObservationLifecycle.ACTIVE
@@ -932,6 +1016,9 @@ def build_observation_advice_snapshot(
         freshness_frontier=frontier,
         suppression_identity=suppression,
         ranked_items=tuple(items),
+        semantic_attempt_state=semantic_state_from_addon(
+            semantic, output_usable=bool(semantic_ids) or not semantic_invalid
+        ),
     )
     if not should_reissue_advice(input_value.prior_snapshot, snapshot):
         return input_value.prior_snapshot
@@ -1021,12 +1108,18 @@ def advice_delivery_identity(snapshot: AdviceSnapshot, *, item: AdviceItem | Non
 def _hook_next_sentence(next_action: str) -> str:
     """Render the hook next-step from a snapshot token.
 
-    ``refresh_observation`` is a kernel token, not an MCP tool or CLI verb; the
-    snapshot field stays unchanged and only this human clause is mapped.
+    ``refresh_observation`` and the standing machine actions are kernel tokens, not
+    MCP tools or CLI verbs; the snapshot field stays unchanged and only this human
+    clause is mapped. Machine clauses ask the agent to tell the user and offer a
+    subagent fix, because only the user can repair the installation (#819).
     """
 
     if next_action == "refresh_observation":
         return _REFRESH_OBSERVATION_HOOK_NEXT
+    machine = _MACHINE_ACTION_HOOK_NEXT.get(next_action)
+    if machine is not None:
+        # Keep the token: guidance maps it to the exact repair.
+        return f"Next: {next_action}. {machine}"
     return f"Next: {next_action}."
 
 

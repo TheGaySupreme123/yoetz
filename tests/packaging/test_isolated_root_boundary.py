@@ -156,8 +156,15 @@ def test_isolation_report_modes_and_fail_closed_root(built_dist: Path) -> None:
         assert isolated.returncode == 0, isolated.stderr
         isolated_report = json.loads(isolated.stdout)
         assert isolated_report["mode"] == "isolated"
-        for key in ("state_digest", "endpoint_digest", "storage_digest", "config_digest"):
-            assert isolated_report["identity"][key] != ambient_report["identity"][key]
+        assert isolated_report["schema"] == "yoetz.isolation-report/1"
+        assert isolated_report["config_content"] is None
+        for key in (
+            "state_path_digest",
+            "endpoint_path_digest",
+            "storage_path_digest",
+            "config_path_digest",
+        ):
+            assert isolated_report["path_identity"][key] != ambient_report["path_identity"][key]
         # Digest-only privacy boundary: the report publishes no raw path.
         assert str(iso) not in isolated.stdout.decode("utf-8")
 

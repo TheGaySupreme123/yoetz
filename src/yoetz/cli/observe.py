@@ -7,7 +7,7 @@ import errno
 import functools
 import os
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, Literal, ParamSpec, Protocol, cast
@@ -19,13 +19,16 @@ from yoetz.adapters.check_sandbox import probe_check_sandbox
 from yoetz.adapters.git_subject_state import GitSubjectStateAdapter, open_local_workspace
 from yoetz.adapters.integrations.codex_lifecycle import (
     load_mapping,
+    scoped_child_session_id,
     validate_codex_session_id,
 )
 from yoetz.adapters.integrations.codex_marketplace import inspect_activation
 from yoetz.adapters.integrations.codex_session_stream import (
     CodexSessionStreamLocator,
+    read_codex_child_rollout_header,
     reconcile_session_stream_path,
     resolve_codex_home,
+    rollout_filename_matches_token,
 )
 from yoetz.adapters.integrations.codex_session_stream import (
     reconcile_session_stream as advance_session_stream,
@@ -47,6 +50,12 @@ from yoetz.application.observation_drain import (
 from yoetz.application.observation_verification import run_bound_approved_check
 from yoetz.cli.exits import exit_code_for, remediation_message
 from yoetz.cli.hook_diagnostics import hook_diagnostic_summary
+from yoetz.cli.render import (
+    error_recovery_json,
+    local_recovery_json,
+    render_error_recovery_lines,
+    render_local_recovery_lines,
+)
 from yoetz.config.paths import PathSafetyError
 from yoetz.domain.observation import (
     ObservationControlCommand,
@@ -64,14 +73,26 @@ from yoetz.domain.observation import (
 from yoetz.domain.observation_budget import (
     BUDGET_POLICY_VERSION,
     BUDGET_VALIDATION_STATUS,
+    LARGEST_CAPACITY,
     BudgetLimits,
+    CapacityRequest,
+    ObservationCapacity,
     mode_limits,
+    no_cap_support,
+    parse_capacity_request,
+)
+from yoetz.domain.observation_capacity_policy import (
+    WORKSPACE_PLACEHOLDER,
+    capacity_change_disclosure,
+    is_closed_token,
+    is_safe_command,
+    render_capacity_disclosure_lines,
+    scope_flag,
 )
 from yoetz.domain.observation_profiles import validate_content_capture_profile
 from yoetz.domain.observation_selection import OBSERVATION_SELECTION_VERSION
 from yoetz.domain.observation_settings import (
     DEFAULT_OBSERVATION_SELECTION,
-    ObservationCapacityProfile,
     ObservationDetailProfile,
     ObservationSelection,
     ObservationSelectionResolution,
@@ -89,6 +110,9 @@ from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOpe
 from yoetz.service.client import connect_service_on_demand
 
 __all__ = [
+    "CapacityNoCapUnsupported",
+    "apply_selection_preview",
+    "build_selection_preview",
     "grant_observation",
     "enable_observation_content",
     "disable_observation_content",
@@ -115,7 +139,22 @@ __all__ = [
 
 _SETUP_PROBE_SESSION: Final = "yoetz-setup-probe-session"
 _DRAIN_DEADLINE_MS: Final = 3_000
-_SELECTION_PREVIEW_SCHEMA: Final = "yoetz.observation-selection-preview/1"
+_SELECTION_PREVIEW_SCHEMA: Final = "yoetz.observation-selection-preview/2"
+_NO_CAP_REASON: Final = "capacity_no_cap_unsupported"
+# Structured records a human preview renders as sentences or one summary line.
+_HUMAN_RECORD_KEYS: Final = frozenset(
+    {"disclosure", "current_effective_budget", "effective_budget"}
+)
+_CAPACITY_REQUEST_MESSAGES: Final[Mapping[str, str]] = {
+    "capacity_queue_count_required": (
+        "A custom capacity needs --queue-count between 64 and 8,192."
+    ),
+    "capacity_queue_count_unsupported": ("The queue count must be between 64 and 8,192 rows."),
+}
+_CAPACITY_REQUEST_INVALID_MESSAGE: Final = (
+    "Capacity must be standard (recommended), larger, largest, custom with --queue-count, or none."
+)
+_QUEUE_COUNT_WITHOUT_CUSTOM_MESSAGE: Final = "--queue-count is only used with --capacity custom."
 
 
 class _DrainClient(Protocol):
@@ -140,6 +179,144 @@ _UNSAFE_OBSERVATION_STORAGE_ERRNOS: Final = frozenset(
 _P = ParamSpec("_P")
 
 
+def _session_filename_stem(path: Path) -> str:
+    """Remove only admitted stream suffixes while preserving the filename token."""
+
+    name = path.name
+    lower_name = name.lower()
+    for suffix in (".jsonl.zst", ".jsonl"):
+        if lower_name.endswith(suffix):
+            return name[: -len(suffix)]
+    return path.stem
+
+
+def _mapped_session_id_from_path(
+    path: Path,
+    *,
+    store: LocalObservationStore,
+    workspace_commitment: str,
+    state_root: Path | None,
+) -> str | None:
+    """Recover one full host session id from an owner-authorized lifecycle mapping.
+
+    Native rollout filenames contain a timestamp prefix and a UUID whose hyphens make
+    suffix splitting lossy. A filename is only allowed to select one valid durable
+    mapping already bound unambiguously to the selected workspace; an unmapped explicit
+    path keeps the legacy recovery fallback below when it is not a native rollout name.
+    """
+
+    stem = _session_filename_stem(path)
+    if not stem:
+        return None
+    candidates: list[str] = []
+    for session_id in store.unambiguous_codex_sessions_for_workspace(workspace_commitment):
+        mapping = load_mapping(session_id, _state=state_root)
+        if mapping is None:
+            continue
+        token = mapping.codex_session_id
+        if stem == token or stem.endswith(f"-{token}") or f"-{token}_" in stem:
+            candidates.append(token)
+    return candidates[0] if len(candidates) == 1 else None
+
+
+# Closed refusals for a delegated child's own rollout (#841). The token leads so machine readers
+# keep one stable prefix; the sentence names the next step without any host or task identity.
+_CHILD_ROUTE_REFUSALS: Final[Mapping[str, str]] = {
+    "child_identity_invalid": (
+        "the rollout declares a delegated child without a usable distinct child and spawning "
+        "thread; it cannot be attributed to any task"
+    ),
+    "child_parent_unmapped": (
+        "the session that spawned this child is not mapped to a task in this workspace alone; "
+        "reconcile or attach the spawning session first, or select the workspace that owns it"
+    ),
+    "child_route_missing": (
+        "no validated attach is recorded for this child thread; the child must attach with its "
+        "delegation handle from a callback that names its own rollout (see observe status hook "
+        "diagnostics)"
+    ),
+    "child_route_ambiguous": (
+        "more than one route or workspace claims this child thread; nothing was reconciled"
+    ),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class _ChildRolloutRoute:
+    """Where a delegated child's own rollout may be reconciled, or why it may not.
+
+    ``lane`` is the validated derived child lane; ``reason`` is a closed bounded refusal. Both are
+    ``None`` when the file is not a delegated-child rollout, which keeps the ordinary host-session
+    recovery rules in charge of it.
+    """
+
+    lane: str | None = None
+    reason: str | None = None
+
+
+def _child_rollout_route(
+    path: Path,
+    *,
+    store: LocalObservationStore,
+    workspace_commitment: str,
+    state_root: Path | None,
+) -> _ChildRolloutRoute:
+    """Resolve a Codex multi-agent v2 child rollout to its one validated child lane (#841).
+
+    A v2 child rollout is named by the child's own thread, which is never a host session: every
+    thread of a delegation tree shares the root ``session_id``, and the accepted child's route is
+    the lane derived from that session and the child thread by its validated attach callback.
+    Filename matching can therefore never select it. Only the header can: it must name a spawning
+    session bound to this workspace alone with a lifecycle mapping, and exactly one lane derived
+    from such a session and the header's child thread must already map to a task other than that
+    session's own. Nothing here creates a mapping, a task, or an annotation, and no workspace-wide
+    stream state or annotation count stands in for that lane.
+    """
+
+    result = read_codex_child_rollout_header(path)
+    if result.status in {"not_child", "unreadable"}:
+        return _ChildRolloutRoute()
+    header = result.header
+    if result.status != "child" or header is None:
+        return _ChildRolloutRoute(reason="child_identity_invalid")
+    if not rollout_filename_matches_token(path.name, header.child_thread_id):
+        return _ChildRolloutRoute()
+    bound = frozenset(store.unambiguous_codex_sessions_for_workspace(workspace_commitment))
+    spawning_mapped = False
+    lanes: set[str] = set()
+    for spawning in header.spawning_sessions:
+        if spawning not in bound:
+            continue
+        spawning_mapping = load_mapping(spawning, _state=state_root)
+        if spawning_mapping is None:
+            continue
+        spawning_mapped = True
+        try:
+            lane = scoped_child_session_id(
+                spawning,
+                host="codex",
+                identity=header.child_thread_id,
+                identity_kind="host",
+            )
+        except ProtocolValueError:
+            continue
+        lane_mapping = load_mapping(lane, _state=state_root)
+        if lane_mapping is None or lane_mapping.yoetz_task_id == spawning_mapping.yoetz_task_id:
+            # No validated child attach published this lane, or the lane still names the
+            # spawning session's own task: neither is a child route.
+            continue
+        if not store.codex_session_workspace_owners(lane) <= {workspace_commitment}:
+            return _ChildRolloutRoute(reason="child_route_ambiguous")
+        lanes.add(lane)
+    if not spawning_mapped:
+        return _ChildRolloutRoute(reason="child_parent_unmapped")
+    if not lanes:
+        return _ChildRolloutRoute(reason="child_route_missing")
+    if len(lanes) != 1:
+        return _ChildRolloutRoute(reason="child_route_ambiguous")
+    return _ChildRolloutRoute(lane=next(iter(lanes)))
+
+
 def _resolve_workspace(path: str | None) -> Path:
     root = canonical_workspace_locator("." if path is None else path)
     if root is None:
@@ -155,28 +332,36 @@ def _typed_failure(
     message: str,
     retryable: bool,
     json_output: bool,
+    recovery_lines: Sequence[str] = (),
+    recovery_json: Mapping[str, JsonValue] | None = None,
+    capacity_json: Mapping[str, JsonValue] | None = None,
 ) -> int:
     """Report one bounded failure that names its layer, never `internal_error` (#428).
 
     The token comes first so existing machine-readable expectations hold; the
-    remediation follows it. JSON callers get the same facts as one object.
+    remediation follows it, and the typed recovery directive follows that on its
+    own lines (ADR-030, issue #741). JSON callers get the same facts as one
+    object, with the directive this renderer resolved from the registry under
+    ``recovery``; ``recovery.continuation`` is the stable key, the prose is advisory.
+    Capacity facts for a no-cap refusal travel beside it under ``capacity``.
     """
 
     if json_output:
-        _emit(
-            {
-                "error": {
-                    "code": code.value,
-                    "message": message,
-                    "operation": operation,
-                    "reason": reason,
-                    "retryable": retryable,
-                }
-            },
-            json_output=True,
-        )
+        error: dict[str, JsonValue] = {
+            "code": code.value,
+            "message": message,
+            "operation": operation,
+            "reason": reason,
+            "retryable": retryable,
+        }
+        if recovery_json is not None:
+            error["recovery"] = dict(recovery_json)
+        if capacity_json is not None:
+            error["capacity"] = dict(capacity_json)
+        _emit({"error": error}, json_output=True)
     else:
-        typer.echo(f"observation_{operation}_failed:{reason}: {message}", err=True)
+        lines = [f"observation_{operation}_failed:{reason}: {message}", *recovery_lines]
+        typer.echo("\n".join(lines), err=True)
     return exit_code_for(code)
 
 
@@ -205,6 +390,8 @@ def _bounded_operation(operation: str) -> Callable[[Callable[_P, int]], Callable
                     message=remediation_message("workspace_unresolvable") or "",
                     retryable=False,
                     json_output=json_output,
+                    recovery_lines=render_local_recovery_lines("workspace_unresolvable"),
+                    recovery_json=local_recovery_json("workspace_unresolvable"),
                 )
             except PathSafetyError:
                 return _typed_failure(
@@ -214,6 +401,32 @@ def _bounded_operation(operation: str) -> Callable[[Callable[_P, int]], Callable
                     message=remediation_message("storage_unsafe") or "",
                     retryable=False,
                     json_output=json_output,
+                    recovery_lines=render_local_recovery_lines("storage_unsafe"),
+                    recovery_json=local_recovery_json("storage_unsafe"),
+                )
+            except CapacityNoCapUnsupported as error:
+                # The explanation is the message; the remaining sentences and
+                # the supported alternative precede the typed directive
+                # (ADR-030), and JSON carries the facts beside ``recovery``.
+                return _typed_failure(
+                    operation,
+                    _NO_CAP_REASON,
+                    code=PublicErrorCode.INVALID_REQUEST,
+                    message=error.message,
+                    retryable=False,
+                    json_output=json_output,
+                    recovery_lines=(
+                        *(line for line in error.lines if line != error.message),
+                        f"Alternative: {error.alternative_command}",
+                        *render_local_recovery_lines(_NO_CAP_REASON),
+                    ),
+                    recovery_json=local_recovery_json(_NO_CAP_REASON),
+                    capacity_json=JsonObject(
+                        {
+                            "no_cap": error.no_cap,
+                            "alternative_command": error.alternative_command,
+                        }
+                    ),
                 )
             except PublicOperationError as error:
                 return _typed_failure(
@@ -223,6 +436,8 @@ def _bounded_operation(operation: str) -> Callable[[Callable[_P, int]], Callable
                     message=error.message,
                     retryable=error.retryable,
                     json_output=json_output,
+                    recovery_lines=render_error_recovery_lines(error.safe_details),
+                    recovery_json=error_recovery_json(error.safe_details),
                 )
             except BrokenPipeError:
                 # A closed output consumer is not an observation-store failure.
@@ -236,6 +451,8 @@ def _bounded_operation(operation: str) -> Callable[[Callable[_P, int]], Callable
                         message=remediation_message("storage_unsafe") or "",
                         retryable=False,
                         json_output=json_output,
+                        recovery_lines=render_local_recovery_lines("storage_unsafe"),
+                        recovery_json=local_recovery_json("storage_unsafe"),
                     )
                 return _typed_failure(
                     operation,
@@ -244,6 +461,8 @@ def _bounded_operation(operation: str) -> Callable[[Callable[_P, int]], Callable
                     message=remediation_message("storage_unavailable") or "",
                     retryable=True,
                     json_output=json_output,
+                    recovery_lines=render_local_recovery_lines("storage_unavailable"),
+                    recovery_json=local_recovery_json("storage_unavailable"),
                 )
 
         return wrapped
@@ -309,22 +528,59 @@ class _ContentCaptureFacts:
         return bool(self.effective_profiles)
 
 
-def _selection_from_cli(detail: str, capacity: str) -> ObservationSelection:
-    """Parse the closed owner-control vocabulary without trusting free text."""
+class CapacityNoCapUnsupported(PublicOperationError):
+    """Typed outcome for a no-cap request on the structural queue.
+
+    The structural queue has no uncapped mode in this storage revision (the
+    local state document has a fixed safety ceiling).  Preview and apply raise
+    this instead of changing anything; every owner surface reports it as the
+    non-retryable ``capacity_no_cap_unsupported`` reason with the rendered
+    explanation and the largest supported finite alternative.
+    """
+
+    no_cap: JsonObject
+    disclosure: JsonObject
+    lines: tuple[str, ...]
+    alternative_command: str
+
+    def __init__(self, *, disclosure: JsonObject, alternative_command: str) -> None:
+        lines = render_capacity_disclosure_lines(disclosure)
+        super().__init__(PublicErrorCode.INVALID_REQUEST, lines[0], retryable=False)
+        object.__setattr__(self, "no_cap", no_cap_support())
+        object.__setattr__(self, "disclosure", disclosure)
+        object.__setattr__(self, "lines", lines)
+        object.__setattr__(self, "alternative_command", alternative_command)
+
+
+def _selection_detail_from_cli(detail: str) -> ObservationDetailProfile:
+    """Parse the closed detail vocabulary without trusting free text."""
 
     try:
-        parsed_detail = ObservationDetailProfile.from_value(detail.casefold())
-        capacity_value = {
-            "standard": "512",
-            "larger": "2048",
-            "largest": "8192",
-        }.get(capacity.casefold(), capacity.casefold())
-        parsed_capacity = ObservationCapacityProfile.from_value(capacity_value)
-        return ObservationSelection(parsed_detail, parsed_capacity)
+        return ObservationDetailProfile.from_value(detail.casefold())
     except (AttributeError, TypeError, ValueError) as exc:
         raise PublicOperationError(
             PublicErrorCode.INVALID_REQUEST,
-            "Observation selection is invalid.",
+            "Observation detail must be focused or detailed.",
+            retryable=False,
+        ) from exc
+
+
+def _capacity_request_from_cli(capacity: str, queue_count: int | None) -> CapacityRequest:
+    """Parse ``--capacity`` (and ``--queue-count``) into one closed capacity request."""
+
+    try:
+        return parse_capacity_request(capacity, queue_count=queue_count)
+    except (AttributeError, TypeError, ValueError) as exc:
+        message = _CAPACITY_REQUEST_MESSAGES.get(str(exc))
+        if message is None:
+            message = _CAPACITY_REQUEST_INVALID_MESSAGE
+            if queue_count is not None:
+                with contextlib.suppress(AttributeError, TypeError, ValueError):
+                    parse_capacity_request(capacity)
+                    message = _QUEUE_COUNT_WITHOUT_CUSTOM_MESSAGE
+        raise PublicOperationError(
+            PublicErrorCode.INVALID_REQUEST,
+            message,
             retryable=False,
         ) from exc
 
@@ -372,8 +628,8 @@ def _selection_resolution_payload(
         {
             "detail": selection.detail.value,
             "mode": selection.detail.value,
-            "capacity": int(selection.capacity),
-            "capacity_profile": selection.capacity.name.casefold(),
+            "capacity": selection.capacity.queue_count,
+            "capacity_profile": selection.capacity.label,
             "queue_count": selection.queue_count,
             "origin": resolution.origin,
             "expires_at": None if resolution.expires_at is None else resolution.expires_at.wire,
@@ -444,7 +700,7 @@ def _selection_runtime_payload(
     selected_mode = snapshot.get("selected_mode", DEFAULT_OBSERVATION_SELECTION.detail.value)
     effective_mode = snapshot.get("effective_mode", selected_mode)
     selected_capacity = snapshot.get(
-        "selected_capacity", int(DEFAULT_OBSERVATION_SELECTION.capacity)
+        "selected_capacity", DEFAULT_OBSERVATION_SELECTION.capacity.queue_count
     )
     effective_capacity = snapshot.get("effective_capacity", selected_capacity)
     selected_profile = _selection_capacity_profile(selected_capacity)
@@ -491,22 +747,15 @@ def _selection_runtime_payload(
 
 def _selection_capacity_profile(value: object) -> str:
     try:
-        return ObservationCapacityProfile.from_value(value).name.casefold()
+        return ObservationCapacity.from_value(value).label
     except TypeError, ValueError:
-        return ObservationCapacityProfile.STANDARD.name.casefold()
+        return DEFAULT_OBSERVATION_SELECTION.capacity.label
 
 
-def _selection_preview_plan(
-    store: LocalObservationStore,
-    commitment: str,
-    selection: ObservationSelection,
-    *,
-    session_commitment: str | None,
+def _validate_selection_scope(
     scope: Literal["workspace", "session"],
-    expires_at: Timestamp | None,
-) -> tuple[JsonObject, str]:
-    """Build the exact owner-choice preimage used by preview and apply."""
-
+    session_commitment: str | None,
+) -> None:
     if scope not in {"workspace", "session"}:
         raise PublicOperationError(
             PublicErrorCode.INVALID_REQUEST,
@@ -523,6 +772,57 @@ def _selection_preview_plan(
         raise PublicOperationError(
             PublicErrorCode.INVALID_REQUEST,
             "A workspace selection cannot carry a session id.",
+            retryable=False,
+        )
+
+
+def _capacity_request_payload(request: CapacityRequest) -> JsonObject:
+    return JsonObject(
+        {
+            "kind": request.kind,
+            "queue_count": None if request.capacity is None else request.capacity.queue_count,
+        }
+    )
+
+
+def _selection_disclosure(
+    current: ObservationSelectionResolution,
+    request: CapacityRequest,
+    *,
+    scope: Literal["workspace", "session"],
+    detail: ObservationDetailProfile,
+) -> JsonObject:
+    return capacity_change_disclosure(
+        current=current.selection.capacity,
+        current_origin=current.origin,
+        requested=request,
+        scope=scope,
+        detail=detail,
+    )
+
+
+def _selection_preview_plan(
+    store: LocalObservationStore,
+    commitment: str,
+    selection: ObservationSelection,
+    *,
+    session_commitment: str | None,
+    scope: Literal["workspace", "session"],
+    expires_at: Timestamp | None,
+    capacity_request: CapacityRequest | None = None,
+) -> tuple[JsonObject, str]:
+    """Build the exact owner-choice preimage used by preview and apply."""
+
+    _validate_selection_scope(scope, session_commitment)
+    request = (
+        CapacityRequest.for_capacity(selection.capacity)
+        if capacity_request is None
+        else capacity_request
+    )
+    if request.capacity != selection.capacity:
+        raise PublicOperationError(
+            PublicErrorCode.INVALID_REQUEST,
+            "Observation selection is invalid.",
             retryable=False,
         )
 
@@ -554,14 +854,21 @@ def _selection_preview_plan(
         else settings.with_session(cast(str, session_commitment), candidate)
     )
     aggregate = proposed.aggregate_capacity(now=set_at)
-    limits = BudgetLimits.for_profile(int(aggregate))
+    limits = BudgetLimits.for_capacity(aggregate)
     mode = mode_limits(selection.detail)
     current = resolve_observation_selection(
         settings,
         session_commitment=session_commitment,
     )
+    disclosure = _selection_disclosure(
+        current,
+        request,
+        scope=scope,
+        detail=selection.detail,
+    )
     runtime = _selection_runtime_payload(store, commitment, session_commitment)
     pressure = "healthy" if runtime is None else runtime.get("pressure_state", "healthy")
+    current_budget = None if runtime is None else runtime.get("effective_budget")
     accounting = _selection_accounting_payload(store, commitment)
     authority_digest = _selection_authority_digest(store, commitment)
     settings_digest = canonical_digest(observation_selection_settings_to_json(settings))
@@ -584,10 +891,11 @@ def _selection_preview_plan(
         }
     )
     # The acceptance digest binds only owner-selected inputs and stable policy
-    # facts. Live pressure/accounting is shown below for the owner's decision,
-    # but an incoming hook or a drain between preview and apply must not make
-    # the exact owner choice unusable. A changed setting or consent fence does
-    # invalidate the digest and requires a fresh review.
+    # facts, including the requested count and the disclosed change. Live
+    # pressure/accounting and the current effective budget are shown below for
+    # the owner's decision, but an incoming hook or a drain between preview and
+    # apply must not make the exact owner choice unusable. A changed setting or
+    # consent fence does invalidate the digest and requires a fresh review.
     stable_plan = JsonObject(
         {
             "schema": _SELECTION_PREVIEW_SCHEMA,
@@ -602,10 +910,12 @@ def _selection_preview_plan(
             "requested_selection": _selection_resolution_payload(
                 ObservationSelectionResolution(selection, scope, expires_at)
             ),
+            "capacity_request": _capacity_request_payload(request),
             "current_selection": _selection_resolution_payload(current),
-            "aggregate_capacity": aggregate.value,
-            "aggregate_capacity_profile": aggregate.name.casefold(),
+            "aggregate_capacity": aggregate.queue_count,
+            "aggregate_capacity_profile": aggregate.label,
             "costs": costs,
+            "disclosure": disclosure,
             "content_authority_changed": False,
             "privacy_authority_changed": False,
         }
@@ -613,11 +923,254 @@ def _selection_preview_plan(
     display_plan = JsonObject(
         {
             **dict(stable_plan),
+            "current_effective_budget": JsonObject(
+                cast(Mapping[str, JsonValue], current_budget)
+                if isinstance(current_budget, Mapping)
+                else {}
+            ),
             "pressure_state": pressure,
             "accounting": accounting,
         }
     )
     return display_plan, canonical_digest(stable_plan)
+
+
+def _no_cap_unsupported(
+    store: LocalObservationStore,
+    commitment: str,
+    *,
+    detail: ObservationDetailProfile,
+    capacity: CapacityRequest,
+    scope: Literal["workspace", "session"],
+    session_commitment: str | None,
+) -> CapacityNoCapUnsupported:
+    current = resolve_observation_selection(
+        store.selection_settings_for(commitment),
+        session_commitment=session_commitment,
+    )
+    disclosure = _selection_disclosure(
+        current,
+        capacity,
+        scope=scope,
+        detail=detail,
+    )
+    alternative_command = (
+        f"yoetz observe selection-preview --workspace {WORKSPACE_PLACEHOLDER} "
+        f"--detail {detail.value} --capacity {LARGEST_CAPACITY.label} {scope_flag(scope)}"
+    )
+    if not is_safe_command(alternative_command):
+        raise PublicOperationError(
+            PublicErrorCode.INVALID_REQUEST,
+            "Observation selection is invalid.",
+            retryable=False,
+        )
+    return CapacityNoCapUnsupported(
+        disclosure=disclosure,
+        alternative_command=alternative_command,
+    )
+
+
+def _checked_selection(
+    detail: ObservationDetailProfile,
+    capacity: CapacityRequest,
+) -> ObservationSelection:
+    if type(capacity) is not CapacityRequest or capacity.capacity is None:
+        raise PublicOperationError(
+            PublicErrorCode.INVALID_REQUEST,
+            "Observation selection is invalid.",
+            retryable=False,
+        )
+    try:
+        return ObservationSelection(detail, capacity.capacity)
+    except (ProtocolValueError, TypeError, ValueError) as exc:
+        raise PublicOperationError(
+            PublicErrorCode.INVALID_REQUEST,
+            "Observation selection is invalid.",
+            retryable=False,
+        ) from exc
+
+
+def _selection_apply_command(
+    selection: ObservationSelection,
+    *,
+    scope: Literal["workspace", "session"],
+    expires_at: Timestamp | None,
+    preview_digest: str,
+) -> str:
+    capacity = selection.capacity
+    capacity_arguments = (
+        f"--capacity custom --queue-count {capacity.queue_count}"
+        if capacity.profile is None
+        else f"--capacity {capacity.label}"
+    )
+    expiry = "" if expires_at is None else f"--expires-at {expires_at.wire} "
+    command = (
+        f"yoetz observe selection-apply --workspace {WORKSPACE_PLACEHOLDER} "
+        f"--detail {selection.detail.value} {capacity_arguments} {scope_flag(scope)} {expiry}"
+        f"--accept --preview-digest {preview_digest}"
+    )
+    if not is_safe_command(command):
+        raise PublicOperationError(
+            PublicErrorCode.INVALID_REQUEST,
+            "Observation selection is invalid.",
+            retryable=False,
+        )
+    return command
+
+
+def build_selection_preview(
+    store: LocalObservationStore,
+    commitment: str,
+    *,
+    detail: ObservationDetailProfile,
+    capacity: CapacityRequest,
+    scope: Literal["workspace", "session"],
+    session_commitment: str | None,
+    expires_at: Timestamp | None,
+) -> JsonObject:
+    """Return the owner preview for one detail/capacity request without changing state.
+
+    Shared by the CLI and the terminal interface. The payload carries the
+    display plan, the exact ``preview_digest`` that apply must accept, the
+    structured capacity-change ``disclosure``, the current effective budget,
+    and the apply command. A no-cap request raises
+    :class:`CapacityNoCapUnsupported` and changes nothing.
+    """
+
+    _validate_selection_scope(scope, session_commitment)
+    if type(capacity) is CapacityRequest and capacity.kind == "no_cap":
+        raise _no_cap_unsupported(
+            store,
+            commitment,
+            detail=detail,
+            capacity=capacity,
+            scope=scope,
+            session_commitment=session_commitment,
+        )
+    selection = _checked_selection(detail, capacity)
+    plan, preview_digest = _selection_preview_plan(
+        store,
+        commitment,
+        selection,
+        session_commitment=session_commitment,
+        scope=scope,
+        expires_at=expires_at,
+        capacity_request=capacity,
+    )
+    return JsonObject(
+        {
+            **dict(plan),
+            "preview": True,
+            "preview_digest": preview_digest,
+            "acceptance": "explicit_preview_digest",
+            "apply_requires_owner": True,
+            "capacity_validation": "provisional",
+            "next_command": _selection_apply_command(
+                selection,
+                scope=scope,
+                expires_at=expires_at,
+                preview_digest=preview_digest,
+            ),
+        }
+    )
+
+
+def apply_selection_preview(
+    store: LocalObservationStore,
+    commitment: str,
+    *,
+    detail: ObservationDetailProfile,
+    capacity: CapacityRequest,
+    scope: Literal["workspace", "session"],
+    session_commitment: str | None,
+    expires_at: Timestamp | None,
+    preview_digest: str | None,
+    accept: bool,
+) -> JsonObject:
+    """Apply one owner-accepted preview; the digest must match the current exact plan.
+
+    Requires ``accept`` and the exact ``preview_digest`` from
+    :func:`build_selection_preview`; a digest for another plan is refused as
+    stale. A no-cap request raises :class:`CapacityNoCapUnsupported` and
+    changes nothing. The result carries the applied selection, the
+    disclosure, and the effective budget read back after the change.
+    """
+
+    _validate_selection_scope(scope, session_commitment)
+    if type(capacity) is CapacityRequest and capacity.kind == "no_cap":
+        raise _no_cap_unsupported(
+            store,
+            commitment,
+            detail=detail,
+            capacity=capacity,
+            scope=scope,
+            session_commitment=session_commitment,
+        )
+    selection = _checked_selection(detail, capacity)
+    plan, expected_digest = _selection_preview_plan(
+        store,
+        commitment,
+        selection,
+        session_commitment=session_commitment,
+        scope=scope,
+        expires_at=expires_at,
+        capacity_request=capacity,
+    )
+    if accept is not True or preview_digest is None:
+        raise PublicOperationError(
+            PublicErrorCode.INVALID_REQUEST,
+            "An exact observation selection preview must be accepted with --accept and its "
+            "--preview-digest.",
+            retryable=False,
+        )
+    try:
+        validate_sha256_digest(preview_digest)
+    except (ProtocolValueError, TypeError, ValueError) as exc:
+        raise PublicOperationError(
+            PublicErrorCode.INVALID_REQUEST,
+            "The observation selection preview digest is invalid.",
+            retryable=False,
+        ) from exc
+    if preview_digest != expected_digest:
+        raise PublicOperationError(
+            PublicErrorCode.INVALID_REQUEST,
+            "The observation selection preview is stale; run selection-preview again.",
+            retryable=False,
+        )
+    setting = (
+        store.set_workspace_selection(commitment, selection, expires_at=expires_at)
+        if scope == "workspace"
+        else store.set_session_selection(
+            commitment,
+            cast(str, session_commitment),
+            selection,
+            expires_at=expires_at,
+        )
+    )
+    runtime = _selection_runtime_payload(store, commitment, session_commitment)
+    effective_budget = None if runtime is None else runtime.get("effective_budget")
+    return JsonObject(
+        {
+            **dict(plan),
+            "workspace_commitment": commitment,
+            "selection": _selection_resolution_payload(
+                ObservationSelectionResolution(selection, scope, setting.expires_at)
+            ),
+            "scope": scope,
+            "session_commitment": session_commitment,
+            "preview_digest": expected_digest,
+            "accepted_preview_digest": preview_digest,
+            "applied": True,
+            "capacity_validation": "provisional",
+            "effective_budget": JsonObject(
+                cast(Mapping[str, JsonValue], effective_budget)
+                if isinstance(effective_budget, Mapping)
+                else {}
+            ),
+            "content_authority_changed": False,
+            "privacy_authority_changed": False,
+        }
+    )
 
 
 def selection_status_payload(
@@ -696,6 +1249,34 @@ def _delivery_facts(
     )
 
 
+def _capture_handoff_retirement_text(retirements: JsonObject) -> str:
+    """Render the bounded handoff-retirement account on one status line."""
+
+    count = retirements.get("retired_count")
+    recent = retirements.get("recent")
+    entries: tuple[Mapping[str, object], ...] = ()
+    if isinstance(recent, tuple):
+        entries = tuple(
+            cast(Mapping[str, object], item)
+            for item in cast(tuple[object, ...], recent)
+            if isinstance(item, Mapping)
+        )
+    if not count:
+        return "none"
+    details = "; ".join(
+        f"{entry.get('stage')} {entry.get('ticket_state')} {entry.get('source')} "
+        f"reason {entry.get('reason')}"
+        + (
+            f" ({entry.get('quarantine_reason')})"
+            if entry.get("quarantine_reason") is not None
+            else ""
+        )
+        + f" age {entry.get('age_ms')}ms at {entry.get('retired_at')}"
+        for entry in entries[-4:]
+    )
+    return f"{count} (recent: {details or 'none'})"
+
+
 @_bounded_operation("status")
 def observe_status(
     *,
@@ -738,6 +1319,14 @@ def observe_status(
         codex_home=codex_home,
     )
     diagnostics = hook_diagnostic_summary(_state=_state)
+    # A refused routine-read summary costs only its lane's bounded account, but
+    # an operator must be able to name that cause instead of reading a bare
+    # "incomplete or stale" coverage note (issue #753).
+    summary_refusals = store.summary_refusals(commitment)
+    # A retired native capture handoff names the stage, ticket state, and reason
+    # that stranded it, so a retained ticket that held capture pressure can be
+    # traced to its transition (issue #836).
+    handoff_retirements = store.capture_handoff_retirements(commitment)
     reclaim_guidance = (
         "reclaim with 'yoetz observe reclaim --workspace .'"
         if root == Path.cwd().resolve()
@@ -795,6 +1384,8 @@ def observe_status(
                 "quarantine_reclaimed_count": quarantine_reclaimed,
                 "mapping_present": mapping_present,
                 "hook_diagnostics": diagnostics,
+                "summary_refusals": summary_refusals,
+                "capture_handoff_retirements": handoff_retirements,
                 "plugin_activation": plugin_activation,
             },
             json_output=True,
@@ -833,6 +1424,18 @@ def observe_status(
         "hook_diagnostics": canonical_encode(diagnostics).decode("utf-8"),
         "advice_frontier": status.advice_frontier or "none",
         "gaps": ",".join(status.gaps) if status.gaps else "none",
+        "summary_refusals": (
+            "none"
+            if not summary_refusals
+            else "; ".join(
+                f"{entry.get('source')} generation {entry.get('source_generation')} "
+                f"identity {entry.get('source_identity')} position {entry.get('event_position')} "
+                f"inputs {entry.get('input_count')} reason {entry.get('reason')} "
+                f"({entry.get('disposition')})"
+                for entry in summary_refusals[-4:]
+            )
+        ),
+        "capture_handoff_retirements": _capture_handoff_retirement_text(handoff_retirements),
         "hook_coverage": str(status.source_coverage.get(ObservationSource.CODEX_HOOK, False)),
         "stream_coverage": str(
             status.source_coverage.get(ObservationSource.CODEX_SESSION_STREAM, False)
@@ -1163,9 +1766,14 @@ def grant_observation(*, workspace: str, _state: Path | None = None) -> int:
     store = LocalObservationStore(_state=_state)
     root = _resolve_workspace(workspace)
     commitment = store.workspace_commitment(str(root))
-    store.grant_consent(commitment)
+    # A repeated grant keeps already-approved native content arms and the unchanged
+    # content fence; only content-disable or revoke removes an arm (issue #835).
+    grant = store.grant_consent(commitment)
     # Never log the raw path — only the commitment.
     typer.echo(f"observation_consent_granted:{commitment}")
+    kept = grant.consent.content_capture_profiles
+    if kept:
+        typer.echo(f"observation_content_capture_kept:{','.join(kept)}")
     return 0
 
 
@@ -1278,6 +1886,47 @@ def observation_content_status(
     return 0
 
 
+def _output_token(value: object) -> str:
+    return value if is_closed_token(value) else "unknown"
+
+
+def _output_count(value: object) -> str:
+    return str(value) if type(value) is int and value >= 0 else "unknown"
+
+
+def _effective_budget_line(budget: object) -> str:
+    """Render the bounded effective-budget summary; unknown when the store has none."""
+
+    record: Mapping[str, object] = (
+        cast(Mapping[str, object], budget) if isinstance(budget, Mapping) else {}
+    )
+    no_cap_raw = record.get("no_cap")
+    no_cap: Mapping[str, object] = (
+        cast(Mapping[str, object], no_cap_raw) if isinstance(no_cap_raw, Mapping) else {}
+    )
+    available = no_cap.get("available")
+    no_cap_state = (
+        "available"
+        if available is True
+        else f"unavailable({_output_token(no_cap.get('reason'))})"
+        if available is False
+        else "unknown"
+    )
+    return (
+        "effective_budget:"
+        f"selected={_output_count(record.get('selected_queue_count'))}"
+        f"({_output_token(record.get('selected_capacity_label'))}); "
+        f"effective={_output_count(record.get('effective_queue_count'))}"
+        f"({_output_token(record.get('effective_capacity_label'))}); "
+        f"reason={_output_token(record.get('effective_reason'))}; "
+        f"limiting={_output_token(record.get('limiting_dimension'))} "
+        f"{_output_count(record.get('utilization_bps'))}bps; "
+        f"no_cap={no_cap_state}; "
+        "lower=yoetz observe selection-revoke or selection-apply --capacity standard; "
+        "pause=yoetz observe pause"
+    )
+
+
 @_bounded_operation("selection_status")
 def observation_selection_status(
     *,
@@ -1320,7 +1969,19 @@ def observation_selection_status(
             f"unrecoverable:{counter('unrecoverable_input_count')}; "
             "content_authority_unchanged; privacy_authority_unchanged"
         )
+        typer.echo(_effective_budget_line(payload.get("effective_budget")))
     return 0
+
+
+def _selection_cli_scope(
+    store: LocalObservationStore,
+    *,
+    session_id: str | None,
+    persist: bool,
+) -> tuple[Literal["workspace", "session"], str | None]:
+    if persist:
+        return "workspace", None
+    return "session", _selection_session_commitment(store, session_id)
 
 
 @_bounded_operation("selection_preview")
@@ -1329,6 +1990,7 @@ def observation_selection_preview(
     workspace: str,
     detail: str,
     capacity: str,
+    queue_count: int | None = None,
     session_id: str | None = None,
     persist: bool = False,
     expires_at: str | None = None,
@@ -1343,35 +2005,34 @@ def observation_selection_preview(
             "A workspace selection cannot carry a session id.",
             retryable=False,
         )
+    parsed_detail = _selection_detail_from_cli(detail)
+    request = _capacity_request_from_cli(capacity, queue_count)
+    expiry = _selection_expiry(expires_at)
     store = LocalObservationStore(_state=_state)
     commitment = store.workspace_commitment(str(_resolve_workspace(workspace)))
-    selection = _selection_from_cli(detail, capacity)
-    expiry = _selection_expiry(expires_at)
-    scope: Literal["workspace", "session"] = "workspace" if persist else "session"
-    session_commitment = None if persist else _selection_session_commitment(store, session_id)
-    plan, preview_digest = _selection_preview_plan(
+    scope, session_commitment = _selection_cli_scope(store, session_id=session_id, persist=persist)
+    payload = build_selection_preview(
         store,
         commitment,
-        selection,
-        session_commitment=session_commitment,
+        detail=parsed_detail,
+        capacity=request,
         scope=scope,
+        session_commitment=session_commitment,
         expires_at=expiry,
     )
-    payload: Mapping[str, JsonValue] = {
-        **dict(plan),
-        "preview": True,
-        "preview_digest": preview_digest,
-        "acceptance": "explicit_preview_digest",
-        "apply_requires_owner": True,
-        "capacity_validation": "provisional",
-        "next_command": (
-            "yoetz observe selection-apply --workspace <workspace> "
-            f"--detail {detail.casefold()} --capacity {capacity.casefold()} "
-            f"{'--persist ' if persist else '--session-id <session-id> '}"
-            f"--accept --preview-digest {preview_digest}"
-        ),
-    }
-    _emit(payload, json_output=json_output)
+    if json_output:
+        _emit(payload, json_output=True)
+        return 0
+    # The structured disclosure and the current effective budget are rendered
+    # as the shared owner sentences and the bounded summary line instead of a
+    # raw key/value dump.
+    _emit(
+        {key: value for key, value in payload.items() if key not in _HUMAN_RECORD_KEYS},
+        json_output=False,
+    )
+    typer.echo(_effective_budget_line(payload.get("current_effective_budget")))
+    for line in render_capacity_disclosure_lines(cast(Mapping[str, object], payload["disclosure"])):
+        typer.echo(line)
     return 0
 
 
@@ -1381,6 +2042,7 @@ def set_observation_selection(
     workspace: str,
     detail: str,
     capacity: str,
+    queue_count: int | None = None,
     session_id: str | None = None,
     persist: bool = False,
     expires_at: str | None = None,
@@ -1397,75 +2059,46 @@ def set_observation_selection(
             "A workspace selection cannot carry a session id.",
             retryable=False,
         )
+    parsed_detail = _selection_detail_from_cli(detail)
+    request = _capacity_request_from_cli(capacity, queue_count)
+    expiry = _selection_expiry(expires_at)
     store = LocalObservationStore(_state=_state)
     commitment = store.workspace_commitment(str(_resolve_workspace(workspace)))
-    selection = _selection_from_cli(detail, capacity)
-    expiry = _selection_expiry(expires_at)
-    scope: Literal["workspace", "session"] = "workspace" if persist else "session"
-    session_commitment = None if persist else _selection_session_commitment(store, session_id)
-    plan, expected_digest = _selection_preview_plan(
+    scope, session_commitment = _selection_cli_scope(store, session_id=session_id, persist=persist)
+    payload = apply_selection_preview(
         store,
         commitment,
-        selection,
-        session_commitment=session_commitment,
+        detail=parsed_detail,
+        capacity=request,
         scope=scope,
+        session_commitment=session_commitment,
         expires_at=expiry,
+        preview_digest=preview_digest,
+        accept=accept,
     )
-    if not accept or preview_digest is None:
-        raise PublicOperationError(
-            PublicErrorCode.INVALID_REQUEST,
-            "An exact observation selection preview must be accepted with --accept and its "
-            "--preview-digest.",
-            retryable=False,
-        )
-    try:
-        validate_sha256_digest(preview_digest)
-    except (ProtocolValueError, TypeError, ValueError) as exc:
-        raise PublicOperationError(
-            PublicErrorCode.INVALID_REQUEST,
-            "The observation selection preview digest is invalid.",
-            retryable=False,
-        ) from exc
-    if preview_digest != expected_digest:
-        raise PublicOperationError(
-            PublicErrorCode.INVALID_REQUEST,
-            "The observation selection preview is stale; run selection-preview again.",
-            retryable=False,
-        )
-    setting = (
-        store.set_workspace_selection(commitment, selection, expires_at=expiry)
-        if persist
-        else store.set_session_selection(
-            commitment,
-            cast(str, session_commitment),
-            selection,
-            expires_at=expiry,
-        )
-    )
-    payload: Mapping[str, JsonValue] = {
-        **dict(plan),
-        "workspace_commitment": commitment,
-        "selection": _selection_resolution_payload(
-            ObservationSelectionResolution(selection, scope, setting.expires_at)
-        ),
-        "scope": scope,
-        "session_commitment": session_commitment,
-        "preview_digest": expected_digest,
-        "accepted_preview_digest": preview_digest,
-        "applied": True,
-        "capacity_validation": "provisional",
-        "content_authority_changed": False,
-        "privacy_authority_changed": False,
-    }
     if json_output:
         _emit(payload, json_output=True)
-    else:
-        typer.echo(
-            "observation_selection_applied:"
-            f"scope={scope}; detail={selection.detail.value}; "
-            f"capacity={selection.capacity.name.casefold()}({selection.queue_count}); "
-            "content_authority_unchanged; privacy_authority_unchanged"
-        )
+        return 0
+    selection = cast(Mapping[str, object], payload["selection"])
+    typer.echo(
+        "observation_selection_applied:"
+        f"scope={scope}; detail={parsed_detail.value}; "
+        f"capacity={_output_token(selection.get('capacity_profile'))}"
+        f"({_output_count(selection.get('queue_count'))}); "
+        "content_authority_unchanged; privacy_authority_unchanged"
+    )
+    typer.echo(_effective_budget_line(payload.get("effective_budget")))
+    disclosure = cast(Mapping[str, object], payload["disclosure"])
+    lines = render_capacity_disclosure_lines(disclosure)
+    hints = [line for line in lines if line.startswith(("Lower it later with:", "Resume with:"))]
+    if not hints:
+        hints = [
+            f"Revoke it with: {disclosure['revoke_command']}. "
+            f"Pause new observation ingest with: {disclosure['pause_command']}.",
+            f"Resume with: {disclosure['resume_command']}.",
+        ]
+    for line in hints:
+        typer.echo(line)
     return 0
 
 
@@ -1856,10 +2489,50 @@ def reconcile_session_stream(
     if not path.is_file() or path.is_symlink():
         typer.echo("observation_reconcile_failed:session_file_unreadable", err=True)
         return 20
-    # Session commitment is derived from the file's stem (opaque token), never the full path.
-    session_token = path.stem if path.stem else "session"
-    if "-" in session_token:
-        session_token = session_token.rsplit("-", 1)[-1] or session_token
+    # Prefer the full host id from one durable lifecycle mapping. Native rollout filenames
+    # include hyphenated UUIDs; suffix splitting would orphan the mapped session. Unmapped
+    # explicit paths retain the established opaque-token recovery behavior.
+    session_token = _mapped_session_id_from_path(
+        path,
+        store=store,
+        workspace_commitment=workspace_commitment,
+        state_root=_state,
+    )
+    if session_token is None:
+        child = _child_rollout_route(
+            path,
+            store=store,
+            workspace_commitment=workspace_commitment,
+            state_root=_state,
+        )
+        if child.reason is not None:
+            typer.echo(
+                f"observation_reconcile_failed:{child.reason}: "
+                f"{_CHILD_ROUTE_REFUSALS[child.reason]}",
+                err=True,
+            )
+            return 20
+        if child.lane is not None:
+            # The child's own rollout drains to its validated child lane, sharing the cursor,
+            # profile, and pairing persistence the automatic child-lane reconcile uses. Its
+            # header is then the child-observed delegation signal that binds the parent's
+            # provisional annotation to this child under admitted catalog lineage.
+            session_commitment = store.bind_codex_session(workspace_commitment, child.lane)
+            payload = reconcile_session_stream_path(
+                store,
+                workspace_commitment=workspace_commitment,
+                session_commitment=session_commitment,
+                codex_session_id=child.lane,
+                path=path,
+            )
+            _emit({**payload, "mode": "recovery_child_lane"}, json_output=json_output)
+            return 0
+        if path.stem.startswith("rollout-"):
+            typer.echo("observation_reconcile_failed:mapping_missing", err=True)
+            return 20
+        session_token = path.stem if path.stem else "session"
+        if "-" in session_token:
+            session_token = session_token.rsplit("-", 1)[-1] or session_token
     session_commitment = store.session_commitment(session_token[:128])
     store.bind_session(workspace_commitment, session_commitment)
     locator = CodexSessionStreamLocator(resolve_codex_home())

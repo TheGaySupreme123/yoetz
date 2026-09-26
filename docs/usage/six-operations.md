@@ -24,7 +24,8 @@ yoetz status --input - --json          # read the request from stdin
 has an unknown outcome, never a known failure.** Reuse the same `request_id` to retry, or call
 `status view=operation` with that `request_id` as a state lookup without reconstructing the
 original body. A `complete` publish returns stored frontiers and accepted event ids; other states
-report only what is honest for that state (`pending`/`quarantined`/`absent`/non-publish).
+report only what is honest for that state (`pending`/`quarantined`/`absent`/non-publish). An
+`absent` check page may add an `admission` stage when Yoetz refused or is still admitting it.
 
 Field-level shapes live in [`docs/INTERFACES.md`](../INTERFACES.md); the JSON Schemas under
 [`schemas/`](../../schemas/) and the golden vectors under [`fixtures/`](../../fixtures/) are the
@@ -212,6 +213,14 @@ gap with the recorded status and reason, and do not spend a third job on the sam
 On `OPERATION_PENDING`, read `status` with
 `view=operation` once and replay the same `request_id` once; if it is still pending, continue with
 a new local-only request and say the earlier operation never reached a terminal result.
+
+A check that Yoetz refused before admitting it is different: nothing was recorded under its
+`request_id`, the error says so with the `check_admission_same_identity` continuation and a
+`retry_after_ms` wait, and `status view=operation` reads `absent` with an `admission` stage naming
+why (a capture handoff still being delivered, the same request already being admitted, a lost race,
+or an import in progress). Wait that long and replay the exact same check, at most three times; if it
+is still refused, report the check as not admitted rather than switching mode or minting a new
+request.
 
 The agent-facing version of this loop, including when *not* to use Yoetz at all, is
 [`guidance/workflow.md`](../../guidance/workflow.md).

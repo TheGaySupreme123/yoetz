@@ -7,17 +7,28 @@ import pytest
 from yoetz.domain.observation_budget import (
     BUDGET_VALIDATION_STATUS,
     CURRENT_SERIALIZATION_CAP_BYTES,
+    LARGER_CAPACITY,
+    LARGEST_CAPACITY,
+    LARGEST_SUPPORTED_QUEUE_COUNT,
+    MIN_CUSTOM_QUEUE_COUNT,
+    NO_CAP_UNSUPPORTED_REASON,
+    STANDARD_CAPACITY,
+    STATE_DOCUMENT_CEILING_BYTES,
     AdmissionReason,
     AdmissionRequest,
     BudgetLimits,
     BudgetUsage,
     CapacityProfile,
+    CapacityRequest,
+    ObservationCapacity,
     ObservationMode,
     PressureDimension,
     PressureState,
     evaluate_admission,
     evaluate_pressure,
     mode_limits,
+    no_cap_support,
+    parse_capacity_request,
 )
 
 
@@ -323,3 +334,236 @@ def test_hard_pressure_reopens_admission_without_restoring_optional_detail(
     assert recovered.state is PressureState.HEALTHY
     assert recovered.effective_mode is mode
     assert recovered.content_allowed
+
+
+# --- #828: finite custom capacity, the no-cap outcome, and the byte ladder ---
+
+
+def test_capacity_labels_profiles_and_custom_range() -> None:
+    assert STANDARD_CAPACITY == ObservationCapacity(512)
+    assert (STANDARD_CAPACITY.label, LARGER_CAPACITY.label, LARGEST_CAPACITY.label) == (
+        "standard",
+        "larger",
+        "largest",
+    )
+    assert LARGER_CAPACITY.profile is CapacityProfile.LARGER
+    custom = ObservationCapacity(1_024)
+    assert custom.label == "custom"
+    assert custom.profile is None
+    assert int(custom) == 1_024
+    assert ObservationCapacity(MIN_CUSTOM_QUEUE_COUNT).queue_count == 64
+    assert ObservationCapacity(LARGEST_SUPPORTED_QUEUE_COUNT) == LARGEST_CAPACITY
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (CapacityProfile.LARGER, 2_048),
+        (ObservationCapacity(700), 700),
+        (1_024, 1_024),
+        ("64", 64),
+        ("8192", 8_192),
+    ],
+)
+def test_capacity_from_value_accepts_exact_counts(value: object, expected: int) -> None:
+    assert ObservationCapacity.from_value(value).queue_count == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "reason"),
+    [
+        (63, "capacity_queue_count_unsupported"),
+        (8_193, "capacity_queue_count_unsupported"),
+        (0, "capacity_queue_count_unsupported"),
+        ("100000", "capacity_queue_count_unsupported"),
+        (True, "capacity_profile_invalid"),
+        (512.0, "capacity_profile_invalid"),
+        ("-512", "capacity_profile_invalid"),
+        (" 512", "capacity_profile_invalid"),
+        ("larger", "capacity_profile_invalid"),
+        (None, "capacity_profile_invalid"),
+    ],
+)
+def test_capacity_from_value_rejects_out_of_range_and_non_integers(
+    value: object, reason: str
+) -> None:
+    with pytest.raises(ValueError, match=reason):
+        ObservationCapacity.from_value(value)
+
+
+def test_capacity_constructor_rejects_bool_and_range() -> None:
+    with pytest.raises(ValueError, match="capacity_profile_invalid"):
+        ObservationCapacity(True)
+    with pytest.raises(ValueError, match="capacity_queue_count_unsupported"):
+        ObservationCapacity(9_000)
+
+
+@pytest.mark.parametrize(
+    ("text", "queue_count", "kind", "count"),
+    [
+        ("standard", None, "profile", 512),
+        ("Recommended", None, "profile", 512),
+        ("LARGER", None, "profile", 2_048),
+        ("largest", None, "profile", 8_192),
+        ("custom", 1_024, "custom", 1_024),
+        ("custom", 64, "custom", 64),
+        ("custom", 8_192, "profile", 8_192),
+        ("1024", None, "custom", 1_024),
+        ("2048", None, "profile", 2_048),
+    ],
+)
+def test_parse_capacity_request_resolves_words_aliases_and_counts(
+    text: str, queue_count: int | None, kind: str, count: int
+) -> None:
+    request = parse_capacity_request(text, queue_count=queue_count)
+    assert request.kind == kind
+    assert request.capacity is not None
+    assert request.capacity.queue_count == count
+
+
+@pytest.mark.parametrize("text", ["none", "no-cap", "no_cap", "Uncapped", "UNLIMITED"])
+def test_parse_capacity_request_no_cap_words_carry_no_capacity(text: str) -> None:
+    assert parse_capacity_request(text) == CapacityRequest("no_cap", None)
+
+
+@pytest.mark.parametrize(
+    ("text", "queue_count", "reason"),
+    [
+        ("custom", None, "capacity_queue_count_required"),
+        ("custom", 63, "capacity_queue_count_unsupported"),
+        ("custom", 8_193, "capacity_queue_count_unsupported"),
+        ("4", None, "capacity_queue_count_unsupported"),
+        ("larger", 2_048, "capacity_request_invalid"),
+        ("none", 512, "capacity_request_invalid"),
+        ("1024", 1_024, "capacity_request_invalid"),
+        ("huge", None, "capacity_request_invalid"),
+        ("", None, "capacity_request_invalid"),
+        ("-64", None, "capacity_request_invalid"),
+        ("1e3", None, "capacity_request_invalid"),
+    ],
+)
+def test_parse_capacity_request_errors_are_closed_tokens(
+    text: str, queue_count: int | None, reason: str
+) -> None:
+    with pytest.raises(ValueError, match=reason):
+        parse_capacity_request(text, queue_count=queue_count)
+
+
+def test_capacity_request_kind_must_match_capacity() -> None:
+    with pytest.raises(ValueError, match="capacity_request_invalid"):
+        CapacityRequest("profile", ObservationCapacity(1_024))
+    with pytest.raises(ValueError, match="capacity_request_invalid"):
+        CapacityRequest("custom", STANDARD_CAPACITY)
+    with pytest.raises(ValueError, match="capacity_request_invalid"):
+        CapacityRequest("no_cap", STANDARD_CAPACITY)
+
+
+def test_no_cap_support_names_the_state_document_ceiling() -> None:
+    assert dict(no_cap_support()) == {
+        "available": False,
+        "dimension": "structural_queue",
+        "reason": NO_CAP_UNSUPPORTED_REASON,
+        "state_document_ceiling_bytes": 16_777_216,
+        "largest_supported_queue_count": 8_192,
+    }
+    assert no_cap_support() == no_cap_support()
+    assert STATE_DOCUMENT_CEILING_BYTES == 16 * 1024 * 1024
+
+
+@pytest.mark.parametrize("profile", list(CapacityProfile))
+def test_named_profiles_keep_byte_identical_limits(profile: CapacityProfile) -> None:
+    expected = {
+        CapacityProfile.STANDARD: (512 * 1024, 1024 * 1024, 128, 128 * 1024, 128, 128 * 1024),
+        CapacityProfile.LARGER: (
+            2 * 1024 * 1024,
+            4 * 1024 * 1024,
+            512,
+            512 * 1024,
+            512,
+            512 * 1024,
+        ),
+        CapacityProfile.LARGEST: (
+            8 * 1024 * 1024,
+            16 * 1024 * 1024,
+            2_048,
+            2 * 1024 * 1024,
+            2_048,
+            2 * 1024 * 1024,
+        ),
+    }[profile]
+    by_capacity = BudgetLimits.for_capacity(ObservationCapacity(int(profile)))
+    assert by_capacity == BudgetLimits.for_profile(profile)
+    assert by_capacity.profile is profile
+    assert (
+        by_capacity.queue_bytes,
+        by_capacity.state_bytes,
+        by_capacity.protected_count,
+        by_capacity.protected_bytes,
+        by_capacity.session_fair_share,
+        by_capacity.session_fair_share_bytes,
+    ) == expected
+
+
+@pytest.mark.parametrize(
+    ("count", "queue_bytes", "state_bytes"),
+    [
+        (64, 64 * 1024, 1024 * 1024),
+        (700, 700 * 1024, 1_400 * 1024),
+        (1_024, 1024 * 1024, 2 * 1024 * 1024),
+        (4_096, 4 * 1024 * 1024, 8 * 1024 * 1024),
+    ],
+)
+def test_custom_capacity_follows_the_byte_ladder(
+    count: int, queue_bytes: int, state_bytes: int
+) -> None:
+    limits = BudgetLimits.for_capacity(ObservationCapacity(count))
+    assert limits.capacity == ObservationCapacity(count)
+    assert limits.profile is None
+    assert limits.queue_count == count
+    assert limits.queue_bytes == queue_bytes
+    assert limits.state_bytes == state_bytes
+    assert limits.state_bytes <= STATE_DOCUMENT_CEILING_BYTES
+    # Capture and pairing lanes never grow with the structural queue.
+    assert (limits.pending_attempts, limits.capture_tickets, limits.capture_bytes) == (
+        256,
+        512,
+        128 * 1024 * 1024,
+    )
+    assert limits.session_fair_share == max(1, count // 4)
+
+
+def test_small_custom_capacity_still_admits_unprotected_rows() -> None:
+    limits = BudgetLimits.for_capacity(ObservationCapacity(64))
+    assert limits.protected_count == 32
+    assert limits.protected_bytes == 32 * 1024
+    decision = evaluate_admission(
+        BudgetUsage(),
+        limits,
+        AdmissionRequest(queue_count=1, queue_bytes=128, session_queue_count=1),
+    )
+    assert decision.admitted is True
+
+
+def test_budget_limits_reject_capacity_count_mismatch() -> None:
+    limits = BudgetLimits.for_capacity(ObservationCapacity(1_024))
+    with pytest.raises(ValueError, match="queue_count_capacity_mismatch"):
+        replace(limits, queue_count=1_000)
+    with pytest.raises(ValueError, match="capacity_profile_invalid"):
+        replace(limits, capacity=CapacityProfile.LARGER)  # pyright: ignore[reportArgumentType]
+
+
+def test_for_capacity_routes_named_profiles_through_for_profile_seam(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[CapacityProfile | int | str] = []
+    original = BudgetLimits.for_profile
+
+    def spy(cls: type[BudgetLimits], profile: CapacityProfile | int | str) -> BudgetLimits:
+        del cls
+        calls.append(profile)
+        return original(profile)
+
+    monkeypatch.setattr(BudgetLimits, "for_profile", classmethod(spy))
+    BudgetLimits.for_capacity(LARGER_CAPACITY)
+    BudgetLimits.for_capacity(ObservationCapacity(1_024))
+    assert calls == [CapacityProfile.LARGER]

@@ -21,6 +21,7 @@ from builders.codex_rollout import (
     session_meta,
 )
 from yoetz.adapters.importers.codex_jsonl import CodexParsedRecord
+from yoetz.adapters.importers.codex_rollout_jsonl import ROLLOUT_MAX_LINE_BYTES
 from yoetz.adapters.integrations import codex_session_stream as stream_module
 from yoetz.adapters.integrations.codex_lifecycle import mapping_from_start_ids, store_mapping
 from yoetz.adapters.integrations.codex_session_stream import (
@@ -39,6 +40,7 @@ from yoetz.adapters.integrations.observation_local import (
 )
 from yoetz.application.observation_materialize import materialize_observation_envelope
 from yoetz.domain.events import ResultOutcome, ResultRecordedPayload
+from yoetz.domain.host_lineage import host_lineage_from_envelope
 from yoetz.domain.observation import (
     ObservationCursor,
     ObservationEnvelope,
@@ -1133,6 +1135,44 @@ def test_locator_exact_session_match_and_rejects_ambiguous(tmp_path: Path) -> No
     assert locator.resolve(session_id=session_id) is None
 
 
+@pytest.mark.parametrize(
+    ("filename", "token", "expected"),
+    [
+        ("rollout-2026-07-23T12-00-00-root.jsonl", "root", True),
+        ("rollout-2026-07-23T12-00-00-root_child.jsonl", "root", True),
+        ("rollout-2026-07-23T12-00-00-root-child.jsonl", "root", False),
+        ("rollout-2026-07-23T12-00-00-child-2.jsonl", "child", False),
+        ("rollout-2026-07-23T12-00-00-child.jsonl", "child", True),
+    ],
+)
+def test_rollout_filename_token_matching_rejects_prefix_and_suffix_collisions(
+    filename: str, token: str, expected: bool
+) -> None:
+    assert stream_module.rollout_filename_matches_token(filename, token) is expected
+
+
+@pytest.mark.parametrize(
+    ("session_id", "name"),
+    [
+        ("root", "rollout-2026-07-23T12-00-00-root-child.jsonl"),
+        ("child", "rollout-2026-07-23T12-00-00-child-2.jsonl"),
+    ],
+)
+def test_locator_does_not_select_colliding_rollout_names(
+    tmp_path: Path, session_id: str, name: str
+) -> None:
+    home = tmp_path / "codex-home"
+    sessions = home / "sessions" / "2026" / "07" / "23"
+    sessions.mkdir(parents=True)
+    home.chmod(0o700)
+    sessions.chmod(0o700)
+    candidate = sessions / name
+    candidate.write_bytes(failed_shell_rollout())
+    os.chmod(candidate, 0o600)
+
+    assert CodexSessionStreamLocator(home).resolve(session_id=session_id) is None
+
+
 def test_locator_rejects_symlink_and_outside_home(tmp_path: Path) -> None:
     home = tmp_path / "codex-home"
     sessions = home / "sessions"
@@ -1410,6 +1450,14 @@ def _fixture_bytes(path: str, variant: str) -> bytes:
     return base64.b64decode(cast(str, source["bytes_base64"]).encode("ascii"), validate=True)
 
 
+def _fixture_expected(path: str, variant: str) -> dict[str, object]:
+    from fixture_loader import build_fixture_loader
+
+    case = cast(dict[str, object], build_fixture_loader().load_json(path))
+    expected = cast(dict[str, object], cast(dict[str, object], case["expected"])["variants"])
+    return cast(dict[str, object], expected[variant])
+
+
 def _header_selected_reader(session: str, *, generation: int = 1) -> SessionStreamReader:
     """A reader with no prior profile: the source header must select one."""
 
@@ -1487,9 +1535,116 @@ def test_0_150_1_stream_admits_from_header_and_envelopes_carry_no_content(
         "result_status",
         "exit_status",
         "tool_call_id",
+        "subagent_id",
     }
     for envelope in advance.envelopes:
         assert set(envelope.structural_payload) <= allowed, envelope.structural_payload
+
+    subagent = next(
+        envelope
+        for envelope in advance.envelopes
+        if envelope.structural_payload.get("subagent_id") is not None
+    )
+    assert subagent.event_kind == "SubagentStart"
+    assert subagent.structural_payload["subagent_id"] == ("019f8b27-b98e-7061-bbb5-d0b897594de7")
+    # The rollout item's ``id`` is not the parent's tool-call id.  The stream
+    # copy therefore remains child-only and can reconcile with a hook copy
+    # whose parent tool alias is absent or arrives separately.
+    assert "parent_tool_call_id" not in subagent.structural_payload
+    assert "tool_call_id" not in subagent.structural_payload
+    assert (
+        materialize_observation_envelope(
+            subagent, task_id="tsk_00000000-0000-4000-8000-000000000001"
+        ).skip_reason
+        is None
+    )
+
+
+def test_subagent_stream_accepts_explicit_parent_alias_but_ignores_item_id() -> None:
+    record = CodexParsedRecord(
+        1,
+        0,
+        160,
+        "response_item",
+        "SubAgentActivity",
+        JsonObject(
+            {
+                "payload": {
+                    "agent_thread_id": "child-stream-1",
+                    "id": "item-child-1",
+                    "kind": "started",
+                    "tool_use_id": "parent-tool-1",
+                    "type": "SubAgentActivity",
+                },
+                "type": "response_item",
+            }
+        ),
+    )
+
+    structural, gaps = stream_module.structural_from_stream_record(record)
+
+    assert gaps == ()
+    assert structural["subagent_id"] == "child-stream-1"
+    assert structural["parent_tool_call_id"] == "parent-tool-1"
+    assert "tool_call_id" not in structural
+
+
+@pytest.mark.parametrize("kind", ["started", "completed"])
+@pytest.mark.parametrize(
+    "parent_aliases",
+    [
+        {"parent_tool_call_id": "spawn-call", "tool_use_id": "other-call"},
+        {"parent_tool_call_id": "spawn-call", "tool_call_id": "other-call"},
+        {"parent_tool_call_id": {"invalid": "token"}},
+        {"tool_use_id": {"invalid": "token"}},
+        {"tool_call_id": None},
+    ],
+)
+def test_subagent_stream_invalid_parent_alias_cannot_weaken_identity(
+    kind: str, parent_aliases: dict[str, Any]
+) -> None:
+    from yoetz.domain.host_lineage import host_lineage_from_envelope
+
+    record = CodexParsedRecord(
+        1,
+        0,
+        160,
+        "response_item",
+        "SubAgentActivity",
+        JsonObject(
+            {
+                "payload": {
+                    "agent_thread_id": "child-stream-1",
+                    "kind": kind,
+                    "type": "SubAgentActivity",
+                    **parent_aliases,
+                },
+                "type": "response_item",
+            }
+        ),
+    )
+    envelope = envelope_from_stream_record(
+        record,
+        session_commitment=_EMPTY,
+        cursor=ObservationCursor(
+            source_generation=1,
+            byte_position=160,
+            event_position=1,
+            last_source_commitment=_EMPTY,
+            mapping_version=STREAM_MAPPING_VERSION,
+        ),
+    )
+
+    assert envelope.event_kind in {"SubagentStart", "SubagentStop"}
+    assert envelope.gap_codes == (ObservationGapCode.MISSING_SUBAGENT_IDENTITY.value,)
+    assert "subagent_id" not in envelope.structural_payload
+    assert "parent_tool_call_id" not in envelope.structural_payload
+    assert host_lineage_from_envelope(envelope) is None
+    batch = materialize_observation_envelope(
+        envelope, task_id="tsk_00000000-0000-4000-8000-000000000001"
+    )
+    assert batch.skip_reason == "missing_subagent_identity"
+    assert batch.drafts == ()
 
 
 def test_unsupported_release_is_refused_durably_without_cursor_loss(tmp_path: Path) -> None:
@@ -1831,6 +1986,275 @@ def test_unknown_and_incompatible_lines_stay_bounded_under_compatible_profile(
     assert ObservationGapCode.TRUNCATED_PAYLOAD.value in truncated.gaps
     assert truncated.cursor.event_position == 2
     assert truncated.partial_line.startswith(b"{")
+
+
+_MULTI_AGENT_V2_0153 = "imports/codex/rollout-multi-agent-v2-0.153.4.case.json"
+
+
+def test_multi_agent_v2_parent_stream_names_one_delegation_without_gaps(tmp_path: Path) -> None:
+    """Issue #754: a v2 parent turn maps every line and starts exactly one delegation.
+
+    The spawn arrives as an ``event_msg.item_completed`` ``SubAgentActivity`` item, which is
+    where 0.153.4 v2 puts it; every later exchange is ``interacted``, a known kind that names no
+    lifecycle transition and so opens no second annotation.
+    """
+
+    session = "hmac-sha256:" + ("d" * 64)
+    path = tmp_path / "session.jsonl"
+    path.write_bytes(_fixture_bytes(_MULTI_AGENT_V2_0153, "parent"))
+
+    advance = _header_selected_reader(session).advance(path)
+
+    assert advance.gaps == ()
+    assert advance.reason_codes == ()
+    assert advance.cursor.event_position == 8
+    assert all(envelope.gap_codes == () for envelope in advance.envelopes)
+    expected = _fixture_expected(_MULTI_AGENT_V2_0153, "parent")
+    starts = [e for e in advance.envelopes if e.event_kind == "SubagentStart"]
+    assert len(starts) == expected["subagent_start_count"]
+    assert starts[0].structural_payload["subagent_id"] == expected["subagent_id"]
+    # The spawn item's own ``id`` is not published as the parent call: only an explicit alias is.
+    assert expected["parent_tool_call_id"] is None
+    assert "parent_tool_call_id" not in starts[0].structural_payload
+    assert "tool_call_id" not in starts[0].structural_payload
+    interacted = [
+        e
+        for e in advance.envelopes
+        if e.structural_payload.get("action") == "SubAgentActivity" and e.event_kind == "event_msg"
+    ]
+    assert len(interacted) == 1
+    assert host_lineage_from_envelope(interacted[0]) is None
+    # The families 0.153.4 added are ordinary understood lines now, not coverage gaps.
+    assert {cast(str, e.structural_payload["stream_kind"]) for e in advance.envelopes} == {
+        "session_meta",
+        "turn_context",
+        "event_msg",
+        "response_item",
+        "inter_agent_communication_metadata",
+        "token_usage_record",
+    }
+
+
+def test_multi_agent_v2_child_header_is_that_childs_own_start(tmp_path: Path) -> None:
+    """The delegated child's own header is the only place v2 names the delegation."""
+
+    session = "hmac-sha256:" + ("e" * 64)
+    path = tmp_path / "session.jsonl"
+    path.write_bytes(_fixture_bytes(_MULTI_AGENT_V2_0153, "child"))
+
+    advance = _header_selected_reader(session).advance(path)
+
+    assert advance.gaps == ()
+    expected = _fixture_expected(_MULTI_AGENT_V2_0153, "child")
+    header = advance.envelopes[0]
+    assert header.event_kind == "SubagentStart"
+    assert header.structural_payload["stream_kind"] == "session_meta"
+    assert header.structural_payload["subagent_id"] == expected["subagent_id"]
+    # The header's ``id`` is a thread, never a parent tool call.
+    assert "tool_call_id" not in header.structural_payload
+    assert "parent_tool_call_id" not in header.structural_payload
+    observation = host_lineage_from_envelope(header)
+    assert observation is not None
+    assert observation.phase == "start"
+    assert observation.correlation.subagent_id == expected["subagent_id"]
+    assert (
+        materialize_observation_envelope(
+            header, task_id="tsk_00000000-0000-4000-8000-000000000001"
+        ).skip_reason
+        is None
+    )
+    # A child reports its exchanges with the root in the same family, with the root thread in
+    # ``agent_thread_id``. Without a start kind it never publishes the parent as a child.
+    reversed_row = advance.envelopes[-1]
+    assert reversed_row.event_kind == "event_msg"
+    assert host_lineage_from_envelope(reversed_row) is None
+
+
+def test_multi_agent_v2_child_header_without_identity_keeps_the_bounded_gap(
+    tmp_path: Path,
+) -> None:
+    """A declared child with no distinct spawning thread is the genuine identity gap."""
+
+    session = "hmac-sha256:" + ("f" * 64)
+    path = tmp_path / "session.jsonl"
+    path.write_bytes(_fixture_bytes(_MULTI_AGENT_V2_0153, "child_without_identity"))
+
+    advance = _header_selected_reader(session).advance(path)
+
+    expected = _fixture_expected(_MULTI_AGENT_V2_0153, "child_without_identity")
+    header = advance.envelopes[0]
+    assert header.event_kind == "SubagentStart"
+    assert expected["subagent_id"] is None
+    assert list(header.gap_codes) == expected["gap_codes"]
+    assert header.gap_codes == (ObservationGapCode.MISSING_SUBAGENT_IDENTITY.value,)
+    assert "subagent_id" not in header.structural_payload
+    assert host_lineage_from_envelope(header) is None
+    assert (
+        materialize_observation_envelope(
+            header, task_id="tsk_00000000-0000-4000-8000-000000000001"
+        ).skip_reason
+        == "missing_subagent_identity"
+    )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # A parent thread declares no child at all.
+        {"id": "child-1", "parent_thread_id": "parent-1", "thread_source": "user"},
+        # Contradictory spellings of the spawning thread.
+        {
+            "id": "child-1",
+            "parent_thread_id": "parent-1",
+            "source": {"subagent": {"thread_spawn": {"parent_thread_id": "parent-2"}}},
+            "thread_source": "subagent",
+        },
+        # A path-shaped or otherwise unusable child token.
+        {"id": "/root/child", "parent_thread_id": "parent-1", "thread_source": "subagent"},
+        # v2 sets ``session_id`` to the parent thread; a header naming itself is refused.
+        {"id": "parent-1", "parent_thread_id": "parent-1", "thread_source": "subagent"},
+    ],
+)
+def test_child_session_identity_never_invents_a_delegation(payload: dict[str, Any]) -> None:
+    record = CodexParsedRecord(
+        1,
+        0,
+        200,
+        "session_meta",
+        None,
+        JsonObject({"payload": payload, "type": "session_meta"}),
+    )
+
+    structural, gaps = stream_module.structural_from_stream_record(record)
+
+    assert "subagent_id" not in structural
+    declared_child = payload["thread_source"] == "subagent"
+    assert (ObservationGapCode.MISSING_SUBAGENT_IDENTITY.value in gaps) is declared_child
+
+
+_V2_ROOT = "019f8b27-b98e-7061-bbb5-d0b897594de6"
+_V2_CHILD = "019f8b27-b98e-7061-bbb5-d0b897594de7"
+
+
+@pytest.mark.parametrize(
+    ("variant", "status"),
+    [("child", "child"), ("child_without_identity", "identity_invalid"), ("parent", "not_child")],
+)
+def test_child_rollout_header_reads_only_the_first_v2_line(
+    tmp_path: Path, variant: str, status: str
+) -> None:
+    """Issue #841: one bounded first-line read classifies a rollout as a delegated child."""
+
+    path = tmp_path / "rollout.jsonl"
+    # Trailing garbage after the header proves nothing past the first newline is read.
+    path.write_bytes(_fixture_bytes(_MULTI_AGENT_V2_0153, variant) + b"\x00not json\n")
+
+    result = stream_module.read_codex_child_rollout_header(path)
+
+    assert result.status == status
+    if status == "child":
+        assert result.header is not None
+        assert result.header.child_thread_id == _V2_CHILD
+        # v2 names the root session and the spawning thread; both are the parent here.
+        assert result.header.spawning_sessions == (_V2_ROOT,)
+        assert _V2_CHILD not in repr(result) and _V2_CHILD not in repr(result.header)
+    else:
+        assert result.header is None
+
+
+def test_child_rollout_header_orders_root_session_before_spawning_thread(tmp_path: Path) -> None:
+    """A nested child's lane belongs to the root session its callbacks carry."""
+
+    nested = "019f8b27-b98e-7061-bbb5-d0b897594de8"
+    header = session_meta(
+        cli_version="0.153.4",
+        history_mode="paginated",
+        session_id=nested,
+        extra={
+            "session_id": _V2_ROOT,
+            "thread_source": "subagent",
+            "parent_thread_id": _V2_CHILD,
+            "source": {"subagent": {"thread_spawn": {"parent_thread_id": _V2_CHILD}}},
+        },
+    )
+    path = tmp_path / "rollout.jsonl"
+    path.write_bytes(encode_lines(header))
+
+    result = stream_module.read_codex_child_rollout_header(path)
+
+    assert result.header is not None
+    assert result.header.child_thread_id == nested
+    assert result.header.spawning_sessions == (_V2_ROOT, _V2_CHILD)
+
+
+@pytest.mark.parametrize("shape", ["unterminated", "compressed", "symlink", "missing", "oversized"])
+def test_child_rollout_header_refuses_what_it_cannot_prove(tmp_path: Path, shape: str) -> None:
+    child = _fixture_bytes(_MULTI_AGENT_V2_0153, "child")
+    first_line = child.split(b"\n", 1)[0]
+    path = tmp_path / "rollout.jsonl"
+    if shape == "unterminated":
+        path.write_bytes(first_line)
+    elif shape == "compressed":
+        path = tmp_path / "rollout.jsonl.zst"
+        path.write_bytes(child)
+    elif shape == "symlink":
+        target = tmp_path / "target.jsonl"
+        target.write_bytes(child)
+        path.symlink_to(target)
+    elif shape == "oversized":
+        path.write_bytes(b"{" + b" " * (ROLLOUT_MAX_LINE_BYTES + 8) + b"}\n")
+
+    assert stream_module.read_codex_child_rollout_header(path).status == "unreadable"
+
+
+def _child_home(tmp_path: Path) -> tuple[CodexSessionStreamLocator, Path]:
+    home = tmp_path / "codex-home"
+    day = home / "sessions" / "2026" / "08" / "22"
+    day.mkdir(parents=True)
+    return CodexSessionStreamLocator(home), day
+
+
+def test_child_rollout_locator_binds_the_header_to_its_thread_filename(tmp_path: Path) -> None:
+    locator, day = _child_home(tmp_path)
+    child = day / f"rollout-2026-08-22T12-00-01-{_V2_CHILD}.jsonl"
+    child.write_bytes(_fixture_bytes(_MULTI_AGENT_V2_0153, "child"))
+
+    by_path, by_path_result = locator.resolve_child_rollout(str(child))
+    by_thread, _ = locator.resolve_child_rollout(None, child_thread_id=_V2_CHILD)
+    checked, _ = locator.resolve_child_rollout(str(child), child_thread_id=_V2_CHILD)
+
+    assert by_path == by_thread == checked == child.resolve()
+    assert by_path_result.status == "child"
+    # A different child than the caller named proves nothing about the requested rollout.
+    assert locator.resolve_child_rollout(str(child), child_thread_id=_V2_ROOT)[0] is None
+    assert locator.resolve_child_rollout(None)[0] is None
+
+
+def test_child_rollout_locator_refuses_a_header_under_another_threads_name(
+    tmp_path: Path,
+) -> None:
+    locator, day = _child_home(tmp_path)
+    copied = day / f"rollout-2026-08-22T12-00-01-{_V2_ROOT}.jsonl"
+    copied.write_bytes(_fixture_bytes(_MULTI_AGENT_V2_0153, "child"))
+    outside = tmp_path / f"rollout-2026-08-22T12-00-01-{_V2_CHILD}.jsonl"
+    outside.write_bytes(_fixture_bytes(_MULTI_AGENT_V2_0153, "child"))
+
+    for candidate in (copied, outside):
+        path, result = locator.resolve_child_rollout(str(candidate))
+        assert path is None
+        assert result.status == "unreadable"
+    assert locator.resolve_child_rollout(None, child_thread_id="../escape")[0] is None
+
+
+def test_child_rollout_locator_reports_a_declared_child_without_identity(tmp_path: Path) -> None:
+    locator, day = _child_home(tmp_path)
+    invalid = day / f"rollout-2026-08-22T12-00-01-{_V2_ROOT}.jsonl"
+    invalid.write_bytes(_fixture_bytes(_MULTI_AGENT_V2_0153, "child_without_identity"))
+
+    path, result = locator.resolve_child_rollout(str(invalid))
+
+    assert path is None
+    assert result.status == "identity_invalid"
 
 
 def test_stream_admission_classification_is_closed_and_honest() -> None:

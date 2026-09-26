@@ -82,6 +82,12 @@ Publish accepts up to 8192 bytes of prose per field. One AI-powered review case 
 for a whole event payload, replaced by a marker carrying only its digest. Coverage names this with
 `semantic_case_content_over_item_limit`. Keep prose you expect a reviewer to read under 4096 bytes.
 
+A local finding can name up to 64 subjects, but one review case item links at most 16. A wider
+finding — typically `ledger_stale_or_incomplete` after many unresolved coverage gaps — stays in your
+check result and receipt in full. The reviewer receives the other findings; this one is listed as
+omitted rather than trimmed, and coverage names it with `semantic_case_finding_refs_over_limit`.
+Resolving the underlying gaps narrows the finding and lets the next review carry it.
+
 ## Completion scope is declared, not inferred
 
 Yoetz reads completion scope only from the effective plan chain. It never invents obligations from

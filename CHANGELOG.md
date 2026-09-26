@@ -6,6 +6,187 @@ reverse-chronological released versions.
 
 ## Unreleased
 
+### Added
+
+- Claude Code's scoped `PermissionDenied` hook now shows the user a notice based on a fresh
+  repository grant read and may emit the host's one-retry cue. The same request must be preserved;
+  a later hold goes to human approval. No-verdict denials and an unreadable, full or unsafe retry
+  ledger offer no retry. Both structural and ordinary capture profiles carry the notice. Claude
+  does not deliver `additionalContext` on this event, so the model receives only the host's retry
+  cue, not the grant explanation. Shipped guidance keeps grant claims conditional and host approval
+  separate. Live acceptance and the remaining cross-host work stay tracked in #857.
+
+### Fixed
+
+- A Codex multi-agent v2 child that attaches with its delegation handle now binds its host
+  identity to exactly one accepted child. v2 gives every thread of a delegation tree the parent's
+  session, so a child callback that names its own rollout takes its child identity from that
+  rollout's header: the attach publishes the child lane, the provisional annotation is bound, and
+  the child's command, file, and advice evidence stays on the child lane. The child's own rollout
+  is reconciled into that lane automatically, and `yoetz observe reconcile` of a child rollout
+  resolves the same lane idempotently instead of failing `mapping_missing`; an unprovable child
+  rollout is refused with a bounded `child_*` reason. Native v2 acceptance remains open (#841).
+
+- A coordination finding declared before a project opt-out, opt-in, consent or approval
+  revocation, unlink, or dissolve no longer stays open with no way to close it. The next check
+  records the superseded context as history and can resolve the finding, and the receipt says the
+  generation was superseded. Declaring or disposing against the old generation now returns
+  `coordination_generation_superseded` with a recovery step you can take (#842).
+
+## 0.3.0 — 2026-09-21
+
+Prepared public-alpha release candidate; publication remains gated by #785. See
+[release notes](docs/releases/v0.3.0.md) for changes and validation limits.
+
+### Added
+
+- One guided installation and connection lifecycle for Codex, Claude Code, Cursor IDE and
+  Cursor Agent CLI, including preview, status, disconnect and reconnect, carried from 0.2.4
+  (#767).
+- Multiple agents can work in independent tasks within one repository. Parents can delegate
+  work, children can register for explicit acceptance, and lineage views and receipts retain
+  each child's findings, unfinished work, and observation gaps. Requesting a receipt does not
+  close a task or erase a child dependency (issues #494–#504, #509).
+- Projects group concurrent tasks and surface declared overlaps under each source workspace's
+  existing consent. The CLI supports project creation, membership changes, grouping opt-out and
+  opt-in, and generation-bound coordination grants. Retrying a project mutation recovers its
+  recorded operation without creating a second project or repeating a membership change
+  (issues #505–#508).
+- Opt-in required startup for native Claude Code and Cursor plugins, with scope-bound plan
+  checks, owner controls, and same-task pending-operation recovery (#692, #797). Native acceptance
+  remains bounded as documented in the required-startup runbook.
+- `yoetz setup status --json` reports each Claude installation's MCP mode (plugin-managed or
+  bare) and whether a session-start cue is installed; a bare registration has none (#789).
+- Observation capacity can be set to a custom queue count from 64 to 8,192 rows with
+  `--capacity custom --queue-count N`, in addition to standard (512), larger (2,048) and largest
+  (8,192). Every capacity preview discloses the scope, current and requested limits, possible
+  disk, memory and CPU cost, the limits that still apply, and how to lower, pause and resume, in
+  the CLI, the terminal interface's `/observe`, and agent guidance. Sessions in a workspace share
+  one queue sized by the largest active selection, so an increase says it raises that queue for
+  every session; a smaller session count limits only that session. Status reports the effective
+  budget and its limiting dimension (#828).
+- Requesting No Yoetz cap (`--capacity none`) returns `capacity_no_cap_unsupported` and changes
+  nothing: the local observation state has a 16 MiB safety ceiling, so the largest supported
+  capacity is 8,192 rows. With `--json` the facts are under `error.capacity` beside the standard
+  `error.recovery` (#828).
+
+### Changed
+
+- Updating Yoetz no longer requires quitting agent apps or stopping the service. `yoetz upgrade
+  --accept` runs from inside an open session, which keeps working on the previous version; the
+  first Yoetz call of the next session switches to the new version and retires the previous
+  service. Upgrading from 0.2 still follows 0.2's stop-first procedure once (#820).
+- Updating from 0.2 preserves existing tasks, settings, permissions, and host registrations.
+  On ordinary service startup after unlock, supported task ledgers receive a verified backup
+  and automatic schema upgrade before new work is admitted. Interrupted upgrades resume from
+  recorded progress; failed verification keeps the service unavailable for writes and retains
+  recovery evidence (issue #496).
+- The 0.3 functionality uses additive control contracts and migrations while retaining the
+  released 0.2 schemas and migration bytes. Observation selection, runtime isolation, and
+  recovery improvements from 0.2 remain in effect.
+- Small status reads reuse immutable projection pages instead of replaying the ledger for
+  each query (#748). New Codex subscription review bindings default to a 15-minute budget
+  and allow explicit budgets up to one hour; existing explicit budgets remain unchanged (#750).
+- Linux sandbox readiness is documented as a fact of the client host, separately from the
+  semantic runtime evaluator; this adds no WSL or AppArmor acceptance claim (#765).
+- The Grok provider preset names grok-4.6 (#763).
+- Native startup guidance is delivered independently of observation consent and availability
+  (#692). Claude Code sessions receive a compact MCP initialize block that fits the host's
+  observed 2,048-character rendering cap, with the "call `start` first" trigger and the
+  late-start rule as its first two sentences; other hosts keep the full document (#789).
+- Guidance, the Claude skill and `AGENTS.md` state what to do when material work began before
+  `start`, and how to load deferred Yoetz tool schemas by name (#789).
+- Local control schema 2.9.0 carries custom capacity counts, capacity labels and the effective
+  budget; both client and service must run it. Defaults are unchanged (Focused, 512), and a
+  saved custom count reads as the default on an older version. Agent guidance and the skills
+  say that a larger or uncapped capacity needs a disclosed, owner-accepted preview and is never
+  chosen for an ordinary task (#828).
+
+### Fixed
+
+- Connecting Codex, rerunning setup, or repeating `yoetz observe grant` no longer turns off
+  native content capture you enabled for Claude Code or Cursor. Repeating consent that is
+  already in effect changes nothing, so content capture already in progress keeps its
+  authorization. Your observation detail and capacity settings are also kept. Only
+  `observe content-disable` or `observe revoke` removes a host's content capture, and granting
+  again after a revoke starts with none (#835).
+- `status view=project` answers again after any project member records a receipt; previously every
+  member's project view failed as `INVALID_REQUEST`. Status faults in stored state or in Yoetz's
+  own projection now return `STORAGE_CORRUPT` or `INTERNAL_ERROR` with a correlation id that
+  resolves to the failing stage and source location, and one unreadable member is reported as a
+  `project_member_unavailable` gap instead of failing the whole view (#840).
+
+- Active native work is no longer abandoned while it keeps working, and abandoned work has a
+  supported way forward (#837):
+  - Host activity counts as contact from when the host reported it, even when Yoetz delivers or
+    retries it later. That includes a turn ending or a subagent finishing.
+  - A native subagent the host reported starting keeps its parent in contact until the host
+    reports it finished, for up to an hour.
+  - Queued host events are delivered before Yoetz decides whether contact was lost.
+  - Resuming finished or abandoned work is refused without disturbing the session still in use.
+  - A task whose work is finished or abandoned cannot start child work. It gets its own reason
+    and directs you to a successor task for new work, while its history and receipts stay as
+    recorded.
+
+  The session lease and the default recovery window are unchanged. A single long quiet operation
+  can still lose contact, as described in the multi-agent usage page.
+- Busy starts recover their recorded route, and review-case construction resolves authenticated
+  captured evidence instead of substituting its description (#745).
+- Long AI-powered reviews retain execution leases and durable responses through client
+  disconnects and recovery, avoiding duplicate dispatch after a client timeout (#750).
+- Child lifecycle and native host correlation preserve parent dependencies and session-health
+  distinctions. Codex 0.153.4 multi-agent v2 child identity comes from the child's own rollout
+  metadata; token-usage and fractional-number handling no longer break stream reconciliation
+  (#752, #762). Native installed multi-agent acceptance remains open (#499, #507).
+- Consumed egress is reconciled after advice cancellation (#761); an invalid routine summary
+  no longer stops observation admission flushes (#764).
+- Every local CLI error has a recovery directive (#780). Failed transport sends receive the
+  retryable transport classification, and pending request futures are consumed on failure (#781).
+- Paired edits produce one advice finding, and verification baselines use a typed contract
+  (#782). Oversized hook payloads produce an explicit scoped coverage gap (#784).
+- Privacy receipt commands serialize datetimes and admit the local purpose on the control
+  wire, fixing #731 and #732 (#783).
+- The npm release verifier checks both the persistent install and subsequent delegation
+  (#777). The parent/worker capture test observes outbox drain between writes to avoid
+  counting runner-load overflow as a product regression (#775).
+- Project overlap advice no longer disappears when a sibling task was idle, evicted, or last used
+  before a service restart or vault relock. Coordination reads each consented sibling's recorded
+  scopes with payload access, exactly as it does for an active task. A consented sibling whose
+  scopes cannot be read is reported as a coverage limit while the other pairs are still detected,
+  and a sibling that is not admitted no longer stops detection for the others. A failed
+  post-publish sweep now leaves a bounded diagnostic instead of failing silently (#839).
+- The release carries every 0.2.2 install fix, including the review follow-ups ported in #774,
+  and every 0.2.3 and 0.2.4 repair: Codex home-aware setup, Cursor exact-path and Agent CLI
+  project binding, fractional Codex metadata, selected observations and routine summaries across
+  local control, contended session attachment with shielded lease release, and the foreground
+  desktop approval and runtime-retaining host handoffs (#786, #787, #788). It also carries the
+  0.2 repairs prepared for 0.2.5: cold session attachment within host hook budgets (#790),
+  complete capture recovery and loss reporting (#792), claim and plan scope differences in status
+  and receipts (#793), unrelated command gaps partitioned from repair proof (#794), Linux Cursor
+  IDE identification without launching it (#795), and approval-preserving setup that inspects the
+  selected installation (#796), plus the remaining 0.2.5 repairs: exact-session recovery and
+  automatic reattachment beside independent tasks in the same workspace, with delegated children
+  still behind their authenticated attachment path (#811, #815, #816).
+- Lowering, revoking, expiring or ending a larger observation capacity while the local state is
+  above 1 MiB no longer blocks later writes. Accepted records still drain. Refused input is
+  recorded as loss, and delivery attempts and session ends are still saved, within finite room
+  that follows only the accepted records. A session end that still cannot be saved is reported as
+  `session_end_unrecorded` (#843).
+- One stranded native capture handoff no longer closes observation admission and content for a
+  whole workspace. A handoff whose structural record can no longer deliver it is retired by that
+  record's delivery, by background service maintenance without waiting for new input, or by a new
+  check's preflight; a handoff whose record is still waiting keeps the unchanged pending-age limit.
+  A Claude Code or Cursor hook no longer quarantines a queued Codex row in the same workspace as a
+  content-profile mismatch, and a late capture for an already delivered record stages nothing.
+  `observe status --json` names each retirement under `capture_handoff_retirements` (#836).
+- A check refused before admission no longer strands its caller behind an `OPERATION_PENDING`
+  whose operation reads `absent`. A pending check whose lease has lapsed no longer defers the
+  observation delivery that later checks wait on; a capture handoff no structural row can consume
+  is retired; a refused check wakes the delivery sweep; and SQLite admission survives unrelated
+  lifecycle writes. Every remaining pre-admission refusal names its stage with a same-identity
+  replay directive and `retry_after_ms`, and `status view=operation` reports that stage on the
+  `absent` page (issue #838).
+
 ## 0.2.5 — 2026-09-23
 
 - Recover exact sessions and automatically reattach known tasks when independent tasks share a
@@ -263,6 +444,14 @@ for host integration, observation selection and recovery, upgrade guidance, and 
   dogfood runs; ADR-026 records that exemption (issue #534).
 
 ### Added
+
+- ADR-027 ratifies task lineage and first-class project grouping: child tasks are own bundles with
+  catalog-held parent, depth, lineage digest, origin, acceptance, and work state; receipts roll
+  up one level by severity; `prj_` is the accepted project id. Coordination remains local
+  disclosure under each source workspace's consent, with a generation-bound coordination grant
+  for general or cross-repository work; the egress lattice is unchanged. `workspace_task_exists`
+  and only inventory-designated shared-mutable state are named for retirement, with replacement
+  invariants, in #496/#497. No wire, catalog, or admission change ships in this change (issue #494).
 
 - Agents can now set up or change semantic review through normal conversation. When a user
   explicitly wants semantic review, the agent recommends Expanded review first, explains the
@@ -724,7 +913,7 @@ and contained no usable Yoetz implementation.
 - First-party Codex **live observation and advice** as a required v0.1 capability (ADR-010
   amendment): dual-source ingest (hooks primary + selective session-stream reconciliation), local
   `ObservationPort` control (`yoetz observe status|grant|pause|resume|revoke|reconcile|drain|reclaim`), unified
-  `yoetz hooks observe`, project-level observation consent via private workspace commitment,
+  `yoetz hooks observe`, workspace-level observation consent via private workspace commitment,
   automatic session↔task attachment without depending on MCP `start`, descriptor-safe workspace
   inspection, approved-check runner, and deterministic `AdviceSnapshot` guidance (optional semantic
   review remains additive). Still exactly six MCP tools; observation is CLI/service control only.

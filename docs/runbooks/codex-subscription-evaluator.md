@@ -80,8 +80,9 @@ After turn acknowledgement an unrecognized bookkeeping shape records only the cl
 A later native error supplies the terminal stage and failure class. Login and pre-disclosure
 validation still reject malformed shapes. No method or tool allowlist has changed.
 
-New Codex-subscription setups recommend and preselect `gpt-5.6-luna`. Default reasoning effort
-stays independently `high`. When an existing binding is targeted, omitting `--model` preserves its
+New Codex-subscription setups recommend and preselect `gpt-5.6-luna`. The final-review reasoning
+effort stays independently `high`, and routine checkpoint reviews default to `medium` (see *Routine
+and final review budgets* below). When an existing binding is targeted, omitting `--model` preserves its
 exact model, including during `--switch-account`; an explicit `--model` (including `gpt-5.6-sol`
 when the app-server lists it) is required to change it. OpenAI API-key and other provider-preset
 catalogs stay Sol-first. Historical packaged live evidence that names `gpt-5.6-sol` remains Sol
@@ -131,7 +132,8 @@ one.
 yoetz provider codex-subscription setup \
   --executable /absolute/path/to/codex \
   --model gpt-5.6-luna \
-  --reasoning-effort high
+  --reasoning-effort high \
+  --routine-reasoning-effort medium
 
 yoetz provider codex-subscription status --json
 yoetz provider codex-subscription disconnect --accept
@@ -164,6 +166,16 @@ its existing `codex_home_digest`. It must remain a dedicated home — never the 
 home and never the per-run host home — and `disconnect` remains the way to log it out. Because a
 reused home outlives the isolation root, its full teardown is `disconnect` followed by the
 operator deleting that directory; deleting the isolation root does not remove it (ADR-026).
+
+### Expired or missing sign-in notice (#819)
+
+When an attempt fails at `login_required` (or Codex rejects the ChatGPT token), the service
+remembers `sign_in_required` for the binding until a later attempt gets an answer or the service is
+recomposed. Codex, Claude Code, and Cursor then receive standing hook advice at session start or
+the end of a turn (Cursor: `sessionStart` only) naming `renew_provider_sign_in`: the agent tells
+the user and offers to rerun `setup` with the executable and home from `status --json`. The user
+completes the browser or device-code sign-in. Nothing probes the login outside an attempt or
+`status`, so after a restart the notice returns only when the next attempt fails.
 
 ## Selected executable resolution
 
@@ -288,13 +300,17 @@ the same token as an owner-only diagnostic line (`semantic_composition` /
 | `rate_limits_invalid` | Unrecognized bounded rate-limit bookkeeping. | Before disclosure: terminal unsupported profile. After acknowledgement: nonterminal diagnostic, including on an otherwise successful result; a later terminal stage replaces it. No account fields are retained. |
 | `token_usage_invalid` | A matching active-turn usage snapshot was malformed or regressed. | Nonterminal telemetry gap; preserve any earlier valid cumulative snapshot and never invalidate the AI-powered judgment solely for usage bookkeeping. |
 | `turn_failed`, `model_rerouted` | Codex reported an authoritative native error or a different bound model. | Usage exhaustion maps to `provider_quota_exhausted`; HTTP 429 maps to `provider_rate_limited`. Only an independently authorized fallback may handle those reasons. Model rerouting remains terminal authorization refusal. |
-| `agent_message_count`, `output_empty`, `output_oversize`, `completion_mismatch` | The completion did not yield exactly one bounded, correlated final answer. | Terminal answer/completion validation (`response_schema_invalid`). |
+| `agent_message_count`, `output_empty`, `output_oversize`, `completion_mismatch` | The completion did not yield exactly one bounded, correlated final answer. `output_oversize` also covers a usage snapshot whose visible output tokens exceeded the check's output limit; the turn is interrupted when that happens. | Terminal answer/completion validation (`response_schema_invalid`). Never retried and never a fallback trigger. Raise the profile's `*_output_limit` if valid judgments hit it. |
 | `output_not_json` | The final answer was not strict JSON (prose, fenced code, trailing text). | Terminal; not retried. |
 | `judgment_envelope_invalid`, `judgment_enum_invalid`, `judgment_refs_duplicate`, `judgment_refs_invalid`, `judgment_conclusion_mismatch`, `judgment_text_bounds`, `judgment_shape_invalid`, `judgment_invariant_invalid` | Strict JSON that failed the frozen judgment contract at the named stage. | Terminal (`response_schema_invalid`); asking again is not a fix. `judgment_refs_invalid` is the model citing an item id instead of a `citable_refs` entry. |
 | `request_failed`, `transport_failed`, `deadline_expired`, `cleanup_unconfirmed`, `event_limit`, `runtime_warning`, `unclassified` | Runtime transport, deadline, event-budget, warning, or cleanup ambiguity. | Per ADR-006: pre-acknowledgement transients may retry; post-acknowledgement ambiguity is `outcome_unknown` and is not retried. No invalid-answer classification. |
 
 `semantic_case_content_over_item_limit` is a separate coverage gap on the disclosed case; it is
-reported alongside a stage, never inferred from one.
+reported alongside a stage, never inferred from one. `semantic_case_finding_refs_over_limit` is the
+same kind of case-composition gap: a local finding cited more than 16 subjects, so its prose and
+projected assessment were omitted from the case while the review still dispatched. It is decided
+by the service before any evaluator runs, so it applies identically to every host and evaluator,
+and it is never a `coordinator_failure`.
 
 ## Packaged live-evidence checklist
 
@@ -316,3 +332,76 @@ separate claims:
    byte-unchanged.
 
 Do not call login, a model listing, unit tests, or one clean judgment proof of this checklist.
+
+## Long semantic reviews on 0.3
+
+New subscription bindings use a 15-minute review budget. Set `external_runtime.timeout_seconds`
+explicitly to select 1–3600 seconds; existing explicit values are preserved. This is the total
+review execution budget, not the browser/device login timeout or a host tool's wait timeout.
+Retries and recovery do not restart it. No extra retries are enabled.
+
+A host tool wait may finish before the review. Keep the same check request and request ID: while
+the service-owned check runs, replay reports pending; after completion it recovers the recorded
+result. A host disconnect does not cancel an admitted review. Explicit control cancellation while
+attached or `yoetz service stop` stops the owned execution; service stop affects the selected
+installation, including its other active work. The maintenance gate can delay ordinary status
+reads during review; `status view=operation` for the running check is the one read admitted
+beside it. Parallel review scheduling remains separate work.
+
+### Structural progress phases (#571 A2)
+
+`status view=operation` with the check's request ID reports `semantic_progress` for the running
+or finished review. For this runtime the phases map to native steps as follows:
+
+| Phase | Reported when |
+| --- | --- |
+| `queued` | the service claims a physical attempt (ordinal increments on retry) |
+| `case_admitted` | the privacy audit consumes the egress authorization, before launch |
+| `runtime_starting` | before the isolated app-server child is launched and initialized |
+| `account_model_validation` | after `initialized`, before `account/read`, `model/list`, `thread/start` |
+| `provider_sampling` | after `turn/start` is acknowledged `inProgress` |
+| `response_validation` | when `turn/completed` arrives, before the judgment is parsed and recorded |
+| `cleanup` | before the interrupt (on failure) and process-group cleanup, on every launched path |
+| `terminal` | derived from the terminal job row, with its outcome and reason |
+
+A launch or pre-sampling failure goes straight to `cleanup`, so `status` distinguishes a stalled
+start from a long sampling turn. Token-usage, rate-limit, delta, plan, and commentary notifications
+do not produce phases and nothing from them is recorded. `overdue` means the frozen deadline passed
+without a terminal row; replay the same check request to reclaim and terminalize it. To diagnose a
+failed attempt, keep using `yoetz service diagnostics --request-id req_…` for failure stages;
+progress is the live view, not the failure record.
+
+## Routine and final review budgets (#571 item A1)
+
+Each check selects one budget profile from its frozen case. A check whose frontier carries an
+effective completion claim is `final`; every other check is `routine`. The profile is frozen
+with the job, so retries, a disclosure-wait resume, and recovery all dispatch with the same
+effort and output limit.
+
+| Profile | Effort key | Output limit key | New-binding default |
+| --- | --- | --- | --- |
+| `final` | `reasoning_effort` | `final_output_limit` | `high`, 8192 tokens |
+| `routine` | `routine_reasoning_effort` | `routine_output_limit` | `medium`, 4096 tokens |
+
+- **Legacy bindings.** A binding written before this change has no `routine_reasoning_effort`,
+  so routine checks keep its single effort. Status reports this as `effort_source:
+  legacy_single_effort`.
+- **Changing effort.** Re-running setup keeps an existing routine choice. Pass
+  `--routine-reasoning-effort` to change it. Setup and status require the exact model to list
+  every configured effort; one attempt requires only its selected effort.
+- **Output limits** count output tokens (1–8192) and are edited in `[external_runtime]`.
+  Re-running setup carries them over. The app-server protocol has no per-turn output ceiling,
+  so Yoetz compares each `thread/tokenUsage/updated` snapshot's visible output
+  (`output_tokens − reasoning_output_tokens`) with the selected limit and interrupts the turn as
+  `output_oversize` when it is exceeded. When Codex reports no usage, the limit is recorded but
+  not measured.
+- **Provenance.** `runtime_evidence.reasoning_effort`, `sampling_params.max_output_tokens`, and
+  `semantic_provenance.model` name the exact selection per check, and `selection_sha256`
+  commits to it together with the profile name. Receipts, `yoetz provider status`,
+  `yoetz provider codex-subscription status`, and `/provider` in the terminal interface show
+  both profiles.
+
+No disclosure, retention, deadline, retry, or fallback rule changes with the profile. There is
+no per-request override yet; a check reaches the final profile only through a completion claim.
+Per-profile latency, output size, judgment validity, and cleanup on an installed Luna cell have
+not been benchmarked here; that needs an authorized live run.

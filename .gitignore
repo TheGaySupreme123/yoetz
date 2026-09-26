@@ -29,6 +29,8 @@ coverage.xml
 .env
 .env.*
 !.env.example
+/state/
+/vault/
 
 # OS/editor transients and project-local debug evidence.
 .DS_Store

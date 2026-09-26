@@ -192,3 +192,51 @@ def test_incompatible_service_status_json_names_reason_holder_and_correlation(
     holder = cast(dict[str, JsonValue], payload["holder"])
     assert holder["pid"] == os.getpid()
     assert holder["schema_manifest_digest"] == "sha256:" + "a" * 64
+
+
+@pytest.mark.parametrize(
+    ("holder_version", "expected", "absent"),
+    [
+        # An in-place update is waiting for the next session; nothing is broken (#820).
+        ("0.0.1", "Yoetz was updated", "different Yoetz installation"),
+        ("99.0.0", "different Yoetz installation", "Yoetz was updated"),
+    ],
+)
+def test_incompatible_service_status_names_a_pending_update_only_for_an_older_holder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    holder_version: str,
+    expected: str,
+    absent: str,
+) -> None:
+    import os
+
+    from yoetz.protocol.canonical import canonical_encode
+
+    lock = tmp_path / "service.lock"
+    lock.write_bytes(
+        canonical_encode(
+            {
+                "instance_id": "svc_00000000-0000-4000-8000-000000000001",
+                "pid": os.getpid(),
+                "service_version": holder_version,
+                "schema_manifest_digest": "sha256:" + "a" * 64,
+            }
+        )
+        + b"\n"
+    )
+    lock.chmod(0o600)
+
+    def record_correlation(**_kwargs: object) -> str:
+        return "err_00000000-0000-4000-8000-000000000099"
+
+    monkeypatch.setattr(
+        "yoetz.observability.logging.record_public_error_without_raising",
+        record_correlation,
+    )
+    code, stderr = _status_stderr(monkeypatch, ControlError("service_incompatible", retryable=True))
+    assert code == 20
+    assert expected in stderr
+    assert absent not in stderr
+    assert "yoetz service restart" in stderr
+    assert f"service version {holder_version}" in stderr

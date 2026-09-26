@@ -221,3 +221,45 @@ The startup disclosure is a configuration snapshot, not a guarantee about the li
 Absent or invalid configuration remains unknown; a policy-route check may still reach an
 external reviewer whose destination the bridge could not determine. Even a valid snapshot
 with no external binding can differ from the independently running service configuration.
+
+## Host-hold advisory amendment (2026-09-26, issue #857)
+
+The scoped Claude Code `PermissionDenied` hook reads the repository grant through the bound
+service and reports whether external review is permitted. A configured MCP route alone is not
+consent. Decision 5 and the #467 rejections stand: Yoetz emits no allow decision, changes no host
+settings, and never treats its own disclosure grant as host tool-call approval.
+
+The supported output is a bounded, fixed-text **user notice** in `systemMessage` and the host's
+`hookSpecificOutput.retry` cue. Claude Code 2.1.281's event schema and handler, checked on
+2026-09-26 alongside the [hooks reference](https://code.claude.com/docs/en/hooks#permissiondenied),
+accept only `retry` inside the event-specific object. They drop `additionalContext`; therefore
+this feature does not claim to deliver the first-hand grant explanation to the model. The shipped
+skill carries the exact-request, one-retry, and pause rules. Higher-priority host instructions and
+explicit human denials always win.
+
+A retry is offered only after a confirmed repository grant permits external review, the denial
+has a classifier verdict, and a first offer is durably recorded for that host session. Current
+Claude omits `source`; the legacy `auto_mode` source is also recognized. Unknown sources, empty
+or missing reasons, the legacy `no_verdict` token, `Classifier unavailable`, and the documented
+no-verdict reason prefix produce no retry. Legacy `permission_rule` and `hook` sources remain
+no-retry defenses; current Claude does not fire this event for owner deny rules or manual denials.
+The notice describes no dispatch **for the denied invocation**, not the history of a replayed job.
+The effective MCP route and every other Yoetz gate still apply; this hook does not prove a policy
+route or authorize external dispatch.
+
+The grant read has one 2.5 s budget including connection, RPC and cleanup, within the 5 s hook
+budget. Missing workspace binding or unreadable grants cannot become confirmed authorization.
+The owner-only retry ledger stores at most 64 domain-separated session digests. It never evicts
+an offer to admit a new session: a full, malformed, unsafe or contended ledger returns
+`unrecorded` and offers no retry. Temporary writes are exclusive, file and directory are synced,
+and existing files are read through bounded, non-following descriptors. This keeps uncertainty
+from re-enabling retries. The durable owner path remains admission grant/revoke.
+
+The closed diagnostics are `host_denial_retry_offered`, `host_denial_retry_exhausted`,
+`host_denial_retry_unrecorded`, and `host_denial_grant_unconfirmed`. Their vocabulary contains no
+host payload or reason prose. An unreadable grant is reported as unconfirmed, not as revoked.
+
+Codex and Cursor lack a supported post-denial event in the reviewed integrations; they retain the
+pause-and-ask rule and conditional grant wording. Live Claude auto-mode acceptance, a supported
+model-visible first-hand notice, policy-route observation before retry, and the cross-host
+SessionStart admission-gap notice remain on #857. This amendment does not certify those cells.

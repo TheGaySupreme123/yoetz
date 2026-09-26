@@ -111,7 +111,9 @@ class TaskObservationPort(Protocol):
 
     async def revoke(self, command: ObservationRevokeCommand) -> ObservationStatus: ...
 
-    def list_envelopes(self, workspace: str) -> tuple[ObservationEnvelope, ...]: ...
+    def list_envelopes(
+        self, workspace: str, *, limit: int | None = None
+    ) -> tuple[ObservationEnvelope, ...]: ...
 
     def set_advice_snapshot(
         self, workspace: str, snapshot: AdviceSnapshot, updated_at: Timestamp
@@ -145,7 +147,7 @@ class TaskObservationPort(Protocol):
         yoetz_writer_id: str,
         codex_session_commitment: str,
         bound_at: Timestamp,
-    ) -> None: ...
+    ) -> bool: ...
 
     def record_inspection_snapshot(
         self,
@@ -232,6 +234,10 @@ class TaskObservationPort(Protocol):
     def delete_capture_ticket(self, ticket: ObservationCaptureTicket) -> None: ...
 
     def tombstone_capture_ticket(self, ticket: ObservationCaptureTicket) -> None: ...
+
+    def structural_envelope_accepted(
+        self, workspace: str, envelope: ObservationEnvelope
+    ) -> bool: ...
 
     def bind_workspace_locator(
         self,

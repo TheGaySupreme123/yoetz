@@ -69,6 +69,7 @@ from yoetz.ports.ledger import (
     SelectedAttempt,
     SemanticAttemptHandle,
     SemanticJobRecord,
+    SemanticProgressRecord,
 )
 from yoetz.ports.objects import (
     ObjectKind,
@@ -90,7 +91,7 @@ from yoetz.protocol.coverage import (
 )
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
-from yoetz.protocol.models import SemanticReason, SemanticStatus
+from yoetz.protocol.models import SemanticProgressPhase, SemanticReason, SemanticStatus
 
 
 @pytest.fixture
@@ -125,9 +126,13 @@ class _Objects:
         del kind
         return "hmac-sha256:" + hashlib.sha256(data).hexdigest()
 
-    async def stage(self, source: ObjectSource, metadata: ObjectMetadata) -> StagedObject:
+    async def stage(
+        self, source: ObjectSource, metadata: ObjectMetadata, *, object_id: str | None = None
+    ) -> StagedObject:
         assert source.data is not None
-        object_id = self._ids.new(IdKind.OBJECT)
+        object_id = object_id if object_id is not None else self._ids.new(IdKind.OBJECT)
+        if object_id in self._data and self._data[object_id] != source.data:
+            raise ValueError("object_identity_conflict")
         commitment = await self.commitment_for(source.data, metadata.kind)
         self._data[object_id] = source.data
         return StagedObject(
@@ -616,11 +621,13 @@ class _GatedObjects(_Objects):
         self.freeze_entered = asyncio.Event()
         self.release_freeze = asyncio.Event()
 
-    async def stage(self, source: ObjectSource, metadata: ObjectMetadata) -> StagedObject:
+    async def stage(
+        self, source: ObjectSource, metadata: ObjectMetadata, *, object_id: str | None = None
+    ) -> StagedObject:
         if metadata.kind is ObjectKind.CHECK_RESUME:
             self.freeze_entered.set()
             await self.release_freeze.wait()
-        return await super().stage(source, metadata)
+        return await super().stage(source, metadata, object_id=object_id)
 
 
 @pytest.mark.anyio
@@ -2266,7 +2273,8 @@ async def test_short_semantic_execution_does_not_get_a_sixty_second_floor() -> N
 
 
 @pytest.mark.anyio
-async def test_real_attempt_loop_crosses_old_lease_without_duplicate_dispatch() -> None:
+@pytest.mark.parametrize("budget", [120, 900, 3600])
+async def test_real_attempt_loop_crosses_old_lease_without_duplicate_dispatch(budget: int) -> None:
     """The shipped attempt loop dispatches once beyond 60s under the frozen AI-powered review cap."""
 
     from yoetz.application.semantic_attempts import run_durable_semantic_attempts
@@ -2289,6 +2297,8 @@ async def test_real_attempt_loop_crosses_old_lease_without_duplicate_dispatch() 
         def monotonic_seconds(self) -> float:
             return (self.now - datetime(2026, 7, 19, 12, 0, tzinfo=UTC)).total_seconds()
 
+    expiry = datetime(2026, 7, 19, 12, 0, tzinfo=UTC) + timedelta(seconds=budget)
+    expiry_wire = expiry.isoformat(timespec="milliseconds").replace("+00:00", "Z")
     command = ledger_command(request_suffix="c")
     operation_id = "req_00000000-0000-4000-8000-0000000000ac"
     for adapter in (memory_ledger(command), sqlite_ledger(command)):
@@ -2302,14 +2312,16 @@ async def test_real_attempt_loop_crosses_old_lease_without_duplicate_dispatch() 
             command,
             ObjectKind.SEMANTIC_CASE,
             semantic_case_digest=case_digest,
+            semantic_case_primary_expires_at=expiry_wire,
+            semantic_case_expires_at=expiry_wire,
         )
         job = await adapter.enqueue_semantic_job(lease, case_digest, case_ref)
         dispatches: list[str] = []
 
         async def dispatch(handle: SemanticAttemptHandle, deadline: Deadline) -> _Eval:
             dispatches.append(handle.provider_request_id)
-            assert deadline.monotonic_deadline == 120.0
-            clock.now += timedelta(seconds=90)
+            assert deadline.monotonic_deadline == float(budget)
+            clock.now += timedelta(seconds=budget * 0.75)
             return _Eval(SemanticStatus.SUCCEEDED, SemanticReason.SEMANTIC_COMPLETED)
 
         async def publish(_handle: SemanticAttemptHandle, _evaluation: object) -> ObjectRef:
@@ -2327,7 +2339,7 @@ async def test_real_attempt_loop_crosses_old_lease_without_duplicate_dispatch() 
             ledger=adapter,
             lease=lease,
             job=job,
-            deadline=Deadline(datetime(2026, 7, 19, 12, 2, tzinfo=UTC), 120.0),
+            deadline=Deadline(expiry, float(budget)),
             max_retries=0,
             now_monotonic=clock.monotonic_seconds,
             dispatch=dispatch,
@@ -2850,3 +2862,180 @@ async def test_sqlite_reclaim_persistence_failure_does_not_adopt_clone() -> None
     assert adapter._state is prior_state  # pyright: ignore[reportPrivateUsage]
     after = await adapter.lookup_operation(command.writer_id, operation_id)
     assert after == before
+
+
+def _restarted_sqlite(adapter: SqliteLedger, command: AppendCommand) -> SqliteLedger:
+    return SqliteLedger(
+        db=adapter._db,  # pyright: ignore[reportPrivateUsage]
+        task_id=command.task_id,
+        ownership_fence=_fence(),
+        clock=adapter._clock,  # pyright: ignore[reportPrivateUsage]
+        ids=adapter._ids,  # pyright: ignore[reportPrivateUsage]
+        objects=adapter._objects,  # pyright: ignore[reportPrivateUsage]
+    )
+
+
+@pytest.mark.anyio
+async def test_semantic_progress_is_monotonic_durable_and_ends_in_one_terminal_state() -> None:
+    """Issue #571 A2: phases only move forward, survive restart, and terminate exactly once."""
+
+    command = ledger_command(request_suffix="d")
+    operation_id = "req_00000000-0000-4000-8000-0000000000dd"
+    queued_at = datetime(2026, 7, 19, 11, 59, tzinfo=UTC)
+    deadline_at = queued_at + timedelta(minutes=15)
+    observed: list[tuple[object, ...]] = []
+    for adapter in (memory_ledger(command), sqlite_ledger(command)):
+        await adapter.append_batch(command)
+        lease = await _semantic_wait_lease(adapter, command, operation_id)
+        case_ref = await _object_ref(
+            adapter,
+            command,
+            ObjectKind.SEMANTIC_CASE,
+            semantic_case_digest="sha256:" + "d" * 64,
+        )
+        job = await adapter.enqueue_semantic_job(lease, "sha256:" + "d" * 64, case_ref)
+        assert await adapter.load_semantic_progress(command.writer_id, operation_id) is None
+
+        await adapter.begin_semantic_progress(job.job_id, queued_at, deadline_at)
+        # A replayed begin never restarts the elapsed-time origin or moves the deadline.
+        await adapter.begin_semantic_progress(
+            job.job_id, queued_at + timedelta(minutes=1), deadline_at + timedelta(hours=1)
+        )
+        queued = await adapter.load_semantic_progress(command.writer_id, operation_id)
+        assert queued == SemanticProgressRecord(
+            job.job_id, 0, SemanticProgressPhase.QUEUED, queued_at, queued_at, deadline_at
+        )
+
+        first = await adapter.claim_semantic_job(lease, job.job_id)
+        at = queued_at + timedelta(seconds=1)
+        assert await adapter.advance_semantic_progress(first, SemanticProgressPhase.QUEUED, at)
+        assert await adapter.advance_semantic_progress(
+            first, SemanticProgressPhase.CASE_ADMITTED, at + timedelta(seconds=1)
+        )
+        assert await adapter.advance_semantic_progress(
+            first, SemanticProgressPhase.PROVIDER_SAMPLING, at + timedelta(seconds=2)
+        )
+        # Regressions and repeats are ignored; the recorded phase never moves backward.
+        assert not await adapter.advance_semantic_progress(
+            first, SemanticProgressPhase.RUNTIME_STARTING, at + timedelta(seconds=3)
+        )
+        assert not await adapter.advance_semantic_progress(
+            first, SemanticProgressPhase.PROVIDER_SAMPLING, at + timedelta(seconds=4)
+        )
+        with pytest.raises(PublicOperationError):
+            await adapter.advance_semantic_progress(
+                first, SemanticProgressPhase.TERMINAL, at + timedelta(seconds=5)
+            )
+        sampling = await adapter.load_semantic_progress(command.writer_id, operation_id)
+        assert sampling is not None
+        assert (sampling.attempt_ordinal, sampling.phase, sampling.phase_entered_at) == (
+            1,
+            SemanticProgressPhase.PROVIDER_SAMPLING,
+            at + timedelta(seconds=2),
+        )
+        if isinstance(adapter, SqliteLedger):
+            restarted = _restarted_sqlite(adapter, command)
+            assert await restarted.load_semantic_progress(command.writer_id, operation_id) == (
+                sampling
+            )
+
+        await adapter.record_attempt_outcome(
+            first, AttemptOutcome.EXPIRED, terminal_code=SemanticReason.TRANSPORT_UNAVAILABLE
+        )
+        second = await adapter.claim_semantic_job(lease, job.job_id)
+        # A superseded attempt can no longer write; the next attempt restarts at queued.
+        assert not await adapter.advance_semantic_progress(
+            first, SemanticProgressPhase.CLEANUP, at + timedelta(seconds=6)
+        )
+        assert await adapter.advance_semantic_progress(
+            second, SemanticProgressPhase.QUEUED, at + timedelta(seconds=7)
+        )
+        retry = await adapter.load_semantic_progress(command.writer_id, operation_id)
+        assert retry is not None
+        assert (retry.attempt_ordinal, retry.phase) == (2, SemanticProgressPhase.QUEUED)
+
+        await adapter.record_attempt_outcome(
+            second, AttemptOutcome.FAILED, terminal_code=SemanticReason.PROVIDER_TIMEOUT
+        )
+        # A failed final attempt terminalizes the job in the same durable write.
+        terminal_job = await adapter.load_semantic_job(command.writer_id, operation_id)
+        assert terminal_job is not None and terminal_job.state == "failed"
+        assert terminal_job.terminal_at is not None
+        terminal = await adapter.load_semantic_progress(command.writer_id, operation_id)
+        assert terminal is not None
+        assert terminal.phase is SemanticProgressPhase.TERMINAL
+        assert terminal.terminal_outcome == "failed"
+        assert terminal.terminal_reason is SemanticReason.PROVIDER_TIMEOUT
+        assert terminal.attempt_ordinal == 2
+        assert terminal.phase_entered_at == max(terminal_job.terminal_at, retry.phase_entered_at)
+        # Nothing can follow the terminal state.
+        assert not await adapter.advance_semantic_progress(
+            second, SemanticProgressPhase.CLEANUP, at + timedelta(seconds=8)
+        )
+        await adapter.begin_semantic_progress(job.job_id, queued_at, deadline_at)
+        assert await adapter.load_semantic_progress(command.writer_id, operation_id) == terminal
+
+        await adapter.fail_check_if_current(
+            lease,
+            PublicOperationError(PublicErrorCode.INTERNAL_ERROR, "The check failed.", False),
+        )
+        if isinstance(adapter, SqliteLedger):
+            # A completed operation's job is not reloaded into the oracle after restart, but
+            # its terminal progress is still read from the durable rows.
+            restarted = _restarted_sqlite(adapter, command)
+            assert await restarted.load_semantic_progress(command.writer_id, operation_id) == (
+                terminal
+            )
+            with pytest.raises(apsw.ConstraintError):
+                adapter._db.execute(  # pyright: ignore[reportPrivateUsage]
+                    "UPDATE semantic_progress SET phase='terminal' WHERE job_id=?",
+                    (job.job_id,),
+                )
+            with pytest.raises(apsw.ConstraintError):
+                adapter._db.execute(  # pyright: ignore[reportPrivateUsage]
+                    "UPDATE semantic_progress SET phase_rank=5 WHERE job_id=?",
+                    (job.job_id,),
+                )
+        observed.append(
+            (
+                terminal.attempt_ordinal,
+                terminal.phase,
+                terminal.queued_at,
+                terminal.deadline_at,
+                terminal.terminal_outcome,
+                terminal.terminal_reason,
+            )
+        )
+    assert observed[0] == observed[1]
+
+
+@pytest.mark.anyio
+async def test_semantic_progress_selected_attempt_terminates_as_succeeded() -> None:
+    command = ledger_command(request_suffix="e")
+    operation_id = "req_00000000-0000-4000-8000-0000000000ee"
+    queued_at = datetime(2026, 7, 19, 11, 59, tzinfo=UTC)
+    for adapter in (memory_ledger(command), sqlite_ledger(command)):
+        await adapter.append_batch(command)
+        lease = await _semantic_wait_lease(adapter, command, operation_id)
+        case_ref = await _object_ref(
+            adapter,
+            command,
+            ObjectKind.SEMANTIC_CASE,
+            semantic_case_digest="sha256:" + "e" * 64,
+        )
+        job = await adapter.enqueue_semantic_job(lease, "sha256:" + "e" * 64, case_ref)
+        await adapter.begin_semantic_progress(
+            job.job_id, queued_at, queued_at + timedelta(minutes=15)
+        )
+        handle = await adapter.claim_semantic_job(lease, job.job_id)
+        assert await adapter.advance_semantic_progress(
+            handle, SemanticProgressPhase.RESPONSE_VALIDATION, queued_at + timedelta(seconds=40)
+        )
+        response_ref = await _object_ref(adapter, command, ObjectKind.SEMANTIC_RESPONSE)
+        await adapter.record_attempt_outcome(handle, AttemptOutcome.RESPONSE_DURABLE, response_ref)
+        await adapter.select_attempt(lease, handle, response_ref)
+        progress = await adapter.load_semantic_progress(command.writer_id, operation_id)
+        assert progress is not None
+        assert progress.phase is SemanticProgressPhase.TERMINAL
+        assert progress.terminal_outcome == "succeeded"
+        assert progress.terminal_reason is SemanticReason.SEMANTIC_COMPLETED

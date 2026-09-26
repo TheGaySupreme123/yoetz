@@ -29,6 +29,17 @@ from textual.containers import Vertical
 from textual.css.query import NoMatches
 
 from yoetz import __version__
+from yoetz.domain.observation_budget import (
+    LARGEST_SUPPORTED_QUEUE_COUNT,
+    MIN_CUSTOM_QUEUE_COUNT,
+    CapacityRequest,
+    parse_capacity_request,
+)
+from yoetz.domain.observation_capacity_policy import (
+    WORKSPACE_PLACEHOLDER,
+    is_safe_command,
+    render_capacity_disclosure_lines,
+)
 from yoetz.tui.commands import SLASH_COMMANDS, command_named
 from yoetz.tui.events import HistoryEvent, Transcript
 from yoetz.tui.models import (
@@ -57,7 +68,7 @@ from yoetz.tui.render import (
     render_welcome,
     render_work_detail,
 )
-from yoetz.tui.runtime import RuntimeError_, YoetzRuntime
+from yoetz.tui.runtime import ObservationCapacityUnavailable, RuntimeError_, YoetzRuntime
 from yoetz.tui.styles import YOETZ_CSS
 from yoetz.tui.symbols import Level
 from yoetz.tui.text import middle_truncate
@@ -77,6 +88,7 @@ from yoetz.tui.widgets.views import (
 
 __all__ = ["YoetzTui"]
 
+_CODEX_EFFORTS: Final[tuple[str, ...]] = ("high", "low", "medium", "xhigh", "max", "ultra")
 _SHORTCUTS: Final[tuple[str, ...]] = (
     "Up / Down     move through options",
     "Enter         confirm or select",
@@ -104,12 +116,145 @@ _PROFILE_FOR_RECIPE: Final[dict[str, str]] = {
 }
 
 
+def _progress_lines(lines: Sequence[str]) -> tuple[str, ...]:
+    """Keep only the structural review-progress lines of a rendered operation page."""
+
+    return tuple(line for line in lines if line.startswith("Semantic review"))
+
+
+# -- /observe capacity helpers ----------------------------------------------
+#
+# Every value below is read from a product-built record and re-validated as a closed token or
+# a bounded integer before it is shown, so a malformed payload renders as "unknown" instead of
+# carrying arbitrary text into the transcript.
+
+_MIN_QUEUE_ROWS: Final = MIN_CUSTOM_QUEUE_COUNT
+_MAX_QUEUE_ROWS: Final = LARGEST_SUPPORTED_QUEUE_COUNT
+_CAPACITY_UNCHANGED: Final = "Capacity was left unchanged."
+_CAPACITY_LABELS: Final = frozenset({"standard", "larger", "largest", "custom"})
+_DETAILS: Final = frozenset({"focused", "detailed"})
+_LIMITING_DIMENSIONS: Final = frozenset({"count", "bytes", "oldest_age", "capture_backlog"})
+_CAPACITY_REASONS: Final[dict[str, str]] = {
+    "selected": "selected",
+    "workspace_aggregate": "workspace aggregate (the largest active selection in this workspace)",
+}
+_CAPACITY_WORDS: Final[dict[str, str]] = {
+    "recommended": "recommended",
+    "larger": "larger",
+    "largest": "largest",
+    "no_cap": "no_cap",
+}
+_PAUSE_COMMAND: Final = f"yoetz observe pause --workspace {WORKSPACE_PLACEHOLDER}"
+_RESUME_COMMAND: Final = f"yoetz observe resume --workspace {WORKSPACE_PLACEHOLDER}"
+_REVOKE_COMMAND: Final = (
+    f"yoetz observe selection-revoke --workspace {WORKSPACE_PLACEHOLDER} --persist"
+)
+_MIB: Final = 1024 * 1024
+
+
+def _mapping_or_empty(value: object) -> Mapping[str, object]:
+    return cast(Mapping[str, object], value) if isinstance(value, Mapping) else {}
+
+
+def _closed_token(value: object, allowed: frozenset[str]) -> str:
+    return value if type(value) is str and value in allowed else "unknown"
+
+
+def _bounded_count(value: object) -> int | None:
+    return value if type(value) is int and 0 < value <= _MAX_QUEUE_ROWS else None
+
+
+def _capacity_phrase(count: object, label: object) -> str:
+    rows = _bounded_count(count)
+    if rows is None:
+        return "unknown"
+    return f"{rows:,} rows ({_closed_token(label, _CAPACITY_LABELS)})"
+
+
+def _selection_capacity_phrase(
+    selection: Mapping[str, object], fallback: Mapping[str, object]
+) -> str:
+    """Name a selection's queue rows and label, preferring the selection record."""
+
+    label = selection.get("capacity_profile", selection.get("label"))
+    phrase = _capacity_phrase(selection.get("queue_count"), label)
+    if phrase != "unknown" and _closed_token(label, _CAPACITY_LABELS) != "unknown":
+        return phrase
+    fallback_phrase = _capacity_phrase(fallback.get("queue_count"), fallback.get("label"))
+    return fallback_phrase if fallback_phrase != "unknown" else phrase
+
+
+def _disclosure_command(disclosure: Mapping[str, object], key: str, fallback: str) -> str:
+    """Return a disclosure command when it is a safe placeholder command, else ``fallback``."""
+
+    value = disclosure.get(key)
+    return value if is_safe_command(value) else fallback
+
+
+def _capacity_request_for(choice: str) -> CapacityRequest | None:
+    word = _CAPACITY_WORDS.get(choice)
+    return None if word is None else parse_capacity_request(word)
+
+
+def _whole_mib(value: object) -> str:
+    if type(value) is int and value > 0 and value % _MIB == 0:
+        return f"{value // _MIB:,} MiB"
+    if type(value) is int and value > 0:
+        return f"{value:,} bytes"
+    return "unknown"
+
+
+def _no_cap_line(no_cap: Mapping[str, object]) -> str:
+    if no_cap.get("available") is False and no_cap.get("reason") == "state_document_ceiling":
+        ceiling = _whole_mib(no_cap.get("state_document_ceiling_bytes"))
+        return f"no Yoetz cap: unavailable (state document ceiling {ceiling})"
+    return "no Yoetz cap: unknown"
+
+
+def _effective_budget_lines(budget: Mapping[str, object]) -> tuple[str, ...]:
+    """Summarize the effective-budget record: capacity, closest limit, no-cap availability."""
+
+    if not budget:
+        return (
+            "capacity: unknown",
+            "closest limit: unknown",
+            "no Yoetz cap: unknown",
+        )
+    selected = _capacity_phrase(
+        budget.get("selected_queue_count"), budget.get("selected_capacity_label")
+    )
+    effective = _capacity_phrase(
+        budget.get("effective_queue_count"), budget.get("effective_capacity_label")
+    )
+    reason = budget.get("effective_reason")
+    reason_text = (
+        _CAPACITY_REASONS[reason]
+        if type(reason) is str and reason in _CAPACITY_REASONS
+        else "unknown"
+    )
+    dimension = _closed_token(budget.get("limiting_dimension"), _LIMITING_DIMENSIONS)
+    utilization = budget.get("utilization_bps")
+    usage = (
+        f"{utilization / 100:.2f}% used ({utilization} bps)"
+        if type(utilization) is int and 0 <= utilization <= 1_000_000
+        else "usage unknown"
+    )
+    return (
+        f"capacity: selected {selected}; effective {effective}",
+        f"capacity reason: {reason_text}",
+        f"closest limit: {dimension}; {usage}",
+        _no_cap_line(_mapping_or_empty(budget.get("no_cap"))),
+    )
+
+
 class YoetzTui(App[int]):
     """The interactive Yoetz surface. A presentation layer over existing services."""
 
     CSS: ClassVar[str] = YOETZ_CSS
     TITLE = "Yoetz"
     BINDINGS: ClassVar[list[Any]] = []
+    # How often a running check's structural progress is re-read while its result is awaited.
+    progress_poll_seconds: float = 5.0
 
     def __init__(
         self,
@@ -347,7 +492,10 @@ class YoetzTui(App[int]):
             "status": self.command_status,
             "observe": self.command_observe,
             "work": self.command_work,
+            "lineage": self.command_lineage,
+            "project": self.command_project,
             "check": self.command_check,
+            "progress": self.command_progress,
             "receipt": self.command_receipt,
             "connect": self.command_connect,
             "disconnect": self.command_disconnect,
@@ -369,10 +517,13 @@ class YoetzTui(App[int]):
             self._report(error)
 
     def _report(self, error: RuntimeError_) -> None:
+        from yoetz.cli.render import render_local_recovery_lines
+
+        extra = (f"Reason: {error.reason}", *render_local_recovery_lines(error.reason))
         self.say(
             Level.BLOCKED,
             error.message,
-            (f"Reason: {error.reason}",),
+            extra,
             details=error.details or (f"reason={error.reason}",),
         )
 
@@ -1060,7 +1211,13 @@ class YoetzTui(App[int]):
         await self._refresh_header()
 
     async def command_observe(self) -> None:
-        """Show observation selection separately from privacy and readiness."""
+        """Show observation selection, then offer a disclosed capacity change.
+
+        Status stays separate from privacy and readiness.  A capacity change is
+        always previewed first (current → proposed, scope, local-resource
+        consequences, remaining limits, and the lower/pause path) and applied only
+        on an explicit choice; ``Esc`` or cancel changes nothing.
+        """
 
         self.say(Level.ACTIVE, "Observation selection")
         status = await self.runtime.observation_selection_status()
@@ -1076,6 +1233,7 @@ class YoetzTui(App[int]):
         accounting_map: Mapping[str, object] = (
             cast(Mapping[str, object], accounting) if isinstance(accounting, Mapping) else {}
         )
+        budget = _mapping_or_empty(status.get("effective_budget"))
 
         def counter(name: str) -> str:
             value = accounting_map.get(name)
@@ -1099,9 +1257,227 @@ class YoetzTui(App[int]):
             f"summarized={counter('summarized_input_count')}; "
             f"omitted={counter('intentionally_omitted_input_count')}; "
             f"unrecoverable={counter('unrecoverable_input_count')}",
+            *_effective_budget_lines(budget),
             "detail and capacity do not change content or privacy authority",
         )
         self.settle(Level.ACTIVE, "Observation selection", body)
+        await self._change_observation_capacity(budget)
+
+    async def _change_observation_capacity(self, budget: Mapping[str, object]) -> None:
+        current = _capacity_phrase(
+            budget.get("selected_queue_count"), budget.get("selected_capacity_label")
+        )
+        choice = await self.ask(
+            SelectionView(
+                name="observe-capacity",
+                title="Change local retention capacity?",
+                options=[
+                    Option(
+                        "keep",
+                        "Keep current",
+                        f"Stay on {current}. Changes nothing."
+                        if current != "unknown"
+                        else "Changes nothing.",
+                    ),
+                    Option("recommended", "Recommended (512 rows)", "The standard capacity."),
+                    Option(
+                        "larger",
+                        "Larger (2,048 rows)",
+                        "Can use more local disk, memory, and CPU work.",
+                    ),
+                    Option(
+                        "largest",
+                        "Largest (8,192 rows)",
+                        "The largest supported finite capacity; uses the most local resources.",
+                    ),
+                    Option(
+                        "custom",
+                        "Custom",
+                        f"Type a queue row count from {_MIN_QUEUE_ROWS:,} to {_MAX_QUEUE_ROWS:,}.",
+                    ),
+                    Option(
+                        "no_cap",
+                        "No Yoetz cap",
+                        "Explains why this is not available for this queue.",
+                    ),
+                ],
+                hint="enter to choose · esc to keep the current setting",
+            )
+        )
+        if choice is None or choice == "keep":
+            self.say(Level.OPTIONAL, _CAPACITY_UNCHANGED)
+            return
+        request: CapacityRequest | None
+        if choice == "custom":
+            request = await self._ask_custom_capacity()
+        else:
+            request = _capacity_request_for(choice)
+        if request is None:
+            self.say(Level.OPTIONAL, _CAPACITY_UNCHANGED)
+            return
+        try:
+            preview = await self.runtime.preview_observation_selection(request)
+        except ObservationCapacityUnavailable as unavailable:
+            self._say_capacity_unavailable(unavailable)
+            return
+        except RuntimeError_ as error:
+            self.say(
+                Level.BLOCKED,
+                "The capacity preview could not be built",
+                (f"Reason: {error.reason}", *error.details, _CAPACITY_UNCHANGED),
+            )
+            return
+        await self._confirm_capacity_preview(request, preview)
+
+    async def _ask_custom_capacity(self) -> CapacityRequest | None:
+        """Ask for a custom count until it is valid or the user presses ``Esc``.
+
+        The typed text is never echoed back: an invalid entry is answered with the
+        accepted range only.
+        """
+
+        while True:
+            entry = TextEntryView(
+                name="observe-capacity-custom",
+                title="Custom local retention capacity",
+                label=f"Queue rows ({_MIN_QUEUE_ROWS}–{_MAX_QUEUE_ROWS:,})",
+                placeholder="1024",
+            )
+            if await self.ask(entry) is None:
+                return None
+            text = entry.value.strip().replace(",", "")
+            if text.isascii() and text.isdigit() and len(text) <= 6:
+                try:
+                    return parse_capacity_request("custom", queue_count=int(text))
+                except ValueError:
+                    pass
+            self.say(
+                Level.BLOCKED,
+                "That is not a supported queue row count",
+                (
+                    f"Enter a whole number from {_MIN_QUEUE_ROWS} to {_MAX_QUEUE_ROWS:,}, "
+                    "or press esc to cancel.",
+                    "Nothing changed.",
+                ),
+            )
+
+    def _say_capacity_unavailable(self, unavailable: ObservationCapacityUnavailable) -> None:
+        alternative = (
+            f"Alternative: choose Largest ({_MAX_QUEUE_ROWS:,} rows) in /observe, or run: "
+            f"{unavailable.alternative_command}"
+            if is_safe_command(unavailable.alternative_command)
+            else f"Alternative: choose Largest ({_MAX_QUEUE_ROWS:,} rows) in /observe."
+        )
+        self.say(
+            Level.OPTIONAL,
+            "No Yoetz cap is not available",
+            (*unavailable.lines, alternative, _CAPACITY_UNCHANGED),
+        )
+
+    async def _confirm_capacity_preview(
+        self, request: CapacityRequest, preview: Mapping[str, object]
+    ) -> None:
+        disclosure = _mapping_or_empty(preview.get("disclosure"))
+        digest = preview.get("preview_digest")
+        try:
+            disclosure_lines = render_capacity_disclosure_lines(disclosure)
+        except ValueError:
+            disclosure_lines = ()
+        if type(digest) is not str or not disclosure_lines:
+            self.say(
+                Level.BLOCKED,
+                "The capacity preview could not be shown",
+                ("Reason: observation_selection_preview_invalid", _CAPACITY_UNCHANGED),
+            )
+            return
+        change = disclosure.get("change")
+        current_selection = _mapping_or_empty(preview.get("current_selection"))
+        requested_selection = _mapping_or_empty(preview.get("requested_selection"))
+        current = _selection_capacity_phrase(
+            current_selection, _mapping_or_empty(disclosure.get("current"))
+        )
+        proposed = _selection_capacity_phrase(
+            requested_selection, _mapping_or_empty(disclosure.get("requested"))
+        )
+        detail = _closed_token(requested_selection.get("detail"), _DETAILS)
+        if change == "unchanged":
+            self.say(
+                Level.OPTIONAL,
+                "Local retention capacity",
+                (*disclosure_lines, _CAPACITY_UNCHANGED),
+            )
+            return
+        self.say(
+            Level.ACTIVE,
+            "Proposed local retention capacity",
+            (
+                f"Capacity: {current} → {proposed}",
+                f"Detail: {detail} (unchanged)",
+                "Scope: this workspace (persisted)",
+                *disclosure_lines,
+            ),
+        )
+        view = ApprovalView(
+            name="observe-capacity-apply",
+            title="Apply this capacity change?",
+            body=(),
+            approve_label="Apply",
+            decline_label="Cancel",
+            approve_key="apply",
+            decline_key="cancel",
+            default_to_safe=True,
+            hint="enter to choose · esc to cancel · D for technical details",
+        )
+        view.technical_details = (f"preview_digest={digest}",)
+        if await self.ask(view) != "apply":
+            self.say(Level.OPTIONAL, _CAPACITY_UNCHANGED)
+            return
+        try:
+            applied = await self.runtime.apply_observation_selection(request, digest)
+        except ObservationCapacityUnavailable as unavailable:
+            self._say_capacity_unavailable(unavailable)
+            return
+        except RuntimeError_ as error:
+            self.say(
+                Level.BLOCKED,
+                "The capacity change did not complete",
+                (
+                    f"Reason: {error.reason}",
+                    *error.details,
+                    "Run /observe to see the current setting.",
+                ),
+            )
+            return
+        self._say_capacity_applied(applied)
+
+    def _say_capacity_applied(self, applied: Mapping[str, object]) -> None:
+        selection = _mapping_or_empty(applied.get("selection"))
+        budget = _mapping_or_empty(applied.get("effective_budget"))
+        disclosure = _mapping_or_empty(applied.get("disclosure"))
+        confirmed = applied.get("applied") is True and bool(selection)
+        self.say(
+            Level.VERIFIED if confirmed else Level.UNPROVEN,
+            "Local retention capacity applied"
+            if confirmed
+            else "The capacity change could not be confirmed",
+            (
+                f"Selected: {_selection_capacity_phrase(selection, {})}, "
+                f"detail {_closed_token(selection.get('detail'), _DETAILS)}, "
+                "this workspace",
+                *_effective_budget_lines(budget),
+                (
+                    "Lower it later with: "
+                    f"{_disclosure_command(disclosure, 'lower_command', _PAUSE_COMMAND)}"
+                    if disclosure.get("change") == "increase"
+                    else "Return to the default with: "
+                    f"{_disclosure_command(disclosure, 'revoke_command', _REVOKE_COMMAND)}"
+                ),
+                "Pause new observation ingest with: "
+                f"{_disclosure_command(disclosure, 'pause_command', _PAUSE_COMMAND)}",
+                "Resume with: "
+                f"{_disclosure_command(disclosure, 'resume_command', _RESUME_COMMAND)}",
+            ),
+        )
 
     async def command_doctor(self) -> None:
         self.say(Level.ACTIVE, "Checking this installation")
@@ -1489,19 +1865,40 @@ class YoetzTui(App[int]):
         effort = await self.ask(
             SelectionView(
                 name="codex-subscription-reasoning",
-                title="Reasoning effort",
+                title="Final review reasoning effort",
                 options=[
-                    Option(value, value, "Exact selection bound into every attempt.")
-                    for value in ("high", "low", "medium", "xhigh", "max", "ultra")
+                    Option(value, value, "Used for completion reviews; recorded per check.")
+                    for value in _CODEX_EFFORTS
                 ],
             )
         )
         if effort is None:
             self.say(Level.OPTIONAL, "Codex subscription setup was cancelled.")
             return
+        # A new binding recommends a bounded routine effort; an existing binding's routine
+        # choice (or legacy single effort) is offered first so setup never silently lowers it.
+        routine_default = self.runtime.codex_subscription_routine_default() or effort
+        routine_effort = await self.ask(
+            SelectionView(
+                name="codex-subscription-routine-reasoning",
+                title="Routine checkpoint reasoning effort",
+                options=[
+                    Option(value, value, "Used for checks without a completion claim.")
+                    for value in (
+                        routine_default,
+                        *(item for item in _CODEX_EFFORTS if item != routine_default),
+                    )
+                ],
+            )
+        )
+        if routine_effort is None:
+            self.say(Level.OPTIONAL, "Codex subscription setup was cancelled.")
+            return
         executable, codex_home, model = values
         try:
-            preview = self.runtime.preview_codex_subscription(executable, codex_home, model, effort)
+            preview = self.runtime.preview_codex_subscription(
+                executable, codex_home, model, effort, routine_effort
+            )
         except RuntimeError_ as error:
             self._report(error)
             return
@@ -1512,7 +1909,8 @@ class YoetzTui(App[int]):
             f"Capability cell: {preview.get('capability_cell_sha256')}",
             f"Cell evidence expires: {preview.get('capability_evidence_expires_at')}",
             f"Dedicated CODEX_HOME: {preview.get('codex_home')}",
-            f"Model / reasoning: {model} / {effort}",
+            f"Model: {model}",
+            f"Reasoning: final {effort} / routine {routine_effort}",
             "Destination: OpenAI through Codex-managed ChatGPT authentication.",
             "Data-use posture: unknown; your ChatGPT plan and terms apply.",
             "Yoetz never receives the OAuth credential or the upstream OpenAI body.",
@@ -1545,7 +1943,12 @@ class YoetzTui(App[int]):
         try:
             status = await self.hand_over_terminal(
                 lambda: self.runtime.setup_codex_subscription(
-                    executable, codex_home, model, effort, switch_account=switch_account
+                    executable,
+                    codex_home,
+                    model,
+                    effort,
+                    switch_account=switch_account,
+                    routine_reasoning_effort=routine_effort,
                 )
             )
         except SuspendNotSupported:
@@ -1607,13 +2010,18 @@ class YoetzTui(App[int]):
         except RuntimeError_ as error:
             self._report(error)
             return
+        from yoetz.cli.provider_status import review_budget_human_line
+
+        budgets = review_budget_human_line(status)
         self.say(
             Level.ACTIVE,
             "Codex subscription status",
             (
                 f"Auth mode: {status.get('auth_mode') or 'not signed in'}",
                 f"Plan: {status.get('plan_type') or 'not reported'}",
+                f"Model: {status.get('model') or 'not reported'}",
                 f"Model available: {status.get('model_available')}",
+                *(() if budgets is None else (f"Review budgets: {budgets}",)),
                 f"Process cleanup: {status.get('process_cleanup')}",
             ),
         )
@@ -1905,7 +2313,7 @@ class YoetzTui(App[int]):
     async def command_work(self) -> None:
         recent = self.runtime.opened_titles
         rows = [Option(f"task:{title}", title, "opened in this session") for title in recent]
-        rows.append(Option("open", "Open a task by name"))
+        rows.append(Option("open", "Open a task by session ID"))
         chosen = await self.ask(
             SelectionView(
                 name="work",
@@ -1913,9 +2321,8 @@ class YoetzTui(App[int]):
                 body=()
                 if recent
                 else (
-                    "Yoetz records work per task. The local service does not keep",
-                    "a browsable index of every task, so open one by the title the",
-                    "agent used for it.",
+                    "Open a task using the session ID returned by Yoetz start.",
+                    "Its title or workspace alone cannot select work to resume.",
                 ),
                 options=rows,
                 searchable=bool(recent),
@@ -1929,8 +2336,8 @@ class YoetzTui(App[int]):
             entry = TextEntryView(
                 name="work-open",
                 title="Open a task",
-                label="Task title",
-                placeholder="the title the agent used",
+                label="Session ID",
+                placeholder="ses_…",
             )
             if await self.ask(entry) is None:
                 return
@@ -1939,6 +2346,37 @@ class YoetzTui(App[int]):
         detail = await self.runtime.open_task(title)
         self._active_task_title = title
         self.settle(Level.ACTIVE, title, render_work_detail(detail, self.body_width))
+
+    async def command_lineage(self) -> None:
+        await self._command_task_view("lineage")
+
+    async def command_project(self) -> None:
+        await self._command_task_view("project")
+
+    async def _command_task_view(self, view: Literal["lineage", "project"]) -> None:
+        title = await self._require_task()
+        if title is None:
+            return
+        cursor: str | None = None
+        while True:
+            page = await self.runtime.task_status(title, view, cursor=cursor)
+            self.settle(Level.ACTIVE, "Child tasks" if view == "lineage" else "Project", page.lines)
+            if page.next_cursor is None:
+                return
+            chosen = await self.ask(
+                SelectionView(
+                    name="task-view-page",
+                    title="More results are available",
+                    options=[
+                        Option("next", "Next page", "Continue this task view."),
+                        Option("done", "Done", "Return to the conversation."),
+                    ],
+                    hint="enter to choose · esc to finish",
+                )
+            )
+            if chosen != "next":
+                return
+            cursor = page.next_cursor
 
     async def command_check(self) -> None:
         title = await self._require_task()
@@ -1955,10 +2393,37 @@ class YoetzTui(App[int]):
         if chosen is None:
             return
         mode = CheckMode(chosen)
-        self.say(Level.ACTIVE, f"Checking {title} ({mode.label.lower()})")
-        verdict, lines = await self.runtime.run_check(title, mode)
+        heading = f"Checking {title} ({mode.label.lower()})"
+        self.say(Level.ACTIVE, heading)
+        check = asyncio.ensure_future(self.runtime.run_check(title, mode))
+        try:
+            while True:
+                done, _pending = await asyncio.wait({check}, timeout=self.progress_poll_seconds)
+                if done:
+                    break
+                # Structural phase and elapsed time only; the check itself keeps running
+                # service-side even if this view stops polling (issue #571 A2).
+                try:
+                    progress = await self.runtime.check_progress(title)
+                except RuntimeError_:
+                    continue
+                self.settle(Level.ACTIVE, heading, _progress_lines(progress.lines))
+        finally:
+            if not check.done():
+                check.cancel()
+        verdict, lines = check.result()
+        if verdict == "awaiting_human":
+            self.settle(Level.ACTIVE, "Check awaiting your decision", lines)
+            return
         level = Level.VERIFIED if verdict == "pass" else Level.UNPROVEN
         self.settle(level, f"Check complete: {verdict}", lines)
+
+    async def command_progress(self) -> None:
+        title = await self._require_task()
+        if title is None:
+            return
+        page = await self.runtime.check_progress(title)
+        self.settle(Level.ACTIVE, "Check progress", page.lines)
 
     async def command_receipt(self) -> None:
         title = await self._require_task()

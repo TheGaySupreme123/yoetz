@@ -1,9 +1,9 @@
-"""Console entry point that fast-paths the observe hook past the typer graph.
+"""Console entry point that fast-paths bounded commands past the typer graph.
 
-Loading ``yoetz.cli.app`` costs ~232 ms of typer/pydantic/protocol-schema
-imports that a Codex hook never uses (#242). Only ``hooks observe`` with the
-exact options it declares is fast-pathed; everything else falls through to the
-full CLI unchanged, so usage errors and ``--help`` stay byte-identical.
+Loading ``yoetz.cli.app`` costs a substantial typer/pydantic/protocol-schema import that a Codex
+hook never uses (#242). Only exact hook commands and the ordinary ``service status`` forms are
+fast-pathed; everything else falls through to the full CLI unchanged, so usage errors and
+``--help`` stay byte-identical.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+from collections.abc import Callable
 from typing import Final
 
 # Sampled before any yoetz module resolves, so the hook can measure the import
@@ -35,6 +36,55 @@ UNSUPPORTED_PLATFORM_MESSAGE: Final = (
     "On Windows, install and run Yoetz inside WSL 2 (Ubuntu). Setup guide:\n"
     "  https://github.com/TheGaySupreme123/yoetz/blob/main/docs/usage/install-and-first-run.md#windows"
 )
+
+
+def _service_status_fast_path(arguments: list[str]) -> int | None:
+    """Connect before loading the full Typer command graph for exact status invocations."""
+
+    if arguments not in ([], ["--json"]):
+        return None
+
+    import asyncio
+
+    from yoetz.cli.bootstrap import connect_cli_service, control_failure, human_or_json, stderr
+    from yoetz.ports.control import ControlError
+
+    json_output = arguments == ["--json"]
+
+    async def _request() -> object:
+        client = await connect_cli_service()
+        try:
+            return await client.service_status()
+        finally:
+            await client.close()
+
+    def _render(callback: Callable[[], object]) -> int:
+        from typer import Exit as TyperExit
+
+        try:
+            result = callback()
+        except TyperExit as error:
+            return int(error.exit_code or 0)
+        except KeyboardInterrupt:
+            stderr("cancelled")
+            return 130
+        except Exception:
+            stderr("internal_error: the command could not be completed")
+            return 70
+        return result if type(result) is int else 0
+
+    try:
+        status = asyncio.run(_request())
+    except ControlError as error:
+        return _render(lambda error=error: control_failure(error, json_output=json_output))
+    except KeyboardInterrupt:
+        stderr("cancelled")
+        return 130
+    except Exception:
+        stderr("internal_error: the command could not be completed")
+        return 70
+
+    return _render(lambda: human_or_json(status, json_output=json_output))
 
 
 def _observe_fast_path(arguments: list[str]) -> int | None:
@@ -247,6 +297,43 @@ def main() -> None:
     """Installed console entry point."""
 
     argv = sys.argv[1:]
+    # The static cue has its own bounded resource fallback and must survive unavailable state
+    # or installation runtime setup. It never serves work, asserts readiness or decides access.
+    if (
+        len(argv) == 4
+        and argv[:3] == ["hooks", "startup-context", "--host"]
+        and argv[3] in {"claude", "cursor"}
+    ):
+        from yoetz.cli.startup_context import handle_startup_context
+
+        raise SystemExit(handle_startup_context(host="claude" if argv[3] == "claude" else "cursor"))
+    if (
+        os.name != "nt"
+        and (
+            argv[:2] in (["mcp", "serve"], ["service", "run"])
+            or argv[:1] in (["hooks"], ["upgrade"])
+        )
+        and not any(token in {"--help", "-h"} for token in argv)
+        and "--prune-runtimes" not in argv
+    ):
+        from yoetz.adapters.release_runtime import ReleaseRuntimeError, enter_release_runtime
+
+        try:
+            enter_release_runtime(argv)
+        except ReleaseRuntimeError as error:
+            message = {
+                "release_runtime_busy": "A package update is running. Retry after it finishes.",
+                "release_runtime_changed_retry": "The package changed during startup. Retry from the installed launcher.",
+                "release_runtime_external_link": "This runtime links to editable or external package files. Use a regular installed Yoetz package.",
+            }.get(
+                str(error),
+                "The retained runtime could not be verified. Repair this Yoetz installation.",
+            )
+            sys.stderr.write(f"release_runtime_unavailable: {message}\n")
+            raise SystemExit(20) from None
+        except OSError:
+            sys.stderr.write("release_runtime_unavailable: retry from the installed launcher.\n")
+            raise SystemExit(20) from None
     if (
         len(argv) == 6
         and argv[:3] == ["hooks", "startup-gate", "--host"]
@@ -258,14 +345,6 @@ def main() -> None:
         raise SystemExit(
             handle_startup_gate(host="claude" if argv[3] == "claude" else "cursor", event=argv[5])
         )
-    if (
-        len(argv) == 4
-        and argv[:3] == ["hooks", "startup-context", "--host"]
-        and argv[3] in {"claude", "cursor"}
-    ):
-        from yoetz.cli.startup_context import handle_startup_context
-
-        raise SystemExit(handle_startup_context(host="claude" if argv[3] == "claude" else "cursor"))
     if len(argv) >= 2 and argv[0] == "hooks" and argv[1] == "observe":
         code = _observe_fast_path(argv[2:])
         if code is not None:
@@ -285,4 +364,8 @@ def main() -> None:
     code = _unsupported_platform_exit(argv)
     if code is not None:
         raise SystemExit(code)
+    if len(argv) >= 2 and argv[0] == "service" and argv[1] == "status":
+        code = _service_status_fast_path(argv[2:])
+        if code is not None:
+            raise SystemExit(code)
     _run_full_cli()

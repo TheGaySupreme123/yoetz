@@ -10,8 +10,9 @@ from mcp import types
 from yoetz.cli.render import render_human_error
 from yoetz.mcp.server import result_from_public_model
 from yoetz.mcp.summaries import summary_for_public_error
-from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
+from yoetz.protocol.errors import attach_reason_continuation
 from yoetz.protocol.models import StartResultModel
+from yoetz.protocol.start_recovery import start_recovery_guidance
 
 
 @pytest.mark.parametrize(
@@ -26,9 +27,6 @@ from yoetz.protocol.models import StartResultModel
 def test_first_start_recovery_survives_all_text_surfaces(
     code: str, reason: str, instruction: str
 ) -> None:
-    error = PublicOperationError(
-        PublicErrorCode(code), "private", True, safe_details={"reason_code": reason}
-    )
     failure = StartResultModel.model_validate(
         {
             "protocol_version": "0.1",
@@ -39,7 +37,7 @@ def test_first_start_recovery_survives_all_text_surfaces(
                 "message": "PRIVATE-MESSAGE-NOT-FOR-MCP-SUMMARY",
                 "retryable": True,
                 "correlation_id": "err_edd47974-68b1-4c5b-88e7-f063054f7760",
-                "safe_details": dict(error.safe_details),
+                "safe_details": dict(attach_reason_continuation({"reason_code": reason})),
             },
         }
     )
@@ -62,6 +60,13 @@ def test_first_start_recovery_survives_all_text_surfaces(
 @pytest.mark.parametrize("reason", ["runtime_rebind_busy", "catalog_busy", "private/path", []])
 def test_unclassified_busy_never_claims_a_released_start_lease(reason: object) -> None:
     details = {"reason_code": reason}
+    assert start_recovery_guidance("BUNDLE_BUSY", True, details) == ""
     assert "Replay" not in summary_for_public_error(
         {"ok": False, "error": {"code": "BUNDLE_BUSY", "retryable": True, "safe_details": details}}
     )
+
+
+def test_terminal_or_wrong_code_does_not_offer_retry() -> None:
+    details = {"reason_code": "start_runtime_rebind_retry_ready"}
+    assert start_recovery_guidance("BUNDLE_BUSY", False, details) == ""
+    assert start_recovery_guidance("STORAGE_CORRUPT", True, details) == ""

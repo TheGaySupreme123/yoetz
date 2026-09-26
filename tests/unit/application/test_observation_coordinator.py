@@ -25,6 +25,7 @@ from yoetz.adapters.sqlite.observation import SqliteObservationStore
 from yoetz.application.observation_control import build_observation_support_handlers
 from yoetz.application.observation_coordinator import ObservationCoordinator
 from yoetz.application.observation_drain import (
+    ObservationCaptureRecoveryOutcome,
     ObservationDrainAction,
     ObservationOutboxSweeper,
     route_observation_ingest,
@@ -38,6 +39,7 @@ from yoetz.application.observation_materialize import (
     materialize_observation_outcome_correction,
     observation_operation_digest,
     observation_writer_id,
+    stable_observation_id,
 )
 from yoetz.domain.findings import Finding
 from yoetz.domain.observation import (
@@ -174,6 +176,48 @@ def test_materialize_pre_post_and_unpaired() -> None:
         task_id=task,
     )
     assert ObservationGapCode.CONTENT_UNSELECTED.value in unselected.coverage.known_gaps
+
+
+def test_materialization_uses_ledger_mapping_independent_of_transport_cursor() -> None:
+    """New IDs use obs-ledger/1.6 while explicit replay can select a legacy map."""
+
+    task = _task_id()
+    session = f"hmac-sha256:{'74' * 32}"
+    envelope = _envelope(session=session, kind="PreToolUse", identity="hook:mapping-source")
+    stream_cursor = replace(envelope.cursor, mapping_version="codex-obs-stream/1.4.0")
+    stream_transport = replace(envelope, cursor=stream_cursor)
+
+    current = materialize_observation_envelope(envelope, task_id=task)
+    current_from_stream = materialize_observation_envelope(stream_transport, task_id=task)
+    action_source = (
+        f"pre-event:codex:{envelope.session_commitment}:"
+        f"{envelope.cursor.source_generation}:{envelope.source_identity}"
+    )
+    current_event = stable_observation_id(
+        kind=IdKind.EVENT,
+        task_id=task,
+        source_identity=action_source,
+        mapping_version=MATERIALIZATION_MAPPING_VERSION,
+        role="action_event",
+    )
+    assert current.drafts[0].draft.event_id == current_event
+    assert current_from_stream.drafts[0].draft.event_id == current_event
+
+    legacy_mapping = MATERIALIZATION_LEGACY_MAPPING_VERSIONS[0]
+    replay = materialize_observation_envelope(
+        envelope,
+        task_id=task,
+        mapping_version=legacy_mapping,
+    )
+    legacy_event = stable_observation_id(
+        kind=IdKind.EVENT,
+        task_id=task,
+        source_identity=action_source,
+        mapping_version=legacy_mapping,
+        role="action_event",
+    )
+    assert replay.drafts[0].draft.event_id == legacy_event
+    assert replay.drafts[0].draft.event_id != current_event
 
 
 def test_materialize_post_only_profiles_never_invent_a_pre_pair() -> None:
@@ -2089,7 +2133,11 @@ async def test_coordinator_rejects_without_mapping(tmp_path: Path) -> None:
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     "code",
-    [code for code in PublicErrorCode if code is not PublicErrorCode.STORAGE_CORRUPT],
+    [
+        code
+        for code in PublicErrorCode
+        if code not in {PublicErrorCode.STORAGE_CORRUPT, PublicErrorCode.SESSION_CONFLICT}
+    ],
 )
 async def test_nonretryable_public_ingest_errors_are_terminal(
     tmp_path: Path, code: PublicErrorCode
@@ -2115,6 +2163,146 @@ async def test_nonretryable_public_ingest_errors_are_terminal(
     )
 
     result = await coordinator.ingest_request(
+        ObservationIngestRequest(
+            codex_session_id=mapping.codex_session_id,
+            envelope=_envelope(session=session),
+        )
+    )
+
+    assert result.reason == ObservationGapCode.LEDGER_REJECTED.value
+    assert route_observation_ingest(result).action is ObservationDrainAction.QUARANTINE
+
+
+@pytest.mark.anyio
+async def test_nonretryable_route_session_conflict_is_mapping_missing(
+    tmp_path: Path,
+) -> None:
+    """A route conflict keeps the row recoverable while the lifecycle mapping is repaired."""
+
+    class _RejectedRuntime:
+        async def route(self, command: object) -> object:
+            del command
+            raise PublicOperationError(
+                PublicErrorCode.SESSION_CONFLICT,
+                "Observation route is already bound.",
+                retryable=False,
+            )
+
+        async def release(self, runtime: object) -> None:
+            raise AssertionError(f"unrouted runtime released: {runtime!r}")
+
+    local, _workspace, session, mapping = _mapped_local(tmp_path, "route-conflict-952")
+    coordinator = ObservationCoordinator(
+        runtime=_RejectedRuntime(),  # type: ignore[arg-type]
+        local=local,
+        clock=object(),  # type: ignore[arg-type]
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+        mapping_loader=lambda *_args, **_kwargs: mapping,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    )
+
+    result = await coordinator.ingest_request(
+        ObservationIngestRequest(
+            codex_session_id=mapping.codex_session_id,
+            envelope=_envelope(session=session),
+        )
+    )
+
+    assert result.disposition is ObservationIngestDisposition.REJECTED
+    assert result.reason == ObservationGapCode.MAPPING_MISSING.value
+    assert route_observation_ingest(result).action is ObservationDrainAction.RETRY
+
+
+@pytest.mark.anyio
+async def test_route_session_conflict_retries_after_mapping_repair_and_delivers_once(
+    tmp_path: Path,
+) -> None:
+    """A repaired lifecycle mapping drains the same queued observation exactly once."""
+
+    cell = _reattach_fixture(tmp_path, "route-recovery-952")
+    envelope = _envelope(
+        session=cell.session,
+        kind="PostToolUse",
+        identity="hook:route-recovery-952",
+        exit_status=1,
+    )
+    cell.local.enqueue_outbox(cell.workspace, cell.codex_id, envelope)
+    route_available = False
+    inner_route = cell.runtime_port.route
+
+    async def route(command: object) -> TaskRuntime:
+        if not route_available:
+            raise PublicOperationError(
+                PublicErrorCode.SESSION_CONFLICT,
+                "Observation route is inactive.",
+                retryable=False,
+            )
+        return await inner_route(command)
+
+    cell.runtime_port.route = route  # type: ignore[method-assign]
+    sweeper = ObservationOutboxSweeper(cell.local, cell.coordinator, budget_seconds=None)
+    try:
+        first = await sweeper.sweep()
+        assert first.retry_pending == 1
+        assert first.quarantined == 0
+        assert cell.local.pending_outbox_count(cell.workspace) == 1
+
+        # A host reattach persists a successor lifecycle mapping before the next drain pass.
+        cell.reattach()
+        route_available = True
+        second = await sweeper.sweep()
+    finally:
+        sweeper.close()
+        cell.coordinator.close()
+
+    assert second.acknowledged == 1
+    assert second.quarantined == 0
+    assert cell.local.pending_outbox_count(cell.workspace) == 0
+    assert cell.operation_count() == 1
+
+
+@pytest.mark.anyio
+async def test_nonretryable_post_route_session_conflict_is_ledger_rejected(
+    tmp_path: Path,
+) -> None:
+    """A conflict after route acquisition remains terminal and is quarantined."""
+
+    from types import SimpleNamespace
+
+    local, _workspace, session, mapping = _mapped_local(tmp_path, "store-conflict-952")
+
+    class _Store:
+        def grant_consent(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+            raise PublicOperationError(
+                PublicErrorCode.SESSION_CONFLICT,
+                "Observation session is already bound.",
+                retryable=False,
+            )
+
+    runtime = SimpleNamespace(
+        task_id=mapping.yoetz_task_id,
+        session_id=mapping.yoetz_session_id,
+        writer_id=observation_writer_id(mapping.yoetz_task_id, mapping.yoetz_session_id),
+        observation=_Store(),
+    )
+
+    class _RuntimePort:
+        async def route(self, command: object) -> object:
+            del command
+            return runtime
+
+        async def release(self, released: object) -> None:
+            assert released is runtime
+
+    result = await ObservationCoordinator(
+        runtime=_RuntimePort(),  # type: ignore[arg-type]
+        local=local,
+        clock=object(),  # type: ignore[arg-type]
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+        mapping_loader=lambda *_args, **_kwargs: mapping,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    ).ingest_request(
         ObservationIngestRequest(
             codex_session_id=mapping.codex_session_id,
             envelope=_envelope(session=session),
@@ -2362,6 +2550,51 @@ async def test_coordinator_rejects_disabled_stream_before_mapping_or_runtime(
     )
     assert result.disposition is ObservationIngestDisposition.REJECTED
     assert result.reason == "observation_disabled"
+
+
+@pytest.mark.anyio
+async def test_capture_handoff_recovery_rotates_past_unavailable_routes() -> None:
+    """A permanently unavailable prefix cannot starve the ninth route."""
+
+    task_ids = tuple(f"task-{index}" for index in range(9))
+
+    class _Local:
+        def capture_handoff_candidates(self, workspace: str) -> tuple[str, ...]:
+            del workspace
+            return task_ids
+
+    calls: list[tuple[str, ...]] = []
+
+    async def reconcile(
+        workspace: str,
+        candidates: tuple[str, ...],
+        visit: object,
+    ) -> bool:
+        del workspace, visit
+        calls.append(candidates)
+        # Model a route opener that cannot reach any named task this turn.
+        return False
+
+    coordinator = ObservationCoordinator(
+        runtime=object(),  # type: ignore[arg-type]
+        local=cast(LocalObservationStore, _Local()),
+        clock=object(),  # type: ignore[arg-type]
+        ids=object(),  # type: ignore[arg-type]
+        capture_handoff_reconcile=reconcile,
+    )
+    try:
+        first = await coordinator._reconcile_capture_handoffs(  # pyright: ignore[reportPrivateUsage]
+            "workspace"
+        )
+        second = await coordinator._reconcile_capture_handoffs(  # pyright: ignore[reportPrivateUsage]
+            "workspace"
+        )
+    finally:
+        coordinator.close()
+
+    assert first is ObservationCaptureRecoveryOutcome.HANDOFF_UNAVAILABLE
+    assert second is ObservationCaptureRecoveryOutcome.HANDOFF_UNAVAILABLE
+    assert calls == [task_ids[:8], (task_ids[8], *task_ids[:7])]
 
 
 def _obs(
@@ -3102,13 +3335,11 @@ async def test_rediscovery_drains_pending_repositories_for_every_bound_session(
     )
 
     await coordinator.rediscover_pending_verification()
-    first = supervisor._handles[workspace]  # pyright: ignore[reportPrivateUsage]
-    await supervisor._drain_once()  # pyright: ignore[reportPrivateUsage]
-    second = supervisor._handles[workspace]  # pyright: ignore[reportPrivateUsage]
-
-    assert second is not first
-    assert len(released) == 1
-
+    # Multi-task discovery keeps one supervisor lane per routed task.  Both sibling repositories
+    # must be visible before a drain round; the old workspace-only key would hide the second lane.
+    assert supervisor.has_handle(workspace, task_ids[0])
+    assert supervisor.has_handle(workspace, task_ids[1])
+    assert len(supervisor._handles) == 2  # pyright: ignore[reportPrivateUsage]
     await supervisor._drain_once()  # pyright: ignore[reportPrivateUsage]
     assert supervisor.has_handle(workspace) is False
     assert sorted(released) == sorted(session_ids)
@@ -5708,6 +5939,435 @@ async def test_successor_route_cache_preserves_concurrent_lifecycle_changes(
             assert persisted is None
         else:
             assert persisted == (successor if concurrent_change == "none" else expected)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("event_kind", ["SubagentStop", "PostToolUse"])
+async def test_missing_subagent_identity_is_durable_without_annotation(
+    tmp_path: Path,
+    event_kind: str,
+) -> None:
+    from types import SimpleNamespace
+
+    from builders.ledger_adapters import FixedClock
+
+    local, workspace, session, mapping = _mapped_local(tmp_path, "missing-subagent")
+    db = apsw.Connection(":memory:")
+    initialize_bundle(db, {"task_id": mapping.yoetz_task_id, "owner_generation": "1"})
+    task_store = SqliteObservationStore(db)
+    runtime = SimpleNamespace(
+        task_id=mapping.yoetz_task_id,
+        session_id=mapping.yoetz_session_id,
+        writer_id=observation_writer_id(mapping.yoetz_task_id, mapping.yoetz_session_id),
+        observation=task_store,
+    )
+
+    class RuntimePort:
+        async def route(self, command: object) -> object:
+            del command
+            return runtime
+
+        async def release(self, released: object) -> None:
+            del released
+
+    class Registry:
+        async def record_host_lineage_observation(self, *args: object, **kwargs: object) -> None:
+            raise AssertionError("missing identity must not create an annotation")
+
+    append_request_id = PREFIX_BY_KIND[IdKind.REQUEST] + str(uuid.uuid4())
+
+    class Coordinator(ObservationCoordinator):
+        async def _append_materialized(self, *args: object, **kwargs: object) -> tuple[object, ...]:  # type: ignore[override]
+            batch = cast(MaterializedObservationBatch, args[2])
+            return (
+                append_request_id,
+                canonical_digest({"missing_identity_test": True}),
+                None,
+                MATERIALIZATION_MAPPING_VERSION,
+                tuple(item.role for item in batch.drafts),
+            )
+
+        async def _enqueue_verification(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            pass
+
+        async def _run_advice(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            pass
+
+    coordinator = Coordinator(
+        runtime=RuntimePort(),  # type: ignore[arg-type]
+        local=local,
+        clock=FixedClock(),
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+        host_lineage_registry=Registry(),  # type: ignore[arg-type]
+        mapping_loader=lambda *_args, **_kwargs: mapping,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    )
+    envelope = replace(
+        _envelope(session=session, kind=event_kind, identity="hook:missing-subagent"),
+        structural_payload=JsonObject(
+            {"lineage_child_task_id": mapping.yoetz_task_id} if event_kind == "PostToolUse" else {}
+        ),
+    )
+    try:
+        for expected in (
+            ObservationIngestDisposition.ACCEPTED,
+            ObservationIngestDisposition.DUPLICATE,
+        ):
+            result = await coordinator.ingest_request(
+                ObservationIngestRequest(codex_session_id="missing-subagent", envelope=envelope)
+            )
+            assert result.disposition is expected, result.reason
+        reloaded = LocalObservationStore(_state=tmp_path)
+        status = reloaded.status(ObservationStatusQuery(workspace))
+        assert ObservationGapCode.MISSING_SUBAGENT_IDENTITY.value in status.gaps
+        retained = task_store.list_envelopes(workspace)
+        assert len(retained) == 1
+        assert retained[0].gap_codes == (ObservationGapCode.MISSING_SUBAGENT_IDENTITY.value,)
+    finally:
+        db.close(force=True)
+
+
+@pytest.mark.anyio
+async def test_strong_subagent_pair_never_replays_a_legacy_child_only_operation(
+    tmp_path: Path,
+) -> None:
+    from types import SimpleNamespace
+
+    from builders.ledger_adapters import FixedClock
+
+    task = _task_id()
+    writer = PREFIX_BY_KIND[IdKind.WRITER] + str(uuid.uuid4())
+    envelope = replace(
+        _envelope(session="hmac-sha256:" + "ab" * 32, kind="SubagentStart"),
+        structural_payload=JsonObject({"subagent_id": "worker", "parent_tool_call_id": "call-b"}),
+    )
+    batch = materialize_observation_envelope(envelope, task_id=task)
+    roles = tuple(item.role for item in batch.drafts)
+    legacy_digest = observation_operation_digest(
+        task_id=task,
+        logical_identity=canonical_logical_identity(envelope, mapping_version="obs-ledger/1.6.0"),
+        draft_roles=roles,
+        mapping_version="obs-ledger/1.6.0",
+    )
+    coordinator = ObservationCoordinator(
+        runtime=object(),  # type: ignore[arg-type]
+        local=LocalObservationStore(_state=tmp_path),
+        clock=FixedClock(),
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+    )
+    legacy_id = coordinator._stable_operation_id(legacy_digest)  # pyright: ignore[reportPrivateUsage]
+    looked_up: list[str] = []
+
+    class Ledger:
+        async def lookup_task_operation(self, writer_id: str, operation_id: str) -> object | None:
+            del writer_id
+            looked_up.append(operation_id)
+            return (
+                SimpleNamespace(request_digest=legacy_digest) if operation_id == legacy_id else None
+            )
+
+        async def lookup_operation(self, writer_id: str, operation_id: str) -> None:
+            del writer_id
+            looked_up.append(operation_id)
+            return None
+
+    runtime = SimpleNamespace(
+        task_id=task,
+        session_id=PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4()),
+        writer_id=writer,
+        ledger=Ledger(),
+    )
+    # If only old replay is authorized, ambiguity fails closed instead of returning an
+    # unrelated invocation. Normal ingestion may append the current stronger identity.
+    with pytest.raises(PublicOperationError) as error:
+        await coordinator._append_materialized(  # pyright: ignore[reportPrivateUsage]
+            cast(TaskRuntime, runtime),
+            envelope,
+            batch,
+            replay_required=True,
+            replay_claims=(((legacy_digest, legacy_id, "obs-ledger/1.6.0"), roles),),
+        )
+    assert error.value.code is PublicErrorCode.SESSION_NOT_FOUND
+    assert legacy_id not in looked_up
+
+
+@pytest.mark.anyio
+async def test_subagent_advice_references_annotation_then_bound_child(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from builders.ledger_adapters import FixedClock
+
+    parent = _task_id()
+    child = _task_id()
+    correlation = "hmac-sha256:" + "cd" * 32
+    envelope = replace(
+        _envelope(session="hmac-sha256:" + "ab" * 32, kind="SubagentStop"),
+        structural_payload=JsonObject({"subagent_id": "worker", "parent_tool_call_id": "call-a"}),
+    )
+    annotation = SimpleNamespace(correlation_id=correlation, bound_child_task_id=None)
+
+    class Registry:
+        async def find_host_lineage_observation(
+            self, parent_task_id: str, observation: object
+        ) -> object:
+            del observation
+            assert parent_task_id == parent
+            return annotation
+
+    coordinator = ObservationCoordinator(
+        runtime=object(),  # type: ignore[arg-type]
+        local=LocalObservationStore(_state=tmp_path),
+        clock=FixedClock(),
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+        host_lineage_registry=Registry(),  # type: ignore[arg-type]
+    )
+    assert await coordinator._lineage_refs_for_advice(  # pyright: ignore[reportPrivateUsage]
+        parent, (envelope,)
+    ) == ((envelope.source_identity, correlation),)
+    annotation.bound_child_task_id = child
+    assert await coordinator._lineage_refs_for_advice(  # pyright: ignore[reportPrivateUsage]
+        parent, (envelope,)
+    ) == ((envelope.source_identity, child),)
+
+
+@pytest.mark.anyio
+async def test_native_activity_releases_runtime_before_lineage_callback(tmp_path: Path) -> None:
+    """A callback waiting on lineage cannot retain the runtime that attach needs to rebind."""
+
+    import asyncio
+    from types import SimpleNamespace
+
+    from builders.ledger_adapters import FixedClock
+
+    local, workspace, session, mapping = _mapped_local(tmp_path, "native-activity-release")
+    db = apsw.Connection(":memory:")
+    initialize_bundle(db, {"task_id": mapping.yoetz_task_id, "owner_generation": "1"})
+    store = SqliteObservationStore(db)
+    clock = FixedClock()
+    runtime = SimpleNamespace(
+        task_id=mapping.yoetz_task_id,
+        session_id=mapping.yoetz_session_id,
+        writer_id=observation_writer_id(mapping.yoetz_task_id, mapping.yoetz_session_id),
+        observation=store,
+    )
+    released = asyncio.Event()
+    calls: list[tuple[str, str, str]] = []
+
+    class RuntimePort:
+        async def route(self, command: object) -> object:
+            del command
+            return runtime
+
+        async def release(self, value: object) -> None:
+            assert value is runtime
+            released.set()
+
+    async def renew(task_id: str, session_id: str, writer_id: str, observed_at: object) -> None:
+        # This event stands for attach's runtime-drained condition. Awaiting it while
+        # retaining the ingest runtime would deterministically deadlock until the deadline.
+        async with asyncio.timeout(1):
+            await released.wait()
+        assert observed_at == clock.now_utc()
+        calls.append((task_id, session_id, writer_id))
+
+    class Coordinator(ObservationCoordinator):
+        async def _run_advice(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            pass
+
+    coordinator = Coordinator(
+        runtime=RuntimePort(),  # type: ignore[arg-type]
+        local=local,
+        clock=clock,
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+        observed_activity_hook=renew,
+        mapping_loader=lambda *_args, **_kwargs: mapping,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    )
+    from yoetz.domain.values import timestamp_from_datetime
+
+    envelope = replace(
+        _envelope(session=session, kind="SubagentStart", identity="hook:activity-release"),
+        structural_payload=JsonObject({}),
+        receipt_time=timestamp_from_datetime(clock.now_utc()),
+    )
+    request = ObservationIngestRequest(
+        codex_session_id="native-activity-release", envelope=envelope
+    )
+    try:
+        accepted = await coordinator.ingest_request(request)
+        assert accepted.disposition is ObservationIngestDisposition.ACCEPTED
+        # The first admitted native event persists its exact host-session route before any
+        # optional verification/advice work. A fresh READY generation can bootstrap this row.
+        assert (
+            store.codex_session_commitment_for_session(
+                workspace=workspace,
+                yoetz_session_id=mapping.yoetz_session_id,
+            )
+            == session
+        )
+        assert calls == [(mapping.yoetz_task_id, mapping.yoetz_session_id, mapping.yoetz_writer_id)]
+        duplicate = await coordinator.ingest_request(request)
+        assert duplicate.disposition is ObservationIngestDisposition.DUPLICATE
+        # The duplicate re-offers the same evidence time; lineage applies it idempotently.
+        assert len(calls) == 2 and calls[0] == calls[1]
+    finally:
+        db.close(force=True)
+
+
+@pytest.mark.anyio
+async def test_ended_predecessor_cannot_seed_successor_host_route(tmp_path: Path) -> None:
+    """A rewritten ended mapping stays structural and cannot bind the successor host lane."""
+
+    from types import SimpleNamespace
+
+    from builders.ledger_adapters import FixedClock
+
+    local = LocalObservationStore(_state=tmp_path)
+    workspace = local.workspace_commitment(str(tmp_path.resolve()))
+    local.grant_consent(workspace)
+    predecessor_codex_id = "native-predecessor-route"
+    current_codex_id = "native-current-route"
+    predecessor_commitment = local.bind_codex_session(workspace, predecessor_codex_id)
+    current_commitment = local.bind_codex_session(workspace, current_codex_id)
+    local.note_session_end(workspace, predecessor_commitment)
+
+    task = _task_id()
+    current_session_id = PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4())
+    current_writer_id = PREFIX_BY_KIND[IdKind.WRITER] + str(uuid.uuid4())
+    predecessor_mapping = LifecycleMapping(
+        mapping_version=1,
+        codex_session_id=predecessor_codex_id,
+        yoetz_task_id=task,
+        # Lifecycle recovery rewrites the ended predecessor's mapping to this successor route.
+        yoetz_session_id=current_session_id,
+        yoetz_writer_id=current_writer_id,
+        last_frontier=None,
+    )
+    current_mapping = replace(predecessor_mapping, codex_session_id=current_codex_id)
+
+    db = apsw.Connection(":memory:")
+    initialize_bundle(db, {"task_id": task, "owner_generation": "1"})
+    store = SqliteObservationStore(db)
+    store.grant_consent(workspace, Timestamp("2026-01-01T00:00:00.000Z"))
+    store.bind_session(workspace, predecessor_commitment)
+    store.bind_session(workspace, current_commitment)
+    runtime = SimpleNamespace(
+        task_id=task,
+        session_id=current_session_id,
+        writer_id=observation_writer_id(task, current_session_id),
+        observation=store,
+    )
+    calls: list[tuple[str, str, str]] = []
+
+    class RuntimePort:
+        async def route(self, command: object) -> object:
+            del command
+            return runtime
+
+        async def release(self, value: object) -> None:
+            assert value is runtime
+
+    async def renew(task_id: str, session_id: str, writer_id: str, observed_at: object) -> None:
+        del observed_at
+        calls.append((task_id, session_id, writer_id))
+
+    class Coordinator(ObservationCoordinator):
+        async def _run_advice(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            pass
+
+        async def _append_materialized(  # type: ignore[override]
+            self, *args: object, **kwargs: object
+        ) -> None:
+            # Keep this regression focused on route admission and the verification worker's
+            # idempotent route write; ledger projection is covered by the surrounding suite.
+            del args, kwargs
+            return None
+
+    def load_mapping_for_session(
+        codex_session_id: str, *, _state: Path | None = None
+    ) -> LifecycleMapping:
+        del _state
+        return predecessor_mapping if codex_session_id == predecessor_codex_id else current_mapping
+
+    coordinator = Coordinator(
+        runtime=RuntimePort(),  # type: ignore[arg-type]
+        local=local,
+        clock=FixedClock(),
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+        observed_activity_hook=renew,
+        mapping_loader=load_mapping_for_session,
+    )
+
+    def post_tool_envelope(session: str, identity: str) -> ObservationEnvelope:
+        return replace(
+            _envelope(session=session, kind="PostToolUse", identity=identity, exit_status=0),
+            receipt_time=Timestamp("2026-07-19T12:00:00.000Z"),
+        )
+
+    def subagent_start_envelope(session: str, identity: str) -> ObservationEnvelope:
+        return replace(
+            _envelope(session=session, kind="SubagentStart", identity=identity),
+            structural_payload=JsonObject({}),
+            receipt_time=Timestamp("2026-07-19T12:00:00.000Z"),
+        )
+
+    try:
+        predecessor_first = await coordinator.ingest_request(
+            ObservationIngestRequest(
+                codex_session_id=predecessor_codex_id,
+                envelope=post_tool_envelope(predecessor_commitment, "hook:early-predecessor"),
+            )
+        )
+        assert predecessor_first.disposition is ObservationIngestDisposition.ACCEPTED
+        assert calls == []
+        assert (
+            store.codex_session_commitment_for_session(
+                workspace=workspace,
+                yoetz_session_id=current_session_id,
+            )
+            is None
+        )
+
+        current = await coordinator.ingest_request(
+            ObservationIngestRequest(
+                codex_session_id=current_codex_id,
+                envelope=subagent_start_envelope(current_commitment, "hook:current-route"),
+            )
+        )
+        assert current.disposition is ObservationIngestDisposition.ACCEPTED
+        assert calls == [(task, current_session_id, current_writer_id)]
+        assert (
+            store.codex_session_commitment_for_session(
+                workspace=workspace,
+                yoetz_session_id=current_session_id,
+            )
+            == current_commitment
+        )
+
+        # The old host event follows the rewritten mapping to the successor runtime. The local
+        # ended-session authority and the original mapping identity fence must win before route
+        # persistence or lineage liveness can see it.
+        predecessor = await coordinator.ingest_request(
+            ObservationIngestRequest(
+                codex_session_id=predecessor_codex_id,
+                envelope=post_tool_envelope(predecessor_commitment, "hook:late-predecessor-route"),
+            )
+        )
+        assert predecessor.disposition is ObservationIngestDisposition.ACCEPTED
+        assert calls == [(task, current_session_id, current_writer_id)]
+        assert (
+            store.codex_session_commitment_for_session(
+                workspace=workspace,
+                yoetz_session_id=current_session_id,
+            )
+            == current_commitment
+        )
+    finally:
+        coordinator.close()
+        db.close(force=True)
 
 
 @pytest.mark.anyio

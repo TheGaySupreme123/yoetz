@@ -1784,11 +1784,11 @@ async def test_native_ticket_from_unproven_session_cannot_lend_content(
 
 
 @pytest.mark.anyio
-async def test_native_finalize_without_manifest_stays_orphan_on_structural_retry(
+async def test_native_finalize_without_manifest_is_removed_before_structural_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A finalized object without its manifest is never fabricated into captured evidence."""
+    """A finalized object without its manifest is removed before structural retry."""
 
     profile = CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
     marker = b"finalize-before-manifest-native-marker: must stay unavailable"
@@ -1878,10 +1878,7 @@ async def test_native_finalize_without_manifest_stays_orphan_on_structural_retry
     assert failed_capture.disposition is ObservationIngestDisposition.REJECTED
     assert failed_capture.reason == ObservationGapCode.SERVICE_UNAVAILABLE.value
     after_failure_files = object_files()
-    orphan_files = after_failure_files - before_files
-    assert len(orphan_files) == 1
-    orphan = next(iter(orphan_files))
-    assert orphan.is_file()
+    assert after_failure_files - before_files == set()
     assert (
         count_rows(
             observation._db,  # pyright: ignore[reportPrivateUsage]
@@ -1930,13 +1927,6 @@ async def test_native_finalize_without_manifest_stays_orphan_on_structural_retry
                 "SELECT COUNT(*) FROM observation_content_manifests",
             )
             == 0
-        )
-        assert orphan.exists()
-        assert (
-            reopened_db.execute(  # pyright: ignore[reportPrivateUsage]
-                "SELECT 1 FROM objects WHERE object_id=?", (orphan.name,)
-            ).fetchone()
-            is None
         )
 
     finally:

@@ -91,6 +91,33 @@ For a material repair, use one bounded status → repair → check → read → 
 - Observed change with hidden content: record observation without claiming content review.
 - Reviewed targeted content: record only the bounded excerpt and its exact provenance.
 
+## Child dependencies and project advice
+
+A parent receipt evaluates direct children from a manifest recorded in the parent ledger. It
+names the tested manifest and any later recorded manifest the check did not cover. Receipt
+creation never reads children to refresh those facts. Unobserved freshness is `unknown`; a
+preview of live facts does not change a recorded check. Grandchild changes propagate through
+the child's own manifest before reaching its parent, one hop at a time.
+
+Accepted children with unresolved actionable findings prevent clean completion wording. Pending
+children and informational findings annotate. Open work, lost contact, abandonment, write-off,
+cancellation, and missing, unreadable, quarantined, or revoked child data remain named gaps.
+These limits do not prevent an honest incomplete receipt, and they do not prevent an unrelated
+qualifying repair of the parent's own deterministic findings. An issued receipt is immutable:
+later child completion needs a new recorded manifest, qualifying parent check, and new receipt.
+
+A child receipt does not prove incorporation or successful integration. Those outcomes belong
+to the parent's own obligations and evidence. Receipt generation never closes either task.
+Accepted lineage authorizes its bounded lineage channels while retaining each source's
+provenance and restrictions; it does not grant unrelated project or observation authority.
+
+Project `advisory_notes` carry admitted identities and counts only. They are not findings,
+cannot change a check verdict, and disappear when their current membership authority is revoked.
+Coordination findings use the local `coordination/0.1.0` pack over recorded recipient-ledger
+contexts. Explicit disposition evidence addresses the coordination obligation; a later qualifying
+check can resolve the finding even when agreed shared work still overlaps. Coordination context
+does not authorize sending another repository's content to an external semantic provider.
+
 ## Candidate findings are not a check
 
 `status` with `view=candidate_findings` is an advisory read of what local policy packs currently say. Candidates have no verdict, IDs, or receipt and the read records nothing. An empty list means no rule fired at that frontier; it is not `no_issue_detected`.
@@ -265,6 +292,16 @@ or repository decision. After a host denial, cancellation, or approval expiry, t
 AI-powered review dispatch. Continue without AI-powered review only if the user explicitly selects
 that fallback after the limitation is shown; otherwise leave the task pending.
 
+A host hold establishes neither a Yoetz grant nor a Yoetz privacy denial. State that the owner
+already authorized external review only when a current first-hand read confirms the repository
+grant; configured routing alone is not consent. Host tool-call approval remains separate.
+Claude Code's `PermissionDenied` event shows the grant notice to the user through `systemMessage`.
+It does not deliver `additionalContext` to the model. The host may relay a one-retry cue from the
+Yoetz hook; only when higher-priority host instructions permit it, retry the identical check once
+with the same body and request_id, then ask the user if held again. Never retry an explicit human
+denial. The cue alone proves neither the grant nor approval. For a confirmed grant, propose the
+owner's `yoetz integrate <host> admission grant` as a durable fix; never write it yourself.
+
 
 ## When a check is waiting on a local decision
 
@@ -329,7 +366,11 @@ quit instructions apply only to Cursor; use the current host's own continuation 
 
 `awaiting_human` is nonterminal: neither a gap to disclose nor a retry to spend. Follow the exact
 continuation above, including its required user-approval path, before applying terminal recovery
-rules. On a generic `OPERATION_PENDING`, read `status` once with the exact
+rules. A check `OPERATION_PENDING` carrying the `check_admission_same_identity` continuation was
+refused before admission and recorded nothing: wait its `retry_after_ms`, replay the exact body and
+`request_id`, and after three refusals retain and report the check as not admitted rather than
+switching mode or minting a new request. Its operation page reads `absent` with an `admission`
+stage. On a generic `OPERATION_PENDING`, read `status` once with the exact
 `filter.operation_request_id`; replay the same `request_id` only when the typed result or status
 page supplies that exact continuation and its approval has completed. A pending operation without
 such a continuation, or a quarantined/unknown operation, is retained and reported; a complete page
@@ -356,10 +397,10 @@ query.
 | Situation | Required action | Prohibited action |
 | --- | --- | --- |
 | A retryable read timeout or reconnect (`status`, diagnostics, or an operation recovery read) | Retry the same read intent with a new read `request_id`, following the typed result. Preserve the cursor-bound view, filter, frontier, and original `limit`. | Reusing a timed-out read ID as a write, changing page size under a cursor, or treating a missing read as evidence of absence. |
-| Any write has an unknown outcome (`start`, `publish_work`, `check`, `respond`, or `receipt`) | For `start` without returned session/writer ids, use the exact-start branch above. Otherwise read `status view=operation` with `filter.operation_request_id` set to the exact write `request_id`. If it is `absent`, replay the exact original body with that exact `request_id` once; if it is `complete`, use the stored outcome and do not replay; if it is `pending` with an exact typed continuation, follow that continuation and its required approval, then replay the same request once; if it is `pending` without a continuation, `quarantined`, or still unknown, retain and report that boundary. | A fresh request ID, guessed result, new task, sibling created to escape ambiguity, fabricated start identity, or replay without the exact continuation. |
-| A typed `OPERATION_PENDING` result | For a `start` result without returned session/writer ids, use the exact-start branch above. Otherwise read operation status once with the exact operation filter. Perform the same-ID replay only after the typed continuation and required approval complete; if no continuation is supplied or the page remains pending, quarantined, or unknown, stop the write path and preserve/report it. | Blind replay, fabricated start identity, repeated probes, a new task, or a clean completion claim. |
-| An exact held `session_id` is available after session rotation or host handoff | Use `mode=attach` with that `session_id` as the selector; preserve the host's canonical working root for its binding, but do not add a guessed `workspace_ref`/`external_ref` pair. An explicit session-plus-new-pair recovery requires an active, non-quarantined selector with matching workspace and repository binding; unrelated workspace tasks do not block it, while a pair selecting another task remains a conflict. Use the returned successor session/writer and inspect status before continuing. | A bare `task_id`, workspace membership as resume authority, or a guessed sibling. |
-| A fresh host conversation has the same work but no held session | Use `mode=create_or_attach` with the exact canonical `workspace_ref` + `external_ref` pair. The same pair resumes; a different complete pair creates independent work. | A remote URL as workspace identity, an invented task ID, or treating workspace membership as a recovery selector. |
+| Any write has an unknown outcome (`start`, `publish_work`, `check`, `respond`, or `receipt`) | For `start` without returned session/writer ids, use the exact-start branch above. Otherwise read `status view=operation` with `filter.operation_request_id` set to the exact write `request_id`. If it is `absent`, replay the exact original body with that exact `request_id` once (with an `admission` stage, after its `retry_after_ms`, at most three times); if it is `complete`, use the stored outcome and do not replay; if it is `pending` with an exact typed continuation, follow that continuation and its required approval, then replay the same request once; if it is `pending` without a continuation, `quarantined`, or still unknown, retain and report that boundary. | A fresh request ID, guessed result, new task, sibling created to escape ambiguity, fabricated start identity, or replay without the exact continuation. |
+| A typed `OPERATION_PENDING` result | For a `start` result without returned session/writer ids, use the exact-start branch above. For the `check_admission_same_identity` continuation, replay the exact check after `retry_after_ms`, at most three times, then report it as not admitted. Otherwise read operation status once with the exact operation filter. Perform the same-ID replay only after the typed continuation and required approval complete; if no continuation is supplied or the page remains pending, quarantined, or unknown, stop the write path and preserve/report it. | Blind replay, fabricated start identity, repeated probes, a new task, or a clean completion claim. |
+| An exact held `session_id` is available after session rotation or host handoff | Use `mode=attach` with that `session_id` as the selector; preserve the host's canonical working root for its binding, but do not add a guessed `workspace_ref`/`external_ref` pair. An explicit session-plus-new-pair recovery requires an active, non-quarantined root-task selector with matching workspace and repository binding; unrelated workspace tasks do not block it, while a pair selecting another task remains a conflict. Delegated child routes require an authenticated attach handle or target selector. Use the returned successor session/writer and inspect status before continuing. | A bare `task_id`, workspace membership as resume authority, or a guessed sibling. |
+| A fresh host conversation has the same work but no held session | Use `mode=create_or_attach` with the exact canonical `workspace_ref` + `external_ref` pair. | A remote URL as workspace identity, an invented task ID, or an implicit second task. |
 | Same-task pair/session recovery is exhausted, every prior write has a known terminal outcome, and the user declares a remaining or repaired verification scope | On one healthy, authorized binding, start one intentional sibling with `mode=create`, the same canonical workspace, and a different stable `external_ref`. Give it a fresh plan naming only that scope and establish its native host mapping from the returned session/task. | Silently replacing the task, inheriting old findings/obligations/evidence, reusing cross-task evidence IDs without a contract, or inventing lineage fields. |
 | Recovery is exhausted but no new scope is declared, or a sibling would only make the old receipt look clean | Keep the old receipt, findings, obligations, and limitations; report the bounded failure and wait for a supported continuation decision. | Creating an unbounded task sequence or presenting a sibling as whole-work closure. |
 | The current ledger has immutable proof limits and a fresh review of repaired/current state is wanted | Use one explicitly scoped verification sibling only after known outcomes and on a healthy authorized binding. Publish its current-state plan, new evidence, and checks; disclose the predecessor receipt's unresolved limits. | Repeating work only to obtain a smaller count, dropping acceptance criteria, or claiming the sibling resolved the predecessor. |

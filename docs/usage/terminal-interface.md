@@ -112,11 +112,13 @@ Type `/` to open the filtered command list.
 | `/status` | show setup, readiness, and current work |
 | `/work` | open a task by title to view claims, evidence, and findings |
 | `/check` | run a verification check |
+| `/progress` | show the latest check's review phase and elapsed time |
 | `/receipt` | view or export an honest receipt |
 | `/connect` | connect or repair an agent integration |
 | `/privacy` | choose what may leave this computer |
 | `/provider` | configure optional deeper review |
 | `/service` | manage the protected local service |
+| `/observe` | show observation selection and change local retention capacity |
 | `/doctor` | diagnose installation problems |
 | `/help` | show what Yoetz can do here |
 | `/quit` | leave Yoetz |
@@ -206,8 +208,8 @@ key or opening Codex login, and states plainly that storing a binding does not s
 review on.
 
 API-provider keys are entered through the secure prompt described under *Secrets* below. For a
-subscription, `/provider` asks for the exact Codex executable, dedicated evaluator home, model, and
-reasoning effort; validates the supported digest-bound cell; shows destination, plan/terms notice,
+subscription, `/provider` asks for the exact Codex executable, dedicated evaluator home, model,
+final-review reasoning effort, and routine-checkpoint reasoning effort; validates the supported digest-bound cell; shows destination, plan/terms notice,
 privacy boundary, disconnect, rollback, and optional account switch; then suspends the UI while
 Codex proves the existing sign-in or, when the home is not signed in, runs its browser flow. The
 result says which of the two happened. OAuth credentials never pass through a widget or Yoetz
@@ -241,7 +243,11 @@ invent one — so tasks are reached by name.
 
 `/check` offers three modes, mapping to the existing check modes: use deeper review when
 available, require deeper review, or local checks only. An unavailable deeper
-review is reported as a limitation, never as a success.
+review is reported as a limitation, never as a success. While a check with deeper review is
+running, its line shows the review phase, attempt, elapsed time, and time left before the fixed
+deadline, refreshed every few seconds. `/progress` reads the latest check of the open task again,
+including after the result arrives. Progress names phases only; it is not evidence that the
+review is correct.
 
 `/receipt` produces Markdown, plain text, or JSON. The readable view leads with the verdict, then
 coverage, open findings, limitations, whether deeper review contributed, freshness, and — always
@@ -264,6 +270,25 @@ next steps. When policy permits package update checks and a newer release is
 known, the package line is optional with remediation `uv tool upgrade yoetz`; when the check is
 allowed but fails, the line is unproven with "could not check for updates." **It never changes
 anything.**
+
+### `/observe`
+
+`/observe` shows the selected and effective observation detail and capacity for the current
+workspace, the effective budget (which limit is closest to full), and whether No Yoetz cap is
+available. It then asks **Change local retention capacity?** with the cursor on keeping the
+current setting. The other options are recommended (512), larger (2,048), largest (8,192), custom
+(type a queue count from 64 to 8,192), and No Yoetz cap. A choice changes the workspace default and
+keeps the current detail mode.
+
+Before anything changes, `/observe` shows the current and proposed values, the scope, the possible
+disk, memory, and CPU cost, what stays limited, and how to lower it, pause new observation ingest,
+and resume it, then asks you to apply or cancel. An increase also says that the shared workspace
+queue follows the largest active selection, so it can raise the queue and state-document bounds for
+every session in the workspace. The commands it shows use `<workspace>` and `<session-id>`
+placeholders rather than your typed path. Cancelling or `Esc` changes nothing and says so. No Yoetz
+cap is not available for this queue: choosing it explains the 16 MiB state-document ceiling, names
+the largest supported capacity, and changes nothing. See [Observation
+selection](observation-selection.md) for the limits and the equivalent `yoetz observe` commands.
 
 ## Secrets
 

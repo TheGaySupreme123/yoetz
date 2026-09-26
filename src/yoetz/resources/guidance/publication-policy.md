@@ -184,8 +184,9 @@ returned `session_id` and `writer_id` on later calls. A `publish_work` preview u
 and the same `request_id` for the real append. A timeout or unknown write outcome uses the exact
 start replay branch below when it is a `start` response without route ids; otherwise use `status
 view=operation` with `filter.operation_request_id` set to the exact write request ID:
-`absent` permits one replay of the exact original body and request ID, `complete` uses the stored
-outcome without replay, and `pending` permits replay only after an exact typed continuation and
+`absent` permits one replay of the exact original body and request ID (an `absent` check page with
+an `admission` stage was refused before admission: replay after its `retry_after_ms`, at most three
+times), `complete` uses the stored outcome without replay, and `pending` permits replay only after an exact typed continuation and
 its required approval complete. A pending operation without a continuation, `quarantined`, or an
 unknown state is retained and reported rather than guessed.
 
@@ -361,7 +362,25 @@ The service independently stamps `accepted_at` on acceptance. Both values are du
 
 ## Multi-agent work
 
-Publish bounded assignments and preserve each delegate's logical writer identity. Treat delegate summaries as claims. Link their accepted evidence separately and record a decision when resolving a contradiction.
+Publish bounded assignments in the parent task, and let each child publish with its own returned
+session and writer in its own task. Pass the complete `attach_handle` privately to the intended
+child; never publish it as evidence or structural prose. Treat delegate summaries as claims. Link
+their accepted evidence separately and record a decision when resolving a contradiction.
+
+`child_accepted`, `child_rejected`, `child_written_off`, and `delegation_cancelled` target a direct
+child from the parent. `work_closed`, `work_cancelled`, and `work_written_off` describe the current
+task. These are ordinary `publish_work` events; keep mutually exclusive transitions in separate
+requests. Service facts such as `delegation_declared`, `work_abandoned`,
+`child_dependencies_recorded`, and `coordination_context_recorded` are not ordinary publication
+authority, even if an actor field or payload claims to be the service.
+
+An overlap notice or ordinary file obligation alone declares no coordination obligation. Publish
+the obligation and an explicit `coordination_obligation_declared` event binding its real ID to the
+admitted detection, project, recipient task, and current membership generation. Then record
+that same binding and evidence in
+`coordination_disposition_recorded`. Choose `shared_work`, `sequencing`, or `scope_revision` to
+record the agreed remedy. An acknowledgement through `respond` is only a finding response;
+it does not supply the coordination remedy or resolve a finding. Recheck the repaired record.
 
 ## Forbidden content
 

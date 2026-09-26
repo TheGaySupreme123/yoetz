@@ -174,11 +174,12 @@ def _version_manifest_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
             "version_schema_template_invalid", entries=(entry.relative_path,)
         ) from exc
 
-    # Bootstrap the new inventory from its frozen predecessor; the resource ripple
-    # then binds the enlarged inventory and regenerates the final cardinalities.
+    # Bootstrap a newly versioned inventory schema from the released predecessor. The
+    # owning ripple mirrors the enlarged inventory, then rebuilds this schema in the same
+    # pass and verifies a fixed point before reporting success.
     destination = source.parents[1] / entry.relative_path
-    if entry.schema_version == "2.2.4" and not destination.exists():
-        document = _load_versioned_template(entry, "version/version-manifest-2.2.3.schema.json")
+    if entry.schema_version == "2.3.0" and not destination.exists():
+        document = _load_versioned_template(entry, "version/version-manifest-2.2.4.schema.json")
         cast(dict[str, JsonValue], document["properties"])["schema_version"] = {
             "const": entry.schema_version
         }
@@ -240,6 +241,7 @@ def _version_manifest_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
     document["title"] = f"Yoetz version manifest {entry.schema_version}"
     properties["schema_version"] = {"const": entry.schema_version}
+    properties["policy_versions"] = {"const": list(manifest.policy_versions)}
     for field_name in (
         "application_id",
         "bundle_schema_version",
@@ -1382,22 +1384,1668 @@ def _control_result_v2_6_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]
     return document
 
 
-def _receipt_document_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
-    """Add optional applicable AI-powered review provenance to the current receipt document."""
+def _finding_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Add the coordination finding and policy identity to the current finding reader."""
 
     document = _simple_versioned_schema(
         entry,
-        "receipts/receipt-document-1.1.0.schema.json",
-        {
-            "finding-1.1.0": "finding-1.2.0",
-            "semantic-provenance-1.1.0": "semantic-provenance-1.2.0",
+        "findings/finding-1.2.0.schema.json",
+        {"semantic-provenance-1.1.0": "semantic-provenance-1.1.0"},
+    )
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+    finding_kind = cast(dict[str, JsonValue], definitions["finding_kind"])
+    enum_values = cast(list[JsonValue], finding_kind["enum"])
+    if "coordination_overlap" not in enum_values:
+        enum_values.append("coordination_overlap")
+        enum_values.sort(key=lambda item: str(item).encode("ascii"))
+    priority = {
+        "properties": {
+            "kind": {"const": "coordination_overlap"},
+            "priority": {"const": 2},
         },
+        "required": ["kind", "priority"],
+    }
+    branches = cast(list[JsonValue], cast(list[JsonValue], document["allOf"])[1]["oneOf"])
+    if priority not in branches:
+        branches.append(priority)
+    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    document["title"] = f"Yoetz finding {entry.schema_version}"
+    return document
+
+
+def _check_request_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Allow the dedicated coordination deterministic policy in the current check request."""
+
+    document = _load_versioned_template(entry, "operations/check-request-1.0.0.schema.json")
+    properties = cast(dict[str, JsonValue], document["properties"])
+    policy_packs = cast(dict[str, JsonValue], properties["policy_packs"])
+    items = cast(dict[str, JsonValue], policy_packs["items"])
+    enum_values = cast(list[JsonValue], items["enum"])
+    if "coordination/0.1.0" not in enum_values:
+        enum_values.append("coordination/0.1.0")
+        enum_values.sort(key=lambda item: str(item).encode("ascii"))
+    policy_packs["maxItems"] = 3
+    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    document["title"] = f"Yoetz check request {entry.schema_version}"
+    return document
+
+
+_LINEAGE_ID_PATTERNS: Final[Mapping[str, str]] = {
+    "task_id": r"^tsk_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    "event_id": r"^evt_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    "receipt_id": r"^rcp_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    "finding_id": r"^fnd_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    "project_id": r"^prj_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+}
+_LINEAGE_UINT_PATTERN: Final = r"^(?:0|[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[0-1][0-9]{17}|92[0-1][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[0-1][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-6]|9223372036854775807)$"
+_LINEAGE_POSITIVE_UINT_PATTERN: Final = _LINEAGE_UINT_PATTERN.replace(r"(?:0|", r"(?:")
+
+
+def _lineage_id_schema(kind: str) -> dict[str, JsonValue]:
+    return {"pattern": _LINEAGE_ID_PATTERNS[kind], "type": "string"}
+
+
+def _lineage_frontier_schema() -> dict[str, JsonValue]:
+    return {"$ref": SCHEMA_NAMESPACE + "common/frontier-1.0.0.schema.json"}
+
+
+def _lineage_enum_schema(values: Sequence[str]) -> dict[str, JsonValue]:
+    return {"enum": list(values), "type": "string"}
+
+
+def _lineage_vocabulary_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Build one shared closed lineage vocabulary schema."""
+
+    values: Mapping[str, tuple[str, ...]] = {
+        "work-state": ("open", "closed", "cancelled", "abandoned", "written_off"),
+        "session-health": ("active", "contact_lost", "ended"),
+        "lineage-origin": ("parent_minted", "self_registered", "host_observed"),
+        "lineage-acceptance": ("pending", "accepted", "rejected"),
+    }
+    try:
+        enum_values = values[entry.schema_name]
+    except KeyError as exc:
+        raise SchemaGenerationError(
+            "lineage_vocabulary_unknown", entries=(entry.relative_path,)
+        ) from exc
+    return _normalize({"enum": list(enum_values), "type": "string"}, entry)
+
+
+def _lineage_child_finding_schema() -> dict[str, JsonValue]:
+    traits = {
+        "completion_with_open_obligations": (1, True),
+        "requested_item_never_attempted": (2, True),
+        "failed_work_omitted": (1, True),
+        "claim_without_admissible_evidence": (1, True),
+        "result_without_action": (2, True),
+        "action_without_result": (3, True),
+        "stale_evidence_for_changed_state": (2, True),
+        "contradictory_claims_unresolved": (1, True),
+        "ledger_stale_or_incomplete": (3, False),
+        "weak_or_stale_response": (2, True),
+        "evidence_does_not_support_claim": (1, True),
+        "diff_does_not_match_account": (1, True),
+        "material_limitation_omitted": (1, True),
+        "questionable_finding_rejection": (2, True),
+        "coordination_overlap": (2, True),
+    }
+    return {
+        "additionalProperties": False,
+        "allOf": [
+            *(
+                {
+                    "if": {
+                        "properties": {"kind": {"const": kind}},
+                        "required": ["kind"],
+                    },
+                    "then": {
+                        "properties": {
+                            "actionable": {"const": actionable},
+                            "priority": {"const": priority},
+                        }
+                    },
+                }
+                for kind, (priority, actionable) in traits.items()
+            ),
+            {
+                "if": {"properties": {"resolved": {"const": True}}, "required": ["resolved"]},
+                "then": {
+                    "properties": {"resolution_event_id": _lineage_id_schema("event_id")},
+                    "required": ["resolution_event_id"],
+                },
+            },
+            {
+                "if": {"required": ["resolution_event_id"]},
+                "then": {"properties": {"resolved": {"const": True}}},
+            },
+        ],
+        "properties": {
+            "actionable": {"type": "boolean"},
+            "finding_id": _lineage_id_schema("finding_id"),
+            "kind": _lineage_enum_schema(
+                [
+                    "action_without_result",
+                    "claim_without_admissible_evidence",
+                    "coordination_overlap",
+                    "completion_with_open_obligations",
+                    "contradictory_claims_unresolved",
+                    "diff_does_not_match_account",
+                    "evidence_does_not_support_claim",
+                    "failed_work_omitted",
+                    "ledger_stale_or_incomplete",
+                    "material_limitation_omitted",
+                    "questionable_finding_rejection",
+                    "requested_item_never_attempted",
+                    "result_without_action",
+                    "stale_evidence_for_changed_state",
+                    "weak_or_stale_response",
+                ]
+            ),
+            "origin": _lineage_enum_schema(["deterministic", "semantic_model_derived"]),
+            "priority": {"maximum": 3, "minimum": 1, "type": "integer"},
+            "resolution_event_id": {"oneOf": [_lineage_id_schema("event_id"), {"type": "null"}]},
+            "resolved": {"type": "boolean"},
+        },
+        "required": [
+            "actionable",
+            "finding_id",
+            "kind",
+            "origin",
+            "priority",
+            "resolved",
+        ],
+        "type": "object",
+    }
+
+
+def _lineage_child_snapshot_schema() -> dict[str, JsonValue]:
+    gap_schema = _lineage_enum_schema(
+        ["missing", "not_authorized", "quarantined", "revoked", "unknown", "unreadable"]
+    )
+    restriction_schema = _lineage_enum_schema(
+        [
+            "authorization_missing",
+            "category_restricted",
+            "minimization",
+            "never_send",
+            "task_scope",
+        ]
+    )
+    frontier_or_null: dict[str, JsonValue] = {
+        "oneOf": [_lineage_frontier_schema(), {"type": "null"}]
+    }
+    properties: dict[str, JsonValue] = {
+        "acceptance": _lineage_enum_schema(["accepted", "pending", "rejected"]),
+        "child_check_id": {"oneOf": [_lineage_id_schema("event_id"), {"type": "null"}]},
+        "child_check_subject_frontier": frontier_or_null,
+        "child_frontier": frontier_or_null,
+        "child_receipt_id": {"oneOf": [_lineage_id_schema("receipt_id"), {"type": "null"}]},
+        "child_task_id": _lineage_id_schema("task_id"),
+        "coverage": {"$ref": SCHEMA_NAMESPACE + "common/coverage-1.0.0.schema.json"},
+        "findings": {
+            "items": {"$ref": "#/$defs/child_finding"},
+            "maxItems": 100,
+            "type": "array",
+            "uniqueItems": True,
+        },
+        "lineage_authority_revision": {
+            "maxLength": 19,
+            "pattern": _LINEAGE_POSITIVE_UINT_PATTERN,
+            "type": "string",
+        },
+        "membership_generation": {
+            "oneOf": [
+                {"maxLength": 19, "pattern": _LINEAGE_POSITIVE_UINT_PATTERN, "type": "string"},
+                {"type": "null"},
+            ]
+        },
+        "origin": _lineage_enum_schema(["host_observed", "parent_minted", "self_registered"]),
+        "provenance_restrictions": {
+            "items": restriction_schema,
+            "maxItems": 5,
+            "type": "array",
+            "uniqueItems": True,
+        },
+        "read_gap_reasons": {
+            "items": gap_schema,
+            "maxItems": 6,
+            "type": "array",
+            "uniqueItems": True,
+        },
+        "session_health": _lineage_enum_schema(["active", "contact_lost", "ended"]),
+        "work_state": _lineage_enum_schema(
+            ["abandoned", "cancelled", "closed", "open", "written_off"]
+        ),
+    }
+    return {
+        "additionalProperties": False,
+        "oneOf": [
+            {
+                "not": {
+                    "properties": {"read_gap_reasons": {"minItems": 1}},
+                    "required": ["read_gap_reasons"],
+                },
+                "properties": {"child_frontier": {"type": "object"}},
+                "required": ["child_frontier"],
+            },
+            {
+                "properties": {
+                    "child_frontier": {"type": "null"},
+                    "read_gap_reasons": {"minItems": 1},
+                },
+                "required": ["read_gap_reasons"],
+            },
+        ],
+        "allOf": [
+            {
+                "if": {"required": ["child_check_id"]},
+                "then": {"required": ["child_check_subject_frontier"]},
+            },
+            {
+                "if": {"required": ["child_check_subject_frontier"]},
+                "then": {"required": ["child_check_id"]},
+            },
+        ],
+        "properties": properties,
+        "required": [
+            "acceptance",
+            "child_task_id",
+            "coverage",
+            "findings",
+            "lineage_authority_revision",
+            "origin",
+            "session_health",
+            "work_state",
+        ],
+        "type": "object",
+    }
+
+
+def _lineage_event_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Build closed event payload schemas for delegation, lifecycle, and frozen manifests."""
+
+    name = entry.schema_name
+    if name == "child-dependencies-recorded":
+        raw: dict[str, object] = {
+            "$defs": {
+                "child_finding": _lineage_child_finding_schema(),
+                "child_snapshot": _lineage_child_snapshot_schema(),
+            },
+            "additionalProperties": False,
+            "properties": {
+                "children": {
+                    "items": {"$ref": "#/$defs/child_snapshot"},
+                    "maxItems": 100,
+                    "type": "array",
+                    "uniqueItems": True,
+                }
+            },
+            "required": ["children"],
+            "type": "object",
+        }
+        return _normalize(raw, entry)
+
+    child_id = _lineage_id_schema("task_id")
+    reason = {
+        "maxLength": 256,
+        "minLength": 1,
+        "pattern": r"^[A-Za-z0-9][A-Za-z0-9._:/+\-]*$",
+        "type": "string",
+    }
+    properties: dict[str, object] = {}
+    required: list[str] = []
+    if name == "delegation-declared":
+        properties = {
+            "child_task_id": child_id,
+            "depth": {"maximum": 64, "minimum": 1, "type": "integer"},
+            "handle_digest": {
+                "maxLength": 71,
+                "minLength": 71,
+                "pattern": r"^sha256:[0-9a-f]{64}$",
+                "type": "string",
+            },
+            "membership_generation": {
+                "maxLength": 19,
+                "minLength": 1,
+                "pattern": _LINEAGE_POSITIVE_UINT_PATTERN,
+                "type": "string",
+            },
+            "project_id": _lineage_id_schema("project_id"),
+        }
+        required = ["child_task_id", "depth", "handle_digest"]
+    elif name in {"delegation-cancelled", "child-rejected", "child-written-off"}:
+        properties = {"child_task_id": child_id, "reason_code": reason}
+        required = ["child_task_id"]
+    elif name == "child-accepted":
+        properties = {"child_task_id": child_id}
+        required = ["child_task_id"]
+    elif name in {"work-closed", "work-cancelled", "work-written-off"}:
+        properties = {"reason_code": reason}
+    elif name == "work-abandoned":
+        properties = {"reason_code": reason, "service_stamped": {"const": True, "type": "boolean"}}
+        required = ["service_stamped"]
+    else:
+        raise SchemaGenerationError("lineage_event_schema_unknown", entries=(entry.relative_path,))
+    raw = {
+        "additionalProperties": False,
+        "properties": properties,
+        "required": required,
+        "type": "object",
+    }
+    if name == "delegation-declared":
+        raw["allOf"] = [
+            {
+                "if": {
+                    "anyOf": [
+                        {"required": ["membership_generation"]},
+                        {"required": ["project_id"]},
+                    ]
+                },
+                "then": {"required": ["membership_generation", "project_id"]},
+            }
+        ]
+    return _normalize(raw, entry)
+
+
+def _coordination_event_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Build closed structural payloads for service context and typed dispositions."""
+
+    event_id = _lineage_id_schema("event_id")
+    task_id = _lineage_id_schema("task_id")
+    project_id = {
+        "pattern": r"^prj_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+        "type": "string",
+    }
+    obligation_id = {
+        "pattern": r"^obl_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+        "type": "string",
+    }
+    finding_id = _lineage_id_schema("finding_id")
+    sha256 = {"pattern": r"^sha256:[0-9a-f]{64}$", "type": "string"}
+    commitment = {"pattern": r"^hmac-sha256:[0-9a-f]{64}$", "type": "string"}
+    positive = {
+        "maxLength": 19,
+        "minLength": 1,
+        "pattern": _LINEAGE_POSITIVE_UINT_PATTERN,
+        "type": "string",
+    }
+    canonical = {
+        "maxLength": 19,
+        "minLength": 1,
+        "pattern": _LINEAGE_UINT_PATTERN,
+        "type": "string",
+    }
+    text_ref = {
+        "additionalProperties": False,
+        "properties": {
+            "content_digest": sha256,
+            "envelope_digest": sha256,
+            "object_id": {
+                "pattern": r"^obj_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                "type": "string",
+            },
+            "owner_task_id": task_id,
+            "plaintext_size": {"maximum": 4194304, "minimum": 0, "type": "integer"},
+            "route_generation": positive,
+        },
+        "required": [
+            "content_digest",
+            "object_id",
+            "owner_task_id",
+            "plaintext_size",
+            "route_generation",
+        ],
+        "type": "object",
+    }
+    if entry.schema_name == "coordination-context-recorded":
+        raw = {
+            "additionalProperties": False,
+            "properties": {
+                "context_digest": sha256,
+                "counterpart_task_id": task_id,
+                "detection_id": event_id,
+                "detail_ref": text_ref,
+                "gap_codes": {
+                    "items": {
+                        "enum": [
+                            "details_truncated",
+                            "not_observable",
+                            "revoked",
+                            "source_unavailable",
+                        ],
+                        "type": "string",
+                    },
+                    "maxItems": 4,
+                    "type": "array",
+                    "uniqueItems": True,
+                },
+                "left_task_id": task_id,
+                "membership_generation": positive,
+                "overlap_kind": {"enum": ["integration", "physical", "plan"], "type": "string"},
+                "project_id": project_id,
+                "recorded_authority_revision": sha256,
+                "recipient_task_id": task_id,
+                "resource_count": canonical,
+                "resource_identities": {
+                    "items": sha256,
+                    "maxItems": 64,
+                    "type": "array",
+                    "uniqueItems": True,
+                },
+                "right_task_id": task_id,
+                "source_attributable_paths": {"type": "boolean"},
+                "source_repository_commitment": commitment,
+                "source_route_generation": positive,
+                "source_task_id": task_id,
+                "source_workspace_commitment": commitment,
+            },
+            "required": [
+                "context_digest",
+                "counterpart_task_id",
+                "detection_id",
+                "left_task_id",
+                "membership_generation",
+                "overlap_kind",
+                "project_id",
+                "recipient_task_id",
+                "resource_count",
+                "resource_identities",
+                "right_task_id",
+                "source_attributable_paths",
+                "source_repository_commitment",
+                "source_route_generation",
+                "source_task_id",
+                "source_workspace_commitment",
+            ],
+            "type": "object",
+        }
+    elif entry.schema_name == "coordination-obligation-declared":
+        raw = {
+            "additionalProperties": False,
+            "properties": {
+                "detection_id": event_id,
+                "membership_generation": positive,
+                "obligation_id": obligation_id,
+                "project_id": project_id,
+                "recipient_task_id": task_id,
+            },
+            "required": [
+                "detection_id",
+                "membership_generation",
+                "obligation_id",
+                "project_id",
+                "recipient_task_id",
+            ],
+            "type": "object",
+        }
+    elif entry.schema_name == "coordination-disposition-recorded":
+        raw = {
+            "additionalProperties": False,
+            "properties": {
+                "context_digest": sha256,
+                "detection_id": event_id,
+                "disposition": {
+                    "enum": ["scope_revision", "sequencing", "shared_work"],
+                    "type": "string",
+                },
+                "evidence_refs": {
+                    "items": {
+                        "pattern": r"^(?:evd|res)_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                        "type": "string",
+                    },
+                    "maxItems": 64,
+                    "minItems": 1,
+                    "type": "array",
+                    "uniqueItems": True,
+                },
+                "finding_id": finding_id,
+                "membership_generation": positive,
+                "obligation_id": obligation_id,
+                "project_id": project_id,
+                "recipient_task_id": task_id,
+            },
+            "required": [
+                "detection_id",
+                "disposition",
+                "evidence_refs",
+                "membership_generation",
+                "obligation_id",
+                "project_id",
+                "recipient_task_id",
+            ],
+            "type": "object",
+        }
+    else:
+        raise SchemaGenerationError(
+            "coordination_event_schema_unknown", entries=(entry.relative_path,)
+        )
+    return _normalize(raw, entry)
+
+
+def _lineage_session_opened_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    document = _load_versioned_template(
+        entry,
+        "events/session-opened-1.1.0.schema.json",
     )
     properties = cast(dict[str, JsonValue], document["properties"])
-    properties["semantic_provenance"] = {
-        "$ref": f"{SCHEMA_NAMESPACE}findings/semantic-provenance-1.2.0.schema.json"
+    properties.update(
+        {
+            "depth": {"maximum": 64, "minimum": 1, "type": "integer"},
+            "origin": _lineage_enum_schema(["host_observed", "parent_minted", "self_registered"]),
+            "parent_task_id": _lineage_id_schema("task_id"),
+            "membership_generation": {
+                "maxLength": 19,
+                "minLength": 1,
+                "pattern": _LINEAGE_POSITIVE_UINT_PATTERN,
+                "type": "string",
+            },
+            "project_id": _lineage_id_schema("project_id"),
+        }
+    )
+    all_of = cast(list[JsonValue], document.setdefault("allOf", []))
+    all_of.append(
+        {
+            "if": {
+                "anyOf": [
+                    {"required": ["depth"]},
+                    {"required": ["origin"]},
+                    {"required": ["parent_task_id"]},
+                ]
+            },
+            "then": {"required": ["depth", "origin", "parent_task_id"]},
+        }
+    )
+    all_of.append(
+        {
+            "if": {
+                "anyOf": [
+                    {"required": ["membership_generation"]},
+                    {"required": ["project_id"]},
+                ]
+            },
+            "then": {"required": ["membership_generation", "project_id"]},
+        }
+    )
+    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    document["title"] = f"Yoetz session opened {entry.schema_version}"
+    return cast(dict[str, JsonValue], document)
+
+
+def _start_request_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Add delegation, self-registration, and host correlation to ``start``."""
+
+    document = _load_versioned_template(entry, "operations/start-request-1.0.0.schema.json")
+    definitions = cast(dict[str, JsonValue], document.setdefault("$defs", {}))
+    definitions.update(
+        {
+            "attach_handle": {
+                "additionalProperties": False,
+                "properties": {
+                    "child_task_id": _lineage_id_schema("task_id"),
+                    "expires_at": {
+                        "format": "date-time",
+                        "pattern": r"^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\.[0-9]{3}Z$",
+                        "type": "string",
+                    },
+                    "handle": {
+                        "maxLength": 256,
+                        "minLength": 32,
+                        "pattern": r"^[A-Za-z0-9][A-Za-z0-9._:/+\-]*$",
+                        "type": "string",
+                    },
+                },
+                "required": ["child_task_id", "expires_at", "handle"],
+                "type": "object",
+            },
+            "host_correlation": {
+                "maxLength": 256,
+                "minLength": 1,
+                "pattern": r"^[A-Za-z0-9][A-Za-z0-9._:/+\-]*$",
+                "type": "string",
+            },
+            "task_id": _lineage_id_schema("task_id"),
+        }
+    )
+    properties = cast(dict[str, JsonValue], document["properties"])
+    properties.update(
+        {
+            "attach_handle": {"$ref": "#/$defs/attach_handle"},
+            "correlation_id": {"$ref": "#/$defs/host_correlation"},
+            "mode": {"enum": ["attach", "create", "create_or_attach", "delegate"]},
+            "parent_session_id": {"$ref": "#/$defs/session_id"},
+            "parent_tool_call_id": {"$ref": "#/$defs/host_correlation"},
+            "session_id": {"$ref": "#/$defs/session_id"},
+            "subagent_id": {"$ref": "#/$defs/host_correlation"},
+        }
+    )
+    rules = cast(list[JsonValue], document.setdefault("allOf", []))
+    for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+        condition = rule.get("if")
+        then = rule.get("then")
+        if not isinstance(condition, dict) or not isinstance(then, dict):
+            continue
+        condition_properties = condition.get("properties")
+        if not isinstance(condition_properties, dict):
+            continue
+        mode = condition_properties.get("mode")
+        if isinstance(mode, dict) and mode.get("const") == "attach":
+            any_of = cast(dict[str, JsonValue], then).get("anyOf")
+            if isinstance(any_of, list):
+                any_of.append({"required": ["attach_handle"]})
+            break
+    rules.extend(
+        [
+            {
+                "if": {"properties": {"mode": {"const": "delegate"}}, "required": ["mode"]},
+                "then": {
+                    "required": ["session_id"],
+                    "not": {
+                        "anyOf": [
+                            {"required": ["parent_session_id"]},
+                            {"required": ["attach_handle"]},
+                        ]
+                    },
+                },
+            },
+            {
+                "if": {"required": ["attach_handle"]},
+                "then": {"properties": {"mode": {"const": "attach"}}},
+            },
+            {
+                "if": {"required": ["parent_session_id"]},
+                "then": {"properties": {"mode": {"enum": ["create", "create_or_attach"]}}},
+            },
+        ]
+    )
+    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    document["title"] = f"Yoetz start request {entry.schema_version}"
+    return cast(dict[str, JsonValue], document)
+
+
+def _start_result_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Extend the reviewed start result with the delegated-child return contract."""
+
+    predecessor = _RegistryEntry(
+        "operations/start-result-1.0.0.schema.json",
+        "start-result",
+        "1.0.0",
+        "request_result",
+        "MCP output",
+        entry.loader,
+    )
+    document = _start_result_schema(predecessor)
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+    success = cast(dict[str, JsonValue], definitions["success"])
+    properties = cast(dict[str, JsonValue], success["properties"])
+    properties.update(
+        {
+            "acceptance": {"enum": ["accepted", "pending", "rejected"]},
+            "attach_handle": {"$ref": "#/$defs/attach_handle"},
+            "depth": {
+                "oneOf": [
+                    {
+                        "maxLength": 19,
+                        "minLength": 1,
+                        "pattern": _LINEAGE_POSITIVE_UINT_PATTERN,
+                        "type": "string",
+                    },
+                    {"type": "null"},
+                ]
+            },
+            "origin": {"enum": ["host_observed", "parent_minted", "self_registered"]},
+            "parent_task_id": {"oneOf": [_lineage_id_schema("task_id"), {"type": "null"}]},
+        }
+    )
+    outcome = cast(dict[str, JsonValue], properties["outcome"])
+    outcome["enum"] = ["attached", "created", "delegated", "replayed"]
+    # The additive fields are omitted for ordinary create/attach results and therefore remain
+    # optional at the top level.  Their delegated branch is made complete below.
+    success.setdefault("allOf", [])
+    cast(list[JsonValue], success["allOf"]).extend(
+        [
+            {
+                "if": {
+                    "anyOf": [
+                        {"required": ["acceptance"]},
+                        {"required": ["depth"]},
+                        {"required": ["origin"]},
+                        {"required": ["parent_task_id"]},
+                    ]
+                },
+                "then": {"required": ["acceptance", "depth", "origin", "parent_task_id"]},
+            },
+            {
+                "if": {"properties": {"outcome": {"const": "delegated"}}, "required": ["outcome"]},
+                "then": {
+                    "properties": {
+                        "acceptance": {"const": "accepted"},
+                        "origin": {"const": "parent_minted"},
+                    },
+                    "required": [
+                        "acceptance",
+                        "attach_handle",
+                        "depth",
+                        "origin",
+                        "parent_task_id",
+                    ],
+                },
+            },
+            {
+                "if": {"required": ["attach_handle"]},
+                "then": {"properties": {"outcome": {"const": "delegated"}}},
+            },
+        ]
+    )
+    definitions["attach_handle"] = {
+        "additionalProperties": False,
+        "properties": {
+            "child_task_id": _lineage_id_schema("task_id"),
+            "expires_at": {
+                "format": "date-time",
+                "pattern": r"^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\.[0-9]{3}Z$",
+                "type": "string",
+            },
+            "handle": {
+                "maxLength": 256,
+                "minLength": 32,
+                "pattern": r"^[A-Za-z0-9][A-Za-z0-9._:/+\-]*$",
+                "type": "string",
+            },
+        },
+        "required": ["child_task_id", "expires_at", "handle"],
+        "type": "object",
     }
+    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    document["title"] = f"Yoetz start result {entry.schema_version}"
     return document
+
+
+def _check_result_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Add the frozen child preview and advisory coordination branches to ``check``."""
+
+    document = _load_versioned_template(
+        entry,
+        "operations/check-result-1.2.0.schema.json",
+    )
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+    binding = cast(dict[str, JsonValue], definitions["semantic_binding"])
+    for branch in cast(list[JsonValue], binding["oneOf"]):
+        if not isinstance(branch, dict):
+            continue
+        branch_properties = branch.get("properties")
+        branch_required = branch.get("required")
+        if not isinstance(branch_properties, dict) or not isinstance(branch_required, list):
+            continue
+        provenance_shape = branch_properties.get("semantic_provenance")
+        # The current result serializer omits nullable provenance for outcomes where no semantic
+        # evidence is required.  Keep the required field on provenance-bearing branches, while
+        # allowing omission on null-only and failed/coordinator branches.
+        if isinstance(provenance_shape, dict):
+            if provenance_shape.get("type") == "null" or "oneOf" in provenance_shape:
+                branch_required[:] = [
+                    item for item in branch_required if item != "semantic_provenance"
+                ]
+    definitions["code"] = {
+        "maxLength": 128,
+        "pattern": r"^[a-z][a-z0-9_]{0,127}$",
+        "type": "string",
+    }
+    frontier_ref = SCHEMA_NAMESPACE + "common/frontier-1.0.0.schema.json"
+    definitions["child_preview_item"] = {
+        "additionalProperties": False,
+        "properties": {
+            "acceptance": {
+                "enum": ["accepted", "pending", "rejected"],
+                "type": "string",
+            },
+            "blocking_conditions": {
+                "items": {"$ref": "#/$defs/code"},
+                "maxItems": 64,
+                "type": "array",
+                "uniqueItems": True,
+            },
+            "child_task_id": {"$ref": "#/$defs/task_id"},
+            "origin": {
+                "enum": ["host_observed", "parent_minted", "self_registered"],
+                "type": "string",
+            },
+            "rollup_state": {
+                "enum": [
+                    "annotation",
+                    "blocked",
+                    "clean",
+                    "incomplete",
+                    "open_gap",
+                    "unavailable",
+                ],
+                "type": "string",
+            },
+            "session_health": {
+                "enum": ["active", "contact_lost", "ended"],
+                "type": "string",
+            },
+            "work_state": {
+                "enum": ["abandoned", "cancelled", "closed", "open", "written_off"],
+                "type": "string",
+            },
+        },
+        "required": [
+            "acceptance",
+            "blocking_conditions",
+            "child_task_id",
+            "origin",
+            "rollup_state",
+            "session_health",
+            "work_state",
+        ],
+        "type": "object",
+    }
+    definitions["children_preview"] = {
+        "additionalProperties": False,
+        "properties": {
+            "items": {
+                "items": {"$ref": "#/$defs/child_preview_item"},
+                "maxItems": 64,
+                "type": "array",
+                "uniqueItems": True,
+            },
+            "label": {"enum": ["preview", "recorded"], "type": "string"},
+            "tested_manifest_frontier": {"oneOf": [{"$ref": frontier_ref}, {"type": "null"}]},
+        },
+        "required": ["items", "label", "tested_manifest_frontier"],
+        "type": "object",
+    }
+    definitions["advisory_note"] = {
+        "additionalProperties": False,
+        "properties": {
+            "count": {
+                "maxLength": 19,
+                "minLength": 1,
+                "pattern": _LINEAGE_POSITIVE_UINT_PATTERN,
+                "type": "string",
+            },
+            "kind": {
+                "enum": ["duplicate_finding", "live_member_present"],
+                "type": "string",
+            },
+            "project_id": {
+                "pattern": r"^prj_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                "type": "string",
+            },
+            "task_ids": {
+                "items": {"$ref": "#/$defs/task_id"},
+                "maxItems": 64,
+                "type": "array",
+                "uniqueItems": True,
+            },
+        },
+        "required": ["count", "kind", "project_id", "task_ids"],
+        "type": "object",
+    }
+    success = cast(dict[str, JsonValue], definitions["success"])
+    properties = cast(dict[str, JsonValue], success["properties"])
+    # Current public serialization omits nullable semantic provenance when no semantic attempt was
+    # requested.  The frozen 1.1 predecessor required an explicit null marker; this successor
+    # carries the additive omission contract used by CheckSuccessModel.optional_non_null_fields.
+    required = cast(list[JsonValue], success["required"])
+    if "semantic_provenance" in required:
+        required.remove("semantic_provenance")
+    properties["children"] = {"oneOf": [{"$ref": "#/$defs/children_preview"}, {"type": "null"}]}
+    properties["advisory_notes"] = {
+        "items": {"$ref": "#/$defs/advisory_note"},
+        "maxItems": 64,
+        "type": "array",
+        "uniqueItems": True,
+    }
+    policy_execution = cast(dict[str, JsonValue], definitions["policy_execution"])
+    policy_execution_properties = cast(dict[str, JsonValue], policy_execution["properties"])
+    policy_id = cast(dict[str, JsonValue], policy_execution_properties["policy_id"])
+    policy_id_values = cast(list[JsonValue], policy_id["enum"])
+    if "coordination" not in policy_id_values:
+        policy_id_values.append("coordination")
+        policy_id_values.sort(key=lambda item: str(item).encode("ascii"))
+    policy_executions = cast(dict[str, JsonValue], properties["policy_executions"])
+    policy_executions["maxItems"] = 3
+    projected_finding = cast(dict[str, JsonValue], definitions["projected_finding"])
+    projected_properties = cast(dict[str, JsonValue], projected_finding["properties"])
+    projected_kind = cast(dict[str, JsonValue], projected_properties["kind"])
+    projected_kind_values = cast(list[JsonValue], projected_kind["enum"])
+    if "coordination_overlap" not in projected_kind_values:
+        projected_kind_values.append("coordination_overlap")
+        projected_kind_values.sort(key=lambda item: str(item).encode("ascii"))
+    projected_policy = cast(dict[str, JsonValue], projected_properties["policy_id"])
+    projected_policy_values = cast(list[JsonValue], projected_policy["enum"])
+    if "coordination" not in projected_policy_values:
+        projected_policy_values.append("coordination")
+        projected_policy_values.sort(key=lambda item: str(item).encode("ascii"))
+    version_slice = cast(dict[str, JsonValue], definitions["version_slice"])
+    version_properties = cast(dict[str, JsonValue], version_slice["properties"])
+    version_packs = cast(dict[str, JsonValue], version_properties["policy_packs"])
+    version_items = cast(dict[str, JsonValue], version_packs["items"])
+    version_values = cast(list[JsonValue], version_items["enum"])
+    if "coordination/0.1.0" not in version_values:
+        version_values.append("coordination/0.1.0")
+        version_values.sort(key=lambda item: str(item).encode("ascii"))
+    version_packs["maxItems"] = 3
+    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    document["title"] = f"Yoetz check result {entry.schema_version}"
+    return document
+
+
+def _status_request_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Add project, task, and host-correlation selectors to the status request."""
+
+    document = _load_versioned_template(
+        entry,
+        "operations/status-request-1.1.0.schema.json",
+    )
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+    definitions["project_id"] = {
+        "pattern": r"^prj_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+        "type": "string",
+    }
+    definitions["task_id"] = _lineage_id_schema("task_id")
+    definitions["host_correlation"] = {
+        "maxLength": 256,
+        "minLength": 1,
+        "pattern": r"^[A-Za-z0-9][A-Za-z0-9._:/+\-]*$",
+        "type": "string",
+    }
+    properties = cast(dict[str, JsonValue], document["properties"])
+    properties.update(
+        {
+            "correlation_id": {"$ref": "#/$defs/host_correlation"},
+            "project_id": {"$ref": "#/$defs/project_id"},
+            "task_id": {"$ref": "#/$defs/task_id"},
+        }
+    )
+    view = cast(dict[str, JsonValue], properties["view"])
+    values = cast(list[JsonValue], view["enum"])
+    for value in ("lineage", "project"):
+        if value not in values:
+            values.append(value)
+    rules = cast(list[JsonValue], document["allOf"])
+    # The no-filter branch in v1.1 also contains the previously-added results view.  Keep the
+    # selector views explicitly filter-free in this successor.
+    rules.append(
+        {
+            "if": {
+                "properties": {"view": {"enum": ["lineage", "project"]}},
+                "required": ["view"],
+            },
+            "then": {"not": {"required": ["filter"]}},
+        }
+    )
+    # Selectors are pairwise exclusive.  Separate rules keep each conflict addressable by the
+    # protocol validator rather than hiding all three cases in one opaque branch.
+    for left, right in (
+        ("project_id", "task_id"),
+        ("project_id", "correlation_id"),
+        ("task_id", "correlation_id"),
+    ):
+        rules.append({"not": {"required": [left, right]}})
+    rules.extend(
+        [
+            {
+                "if": {"required": ["project_id"]},
+                "then": {"properties": {"view": {"const": "project"}}},
+            },
+            {
+                "if": {"required": ["correlation_id"]},
+                "then": {"properties": {"view": {"const": "lineage"}}},
+            },
+        ]
+    )
+    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    document["title"] = f"Yoetz status request {entry.schema_version}"
+    return document
+
+
+def _status_result_v1_4_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Add lineage and project pages while preserving every earlier status view."""
+
+    document = _load_versioned_template(
+        entry,
+        "operations/status-result-1.3.0.schema.json",
+    )
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+    history_item = cast(dict[str, JsonValue], definitions["history_item"])
+    history_properties = cast(dict[str, JsonValue], history_item["properties"])
+    history_summary = cast(dict[str, JsonValue], history_properties["summary_code"])
+    history_codes = cast(list[JsonValue], history_summary["enum"])
+    history_codes.extend(
+        code
+        for code in (
+            "child_accepted",
+            "child_dependencies_recorded",
+            "child_rejected",
+            "child_written_off",
+            "coordination_context_recorded",
+            "coordination_disposition_recorded",
+            "coordination_obligation_declared",
+            "delegation_cancelled",
+            "delegation_declared",
+            "work_abandoned",
+            "work_cancelled",
+            "work_closed",
+            "work_written_off",
+        )
+        if code not in history_codes
+    )
+    history_codes.sort(key=lambda item: str(item).encode("ascii"))
+    finding_kind = cast(dict[str, JsonValue], definitions["finding_kind"])
+    finding_kind_values = cast(list[JsonValue], finding_kind["enum"])
+    if "coordination_overlap" not in finding_kind_values:
+        finding_kind_values.append("coordination_overlap")
+        finding_kind_values.sort(key=lambda item: str(item).encode("ascii"))
+    for definition_name in ("candidate_finding_item", "finding_item"):
+        finding_definition = cast(dict[str, JsonValue], definitions[definition_name])
+        finding_properties = cast(dict[str, JsonValue], finding_definition["properties"])
+        policy_id = cast(dict[str, JsonValue], finding_properties["policy_id"])
+        policy_values = cast(list[JsonValue], policy_id["enum"])
+        if "coordination" not in policy_values:
+            policy_values.append("coordination")
+            policy_values.sort(key=lambda item: str(item).encode("ascii"))
+    frontier_ref = SCHEMA_NAMESPACE + "common/frontier-1.0.0.schema.json"
+    definitions["project_id"] = {
+        "pattern": r"^prj_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+        "type": "string",
+    }
+    definitions["host_correlation"] = {
+        "maxLength": 256,
+        "minLength": 1,
+        "pattern": r"^[A-Za-z0-9][A-Za-z0-9._:/+\-]*$",
+        "type": "string",
+    }
+    definitions["positive_uint"] = {
+        "maxLength": 19,
+        "minLength": 1,
+        "pattern": _LINEAGE_POSITIVE_UINT_PATTERN,
+        "type": "string",
+    }
+    definitions["lineage_child"] = {
+        "additionalProperties": False,
+        "properties": {
+            "acceptance": {"enum": ["accepted", "pending", "rejected"], "type": "string"},
+            "blocking_conditions": {
+                "items": {"$ref": "#/$defs/code"},
+                "maxItems": 64,
+                "type": "array",
+                "uniqueItems": True,
+            },
+            "depth": {"$ref": "#/$defs/positive_uint"},
+            "origin": {
+                "enum": ["host_observed", "parent_minted", "self_registered"],
+                "type": "string",
+            },
+            "parent_task_id": {"$ref": "#/$defs/task_id"},
+            "rollup_state": {
+                "enum": [
+                    "annotation",
+                    "blocked",
+                    "clean",
+                    "incomplete",
+                    "open_gap",
+                    "unavailable",
+                ],
+                "type": "string",
+            },
+            "session_health": {
+                "enum": ["active", "contact_lost", "ended"],
+                "type": "string",
+            },
+            "task_id": {"$ref": "#/$defs/task_id"},
+            "work_state": {
+                "enum": ["abandoned", "cancelled", "closed", "open", "written_off"],
+                "type": "string",
+            },
+        },
+        "required": [
+            "acceptance",
+            "blocking_conditions",
+            "depth",
+            "origin",
+            "parent_task_id",
+            "rollup_state",
+            "session_health",
+            "task_id",
+            "work_state",
+        ],
+        "type": "object",
+    }
+    definitions["lineage_annotation"] = {
+        "additionalProperties": False,
+        "anyOf": [
+            {
+                "properties": {"subagent_id": {"$ref": "#/$defs/host_correlation"}},
+                "required": ["subagent_id"],
+            },
+            {
+                "properties": {"parent_tool_call_id": {"$ref": "#/$defs/host_correlation"}},
+                "required": ["parent_tool_call_id"],
+            },
+        ],
+        "properties": {
+            "acceptance": {"const": "pending", "type": "string"},
+            "correlation_id": {"$ref": "#/$defs/host_correlation"},
+            "origin": {"const": "host_observed", "type": "string"},
+            "parent_tool_call_id": {
+                "oneOf": [{"$ref": "#/$defs/host_correlation"}, {"type": "null"}]
+            },
+            "subagent_id": {"oneOf": [{"$ref": "#/$defs/host_correlation"}, {"type": "null"}]},
+        },
+        "required": ["acceptance", "correlation_id", "origin"],
+        "type": "object",
+    }
+    definitions["lineage_page"] = {
+        "additionalProperties": False,
+        "properties": {
+            "annotations": {
+                "items": {"$ref": "#/$defs/lineage_annotation"},
+                "maxItems": 100,
+                "type": "array",
+                "uniqueItems": True,
+            },
+            "children": {
+                "items": {"$ref": "#/$defs/lineage_child"},
+                "maxItems": 100,
+                "type": "array",
+                "uniqueItems": True,
+            },
+            "next_cursor": {"$ref": "#/$defs/nullable_cursor"},
+            "parent_task_id": {"oneOf": [{"$ref": "#/$defs/task_id"}, {"type": "null"}]},
+        },
+        "required": ["annotations", "children", "next_cursor"],
+        "type": "object",
+    }
+    definitions["project_text_ref"] = {
+        "additionalProperties": False,
+        "properties": {
+            "content_digest": {"$ref": "#/$defs/digest"},
+            "envelope_digest": {"oneOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
+            "object_id": {"$ref": "#/$defs/object_id"},
+            "owner_task_id": {"$ref": "#/$defs/task_id"},
+            "plaintext_size": {"maximum": 4194304, "minimum": 0, "type": "integer"},
+            "route_generation": {"$ref": "#/$defs/positive_uint"},
+        },
+        "required": [
+            "content_digest",
+            "object_id",
+            "owner_task_id",
+            "plaintext_size",
+            "route_generation",
+        ],
+        "type": "object",
+    }
+    definitions["project_member"] = {
+        "additionalProperties": False,
+        "properties": {
+            "actor_id": {"oneOf": [{"$ref": "#/$defs/actor_id"}, {"type": "null"}]},
+            "parent_task_id": {"oneOf": [{"$ref": "#/$defs/task_id"}, {"type": "null"}]},
+            "session_health": {
+                "enum": ["active", "contact_lost", "ended"],
+                "type": "string",
+            },
+            "task_id": {"$ref": "#/$defs/task_id"},
+            "work_state": {
+                "enum": ["abandoned", "cancelled", "closed", "open", "written_off"],
+                "type": "string",
+            },
+        },
+        "required": ["actor_id", "session_health", "task_id", "work_state"],
+        "type": "object",
+    }
+    definitions["project_detection"] = {
+        "additionalProperties": False,
+        "properties": {
+            "detection_id": {"$ref": "#/$defs/event_id"},
+            "open": {"type": "boolean"},
+            "resource_count": {"$ref": "#/$defs/canonical_uint"},
+            "resource_paths": {
+                "oneOf": [
+                    {
+                        "items": {
+                            "maxLength": 4096,
+                            "minLength": 1,
+                            "type": "string",
+                        },
+                        "maxItems": 256,
+                        "type": "array",
+                        "uniqueItems": True,
+                    },
+                    {"$ref": "#/$defs/resource_omission"},
+                ]
+            },
+            "task_ids": {
+                "items": {"$ref": "#/$defs/task_id"},
+                "maxItems": 64,
+                "minItems": 2,
+                "type": "array",
+                "uniqueItems": True,
+            },
+        },
+        "required": ["detection_id", "open", "resource_count", "task_ids"],
+        "type": "object",
+    }
+    definitions["resource_omission"] = {
+        "allOf": [
+            {
+                "$ref": (
+                    SCHEMA_NAMESPACE
+                    + "common/operation-result-1.0.0.schema.json#/$defs/omitted_content"
+                )
+            },
+            {
+                "properties": {"category": {"const": "repository_excerpt"}},
+                "required": ["category"],
+            },
+        ]
+    }
+    advice_item = cast(dict[str, JsonValue], definitions["advice_item"])
+    advice_properties = cast(dict[str, JsonValue], advice_item["properties"])
+    advice_properties.update(
+        {
+            "coordination_counterpart_task_id": {"$ref": "#/$defs/task_id"},
+            "coordination_detection_id": {"$ref": "#/$defs/event_id"},
+            "coordination_membership_generation": {"$ref": "#/$defs/positive_uint"},
+            "coordination_project_id": {"$ref": "#/$defs/project_id"},
+            "coordination_resource_paths": {
+                "oneOf": [
+                    {
+                        "items": {
+                            "maxLength": 4096,
+                            "minLength": 1,
+                            "type": "string",
+                        },
+                        "maxItems": 256,
+                        "type": "array",
+                        "uniqueItems": True,
+                    },
+                    {"$ref": "#/$defs/resource_omission"},
+                ]
+            },
+        }
+    )
+    advice_item["allOf"] = [
+        {
+            "if": {
+                "anyOf": [
+                    {"required": ["coordination_counterpart_task_id"]},
+                    {"required": ["coordination_detection_id"]},
+                    {"required": ["coordination_membership_generation"]},
+                    {"required": ["coordination_project_id"]},
+                    {"required": ["coordination_resource_paths"]},
+                ]
+            },
+            "then": {
+                "required": [
+                    "coordination_counterpart_task_id",
+                    "coordination_detection_id",
+                    "coordination_membership_generation",
+                    "coordination_project_id",
+                    "coordination_resource_paths",
+                ]
+            },
+        }
+    ]
+    definitions["project_coverage"] = {
+        "additionalProperties": False,
+        "properties": {
+            "coverage": {"const": "unobservable", "type": "string"},
+            "coverage_id": {"$ref": "#/$defs/event_id"},
+            "gap_code": {"const": "not_observable", "type": "string"},
+            "membership_generation": {"$ref": "#/$defs/positive_uint"},
+            "project_id": {"$ref": "#/$defs/project_id"},
+            "task_id": {"$ref": "#/$defs/task_id"},
+        },
+        "required": [
+            "coverage",
+            "coverage_id",
+            "gap_code",
+            "membership_generation",
+            "project_id",
+            "task_id",
+        ],
+        "type": "object",
+    }
+    definitions["project_receipt"] = {
+        "additionalProperties": False,
+        "properties": {
+            "conclusion": {
+                "enum": [
+                    "insufficient_coverage",
+                    "no_unresolved_deterministic_findings",
+                    "unresolved_findings_remain",
+                ],
+                "type": "string",
+            },
+            "frontier": {"$ref": frontier_ref},
+            "receipt_id": {
+                "pattern": r"^rcp_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                "type": "string",
+            },
+            "task_id": {"$ref": "#/$defs/task_id"},
+        },
+        "required": ["conclusion", "frontier", "receipt_id", "task_id"],
+        "type": "object",
+    }
+    definitions["project_page"] = {
+        "additionalProperties": False,
+        "properties": {
+            "description": {
+                "oneOf": [
+                    {"$ref": "#/$defs/content_text"},
+                    {"$ref": "#/$defs/task_omission"},
+                ]
+            },
+            "description_ref": {"oneOf": [{"$ref": "#/$defs/project_text_ref"}, {"type": "null"}]},
+            "coverage": {
+                "items": {"$ref": "#/$defs/project_coverage"},
+                "maxItems": 100,
+                "type": "array",
+                "uniqueItems": True,
+            },
+            "detections": {
+                "items": {"$ref": "#/$defs/project_detection"},
+                "maxItems": 100,
+                "type": "array",
+                "uniqueItems": True,
+            },
+            "grant_state": {
+                "enum": ["active", "revoked", None],
+            },
+            "kind": {"enum": ["general", "repository"], "type": "string"},
+            "lineage": {"$ref": "#/$defs/lineage_page"},
+            "members": {
+                "items": {"$ref": "#/$defs/project_member"},
+                "maxItems": 100,
+                "type": "array",
+                "uniqueItems": True,
+            },
+            "membership_generation": {"$ref": "#/$defs/positive_uint"},
+            "next_cursor": {"$ref": "#/$defs/nullable_cursor"},
+            "project_id": {"$ref": "#/$defs/project_id"},
+            "receipts": {
+                "items": {"$ref": "#/$defs/project_receipt"},
+                "maxItems": 100,
+                "type": "array",
+                "uniqueItems": True,
+            },
+            "title": {
+                "oneOf": [
+                    {"$ref": "#/$defs/content_text"},
+                    {"$ref": "#/$defs/task_omission"},
+                ]
+            },
+            "title_ref": {"oneOf": [{"$ref": "#/$defs/project_text_ref"}, {"type": "null"}]},
+        },
+        "required": [
+            "detections",
+            "grant_state",
+            "kind",
+            "lineage",
+            "members",
+            "membership_generation",
+            "next_cursor",
+            "project_id",
+            "receipts",
+        ],
+        "type": "object",
+    }
+    success = cast(dict[str, JsonValue], definitions["success"])
+    properties = cast(dict[str, JsonValue], success["properties"])
+    view = cast(dict[str, JsonValue], properties["view"])
+    view_values = cast(list[JsonValue], view["enum"])
+    for value in ("lineage", "project"):
+        if value not in view_values:
+            view_values.append(value)
+    page = cast(dict[str, JsonValue], properties["page"])
+    page_values = cast(list[JsonValue], page["anyOf"])
+    page_values.extend([{"$ref": "#/$defs/lineage_page"}, {"$ref": "#/$defs/project_page"}])
+    rules = cast(list[JsonValue], success.setdefault("allOf", []))
+    rules.extend(
+        [
+            {
+                "if": {"properties": {"view": {"const": "lineage"}}, "required": ["view"]},
+                "then": {"properties": {"page": {"$ref": "#/$defs/lineage_page"}}},
+            },
+            {
+                "if": {"properties": {"view": {"const": "project"}}, "required": ["view"]},
+                "then": {"properties": {"page": {"$ref": "#/$defs/project_page"}}},
+            },
+        ]
+    )
+    _add_status_semantic_progress(definitions)
+    _add_status_operation_admission(definitions)
+    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    document["title"] = f"Yoetz status result {entry.schema_version}"
+    return document
+
+
+def _add_status_semantic_progress(definitions: dict[str, JsonValue]) -> None:
+    """Add optional structural AI-powered review progress to check operation pages (#571 A2)."""
+
+    models = __import__(
+        "yoetz.protocol.models", fromlist=["SemanticProgressPhase", "SemanticReason"]
+    )
+    phases = [phase.value for phase in models.SemanticProgressPhase]
+    reasons = sorted(
+        (reason.value for reason in models.SemanticReason),
+        key=lambda item: str(item).encode("ascii"),
+    )
+    terminal_fields: list[JsonValue] = [
+        {"required": ["terminal_outcome"]},
+        {"required": ["terminal_reason"]},
+    ]
+    definitions["semantic_progress"] = {
+        "additionalProperties": False,
+        "allOf": [
+            {
+                "if": {"properties": {"phase": {"const": "terminal"}}, "required": ["phase"]},
+                "then": {
+                    "not": {"required": ["remaining_ms"]},
+                    "properties": {"condition": {"const": "terminal"}},
+                    "required": ["terminal_outcome", "terminal_reason"],
+                },
+                "else": {
+                    "not": {"anyOf": terminal_fields},
+                    "properties": {"condition": {"enum": ["active", "overdue"]}},
+                    "required": ["remaining_ms"],
+                },
+            }
+        ],
+        "properties": {
+            "attempt_ordinal": {"$ref": "#/$defs/canonical_uint"},
+            "condition": {"enum": ["active", "overdue", "terminal"], "type": "string"},
+            "deadline_at": {"$ref": "#/$defs/timestamp"},
+            "elapsed_ms": {"$ref": "#/$defs/canonical_uint"},
+            "observed_at": {"$ref": "#/$defs/timestamp"},
+            "phase": {"enum": cast(list[JsonValue], phases), "type": "string"},
+            "phase_entered_at": {"$ref": "#/$defs/timestamp"},
+            "queued_at": {"$ref": "#/$defs/timestamp"},
+            "remaining_ms": {"$ref": "#/$defs/canonical_uint"},
+            "terminal_outcome": {
+                "enum": ["failed", "quarantined", "succeeded"],
+                "type": "string",
+            },
+            "terminal_reason": {"enum": cast(list[JsonValue], reasons), "type": "string"},
+        },
+        "required": [
+            "attempt_ordinal",
+            "condition",
+            "deadline_at",
+            "elapsed_ms",
+            "observed_at",
+            "phase",
+            "phase_entered_at",
+            "queued_at",
+        ],
+        "type": "object",
+    }
+    operation_page = cast(dict[str, JsonValue], definitions["operation_page"])
+    operation_properties = cast(dict[str, JsonValue], operation_page["properties"])
+    operation_properties["semantic_progress"] = {"$ref": "#/$defs/semantic_progress"}
+    operation_rules = cast(list[JsonValue], operation_page.setdefault("allOf", []))
+    operation_rules.append(
+        {
+            "if": {"required": ["semantic_progress"]},
+            "then": {
+                "properties": {
+                    "operation_kind": {"const": "check"},
+                    "state": {"enum": ["pending", "complete"]},
+                },
+                "required": ["operation_kind", "state"],
+            },
+        }
+    )
+
+
+def _add_status_operation_admission(definitions: dict[str, JsonValue]) -> None:
+    """Add the optional pre-admission stage to absent operation pages (issue #838)."""
+
+    definitions["check_admission"] = {
+        "additionalProperties": False,
+        "allOf": [
+            {
+                "if": {
+                    "properties": {"refusal_count": {"const": "0"}},
+                    "required": ["refusal_count"],
+                },
+                "then": {"properties": {"stage": {"const": "acquiring"}}},
+            }
+        ],
+        "properties": {
+            "elapsed_ms": {"$ref": "#/$defs/canonical_uint"},
+            "first_observed_at": {"$ref": "#/$defs/timestamp"},
+            "last_observed_at": {"$ref": "#/$defs/timestamp"},
+            "observed_at": {"$ref": "#/$defs/timestamp"},
+            "refusal_count": {"$ref": "#/$defs/canonical_uint"},
+            "retry_after_ms": {"$ref": "#/$defs/canonical_uint"},
+            "stage": {
+                "enum": [
+                    "acquiring",
+                    "capture_handoff_pending",
+                    "acquisition_contended",
+                    "import_pending",
+                ],
+                "type": "string",
+            },
+        },
+        "required": [
+            "elapsed_ms",
+            "first_observed_at",
+            "last_observed_at",
+            "observed_at",
+            "refusal_count",
+            "retry_after_ms",
+            "stage",
+        ],
+        "type": "object",
+    }
+    operation_page = cast(dict[str, JsonValue], definitions["operation_page"])
+    operation_properties = cast(dict[str, JsonValue], operation_page["properties"])
+    operation_properties["admission"] = {"$ref": "#/$defs/check_admission"}
+    operation_rules = cast(list[JsonValue], operation_page.setdefault("allOf", []))
+    operation_rules.append(
+        {
+            "if": {"required": ["admission"]},
+            "then": {
+                "properties": {"found": {"const": False}, "state": {"const": "absent"}},
+                "required": ["found", "state"],
+            },
+        }
+    )
+
+
+def _receipt_document_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Add the recorded child outcome section to the immutable receipt document."""
+
+    document = _load_versioned_template(
+        entry,
+        "receipts/receipt-document-1.2.0.schema.json",
+    )
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+    definitions["child_finding"] = _lineage_child_finding_schema()
+    definitions["receipt_child"] = {
+        "additionalProperties": False,
+        "allOf": [
+            {
+                "if": {
+                    "properties": {"outcome": {"const": "unavailable"}},
+                    "required": ["outcome"],
+                },
+                "then": {"properties": {"tested_manifest_ref": {"type": "null"}}},
+            }
+        ],
+        "properties": {
+            "child_task_id": _lineage_id_schema("task_id"),
+            "findings": {
+                "items": {"$ref": "#/$defs/child_finding"},
+                "maxItems": 100,
+                "type": "array",
+                "uniqueItems": True,
+            },
+            "freshness": {"enum": ["known", "unknown"], "type": "string"},
+            "outcome": {
+                "enum": ["annotated", "clean", "incomplete", "open_gap", "unavailable"],
+                "type": "string",
+            },
+            "tested_manifest_ref": {"oneOf": [_lineage_id_schema("event_id"), {"type": "null"}]},
+        },
+        "required": [
+            "child_task_id",
+            "findings",
+            "freshness",
+            "outcome",
+            "tested_manifest_ref",
+        ],
+        "type": "object",
+    }
+    # ``later_manifest_ref`` is nullable and optional in the domain model.
+    cast(dict[str, JsonValue], definitions["receipt_child"])["properties"]["later_manifest_ref"] = {
+        "oneOf": [_lineage_id_schema("event_id"), {"type": "null"}]
+    }
+    definitions["receipt_children"] = {
+        "additionalProperties": False,
+        "properties": {
+            "children": {
+                "items": {"$ref": "#/$defs/receipt_child"},
+                "maxItems": 100,
+                "type": "array",
+                "uniqueItems": True,
+            }
+        },
+        "required": ["children"],
+        "type": "object",
+    }
+    properties = cast(dict[str, JsonValue], document["properties"])
+    findings = cast(dict[str, JsonValue], properties["findings"])
+    findings["items"] = {"$ref": SCHEMA_NAMESPACE + "findings/finding-1.3.0.schema.json"}
+    properties["children"] = {"$ref": "#/$defs/receipt_children"}
+    required = cast(list[JsonValue], document["required"])
+    if "children" not in required:
+        required.append("children")
+    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    document["title"] = f"Yoetz receipt document {entry.schema_version}"
+    return document
+
+
+def _receipt_result_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    return _simple_versioned_schema(
+        entry,
+        "operations/receipt-result-1.2.0.schema.json",
+        {"receipt-document-1.2.0": "receipt-document-1.3.0"},
+    )
+
+
+def _publish_work_request_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    return _simple_versioned_schema(
+        entry,
+        "operations/publish-work-request-1.1.0.schema.json",
+        {"event-draft-1.1.0": "event-draft-1.2.0"},
+    )
 
 
 def _event_draft_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
@@ -1439,6 +3087,75 @@ def _event_draft_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     return document
 
 
+def _event_draft_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Add lineage payload families while retaining every previously admitted event pair."""
+
+    document = _event_draft_v1_1_schema(entry)
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+    branches = cast(list[JsonValue], document["oneOf"])
+    # ``_event_draft_v1_1_schema`` is intentionally derived from the frozen v1.0 template and
+    # therefore points its opaque fallback at the v1.1 opaque schema.  The v1.2 draft must carry
+    # that fallback forward as well; otherwise a known lineage event matches both its new branch
+    # and the stale opaque branch, making the advertised publish request oneOf ambiguous.
+    opaque_v11 = SCHEMA_NAMESPACE + "events/opaque-unknown-event-draft-1.1.0.schema.json"
+    opaque_v12 = SCHEMA_NAMESPACE + "events/opaque-unknown-event-draft-1.2.0.schema.json"
+    opaque_branch = next(
+        (item for item in branches if isinstance(item, dict) and item.get("$ref") == opaque_v11),
+        None,
+    )
+    if opaque_branch is None:
+        raise SchemaGenerationError(
+            "event_draft_schema_template_invalid", entries=(entry.relative_path,)
+        )
+    opaque_branch["$ref"] = opaque_v12
+
+    def add_branch(family: str, version: str) -> None:
+        suffix = "_".join(version.split(".")[:2])
+        identity_name = f"schema_identity_{family}_{suffix}"
+        alias_name = f"{family}_{suffix}_schema"
+        definitions[identity_name] = {
+            "additionalProperties": False,
+            "properties": {"name": {"const": family}, "version": {"const": version}},
+            "required": ["name", "version"],
+            "type": "object",
+        }
+        definitions[alias_name] = {"$ref": f"#/$defs/{identity_name}"}
+        payload_path = f"events/{family.replace('_', '-')}-{version}.schema.json"
+        branches.append(
+            {
+                "properties": {
+                    "payload": {"$ref": SCHEMA_NAMESPACE + payload_path},
+                    "schema": {"$ref": f"#/$defs/{alias_name}"},
+                },
+                "required": ["schema", "payload"],
+            }
+        )
+
+    add_branch("check_recorded", "1.2.0")
+    add_branch("session_opened", "1.2.0")
+    add_branch("finding_recorded", "1.2.0")
+    add_branch("finding_recorded", "1.3.0")
+    for family in (
+        "child_accepted",
+        "child_dependencies_recorded",
+        "child_rejected",
+        "child_written_off",
+        "delegation_cancelled",
+        "delegation_declared",
+        "work_abandoned",
+        "work_cancelled",
+        "work_closed",
+        "work_written_off",
+        "coordination_context_recorded",
+        "coordination_obligation_declared",
+        "coordination_disposition_recorded",
+    ):
+        add_branch(family, "1.0.0")
+    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    document["title"] = f"Yoetz event draft {entry.schema_version}"
+    return document
+
+
 def _opaque_unknown_event_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     document = _opaque_unknown_event_draft_schema(entry)
     definitions = cast(dict[str, JsonValue], document["$defs"])
@@ -1459,6 +3176,67 @@ def _opaque_unknown_event_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonVa
                 "type": "object",
             }
         )
+    return document
+
+
+def _opaque_unknown_event_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Exclude the lineage event pairs from the opaque-event fallback."""
+
+    document = _opaque_unknown_event_v1_1_schema(entry)
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+    unknown = cast(dict[str, JsonValue], definitions["unknown_event_schema"])
+    exclusion = cast(dict[str, JsonValue], unknown["not"])
+    values = cast(list[JsonValue], exclusion["anyOf"])
+    for family in ("check_recorded", "finding_recorded"):
+        values.append(
+            {
+                "additionalProperties": False,
+                "properties": {"name": {"const": family}, "version": {"const": "1.2.0"}},
+                "required": ["name", "version"],
+                "type": "object",
+            }
+        )
+    values.append(
+        {
+            "additionalProperties": False,
+            "properties": {"name": {"const": "session_opened"}, "version": {"const": "1.2.0"}},
+            "required": ["name", "version"],
+            "type": "object",
+        }
+    )
+    values.append(
+        {
+            "additionalProperties": False,
+            "properties": {"name": {"const": "finding_recorded"}, "version": {"const": "1.3.0"}},
+            "required": ["name", "version"],
+            "type": "object",
+        }
+    )
+    for family in (
+        "child_accepted",
+        "child_dependencies_recorded",
+        "child_rejected",
+        "child_written_off",
+        "delegation_cancelled",
+        "delegation_declared",
+        "work_abandoned",
+        "work_cancelled",
+        "work_closed",
+        "work_written_off",
+        "coordination_context_recorded",
+        "coordination_obligation_declared",
+        "coordination_disposition_recorded",
+    ):
+        values.append(
+            {
+                "additionalProperties": False,
+                "properties": {"name": {"const": family}, "version": {"const": "1.0.0"}},
+                "required": ["name", "version"],
+                "type": "object",
+            }
+        )
+    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    document["title"] = f"Yoetz opaque unknown event draft {entry.schema_version}"
     return document
 
 
@@ -1792,6 +3570,857 @@ def _read_guidance_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         ],
     }
     return _normalize(raw, entry)
+
+
+_CONTROL_ID_PATTERNS: Final[Mapping[str, str]] = {
+    "event_id": r"^evt_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    "object_id": r"^obj_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    "project_id": r"^prj_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    "receipt_id": r"^rcp_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    "request_id": r"^req_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    "session_id": r"^ses_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    "task_id": r"^tsk_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    "writer_id": r"^wri_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+}
+_CONTROL_DIGEST_PATTERN: Final = r"^sha256:[0-9a-f]{64}$"
+_CONTROL_COMMITMENT_PATTERN: Final = r"^hmac-sha256:[0-9a-f]{64}$"
+_CONTROL_TIMESTAMP_PATTERN: Final = (
+    r"^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T"
+    r"(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\.[0-9]{3}Z$"
+)
+
+
+def _control_id_schema(kind: str) -> dict[str, JsonValue]:
+    return {"pattern": _CONTROL_ID_PATTERNS[kind], "type": "string"}
+
+
+def _control_string_schema(*, minimum: int = 1, maximum: int = 128) -> dict[str, JsonValue]:
+    return {"maxLength": maximum, "minLength": minimum, "type": "string"}
+
+
+def _control_nullable(schema: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    return {"oneOf": [schema, {"type": "null"}]}
+
+
+def _control_positive_integer_schema() -> dict[str, JsonValue]:
+    return {
+        "maximum": 2**53 - 1,
+        "minimum": 1,
+        "type": "integer",
+    }
+
+
+def _control_project_request_schema() -> dict[str, JsonValue]:
+    """Return the closed CLI-only project command body used by active control 2.7."""
+
+    text = _control_string_schema(maximum=65_536)
+    request = _control_id_schema("request_id")
+    task = _control_id_schema("task_id")
+    project = _control_id_schema("project_id")
+    commitment = {"pattern": _CONTROL_COMMITMENT_PATTERN, "type": "string"}
+    member = {
+        "oneOf": [
+            _control_id_schema("task_id"),
+            commitment,
+        ]
+    }
+    event = _control_id_schema("event_id")
+    positive = _control_positive_integer_schema()
+    properties: dict[str, JsonValue] = {
+        "audit_record_id": _control_nullable(event),
+        "auto_grouping": _control_nullable({"type": "boolean"}),
+        "description": _control_nullable(text),
+        "expected_generation": _control_nullable(positive),
+        "member_commitment_or_id": _control_nullable(member),
+        "member_kind": _control_nullable(
+            {"enum": ["repository", "task", "workspace"], "type": "string"}
+        ),
+        "member_repository_commitment": _control_nullable(commitment),
+        "membership_generation": _control_nullable(positive),
+        "operation": {
+            "enum": [
+                "amend",
+                "create",
+                "dissolve",
+                "grant",
+                "link",
+                "opt_in",
+                "opt_out",
+                "revoke",
+                "status",
+                "unlink",
+            ],
+            "type": "string",
+        },
+        "owner_route_generation": _control_nullable(positive),
+        "owner_task_id": _control_nullable(task),
+        "project_id": _control_nullable(project),
+        "repository_commitment": _control_nullable(commitment),
+        "request_id": request,
+        "requester_task_id": _control_nullable(task),
+        "schema_version": {"const": "1.0.0"},
+        "selected_task_id": _control_nullable(task),
+        "source_workspace_commitment": _control_nullable(commitment),
+        "title": _control_nullable(text),
+    }
+
+    def operation(
+        name: str,
+        required: tuple[str, ...],
+        overrides: Mapping[str, JsonValue],
+    ) -> dict[str, JsonValue]:
+        return {
+            "if": {
+                "properties": {"operation": {"const": name}},
+                "required": ["operation"],
+            },
+            "then": {
+                "properties": dict(overrides),
+                "required": list(required),
+            },
+        }
+
+    conditions: list[JsonValue] = [
+        operation(
+            "create",
+            ("title", "owner_task_id"),
+            {"owner_task_id": task, "title": text},
+        ),
+        operation(
+            "link",
+            ("project_id", "member_kind", "member_commitment_or_id"),
+            {
+                "member_commitment_or_id": member,
+                "member_kind": {"enum": ["repository", "task", "workspace"], "type": "string"},
+                "project_id": project,
+            },
+        ),
+        operation(
+            "unlink",
+            ("project_id", "member_kind", "member_commitment_or_id"),
+            {
+                "member_commitment_or_id": member,
+                "member_kind": {"enum": ["repository", "task", "workspace"], "type": "string"},
+                "project_id": project,
+            },
+        ),
+        {
+            "if": {
+                "properties": {"operation": {"const": "amend"}},
+                "required": ["operation"],
+            },
+            "then": {
+                "anyOf": [
+                    {"properties": {"title": text}, "required": ["title"]},
+                    {"properties": {"description": text}, "required": ["description"]},
+                ],
+                "properties": {"owner_task_id": task, "project_id": project},
+                "required": ["owner_task_id", "project_id"],
+            },
+        },
+        operation("dissolve", ("project_id",), {"project_id": project}),
+        operation(
+            "opt_out",
+            ("repository_commitment",),
+            {"repository_commitment": commitment},
+        ),
+        operation(
+            "opt_in",
+            ("repository_commitment",),
+            {"repository_commitment": commitment},
+        ),
+        operation(
+            "grant",
+            ("project_id", "membership_generation"),
+            {"membership_generation": positive, "project_id": project},
+        ),
+        operation(
+            "revoke",
+            ("project_id", "membership_generation"),
+            {"membership_generation": positive, "project_id": project},
+        ),
+        operation(
+            "status",
+            ("requester_task_id", "project_id"),
+            {"project_id": project, "requester_task_id": task},
+        ),
+    ]
+    return {
+        "additionalProperties": False,
+        "allOf": conditions,
+        "properties": properties,
+        "required": ["operation", "request_id", "schema_version"],
+        "type": "object",
+    }
+
+
+def _control_project_result_schema() -> dict[str, JsonValue]:
+    """Return the structural project result union used by CLI control responses."""
+
+    digest = {"pattern": _CONTROL_DIGEST_PATTERN, "type": "string"}
+    commitment = {"pattern": _CONTROL_COMMITMENT_PATTERN, "type": "string"}
+    timestamp = {"format": "date-time", "pattern": _CONTROL_TIMESTAMP_PATTERN, "type": "string"}
+    project = _control_id_schema("project_id")
+    task = _control_id_schema("task_id")
+    event = _control_id_schema("event_id")
+    object_id = _control_id_schema("object_id")
+    positive = {
+        "maxLength": 19,
+        "pattern": _LINEAGE_POSITIVE_UINT_PATTERN,
+        "type": "string",
+    }
+    text_ref: dict[str, JsonValue] = {
+        "additionalProperties": False,
+        "properties": {
+            "content_digest": digest,
+            "envelope_digest": _control_nullable(digest),
+            "object_id": object_id,
+            "owner_task_id": task,
+            "plaintext_size": {"maximum": 4_194_304, "minimum": 0, "type": "integer"},
+            "route_generation": positive,
+        },
+        "required": [
+            "content_digest",
+            "object_id",
+            "owner_task_id",
+            "plaintext_size",
+            "route_generation",
+        ],
+        "type": "object",
+    }
+    descriptor: dict[str, JsonValue] = {
+        "additionalProperties": False,
+        "properties": {
+            "auto_grouping": {"type": "boolean"},
+            "created_at": timestamp,
+            "description_ref": text_ref,
+            "dissolved_at": timestamp,
+            "kind": {"enum": ["general", "repository"], "type": "string"},
+            "membership_generation": positive,
+            "project_id": project,
+            "repository_commitment": commitment,
+            "title_ref": text_ref,
+        },
+        "required": [
+            "auto_grouping",
+            "created_at",
+            "kind",
+            "membership_generation",
+            "project_id",
+        ],
+        "type": "object",
+    }
+    membership: dict[str, JsonValue] = {
+        "additionalProperties": False,
+        "properties": {
+            "bound_at": timestamp,
+            "member_commitment_or_id": {
+                "oneOf": [task, commitment],
+            },
+            "member_kind": {"enum": ["repository", "task", "workspace"], "type": "string"},
+            "membership_generation": positive,
+            "project_id": project,
+            "unbound_at": timestamp,
+        },
+        "required": [
+            "bound_at",
+            "member_commitment_or_id",
+            "member_kind",
+            "membership_generation",
+            "project_id",
+        ],
+        "type": "object",
+    }
+    membership_view = {
+        "allOf": [
+            {"$ref": "#/$defs/project_membership"},
+            {
+                "properties": {
+                    "actor_id": {"pattern": r"^[A-Za-z0-9._:-]{1,128}$", "type": "string"},
+                    "parent_task_id": task,
+                    "session_health": {
+                        "enum": ["active", "contact_lost", "ended"],
+                        "type": "string",
+                    },
+                    "task_id": task,
+                    "work_state": {
+                        "enum": ["abandoned", "cancelled", "closed", "open", "written_off"],
+                        "type": "string",
+                    },
+                },
+                "type": "object",
+            },
+        ],
+        "unevaluatedProperties": False,
+    }
+    grant: dict[str, JsonValue] = {
+        "additionalProperties": False,
+        "allOf": [
+            {
+                "if": {"properties": {"state": {"const": "active"}}, "required": ["state"]},
+                "then": {"not": {"required": ["revoked_at"]}},
+            },
+            {
+                "if": {"properties": {"state": {"const": "revoked"}}, "required": ["state"]},
+                "then": {"required": ["revoked_at"]},
+            },
+        ],
+        "properties": {
+            "audit_record_id": event,
+            "granted_at": timestamp,
+            "membership_generation": positive,
+            "project_id": project,
+            "revoked_at": timestamp,
+            "state": {"enum": ["active", "revoked"], "type": "string"},
+        },
+        "required": [
+            "audit_record_id",
+            "granted_at",
+            "membership_generation",
+            "project_id",
+            "state",
+        ],
+        "type": "object",
+    }
+    detection: dict[str, JsonValue] = {
+        "additionalProperties": False,
+        "properties": {
+            "detection_id": event,
+            "open": {"type": "boolean"},
+            "resource_count": {"maximum": 2**53 - 1, "minimum": 0, "type": "integer"},
+            "task_ids": {
+                "items": task,
+                "maxItems": 64,
+                "minItems": 2,
+                "type": "array",
+                "uniqueItems": True,
+            },
+        },
+        "required": ["detection_id", "open", "resource_count", "task_ids"],
+        "type": "object",
+    }
+    status: dict[str, JsonValue] = {
+        "additionalProperties": False,
+        "properties": {
+            "authorized_task_id": task,
+            "detections": {
+                "items": detection,
+                "maxItems": 100,
+                "type": "array",
+                "uniqueItems": True,
+            },
+            "grant": grant,
+            "memberships": {
+                "items": {"$ref": "#/$defs/project_membership_view"},
+                "maxItems": 100,
+                "type": "array",
+                "uniqueItems": True,
+            },
+            "project": {"$ref": "#/$defs/project_descriptor"},
+            "schema_version": {"const": "1.0.0"},
+        },
+        "required": ["detections", "memberships", "project", "schema_version"],
+        "type": "object",
+    }
+    opt_result = {
+        "additionalProperties": False,
+        "properties": {
+            "auto_grouping": {"type": "boolean"},
+            "project_id": {"type": "null"},
+            "repository_commitment": commitment,
+            "schema_version": {"const": "1.0.0"},
+        },
+        "required": ["auto_grouping", "project_id", "repository_commitment", "schema_version"],
+        "type": "object",
+    }
+    return {
+        "$defs": {
+            "project_descriptor": descriptor,
+            "project_detection": detection,
+            "project_grant": grant,
+            "project_membership": membership,
+            "project_membership_view": membership_view,
+            "project_opt_result": opt_result,
+            "project_status": status,
+            "project_text_ref": text_ref,
+        },
+        "oneOf": [
+            {"$ref": "#/$defs/project_descriptor"},
+            {"$ref": "#/$defs/project_membership"},
+            {"$ref": "#/$defs/project_grant"},
+            {"$ref": "#/$defs/project_opt_result"},
+            {"$ref": "#/$defs/project_status"},
+        ],
+    }
+
+
+def _individual_observation_envelope(definitions: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    """Return the individual-observation branch of a control-request envelope definition.
+
+    Since ``2.6.1`` the ``observation_envelope`` definition is a ``oneOf`` whose first branch is
+    the individual native capture envelope and whose second is the closed routine-read-summary
+    reference. Later contracts extend the individual branch only; the summary branch stays the
+    reference to its own versioned schema.
+    """
+
+    envelope = cast(dict[str, JsonValue], definitions["observation_envelope"])
+    branches = envelope.get("oneOf")
+    if isinstance(branches, list):
+        return cast(dict[str, JsonValue], cast(list[JsonValue], branches)[0])
+    return envelope
+
+
+def _control_v2_8_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Extend frozen 2.7 with native cooperative-child correlation candidates."""
+
+    source = (
+        Path(__file__).resolve().parent.parent
+        / "schemas"
+        / entry.relative_path.replace("2.8.0", "2.7.0")
+    )
+    document = cast(dict[str, JsonValue], json.loads(source.read_bytes()))
+    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    if entry.schema_name == "control-request":
+        definitions = cast(dict[str, JsonValue], document["$defs"])
+        envelope = _individual_observation_envelope(definitions)
+        properties = cast(dict[str, JsonValue], envelope["properties"])
+        structural = cast(dict[str, JsonValue], properties["structural_payload"])
+        fields = cast(dict[str, JsonValue], structural["properties"])
+        fields.update(
+            {
+                "lineage_child_task_id": _control_id_schema("task_id"),
+                "lineage_child_session_id": _control_id_schema("session_id"),
+                "lineage_child_writer_id": _control_id_schema("writer_id"),
+                "lineage_parent_task_id": _control_id_schema("task_id"),
+            }
+        )
+    return document
+
+
+# The finite structural-queue bounds a 2.9 selection runtime may report (issue #828).  Mirrored
+# from ``yoetz.domain.observation_budget`` as reviewable literals rather than imported.
+_OBSERVATION_CAPACITY_MINIMUM: Final = 64
+_OBSERVATION_CAPACITY_MAXIMUM: Final = 8_192
+_OBSERVATION_CAPACITY_LABELS: Final[tuple[str, ...]] = ("standard", "larger", "largest", "custom")
+_OBSERVATION_BUDGET_LIMIT_KEYS: Final[tuple[str, ...]] = (
+    "queue_count",
+    "queue_bytes",
+    "state_bytes",
+    "pending_attempts",
+    "capture_tickets",
+    "capture_bytes",
+    "protected_count",
+    "protected_bytes",
+    "session_fair_share",
+    "session_fair_share_bytes",
+    "max_pending_age_ms",
+    "state_document_ceiling_bytes",
+)
+
+
+def _observation_capacity_count_schema() -> dict[str, JsonValue]:
+    return {
+        "maximum": _OBSERVATION_CAPACITY_MAXIMUM,
+        "minimum": _OBSERVATION_CAPACITY_MINIMUM,
+        "type": "integer",
+    }
+
+
+def _observation_capacity_label_schema() -> dict[str, JsonValue]:
+    return {"enum": list(_OBSERVATION_CAPACITY_LABELS), "type": "string"}
+
+
+def _observation_nonnegative_integer_schema() -> dict[str, JsonValue]:
+    return {"maximum": 9_007_199_254_740_991, "minimum": 0, "type": "integer"}
+
+
+def _observation_effective_budget_schema(
+    token: Mapping[str, JsonValue],
+) -> dict[str, JsonValue]:
+    """Return the closed ``yoetz.observation-effective-budget/1`` record definition."""
+
+    limits: dict[str, JsonValue] = {
+        "additionalProperties": False,
+        "properties": {
+            key: _observation_nonnegative_integer_schema() for key in _OBSERVATION_BUDGET_LIMIT_KEYS
+        },
+        "required": list(_OBSERVATION_BUDGET_LIMIT_KEYS),
+        "type": "object",
+    }
+    no_cap: dict[str, JsonValue] = {
+        "additionalProperties": False,
+        "properties": {
+            "available": {"const": False},
+            "dimension": {"const": "structural_queue"},
+            "reason": {"const": "state_document_ceiling"},
+            "state_document_ceiling_bytes": _observation_nonnegative_integer_schema(),
+            "largest_supported_queue_count": _observation_nonnegative_integer_schema(),
+        },
+        "required": [
+            "available",
+            "dimension",
+            "reason",
+            "state_document_ceiling_bytes",
+            "largest_supported_queue_count",
+        ],
+        "type": "object",
+    }
+    properties: dict[str, JsonValue] = {
+        "schema": {"const": "yoetz.observation-effective-budget/1"},
+        "budget_policy_version": dict(token),
+        "validation_status": dict(token),
+        "scope": {"enum": ["session", "workspace"], "type": "string"},
+        "selected_queue_count": _observation_capacity_count_schema(),
+        "selected_capacity_label": _observation_capacity_label_schema(),
+        "effective_queue_count": _observation_capacity_count_schema(),
+        "effective_capacity_label": _observation_capacity_label_schema(),
+        "effective_reason": {"enum": ["selected", "workspace_aggregate"], "type": "string"},
+        "limits": limits,
+        "limiting_dimension": {
+            "enum": ["count", "bytes", "oldest_age", "capture_backlog"],
+            "type": "string",
+        },
+        "utilization_bps": _observation_nonnegative_integer_schema(),
+        "no_cap": no_cap,
+    }
+    return {
+        "additionalProperties": False,
+        "properties": properties,
+        "required": list(properties),
+        "type": "object",
+    }
+
+
+def _control_v2_9_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Extend frozen 2.8 with custom finite capacity and the effective-budget record (#828).
+
+    Only ``control-result`` changes: ``observation_selection_runtime`` accepts any finite
+    structural-queue count in the supported range, names its capacity labels, and carries the
+    closed effective-budget record.  The other three documents only move to the 2.9.0 ``$id``.
+    """
+
+    source = (
+        Path(__file__).resolve().parent.parent
+        / "schemas"
+        / entry.relative_path.replace("2.9.0", "2.8.0")
+    )
+    document = cast(dict[str, JsonValue], json.loads(source.read_bytes()))
+    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    if entry.schema_name == "control-result":
+        definitions = cast(dict[str, JsonValue], document["$defs"])
+        runtime = definitions.get("observation_selection_runtime")
+        if not isinstance(runtime, dict):
+            raise SchemaGenerationError(
+                "control_selection_runtime_schema_template_invalid",
+                entries=(entry.relative_path,),
+            )
+        properties = runtime.get("properties")
+        required = runtime.get("required")
+        if (
+            not isinstance(properties, dict)
+            or not isinstance(required, list)
+            or not isinstance(properties.get("policy_version"), dict)
+            or "selected_capacity" not in properties
+            or "effective_capacity" not in properties
+        ):
+            raise SchemaGenerationError(
+                "control_selection_runtime_schema_template_invalid",
+                entries=(entry.relative_path,),
+            )
+        token = cast(dict[str, JsonValue], properties["policy_version"])
+        properties.update(
+            {
+                "selected_capacity": _observation_capacity_count_schema(),
+                "effective_capacity": _observation_capacity_count_schema(),
+                "selected_capacity_label": _observation_capacity_label_schema(),
+                "effective_capacity_label": _observation_capacity_label_schema(),
+                "effective_budget": {"$ref": "#/$defs/observation_effective_budget"},
+            }
+        )
+        required.extend(["selected_capacity_label", "effective_capacity_label", "effective_budget"])
+        definitions["observation_effective_budget"] = _observation_effective_budget_schema(token)
+    return document
+
+
+# The local-disclosure purpose grammar owned by ``yoetz.domain.privacy``.  Mirrored here rather
+# than imported so the generated bytes stay a reviewable literal; the conformance suite asserts
+# the two stay equal.
+LOCAL_DISCLOSURE_PURPOSE_PATTERN: Final = "^[a-z][a-z0-9_-]{0,127}$"
+
+
+def _admit_local_disclosure_purpose(
+    entry: _RegistryEntry, definitions: dict[str, JsonValue]
+) -> None:
+    """Let the 2.7 wire carry the purposes local disclosure receipts actually record.
+
+    ``local_disclosure_receipt.purpose`` referenced the privacy-policy purpose grammar, which is
+    the *external egress* vocabulary and forbids underscores.  The product's own agent-projection
+    purpose is ``client_result_projection`` -- a storage-CHECK-enforced value in
+    ``migrations/catalog/0001.sql`` that is part of every stored receipt's canonical bytes and so
+    cannot be renamed.  Ordinary local receipts therefore failed ``_validated_wire`` and broke
+    ``privacy receipts list``/``get`` (issue #732).
+
+    The fix stays on the schema side and stays local: 2.7 is the active, unreleased envelope, so
+    it gains a ``local_disclosure_purpose`` definition mirroring the domain grammar that produces
+    these values.  ``privacy/egress-receipt-1.0.0`` is untouched, so network egress purposes keep
+    the hyphen-only external vocabulary this codebase already requires of anything crossing the
+    privacy-policy boundary.
+    """
+
+    local_receipt = definitions.get("local_disclosure_receipt")
+    if not isinstance(local_receipt, dict):
+        raise SchemaGenerationError(
+            "control_local_receipt_schema_template_invalid", entries=(entry.relative_path,)
+        )
+    local_properties = local_receipt.get("properties")
+    if not isinstance(local_properties, dict) or "purpose" not in local_properties:
+        raise SchemaGenerationError(
+            "control_local_receipt_schema_template_invalid", entries=(entry.relative_path,)
+        )
+    definitions["local_disclosure_purpose"] = {
+        "maxLength": 128,
+        "minLength": 1,
+        "pattern": LOCAL_DISCLOSURE_PURPOSE_PATTERN,
+        "type": "string",
+    }
+    local_properties["purpose"] = {"$ref": "#/$defs/local_disclosure_purpose"}
+
+
+def _control_v2_7_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Derive the 0.3 project-control contract from the frozen main 2.6 wire.
+
+    Main's 2.6 control files are a released observation/selection baseline and remain frozen.
+    The 0.3 project and coordination additions are therefore an append-only 2.7 contract derived
+    from those exact bytes, with the current operation-result references retargeted as usual.
+    The request and result envelopes derive from the released ``2.6.1`` patch (0.2.3): it carries
+    the selected-observation route fields, protected-read reference, subject-state digest, the
+    routine-read-summary branch, and the local disclosure purpose grammar that the 0.2 line
+    already ships. The hello envelopes have no ``2.6.1`` and derive from ``2.6.0``.
+    """
+
+    template_version = (
+        "2.6.1" if entry.schema_name in {"control-request", "control-result"} else "2.6.0"
+    )
+    source = (
+        Path(__file__).resolve().parent.parent
+        / "schemas"
+        / entry.relative_path.replace("2.7.0", template_version)
+    )
+    try:
+        document = cast(dict[str, JsonValue], json.loads(source.read_bytes()))
+    except (OSError, TypeError, json.JSONDecodeError) as exc:
+        raise SchemaGenerationError(
+            "control_schema_template_invalid", entries=(entry.relative_path,)
+        ) from exc
+    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+
+    operation_ref_replacements = {
+        SCHEMA_NAMESPACE + "operations/start-request-1.0.0.schema.json": SCHEMA_NAMESPACE
+        + "operations/start-request-1.1.0.schema.json",
+        SCHEMA_NAMESPACE + "operations/start-result-1.0.0.schema.json": SCHEMA_NAMESPACE
+        + "operations/start-result-1.1.0.schema.json",
+        SCHEMA_NAMESPACE + "operations/publish-work-request-1.1.0.schema.json": SCHEMA_NAMESPACE
+        + "operations/publish-work-request-1.2.0.schema.json",
+        SCHEMA_NAMESPACE + "operations/check-request-1.0.0.schema.json": SCHEMA_NAMESPACE
+        + "operations/check-request-1.1.0.schema.json",
+        SCHEMA_NAMESPACE + "operations/check-result-1.2.0.schema.json": SCHEMA_NAMESPACE
+        + "operations/check-result-1.3.0.schema.json",
+        SCHEMA_NAMESPACE + "operations/status-request-1.1.0.schema.json": SCHEMA_NAMESPACE
+        + "operations/status-request-1.2.0.schema.json",
+        SCHEMA_NAMESPACE + "operations/status-result-1.3.0.schema.json": SCHEMA_NAMESPACE
+        + "operations/status-result-1.4.0.schema.json",
+        SCHEMA_NAMESPACE + "operations/receipt-result-1.2.0.schema.json": SCHEMA_NAMESPACE
+        + "operations/receipt-result-1.3.0.schema.json",
+    }
+
+    def retarget(node: JsonValue) -> None:
+        if isinstance(node, dict):
+            for key, value in tuple(node.items()):
+                if type(value) is str:
+                    node[key] = operation_ref_replacements.get(value, value)
+                else:
+                    retarget(value)
+        elif isinstance(node, list):
+            for value in node:
+                retarget(value)
+
+    retarget(document)
+    if entry.schema_name == "control-hello":
+        return document
+    if entry.schema_name == "control-hello-result":
+        properties = cast(dict[str, JsonValue], document["properties"])
+        allowed = cast(dict[str, JsonValue], properties["allowed_methods"])
+        enum_values = cast(list[JsonValue], allowed["enum"])
+        item_values = cast(dict[str, JsonValue], allowed["items"])
+        item_enum = cast(list[JsonValue], item_values["enum"])
+        for values in (enum_values[1], item_enum):
+            methods = cast(list[JsonValue], values)
+            if "project" not in methods:
+                methods.append("project")
+            methods.sort(key=lambda value: str(value).encode("ascii"))
+        allowed["maxItems"] = 32
+        return document
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+    branches = cast(list[JsonValue], document["oneOf"])
+    if entry.schema_name == "control-request":
+        # Native Claude/Cursor ingress adds the reviewed pairing contract to the structural
+        # observation payload.  These fields are intentionally current 2.7-only: the 2.6
+        # document is frozen, while cloning it here must still track every field the domain
+        # serializer can emit (including Cursor's generation identity).
+        observation_envelope = _individual_observation_envelope(definitions)
+        envelope_properties = cast(dict[str, JsonValue], observation_envelope["properties"])
+        structural_payload = cast(dict[str, JsonValue], envelope_properties["structural_payload"])
+        structural_properties = cast(dict[str, JsonValue], structural_payload["properties"])
+        structural_properties.update(
+            {
+                "correlation_kind": {
+                    "enum": ["generation_id", "none", "tool_call_id"],
+                    "type": "string",
+                },
+                "generation_id": {
+                    "maxLength": 128,
+                    "minLength": 1,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$",
+                    "type": "string",
+                },
+                "pairing_mode": {
+                    "enum": ["paired", "post_only"],
+                    "type": "string",
+                },
+                "selection_authority_generation": {
+                    "maxLength": 71,
+                    "minLength": 71,
+                    "pattern": _CONTROL_DIGEST_PATTERN,
+                    "type": "string",
+                },
+                "selection_session_id": _control_id_schema("session_id"),
+                "selection_task_id": _control_id_schema("task_id"),
+                "selection_writer_id": _control_id_schema("writer_id"),
+            }
+        )
+    if entry.schema_name == "control-result":
+        _admit_local_disclosure_purpose(entry, definitions)
+        # Project lifecycle refusals are bounded application reasons, not transport failures. 2.7
+        # is the first control envelope that carries the CLI-only project method, so extend only
+        # this unreleased schema's generic error branch; every older control-result artifact stays
+        # frozen. Keep the finite vocabulary explicit here so a caller cannot smuggle arbitrary
+        # project text into a wire error code.
+        coordination_reasons = (
+            # Main's shared control vocabulary uses this bounded reason for policy-layer
+            # request rejection.  It is absent from the frozen 2.6 transport enum, so the
+            # active 2.7 envelope must add it alongside the project coordination reasons.
+            "invalid_request",
+            "coordination_invalid",
+            "project_not_found",
+            "project_dissolved",
+            "implicit_project_requires_opt_out",
+            "general_project_membership_conflict",
+            "project_member_not_found",
+            "selector_conflict",
+            "coordination_consent_required",
+            "coordination_source_policy_denied",
+            "coordination_grant_required",
+            "coordination_generation_revoked",
+            "coordination_generation_mismatch",
+            "cross_repository_lineage_requires_grant",
+            "project_member_already_unbound",
+        )
+        error_body = definitions.get("error_body")
+        if not isinstance(error_body, dict):
+            raise SchemaGenerationError(
+                "control_error_schema_template_invalid", entries=(entry.relative_path,)
+            )
+        error_branches = error_body.get("oneOf")
+        if not isinstance(error_branches, list):
+            raise SchemaGenerationError(
+                "control_error_schema_template_invalid", entries=(entry.relative_path,)
+            )
+        for error_branch in error_branches:
+            if not isinstance(error_branch, dict):
+                continue
+            properties = error_branch.get("properties")
+            if not isinstance(properties, dict):
+                continue
+            code_schema = properties.get("code")
+            if not isinstance(code_schema, dict):
+                continue
+            enum_values = code_schema.get("enum")
+            if not isinstance(enum_values, list):
+                continue
+            enum_values.extend(
+                reason for reason in coordination_reasons if reason not in enum_values
+            )
+            enum_values.sort(key=lambda value: str(value).encode("ascii"))
+            break
+        else:
+            raise SchemaGenerationError(
+                "control_error_schema_template_invalid", entries=(entry.relative_path,)
+            )
+    if entry.schema_name == "control-request":
+        definitions["project_body"] = _control_project_request_schema()
+        template = next(
+            cast(dict[str, JsonValue], branch)
+            for branch in branches
+            if isinstance(branch, dict)
+            and cast(dict[str, JsonValue], branch.get("properties", {})).get("method")
+            == {"const": "review"}
+        )
+        project_branch = cast(dict[str, JsonValue], json.loads(json.dumps(template)))
+        project_properties = cast(dict[str, JsonValue], project_branch["properties"])
+        project_properties["body"] = {"$ref": "#/$defs/project_body"}
+        project_properties["method"] = {"const": "project"}
+        branches.append(project_branch)
+        branches.sort(
+            key=lambda branch: str(
+                cast(dict[str, JsonValue], cast(dict[str, JsonValue], branch).get("properties", {}))
+                .get("method", {})
+                .get("const", "")
+            ).encode("ascii")
+        )
+        return document
+    definitions.update(_control_project_result_schema()["$defs"])
+    result_defs = _control_project_result_schema()
+    # The result helper's top-level oneOf is referenced from the project success branch below;
+    # its local definitions are merged into the existing envelope definitions.
+    template_error = next(
+        cast(dict[str, JsonValue], branch)
+        for branch in branches
+        if isinstance(branch, dict)
+        and cast(dict[str, JsonValue], branch.get("properties", {})).get("method")
+        == {"const": "review"}
+        and cast(dict[str, JsonValue], branch.get("properties", {})).get("outcome")
+        == {"const": "error"}
+    )
+    template_ok = next(
+        cast(dict[str, JsonValue], branch)
+        for branch in branches
+        if isinstance(branch, dict)
+        and cast(dict[str, JsonValue], branch.get("properties", {})).get("method")
+        == {"const": "review"}
+        and cast(dict[str, JsonValue], branch.get("properties", {})).get("outcome")
+        == {"const": "ok"}
+    )
+    error_branch = cast(dict[str, JsonValue], json.loads(json.dumps(template_error)))
+    ok_branch = cast(dict[str, JsonValue], json.loads(json.dumps(template_ok)))
+    cast(dict[str, JsonValue], error_branch["properties"])["method"] = {"const": "project"}
+    cast(dict[str, JsonValue], ok_branch["properties"])["method"] = {"const": "project"}
+    cast(dict[str, JsonValue], ok_branch["properties"])["body"] = {"oneOf": result_defs["oneOf"]}
+    branches.extend((error_branch, ok_branch))
+    branches.sort(
+        key=lambda branch: (
+            str(
+                cast(dict[str, JsonValue], cast(dict[str, JsonValue], branch).get("properties", {}))
+                .get("method", {})
+                .get("const", "")
+            ).encode("ascii"),
+            str(
+                cast(dict[str, JsonValue], cast(dict[str, JsonValue], branch).get("properties", {}))
+                .get("outcome", {})
+                .get("const", "")
+            ).encode("ascii"),
+        )
+    )
+    return document
 
 
 def _publish_work_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
@@ -2361,12 +4990,48 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         lambda: __import__("yoetz.domain.values", fromlist=["Frontier"]).Frontier,
     ),
     _RegistryEntry(
+        "common/lineage-acceptance-1.0.0.schema.json",
+        "lineage-acceptance",
+        "1.0.0",
+        "request_result",
+        "common-value",
+        lambda: (
+            __import__(
+                "yoetz.domain.coordination", fromlist=["LineageAcceptance"]
+            ).LineageAcceptance
+        ),
+    ),
+    _RegistryEntry(
+        "common/lineage-origin-1.0.0.schema.json",
+        "lineage-origin",
+        "1.0.0",
+        "request_result",
+        "common-value",
+        lambda: __import__("yoetz.domain.coordination", fromlist=["LineageOrigin"]).LineageOrigin,
+    ),
+    _RegistryEntry(
         "common/operation-result-1.0.0.schema.json",
         "operation-result",
         "1.0.0",
         "request_result",
         "MCP output",
         _operation_result_schema,
+    ),
+    _RegistryEntry(
+        "common/session-health-1.0.0.schema.json",
+        "session-health",
+        "1.0.0",
+        "request_result",
+        "common-value",
+        lambda: __import__("yoetz.domain.coordination", fromlist=["SessionHealth"]).SessionHealth,
+    ),
+    _RegistryEntry(
+        "common/work-state-1.0.0.schema.json",
+        "work-state",
+        "1.0.0",
+        "request_result",
+        "common-value",
+        lambda: __import__("yoetz.domain.coordination", fromlist=["WorkState"]).WorkState,
     ),
     _RegistryEntry(
         "common/public-error-1.0.0.schema.json",
@@ -2413,6 +5078,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         lambda: __import__("yoetz.config.models", fromlist=["YoetzConfig"]).YoetzConfig,
     ),
     _RegistryEntry(
+        "config/yoetz-config-1.3.0.schema.json",
+        "yoetz-config",
+        "1.3.0",
+        "config",
+        "configuration",
+        lambda: __import__("yoetz.config.models", fromlist=["YoetzConfig"]).YoetzConfig,
+    ),
+    _RegistryEntry(
         "consent/catalog-2.0.0.schema.json",
         "catalog",
         "2.0.0",
@@ -2448,6 +5121,18 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "consent/catalog-6.0.0.schema.json",
         "catalog",
         "6.0.0",
+        "request_result",
+        "local-control",
+        lambda: (
+            __import__(
+                "yoetz.protocol.consent", fromlist=["ConsentCatalogModel"]
+            ).ConsentCatalogModel
+        ),
+    ),
+    _RegistryEntry(
+        "consent/catalog-7.0.0.schema.json",
+        "catalog",
+        "7.0.0",
         "request_result",
         "local-control",
         lambda: (
@@ -2513,6 +5198,18 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         ),
     ),
     _RegistryEntry(
+        "consent/pending-agent-7.0.0.schema.json",
+        "pending-agent",
+        "7.0.0",
+        "request_result",
+        "local-control",
+        lambda: (
+            __import__(
+                "yoetz.protocol.consent", fromlist=["AgentSafePendingModel"]
+            ).AgentSafePendingModel
+        ),
+    ),
+    _RegistryEntry(
         "consent/prepare-result-2.0.0.schema.json",
         "prepare-result",
         "2.0.0",
@@ -2548,6 +5245,18 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "consent/prepare-result-6.0.0.schema.json",
         "prepare-result",
         "6.0.0",
+        "request_result",
+        "local-control",
+        lambda: (
+            __import__(
+                "yoetz.protocol.consent", fromlist=["ConsentPrepareResultModel"]
+            ).ConsentPrepareResultModel
+        ),
+    ),
+    _RegistryEntry(
+        "consent/prepare-result-7.0.0.schema.json",
+        "prepare-result",
+        "7.0.0",
         "request_result",
         "local-control",
         lambda: (
@@ -2601,6 +5310,18 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         ),
     ),
     _RegistryEntry(
+        "consent/review-result-7.0.0.schema.json",
+        "review-result",
+        "7.0.0",
+        "request_result",
+        "local-control",
+        lambda: (
+            __import__(
+                "yoetz.protocol.consent", fromlist=["ConsentReviewResultModel"]
+            ).ConsentReviewResultModel
+        ),
+    ),
+    _RegistryEntry(
         "consent/status-2.0.0.schema.json",
         "status",
         "2.0.0",
@@ -2643,6 +5364,16 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         ),
     ),
     _RegistryEntry(
+        "consent/status-7.0.0.schema.json",
+        "status",
+        "7.0.0",
+        "request_result",
+        "local-control",
+        lambda: (
+            __import__("yoetz.protocol.consent", fromlist=["ConsentStatusModel"]).ConsentStatusModel
+        ),
+    ),
+    _RegistryEntry(
         "events/accepted-event-1.0.0.schema.json",
         "accepted-event",
         "1.0.0",
@@ -2672,6 +5403,90 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
             __import__(
                 "yoetz.domain.events", fromlist=["ActionRecordedPayload"]
             ).ActionRecordedPayload
+        ),
+    ),
+    _RegistryEntry(
+        "events/child-accepted-1.0.0.schema.json",
+        "child-accepted",
+        "1.0.0",
+        "event",
+        "event-payload",
+        lambda: (
+            __import__(
+                "yoetz.domain.events", fromlist=["ChildAcceptedPayload"]
+            ).ChildAcceptedPayload
+        ),
+    ),
+    _RegistryEntry(
+        "events/child-dependencies-recorded-1.0.0.schema.json",
+        "child-dependencies-recorded",
+        "1.0.0",
+        "event",
+        "event-payload",
+        lambda: (
+            __import__(
+                "yoetz.domain.events", fromlist=["ChildDependenciesRecordedPayload"]
+            ).ChildDependenciesRecordedPayload
+        ),
+    ),
+    _RegistryEntry(
+        "events/coordination-context-recorded-1.0.0.schema.json",
+        "coordination-context-recorded",
+        "1.0.0",
+        "event",
+        "event-payload",
+        lambda: (
+            __import__(
+                "yoetz.domain.events", fromlist=["CoordinationContextRecordedPayload"]
+            ).CoordinationContextRecordedPayload
+        ),
+    ),
+    _RegistryEntry(
+        "events/coordination-disposition-recorded-1.0.0.schema.json",
+        "coordination-disposition-recorded",
+        "1.0.0",
+        "event",
+        "event-payload",
+        lambda: (
+            __import__(
+                "yoetz.domain.events", fromlist=["CoordinationDispositionRecordedPayload"]
+            ).CoordinationDispositionRecordedPayload
+        ),
+    ),
+    _RegistryEntry(
+        "events/coordination-obligation-declared-1.0.0.schema.json",
+        "coordination-obligation-declared",
+        "1.0.0",
+        "event",
+        "event-payload",
+        lambda: (
+            __import__(
+                "yoetz.domain.events", fromlist=["CoordinationObligationDeclaredPayload"]
+            ).CoordinationObligationDeclaredPayload
+        ),
+    ),
+    _RegistryEntry(
+        "events/child-rejected-1.0.0.schema.json",
+        "child-rejected",
+        "1.0.0",
+        "event",
+        "event-payload",
+        lambda: (
+            __import__(
+                "yoetz.domain.events", fromlist=["ChildRejectedPayload"]
+            ).ChildRejectedPayload
+        ),
+    ),
+    _RegistryEntry(
+        "events/child-written-off-1.0.0.schema.json",
+        "child-written-off",
+        "1.0.0",
+        "event",
+        "event-payload",
+        lambda: (
+            __import__(
+                "yoetz.domain.events", fromlist=["ChildWrittenOffPayload"]
+            ).ChildWrittenOffPayload
         ),
     ),
     _RegistryEntry(
@@ -2759,6 +5574,30 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         ),
     ),
     _RegistryEntry(
+        "events/delegation-cancelled-1.0.0.schema.json",
+        "delegation-cancelled",
+        "1.0.0",
+        "event",
+        "event-payload",
+        lambda: (
+            __import__(
+                "yoetz.domain.events", fromlist=["DelegationCancelledPayload"]
+            ).DelegationCancelledPayload
+        ),
+    ),
+    _RegistryEntry(
+        "events/delegation-declared-1.0.0.schema.json",
+        "delegation-declared",
+        "1.0.0",
+        "event",
+        "event-payload",
+        lambda: (
+            __import__(
+                "yoetz.domain.events", fromlist=["DelegationDeclaredPayload"]
+            ).DelegationDeclaredPayload
+        ),
+    ),
+    _RegistryEntry(
         "events/event-draft-1.0.0.schema.json",
         "event-draft",
         "1.0.0",
@@ -2770,6 +5609,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "events/event-draft-1.1.0.schema.json",
         "event-draft",
         "1.1.0",
+        "event",
+        "event-envelope",
+        lambda: __import__("yoetz.domain.events", fromlist=["EventDraft"]).EventDraft,
+    ),
+    _RegistryEntry(
+        "events/event-draft-1.2.0.schema.json",
+        "event-draft",
+        "1.2.0",
         "event",
         "event-envelope",
         lambda: __import__("yoetz.domain.events", fromlist=["EventDraft"]).EventDraft,
@@ -2832,6 +5679,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "1.2.0",
         "event",
         "event-payload",
+        None,
+    ),
+    _RegistryEntry(
+        "events/finding-recorded-1.3.0.schema.json",
+        "finding-recorded",
+        "1.3.0",
+        "event",
+        "event-payload",
         lambda: __import__("yoetz.domain.findings", fromlist=["Finding"]).Finding,
     ),
     _RegistryEntry(
@@ -2858,6 +5713,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "events/opaque-unknown-event-draft-1.1.0.schema.json",
         "opaque-unknown-event-draft",
         "1.1.0",
+        "event",
+        "event-envelope",
+        lambda: __import__("yoetz.domain.events", fromlist=["UnknownEvent"]).UnknownEvent,
+    ),
+    _RegistryEntry(
+        "events/opaque-unknown-event-draft-1.2.0.schema.json",
+        "opaque-unknown-event-draft",
+        "1.2.0",
         "event",
         "event-envelope",
         lambda: __import__("yoetz.domain.events", fromlist=["UnknownEvent"]).UnknownEvent,
@@ -2957,6 +5820,18 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         ),
     ),
     _RegistryEntry(
+        "events/session-opened-1.2.0.schema.json",
+        "session-opened",
+        "1.2.0",
+        "event",
+        "event-payload",
+        lambda: (
+            __import__(
+                "yoetz.domain.events", fromlist=["SessionOpenedPayload"]
+            ).SessionOpenedPayload
+        ),
+    ),
+    _RegistryEntry(
         "events/session-resumed-1.0.0.schema.json",
         "session-resumed",
         "1.0.0",
@@ -2981,6 +5856,50 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         ),
     ),
     _RegistryEntry(
+        "events/work-abandoned-1.0.0.schema.json",
+        "work-abandoned",
+        "1.0.0",
+        "event",
+        "event-payload",
+        lambda: (
+            __import__(
+                "yoetz.domain.events", fromlist=["WorkAbandonedPayload"]
+            ).WorkAbandonedPayload
+        ),
+    ),
+    _RegistryEntry(
+        "events/work-cancelled-1.0.0.schema.json",
+        "work-cancelled",
+        "1.0.0",
+        "event",
+        "event-payload",
+        lambda: (
+            __import__(
+                "yoetz.domain.events", fromlist=["WorkCancelledPayload"]
+            ).WorkCancelledPayload
+        ),
+    ),
+    _RegistryEntry(
+        "events/work-closed-1.0.0.schema.json",
+        "work-closed",
+        "1.0.0",
+        "event",
+        "event-payload",
+        lambda: __import__("yoetz.domain.events", fromlist=["WorkClosedPayload"]).WorkClosedPayload,
+    ),
+    _RegistryEntry(
+        "events/work-written-off-1.0.0.schema.json",
+        "work-written-off",
+        "1.0.0",
+        "event",
+        "event-payload",
+        lambda: (
+            __import__(
+                "yoetz.domain.events", fromlist=["WorkWrittenOffPayload"]
+            ).WorkWrittenOffPayload
+        ),
+    ),
+    _RegistryEntry(
         "findings/finding-1.0.0.schema.json",
         "finding",
         "1.0.0",
@@ -3000,6 +5919,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "findings/finding-1.2.0.schema.json",
         "finding",
         "1.2.0",
+        "request_result",
+        "finding",
+        None,
+    ),
+    _RegistryEntry(
+        "findings/finding-1.3.0.schema.json",
+        "finding",
+        "1.3.0",
         "request_result",
         "finding",
         lambda: __import__("yoetz.domain.findings", fromlist=["Finding"]).Finding,
@@ -3081,6 +6008,16 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         ),
     ),
     _RegistryEntry(
+        "operations/check-request-1.1.0.schema.json",
+        "check-request",
+        "1.1.0",
+        "request_result",
+        "MCP input",
+        lambda: (
+            __import__("yoetz.protocol.models", fromlist=["CheckRequestModel"]).CheckRequestModel
+        ),
+    ),
+    _RegistryEntry(
         "operations/check-result-1.0.0.schema.json",
         "check-result",
         "1.0.0",
@@ -3102,6 +6039,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "1.2.0",
         "request_result",
         "MCP output",
+        None,
+    ),
+    _RegistryEntry(
+        "operations/check-result-1.3.0.schema.json",
+        "check-result",
+        "1.3.0",
+        "request_result",
+        "MCP output",
         lambda: __import__("yoetz.protocol.models", fromlist=["CheckResultModel"]).CheckResultModel,
     ),
     _RegistryEntry(
@@ -3120,6 +6065,18 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "operations/publish-work-request-1.1.0.schema.json",
         "publish-work-request",
         "1.1.0",
+        "request_result",
+        "MCP input",
+        lambda: (
+            __import__(
+                "yoetz.protocol.models", fromlist=["PublishWorkRequestModel"]
+            ).PublishWorkRequestModel
+        ),
+    ),
+    _RegistryEntry(
+        "operations/publish-work-request-1.2.0.schema.json",
+        "publish-work-request",
+        "1.2.0",
         "request_result",
         "MCP input",
         lambda: (
@@ -3202,6 +6159,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "1.2.0",
         "request_result",
         "MCP output",
+        None,
+    ),
+    _RegistryEntry(
+        "operations/receipt-result-1.3.0.schema.json",
+        "receipt-result",
+        "1.3.0",
+        "request_result",
+        "MCP output",
         lambda: (
             __import__("yoetz.protocol.models", fromlist=["ReceiptResultModel"]).ReceiptResultModel
         ),
@@ -3239,9 +6204,27 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         ),
     ),
     _RegistryEntry(
+        "operations/start-request-1.1.0.schema.json",
+        "start-request",
+        "1.1.0",
+        "request_result",
+        "MCP input",
+        lambda: (
+            __import__("yoetz.protocol.models", fromlist=["StartRequestModel"]).StartRequestModel
+        ),
+    ),
+    _RegistryEntry(
         "operations/start-result-1.0.0.schema.json",
         "start-result",
         "1.0.0",
+        "request_result",
+        "MCP output",
+        lambda: __import__("yoetz.protocol.models", fromlist=["StartResultModel"]).StartResultModel,
+    ),
+    _RegistryEntry(
+        "operations/start-result-1.1.0.schema.json",
+        "start-result",
+        "1.1.0",
         "request_result",
         "MCP output",
         lambda: __import__("yoetz.protocol.models", fromlist=["StartResultModel"]).StartResultModel,
@@ -3277,6 +6260,16 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         ),
     ),
     _RegistryEntry(
+        "operations/status-request-1.2.0.schema.json",
+        "status-request",
+        "1.2.0",
+        "request_result",
+        "MCP input",
+        lambda: (
+            __import__("yoetz.protocol.models", fromlist=["StatusRequestModel"]).StatusRequestModel
+        ),
+    ),
+    _RegistryEntry(
         "operations/status-result-1.1.0.schema.json",
         "status-result",
         "1.1.0",
@@ -3300,6 +6293,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "operations/status-result-1.3.0.schema.json",
         "status-result",
         "1.3.0",
+        "request_result",
+        "MCP output",
+        None,
+    ),
+    _RegistryEntry(
+        "operations/status-result-1.4.0.schema.json",
+        "status-result",
+        "1.4.0",
         "request_result",
         "MCP output",
         lambda: (
@@ -3363,6 +6364,18 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         None,
     ),
     _RegistryEntry(
+        "integrations/mcp-removal-1.0.0.schema.json",
+        "mcp-removal",
+        "1.0.0",
+        "request_result",
+        "setup-contract",
+        lambda: (
+            __import__(
+                "yoetz.protocol.mcp_removal", fromlist=["McpRemovalContract"]
+            ).McpRemovalContract
+        ),
+    ),
+    _RegistryEntry(
         "integrations/setup-readiness-1.0.0.schema.json",
         "setup-readiness",
         "1.0.0",
@@ -3412,6 +6425,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "receipts/receipt-document-1.2.0.schema.json",
         "receipt-document",
         "1.2.0",
+        "request_result",
+        "receipt-document",
+        None,
+    ),
+    _RegistryEntry(
+        "receipts/receipt-document-1.3.0.schema.json",
+        "receipt-document",
+        "1.3.0",
         "request_result",
         "receipt-document",
         lambda: __import__("yoetz.domain.receipts", fromlist=["ReceiptDocument"]).ReceiptDocument,
@@ -3689,6 +6710,114 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         lambda: dict,
     ),
     _RegistryEntry(
+        "service/control-hello-2.7.0.schema.json",
+        "control-hello",
+        "2.7.0",
+        "request_result",
+        "local-control",
+        lambda: __import__("yoetz.ports.control", fromlist=["ControlRequest"]).ControlRequest,
+    ),
+    _RegistryEntry(
+        "service/control-hello-result-2.7.0.schema.json",
+        "control-hello-result",
+        "2.7.0",
+        "request_result",
+        "local-control",
+        lambda: __import__("yoetz.ports.control", fromlist=["ControlResult"]).ControlResult,
+    ),
+    _RegistryEntry(
+        "service/control-request-2.7.0.schema.json",
+        "control-request",
+        "2.7.0",
+        "request_result",
+        "local-control",
+        lambda: __import__("yoetz.ports.control", fromlist=["ControlRequest"]).ControlRequest,
+    ),
+    _RegistryEntry(
+        "service/control-result-2.7.0.schema.json",
+        "control-result",
+        "2.7.0",
+        "request_result",
+        "local-control",
+        lambda: __import__("yoetz.ports.control", fromlist=["ControlResult"]).ControlResult,
+    ),
+    _RegistryEntry(
+        "service/control-hello-2.8.0.schema.json",
+        "control-hello",
+        "2.8.0",
+        "request_result",
+        "local-control",
+        lambda: __import__("yoetz.ports.control", fromlist=["ControlRequest"]).ControlRequest,
+    ),
+    _RegistryEntry(
+        "service/control-hello-result-2.8.0.schema.json",
+        "control-hello-result",
+        "2.8.0",
+        "request_result",
+        "local-control",
+        lambda: __import__("yoetz.ports.control", fromlist=["ControlResult"]).ControlResult,
+    ),
+    _RegistryEntry(
+        "service/control-request-2.8.0.schema.json",
+        "control-request",
+        "2.8.0",
+        "request_result",
+        "local-control",
+        lambda: __import__("yoetz.ports.control", fromlist=["ControlRequest"]).ControlRequest,
+    ),
+    _RegistryEntry(
+        "service/control-result-2.8.0.schema.json",
+        "control-result",
+        "2.8.0",
+        "request_result",
+        "local-control",
+        lambda: __import__("yoetz.ports.control", fromlist=["ControlResult"]).ControlResult,
+    ),
+    _RegistryEntry(
+        "service/control-hello-2.9.0.schema.json",
+        "control-hello",
+        "2.9.0",
+        "request_result",
+        "local-control",
+        lambda: __import__("yoetz.ports.control", fromlist=["ControlRequest"]).ControlRequest,
+    ),
+    _RegistryEntry(
+        "service/control-hello-result-2.9.0.schema.json",
+        "control-hello-result",
+        "2.9.0",
+        "request_result",
+        "local-control",
+        lambda: __import__("yoetz.ports.control", fromlist=["ControlResult"]).ControlResult,
+    ),
+    _RegistryEntry(
+        "service/control-request-2.9.0.schema.json",
+        "control-request",
+        "2.9.0",
+        "request_result",
+        "local-control",
+        lambda: __import__("yoetz.ports.control", fromlist=["ControlRequest"]).ControlRequest,
+    ),
+    _RegistryEntry(
+        "service/control-result-2.9.0.schema.json",
+        "control-result",
+        "2.9.0",
+        "request_result",
+        "local-control",
+        lambda: __import__("yoetz.ports.control", fromlist=["ControlResult"]).ControlResult,
+    ),
+    _RegistryEntry(
+        "service/isolation-report-1.0.0.schema.json",
+        "isolation-report",
+        "1.0.0",
+        "request_result",
+        "service-status",
+        lambda: (
+            __import__(
+                "yoetz.protocol.isolation_report", fromlist=["IsolationReportContract"]
+            ).IsolationReportContract
+        ),
+    ),
+    _RegistryEntry(
         "service/service-status-1.0.0.schema.json",
         "service-status",
         "1.0.0",
@@ -3760,6 +6889,74 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "version-report",
         lambda: __import__("yoetz.version", fromlist=["VersionManifest"]).VersionManifest,
     ),
+    _RegistryEntry(
+        "version/version-manifest-2.3.0.schema.json",
+        "version-manifest",
+        "2.3.0",
+        "version_manifest",
+        "version-report",
+        lambda: __import__("yoetz.version", fromlist=["VersionManifest"]).VersionManifest,
+    ),
+)
+
+
+# These paths were introduced in the current protocol wave and are derived by this generator
+# from the owning models/templates.  The other legacy ``loader=None`` entries are deliberately
+# checked from their reviewed bytes only: their source model is not available to this tool and
+# regenerating them would silently rewrite frozen history.
+_BUILDER_OWNED_SCHEMA_PATHS: Final[frozenset[str]] = frozenset(
+    {
+        "consent/status-7.0.0.schema.json",
+        "consent/review-result-7.0.0.schema.json",
+        "consent/prepare-result-7.0.0.schema.json",
+        "consent/pending-agent-7.0.0.schema.json",
+        "consent/catalog-7.0.0.schema.json",
+        "common/lineage-acceptance-1.0.0.schema.json",
+        "common/lineage-origin-1.0.0.schema.json",
+        "common/session-health-1.0.0.schema.json",
+        "common/work-state-1.0.0.schema.json",
+        "events/child-accepted-1.0.0.schema.json",
+        "events/child-dependencies-recorded-1.0.0.schema.json",
+        "events/child-rejected-1.0.0.schema.json",
+        "events/child-written-off-1.0.0.schema.json",
+        "events/coordination-context-recorded-1.0.0.schema.json",
+        "events/coordination-disposition-recorded-1.0.0.schema.json",
+        "events/coordination-obligation-declared-1.0.0.schema.json",
+        "events/delegation-cancelled-1.0.0.schema.json",
+        "events/delegation-declared-1.0.0.schema.json",
+        "events/event-draft-1.2.0.schema.json",
+        "events/finding-recorded-1.3.0.schema.json",
+        "events/opaque-unknown-event-draft-1.2.0.schema.json",
+        "events/session-opened-1.2.0.schema.json",
+        "events/work-abandoned-1.0.0.schema.json",
+        "events/work-cancelled-1.0.0.schema.json",
+        "events/work-closed-1.0.0.schema.json",
+        "events/work-written-off-1.0.0.schema.json",
+        "operations/check-result-1.3.0.schema.json",
+        "config/yoetz-config-1.3.0.schema.json",
+        "operations/check-request-1.1.0.schema.json",
+        "operations/publish-work-request-1.2.0.schema.json",
+        "operations/receipt-result-1.3.0.schema.json",
+        "operations/start-request-1.1.0.schema.json",
+        "operations/start-result-1.1.0.schema.json",
+        "operations/status-request-1.2.0.schema.json",
+        "operations/status-result-1.4.0.schema.json",
+        "observations/routine-read-summary-1.0.0.schema.json",
+        "receipts/receipt-document-1.3.0.schema.json",
+        "findings/finding-1.3.0.schema.json",
+        "service/control-hello-2.7.0.schema.json",
+        "service/control-hello-result-2.7.0.schema.json",
+        "service/control-request-2.7.0.schema.json",
+        "service/control-result-2.7.0.schema.json",
+        "service/control-hello-2.8.0.schema.json",
+        "service/control-hello-result-2.8.0.schema.json",
+        "service/control-request-2.8.0.schema.json",
+        "service/control-result-2.8.0.schema.json",
+        "service/control-hello-2.9.0.schema.json",
+        "service/control-hello-result-2.9.0.schema.json",
+        "service/control-request-2.9.0.schema.json",
+        "service/control-result-2.9.0.schema.json",
+    }
 )
 
 
@@ -3962,9 +7159,18 @@ def build_schema_documents(
 
         assert entry.loader is not None  # narrowed by the pending-check above
         if entry.relative_path in {
+            "common/lineage-acceptance-1.0.0.schema.json",
+            "common/lineage-origin-1.0.0.schema.json",
+            "common/session-health-1.0.0.schema.json",
+            "common/work-state-1.0.0.schema.json",
+        }:
+            normalized = _lineage_vocabulary_schema(entry)
+        elif entry.relative_path in {
+            "consent/catalog-7.0.0.schema.json",
             "privacy/privacy-policy-1.0.0.schema.json",
             "config/yoetz-config-1.0.0.schema.json",
             "config/yoetz-config-1.1.0.schema.json",
+            "config/yoetz-config-1.2.0.schema.json",
             "events/check-recorded-1.0.0.schema.json",
             "events/finding-recorded-1.0.0.schema.json",
             "findings/finding-1.0.0.schema.json",
@@ -3984,6 +7190,8 @@ def build_schema_documents(
             normalized = _frozen_schema(entry)
         elif entry.relative_path == "events/event-draft-1.1.0.schema.json":
             normalized = _event_draft_v1_1_schema(entry)
+        elif entry.relative_path == "events/event-draft-1.2.0.schema.json":
+            normalized = _event_draft_v1_2_schema(entry)
         elif entry.relative_path == "events/check-recorded-1.1.0.schema.json":
             normalized = _check_recorded_v1_1_schema(entry)
         elif entry.relative_path == "events/check-recorded-1.2.0.schema.json":
@@ -3998,11 +7206,11 @@ def build_schema_documents(
                 "events/finding-recorded-1.0.0.schema.json",
                 {"finding-1.0.0": "finding-1.1.0"},
             )
-        elif entry.relative_path == "events/finding-recorded-1.2.0.schema.json":
+        elif entry.relative_path == "events/finding-recorded-1.3.0.schema.json":
             normalized = _simple_versioned_schema(
                 entry,
-                "events/finding-recorded-1.1.0.schema.json",
-                {"finding-1.1.0": "finding-1.2.0"},
+                "events/finding-recorded-1.2.0.schema.json",
+                {"finding-1.2.0": "finding-1.3.0"},
             )
         elif entry.relative_path in {
             "events/evidence-recorded-1.1.0.schema.json",
@@ -4013,12 +7221,58 @@ def build_schema_documents(
             normalized = _claim_payload_schema(entry)
         elif entry.relative_path == "events/response-recorded-1.0.0.schema.json":
             normalized = _response_recorded_schema(entry)
+        elif entry.relative_path in {
+            "events/child-accepted-1.0.0.schema.json",
+            "events/child-dependencies-recorded-1.0.0.schema.json",
+            "events/child-rejected-1.0.0.schema.json",
+            "events/child-written-off-1.0.0.schema.json",
+            "events/delegation-cancelled-1.0.0.schema.json",
+            "events/delegation-declared-1.0.0.schema.json",
+            "events/work-abandoned-1.0.0.schema.json",
+            "events/work-cancelled-1.0.0.schema.json",
+            "events/work-closed-1.0.0.schema.json",
+            "events/work-written-off-1.0.0.schema.json",
+        }:
+            normalized = _lineage_event_schema(entry)
+        elif entry.relative_path in {
+            "events/coordination-context-recorded-1.0.0.schema.json",
+            "events/coordination-obligation-declared-1.0.0.schema.json",
+            "events/coordination-disposition-recorded-1.0.0.schema.json",
+        }:
+            normalized = _coordination_event_schema(entry)
+        elif entry.relative_path == "events/session-opened-1.2.0.schema.json":
+            normalized = _lineage_session_opened_schema(entry)
         elif entry.relative_path == "events/opaque-unknown-event-draft-1.0.0.schema.json":
             normalized = _frozen_schema(entry)
         elif entry.relative_path == "events/opaque-unknown-event-draft-1.1.0.schema.json":
             normalized = _opaque_unknown_event_v1_1_schema(entry)
+        elif entry.relative_path == "events/opaque-unknown-event-draft-1.2.0.schema.json":
+            normalized = _opaque_unknown_event_v1_2_schema(entry)
+        elif entry.relative_path in {
+            "service/control-hello-2.7.0.schema.json",
+            "service/control-hello-result-2.7.0.schema.json",
+            "service/control-request-2.7.0.schema.json",
+            "service/control-result-2.7.0.schema.json",
+        }:
+            normalized = _control_v2_7_schema(entry)
+        elif entry.relative_path in {
+            "service/control-hello-2.8.0.schema.json",
+            "service/control-hello-result-2.8.0.schema.json",
+            "service/control-request-2.8.0.schema.json",
+            "service/control-result-2.8.0.schema.json",
+        }:
+            normalized = _control_v2_8_schema(entry)
+        elif entry.relative_path in {
+            "service/control-hello-2.9.0.schema.json",
+            "service/control-hello-result-2.9.0.schema.json",
+            "service/control-request-2.9.0.schema.json",
+            "service/control-result-2.9.0.schema.json",
+        }:
+            normalized = _control_v2_9_schema(entry)
         elif entry.relative_path == "operations/publish-work-request-1.1.0.schema.json":
             normalized = _publish_work_request_schema(entry)
+        elif entry.relative_path == "operations/publish-work-request-1.2.0.schema.json":
+            normalized = _publish_work_request_v1_2_schema(entry)
         elif entry.relative_path == "findings/runtime-attempt-evidence-1.0.0.schema.json":
             normalized = _runtime_attempt_evidence_schema(entry)
         elif entry.relative_path == "findings/runtime-attempt-evidence-1.1.0.schema.json":
@@ -4033,34 +7287,28 @@ def build_schema_documents(
                 "findings/finding-1.0.0.schema.json",
                 {"semantic-provenance-1.0.0": "semantic-provenance-1.1.0"},
             )
-        elif entry.relative_path == "findings/finding-1.2.0.schema.json":
-            normalized = _simple_versioned_schema(
-                entry,
-                "findings/finding-1.1.0.schema.json",
-                {"semantic-provenance-1.1.0": "semantic-provenance-1.2.0"},
-            )
+        elif entry.relative_path == "findings/finding-1.3.0.schema.json":
+            normalized = _finding_v1_3_schema(entry)
+        elif entry.relative_path == "operations/check-request-1.1.0.schema.json":
+            normalized = _check_request_v1_1_schema(entry)
         elif entry.relative_path == "operations/check-result-1.1.0.schema.json":
             normalized = _check_result_v1_1_schema(entry)
-        elif entry.relative_path == "operations/check-result-1.2.0.schema.json":
-            normalized = _simple_versioned_schema(
-                entry,
-                "operations/check-result-1.1.0.schema.json",
-                {"semantic-provenance-1.1.0": "semantic-provenance-1.2.0"},
-            )
+        elif entry.relative_path == "operations/check-result-1.3.0.schema.json":
+            normalized = _check_result_v1_3_schema(entry)
         elif entry.relative_path == "operations/receipt-result-1.1.0.schema.json":
             normalized = _simple_versioned_schema(
                 entry,
                 "operations/receipt-result-1.0.0.schema.json",
                 {"receipt-document-1.0.0": "receipt-document-1.1.0"},
             )
-        elif entry.relative_path == "operations/receipt-result-1.2.0.schema.json":
-            normalized = _simple_versioned_schema(
-                entry,
-                "operations/receipt-result-1.1.0.schema.json",
-                {"receipt-document-1.1.0": "receipt-document-1.2.0"},
-            )
+        elif entry.relative_path == "operations/receipt-result-1.3.0.schema.json":
+            normalized = _receipt_result_v1_3_schema(entry)
         elif entry.relative_path == "operations/start-result-1.0.0.schema.json":
             normalized = _start_result_schema(entry)
+        elif entry.relative_path == "operations/start-result-1.1.0.schema.json":
+            normalized = _start_result_v1_1_schema(entry)
+        elif entry.relative_path == "operations/start-request-1.1.0.schema.json":
+            normalized = _start_request_v1_1_schema(entry)
         elif entry.relative_path == "operations/read-guidance-result-1.0.0.schema.json":
             normalized = _read_guidance_result_schema(entry)
         elif entry.relative_path == "operations/publish-work-result-1.0.0.schema.json":
@@ -4074,6 +7322,8 @@ def build_schema_documents(
             "operations/status-request-1.1.0.schema.json",
         }:
             normalized = _status_request_schema(entry)
+        elif entry.relative_path == "operations/status-request-1.2.0.schema.json":
+            normalized = _status_request_v1_2_schema(entry)
         elif entry.relative_path in {
             "operations/status-result-1.0.0.schema.json",
             "operations/status-result-1.1.0.schema.json",
@@ -4085,12 +7335,8 @@ def build_schema_documents(
                 "operations/status-result-1.1.0.schema.json",
                 {"semantic-provenance-1.0.0": "semantic-provenance-1.1.0"},
             )
-        elif entry.relative_path == "operations/status-result-1.3.0.schema.json":
-            normalized = _simple_versioned_schema(
-                entry,
-                "operations/status-result-1.2.0.schema.json",
-                {"semantic-provenance-1.1.0": "semantic-provenance-1.2.0"},
-            )
+        elif entry.relative_path == "operations/status-result-1.4.0.schema.json":
+            normalized = _status_result_v1_4_schema(entry)
         elif entry.relative_path == "receipts/receipt-document-1.0.0.schema.json":
             normalized = _receipt_document_schema(entry)
         elif entry.relative_path == "receipts/receipt-document-1.1.0.schema.json":
@@ -4102,8 +7348,8 @@ def build_schema_documents(
                     "semantic-provenance-1.0.0": "semantic-provenance-1.1.0",
                 },
             )
-        elif entry.relative_path == "receipts/receipt-document-1.2.0.schema.json":
-            normalized = _receipt_document_v1_2_schema(entry)
+        elif entry.relative_path == "receipts/receipt-document-1.3.0.schema.json":
+            normalized = _receipt_document_v1_3_schema(entry)
         elif entry.relative_path in {
             "version/version-manifest-2.0.0.schema.json",
             "version/version-manifest-2.1.0.schema.json",
@@ -4111,9 +7357,10 @@ def build_schema_documents(
             "version/version-manifest-2.2.1.schema.json",
             "version/version-manifest-2.2.2.schema.json",
             "version/version-manifest-2.2.3.schema.json",
+            "version/version-manifest-2.2.4.schema.json",
         }:
             normalized = _frozen_version_manifest_schema(entry)
-        elif entry.relative_path == "version/version-manifest-2.2.4.schema.json":
+        elif entry.relative_path == "version/version-manifest-2.3.0.schema.json":
             normalized = _version_manifest_schema(entry)
         elif entry.relative_path == "service/control-request-2.6.1.schema.json":
             normalized = _control_request_v2_6_1_schema(entry)
@@ -4306,6 +7553,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         metavar="RELATIVE_PATH",
         help="With --write, regenerate only the named loader-backed registry path (repeatable).",
     )
+    parser.add_argument(
+        "--include-builder-owned",
+        action="store_true",
+        help="With --write, include the current builder-owned wave without rewriting frozen schemas.",
+    )
     return parser
 
 
@@ -4315,10 +7567,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     root = args.output_root.resolve() if args.output_root is not None else _default_schema_root()
     selected_entries = _REGISTRY
-    if args.only:
+    if args.only or args.include_builder_owned:
         if args.check:
-            parser.error("--only is supported only with --write")
-        requested = frozenset(args.only)
+            parser.error("schema selection is supported only with --write")
+        requested = frozenset(args.only) | (
+            _BUILDER_OWNED_SCHEMA_PATHS if args.include_builder_owned else frozenset()
+        )
         selected_entries = tuple(entry for entry in _REGISTRY if entry.relative_path in requested)
         missing = sorted(requested - {entry.relative_path for entry in selected_entries})
         if missing:
@@ -4340,6 +7594,36 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     if args.check:
+        # ``schema_root`` mode intentionally treats legacy loader-less entries as reviewed
+        # documents.  Rebuild only the current wave's owned paths as an additional guard so a
+        # changed derivation cannot leave a stale source file while the disk-only check remains
+        # green.  This subset is read-only and never rewrites manifests or schema files.
+        builder_entries = tuple(
+            entry
+            for entry in selected_entries
+            if entry.relative_path in _BUILDER_OWNED_SCHEMA_PATHS
+        )
+        if builder_entries:
+            try:
+                generated = build_schema_documents(entries=builder_entries)
+                for document in generated:
+                    validate_schema_document(document)
+            except SchemaGenerationError as exc:
+                print(f"generate_schemas: FAIL ({exc.reason})", file=sys.stderr)
+                for entry in exc.entries:
+                    print(f"  {entry}", file=sys.stderr)
+                return 1
+            generated_diff = compare_tree(generated, root)
+            # ``compare_tree`` also reports every schema outside this deliberate subset as
+            # ``extra``.  Those files are expected here because the subset is only the current
+            # builder-owned wave, so only missing or changed owned paths are drift.
+            if generated_diff.missing or generated_diff.changed:
+                print("generate_schemas: FAIL (builder-owned drift detected)", file=sys.stderr)
+                for relative_path in generated_diff.missing:
+                    print(f"  missing {relative_path}", file=sys.stderr)
+                for relative_path in generated_diff.changed:
+                    print(f"  changed {relative_path}", file=sys.stderr)
+                return 1
         diff = compare_tree(documents, root)
         if diff.is_clean:
             print(f"generate_schemas: PASS ({len(documents)} schema(s) match)")
@@ -4361,7 +7645,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         for entry in exc.entries:
             print(f"  {entry}", file=sys.stderr)
         return 1
-    if args.only:
+    if args.only or args.include_builder_owned:
         for document in documents:
             if (root / document.relative_path).read_bytes() != document.schema_bytes:
                 print("generate_schemas: FAIL (post-write verification drift)", file=sys.stderr)

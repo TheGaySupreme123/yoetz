@@ -545,7 +545,13 @@ def test_snapshot_rejects_a_null_resolution_key() -> None:
 
 
 @pytest.mark.parametrize(
-    "gap", ["host_outcome_unavailable", "unpaired_event", "semantic_case_content_over_item_limit"]
+    "gap",
+    [
+        "host_outcome_unavailable",
+        "unpaired_event",
+        "semantic_case_content_over_item_limit",
+        "semantic_case_finding_refs_over_limit",
+    ],
 )
 def test_resolution_explains_only_disqualifying_semantic_gaps(gap: str) -> None:
     from yoetz.kernel.finding_resolution import resolution_blockers
@@ -802,3 +808,146 @@ def test_independent_command_gap_can_coexist_with_tolerated_host_gaps() -> None:
     assert qualifying_check_resolves(
         finding, 4, check, frozenset(), proof_state=_command_proof_state()
     )
+
+
+def _coordination_explanation_state(
+    *, resolved_at: int | None, closure_at: int | None, kind: FindingKind
+) -> tuple[ProjectionState, tuple[object, ...]]:
+    """A finding derived from the context at 3, a check at 5, and an optional closure (#842)."""
+
+    from types import SimpleNamespace
+
+    from builders.policy_cases import record
+    from yoetz.domain.coordination import CoordinationGapCode, OverlapKind
+    from yoetz.domain.events import CoordinationContextRecordedPayload
+
+    context = CoordinationContextRecordedPayload(
+        detection_id=evt(1),
+        project_id="prj_20000000-0000-4000-8000-000000000001",
+        membership_generation=4,
+        left_task_id="tsk_20000000-0000-4000-8000-000000000001",  # type: ignore[arg-type]
+        right_task_id="tsk_20000000-0000-4000-8000-000000000002",  # type: ignore[arg-type]
+        recipient_task_id="tsk_20000000-0000-4000-8000-000000000001",  # type: ignore[arg-type]
+        counterpart_task_id="tsk_20000000-0000-4000-8000-000000000002",  # type: ignore[arg-type]
+        source_task_id="tsk_20000000-0000-4000-8000-000000000002",  # type: ignore[arg-type]
+        overlap_kind=OverlapKind.PHYSICAL,
+        resource_identities=("sha256:" + "a" * 64,),
+        resource_count=1,
+        source_repository_commitment="hmac-sha256:" + "b" * 64,
+        source_workspace_commitment="hmac-sha256:" + "c" * 64,
+        source_route_generation=1,
+        source_attributable_paths=True,
+        context_digest="sha256:" + "d" * 64,
+    )
+    contexts = {evt(3): record(context, 3)}
+    if closure_at is not None:
+        closure = replace(
+            context,
+            resource_identities=(),
+            resource_count=0,
+            source_attributable_paths=False,
+            gap_codes=(CoordinationGapCode.REVOKED,),
+            context_digest="sha256:" + "e" * 64,
+        )
+        contexts[evt(closure_at)] = record(closure, closure_at)
+    policy = ("coordination", "0.1.0") if kind is FindingKind.COORDINATION_OVERLAP else _WORK
+    finding = _finding(kind=kind, subject_refs=(evt(3),), policy_id=policy[0])
+    state = replace(
+        empty_projection_state(),
+        frontier=20,
+        head_digest=_DIGEST,
+        findings={
+            fnd(1): finding_record(
+                finding,
+                4,
+                resolved_by_check_event_id=None if resolved_at is None else evt(resolved_at),
+            )
+        },
+        coordination_contexts=contexts,
+    )
+    checks = tuple(
+        SimpleNamespace(
+            event_id=evt(sequence),
+            schema=SimpleNamespace(name="check_recorded"),
+            ledger=SimpleNamespace(ingestion_sequence=sequence),
+            payload=_check(tested=sequence, policies=(policy,)),
+        )
+        for sequence in sorted({5, *(() if resolved_at is None else (resolved_at,))})
+    )
+    return state, checks
+
+
+def test_resolution_explanation_names_a_superseded_coordination_generation() -> None:
+    from typing import cast
+
+    from yoetz.domain.events import LedgerRecord
+    from yoetz.kernel.finding_resolution import finding_resolution_explanation
+
+    state, records = _coordination_explanation_state(
+        resolved_at=12, closure_at=10, kind=FindingKind.COORDINATION_OVERLAP
+    )
+    explanation = finding_resolution_explanation(
+        state, fnd(1), cast(tuple[LedgerRecord, ...], records)
+    )
+    assert explanation == (
+        f"Resolved by qualifying check {evt(12)} after project coordination generation 4 was "
+        "superseded; the context is retained as history, not as a current coordination "
+        "obligation."
+    )
+
+
+def test_resolution_before_the_closure_keeps_the_ordinary_explanation() -> None:
+    """A disposition-backed resolution that predates the closure is not re-described."""
+
+    from typing import cast
+
+    from yoetz.domain.events import LedgerRecord
+    from yoetz.kernel.finding_resolution import finding_resolution_explanation
+
+    state, records = _coordination_explanation_state(
+        resolved_at=8, closure_at=10, kind=FindingKind.COORDINATION_OVERLAP
+    )
+    explanation = finding_resolution_explanation(
+        state, fnd(1), cast(tuple[LedgerRecord, ...], records)
+    )
+    assert explanation == f"Resolved by qualifying check {evt(8)}; retained as history."
+
+
+def test_unresolved_superseded_finding_points_at_the_next_qualifying_check() -> None:
+    from typing import cast
+
+    from yoetz.domain.events import LedgerRecord
+    from yoetz.kernel.finding_resolution import finding_resolution_explanation
+
+    state, records = _coordination_explanation_state(
+        resolved_at=None, closure_at=10, kind=FindingKind.COORDINATION_OVERLAP
+    )
+    explanation = finding_resolution_explanation(
+        state, fnd(1), cast(tuple[LedgerRecord, ...], records)
+    )
+    assert explanation.startswith(
+        "Unresolved: project coordination generation 4 was superseded, so this is historical "
+        "context rather than a current coordination obligation"
+    )
+    assert "can resolve it" in explanation
+
+
+@pytest.mark.parametrize(
+    ("closure_at", "kind"),
+    ((None, FindingKind.COORDINATION_OVERLAP), (10, FindingKind.ACTION_WITHOUT_RESULT)),
+)
+def test_supersession_wording_needs_a_closure_for_that_coordination_finding(
+    closure_at: int | None, kind: FindingKind
+) -> None:
+    from typing import cast
+
+    from yoetz.domain.events import LedgerRecord
+    from yoetz.kernel.finding_resolution import finding_resolution_explanation
+
+    state, records = _coordination_explanation_state(
+        resolved_at=12, closure_at=closure_at, kind=kind
+    )
+    explanation = finding_resolution_explanation(
+        state, fnd(1), cast(tuple[LedgerRecord, ...], records)
+    )
+    assert explanation == f"Resolved by qualifying check {evt(12)}; retained as history."

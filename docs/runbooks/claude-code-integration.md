@@ -1,5 +1,9 @@
 # Claude Code native integration
 
+Codex's external MCP removal reconciliation (issue #860) does not apply to Claude Code:
+Claude's plugin-managed MCP follows the plugin lifecycle below. No Claude mutation or outcome
+contract changes are required for that Codex-specific host command.
+
 For setup prerequisites, use `yoetz setup status --next --host claude` with the same
 executable, configuration root and project. `--operation connection` inspects installation without
 provider sign-in; `local` and `review` inspect their respective vault/privacy prerequisites.
@@ -402,6 +406,21 @@ A background Bash launch
 is recorded as partial until the host supplies completion evidence. These decisions do not add
 filesystem or batch observation.
 
+Stale-verification advice is scoped to the logical tool call, not to the observed phase. On this
+profile one edit is observed twice — a `PreToolUse` attempt and a `PostToolUse` result sharing the
+normalized `tool_call_id` (Claude's `tool_use_id`) — and the pair reports one
+`edit_after_successful_check` finding whose evidence refs name each observed phase (issue #680).
+Where only the result is observed, that single phase is the whole condition; no pre-event is
+fabricated.
+
+A successful `Bash` result on this profile is an explicit host-tool success fact and nothing more.
+Deterministic advice never promotes it to a verification check: only a current `passed`
+approved-check fact, or an explicit success from a dedicated verification tool, establishes or
+advances the verification baseline, and a routine read never does. A Claude session that edits and
+claims completion after successful `Bash` commands alone therefore keeps
+`completion_without_verification` rather than silently counting those commands as a check
+(issue #681). Failed-command advice is unchanged and still reads every `Bash` outcome.
+
 Select these hooks with `--observation-profile ordinary` on the existing Claude plugin
 preview/install/update/status commands, or on `yoetz integrate claude plugin export` for a
 development directory. Repeat the same profile when applying an exact preview. To return to
@@ -421,6 +440,11 @@ yoetz observe content-status --workspace /exact/project --json
 yoetz observe content-disable --workspace /exact/project \
   --profile claude-code-ordinary-observation-v1
 ```
+
+This arm persists through later structural grants in the same workspace: connecting Codex,
+rerunning Codex setup, or repeating `yoetz observe grant` keeps it and does not advance its content
+fence, so a capture in flight stays authorized (#835). Only `content-disable` or `observe revoke`
+removes it; after a revoke, enable it again explicitly.
 
 The service accepts Claude chunks only when that exact profile is active in local consent and in the
 mapped task grant. A missing or mismatched profile drops plaintext chunks and records
@@ -453,6 +477,18 @@ selection uses the accepted tool event's durable session route and does not requ
 approved-check policy. Local capture consent and repository disclosure permission remain separate
 requirements.
 
+A handoff that its structural row can no longer consume (the row was already acknowledged,
+quarantined, or refused) is retired by that row's own delivery, by the READY maintenance sweep once
+it is 30 seconds old, or by a new CHECK's preflight, instead of holding shared oldest-age pressure
+at the hard limit (#836). Its payload-free retirement account and
+`content_capture_unavailable` marker commit before the ticket is tombstoned or its reservation is
+released; a failed or cancelled account leaves the handoff retryable, and a replay is idempotent by
+ticket identity. `observe status --json` names each retirement under
+`capture_handoff_retirements`. A handoff whose row is still queued keeps counting toward pending age.
+This hook sends its Claude Code content profile only with
+Claude Code rows; a queued Codex or Cursor row drained from the same workspace carries no profile, so
+it is not refused as `content_capture_profile_mismatch`.
+
 Claude Code has no `codex exec --json` import surface. Issue #301's bounded import authorization
 therefore makes no Claude adapter change; Claude evidence continues through cooperative MCP and
 the native hook/observation paths below.
@@ -465,15 +501,156 @@ server-key normalization are confined to the Cursor adapter. Cross-host regressi
 Claude's structured result, single JSON text block, live-characterized JSON string, and failed
 start rejection.
 
-The native hook profile emits only `SessionStart`, scoped-Yoetz `PostToolUse`, scoped-Yoetz
-`PostToolUseFailure`, `Stop`, and `SessionEnd`. A bare MCP matcher is a negative control. Hooks call
-`yoetz hooks claude-observe` through a lightweight entrypoint that avoids loading the full CLI
-application graph. The renderer gives ordinary events a five-second budget, `SessionStart` and
-`Stop` ten seconds, and teardown `SessionEnd` three seconds. Structural capture and pairing close
-before service drain; advice-bearing events remain synchronous so Claude receives
-`additionalContext` in the same hook response. Timeouts/nonzero exits never authorize or block
-Claude work. The renderer knows Claude's documented `SubagentStart` / `SubagentStop` stdout shapes,
-but this profile does not advertise those events; adding them is a separate profile expansion.
+The native hook profile emits `SessionStart`, scoped-Yoetz `PostToolUse`, scoped-Yoetz
+`PostToolUseFailure`, `Stop`, `SessionEnd`, `SubagentStart`, and `SubagentStop`. A bare MCP matcher is
+a negative control. Hooks call `yoetz hooks claude-observe` and are best-effort; timeouts/nonzero
+exits never authorize or block Claude work. The child hooks retain only the bounded child identity;
+transcript, prompt, agent type, and path data stay outside the Yoetz envelope.
+
+The renderer uses a lightweight entrypoint that avoids loading the full CLI application graph.
+Ordinary events have a five-second budget, `SessionStart` and `Stop` ten seconds, and teardown
+`SessionEnd` three seconds. Structural capture and pairing close before service drain, while
+advice-bearing events remain synchronous so Claude receives `additionalContext` in the same hook
+response. The conservative 0.2 profile used five lifecycle events; the 0.3 capability cell adds
+`SubagentStart` and `SubagentStop` only where the exact installed cell and evidence below support
+them.
+
+### Task-tool subagents and attribution (#506)
+
+The #499 lifecycle repair applies to cooperative Claude children: successful routed activity
+renews session health, abandonment is a service-stamped ledger event, and an unused expired handle
+leaves an abandoned reservation. The #507 native start-callback correlation bridge is Codex-only;
+it does not establish new Claude host support. The #754 multi-agent v2 child identity source is
+Codex-only for the same reason: it reads a Codex rollout `session_meta` header, a stream family
+Claude Code does not have. Claude keeps its native `SubagentStart`/`SubagentStop` hook identity
+unchanged, and no Claude capability cell moves. Existing Claude cooperative identity and native
+evidence boundaries below remain in force.
+
+### Parent liveness while native subagents run (#837)
+
+In the 2026-09-25 dogfood, a Claude parent's last accepted hook was a `SubagentStart`. Its
+native subagents then ran for about twelve minutes with no parent event. Yoetz abandoned the
+parent while it kept working, and a later delegation was refused. Injected-clock conformance
+reproduces the same sequence on the released source. The per-profile decisions are:
+
+- **Structural profile (default).** These count as parent contact, each at its own receipt time:
+  - workflow calls;
+  - scoped-Yoetz `PostToolUse` and `PostToolUseFailure`;
+  - `SessionStart`, `Stop`, `SubagentStart`, and `SubagentStop`.
+
+  Only `SessionEnd` ends contact. A `SubagentStart` recorded without its `SubagentStop` holds the
+  parent in contact until the stop, for at most 3,600 seconds.
+- **Ordinary profile.** It registers no `SubagentStart` or `SubagentStop`, so it has no subagent
+  hold:
+  - Subagent `PreToolUse`, `PermissionRequest`, and `PermissionDenied` events route to the parent
+    lane and count as parent contact at their receipt time, even when the sweeper delivers them
+    late.
+  - Subagent `PostToolUse` carries the child identity and never renews the parent.
+  - Adding the lifecycle hooks to this profile needs its own installed-artifact evidence. It is
+    not claimed here.
+- **Remaining gap (both profiles).** Some quiet periods produce no qualifying evidence:
+  - one native tool call that runs past the lease and recovery window;
+  - a turn waiting on the user;
+  - in the ordinary profile, a subagent that stays silent.
+
+  Such periods still lose contact after the lease and abandon the work after
+  `lineage.contact_lost_recovery_seconds`, which operators can raise.
+- **After abandonment.** Refusals carry `lineage_resume_work_terminal` or
+  `lineage_parent_work_terminal` with the `lineage_successor_task` continuation. Keep the held
+  session for history and receipts, and start one successor task for new work and delegation.
+
+No Claude capability cell moves. Native re-verification of this path is still owed on a pinned
+instance.
+
+The exact pinned capability cell remains `claude-code-cli-local-project-2.1.241`. The earlier
+installed Claude Code `2.1.261` fixture proves native child-hook delivery in an evidence-only
+plugin. The latest installed binary reported `2.1.263`; it was exercised in a fresh isolated
+strict-plugin export with a bounded loopback Messages provider. Claude's real native `Agent` path
+started and completed one child at `spawn_depth=1`; both `SubagentStart` and `SubagentStop` hooks
+ran successfully. The observed start shape carried `agent_id`, `agent_type`, `session_id`, `cwd`,
+and `transcript_path`; stop additionally carried `agent_transcript_path` and `permission_mode`.
+Neither event carried a parent tool-call id, so child-only correlation is a required supported input
+shape.
+
+The final exact-wheel cell used `yoetz-0.1.0-py3-none-any.whl` at SHA256
+`8d54a73c87e5e49b0b6179ad58f673d2b2f40b1a93c80c4393ce56ae36e82988` from source commit
+`2e8b0b48`, with 216 packaged resources (`sha256:1e4cc667456c1cf9ac579d7bc1db186937c29abd9637025c42569ffc7701895c`)
+and a strict plugin export (`sha256:f2f7249ef47e43cde1fb0004d2bb770125665c7fc15664c8c6d116242dec6fdb`) loaded
+through Claude's development `--plugin-dir` carrier in a fresh mode-0700 isolated root; this is not
+marketplace-installed activation. It completed a Yoetz parent `start`, `mode=delegate`, native
+child `Agent`, child `mode=attach`, one `publish_work`, deterministic `check`, and JSON `receipt`;
+the child receipt was `rcp_f567225d-a34f-4a07-beda-2866649a3b57` with digest
+`sha256:47a578bbdaedd7f93e3389ee7d212b84feb132dd44ff2f02a1c8d10e63ba3e3a` and the recorded
+conclusion `insufficient_coverage` (`semantic_review_not_requested`). The parent and child ledgers
+durably recorded delegation, the child action, check, and receipt. The provider remained a loopback
+synthetic Messages server, Claude auth status was `loggedIn=false`/`authMethod=none`, and no normal
+credentials or user vault material entered the root; only a throwaway synthetic passphrase vault was
+initialized inside that isolated root. Workspace-level observation consent covered only the
+synthetic workspace. Post-run status
+recorded `claude_hook:true` but `mapping_present:false`, ten `mapping_missing` quarantines, and
+`outbox_quarantined`/`unpaired_event` gaps, so this cell proves hook execution but does not claim
+attributed host observation or accepted hook coverage. The first `SessionStart` hook was cancelled;
+child and operation hooks returned success. The parent's advice/frontier remained independent and
+recommended `refresh_observation`. This proves the bounded host and Yoetz workflow under the
+recorded limits; it does not promote either installed version to the pinned `2.1.241` capability
+cell or prove production model use.
+
+For a validated child signal, the service normalizes `agent_id` to a bounded
+subagent identity and retains only structural correlation. `origin=host_observed` and
+`acceptance=pending` stay service-stamped until an accepted `mode=delegate` handle or cooperative
+self-registration binds the same correlation. A hook carrying only the parent's `session_id`, or a
+PostToolUse row fired inside a child without a validated child identity, is an attribution gap and
+never parent work. The parent's advice and frontier lane remains independent. Transcript paths,
+prompts, agent types, and summaries are never correlation proof.
+
+Shared-session callbacks preserve the parent mapping when the child attaches. A successful child
+start can establish a separate local route when Claude supplies a validated child agent ID. If the
+callback omits that identity, names a foreign task or service session without a matching child
+route, or supplies conflicting aliases, it remains an explicit attribution gap. Such a callback
+cannot enqueue parent work or consume parent advice and frontier notices. A local delivery route
+does not create or accept a cooperative child. Ordinary child callbacks with no safe identity
+remain outside the attributed delivery contract.
+
+This decision is based on installed native execution and the pinned profile boundary; a current
+online Claude reference or a renderer fixture does not upgrade the pinned cell. The #509 host
+matrix records the `2.1.261` child-hook fixture and the later installed `2.1.263` bounded
+parent/delegate publication, check, and receipt run as separate evidence cells. Cooperative MCP
+self-registration remains a separate, explicitly bounded path.
+
+The historical 0.3 child-hook cell used control 2.5, which admits the `pairing_mode` and
+`correlation_kind` metadata emitted by Claude ingress. Current main's control 2.6 successor retains
+those fields and adds the bounded observation-selection projection; both peers must use the same
+current manifest after integration. Earlier development artifacts omitted the pairing fields from
+the closed schema: the client returned `frame_invalid` before sending the observation, and the hook
+layer reported `ledger_rejected`. That refusal did not establish a service-stage failure or an
+unsupported host signal. The frozen control 2.4 schema remains available for historical validation.
+Verify admitted observations separately from successful cooperative tool calls and local queue
+drainage.
+
+The 2026-09-07 native cell used source `80d0d94c` and the development `0.1.0` wheel at SHA256
+`18b0e5ecd9cc09acb06dd805d90c01dc506241a26e2405b152dec36a51ec6f9d`. All 475 installed package
+files matched the wheel. Claude Code `2.1.263` ran with an isolated synthetic workspace and
+passphrase vault, the development `--plugin-dir` carrier, a strict MCP route, and a synthetic
+loopback Messages provider. The native host and driver exited `0` without timeout. Parent attach,
+delegation, native `Agent`, child attach, publication, deterministic check, and receipt completed;
+request/result models, child identity, operation ordering, and receipt/check bindings validated.
+`SessionStart`, `SubagentStart`, `SubagentStop`, and `Stop` hooks succeeded without cancellation.
+
+Consented hook envelopes retained one validated child identity across `SubagentStart`, four child
+`PostToolUse` callbacks, and `SubagentStop`. The four child callbacks used a separate scoped route;
+five mapping snapshots preserved the parent identity. Child frontier delivery and advice state
+remained separate from the parent, and the parent lineage contained an annotation. Native output
+stream records omitted the child identity fields, so this attribution is supported by the installed
+hook ingress and retained structural state, not independently attested by the output stream.
+
+Final observation status showed Claude hook coverage, zero pending rows, zero quarantines, and a
+completed drain. One bounded `drain_budget_exhausted` diagnostic remained; a historical parent
+`mapping_missing` event did not recur in child callbacks. Public status retained
+`content_capture_unavailable`. The check and receipt used deterministic coverage with
+`semantic_review_not_requested`; their validation allowed later observation-related frontiers but
+did not independently prove the intervening digest chain. This cell proves the bounded native
+workflow and lane separation. Production model behavior, semantic advice content, marketplace
+activation, and support for the pinned `2.1.241` capability cell remain outside its coverage.
 
 Advice uses Claude Code's documented output contract. `SessionStart`, `PostToolUse`,
 `PostToolUseFailure`, and `Stop` may emit `hookSpecificOutput.additionalContext`. The failure event
@@ -481,7 +658,13 @@ keeps `hookEventName: PostToolUseFailure` even though Yoetz normalizes its inter
 to `PostToolUse`. At `Stop`, additional context is Claude Code's non-error feedback channel: it
 continues through the same `stop_hook_active` loop guard as a blocking decision, but is labelled as
 feedback rather than an error. Yoetz never emits `decision: block` to Claude Code. `SessionEnd`
-emits `{}`.
+emits `{}`. Provider-repair advice is standing advice (#844). Claude Code delivers it only on
+`SessionStart` and `Stop`, still as `additionalContext` and never as `decision: block`.
+`PostToolUse` does not carry it. A private or no-egress install, an install with no provider
+endpoint, and an install whose verification is disabled do not emit `connect_provider` or another
+provider-repair request. The service emits it only when verification is not disabled, a provider
+endpoint is bound, network egress is permitted, and an LLM inference channel is enabled, and the
+provider is still structurally unusable, including when no factory id is available.
 
 The rendered hook commands bind `--workspace "${CLAUDE_PROJECT_DIR}"`. When a hook ingests
 nothing it still exits 0 with `{}`, but records one payload-free `hook_diagnostics` reason that
@@ -494,31 +677,32 @@ zero `recent_count` after a session that ran Yoetz tools means the hooks never r
 or the runtime gate is disabled — not that they were dropped for binding.
 
 A consented `SessionStart` auto-attaches a ledger task without an explicit MCP `start`: the hook
-uses the canonical project root as `workspace_ref` and `claude-session:<session_id>` as
-`external_ref` (both persisted only as HMAC commitments). Before creating that new pair, the shared
-hook path checks its private local store for a unique valid mapping from an earlier Claude session
-whose `SessionEnd` was received, with every other bound session ended and every candidate limited to
-this consented workspace. A unique candidate is held under the workspace and predecessor session
-locks, revalidated, and sent as `mode=attach` with the existing Yoetz `session_id` plus the new pair.
-The catalog requires the selector to be active and non-quarantined, its canonical workspace and
-repository-privacy binding to match, and no start already pending for that selected route. Other
-independent tasks in the same workspace do not block this recovery (#814); a pair already bound
-to another task remains a conflict. If eligible mappings name more than one task, the hook records
-`auto_attach_binding_ambiguous` with a bounded candidate count only; it does not create or choose
-among them, and a hard crash without `SessionEnd` remains fail-closed. With no usable predecessor,
-ordinary `create_or_attach` admits the new pair as independent work, even beside a dormant task.
-The successful recovery rewrites every ended same-host predecessor mapping for that task to the
-rotated session and writer, so pending rows drain on the successor route. Recovery first takes a
-nonblocking workspace reservation, then holds ordered locks for every eligible ended same-host session
-through full candidate revalidation, the service RPC, authorized rewrites, and pruning. The
-revalidation covers unmapped sessions, cross-workspace ownership, mapping identity, and mapping
-recency; a busy workspace reservation or candidate-lock/changed-snapshot boundary remains typed
-`auto_attach_recovery_busy` rather than guessing or silently creating.
-Pending predecessor rows then
-drain on that successor route (`session_superseded` is followed, not quarantined as
-`ledger_rejected`). A failed attempt records its cause as a
+sends `start mode=create_or_attach` with the canonical project root as `workspace_ref` and
+`claude-session:<session_id>` as `external_ref` (both persisted only as HMAC commitments). Success
+shows as `mapping_present: true` in `observe status` and the session's queued rows drain in the
+same pass. Before admitting a new pair, the shared hook path checks private persisted mappings
+from eligible ended Claude sessions. Eligibility requires a received `SessionEnd`, every other bound
+session ended, and a candidate bound only to this consented workspace. A unique eligible mapping is
+selected before automatic new-pair admission: the hook holds the workspace and lifecycle locks,
+revalidates ownership and state, and sends one `mode=attach` request carrying that selector plus the
+new pair. The catalog requires the selected root task to be active and non-quarantined, its
+canonical workspace and repository-privacy binding to match, and no start already pending for that
+selected route. Other independent tasks in the same workspace do not block this recovery (#814); a
+pair already bound to another task remains a conflict. Delegated child routes require an
+authenticated attach handle or target selector. Recovery revalidates unmapped sessions,
+cross-workspace ownership, mapping identity, and mapping recency; a busy workspace reservation
+defers with `auto_attach_recovery_busy`, while candidate-lock contention or changed state returns
+the closed `auto_attach_recovery_busy` boundary rather than creating work from an unstable selector.
+A successful recovery
+rewrites every ended same-host predecessor mapping for that task to the rotated session and writer.
+With no usable persisted selector, automatic `create_or_attach` admits the new pair as independent
+work, including beside a dormant task. Pending predecessor rows then drain on that successor route
+(`session_superseded` is followed, not quarantined as `ledger_rejected`). `workspace_task_exists`
+identifies only explicit `mode=create` colliding with an identical pair; workspace membership never
+selects a task. Age alone never proves a host session ended. A failed attempt records its cause as a
 payload-free `hook_diagnostics` reason
-(`auto_attach_workspace_unbound`, `auto_attach_request_invalid`, `auto_attach_binding_ambiguous`, `auto_attach_conflict`,
+(`auto_attach_workspace_unbound`, `auto_attach_request_invalid`, `auto_attach_binding_ambiguous`,
+`auto_attach_conflict`,
 `auto_attach_refused`, `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`,
 `privacy_authority_required`, `service_unavailable`, `service_incompatible`, `vault_locked`, `timeout`, `storage_unsafe`,
 or `storage_corrupt`) and the session keeps an observation-only binding; `UserPromptSubmit` and
@@ -548,17 +732,24 @@ Shared drain terminalization is host-neutral: `ledger_rejected` means the ready 
 one envelope non-retryably, so that row is retained in quarantine and later rows proceed. A task
 bundle at schema 9 (bundle migration `0009`) stores `claude_hook` rows; schema 8's source CHECK
 refused them. The SQLite store now classifies deterministic constraint failures as `ledger_rejected`
-(issue #576). Existing task bundles require the explicit [migration procedure](migration-rollback.md);
-upgrading or restarting the service alone does not migrate them, and the new writer refuses an
-unmigrated bundle before observation ingestion. Migration allows valid pending envelopes to store
-unchanged, but delivery still requires a usable session mapping; it does not itself repair a retired
-session route or replay quarantined rows. An
+(issue #576). During a compatible 0.2-to-0.3 package update, after old writers are stopped, the
+fresh service runs its backup-first bundle migration before READY; no per-task migration ceremony
+is required. The ordinary writer still refuses an unmigrated bundle before observation ingestion,
+and an unsupported or ambiguous startup result remains fail-closed with the [migration and rollback
+procedure](migration-rollback.md). Migration allows valid pending envelopes to store unchanged, but
+delivery still requires a usable session mapping; it does not itself repair a retired session route
+or replay quarantined rows. An
 idempotent repeat of a committed envelope (lost acknowledgement, service restart, or a workflow
 reattach that rotates the mapped Yoetz session) is resolved task-wide and acknowledged, never
 quarantined. A pending row from an ended host session whose task was recovered by a successor
 session is delivered on the successor route (`session_superseded` is followed). A successor
 binding that cannot be followed quarantines that row as `session_superseded`, not
 `ledger_rejected` or `mapping_missing`.
+A non-retryable `SESSION_CONFLICT` while acquiring the task runtime reports `mapping_missing`,
+keeping the envelope pending for a later drain after its lifecycle mapping is repaired. The route must still
+pass its ownership checks. Non-retryable conflicts after runtime acquisition remain
+`ledger_rejected` and enter quarantine. Retryable route conflicts report `service_unavailable`
+and stay pending.
 A row
 also enters quarantine after 128 consecutive rejections with the same retryable reason, except for
 designed back-pressure and workspace-global pause/vault/disabled gates. Both cases remain visible
@@ -576,8 +767,9 @@ or `_respond` enqueues one row; every `PostToolUseFailure` enqueues one row. Cla
 pre-event to hold back. Its `tool_use_id`, when present, identifies the observed result; no
 missing-pre gap is created for a legacy post-only hook. The `PostToolUse` advice
 guard recognizes Claude's plugin spelling together with the other host spellings, so a self-owned
-hook does not lease pending frontier or recommendation context for the call being observed.
-Explicit self-call failures remain retained and enqueued. The manual
+hook without an explicit failure does not lease pending frontier or recommendation context for
+the call being observed. Explicit self-call failures remain retained, enqueued, and eligible for
+pending advice. The manual
 `yoetz observe drain --json` reports `terminal: drained` once nothing is pending.
 
 Grant observation separately for the exact project. Exercise every advertised event and inspect
@@ -588,6 +780,23 @@ the returned task/session/writer identifiers and frontier to bind the Claude ses
 none of the response bytes or prose. Confirm `mapping_present: true`, then drain and require accepted
 rows before claiming hook coverage. Pause, resume, revoke, deduplication, restart, and gap behavior
 require their own evidence.
+
+### Oversized hook payloads (issue #667)
+
+A Claude Code hook body over the 256 KiB ingress cap (`MAX_HOOK_STDIN_BYTES`) is refused at
+stdin, before any parse. Claude Code does not use Cursor's 1 MiB identity skim, so the oversized
+event stays an unparsed gap. The hook stays fail-open and the host continues. Yoetz records the
+bounded `claude_payload_too_large` reason against that event in `yoetz observe status` hook
+diagnostics, and notes the `payload_too_large` coverage gap on the consented workspace, where
+`yoetz observe status` shows it. That workspace gap does not yet reach task receipts: no row
+exists, so a receipt simply has no evidence for the dropped event rather than naming the loss. This host ingress previously swallowed every
+refusal into a bare `{}` with no record at all, so a dropped large edit left no trace.
+The cap is fixed and shared by every host; raising it is not an operator control. Each reader
+consumes at most cap-plus-one bytes, so the true size of a refused body is never measured and
+never recorded — the bound itself is the whole fact. Nothing about the event is parsed, so the
+hook name the host supplied on the command line is the only identity the record can carry: no
+tool name, session, or path. The refusal costs exactly that one event; the next ordinary event
+still ingests.
 
 ### Smart observation selection (issue #687)
 
@@ -627,6 +836,29 @@ retention only. They do not rewrite accepted rows, extend Claude's five-second o
 ten-second session, or three-second teardown budgets, or change content, privacy, provider, or
 network authority. Under pressure, a selected Detailed session can be effectively Focused while
 the owner setting remains Detailed.
+
+**Configurable capacity (issue #828) — Claude Code decision.** Claude Code uses the same local
+capacity path as every other host: `yoetz observe selection-preview` with `--capacity
+standard|larger|largest`, `--capacity custom --queue-count <64..8192>`, or `--capacity none`, then
+`selection-apply --accept --preview-digest`, or the terminal interface's `/observe`. There is no
+Claude Code-specific capacity control, and repository or plugin configuration cannot raise capacity.
+An agent may relay a change only after the owner accepts the displayed preview's scope, values,
+local-hardware consequences, remaining limits, and lower/pause/resume path; ordinary task permission
+never authorizes an increase. `--capacity none` returns `capacity_no_cap_unsupported` because the
+local state document has a 16 MiB safety ceiling, and changes nothing; the largest supported
+capacity is 8,192 rows. MCP `status` stays read-only for capacity. Hook body caps and Claude's hook
+budgets are unchanged. Custom counts need control schema `2.9.0` on both the client and the service;
+an older revision drops a saved custom count to the default.
+
+**Lowering above the fallback byte bound (issue #843) — Claude Code decision.** Claude Code uses
+the shared store path with no Claude-specific behavior. Lowering, revoking, expiring, or ending a
+larger selection can leave more accepted rows than the new target holds. Those rows still drain,
+and the store keeps finite room, tied only to them, for refused-input loss, delivery attempts, and
+session ends. A refused hook reports `hook_observe_degraded: outbox_overflow; loss accounted`
+only after the loss is durable. If a `SessionEnd` hook cannot persist its local end, it stays
+fail-open within its three-second budget. It prints
+`hook_observe_degraded: session_end_unrecorded` and records that reason in
+`hook_diagnostics.reasons`.
 
 Use `protect-read` before an upcoming read when a later claim needs its individual identity. The
 reference must be an `obl_`, `clm_`, or `fnd_` identifier; at most 32 logical reads are outstanding,
@@ -724,6 +956,36 @@ check as host authorization, never as an AI-powered review status. Yoetz deliber
 `PermissionRequest` hook returning `decision: allow`, which would make the plugin the authority over
 the host's own review.
 
+The same scoped hook reports a hold to the user (issue #857). Its stdout has
+`hookSpecificOutput.{hookEventName, retry}` and a bounded `systemMessage`. Claude Code 2.1.281's
+installed schema and handler and the [current reference](https://code.claude.com/docs/en/hooks#permissiondenied)
+were checked on 2026-09-26: `PermissionDenied` drops `additionalContext`. The user sees the
+first-hand notice; the model receives only the host's retry cue, with exact-request and pause
+rules supplied by the shipped skill. Do not claim model-visible grant delivery.
+
+| Facts | User notice | `retry` | Diagnostic |
+| --- | --- | --- | --- |
+| confirmed grant, recognized classifier verdict, first recorded offer this session | external review grant present; this invocation was held; one identical retry may be offered | `true` | `host_denial_retry_offered` |
+| same session already offered a retry | present the exact call for human approval | `false` | `host_denial_retry_exhausted` |
+| no verdict or unknown source/reason | classifier verdict not established; ask the human | `false` | `host_denial_retry_exhausted` |
+| legacy `source` `permission_rule` or `hook` | owner rule held it; ask | `false` | `host_denial_retry_exhausted` |
+| grant absent or unreadable | grant unconfirmed; closed reason named | `false` | `host_denial_grant_unconfirmed` |
+| full, damaged, unsafe, contended or unwritable retry ledger | confirmation without a retry | `false` | `host_denial_retry_unrecorded` |
+
+Current Claude omits `source` and does not fire this event on manual denials or deny rules.
+No-verdict detection includes the reason prefix `Auto mode could not evaluate this action and is
+blocking it for safety`, `Classifier unavailable`, and the legacy `no_verdict` token. Unknown
+sources and missing reasons fail closed. Host payloads are never echoed.
+
+The repository-bound grant read has a 2.5 s deadline covering connect, request and cleanup.
+`observation/host-hold-retries.json` stores at most 64 session digests under the owner-only state
+directory. Old offers are never evicted to make room: at capacity, new sessions need human
+approval. Damaged or unsafe ledgers are preserved without offering another retry. Admission
+remains the durable owner choice; revoke it through `yoetz integrate claude admission revoke`.
+A grant notice is not MCP route verification. The strict route still blocks external dispatch.
+Policy-route observation before retry, a model-visible first-hand notice, and the live Claude
+auto-mode approval/denial cell remain unverified and tracked in #857.
+
 Claude Code surfaces MCP initialize `instructions` as server instructions in the model's context.
 Whether the auto-mode classifier reads them is not documented, so the policy-route destination
 disclosure (issue #479: provider, endpoint profile, and host, or the Codex runtime class, plus the
@@ -799,6 +1061,13 @@ API provider serves a given attempt is a service-side dispatch decision recorded
 (`fallback_from`), with no Claude-Code-specific behaviour, plugin, or route input — the route
 ceiling applies to dispatch authority regardless of which endpoint serves.
 
+Routine/final Codex review budgets (issue #571 item A1) are host-independent too. The service
+selects the budget profile from the frozen case: `final` when the frontier carries a completion
+claim, `routine` otherwise. It then dispatches with that profile's configured effort and output
+limit and records them in provenance. Claude Code gets no host-specific behavior, registration, route
+input, or per-request selector, so the decision for this host is "supported, unchanged".
+Recording a completion claim is the only way a check requests the final profile.
+
 
 ### Large tasks and AI-powered review failure recovery (#674–#676)
 
@@ -841,6 +1110,12 @@ them from memory, `CLAUDE.md`, or the live store.
   replay only `absent`; use stored `complete`; follow an exact typed continuation and required
   approval before replaying `pending`. Retain and report pending without a continuation,
   `quarantined`, or unknown. Never invent session/writer IDs or create a task to escape a write.
+- **Refused check admission.** A check `OPERATION_PENDING` carrying the
+  `check_admission_same_identity` continuation recorded nothing: its `reason_code` names the stage
+  (`check_admission_capture_pending`, `…_in_progress`, `…_contended`, or `…_import_pending`) and
+  `status view=operation` reads `absent` with the same `admission` stage. Replay the exact check
+  body and request ID after `retry_after_ms`, at most three times, then report the check as not
+  admitted. The service is host-agnostic here; this host needs no extra step (issue #838).
 - **Exact-session attach.** When the `SessionStart` context provides a held `session_id`, use that
   exact value as the `mode=attach` selector. `${CLAUDE_PROJECT_DIR}` is the canonical workspace
   fence supplied by the host context; if the request carries identity refs, include the canonical
@@ -932,7 +1207,8 @@ Task/receipt advice can occupy the same context slot and defer the recommendatio
 Use the exact advertised accept/decline command, including `--release-version`. A new decline skips
 that release; older permanent declines remain respected. Acceptance only supplies the upgrade
 instructions, and execution requires the user's explicit upgrade request. Package replacement does
-not itself prove host activation or data migration. Preserve the existing host roots, ownership and
+not itself prove host activation; a compatible data migration is performed by the fresh service
+before READY and must be verified separately. Preserve the existing host roots, ownership and
 privacy choices; new settings such as Expanded review require a separate exact approval.
 
 ## Recovery directives in errors (ADR-030)
@@ -956,11 +1232,45 @@ returned.
 No Claude-specific behavior is configured: the projection is host-neutral and lives in
 `yoetz.mcp.summaries`.
 
+
+### First-start contention and long review recovery
+
+Native and explicit MCP startup share the catalog lease-yield repair. A released start lease
+carries the typed same-request retry directive; an active lease carries the bounded wait directive.
+Both retain the original body and request identity. The shared service keeps an admitted semantic
+check running after an ordinary client wait timeout or disconnect; an explicit control cancellation
+or service shutdown still cancels it. This is shared service behavior, not proof of a new native
+Claude dogfood run.
+
 For a returned start error with `start_busy_same_identity`, the reservation remains durable and
 only its fenced lease was yielded. Replay the exact start body and request ID once, without
 inventing session or writer IDs. `start_pending_same_identity` instead means a live lease remains:
 wait up to 60 seconds before the one exact replay. If still busy or pending, retain the original
 request and report the unresolved start. These continuations do not authorize a new task.
+
+**CLI JSON (issue #741).** When an agent in this host runs `yoetz` in a shell with `--json`, a
+CLI-owned JSON error body carries a `recovery` object resolved from the same registry. A workflow
+command (`start`, `publish-work`, `check`, `respond`, `status`, `receipt`) also prints JSON when
+stdout is not a TTY; its failure keeps the exact wire body on stdout and writes the directive
+lines to stderr. This is CLI behavior shared by every host; no Claude Code-specific behavior is
+configured.
+
+**Provider outcomes (issue #742).** A check whose AI-powered review failed carries a
+`continuation_for_semantic_outcome` token in the shared CLI and MCP check projections. Claude
+Code depends on the MCP text channel, so the token and, when the 512-byte budget allows, the
+directive appear there. Raw provider text never reaches that projection. Hook advisories never
+carry this token; SessionStart's vault-locked advisory appends its own `vault_unlock_required`
+token after the host-specific prefix (issue #739). No Claude-specific recovery wording is
+configured.
+
+### Structural review progress (#571 A2)
+
+Decision: supported through the shared MCP `status` tool with no Claude Code-specific behavior,
+registration, or route input. Call `status` with `view: "operation"` and the check request ID while a long review runs; Claude Code receives the privacy-minimized text summary, which names the operation state, phase, attempt, condition, elapsed and remaining milliseconds, and the structured page carries every field. The phase vocabulary, deadline, and terminal outcome are
+service facts, identical for every host; progress never includes provider text, tokens, reasoning,
+or account identity. A read from a different session or writer of the same task may return
+retryable `BUNDLE_BUSY` while the check runs. This is shared service behavior, not evidence of a
+fresh installed native Claude Code dogfood run.
 
 ## Cold service attachment and recovery (issue #670)
 
@@ -984,9 +1294,10 @@ admission conflict (`auto_attach_conflict`). Missing mapping remains explicit. C
 task selector or explicit admission decision, not a service restart. Successful hook exit alone
 does not establish attachment. A unique ended predecessor is attached before a new pair is created;
 ambiguous predecessor tasks produce `auto_attach_binding_ambiguous` with a count only, and the
-explicit session-plus-new-pair recovery preserves the selected task even when unrelated tasks
-share the canonical workspace (#814). It still checks the active selector, workspace and repository
-binding, and pending operations for that task; no task interaction authority is added.
+explicit session-plus-new-pair recovery preserves the selected root task even when unrelated
+tasks share the canonical workspace (#814, #816). It still checks the active selector, workspace and
+repository binding, and pending operations for that task; delegated child routes keep their
+authenticated attachment path, and no task interaction authority is added.
 
 Structural pre/post observations remain queued and keep their original identities across
 bootstrap. A later successful mapping permits their normal drain. Missing transient content

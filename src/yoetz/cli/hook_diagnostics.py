@@ -74,6 +74,31 @@ _REASONS: Final = frozenset(
         "drain_budget_exhausted",
         "drain_lease_contended",
         "drain_preflight_failed",
+        # A structural defect in the buffered admission account refused this
+        # hook's pre-flush. Before this token the failure reached the outer
+        # handler as the bare `observe` reason, so a permanently wedged flush
+        # was indistinguishable from any other hook fault (issue #753).
+        "admission_flush_invalid",
+        # A teardown hook could not persist its session end. The hook stays
+        # fail-open, so this is the only record that the session and any
+        # temporary selection override are still active (issue #843).
+        "session_end_unrecorded",
+        # One host event refused at stdin ingress for exceeding
+        # ``MAX_HOOK_STDIN_BYTES``, named per host because the reading process
+        # is the only thing that still knows which host it was: the body was
+        # never parsed, so hook payload identity (tool name, session, paths) is
+        # unavailable. Before these, an oversized Cursor write was recorded as
+        # the generic `cursor_payload_invalid`, a Codex one degraded to the bare
+        # `observe` token, and a Claude Code one recorded nothing at all
+        # (issue #667).
+        "codex_payload_too_large",
+        "claude_payload_too_large",
+        "cursor_payload_too_large",
+        # Cursor retained a structural identity for one hook body over the
+        # trusted cap and inside the skim cap. Content was not captured. Codex
+        # and Claude Code do not skim, so they have no sibling of this reason
+        # (issue #667).
+        "cursor_payload_content_omitted",
         "auto_attach_retry_failed",
         # Why a consented SessionStart (or its turn-boundary retry) produced no
         # mapping (#459). Before these, every auto-attach failure collapsed to a
@@ -129,8 +154,13 @@ _REASONS: Final = frozenset(
         # bind failed silently and observation kept routing to the old task.
         "start_bind_unparsed",
         "start_bind_invalid_ids",
+        "start_bind_child_lane_unbound",
         "start_bind_deferred",
         "start_bind_write_failed",
+        # A Codex callback's own transcript proved it came from a delegated child but could not
+        # name that child for the callback's session, or contradicted the host child alias
+        # (issue #841). The callback stays an explicit attribution gap, never parent work.
+        "child_transcript_identity_conflict",
         # Observability only: the end-to-end hook budget is a contract, not an
         # enforcement point. Aborting mid-hook would drop ingest.
         "hook_budget_exceeded",
@@ -142,6 +172,15 @@ _REASONS: Final = frozenset(
         # not a Yoetz AI-powered review result: no AI-powered review status can be inferred.
         "host_auto_review_denied",
         "host_permission_rule_denied",
+        # What the same ``PermissionDenied`` hook then said about the hold (issue #857): the
+        # grant was confirmed first-hand and the session's one retry was offered; the grant was
+        # confirmed but the retry was already spent, the denial came from the owner's own rule,
+        # or the host produced no verdict; the retry ledger could not be written so no retry was
+        # emitted; or the grant could not be confirmed inside the hook deadline. Payload-free.
+        "host_denial_retry_offered",
+        "host_denial_retry_exhausted",
+        "host_denial_retry_unrecorded",
+        "host_denial_grant_unconfirmed",
         # The durable applied route and the live host registration disagree:
         # policy was applied but the host now serves strict (or vice versa),
         # so a fresh Codex process is still on the old route (issue #537).

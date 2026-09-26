@@ -15,6 +15,7 @@ from typing import Final, Literal, Never, Protocol, cast
 from pydantic import BaseModel
 
 from yoetz.adapters.control.unix_socket import LocalControlTransportError
+from yoetz.domain.coordination import CoordinationErrorCode
 from yoetz.domain.values import JsonObject, freeze_json
 from yoetz.ports.control import (
     ControlCallRequest,
@@ -83,9 +84,11 @@ MAX_CONTROL_FRAME_BYTES: Final = 6_291_456
 MAX_ORDINARY_CONTROL_FRAME_BYTES: Final = 1_048_576
 MAX_ACTIVE_REQUESTS_PER_SESSION: Final = 32
 
-_CONTROL_SCHEMA_VERSION: Final = "2.6.0"
-_CONTROL_RESULT_SCHEMA_VERSION: Final = "2.6.1"
-_CONTROL_REQUEST_SCHEMA_VERSION: Final = "2.6.1"
+_CONTROL_SCHEMA_VERSION: Final = "2.9.0"
+# The 0.2.3 line split request/result (2.6.1) from hello (2.6.0); the 0.3 line carries
+# every 2.6.1 addition inside its single live 2.9.0 contract, so all three agree.
+_CONTROL_RESULT_SCHEMA_VERSION: Final = _CONTROL_SCHEMA_VERSION
+_CONTROL_REQUEST_SCHEMA_VERSION: Final = _CONTROL_SCHEMA_VERSION
 _SCHEMA_VERSION: Final = "1.0.0"
 _MAX_IMPORT_SOURCE_BYTES: Final = 4 * 1024 * 1024
 _ERROR_REASONS: Final = frozenset(
@@ -104,6 +107,9 @@ _ERROR_REASONS: Final = frozenset(
         "session_closed",
         "transport_failed",
     }
+)
+_COORDINATION_CONTROL_ERROR_REASONS: Final[frozenset[str]] = frozenset(
+    code.value for code in CoordinationErrorCode
 )
 _WORKFLOW_METHODS: Final = tuple(
     sorted(
@@ -568,7 +574,7 @@ def schema_for_method(method: ControlMethod, direction: SchemaDirection) -> Mapp
     if direction not in {"request", "result"}:
         raise ValueError("control_schema_direction_invalid")
     schema_name = "control-request" if direction == "request" else "control-result"
-    document = schema_document_for(schema_name, _SCHEMA_VERSION)
+    document = schema_document_for(schema_name, _CONTROL_SCHEMA_VERSION)
     branches = document.json_schema.get("oneOf")
     if not isinstance(branches, list | tuple):
         _fail("frame_invalid")
@@ -926,6 +932,11 @@ async def server_handshake(
 def public_error_code_for_control_reason(reason: str) -> PublicErrorCode:
     """Map a bounded control reason without exposing wire-only tokens."""
 
+    if reason in _COORDINATION_CONTROL_ERROR_REASONS:
+        # Project lifecycle refusals are caller-actionable command outcomes. They share the
+        # INVALID_REQUEST shell exit while the original finite token remains available to the CLI
+        # renderer and MCP-safe reason projection.
+        return PublicErrorCode.INVALID_REQUEST
     if reason in {
         "service_generation_changed",
         "privacy_projection_unavailable",

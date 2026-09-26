@@ -268,7 +268,19 @@ def test_recorded_codex_consumer_observation_is_bounded_and_honest() -> None:
     assert raw["start_root_type"] == "object"
     assert raw["publish_event_drafts_items_type"] == "object"
     assert set(raw["publish_envelope_fields"]) == _ENVELOPE_FIELDS
-    assert set(raw["publish_schema_name_families"]) == ORDINARY_MCP_PUBLISH_EVENT_FAMILIES
+    # This is evidence for the frozen 0.2 producer, not a native-host execution of the later
+    # multi-agent surface. New families are proven separately by current authorability tests.
+    assert set(raw["publish_schema_name_families"]) == {
+        "action_recorded",
+        "assignment_recorded",
+        "claim_recorded",
+        "decision_recorded",
+        "evidence_recorded",
+        "obligation_published",
+        "plan_published",
+        "plan_revised",
+        "result_recorded",
+    }
     assert raw["request_id_type"] == "string"
     assert raw["check_expected_frontier_type"] == "object"
     assert raw["check_scope_type"] == "object"

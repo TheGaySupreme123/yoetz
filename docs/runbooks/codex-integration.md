@@ -130,6 +130,19 @@ selected home, launcher and isolation root when no selector is given.
 
 ## 2. Prerequisites and exact supported scope
 
+### Explicit attach under observation contention
+
+An explicit `start mode=attach` can meet an existing observation/advisory runtime lease.
+The service waits at most five seconds for same-bundle use to drain. A retry-ready start
+reason retains the reserved operation and releases only its lease; replay the identical
+request body and ID once. `start_lease_pending` instead means a live owner still holds the
+operation: wait up to 60 seconds before the same replay. A repeated busy/pending answer remains
+unresolved. No returned writer ID is needed for this recovery, and no replacement task should
+be created. Both structured errors and the compact MCP text carry the bounded continuation.
+Hook auto-attachment uses the same service path; a hook deadline may expire before the service
+wait finishes, so a lost response remains an exact-request recovery case, never proof of failure.
+These runtime tests do not qualify a new native Codex version or prove source-content delivery.
+
 Check `yoetz version --json`, the installed resource set, and the current compatibility/capability
 matrix. Confirm owner permissions on the target project, that you trust this repository, and the
 expected Codex version. Codex support is the exact tested set in the packaged manifest; an empty
@@ -302,6 +315,11 @@ a no-op, because the route state and the project admission state are independent
 Codex exposes no typed denial signal for a guardian refusal: its `PermissionRequest` hook fires
 before the decision and may allow, so it is not a denial. A held check is visible only as the
 #187 pause/approval flow in the transcript. This is a documented gap, not a Yoetz diagnostic.
+For the same reason the host-hold advisory that Claude Code's `PermissionDenied` hook emits
+(issue #857: a first-hand grant notice for the user and a separate host retry cue)
+has no Codex carrier. The shipped skill and guidance require a current first-hand grant read
+before asserting existing authorization, and the durable answer remains admission above. If a later Codex release publishes a
+post-decision denial event, mirror the Claude ingress (`cli/host_hold_advisory.py`) onto it.
 The 2026-08-30 source read is not a live cell; the `auto_review` acceptance cell in issue #467
 remains to be run.
 
@@ -443,13 +461,321 @@ affected. Installing the skill never itself changes MCP configuration or produce
 The exact capability profile also reports whether a compaction-recovery trigger hook and/or a
 first-party observation arm is present. A present v0.1 trigger only prompts the agent to re-ground
 by calling `status` — it records no observation, changes no coverage, and remains optional. When
-the cell advertises observation, enablement requires one project-level observation consent
+the cell advertises observation, enablement requires one workspace-level observation consent
 (workspace commitment, never a raw path in logs); live ingest uses local control methods
 (`observation_ingest|status|pause|resume|revoke`), not a seventh MCP tool. `hook_observed` is earned
 only from real observation evidence. `AdviceSnapshot` surfaces via nonblocking hooks and ordinary
 `status`. Skill installation never configures hooks. If the profile is absent or a trigger/observation
 path fails, use the ordinary manual resume/compaction procedure and cooperative publication; do not
 infer support from a different Codex version.
+
+Codex setup's consent step is a structural grant. It uses the same path from `yoetz setup`, host
+connection, and the terminal interface. When the workspace already has live consent (for example,
+from a Claude Code or Cursor connection), the step keeps that consent: the original grant time,
+every approved Claude Code or Cursor content profile, selection and capacity settings, and the
+unchanged content fence. Capture already in progress for the other host therefore stays authorized
+(#835). The setup report's `observation_consent.transition` reads `unchanged` and lists the retained
+`content_capture_profiles`. A paused workspace is resumed (`resumed`). With no prior consent, or
+after a completed revoke, consent starts fresh (`granted`) with no content profile. While a revoke's
+project fence is pending, the consent step reports `failed` and leaves consent revoked. Only
+`observe content-disable` or `observe revoke` removes a host's content arm.
+
+### Subagent correlation (#507)
+
+The Codex native hook artifact includes `SubagentStart` and `SubagentStop`. Their structural
+identifiers are normalized as `subagent_id` plus the optional `parent_tool_call_id`; the 0.150.1
+rollout grammar also exposes a `SubAgentActivity` record whose bounded `agent_thread_id` maps to
+the child identity and whose closed `kind` (`started` or a terminal state) selects the phase. Raw
+agent paths, prompts, and summaries are discarded. These mappings are service inputs, not caller
+authorship.
+
+The service records one provisional annotation per observed child correlation, keyed by one
+correlation identity, with `origin=host_observed`, `acceptance=pending`, and no child bundle. The
+materializer retains the host observation as evidence, and the durable registry exposes its
+bounded annotation through lineage status. A
+parent may mint an accepted child with `mode=delegate` before spawning; a cooperative child may
+self-register with the parent session. Either accepted path binds the
+existing annotation and never creates a second record. A stop replay after session rotation must
+resolve through the same child/parent-tool aliases; an event with no usable child identity remains
+the permanent `missing_subagent_identity` gap and does not also produce an annotation. Parent
+advice and frontier delivery are never redirected to the child.
+
+When a retained child stop reports a finding, `subagent_finding_unaddressed` advice names the
+registry's annotation ID, or the bound child task ID when available. Advice refresh resolves that
+identity through a read-only, parent-scoped lookup; it does not update the annotation's timestamps
+or session ownership. The original observation reference remains attached as evidence. If no
+unambiguous annotation is available, advice retains that observation reference without inventing
+a lineage identity.
+
+Stale-verification advice is scoped to the logical tool call, not to the observed phase. A Codex
+`function_call`/`function_call_output` pair, and the hook pre/post pair, share one correlation
+identity, so one edit reports one `edit_after_successful_check` finding whose evidence refs name
+each observed phase; the originating call's tool name resolves the pair exactly as it already does
+for unresolved-command advice (issue #680).
+A successful Codex `shell` call is a command outcome, not a check. Deterministic advice moves its
+verification baseline only on a current `passed` approved-check fact or an explicit success from a
+dedicated verification tool, and a routine read never moves it — including in Detailed mode, where
+a routine read keeps its `function_call_output` action and carries no routine marker (issue #681).
+Unresolved-command advice still reads every `shell` outcome.
+
+Native child tool callbacks can carry the parent's host session ID together with a child
+`agent_id`. A successful delegated `start` preserves the parent mapping: its task result names the
+reserved child, but its session and writer still belong to `parent_task_id`. A successful child
+attach establishes a separate local route scoped to the host session and child identity. A shared
+session without a validated child identity remains an attribution gap. Conflicting aliases or a
+callback naming an unbound child also produce a gap; they cannot enqueue parent work or consume
+parent advice and frontier notices. Pending lifecycle writes and existing alias ownership are
+checked before publishing a child route. A contended write leaves a durable retry for that single
+route; replay cannot change its task owner. `SubagentStart` and
+`SubagentStop` remain parent lineage signals. Local routes by themselves do not mint cooperative
+children or establish registry correlation, and they are excluded from parent session recovery and
+parent stream reconciliation.
+
+The #507 source repair adds a Codex bridge for the blessed handle-only flow. A native successful
+child `start` callback carries its host subagent identity and bounded returned task, session,
+writer, and parent identities. The service validates those fields against the admitted child
+mapping and persisted lineage before binding the annotation. A callback that arrives before
+`SubagentStart` can establish the same correlation for the later lifecycle hook. Missing or
+conflicting identity cannot bind another child. The parent does not need to know an ID before the
+host spawns it, and the capability handle is not added to observation payloads. On `PostToolUse`,
+`tool_use_id` and `tool_call_id` identify the attach call and must agree when both are supplied;
+`parent_tool_call_id` independently identifies the spawn call and may differ. Any explicitly
+malformed call identity blocks binding and persists `missing_subagent_identity` in the task
+observation ledger, including when the registry sidecar is unavailable. Session-stream
+`SubAgentActivity` records follow the same rule: conflicting or malformed parent-call aliases
+cannot degrade to a child-only identity, so the `SubagentStart`/`SubagentStop` envelope drops
+the child token and records the same durable gap instead of a weaker annotation.
+
+Explicit cooperative correlation fields are validated before consuming the attach handle. A
+post-attach transient registry error remains recoverable with the exact request and consumed
+handle, including after expiry; a fresh request cannot reuse that capability. A crash after the
+child start committed but before handle consumption is recovered the same way: the exact
+request finishes consumption after expiry, while any other request is refused as expired. Subagent evidence
+under `obs-ledger/1.7.0` distinguishes different parent tool calls. Copies that omit the parent
+call may produce separate evidence, while the registry merges only unambiguous aliases. Once a
+child-only annotation is bound, a later strong parent-call pair creates a separate annotation:
+the shared child token does not prove the call belonged to that previously bound child. Strong
+cooperative selectors and advice lookups use the same boundary. A new
+observation does not reuse a historical child-only evidence key when the missing discriminator
+cannot prove equivalence. Missing or malformed child identity is retained as a durable
+`missing_subagent_identity` gap without also creating an annotation for that event.
+
+**2026-09-16 source-only repair boundary (#499/#507):** isolated source fixtures cover the
+lifecycle and correlation changes above. No native Codex process, Yoetz workflow, live receipt,
+or cooperative-child proof was produced during this repair phase. Fresh installed native
+validation with the corrected candidate and the requested independent semantic review remains
+required. E-013 and host capability cells are unchanged. The historical native records below
+retain their original limits.
+
+### Multi-agent v2 (0.153.4, #754)
+
+Codex `0.153.4` with `multi_agent_version=v2` expresses a delegation in two places, and Yoetz
+reads both:
+
+- the **parent** rollout carries `SubAgentActivity` nested in `event_msg` → `item_completed` →
+  `item` (never as a `response_item`). Its `agent_thread_id` is the child thread, its `kind` is
+  `started` once per delegation and `interacted` for every later exchange, and its `id` is a
+  `call_…` token that is not published as `parent_tool_call_id`: only an explicit parent alias
+  ever fills that field. `interacted` is an understood kind that names no lifecycle transition,
+  so it opens no second annotation and is not an `unsupported_event` gap;
+- the **child** rollout's own `session_meta` header carries `thread_source: subagent`, `id` (the
+  child thread), `parent_thread_id`, `agent_path`, `agent_nickname`, and `multi_agent_version`.
+  Its `session_id` is the *parent* thread, so only `id` is ever the child key. Yoetz maps that
+  header to a `SubagentStart` whose `subagent_id` is the child thread; both spellings of the
+  spawning thread (`parent_thread_id` and `source.subagent.thread_spawn.parent_thread_id`) must
+  agree, and a header naming itself is refused. A header that declares `thread_source: subagent`
+  with no usable distinct identity is the one shape that earns `missing_subagent_identity`; an
+  ordinary user thread declares no child and earns no gap.
+
+Because the child observes that header in its own session, filing it the ordinary way would name
+the child as its own parent. The parent task therefore comes from admitted catalog lineage, never
+from the host's `parent_thread_id` token, and the annotation is then bound to the observing child
+task — the same shape as the native `PostToolUse` child-start bridge. With no admitted lineage the
+observation keeps a bounded `host_lineage_child_not_found` gap instead of inventing attribution.
+Both sources produce the same correlation identity for one delegation (the child thread), so a
+parent-observed spawn and a child-observed header merge into one annotation rather than two.
+
+`agent_path` and `agent_nickname` are **not** lineage identity. `agent_path` names an agent
+definition, not a delegation instance: the same path repeats across every exchange with that agent
+and across repeat delegations to it, and its `/root/…` shape is barred from structural payloads by
+design. `agent_message` `author`/`recipient` carry the same paths and are treated the same way.
+
+Two record families 0.153.4 adds are admitted as structurally ignored rather than mapped:
+`inter_agent_communication_metadata` (already in the vocabulary) and `token_usage_record` (new,
+admitted on the structural compatibility profile only). 0.153.4 also added fractional leaves to
+ordinary rows — `internal_chat_message_metadata_passthrough.create_time` on every `response_item`
+and `rate_limits.*.used_percent` on `token_count`. The canonical value model has no float, so the
+parser normalizes such a leaf to `null` in the mapped record and keeps the line; before that, one
+fractional leaf refused the whole line as `json_profile_unsupported`. No structural field Yoetz
+maps is ever a float, and the line's commitment is still taken over its raw bytes.
+
+**2026-09-16 v2 observation cell (`multi_agent_v2=true`, read-only, not a certification).** Source
+`12796f74` (PR #752 head), wheel `yoetz-0.2.1`, pinned test instance `df507f`, Codex `0.153.4`,
+originator `Codex Desktop`. Read from the stopped instance's artifacts after the run:
+
+| Fact | Observed |
+|---|---|
+| Parent rollout record families | `event_msg` 152, `response_item` 118, `token_usage_record` 36, `inter_agent_communication_metadata` 8, `world_state` 3, `session_meta`/`turn_context` 1 each |
+| Parent `SubAgentActivity` | 8, all nested in `event_msg.item_completed`; `kind` `started` 2, `interacted` 6; 0 as `response_item` |
+| Child rollouts | 2, each `thread_source: subagent` with `parent_thread_id` equal to the parent thread and `session_id` equal to the parent thread |
+| Annotations produced | 0 host annotations, 0 aliases, 2 consumed attach handles |
+| Parser result at that revision | 174 of 319 parent lines refused (138 `json_profile_unsupported` from the new fractional leaves, 36 `unknown_wrapper_type` from `token_usage_record`) |
+| Parser result after this change | 319 of 319 parent lines and 218 of 218 child lines mapped, no per-line reason codes, no `unsupported_event` |
+| Stream cursor at stop | event position 77, byte 956,771 of 2,268,686 — the first `SubAgentActivity` is at line 91 |
+
+The 50 `unsupported_event` rows in the parent ledger are exactly the 40 fractional-leaf refusals
+plus the 10 `token_usage_record` lines inside those first 77 positions. The run produced no
+annotation for two independent reasons: the delegation rows were past the last consumed position
+(the hook-driven reconcile stalled, #753), and neither child's own session observed its own
+rollout, because the observation cursor and workspace binding for a child thread are established
+by that thread's hooks and no hook reached those child sessions (0 observation events, 0 cursors
+in both child ledgers).
+
+**Not established by that transcript.** Whether `0.153.4` still emits `SubAgentActivity` with
+`multi_agent_v2=false`; whether the v2 `SubagentStart` hook payload carries `subagent_id` (every
+hook after 14:39:59Z hit the degraded path, #753); whether `agent_path` is stable across session
+rotation; and whether a delegated child thread ever runs the hook bridge, which is what would let
+the child-header identity source fire natively. The child-header path is proven against fixture
+IMP-015 and the registry bridge, not against a native v2 run. `0.153.4` remains admitted under the
+structural compatibility profile: it earns no exact rollout profile and no certified host cell from
+this evidence, so its admission stays `partially_understood`.
+
+**Child lanes under the shared root session (#841).** The 2026-09-25 follow-up to #823 ran the
+0.3.0 package (`2e9b35ce`, wheel SHA-256 `09e507d3…7588`) on a disposable ADR-028 instance with
+Codex Testing `0.153.4`. A parent delegated and one native child attached with the handle,
+published, checked, and obtained a receipt. The parent saw that accepted child, but its lineage
+view also kept one pending unbound provisional annotation, and one supported `observe reconcile
+--session-file <child rollout>` returned `observation_reconcile_failed:mapping_missing` (exit 20).
+The raw run evidence is private; only these structural facts are recorded here.
+
+The source analysis names two boundaries, both reproduced from the exact IMP-015 records:
+
+- **Callback identity.** v2 writes the same root `session_id` into every thread of one delegation
+  tree (the child header's `session_id` is the parent thread). A delegated child's own callbacks
+  therefore arrive under the parent's session. With no host child alias (`subagent_id`,
+  `agent_id`, `agent_thread_id`), the child's successful attach `PostToolUse` cannot publish a
+  child lane (`start_bind_child_lane_unbound`), so the native child-start bridge never binds the
+  annotation, and the child's other callbacks were ordinary parent callbacks.
+- **Rollout routing.** A v2 child rollout is named by the child's own thread, never by a host
+  session, and an accepted child's route is the digest lane derived from the root session and the
+  child thread. Hook-driven stream reconcile skipped every child lane, and manual reconcile only
+  matched raw host sessions by filename. The child's own `session_meta` header — the #754
+  child-observed delegation signal — could therefore never be delivered natively, and every child
+  rollout was refused as `mapping_missing` whether or not a child route existed.
+
+Which callback shape the native run produced is visible in that run's private
+`hook_diagnostics.reasons`: `start_bind_child_lane_unbound` on the child's attach means the child
+callbacks carried no alias; no child callback diagnostics at all means no hook reached the child
+thread. The public issue does not establish which.
+
+The repair keeps every existing authority rule and adds no inference from workspace-wide stream
+state or annotation counts:
+
+- A Codex tool, permission, prompt, `Stop`, or compaction callback whose `transcript_path` (or
+  `session_file`) is not the session's own rollout reads only that file's first line. When it is
+  a safe owner-private `.jsonl` beneath the Codex home's `sessions` root, its v2 header declares a
+  delegated child, the filename carries that child's thread, and the header names the callback's
+  session as the spawning root, the child thread becomes the callback's host child identity —
+  the same fact a native `agent_id` supplies. The attach then publishes the child lane, the native
+  child-start bridge binds the annotation, and the child's command, file, and advice evidence
+  stays on its own lane. A transcript that proves a delegated child but cannot name it for this
+  session, or that contradicts a host alias, keeps the callback an explicit attribution gap with
+  the hook diagnostic `child_transcript_identity_conflict`; it never becomes parent work. Session
+  lifecycle and `SubagentStart`/`SubagentStop` hooks are never re-attributed.
+- A callback routed to a validated host-identity child lane reconciles that child's own rollout
+  into the lane. Its header is filed under the parent named by admitted catalog lineage and bound
+  to the observing child, so the parent's provisional annotation, the child-header signal, and the
+  attach callback merge into one annotation bound to exactly one accepted child.
+- `observe reconcile` of a child rollout resolves it through its header to the one lane derived
+  from a spawning session bound to that workspace alone and already mapped to a child task. The
+  result carries `mode: recovery_child_lane` and shares the automatic cursor, so repeating it
+  accepts nothing new. A child rollout that cannot be proven is refused with a bounded reason
+  instead of `mapping_missing` (see troubleshooting below). An ordinary unmapped rollout still
+  reports `mapping_missing`.
+
+Evidence boundary: a source repair proven by focused unit rows and a composed-READY conformance
+row over the exact IMP-015 parent and child records, including idempotent recovery and the
+parent's recorded rollup of the child. It assumes the v2 child callback shape the header implies
+(root session plus the child's own transcript) and has not been rerun natively. When a child
+thread's callbacks carry neither a child alias nor their own transcript, or no hook reaches the
+child thread, the child route stays unprovable and recovery reports `child_route_missing`.
+`0.153.4` remains admitted on the structural compatibility profile only: this repair earns no
+exact rollout profile, formal parity-gate cell, or E-013 capability cell.
+
+Admitted native hook activity on the current mapped session is contact evidence at its own
+receipt time (#837). A row the hook drain, sweeper, or legacy spool delivers late still counts from
+when it was received. A duplicate replay re-offers the same evidence without extending it, and
+`Stop` counts as contact while `SessionEnd` ends it. Stream history and predecessor sessions do not
+renew. Codex registers no subagent lifecycle hook for the parent, so no in-flight hold applies. A
+parent's own `PreToolUse` and `PostToolUse` still count, but one `wait` or other tool call that
+runs past the lease plus the recovery window, with no other parent event, loses contact and
+abandons the work after `lineage.contact_lost_recovery_seconds`. That is the recorded Codex gap,
+and raising the window is the supported mitigation. A silent child still enters contact loss and
+the configured recovery window; source edits by themselves cannot prove continuing contact when
+observation is unavailable. Terminal parents are refused new child work with
+`lineage_parent_work_terminal` and continue through a successor task (`lineage_successor_task`).
+
+The isolated native cell below exercises the parent-minted path for the reviewed legacy
+`codex-cli 0.150.1` profile. Broader host profiles need their own execution evidence; host hooks
+alone never mint a child.
+
+A fresh project-marketplace carrier requires the supported TUI **Trust all and continue**
+ceremony. Before native verification, inspect app-server `hooks/list`: the reviewed carrier has
+13 enabled, trusted hooks, including `SubagentStart` and `SubagentStop`, with no warnings or errors.
+An active marketplace entry and `features.hooks=true` establish configuration; actual hook
+diagnostics and admitted observations establish execution. Keep source-stream coverage separate:
+a rollout may contain `spawn_agent` and `wait_agent` records without a usable subagent identity.
+Such a stream cannot establish a parent lineage annotation or a late-stop replay by itself.
+
+The 2026-09-07 native cell used source `80d0d94c` and the development `0.1.0` wheel at SHA256
+`18b0e5ecd9cc09acb06dd805d90c01dc506241a26e2405b152dec36a51ec6f9d`. All 475 installed package
+files matched the wheel. `codex-testing 0.150.1` ran in an isolated home and workspace, with a
+trusted project-marketplace carrier, a strict owned MCP route, `multi_agent_v2=false`, and a
+synthetic loopback Responses provider. The native process exited `0`; parent start, delegation,
+one legacy child, child attach, publication, deterministic check, receipt, and child terminal
+completion were recorded. The check and receipt returned structured success with deterministic
+coverage and matching child/check frontiers. Parent mapping snapshots remained stable and a
+separate child route appeared after attach.
+
+Actual native hooks recorded one `SubagentStart` and one `SubagentStop` with the same child
+identity and no gaps on those events. Parent lineage showed one accepted `parent_minted` child and
+one provisional `host_observed` annotation. The native payload omitted `parent_tool_call_id`, so
+the annotation remained unbound. Two native rollout streams contained 39 and 29 records but no
+`SubAgentActivity` or usable child identity fields. Replaying the exact captured streams accepted
+zero new records; this proves cursor idempotency, not a newly emitted late stop or session rotation.
+The host supplied no structural child-finding outcome, so synthetic advice-policy checks remain
+separate from this native evidence.
+
+The native record retains `content_capture_unavailable`, `unpaired_event`, and `unsupported_event`
+coverage gaps, plus four bounded `drain_budget_exhausted` diagnostics. A later manual-reconcile
+pass on that artifact exposed UUID truncation and left 62 stream rows with `mapping_missing`;
+those rows were not native hook or provider failures. The child remained open with contact lost
+after host exit, and its recorded receipt did not close work or erase incomplete coverage. This
+cell does not prove production model behavior, semantic review, or other Codex profiles.
+
+Manual reconciliation of a native `rollout-*` file requires one full session identity already
+bound to the selected workspace, or, for a v2 delegated child's own rollout, one validated child
+lane resolved through its header (#841, above). It shares the automatic stream cursor and refuses
+an unmapped, ambiguous, or foreign-workspace session as `mapping_missing` before ingesting it. Compressed
+`.jsonl.zst` files retain the bounded `unsupported_format` result. Existing truncated aliases are
+left visible as legacy recovery gaps; a filename cannot authorize rebinding or deletion of their
+pending rows.
+
+The repair was installed from source `931acec4`, wheel SHA256
+`1a378d66b71c945a1f2d507f8534f0308265ec7c7fc238f500559539a2956a3a`; all 475 installed package
+files matched the artifact. Two public `observe reconcile` calls over the captured parent rollout
+returned exit `0`, accepted zero new records, and retained event position 39 and generation 1
+without rotation or truncation. The unmapped captured child rollout returned `mapping_missing`.
+Full-row digests confirmed all 62 historical pending rows and the four existing bindings remained
+unchanged. Before/after file digests also confirmed the original capture and mappings were
+unchanged. This installed CLI replay used copied structural state and read-only captured inputs;
+it did not launch another native host or service.
+
+The composed READY regression separately exercises parent session/writer rotation, a late
+`SubagentStop`, service close/reopen, and a subsequent parent `Stop`. Public lineage and advice
+retain the same annotation ID, without a duplicate annotation or changed observation timestamps
+from rebuilding advice. This is service conformance evidence; the native cell above did not emit
+a child-finding outcome.
 
 The rendered `SessionStart`, `UserPromptSubmit`, tool, and turn-boundary commands bind
 `--workspace .`. Codex's hooks contract (re-read 2026-09-03) gives every hook the session `cwd` and
@@ -498,6 +824,17 @@ from AI-powered review selection. The current hook path may still stage consente
 chunks locally pending the follow-up staging filter. Codex keeps its existing replay semantics; the
 shared operation-replay, source-generation fencing, and teardown repairs apply to all host adapters.
 
+Provider-repair advice is standing advice, so Codex delivers it only at session boundaries (#844).
+`SessionStart` carries it in `hookSpecificOutput.additionalContext`. `Stop` carries it as
+`decision: block` plus `reason`, which Codex treats as a continuation rather than a rejected turn.
+`PostToolUse` and `UserPromptSubmit` do not carry it. A private or no-egress install, an install
+with no provider endpoint, and an install whose verification is disabled do not emit
+`connect_provider`, `renew_provider_sign_in`, or `repair_semantic_provider`. The service emits
+that advice only when verification is not disabled, a provider endpoint is bound, network egress
+is permitted, and an LLM inference channel is enabled, and the provider is still structurally
+unusable, including when no factory id is available. `SessionEnd` still emits `{}` and does not
+consume a pending delivery.
+
 Legacy synchronous `hooks spool` is a separate structural fast path. It only appends the owner-only
 structural spool record and returns; it does not normalize or pair the event, open the service, drain
 an outbox, or carry native content. The READY forwarder later consumes the spool and performs normal
@@ -511,9 +848,10 @@ denial in either phase, or the `PostToolUse` of `start`, `publish_work`, `check`
 and keeps the pre-event of every Yoetz call and the post-event of a non-failed `status`, `receipt`,
 or `read_guidance` in the bounded local store only. Yoetz tool input/output is never captured as
 content. The same policy applies to the legacy spool replay and to the Codex session stream, so
-neither path reintroduces the rows. The shared host-spelling advice guard also suppresses pending
-frontier or recommendation delivery on a Yoetz-owned hook, while explicit self-call failures stay
-retained and enqueued. Ordinary tools are unchanged. To confirm closure converged,
+neither path reintroduces the rows. The shared host-spelling advice guard suppresses pending
+frontier or recommendation delivery on a Yoetz-owned hook without an explicit failure. Explicit
+self-call failures stay retained, enqueued, and eligible for pending advice. Ordinary tools are
+unchanged. To confirm closure converged,
 run `yoetz observe drain --workspace . --json` after the agent stops and require
 `terminal: drained` with `pending_after: 0`; `retry_pending` names the retryable head cause in
 `reasons` (a check barrier's `operation_pending` clears when the check completes), and
@@ -585,6 +923,14 @@ proven-success read can enter a summary. Ambiguous shell composition, nonzero or
 outcomes, and caller-supplied `routine_read` labels stay protected. Codex session-stream records
 remain a separate structural source and are outside this native selection/content path.
 
+Codex states a tool result under `tool_response`, so the proof that a read succeeded is normally
+nested rather than a top-level field. The selector and the summary builder share one definition of
+that proof; where they disagreed, the buffered account refused every Codex-shaped post and
+observation ingestion stopped for the rest of the session (issue #753). A refused summary now
+admits its reads individually with a `routine_summary_invalid` coverage gap, names the lane once in
+`yoetz observe status`, and records the bounded `routine_summary_invalid` hook reason instead of
+the opaque `observe` token. The behavior is shared by every host ingress, not Codex-specific.
+
 Use the owner controls after an exact preview:
 
 ```text
@@ -602,6 +948,28 @@ Revoke with `selection-revoke` at the same scope. Expiry, revoke, lowering capac
 affects future optional admission; accepted observations continue to drain and are not rewritten
 to fit the new target. Selection does not change Codex hook deadlines, session-stream admission,
 content consent, repository privacy, provider, or network authority.
+
+**Configurable capacity (issue #828) — Codex decision.** Codex uses the same local capacity path as
+every other host: `yoetz observe selection-preview` with `--capacity standard|larger|largest`,
+`--capacity custom --queue-count <64..8192>`, or `--capacity none`, then `selection-apply --accept
+--preview-digest`, or the terminal interface's `/observe`. There is no Codex-specific capacity
+control, and repository or plugin configuration cannot raise capacity. An agent may relay a change
+only after the owner accepts the displayed preview's scope, values, local-hardware consequences,
+remaining limits, and lower/pause/resume path; ordinary task permission never authorizes an
+increase. `--capacity none` returns `capacity_no_cap_unsupported` because the local state document
+has a 16 MiB safety ceiling, and changes nothing; the largest supported capacity is 8,192 rows. MCP
+`status` stays read-only for capacity. Hook body caps and Codex hook deadlines are unchanged. Custom
+counts need control schema `2.9.0` on both the client and the service; an older revision drops a
+saved custom count to the default.
+
+**Lowering above the fallback byte bound (issue #843) — Codex decision.** Codex uses the shared
+store path with no Codex-specific behavior. Lowering, revoking, expiring, or ending a larger
+selection can leave more accepted rows than the new target holds. Those rows still drain, and the
+store keeps finite room, tied only to them, for refused-input loss, delivery attempts, and session
+ends. A refused hook reports `hook_observe_degraded: outbox_overflow; loss accounted` only after
+the loss is durable. If a `SessionEnd` hook cannot persist its local end, it stays fail-open
+within its teardown budget. It prints `hook_observe_degraded: session_end_unrecorded` and
+records that reason in `hook_diagnostics.reasons`.
 
 To keep an upcoming read individually linked to a later claim, use the bounded narrowing control
 with an active consent and the exact current Codex session:
@@ -644,6 +1012,25 @@ ordinary shell observation and may use the available structural, capture, or mat
 budget. Failures, mutations, and ambiguous shell are never suppressed. This is a current support
 boundary for local CLI self-reads; use the explicit MCP status or receipt route where available or
 account for the CLI read in coverage and capacity.
+
+### Oversized hook payloads (issue #667)
+
+A Codex hook body over the 256 KiB ingress cap (`MAX_HOOK_STDIN_BYTES`) is refused at stdin,
+before any parse. Codex does not use Cursor's 1 MiB identity skim, so the oversized event stays
+an unparsed gap. The hook stays fail-open and the host continues. Yoetz records the bounded
+`codex_payload_too_large` reason against that event in `yoetz observe status` hook diagnostics,
+and notes the `payload_too_large` coverage gap on the consented workspace, where
+`yoetz observe status` shows it. That workspace gap does not yet reach task receipts: no row
+exists, so a receipt simply has no evidence for the dropped event rather than naming the loss. Before this, the refusal reached the outer handler as the bare
+`observe` reason, which named neither the cause nor the affected event, and the native
+`post-tool-use`, `user-prompt-submit`, and `session-start` entry points recorded nothing at all
+because they parse the body before handing the same bytes to the observation ingress.
+The cap is fixed and shared by every host; raising it is not an operator control. Each reader
+consumes at most cap-plus-one bytes, so the true size of a refused body is never measured and
+never recorded — the bound itself is the whole fact. Nothing about the event is parsed, so the
+hook name the host supplied on the command line is the only identity the record can carry: no
+tool name, session, or path. The refusal costs exactly that one event; the next ordinary event
+still ingests.
 
 ## 8. Remove
 
@@ -743,6 +1130,23 @@ entry is not positively observed absent; a generic failed named lookup is not su
 Plugin-managed MCP is not this command: it goes away with the plugin artifact, not with `codex mcp
 remove`.
 
+After the removal command returns, Yoetz checks the selected home again even if Codex exited
+nonzero. A successful structural list confirming absence completes removal with exit 0 and
+`removal.warnings=["host_remove_returned_nonzero"]`; a zero-exit removal has an empty warning
+list. Setup disconnect carries the same versioned outcome in `status.mcp_removal` and prints
+the warning in its human report. No host stderr or subprocess payload is echoed.
+
+If the entry is still present or the check is unreadable, removal remains unverified (CLI exit 20).
+Its report carries the observed owned/foreign state or null, `next_action=inspect_registration`,
+and an exact `next_command` for the selected runtime, binary and home. Run that read-only command
+first. If absent, a newly accepted removal preview is a no-op and reconciles stale route metadata;
+if still owned, obtain and accept a fresh preview before retrying. Preserve foreign entries.
+Command exceptions also remain unverified. Yoetz never retries the mutation automatically.
+
+This reconciliation applies to external Codex MCP removal on macOS, Linux and Windows through
+WSL 2; it does not establish native Windows support. Deterministic adapter coverage is separate
+from host-version acceptance: issue #860 records the bounded disposable native round trip.
+
 ## 9. Bounded `codex exec --json` import
 
 The import support command is Codex-only and local. It accepts the exact request documented in
@@ -785,11 +1189,21 @@ egress.
 | MCP unavailable | Diagnose through separate MCP configuration/startup steps. |
 | Trigger absent or failed | Use the manual re-grounding procedure; never edit hook configuration through this integration. |
 | `observe status` shows no envelopes for a session | Read `hook_diagnostics.reasons`: `workspace_unresolvable` means the hook's `--workspace` locator could not be canonicalized; `workspace_unconsented` means the session's Git root carries no active consent (a session started in a subdirectory canonicalizes to the same root as the consent, so grant consent at the repository root); `paused` means consent is paused. A successful ingest records no diagnostic, so read `recent_count` together with the envelopes: no new envelopes and a zero `recent_count` means the hooks never reached the ingress or the runtime gate is disabled, not that a binding drop occurred. |
-| `observe status` shows `mapping_present: false` after a consented `SessionStart` | Before creating a new pair, the hook scans the private local lifecycle store for a unique valid mapping from an earlier Codex session whose `SessionEnd` was received; every other bound session must be ended and every candidate must belong only to this consented workspace. A unique candidate is held under the workspace and predecessor session locks, revalidated, and sent as `mode=attach` with the existing Yoetz `session_id` plus the new `workspace_ref`/`external_ref` pair. The catalog requires the selector to be active and non-quarantined, its canonical workspace and repository-privacy binding to match, and no start already pending for that selected route. Unrelated tasks in the same workspace do not block this recovery (#814); a pair already bound to another task remains a conflict. If eligible mappings name more than one task, the hook records `auto_attach_binding_ambiguous` with a bounded candidate count only and neither creates nor chooses among them; a hard crash without `SessionEnd` remains fail-closed. With no usable predecessor, ordinary `create_or_attach` creates the new pair even beside a dormant task. Recovery takes a nonblocking workspace reservation before scanning, then holds ordered locks through candidate revalidation, the service RPC, authorized rewrites, and pruning; a busy reservation, candidate lock, or changed snapshot remains a typed recovery boundary. A successful recovery rewrites every ended same-host predecessor mapping for that task to the rotated session and writer so pending rows drain on the successor route. The candidate set remains bounded (#549), and protected pending/quarantined rows may keep it above the retention cap. Read `hook_diagnostics.reasons` for `auto_attach_workspace_unbound`, `auto_attach_request_invalid`, `auto_attach_binding_ambiguous`, `auto_attach_conflict` / `auto_attach_refused`, `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`, `vault_locked`, `timeout`, `storage_unsafe` / `storage_corrupt`, `service_incompatible`, or `service_unavailable`. An explicit MCP `start` remains the recovery path; an explicit `mode=create` collision remains `SESSION_CONFLICT` and is not a recovery selector. |
+| `observe status` shows `mapping_present: false` after a consented `SessionStart` | The hook sends `start mode=create_or_attach` with the canonical `--workspace` root as `workspace_ref` and `codex-session:<session_id>` as `external_ref`. Before automatic new-pair admission, it scans private local lifecycle mappings for an eligible ended same-host session. A unique mapping from a received `SessionEnd`, with every other bound session ended and the candidate bound only to this consented workspace, is selected before the ordinary request: the hook holds the workspace and predecessor lifecycle locks, revalidates ownership and state, and sends one `mode=attach` request carrying that selector plus the new pair. The catalog requires the selected root task to be active and non-quarantined, its canonical workspace and repository-privacy binding to match, and no start already pending for that selected route. Unrelated tasks in the same workspace do not block this recovery (#814); a pair already bound to another task remains a conflict. Delegated child routes require an authenticated attach handle or target selector. Recovery takes a nonblocking workspace reservation before pruning or scanning, then holds it with ordered locks for every eligible ended same-host session through full candidate revalidation, the service RPC, authorized rewrites, and pruning. The revalidation includes unmapped sessions, cross-workspace ownership, mapping identities, and mapping recency; a busy workspace reservation or candidate-lock contention or a changed snapshot returns `auto_attach_recovery_busy` rather than creating work from an unstable selector. A successful recovery rewrites every ended same-host predecessor mapping for that task to the rotated session and writer so pending predecessor rows drain on the successor route rather than being quarantined. With no usable persisted selector, automatic `create_or_attach` admits the new pair as independent work, including beside a dormant task. `workspace_task_exists` identifies only explicit `mode=create` colliding with an identical pair; workspace membership never selects a task. The candidate set is bounded (#549): a recovery unbinds the ended predecessors it consumed, and each `SessionStart` pass keeps at most the 32 most recently mapped ended bindings per workspace, pruning unmapped ended sessions first; a binding is never pruned while its session is live or while a pending or quarantined row still names it, so protected rows may keep the total above 32, ended unmapped rows still terminalize, and a pruned session that resumes re-binds on its next hook event. The public error reveals no selector; a hard crash without `SessionEnd` remains fail-closed rather than being guessed from age. Otherwise read `hook_diagnostics.reasons` for the typed cause: `auto_attach_workspace_unbound` (no paired request was legal), `auto_attach_request_invalid` (an authoring defect — file it), `auto_attach_conflict` / `auto_attach_refused` (the service answered and declined), `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`, `vault_locked`, `timeout`, `storage_unsafe` / `storage_corrupt`, `service_incompatible`, or `service_unavailable` (the daemon was still starting; `UserPromptSubmit` and `Stop` retry under the bounded budget; teardown `SessionEnd` records its lifecycle intent and drains without an auto-attach retry). An explicit MCP `start` remains the recovery path; for `vault_locked` on a never-initialized install, that `start` returns the typed `vault_initialization_required` continuation below rather than a dead end. |
 | `observe status` shows `mapping_stale` after every resume or compaction | Before issue #578 the `yoetz hooks session-start` status read connected without a workspace locator, so the daemon's repository fence refused every probe as `SESSION_CONFLICT` and a live mapping was reported stale. The rendered command now passes `--workspace .`, and the probe selects its locator in a fixed order (issue #659): an explicit project path other than the bare `.`, then the host payload's session `cwd` (a subdirectory resolves to the repository root), then the hook's own working directory. The host cwd outranks the bare `.` because Codex hook working directories are not stable across surfaces; an explicit path that cannot be canonicalized never falls through to another repository. `yoetz hooks observe --event SessionStart` and the shared mapped-session lane derive the probe locator the same way when no explicit workspace was consented. A fence refusal is `status_workspace_unbound` / `status_workspace_mismatch` with a keep-the-mapping advisory, and a companion diagnostic row names the locator source (`locator_source_explicit`, `locator_source_host_payload`, `locator_source_cwd`, `locator_absent`, or `locator_unresolvable`) so an absent context and a supplied one that failed to resolve are distinguishable; `mapping_stale` means the daemon actually reported the session replaced, and the advisory names the replacement ids. |
 | The agent created a sibling task instead of continuing the auto-attached one | The `SessionStart` context names the mapped `session_id` and `writer_id` and says to continue with `start mode=attach` by that session id; guidance and the `start` tool description name the canonical absolute repository root as `workspace_ref`, the value the hook commits (issue #580). The agent's successful scoped `start` re-binds the mapping through `yoetz hooks post-tool-use` from `structuredContent`; a scoped start that binds nothing records `start_bind_unparsed` / `start_bind_invalid_ids` / `start_bind_write_failed`. |
+| `observe reconcile` of a child rollout reports `child_parent_unmapped` | The v2 child header names a spawning session that is not bound to the selected workspace alone with a lifecycle mapping. Reconcile or attach the parent session in its own workspace first, or select the workspace that owns it. Nothing was ingested (#841). |
+| `observe reconcile` of a child rollout reports `child_route_missing` | The spawning session is mapped, but no validated attach published a child lane for this child thread: the child's attach callback carried neither a host child alias nor its own transcript, or no hook reached the child thread. Read `hook_diagnostics.reasons` for `start_bind_child_lane_unbound`. The provisional annotation stays unbound; nothing is inferred from stream status or annotation counts (#841). |
+| `observe reconcile` of a child rollout reports `child_route_ambiguous` or `child_identity_invalid` | More than one route or workspace claims the child thread, or the header declares a delegated child without a usable distinct child and spawning thread. Nothing was ingested; the observation keeps its bounded gap (#841). |
+| `hook_diagnostics.reasons` shows `child_transcript_identity_conflict` | A Codex callback's own transcript proved it came from a delegated child that it cannot name for the callback's session, or that contradicts the host child alias. The callback is an explicit attribution gap and is never delivered as parent work (#841). |
+| `observe status` shows pending `mapping_missing` after a runtime route conflict | A non-retryable `SESSION_CONFLICT` while acquiring the task runtime keeps the envelope pending for a later drain after its lifecycle mapping is repaired. The route must still pass its ownership checks. Non-retryable conflicts after runtime acquisition remain `ledger_rejected` and enter quarantine. Retryable route conflicts report `service_unavailable` and stay pending. |
 | `observe status` shows `ledger_rejected` and `outbox_quarantined` | The service was reachable but rejected one envelope non-retryably. A repeated envelope after a lost acknowledgement, a service restart, or a workflow reattach (a second `start` in the same Codex session) is not such a rejection: its committed operation is resolved task-wide and the row is acknowledged idempotently with no quarantine row. A pending row from an ended host session whose task a successor recovered is delivered on the successor route (`session_superseded` is followed) and is also not `ledger_rejected`. A successor binding that cannot be followed quarantines that row as `session_superseded`, not `mapping_missing`. A `ledger_rejected` row is a genuine conflicting reuse of an event or operation identity. The row is retained under `quarantine_causes`, aggregate `delivery_causes`, and gaps; `pending_delivery_causes` names only rows still in the outbox. Later rows can drain; reclaim only after the underlying defect is understood. A hook-driven attempt also appears in the bounded `hook_diagnostics`, while manual and supervisor drains are represented by status rather than hook activity. Do not restart a ready service. A row is also quarantined after 128 consecutive rejections with the same retryable reason so a catch-all failure cannot block the lane forever; pause, vault, disabled, and designed back-pressure reasons keep their existing recovery behavior. |
 | `observe status` exits with `observation_status_failed:<reason>` | The reason names the layer: `workspace_unresolvable` (exit 2) is the locator; `storage_unsafe` (exit 20) is an unsafe state/lock path; `storage_unavailable` (exit 20) is a bounded open, permission, read-only, missing-parent, or lock-acquisition failure; `storage_corrupt` (exit 40) is invalid stored data. The fixed remediation never prints the absolute state path. A sandboxed Codex result proves only that sandbox cell; run and record an unrestricted-terminal comparison separately before making that claim. |
+
+When more than one eligible ended same-host mapping names a different task, automatic admission
+records the closed `auto_attach_binding_ambiguous` cause and does not guess or create around the
+ambiguous selector. A busy recovery reservation, candidate lock, or changed recovery snapshot uses
+`auto_attach_recovery_busy`; `workspace_task_exists` remains the explicit identical-pair conflict.
 
 Busy host lifecycle changes are durable local work. State schema `/11` adds bounded pending
 session-lifecycle intents, and a READY or hook drain reconciles them under the workspace and
@@ -920,6 +1334,22 @@ API provider serves a given attempt is a service-side dispatch decision recorded
 (`fallback_from`), with no Codex-host-specific behaviour, registration, or route input — the
 strict/policy route ceiling applies to dispatch authority regardless of which endpoint serves.
 
+Routine/final Codex review budgets (issue #571 item A1) are host-independent too. The service
+selects the budget profile from the frozen case: `final` when the frontier carries a completion
+claim, `routine` otherwise. It then dispatches with that profile's configured effort and output
+limit and records them in provenance. Codex gets no host-specific behavior, registration, route
+input, or per-request selector, so the decision for this host is "supported, unchanged".
+Recording a completion claim is the only way a check requests the final profile.
+
+
+### Structural review progress (#571 A2)
+
+Decision: supported through the shared MCP `status` tool with no Codex-specific behavior,
+registration, or route input. Call `status` with `view: "operation"` and the check request ID while a long review runs; Codex receives the privacy-minimized text summary, which names the operation state, phase, attempt, condition, elapsed and remaining milliseconds, and the structured page carries every field. The phase vocabulary, deadline, and terminal outcome are
+service facts, identical for every host; progress never includes provider text, tokens, reasoning,
+or account identity. A read from a different session or writer of the same task may return
+retryable `BUNDLE_BUSY` while the check runs. This is shared service behavior, not evidence of a
+fresh installed native Codex dogfood run.
 
 ### Large tasks and AI-powered review failure recovery (#674–#676)
 
@@ -962,6 +1392,12 @@ them from memory or from the live store.
   replay only `absent`; use stored `complete`; follow an exact typed continuation and required
   approval before replaying `pending`. Retain and report pending without a continuation,
   `quarantined`, or unknown. Never invent session/writer IDs or create a task to escape a write.
+- **Refused check admission.** A check `OPERATION_PENDING` carrying the
+  `check_admission_same_identity` continuation recorded nothing: its `reason_code` names the stage
+  (`check_admission_capture_pending`, `…_in_progress`, `…_contended`, or `…_import_pending`) and
+  `status view=operation` reads `absent` with the same `admission` stage. Replay the exact check
+  body and request ID after `retry_after_ms`, at most three times, then report the check as not
+  admitted. The service is host-agnostic here; this host needs no extra step (issue #838).
 - **Exact-session attach.** When `SessionStart` or recovery context provides a held
   `session_id`, use that exact value as the `mode=attach` selector. Codex's canonical repository
   context supplies the workspace fence; if the request carries identity refs, include the
@@ -997,6 +1433,20 @@ route or missing mapping stays blocked rather than being assumed empty; recovery
 it becomes readable without requiring a fresh event. Do not reset local state, enlarge capacity,
 or toggle consent to manufacture a healthy status. Real hard limits continue to apply after
 inventory recovery, and previous loss counts and identities remain unchanged.
+
+A known inventory can still hold a stranded capture handoff: a ticket whose `codex_hook` row was
+already acknowledged or quarantined, so nothing will consume it. Its age alone used to hold
+`oldest_age` at the hard limit with an empty queue (#836). The row's own delivery now retires a
+ticket it leaves behind, and the same READY maintenance pass retires any handoff at least 30
+seconds old that no queued row can deliver, through the catalog route of the task that owns it
+rather than a session mapping. It reports `capture_handoff_retired` or, when an owning bundle cannot
+be read, `capture_handoff_unavailable` and retries. A handoff whose row is still queued keeps its
+pressure. `observe status --json` names each retirement under `capture_handoff_retirements`
+(ticket identity, stage, reason, ticket state, quarantine reason, and age) and records
+`content_capture_unavailable`,
+because the staged bytes are not attached. In a workspace shared with Claude Code or Cursor, their
+hooks deliver queued Codex rows without their own content profile, so a Codex row is no longer
+refused as `content_capture_profile_mismatch`.
 
 Recovery emits fixed `capture_inventory_*` reason counts in its internal maintenance summary;
 these are not ledger receipts or a new hook diagnostic format. Historical local selection losses with complete original route attribution are reported by
@@ -1052,7 +1502,8 @@ Task/receipt advice can occupy the same context slot and defer the recommendatio
 Use the exact advertised accept/decline command, including `--release-version`. A new decline skips
 that release; older permanent declines remain respected. Acceptance only supplies the upgrade
 instructions, and execution requires the user's explicit upgrade request. Package replacement does
-not itself prove host activation or data migration. Preserve the existing host roots, ownership and
+not itself prove host activation; a compatible data migration is performed by the fresh service
+before READY and must be verified separately. Preserve the existing host roots, ownership and
 privacy choices; new settings such as Expanded review require a separate exact approval.
 
 ## Recovery directives in errors (ADR-030)
@@ -1070,8 +1521,12 @@ corrected body once under a new `request_id`. The regression case is
 `tests/unit/mcp/test_recovery_directive_delivery.py`, which replays that exact body.
 
 Provider-side failures reaching Codex through the app-server path keep their existing stage-typed
-diagnostics (issue #529). Classifying those failures into typed recovery tokens is tracked
-separately on issue #742 and is not part of ADR-030's first implementation.
+diagnostics (issue #529). Those failures also resolve through the shared recovery registry
+(`continuation_for_semantic_outcome`, issue #742): the adapter's closed `failure_class` and the
+recorded `semantic_reason` select a frozen directive, and raw provider text never reaches it.
+Hook advisories never carry that token; SessionStart's vault-locked advisory appends its own
+`vault_unlock_required` token after the host-specific prefix (issue #739). No Codex-specific
+recovery wording is configured.
 
 ### Compatible newer transcript metadata (0.2.3)
 
@@ -1087,6 +1542,13 @@ only its fenced lease was yielded. Replay the exact start body and request ID on
 inventing session or writer IDs. `start_pending_same_identity` instead means a live lease remains:
 wait up to 60 seconds before the one exact replay. If still busy or pending, retain the original
 request and report the unresolved start. These continuations do not authorize a new task.
+
+**CLI JSON (issue #741).** When an agent in this host runs `yoetz` in a shell with `--json`, a
+CLI-owned JSON error body carries a `recovery` object resolved from the same registry. A workflow
+command (`start`, `publish-work`, `check`, `respond`, `status`, `receipt`) also prints JSON when
+stdout is not a TTY; its failure keeps the exact wire body on stdout and writes the directive
+lines to stderr. This is CLI behavior shared by every host; no Codex-specific behavior is
+configured.
 
 ## Cold service attachment and recovery (issue #670)
 
@@ -1111,9 +1573,10 @@ admission conflict (`auto_attach_conflict`). Missing mapping remains explicit. C
 task selector or explicit admission decision, not a service restart. Successful hook exit alone
 does not establish attachment. A unique ended predecessor is attached before a new pair is created;
 ambiguous predecessor tasks produce `auto_attach_binding_ambiguous` with a count only, and the
-explicit session-plus-new-pair recovery preserves the selected task even when unrelated tasks
-share the canonical workspace (#814). It still checks the active selector, workspace and repository
-binding, and pending operations for that task; no task interaction authority is added.
+explicit session-plus-new-pair recovery preserves the selected root task even when unrelated
+tasks share the canonical workspace (#814, #816). It still checks the active selector, workspace and
+repository binding, and pending operations for that task; delegated child routes keep their
+authenticated attachment path, and no task interaction authority is added.
 
 Structural pre/post observations remain queued and keep their original identities across
 bootstrap. A later successful mapping permits their normal drain. Missing transient content
