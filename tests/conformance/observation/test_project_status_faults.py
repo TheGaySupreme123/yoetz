@@ -15,12 +15,14 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
 
 import yoetz.application.status as status_module
 import yoetz.application.task_views as task_views_module
+import yoetz.kernel.reducers as reducers_module
 import yoetz.observability.diagnostics as diagnostics
 from builders.multi_agent import MultiAgentService, multi_agent_service
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
@@ -32,7 +34,10 @@ from yoetz.application.status import StatusInternalResult
 from yoetz.domain.coordination import CoordinationError, CoordinationErrorCode
 from yoetz.domain.values import JsonObject
 from yoetz.ports.control import RepositoryPrivacyContext
+from yoetz.ports.diagnostics import RuntimeCapability
+from yoetz.ports.host_lineage import HostLineageRegistryError, HostLineageRegistryReason
 from yoetz.ports.ledger import CheckCommitResult
+from yoetz.ports.runtime import RouteAccess, RouteCommand
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.models import (
@@ -377,6 +382,129 @@ async def test_member_replay_fault_degrades_only_that_member(
         assert record["operation"] == "status_project_replay_failed"
         assert record["reason"] == "exception_value_error"
         _assert_ring_is_content_free()
+
+
+async def test_member_catalog_route_fault_degrades_only_that_member(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A corrupt catalog route is contained to its member before bundle routing begins."""
+
+    async with multi_agent_service(tmp_path / "state") as service:
+        first, second, _project_id = await _two_roots_with_receipts(service, _workspace(tmp_path))
+        project_application = service.app.project_application
+        assert project_application is not None
+        admitted_view = await project_application.project_view_for(first.task.task_id)
+        assert isinstance(admitted_view, ProjectStatus)
+        compact = await _status(service, first.task, view="compact", limit="1")
+        runtime = await service.app.runtime.route(
+            RouteCommand(
+                first.task.session_id,
+                first.task.writer_id,
+                RouteAccess.PAYLOAD_READ,
+                frozenset({RuntimeCapability.STRUCTURAL_READ, RuntimeCapability.PAYLOAD_READ}),
+            )
+        )
+        catalog_type = type(service.app.start_catalog)
+        real_task_route = catalog_type.task_route
+
+        async def corrupt_route(self: object, task_id: str) -> object:
+            if task_id == second.task.task_id:
+                raise PublicOperationError(
+                    PublicErrorCode.STORAGE_CORRUPT,
+                    "The stored project route is inconsistent.",
+                    False,
+                )
+            return await real_task_route(self, task_id)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(catalog_type, "task_route", corrupt_route)
+        request_id = new_id(IdKind.REQUEST)
+
+        async def admitted(*_args: object, **_kwargs: object) -> ProjectStatus:
+            return admitted_view
+
+        try:
+            snapshot = await task_views_module.project_status_snapshot(
+                cast(ProjectApplication, SimpleNamespace(project_view_for=admitted)),
+                service.app.start_catalog,
+                service.app.runtime,
+                runtime,
+                compact.head_frontier,
+                selected_task_id=None,
+                project_id=None,
+                request_id=request_id,
+            )
+            assert isinstance(snapshot, task_views_module.ProjectStatusSnapshot)
+            assert first.task.task_id in {item.task_id for item in snapshot.members}
+            assert tuple(item.task_id for item in snapshot.receipts) == (first.task.task_id,)
+            assert "project_member_unavailable" in snapshot.gaps
+            (record,) = tuple(
+                item
+                for item in _records(request_id=request_id)
+                if item["component"] == "application.status"
+            )
+            assert record["operation"] == "status_project_member_unavailable"
+            assert record["reason"] == "storage_corrupt"
+            _assert_ring_is_content_free()
+        finally:
+            await service.app.runtime.release(runtime)
+
+
+async def test_host_lineage_storage_fault_is_classified_at_status_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with multi_agent_service(tmp_path / "state") as service:
+        first, _second, _project_id = await _two_roots_with_receipts(service, _workspace(tmp_path))
+        registry = service.app.host_lineage_registry
+        assert registry is not None
+        registry_type = type(registry)
+
+        async def corrupt_annotations(self: object, *_args: object, **_kwargs: object) -> object:
+            del self
+            raise HostLineageRegistryError(HostLineageRegistryReason.STORAGE_CORRUPT)
+
+        monkeypatch.setattr(registry_type, "list_provisional_annotations", corrupt_annotations)
+        request_id = new_id(IdKind.REQUEST)
+        with pytest.raises(PublicOperationError) as caught:
+            await _status(service, first.task, view="lineage", limit="10", request_id=request_id)
+        _assert_joined(
+            caught.value,
+            code=PublicErrorCode.STORAGE_CORRUPT,
+            operation="status_lineage_replay_failed",
+            reason="exception_host_lineage_registry_error",
+            origin_module="yoetz.application.task_views",
+            request_id=request_id,
+        )
+
+
+async def test_candidate_frontier_fault_is_classified_at_status_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with multi_agent_service(tmp_path / "state") as service:
+        first, _second, _project_id = await _two_roots_with_receipts(service, _workspace(tmp_path))
+        real_replay = reducers_module.replay
+
+        def inconsistent_replay(records: object) -> object:
+            projection = real_replay(records)  # type: ignore[arg-type]
+            return replace(projection, frontier=projection.frontier + 1)
+
+        monkeypatch.setattr(reducers_module, "replay", inconsistent_replay)
+        request_id = new_id(IdKind.REQUEST)
+        with pytest.raises(PublicOperationError) as caught:
+            await _status(
+                service,
+                first.task,
+                view="candidate_findings",
+                limit="10",
+                request_id=request_id,
+            )
+        _assert_joined(
+            caught.value,
+            code=PublicErrorCode.STORAGE_CORRUPT,
+            operation="status_candidate_findings_replay_failed",
+            reason="exception_value_error",
+            origin_module="yoetz.application.status",
+            request_id=request_id,
+        )
 
 
 async def test_requester_lineage_replay_fault_is_storage_corrupt(

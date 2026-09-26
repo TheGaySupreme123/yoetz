@@ -2065,7 +2065,8 @@ may dereference it for either affected task only after both participants pass cu
 workspace-consent, and source-policy checks; the recipient projection then applies its own sink
 policy to the relative-resource content. The typed project detection row carries either the
 approved repository-relative path tuple or a bounded omission. Catalog rows, delivery events, and
-MCP text summaries retain only identities, counts, and digests.
+MCP text summaries retain only identities, counts, digests, and allowlisted gap codes; they never
+carry raw paths.
 The ordinary advice view carries the counterpart task and an exact project/detection/generation
 selector; its resource field follows the same sink-bound hydration and omission rules.
 
@@ -6045,7 +6046,7 @@ daemon and MCP bridge reuse it and mint no second `status_public_error` record; 
 diagnostics --correlation-id` or `--request-id` resolves the failure. The record never contains an
 exception message, a validation payload, a path, or user content. `CoordinationError` and
 `ProjectCommandError` are reviewed exception-class tokens (`exception_coordination_error`,
-`exception_project_command_error`).
+`exception_project_command_error`, and `exception_host_lineage_registry_error`).
 
 The project view contains faults to the member that raised them. A member that cannot be routed,
 replayed, or projected contributes no lineage or receipt rows, the response `gaps` carry
@@ -6056,7 +6057,9 @@ coverage rows, the snapshot digest, and the page model still fail the read with 
 error. Member receipt rows carry the receipt's recorded `subject_frontier`; the frozen `Frontier`
 wire object is normalized to a plain mapping at the strict `FrontierModel` boundary. Passing the
 frozen object directly rejected every member with a recorded receipt, which failed every root's
-project view as `INVALID_REQUEST` in the two-host 0.3.0 dogfood.
+project view as `INVALID_REQUEST` in the two-host 0.3.0 dogfood. The multi-agent MCP text summary
+also carries the allowlisted gap codes within its bounded fallback so a generic client can see a
+member omission without receiving private row content.
 
 
 ### Evidence-aware closure preparation (issues #569, #618, #657, #660, #666)

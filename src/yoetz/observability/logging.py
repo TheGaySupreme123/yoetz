@@ -135,6 +135,7 @@ _EXCEPTION_REASONS: Final[Mapping[str, str]] = MappingProxyType(
         "FileExistsError": "exception_file_exists_error",
         "FileNotFoundError": "exception_file_not_found_error",
         "FullError": "exception_full_error",
+        "HostLineageRegistryError": "exception_host_lineage_registry_error",
         "IndexError": "exception_index_error",
         "InterruptedError": "exception_interrupted_error",
         "IsADirectoryError": "exception_is_a_directory_error",

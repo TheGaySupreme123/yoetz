@@ -915,7 +915,8 @@ async def _candidate_page(
         # status boundary records its class and origin under the public correlation id.
         raise StatusFault(StatusFaultStage.REPLAY, "The task ledger is unreadable.") from exc
     if Frontier(projection.frontier, projection.head_digest) != frontier:
-        raise _error(PublicErrorCode.STORAGE_CORRUPT, "The status frontier is inconsistent.")
+        with status_stage(StatusFaultStage.REPLAY, "The status frontier is inconsistent."):
+            raise ValueError("status_frontier_inconsistent")
     availability = await runtime.ledger.load_case_availability(
         runtime.session_id, frontier, projection
     )

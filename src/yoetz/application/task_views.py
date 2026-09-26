@@ -176,10 +176,8 @@ async def lineage_status_page(
             annotations = tuple(observed)
         except HostLineageRegistryError as exc:
             if exc.reason is HostLineageRegistryReason.STORAGE_CORRUPT:
-                raise PublicOperationError(
-                    PublicErrorCode.STORAGE_CORRUPT,
-                    "Host lineage storage is inconsistent.",
-                    False,
+                raise StatusFault(
+                    StatusFaultStage.REPLAY, "Host lineage status is inconsistent."
                 ) from exc
             raise PublicOperationError(
                 PublicErrorCode.SERVICE_UNAVAILABLE,
@@ -278,23 +276,28 @@ async def project_status_snapshot(
     children: dict[str, StatusLineageChildModel] = {}
     receipts: list[StatusProjectReceiptModel] = []
     gaps: set[str] = set()
-    own_lineage = await catalog.task_lineage(requester.task_id)
+    own_lineage: TaskLineage | None = None
     for identifier in sorted(task_ids):
-        lineage = await catalog.task_lineage(identifier)
-        sessions = await catalog.task_session_states(identifier)
-        route = await catalog.task_route(identifier)
-        if lineage is None:
-            gaps.add("project_member_unavailable")
-            continue
-        health = SessionHealth.CONTACT_LOST
-        if any(item.health is SessionHealth.ACTIVE for item in sessions):
-            health = SessionHealth.ACTIVE
-        elif sessions and all(item.health is SessionHealth.ENDED for item in sessions):
-            health = SessionHealth.ENDED
-        latest_session = max(
-            sessions, key=lambda item: (item.changed_at, item.session_id), default=None
-        )
+        member_runtime: TaskRuntime | None = None
+        member_receipt: StatusProjectReceiptModel | None = None
+        tree: LineageStatusSnapshot | None = None
         try:
+            lineage = await catalog.task_lineage(identifier)
+            sessions = await catalog.task_session_states(identifier)
+            route = await catalog.task_route(identifier)
+            if lineage is None:
+                gaps.add("project_member_unavailable")
+                continue
+            if identifier == requester.task_id:
+                own_lineage = lineage
+            health = SessionHealth.CONTACT_LOST
+            if any(item.health is SessionHealth.ACTIVE for item in sessions):
+                health = SessionHealth.ACTIVE
+            elif sessions and all(item.health is SessionHealth.ENDED for item in sessions):
+                health = SessionHealth.ENDED
+            latest_session = max(
+                sessions, key=lambda item: (item.changed_at, item.session_id), default=None
+            )
             with status_stage(StatusFaultStage.MODEL):
                 member = StatusProjectMemberModel.model_validate(
                     {
@@ -305,17 +308,10 @@ async def project_status_snapshot(
                         "parent_task_id": lineage.parent_task_id,
                     }
                 )
-        except StatusFault as exc:
-            record_status_member_unavailable(exc, request_id=request_id)
-            gaps.add("project_member_unavailable")
-            continue
-        members.append(member)
-        if route is None or route.state is TaskRouteState.QUARANTINED:
-            gaps.add("project_member_unavailable")
-            continue
-        member_runtime: TaskRuntime | None = None
-        member_receipt: StatusProjectReceiptModel | None = None
-        try:
+            members.append(member)
+            if route is None or route.state is TaskRouteState.QUARANTINED:
+                gaps.add("project_member_unavailable")
+                continue
             member_runtime = (
                 requester
                 if identifier == requester.task_id

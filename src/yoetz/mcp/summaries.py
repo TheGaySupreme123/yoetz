@@ -218,6 +218,15 @@ def _safe_gap_codes(source: Mapping[str, JsonValue]) -> tuple[str, ...]:
     )
 
 
+def _safe_status_gap_codes(source: Mapping[str, JsonValue]) -> tuple[str, ...]:
+    raw_gaps = source.get("gaps")
+    if not isinstance(raw_gaps, list | tuple):
+        return ()
+    return tuple(
+        gap for gap in raw_gaps if type(gap) is str and _GAP_CODE.fullmatch(gap) is not None
+    )
+
+
 def _bounded(summary: str) -> str:
     try:
         encoded = summary.encode("ascii", errors="strict")
@@ -678,7 +687,12 @@ def _summary_for_multi_agent_status(source: Mapping[str, JsonValue], view: str) 
     suffix = "Read the structured page for child states and row identities."
     if page.get("next_cursor") is not None:
         suffix = "More pages available. " + suffix
-    return _bounded(prefix + suffix)
+    gap_clause = _bounded_list_clause(
+        "gap codes: ",
+        _safe_status_gap_codes(source),
+        byte_budget=_MAX_SUMMARY_BYTES - len((prefix + suffix).encode("ascii")),
+    )
+    return _bounded(prefix + gap_clause + suffix)
 
 
 def summary_for_receipt(envelope: object) -> str:
