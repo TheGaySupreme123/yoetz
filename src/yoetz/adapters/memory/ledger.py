@@ -118,6 +118,8 @@ from yoetz.observability.logging import record_unexpected_exception_without_rais
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.ids import IdPort
 from yoetz.ports.ledger import (
+    CHECK_ACQUISITION_RESERVATION_SECONDS,
+    CHECK_ADMISSION_RETRY_AFTER_MS,
     AcceptedEventSummary,
     AppendCommand,
     AppendEntry,
@@ -125,6 +127,8 @@ from yoetz.ports.ledger import (
     AppendWarning,
     AssignmentProjectionFilter,
     AttemptOutcome,
+    CheckAdmissionRecord,
+    CheckAdmissionStage,
     CheckCommitResult,
     CheckPhase,
     CheckPolicyExecution,
@@ -156,6 +160,8 @@ from yoetz.ports.ledger import (
     SemanticJobRecord,
     SemanticProgressRecord,
     StoredProjection,
+    check_admission_refused,
+    check_admission_stage,
 )
 from yoetz.ports.objects import (
     ObjectKind,
@@ -346,6 +352,16 @@ class _CheckReservation:
     expires_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class _CheckAdmissionRefusal:
+    """One exact check key's recent pre-admission refusals; transient and structural only."""
+
+    stage: CheckAdmissionStage
+    first_refused_at: datetime
+    last_refused_at: datetime
+    refusal_count: int
+
+
 @dataclass(slots=True)
 class MemoryLedgerState:
     """Copy-on-write task state shared by the reference adapters."""
@@ -370,6 +386,12 @@ class MemoryLedgerState:
     semantic_progress: dict[str, SemanticProgressRecord] = field(default_factory=lambda: {})
     # Transient freeze-acquisition holds: never persisted; a crash mid-freeze must drop them.
     check_reservations: dict[tuple[str, str], _CheckReservation] = field(default_factory=lambda: {})
+    # Transient, bounded pre-admission refusals keyed by exact (writer, request) (issue #838).
+    # Never persisted, cloned, or adopted: only the outermost ledger layer that answered the
+    # caller records here, and admission of the key clears its entry.
+    check_admissions: dict[tuple[str, str], _CheckAdmissionRefusal] = field(
+        default_factory=lambda: {}
+    )
 
     # Transient, bounded exact-snapshot row indexes; never persisted or shared across clones.
     query_records: tuple[LedgerRecord, ...] = ()
@@ -628,6 +650,84 @@ def quarantine_resume_object_invalid(
         suspension_kind=None,
     )
     return quarantined, error
+
+
+_CHECK_ADMISSION_JOURNAL_LIMIT: Final = 64
+_CHECK_ADMISSION_JOURNAL_TTL: Final = timedelta(minutes=15)
+_CHECK_ADMISSION_MAX_REFUSALS: Final = 2**53 - 1
+
+
+def _prune_check_admissions(state: MemoryLedgerState, now: datetime) -> None:
+    journal = state.check_admissions
+    for key in tuple(journal):
+        if now - journal[key].last_refused_at > _CHECK_ADMISSION_JOURNAL_TTL:
+            del journal[key]
+
+
+def note_check_admission_refusal(
+    state: MemoryLedgerState,
+    key: tuple[str, str],
+    stage: CheckAdmissionStage,
+    now: datetime,
+) -> None:
+    """Remember one pre-admission refusal for an exact check key (issue #838).
+
+    The journal is what lets ``status view=operation`` tell a refused admission apart from a
+    request this service never saw. It is bounded by entry count and age, holds only closed
+    stage tokens and service timestamps, and is never persisted.
+    """
+
+    _prune_check_admissions(state, now)
+    journal = state.check_admissions
+    prior = journal.pop(key, None)
+    journal[key] = (
+        _CheckAdmissionRefusal(stage, now, now, 1)
+        if prior is None
+        else _CheckAdmissionRefusal(
+            stage,
+            prior.first_refused_at,
+            max(now, prior.last_refused_at),
+            min(prior.refusal_count + 1, _CHECK_ADMISSION_MAX_REFUSALS),
+        )
+    )
+    while len(journal) > _CHECK_ADMISSION_JOURNAL_LIMIT:
+        del journal[next(iter(journal))]
+
+
+def check_admission_record(
+    state: MemoryLedgerState, key: tuple[str, str], now: datetime
+) -> CheckAdmissionRecord | None:
+    """Project the live reservation and recent refusals for one key; ``None`` once admitted."""
+
+    if key in state.operations:
+        return None
+    _prune_check_admissions(state, now)
+    refusal = state.check_admissions.get(key)
+    reservation = cast(object | None, state.check_reservations.get(key))
+    expires_at = getattr(reservation, "expires_at", None)
+    if type(expires_at) is datetime and expires_at > now:
+        armed_at = min(now, expires_at - timedelta(seconds=CHECK_ACQUISITION_RESERVATION_SECONDS))
+        first = armed_at if refusal is None else min(armed_at, refusal.first_refused_at)
+        return CheckAdmissionRecord(
+            key[0],
+            key[1],
+            CheckAdmissionStage.ACQUIRING,
+            0 if refusal is None else refusal.refusal_count,
+            first,
+            now,
+            CHECK_ADMISSION_RETRY_AFTER_MS[CheckAdmissionStage.ACQUIRING],
+        )
+    if refusal is None:
+        return None
+    return CheckAdmissionRecord(
+        key[0],
+        key[1],
+        refusal.stage,
+        refusal.refusal_count,
+        refusal.first_refused_at,
+        refusal.last_refused_at,
+        CHECK_ADMISSION_RETRY_AFTER_MS[refusal.stage],
+    )
 
 
 def _now(clock: ClockPort | None) -> datetime:
@@ -1463,6 +1563,13 @@ class MemoryLedgerAdapter:
         A standing-grant park expires the lease and may never resume, so
         ``suspension_kind=repository_grant`` is not a barrier: observation
         continues and the same request re-acquires the barrier on replay.
+
+        The same holds for any pending check whose lease is no longer live under this owner: an
+        invocation that was abandoned (its caller went away, or a previous service generation
+        died holding it) renews nothing and may never be replayed. Deferring observation behind
+        it stranded the native capture handoffs that every new check on the task must wait for,
+        so neither could ever proceed (issue #838). Commit already tolerates an
+        observation-only suffix, and an exact replay re-installs the barrier when it reclaims.
         """
 
         now = _now(self._clock)
@@ -1471,6 +1578,7 @@ class MemoryLedgerAdapter:
             for reservation in self._state.check_reservations.values()
         ):
             return True
+        owner_generation = str(self._fence.owner_generation)
         return any(
             (writer := self._state.writers.get(case_writer_id)) is not None
             and writer.session_id == session_id
@@ -1478,6 +1586,9 @@ class MemoryLedgerAdapter:
             is not None
             and operation[0].state is OperationState.PENDING
             and operation[0].suspension_kind is not CheckSuspensionKind.REPOSITORY_GRANT
+            and operation[0].owner_generation == owner_generation
+            and operation[0].lease_expires_at is not None
+            and operation[0].lease_expires_at > now
             for case_writer_id, operation_id in self._state.frozen_cases
         )
 
@@ -2207,10 +2318,40 @@ class MemoryLedgerAdapter:
         request_digest: str,
     ) -> FrozenCase | CheckCommitResult:
         key = (writer_id, request_id)
+        try:
+            result = await self._freeze_case_unrecorded(
+                session_id, writer_id, expected_frontier, request_id, request_digest
+            )
+        except PublicOperationError as exc:
+            stage = check_admission_stage(exc)
+            if stage is not None:
+                # Synchronous on purpose: no await may separate the answer from its note, and a
+                # cancelled lock wait must never discard an admission that already happened.
+                note_check_admission_refusal(self._state, key, stage, _now(self._clock))
+            raise
+        self._state.check_admissions.pop(key, None)
+        return result
+
+    async def lookup_check_admission(
+        self, writer_id: str, operation_id: str
+    ) -> CheckAdmissionRecord | None:
+        async with self._lock:
+            return check_admission_record(self._state, (writer_id, operation_id), _now(self._clock))
+
+    async def _freeze_case_unrecorded(
+        self,
+        session_id: str,
+        writer_id: str,
+        expected_frontier: int | None,
+        request_id: str,
+        request_digest: str,
+    ) -> FrozenCase | CheckCommitResult:
+        key = (writer_id, request_id)
         prior_record: OperationRecord | None = None
         projection: ProjectionState | None = None
         frontier: Frontier | None = None
         records: tuple[LedgerRecord, ...] | None = None
+        object_refs: dict[str, ObjectRef] | None = None
         acquisition_reservation: _CheckReservation | None = None
         async with self._lock:
             prior = self._state.operations.get(key)
@@ -2251,7 +2392,7 @@ class MemoryLedgerAdapter:
                 prior_record = record
             else:
                 if self._pending_import(session_id):
-                    raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+                    raise check_admission_refused(CheckAdmissionStage.IMPORT_PENDING)
                 projection = self._state.projection
                 frontier = Frontier(projection.frontier, projection.head_digest)
                 # Observation-only motion past the caller's frontier is tolerated by freezing at
@@ -2266,6 +2407,7 @@ class MemoryLedgerAdapter:
                 ):
                     raise _frontier_conflict(frontier)
                 records = self._state.records
+                object_refs = dict(self._state.object_refs)
                 writer = self._state.writers.get(writer_id)
                 if writer is None or writer.session_id != session_id:
                     raise _error(PublicErrorCode.SESSION_NOT_FOUND)
@@ -2273,9 +2415,10 @@ class MemoryLedgerAdapter:
                 # that stayed active through acquisition would race the freeze it just tolerated.
                 reservation = self._state.check_reservations.get(key)
                 if reservation is not None and reservation.expires_at > _now(self._clock):
-                    raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+                    raise check_admission_refused(CheckAdmissionStage.ACQUIRING)
                 acquisition_reservation = _CheckReservation(
-                    session_id, _now(self._clock) + timedelta(seconds=60)
+                    session_id,
+                    _now(self._clock) + timedelta(seconds=CHECK_ACQUISITION_RESERVATION_SECONDS),
                 )
                 self._state.check_reservations[key] = acquisition_reservation
         if prior_record is not None:
@@ -2299,6 +2442,7 @@ class MemoryLedgerAdapter:
                 _, renewed = self._replace_pending_record(prior_record)
                 return FrozenCase(case, renewed)
         assert projection is not None and frontier is not None and records is not None
+        assert object_refs is not None
         try:
             availability = await self.load_case_availability(session_id, frontier, projection)
             try:
@@ -2337,12 +2481,32 @@ class MemoryLedgerAdapter:
             resume_ref = await self._objects.finalize(staged)
             async with self._lock:
                 if key in self._state.operations:
-                    raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+                    # Another invocation admitted this exact key after this one's reservation
+                    # lapsed; the replay converges on that operation.
+                    raise check_admission_refused(CheckAdmissionStage.ACQUIRING)
+                current_reservation = self._state.check_reservations.get(key)
+                if (
+                    acquisition_reservation is not None
+                    and current_reservation is not acquisition_reservation
+                ):
+                    # A successor may replace an expired reservation while this invocation is
+                    # staging.  Its exact token owns the admission; this stale attempt must not
+                    # overwrite the successor or win the race itself.
+                    raise check_admission_refused(
+                        CheckAdmissionStage.ACQUIRING
+                        if current_reservation is not None
+                        else CheckAdmissionStage.ACQUISITION_CONTENDED
+                    )
                 current = Frontier(
                     self._state.projection.frontier, self._state.projection.head_digest
                 )
                 if current != frontier or self._pending_import(session_id):
                     raise _frontier_conflict(current)
+                if self._state.object_refs != object_refs:
+                    # Case availability includes the object inventory.  A concurrent inventory
+                    # refresh can change that input without moving the ledger frontier, so the
+                    # staged case must be retried instead of admitting stale availability.
+                    raise check_admission_refused(CheckAdmissionStage.ACQUISITION_CONTENDED)
                 operation = OperationRecord(
                     writer_id,
                     request_id,

@@ -42,6 +42,7 @@ from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.host_lineage import HostLineageRegistryPort
 from yoetz.ports.ledger import (
     AssignmentProjectionFilter,
+    CheckAdmissionRecord,
     CheckSuspensionKind,
     EvidenceProjectionFilter,
     FindingProjectionPosition,
@@ -91,6 +92,7 @@ from yoetz.protocol.models import (
     StatusCandidateFindingItemModel,
     StatusCandidateFindingsFilterModel,
     StatusCandidateFindingsPageModel,
+    StatusCheckAdmissionModel,
     StatusClosureReadinessModel,
     StatusCompactItemModel,
     StatusCompactPageModel,
@@ -710,27 +712,86 @@ async def _operation_semantic_progress(
         return None
 
 
+def check_admission_wire(
+    record: CheckAdmissionRecord, observed_at: datetime
+) -> dict[str, JsonValue]:
+    """Project one transient admission record onto the bounded structural wire (issue #838).
+
+    Only the closed stage, a count, service timestamps, and durations derived at one service
+    observation time leave; the page never names another request or any payload.
+    """
+
+    if type(record) is not CheckAdmissionRecord or type(observed_at) is not datetime:
+        raise ValueError("status_check_admission_invalid")
+    observed = observed_at.replace(microsecond=observed_at.microsecond // 1000 * 1000)
+    first = record.first_observed_at
+    last = record.last_observed_at
+    observed = max(observed, last)
+    return {
+        "stage": record.stage.value,
+        "refusal_count": str(record.refusal_count),
+        "first_observed_at": format_rfc3339_millis(first),
+        "last_observed_at": format_rfc3339_millis(last),
+        "observed_at": format_rfc3339_millis(observed),
+        "elapsed_ms": str(max(0, int((observed - first).total_seconds() * 1000))),
+        "retry_after_ms": str(record.retry_after_ms),
+    }
+
+
+async def _operation_admission(
+    app: Application, runtime: TaskRuntime, writer_id: str, operation_request_id: str
+) -> dict[str, JsonValue] | None:
+    """Read best-effort pre-admission state for an absent check request; never fail recovery."""
+
+    lookup = getattr(runtime.ledger, "lookup_check_admission", None)
+    if not callable(lookup):
+        return None
+    try:
+        record = await cast(Callable[[str, str], Awaitable[CheckAdmissionRecord | None]], lookup)(
+            writer_id, operation_request_id
+        )
+        if record is None:
+            return None
+        clock = getattr(app, "clock", None)
+        now = clock.now_utc() if clock is not None else datetime.now(UTC)
+        wire = check_admission_wire(record, now)
+        StatusCheckAdmissionModel.model_validate(wire)
+        return wire
+    except Exception as exc:  # noqa: BLE001 - admission enriches recovery, never blocks it
+        record_unexpected_exception_without_raising(
+            exc,
+            component="application.status",
+            operation="status_check_admission_unavailable",
+            request_id=operation_request_id,
+        )
+        return None
+
+
 def _operation_page_from_record(
     operation_request_id: str,
     operation: object | None,
     continuation: Mapping[str, JsonValue] | None = None,
     semantic_progress: Mapping[str, JsonValue] | None = None,
+    admission: Mapping[str, JsonValue] | None = None,
 ) -> StatusOperationPageModel:
     """Project one operation record into the recovery page, or a bounded not-found page.
 
     Every exit is either a validated page or ``ValueError``. Attribute and type faults on a
     stored record (corrupt shape, missing enum members) collapse to the same bounded error so
-    the operation status branch never raises an unbounded exception into the daemon.
+    the operation status branch never raises an unbounded exception into the daemon. An absent
+    page carries ``admission`` only when a check under this exact key was refused before
+    admission or is being admitted right now (issue #838).
     """
 
     if operation is None:
-        return StatusOperationPageModel.model_validate(
-            {
-                "operation_request_id": operation_request_id,
-                "found": False,
-                "state": "absent",
-            }
-        )
+        absent: dict[str, JsonValue] = {
+            "operation_request_id": operation_request_id,
+            "found": False,
+            "state": "absent",
+        }
+        if admission is not None:
+            absent["admission"] = cast(JsonValue, dict(admission))
+        return StatusOperationPageModel.model_validate(absent)
     from yoetz.ports.ledger import OperationRecord as _OperationRecord
 
     try:
@@ -1246,12 +1307,20 @@ async def execute_status(
                     operation,
                 )
             semantic_progress = await _operation_semantic_progress(app, runtime, operation)
+            admission = (
+                await _operation_admission(
+                    app, runtime, request.writer_id, request.filter.operation_request_id
+                )
+                if operation is None
+                else None
+            )
             try:
                 page = _operation_page_from_record(
                     request.filter.operation_request_id,
                     operation,
                     continuation,
                     semantic_progress,
+                    admission,
                 )
             except (AttributeError, TypeError, ValueError) as exc:
                 raise StatusFault(

@@ -430,8 +430,11 @@ them; non-publish completions report kind without append-shaped event detail. A 
 is awaiting repository setup or a one-use disclosure decision reconstructs its typed continuation
 from the routed task ledger using the operation's recorded writer, so a same-task session/writer
 rotation does not strand the decision. A pending or complete check may also carry structural
-`semantic_progress` (see "Structural semantic progress"). Lookups are scoped to the authenticated
-task. A request from another task is reported as absent.
+`semantic_progress` (see "Structural semantic progress"). An `absent` page for a check that this
+service is admitting, or recently refused before admission, carries a structural `admission` stage
+(see "Check admission stage"); an `absent` page without it is a request this service knows nothing
+about. Lookups are scoped to the authenticated task. A request from another task is reported as
+absent.
 MCP `publish_work` performs the same envelope-first operation lookup when the supplied body fails
 schema validation (so a malformed retry body can still recover a committed operation) — except
 under a declared `dry_run: true`, which appends nothing, so no prior-operation lookup can change
@@ -1633,10 +1636,14 @@ actor-id, actor-type, assurance, and channel predicate. The accepted batch still
 reports the real head. For `operation_kind=receipt`, that suffix must additionally contain no
 `finding_recorded` event, so the pinned receipt cannot append past a finding it did not cover. Any
 other intervening record conflicts. Observation appends receive retryable `OPERATION_PENDING` while
-a check-acquisition reservation or an *active* frozen case for their session is present. A pending
-check whose `suspension_kind` is `repository_grant` is not an active barrier: the standing-grant
-ceremony may never complete, so observation continues and the same request re-installs the barrier
-on replay. Check commit keeps the frozen subject frontier and tolerates an observation-authored
+a check-acquisition reservation or an *active* frozen case for their session is present. A frozen
+case is active only while its pending check holds a live lease under the current owner generation.
+A pending check whose `suspension_kind` is `repository_grant`, whose lease has expired, or whose
+lease belongs to an earlier service generation is not an active barrier: nothing renews it and it
+may never be replayed, so observation continues and the same request re-installs the barrier when
+its replay reclaims the operation (issues #445, #838). Before #838 an abandoned check kept deferring
+the structural delivery of its task's native capture handoffs indefinitely, and every new check on
+the task waited on those handoffs. Check commit keeps the frozen subject frontier and tolerates an observation-authored
 suffix after that frontier the same way acquisition and `append_batch` do; cooperative or importer
 motion still conflicts. The verdict is never retargeted to a frontier the case did not inspect.
 
@@ -4168,7 +4175,9 @@ pending. It is separate from `operation_pending`, which is generic observation b
 makes no claim that content was retained. Up to 512 `staging`/`pending` tickets may be outstanding
 per workspace; revoked tombstones are excluded from that quota but retained to fence ABA reuse. A
 new check/frozen-case acquisition sees an outstanding ticket in the same bundle transaction and
-returns retryable `OPERATION_PENDING`; retrying the same request is idempotent. When a new CHECK
+returns retryable `OPERATION_PENDING` with `reason_code: check_admission_capture_pending`,
+`retry_after_ms`, and the `check_admission_same_identity` continuation; retrying the same request
+is idempotent. When a new CHECK
 encounters this barrier, READY performs a bounded listing for the exact routed task and reconciles
 each ticket against current local content authority before one freeze retry. This task-local
 preflight retires tickets whose authority is absent, inactive, revoked, runtime-disabled,
@@ -4178,7 +4187,8 @@ outbox row. When the capture lock is free it then also retires an active ticket 
 in the selected-admission buffer (issue #836); a younger ticket, or one whose row is still queued,
 retains the retryable barrier. A CHECK never waits for the capture lock. A completed same-request
 replay returns without inspecting newer tickets. It does not rewrite captured history or encrypted
-objects.
+objects. The refused check held both dispatch gates; the daemon wakes the observation sweep
+as the refusal leaves so pending structural delivery can run before the bounded replay (#838).
 The capture lane can stage while a heavy append runs, while its bounded object/manifest writes stay
 serialized. This boundary provides local encrypted durability only: there is no plaintext spool or
 offline guarantee, and a host kill or service failure before authenticated staging may leave the
@@ -6301,6 +6311,47 @@ cancellation merely stops waiting for a check. Other workflow cancellation behav
 The existing maintenance gate may delay other task reads while a check runs; this change supplies
 pending/replay continuity, not concurrent-check scheduling. Structural progress for the running
 check is readable through `status view=operation` (next section).
+
+### Check admission stage (#838)
+
+Every branch that refuses a new check before an operation record exists raises retryable
+`OPERATION_PENDING` with a closed `reason_code`, an integer `retry_after_ms`, and the
+`check_admission_same_identity` continuation, attached at construction:
+
+| Stage | `reason_code` | `retry_after_ms` | Meaning |
+| --- | --- | --- | --- |
+| `acquiring` | `check_admission_in_progress` | 2000 | A live acquisition reservation already holds the exact (writer, request) key, or another invocation admitted it first. |
+| `capture_handoff_pending` | `check_admission_capture_pending` | 5000 | A native capture handoff for the task is outstanding, before staging or landing during it. |
+| `acquisition_contended` | `check_admission_contended` | 1000 | Concurrent motion in the case's own inputs, or a lapsed reservation, left nothing admitted. |
+| `import_pending` | `check_admission_import_pending` | 5000 | A Codex import for the session is still being published. |
+
+Nothing is recorded under the request identity at any stage, so the exact replay after
+`retry_after_ms` converges on the one operation admission eventually creates. `execute_check`
+retries once inside the call for `capture_handoff_pending` (after the task-local capture preflight)
+and `acquisition_contended`; it returns `acquiring` and `import_pending` directly. The daemon records
+each refusal's `reason_code` in its durable public-error diagnostic, so the correlation id names the
+stage. An admitted pending check with a live lease keeps the untyped `OPERATION_PENDING` and a
+`found=true` operation page.
+
+SQLite acquisition stages its resume object with the repository lock released. When only
+lifecycle state that moved no ledger record changed meanwhile (another operation's lease, phase, or
+AI-powered review bookkeeping), SQLite carries this acquisition's own operation row and frozen case
+over that motion instead of discarding it. A change to the projection, writers, object inventory, or
+this key refuses as `acquisition_contended`; a moved ledger head still returns `FRONTIER_CONFLICT`.
+
+`status view=operation` for an `absent` page adds an optional `admission` object (status result
+schema 1.4.0; omitted, never null, otherwise) while the service holds a live acquisition reservation
+or a recent refusal for the exact (writer, request) key: `stage` (the closed stage above),
+`refusal_count` (canonical uint; `0` only while `acquiring`), `first_observed_at`,
+`last_observed_at`, `observed_at` (timestamps), `elapsed_ms` (canonical uint, from
+`first_observed_at` to `observed_at`), and `retry_after_ms`. The page keeps `found=false` and
+`state=absent`: replaying the exact body is still the recovery. The ledger port method is
+`lookup_check_admission(writer_id, operation_id) -> CheckAdmissionRecord | None`, exposed on the
+read-only runtime facade. The journal behind it is in-memory, bounded to 64 keys and 15 minutes,
+never persisted, and cleared when the key is admitted; a service restart or runtime eviction forgets
+it and the page reads as plainly absent again. It carries no payload and never names another
+request or writer. The CLI human status rendering prints `Check admission: …` lines; the MCP text
+summary adds `admission stage`, `refusals`, `elapsed ms`, and `retry after ms`.
 
 ### Structural semantic progress (#571 A2)
 
