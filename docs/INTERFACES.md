@@ -755,7 +755,11 @@ Key payload fields (minimum; full shapes in `src/yoetz/domain/events.py`):
   IDs) and `supersedes_claim_refs` (prior effective claim IDs), using empty arrays when neither
   applies. Admissible support stays in
   `supporting_refs`; non-success results never do. A replacement uses a fresh claim id, same claim
-  kind, overlapping declared obligation scope, and the complete relevant limitation set. Replay
+  kind, overlapping declared obligation scope for each nonempty target, and the complete relevant
+  limitation set. An empty-scope target may be explicitly superseded by empty or populated scope;
+  no scope is inferred from supporting refs. New ordinary v1.1 completion publications must
+  explicitly send `obligation_refs`; intentional `[]` cannot have obligation support and remains
+  coverage-incomplete. These admission guards do not invalidate history or committed retries. Replay
   rejects missing/already-replaced targets, disjoint scope, wrong result outcomes, irrelevant
   limitations, or incomplete linkage before append. A limiting result must predate the claim and
   have an action whose obligation scope overlaps the claim; an unscoped side remains task-wide, and

@@ -119,17 +119,27 @@ binding is reported as legacy/unknown and cannot silently satisfy a new completi
 
 ### Claim correction and limitation linkage
 
-Use `claim_recorded/1.1.0` for new claims and send both new arrays, even when empty. Keep admissible
+Use `claim_recorded/1.1.0` for new claims and send both new arrays, even when empty. Completion
+claims must explicitly send `obligation_refs`: intended obligation IDs, or `[]` for intentional
+empty scope. `supporting_refs` does not declare scope. Obligation support with empty scope is
+rejected; consciously declare those IDs in scope or remove them from support. Empty scope remains
+coverage-incomplete and does not assert that the plan's work is complete. Keep admissible
 evidence, successful results, and resolved obligations in `supporting_refs`; put partial or failed
 result ids in `limitation_refs`.
 To correct an append-only claim, publish a fresh claim id and name every prior effective claim it
-replaces in `supersedes_claim_refs`. Restate corrected overlapping `obligation_refs`. The prior
+replaces in `supersedes_claim_refs`. Restate corrected `obligation_refs`, overlapping every target
+whose scope is nonempty. An already accepted empty-scope target can be replaced by either explicit
+empty or populated scope. For C0 with empty scope and a later scoped C1, name **both** actual IDs in
+the sorted `supersedes_claim_refs` of C2 and supply the intended scope; superseding only C1 leaves
+C0 effective. Retain every relevant limitation and make a real correction, not an identical claim
+under a new ID. The prior
 event stays immutable and visible as history, while checks and receipts evaluate the replacement
 as current.
 
 Before append, read `candidate_findings`, `history`, and `results`, then dry-run the exact
 replacement. Preflight rejects a missing or already-superseded target, a different claim kind,
-disjoint or absent declared scope, a success/unknown/unrelated limitation, a non-success result in
+disjoint scope against a populated target, omitted completion scope, misplaced obligation support,
+a success/unrelated limitation, a non-success result in
 `supporting_refs`, or an incomplete set of relevant partial/failed results. Do not use
 `disputes_refs` or `decision_recorded.supersedes_event_id` as claim supersession; those fields keep
 their existing contradiction and decision-history meanings.

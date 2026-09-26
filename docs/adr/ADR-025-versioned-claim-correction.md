@@ -48,6 +48,24 @@ Append-only history must remain intact, so mutation or erasure is not an accepta
    projection history. Narrowing a claim may deliberately leave former scope without a current
    completion claim; no scope is silently transferred.
 
+   **Empty-scope repair (#859, 2026-09-26).** An already accepted target with empty
+   `obligation_refs` has no declared scope to overlap. Explicitly naming it in
+   `supersedes_claim_refs` permits either populated or empty replacement scope. Every populated
+   target still requires overlap, including when mixed with empty targets. The same fresh-id,
+   effective-target, same-kind, non-dispute, changed-meaning and limitation rules apply. The
+   existing task/session/writer routing fences remain authoritative; another task's claim is not
+   a target in this ledger. No scope is inferred from support, prose, or another claim.
+
+   New ordinary v1.1 completion publications must explicitly include `obligation_refs`. An
+   intentional `[]` remains valid and coverage-incomplete; it cannot coexist with obligation IDs
+   in `supporting_refs`. Such IDs must be consciously declared as scope or removed from support.
+   Dry-run and append reject these authoring errors before staging objects, with the structural
+   invariants `completion_scope_must_be_explicit` and
+   `empty_scope_must_not_support_obligations`. These are admission guards, not historical replay
+   rules: legacy events and exact retries of already accepted operations remain readable and
+   recoverable. Frozen v1.0 admission is unchanged. No new wire field or schema version is needed;
+   this repairs the existing v1.1 correction operation and leaves all frozen schema bytes intact.
+
 3. **Limitations are separate from support.** A v1.1 completion claim puts every relevant partial
    or failed result in `limitation_refs`; such a result is rejected from `supporting_refs`.
    A relevant result existed no later than the claim and either has unscoped action provenance or

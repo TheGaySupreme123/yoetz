@@ -937,6 +937,16 @@ CLAIM_REVISION_CORRECTIONS: Final[Mapping[str, str]] = MappingProxyType(
     {
         "claim_id_must_be_fresh": "use a fresh claim_id",
         "claim_kind_must_match": "match claim_kind with every superseded claim",
+        "completion_scope_must_be_explicit": (
+            "set obligation_refs explicitly to the intended obligation ids, or [] for intentional "
+            "empty scope; repair an accepted empty-scope claim with a fresh claim_id and its "
+            "actual id in supersedes_claim_refs"
+        ),
+        "empty_scope_must_not_support_obligations": (
+            "declare intended obligation ids in obligation_refs; supporting_refs does not declare "
+            "scope; for intentional empty scope use [] and remove obligation support; repair an "
+            "accepted claim with a fresh claim_id and its actual id in supersedes_claim_refs"
+        ),
         "limitation_refs_complete": (
             "include every relevant partial or failed result in limitation_refs"
         ),
@@ -947,7 +957,10 @@ CLAIM_REVISION_CORRECTIONS: Final[Mapping[str, str]] = MappingProxyType(
             "change the replacement's effective claim meaning"
         ),
         "replacement_must_not_dispute": "do not combine supersedes_claim_refs with disputes_refs",
-        "scope_overlap_required": "overlap obligation scope with every superseded claim",
+        "scope_overlap_required": (
+            "overlap obligation scope with every nonempty superseded claim; an empty-scope target "
+            "may be explicitly replaced with empty or populated obligation_refs"
+        ),
         "supporting_refs_must_exclude_limitations": (
             "keep non-success result ids in limitation_refs rather than supporting_refs"
         ),

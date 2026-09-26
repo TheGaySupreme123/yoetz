@@ -22,6 +22,7 @@ from yoetz.domain.events import (
     ActionRecordedPayload,
     AssignmentRecordedPayload,
     CheckRecordedPayload,
+    ClaimKind,
     ClaimRecordedPayload,
     ClaimRecordedPayloadV1_1,
     ClaimRevisionMismatch,
@@ -1428,6 +1429,37 @@ async def _preflight_dry_run_feasibility(
     return current, with_completion_scope_coverage(prepared.coverage, projected)
 
 
+def _validate_new_completion_scope(
+    request: PublishWorkRequestModel, prepared: PreparedPublication
+) -> None:
+    """Guard new v1.1 authoring without invalidating historical replay or write recovery.
+
+    An explicit empty array remains a bounded assertion, never inferred task-wide completion.
+    Obligation support alongside an empty scope is almost certainly a misplaced scope reference;
+    require the author to decide its meaning instead of silently moving those ids.
+    """
+
+    for index, item in enumerate(prepared.drafts):
+        payload = item.draft.payload
+        if type(payload) is not ClaimRecordedPayloadV1_1:
+            continue
+        if payload.claim_kind is not ClaimKind.COMPLETION:
+            continue
+        raw = _mapping(_field(_mapping(request.event_drafts[index]), "payload"))
+        invariant = None
+        if "obligation_refs" not in raw:
+            invariant = "completion_scope_must_be_explicit"
+        elif not payload.obligation_refs and any(
+            ref.startswith("obl_") for ref in payload.supporting_refs
+        ):
+            invariant = "empty_scope_must_not_support_obligations"
+        if invariant is not None:
+            raise public_error_for_claim_revision_mismatch(
+                ClaimRevisionMismatch("obligation_refs", invariant, item.draft.event_id),
+                event_index=index,
+            )
+
+
 async def _execute_dry_run(
     app: Application,
     request: PublishWorkRequestModel,
@@ -1438,6 +1470,7 @@ async def _execute_dry_run(
 
     # Intentionally skip operation lookup: dry_run must not consume or conflict on request_id.
     prepared = prepare_publication(request, channel=channel, app=app)
+    _validate_new_completion_scope(request, prepared)
     current, coverage = await _preflight_dry_run_feasibility(runtime, request, prepared)
     frontier = FrontierModel.model_validate(dict(current.as_wire()))
     preview = tuple(
@@ -1577,6 +1610,7 @@ async def execute_publish_work(
 
         # No prior operation: ordinary publish path. Body validation and expected_frontier apply.
         prepared = prepare_publication(request, channel=channel, app=app)
+        _validate_new_completion_scope(request, prepared)
         commitments, digest = await _commitments_and_digest(runtime, request, prepared)
         refs: list[ObjectRef] = []
         entries: list[AppendEntry] = []

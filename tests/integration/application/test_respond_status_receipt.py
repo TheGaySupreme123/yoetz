@@ -4288,3 +4288,187 @@ async def test_command_gap_partition_preserves_receipt_coverage(
     assert isinstance(status.page, StatusFindingsPageModel)
     final = next(row for row in status.page.items if row.finding_id == target.finding_id)
     assert final.resolved is should_resolve
+
+
+@pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))
+async def test_empty_claim_repair_converges_across_views_and_receipts(
+    ledger_backend: Literal["memory", "sqlite"], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#859: historical C0 + scoped C1 become C2 without rewriting accepted bytes."""
+    import yoetz.application.publish_work as publication
+    from yoetz.kernel.claims import effective_claim_ids
+    from yoetz.kernel.completion_scope import completion_scope_codes
+
+    app, runtime, _ = _build_app(ledger_backend=ledger_backend)
+    started = await app.start(start_request(85900, title="Empty claim repair"))
+    obligation = protocol_id("obl_", 85901)
+    evidence = protocol_id("evd_", 85902)
+    c0, c1, c2 = (protocol_id("clm_", n) for n in (85903, 85904, 85905))
+    serial = 86000
+    frontier = started.frontier
+
+    def draft(name: str, payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        nonlocal serial
+        serial += 1
+        return {
+            "event_id": protocol_id("evt_", serial),
+            "schema": {"name": name, "version": "1.1.0" if name == "claim_recorded" else "1.0.0"},
+            "occurred_at": "2026-07-19T12:00:00.000Z",
+            "causal_parents": [],
+            "artifact_refs": [],
+            "evidence_refs": [],
+            "payload": payload,
+        }
+
+    def request_base() -> dict[str, object]:
+        nonlocal serial
+        serial += 1
+        return {
+            **_request_base(protocol_id("req_", serial)),
+            "session_id": started.session_id,
+            "writer_id": started.writer_id,
+        }
+
+    async def publish(drafts: list[dict[str, JsonValue]]) -> PublishWorkRequest:
+        nonlocal frontier
+        req = PublishWorkRequest.model_validate(
+            {**request_base(), "expected_frontier": _frontier(frontier), "event_drafts": drafts}
+        )
+        preview = await app.publish_work(req.model_copy(update={"dry_run": True}))
+        assert isinstance(preview, PublishWorkResult)
+        result = await app.publish_work(req)
+        assert isinstance(result, PublishWorkInternalResult)
+        frontier = result.result_frontier
+        return req
+
+    meaning: dict[str, JsonValue] = {
+        "obligation_id": obligation,
+        "description": "Synthetic bounded repair",
+        "evidence_expectation": "Evidence",
+        "status": "open",
+    }
+    await publish(
+        [
+            draft(
+                "plan_published",
+                {"plan_version": 1, "summary": "Repair", "obligation_refs": [obligation]},
+            ),
+            draft("obligation_published", meaning),
+            draft(
+                "evidence_recorded",
+                {
+                    "evidence_id": evidence,
+                    "evidence_kind": "other",
+                    "strength": "metadata_only",
+                    "description": "Synthetic evidence",
+                    "observed_at": "2026-07-19T12:00:00.000Z",
+                },
+            ),
+            draft(
+                "obligation_published",
+                {**meaning, "status": "resolved", "resolution_evidence_refs": [evidence]},
+            ),
+        ]
+    )
+    initial: dict[str, JsonValue] = {
+        "claim_id": c0,
+        "claim_kind": "completion",
+        "statement": "Original missing scope",
+        "supporting_refs": [obligation],
+        "limitation_refs": [],
+        "supersedes_claim_refs": [],
+    }
+
+    # Seed the exact historically accepted v1.1 authoring shape through the ordinary durable
+    # append path with only the new admission guard disabled, as on the pre-fix runtime.
+    def prior_admission(*_args: object) -> None:
+        pass
+
+    with monkeypatch.context() as old_runtime:
+        old_runtime.setattr(publication, "_validate_new_completion_scope", prior_admission)
+        historical_request = await publish([draft("claim_recorded", initial)])
+    await publish(
+        [
+            draft(
+                "claim_recorded",
+                {
+                    **initial,
+                    "claim_id": c1,
+                    "statement": "Scoped completion",
+                    "obligation_refs": [obligation],
+                    "supporting_refs": [evidence],
+                },
+            )
+        ]
+    )
+    ledger, _ = runtime.resources[started.task_id]
+    before = tuple([row async for row in ledger.load_events(started.session_id)])
+    assert completion_scope_codes(replay(before)) == ("completion_plan_not_claimed",)
+    for view in ("compact", "candidate_findings"):
+        status = await app.status(
+            StatusRequest.model_validate({**request_base(), "view": view, "limit": "100"})
+        )
+        assert "completion_plan_not_claimed" in str(status)
+    await publish(
+        [
+            draft(
+                "claim_recorded",
+                {
+                    **initial,
+                    "claim_id": c2,
+                    "statement": "Corrected bounded completion",
+                    "obligation_refs": [obligation],
+                    "supporting_refs": [evidence],
+                    "supersedes_claim_refs": [c0, c1],
+                },
+            )
+        ]
+    )
+    records = tuple([row async for row in ledger.load_events(started.session_id)])
+    assert records[: len(before)] == before
+    state = replay(records)
+    assert effective_claim_ids(state) == frozenset({c2})
+    assert completion_scope_codes(state) == ()
+    for view in ("compact", "candidate_findings", "history"):
+        status = await app.status(
+            StatusRequest.model_validate({**request_base(), "view": view, "limit": "100"})
+        )
+        assert "completion_plan_not_claimed" not in str(status)
+    # A pre-upgrade operation remains replayable even though its authoring shape is now refused.
+    recovered = await app.publish_work(historical_request)
+    assert isinstance(recovered, PublishWorkInternalResult)
+    assert recovered.outcome == "replayed"
+    check = await app.check(
+        CheckRequest.model_validate(
+            {
+                **request_base(),
+                "expected_frontier": _frontier(frontier),
+                "mode": "deterministic_only",
+                "max_findings": "10",
+            }
+        )
+    )
+    assert isinstance(check, CheckCommitResult)
+    frontier = check.result_frontier
+    assert "completion_plan_not_claimed" not in check.coverage.known_gaps
+    for fmt in ("json", "markdown", "text"):
+        receipt = await app.receipt(
+            ReceiptRequest.model_validate(
+                {
+                    **request_base(),
+                    "task_id": started.task_id,
+                    "expected_frontier": _frontier(frontier),
+                    "format": fmt,
+                    "include": "standard",
+                    "redaction_profile": "full_local",
+                }
+            )
+        )
+        frontier = receipt.result_frontier
+        assert "completion_plan_not_claimed" not in receipt.coverage.known_gaps
+        assert "semantic_review_not_requested" in receipt.coverage.known_gaps
+        rendered = str(receipt.document if fmt == "json" else receipt.human_text)
+        if fmt == "json":
+            assert c2 in rendered
+        assert "Original missing scope" not in rendered
+        assert receipt.conclusion != "no_issue_detected"

@@ -1702,22 +1702,21 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "Before evidence or a completion claim, read status view=evidence at one frontier and "
         "reuse matching IDs. Put feedback and requested delivery in the effective "
         "plan via a revision. Accepted records are assertions, not repair proof. "
-        "Records a bounded batch of agent-published work events and returns the accepted event "
-        "range and coverage. When dry_run is false, this appends records to the local Yoetz ledger; "
-        "it does not publish to GitHub or run an AI-powered evaluation; it knows nothing outside "
-        "that batch. Every set-valued reference list must be unique and already in "
+        "Previews or appends asserted work to the local Yoetz ledger. It does not publish to GitHub "
+        "or run an AI-powered evaluation. Set-valued lists must be unique and already in "
         "ascending ASCII order; rejection names unsorted_set_field. attempted_items belongs only on the "
         "action_recorded payload; copy each requested_items value exactly and never place it on "
         "claim_recorded. decision_recorded.authority is a structural actor id, not approval prose; "
         "action_kind is one of command, edit, research, review, or other; command also requires "
         "command. claim_recorded at schema 1.1.0 separates supporting_refs from "
         "limitation_refs and corrections name exact prior effective claims in supersedes_claim_refs. "
+        "Completion requires explicit obligation_refs; [] cannot carry obligation support. "
+        "An accepted empty-scope target can be superseded with explicit empty or populated scope. "
         "Dry-run checks references, outcome, scope, replacement, and limitation linkage; author "
-        "corrections from candidate_findings, history, and results. Each occurred_at is a "
-        "caller-asserted RFC 3339 UTC time with milliseconds; use the real time and do not copy "
-        "the illustrative example timestamp. Ledger order follows ingestion sequence, Service "
-        "accepted_at is independent metadata, and receipt freshness is "
-        "frontier-bound. Dry-run previews are not evidential or citable. Read status "
+        "corrections from candidate_findings, history, and results. occurred_at asserts real "
+        "RFC 3339 UTC time with milliseconds; do not copy the illustrative example timestamp. Ledger order uses "
+        "ingestion sequence. Service accepted_at is independent; receipt freshness is frontier-bound. "
+        "Dry-run previews are not evidence. Read status "
         "view=obligations for exact unattempted_items before resolution; after publishing repair, "
         "claim and evidence, disposition older findings, call check, respond, then call receipt "
         "before claiming completion. Batch material transitions together, usually one to eight "
@@ -1914,7 +1913,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         "policy": MappingProxyType(
             {
                 "start": "sha256:3a2186a2db53b91fcf7a8f3117cb8ff6a2b8bad6bc78e3e796e5e611e8598405",
-                "publish_work": "sha256:8e5261e9d30677fe5741284a653b530d62acb08f3367a506f243523b131bd117",
+                "publish_work": "sha256:beac3d5a856ef374947ffda1b47cea2fbf2cf6020758cdd35c3c9a02043e1a05",
                 "check": "sha256:9befe13b257acf10535009c1dd69d9a933f3d94f5cd2aaac1655d4867596f89e",
                 "respond": "sha256:8b5dc94f431a411ef332021af01050a4b0c248a800e46d5b3bdb567f770d25a5",
                 "status": "sha256:517eb05aa015834d98bd96ed59d4b647a95e6c42a13013803caf19b9b4b07875",
@@ -1925,7 +1924,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         "strict": MappingProxyType(
             {
                 "start": "sha256:3a2186a2db53b91fcf7a8f3117cb8ff6a2b8bad6bc78e3e796e5e611e8598405",
-                "publish_work": "sha256:8e5261e9d30677fe5741284a653b530d62acb08f3367a506f243523b131bd117",
+                "publish_work": "sha256:beac3d5a856ef374947ffda1b47cea2fbf2cf6020758cdd35c3c9a02043e1a05",
                 "check": "sha256:2bd9947abc7b60564474840a73d99a80bfa528b98af1a725d11fdfde5dac9795",
                 "respond": "sha256:8b5dc94f431a411ef332021af01050a4b0c248a800e46d5b3bdb567f770d25a5",
                 "status": "sha256:517eb05aa015834d98bd96ed59d4b647a95e6c42a13013803caf19b9b4b07875",
@@ -1937,8 +1936,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:5db0bcfd445438e977869b3f5fd0e88c3d877f875b87cc8dfcaa1126b866cccf",
-        "strict": "sha256:b505bf514d57b00fd7ce1fa7b1c679f550bea5bebfe114c6d4a66423c3eec69d",
+        "policy": "sha256:0325eef389b97aab94bc6a0855ea405214bd43cdd7d7a6f2cfc600569c10a0d4",
+        "strict": "sha256:242473ec8961f90d8d6cddeaae11a13ac7af7b2d278af75a9ec3f364ad1c7737",
     }
 )
 
