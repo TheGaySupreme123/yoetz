@@ -91,6 +91,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "coordination_evidence_missing",
     "coordination_generation_mismatch",
     "coordination_generation_revoked",
+    "coordination_generation_superseded",
     "coordination_grant_required",
     "coordination_invalid",
     "coordination_obligation_conflict",
@@ -352,7 +353,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
 )
 
 _REASON_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
-assert len(_PROTOCOL_REASON_CODE_VALUES) == 295
+assert len(_PROTOCOL_REASON_CODE_VALUES) == 296
 assert len(_PROTOCOL_REASON_CODE_VALUES) == len(set(_PROTOCOL_REASON_CODE_VALUES))
 assert _PROTOCOL_REASON_CODE_VALUES == tuple(sorted(_PROTOCOL_REASON_CODE_VALUES, key=str.encode))
 assert all(_REASON_CODE_PATTERN.fullmatch(value) for value in _PROTOCOL_REASON_CODE_VALUES)
@@ -454,6 +455,7 @@ ADMITTED_CONTINUATION_TOKENS: frozenset[str] = frozenset(
         "write_timeout_same_identity",
         "coordination_authority_review",
         "coordination_policy_review",
+        "coordination_superseded_recheck",
         "cursor_project_preview_review",
         "lineage_attach_review",
         "lineage_integrity_review",
@@ -543,6 +545,7 @@ REASON_CODE_CONTINUATIONS: Mapping[str, str] = MappingProxyType(
         "coordination_evidence_missing": "lineage_integrity_review",
         "coordination_generation_mismatch": "lineage_state_refresh",
         "coordination_generation_revoked": "coordination_authority_review",
+        "coordination_generation_superseded": "coordination_superseded_recheck",
         "coordination_grant_required": "coordination_authority_review",
         "coordination_invalid": "lineage_integrity_review",
         "coordination_obligation_conflict": "lineage_state_refresh",

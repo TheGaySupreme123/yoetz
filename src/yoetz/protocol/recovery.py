@@ -335,6 +335,18 @@ _DIRECTIVES: Final = (
         guidance_uri=_WORKFLOW_ERRORS,
     ),
     RecoveryDirective(
+        # Issue #842: a superseded project generation can never be admitted again, so the
+        # authority review above would send the caller after authority that cannot exist.
+        token="coordination_superseded_recheck",
+        directive=(
+            "This detection's project generation was superseded and cannot be reauthorized. Run "
+            "check to record it as history; if the overlap still applies, declare against the "
+            "current detection named in coordination advice."
+        ),
+        guidance_uri=_WORKFLOW_ERRORS,
+        nudge="Do not request consent or a grant to revive the old generation.",
+    ),
+    RecoveryDirective(
         token="coordination_policy_review",
         directive="The source-workspace policy denies coordination. This is not a missing consent grant. Keep the denial in place and ask the policy owner to review the configured restriction; another grant or repeated request does not override it.",
         guidance_uri=_WORKFLOW_ERRORS,
