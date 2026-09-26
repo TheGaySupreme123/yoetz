@@ -1373,7 +1373,8 @@ def test_integrate_mcp_refuses_foreign_entry(wizard_env: dict[str, object]) -> N
     assert "foreign_entry_present" in result.stderr
 
 
-def test_integrate_mcp_remove_owned_entry(wizard_env: dict[str, object]) -> None:
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_integrate_mcp_remove_owned_entry(wizard_env: dict[str, object], exit_code: int) -> None:
     wizard_env["outputs"] = [_yoetz_entry()]
     previewed = _RUNNER.invoke(cli.app, ["integrate", "codex", "mcp", "preview-remove", "--json"])
     assert previewed.exit_code == 0, (previewed.output, previewed.exception)
@@ -1398,7 +1399,7 @@ def test_integrate_mcp_remove_owned_entry(wizard_env: dict[str, object]) -> None
         _yoetz_entry(),
         _yoetz_entry(),
         _yoetz_entry(),
-        CommandOutput(0, b""),
+        CommandOutput(exit_code, b""),
         CommandOutput(1, b""),
         CommandOutput(0, b"[]"),
     ]
@@ -1419,6 +1420,7 @@ def test_integrate_mcp_remove_owned_entry(wizard_env: dict[str, object]) -> None
     body = json.loads(result.stdout)
     assert body["action"] == "unregister"
     assert body["state_after"] == "absent"
+    assert body["removal"]["warnings"] == (["host_remove_returned_nonzero"] if exit_code else [])
 
 
 def test_integrate_mcp_interactive_remove_surfaces_complete_warning_bound_preview(

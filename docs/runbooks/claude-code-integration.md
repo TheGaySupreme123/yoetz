@@ -1,5 +1,9 @@
 # Claude Code native integration
 
+Codex's external MCP removal reconciliation (issue #860) does not apply to Claude Code:
+Claude's plugin-managed MCP follows the plugin lifecycle below. No Claude mutation or outcome
+contract changes are required for that Codex-specific host command.
+
 For setup prerequisites, use `yoetz setup status --next --host claude` with the same
 executable, configuration root and project. `--operation connection` inspects installation without
 provider sign-in; `local` and `review` inspect their respective vault/privacy prerequisites.

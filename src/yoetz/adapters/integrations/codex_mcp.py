@@ -609,22 +609,23 @@ class CodexMcpAdapter:
             # harness failure surfaced. Its outcome is therefore unknown, never a
             # pre-mutation observation error.
             raise McpRegistrationError(McpRegistrationReason.REGISTRATION_FAILED, {}) from exc
-        if remove_output.exit_code != 0:
-            raise McpRegistrationError(
-                McpRegistrationReason.REGISTRATION_FAILED,
-                {"exit_code_class": "nonzero"},
-            )
+        # A nonzero exit does not establish that the host left the entry present.
+        # Reconcile once through the same bounded positive-absence probe as exit zero;
+        # never retry the mutation or echo the host's output.
+        details: dict[str, JsonValue] = (
+            {"exit_code_class": "nonzero"} if remove_output.exit_code != 0 else {}
+        )
         try:
             state_after, _command_after, _root_after = self._observe_registration_state(binary)
         except McpRegistrationError as exc:
-            # The name-based remove command already succeeded. Any unreadable or
+            # The name-based remove command already ran. Any unreadable or
             # malformed verification is therefore an outcome-unknown mutation,
             # not the pre-mutation observation reason.
-            raise McpRegistrationError(McpRegistrationReason.REGISTRATION_FAILED, {}) from exc
+            raise McpRegistrationError(McpRegistrationReason.REGISTRATION_FAILED, details) from exc
         if state_after is not McpRegistrationState.ABSENT:
             raise McpRegistrationError(
                 McpRegistrationReason.REGISTRATION_FAILED,
-                {"verified_state": state_after.value},
+                {**details, "verified_state": state_after.value},
             )
         return McpRegistrationResult(
             binary.harness_id,
@@ -632,4 +633,5 @@ class CodexMcpAdapter:
             preview.state_before,
             state_after,
             preview.preview_digest,
+            ("host_remove_returned_nonzero",) if remove_output.exit_code != 0 else (),
         )
