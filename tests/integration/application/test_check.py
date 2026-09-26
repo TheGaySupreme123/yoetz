@@ -51,6 +51,7 @@ from yoetz.domain.findings import (
 from yoetz.domain.receipts import (
     COMPLETION_SCOPE_DECLARED_NONE_GAP,
     COMPLETION_SCOPE_UNDECLARED_GAP,
+    SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
 )
 from yoetz.domain.values import Frontier, disclosure_continuation
 from yoetz.kernel import deterministic_checks as deterministic_checks_module
@@ -1210,6 +1211,29 @@ async def test_capacity_failure_preserves_deterministic_result_and_precise_recei
         == "semantic_case_capacity_exceeded"
     )
     assert result.verdict.value == "incomplete_check"
+    assert result.findings
+
+
+@pytest.mark.anyio
+async def test_wide_finding_prose_gap_reaches_the_committed_check_coverage() -> None:
+    """A finding wider than one case item is a coverage fact, not a failed review (issue #858).
+
+    The case builder omits the finding's prose and declares the gap on the packet; composition
+    carries it here as a case-content gap. The committed check result is the single source the
+    MCP response, CLI output, status and receipt all render, so folding it once here is what makes
+    those surfaces agree.
+    """
+
+    app = _App(semantic=True)
+    app.semantic_result = replace(
+        _succeeded(SemanticJudgment("no_material_discrepancy", ())),
+        case_content_gaps=(SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,),
+    )
+    result = await execute_check_commit(app, _request("semantic_required"))
+    assert result.semantic_status is SemanticStatus.SUCCEEDED
+    assert SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP in result.coverage.known_gaps
+    assert result.coverage.ledger_freshness.value == "partial"
+    # Local findings are retained whatever the review could carry.
     assert result.findings
 
 
