@@ -260,6 +260,33 @@ The closed diagnostics are `host_denial_retry_offered`, `host_denial_retry_exhau
 host payload or reason prose. An unreadable grant is reported as unconfirmed, not as revoked.
 
 Codex and Cursor lack a supported post-denial event in the reviewed integrations; they retain the
-pause-and-ask rule and conditional grant wording. Live Claude auto-mode acceptance, a supported
-model-visible first-hand notice, policy-route observation before retry, and the cross-host
-SessionStart admission-gap notice remain on #857. This amendment does not certify those cells.
+pause-and-ask rule and conditional grant wording. Live Claude auto-mode acceptance and reliable
+policy-route attribution for a held call remain on #857. This amendment does not certify those cells.
+
+### Session-start grant notice and route attribution correction
+
+The shared SessionStart path for Codex, Claude Code and Cursor can append a model-visible grant
+snapshot when a fresh repository-bound service read confirms external review and the host's project
+admission is absent. It states that the active route and host approval remain unconfirmed, names
+the owner's admission command, and preserves the exact-request and no-silent-downgrade rules.
+SessionStart supports context delivery; PermissionDenied still does not deliver additionalContext.
+A startup snapshot does not establish the grant at a later hold or prove classifier consumption.
+
+Reject a durable last-started route record keyed by host. Concurrent bridges can use different
+routes, a process can exit, and one host can open several repositories. The current hook contracts
+do not correlate the held call to a live serving bridge. Neither a stored registration nor another
+bridge's startup establishes this call's route. No route record is written or consulted here, and
+no route claim or new retry behavior is introduced. The #862 denial handler and strict dispatch
+fence remain authoritative for their respective layers.
+
+Existing lifecycle/task/recovery context takes priority. The notice uses at most 500 ms of spare
+hook time, with one deadline covering connection, grant RPC and cleanup after local admission reads;
+it is omitted if the existing context leaves insufficient room, the hook budget is spent, a mapping
+operation is deferred, service access is skipped, admission is not absent, or the grant is unreadable.
+Codex's mapped resume path reads the grant only once and only after an active workspace-bound status.
+The shared observation path requires active capture consent; this change does not activate capture.
+Admission files are read through bounded, non-following, nonblocking descriptors, so a FIFO cannot
+stall startup. No host settings, grants, retry markers or caches are written by this notice.
+
+The same adapters apply on macOS, Linux and WSL 2. Tests exercise host-specific stdout contracts and
+failure conditions in isolated state; fresh native host runs on those OS cells remain unverified.

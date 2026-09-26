@@ -3040,6 +3040,7 @@ def handle_observe(
     _content_capture_profile: str | None = None,
     _content_payload: Mapping[str, JsonValue] | None = None,
     _ingress_gap: str | None = None,
+    _include_admission_notice: bool = True,
 ) -> int:
     """Bounded observation ingress for Codex lifecycle hooks. Always exits 0.
 
@@ -4441,6 +4442,27 @@ def handle_observe(
                         and len(additional) + 1 + len(recommendation) <= _MAX_ADVICE_CONTEXT
                     ):
                         additional = f"{additional} {recommendation}"
+
+                if (
+                    _include_admission_notice
+                    and not pending_mapping_deferred
+                    and not mapping_lifecycle_deferred
+                    and _session_start_source(payload) != "clear"
+                ):
+                    from yoetz.cli.host_hold_advisory import PrivacyConnector
+                    from yoetz.cli.host_startup_advisory import append_admission_notice
+
+                    additional = append_admission_notice(
+                        additional,
+                        harness_id,
+                        workspace_locator,
+                        connect=None if connect is None else cast(PrivacyConnector, connect),
+                        run_async=_resolve_runner(),
+                        deadline=entry_started + _HOOK_TOTAL_BUDGET_SECONDS - 0.1,
+                        max_chars=_MAX_ADVICE_CONTEXT,
+                        skip_service=skip_service,
+                        monotonic=_monotonic,
+                    )
 
             rendered_output = _render_context(additional) if additional else {}
             host_consumable = bool(rendered_output)

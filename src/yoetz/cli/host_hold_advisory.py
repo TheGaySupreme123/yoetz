@@ -55,6 +55,8 @@ __all__ = [
     "grant_from_setup",
     "note_retry_offer",
     "read_host_hold_facts",
+    "read_repository_grant",
+    "read_admission_state",
 ]
 
 type GrantReadReason = Literal[
@@ -238,14 +240,17 @@ def _grant_from_control_error(error: ControlError) -> GrantReadReason:
     return "service_unavailable"
 
 
-async def _read_grant(connect: PrivacyConnector) -> GrantReadReason:
+async def read_repository_grant(
+    connect: PrivacyConnector, *, deadline_ms: int | None = None
+) -> GrantReadReason:
     # Bound connection/handshake, request, and cleanup together, not just the RPC.
     try:
-        with anyio.fail_after(GRANT_READ_DEADLINE_MS / 1_000):
+        budget = GRANT_READ_DEADLINE_MS if deadline_ms is None else deadline_ms
+        with anyio.fail_after(budget / 1_000):
             client = await connect(ControlClientKind.CLI)
             try:
                 effective = await client.privacy_get_setup(
-                    JsonObject({"schema_version": "2.0.0"}), deadline_ms=GRANT_READ_DEADLINE_MS
+                    JsonObject({"schema_version": "2.0.0"}), deadline_ms=budget
                 )
             finally:
                 await client.close()
@@ -256,14 +261,14 @@ async def _read_grant(connect: PrivacyConnector) -> GrantReadReason:
         return "service_unavailable"
 
 
-def _admission_state(workspace_locator: str | None) -> str:
+def read_admission_state(workspace_locator: str | None, *, host: str = "claude") -> str:
     if workspace_locator is None:
         return "unknown"
     try:
         from yoetz.cli.provider_status import host_admission_observation
 
         report = host_admission_observation(Path(workspace_locator))
-        entry = report.get("claude")
+        entry = report.get(host)
         state = entry.get("state") if isinstance(entry, Mapping) else None
     except Exception:
         return "unknown"
@@ -284,7 +289,7 @@ def read_host_hold_facts(
     means no repository-bound read is possible and the grant stays ``workspace_unbound``.
     """
 
-    admission = _admission_state(workspace_locator)
+    admission = read_admission_state(workspace_locator)
     if skip_service:
         return HostHoldFacts("service_skipped", admission)
     if workspace_locator is None:
@@ -296,7 +301,7 @@ def read_host_hold_facts(
         connect = cast(PrivacyConnector, bound_connector(connect_service, workspace_locator))
     grant: GrantReadReason = "service_unavailable"
     try:
-        outcome = run_async(lambda: _read_grant(connect))
+        outcome = run_async(lambda: read_repository_grant(connect))
     except Exception:
         outcome = None
     if type(outcome) is str and outcome in GRANT_REASONS:

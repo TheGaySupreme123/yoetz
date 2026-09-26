@@ -8,6 +8,11 @@ reverse-chronological released versions.
 
 ### Added
 
+- Codex, Claude Code and Cursor session-start context can show a fresh repository-grant snapshot
+  and name the owner's missing admission command. The notice leaves route and host approval
+  unconfirmed, preserves existing context and spends only spare hook time. No cross-session
+  route cache or new retry path is introduced. Native acceptance remains tracked in #857.
+
 - Claude Code's scoped `PermissionDenied` hook now shows the user a notice based on a fresh
   repository grant read and may emit the host's one-retry cue. The same request must be preserved;
   a later hold goes to human approval. No-verdict denials and an unreadable, full or unsafe retry

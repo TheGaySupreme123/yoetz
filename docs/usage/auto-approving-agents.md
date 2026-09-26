@@ -126,6 +126,13 @@ Yoetz rechecks the exact bytes immediately before each atomic replacement or del
 the result, but an ordinary host configuration file has no portable compare-and-swap operation
 that can exclude a non-cooperating process in the final filesystem syscall window.
 
+At session start, Yoetz may show a short notice when a fresh read confirms your repository grant
+allows external AI review but the host has no project admission entry for `check`. The notice names
+the admission command for your host. It describes the grant at startup; it does not confirm the
+active connection can dispatch review or approve a held tool call. If the read cannot finish in the
+available time, or other task context fills the message, the notice is omitted. Its absence does
+not mean you revoked consent. The existing host approval flow and Yoetz's current gates still apply.
+
 ### The way out
 
 Every way in has a way out, and each is reported rather than silent:

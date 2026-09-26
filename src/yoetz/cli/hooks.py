@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import sys
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from importlib import resources
@@ -1474,6 +1475,7 @@ def handle_session_start(
 
     import anyio
 
+    entered = time.monotonic()
     runner: AsyncRunner = cast(AsyncRunner, anyio.run if run_async is None else run_async)
     try:
         raw = (
@@ -1642,13 +1644,26 @@ def handle_session_start(
                 connect=connect,
                 run_async=run_async,
                 _session_lock_owned=True,
+                _include_admission_notice=False,
             )
             if kind == "active" and updated is not None:
+                from yoetz.cli.host_hold_advisory import PrivacyConnector
+                from yoetz.cli.host_startup_advisory import append_admission_notice
+
                 store_mapping(updated, _state=_state)
+                context = append_admission_notice(
+                    _active_context(updated, updated.last_frontier),
+                    "codex",
+                    selection.locator,
+                    connect=None if connect is None else cast(PrivacyConnector, connect),
+                    run_async=runner,
+                    deadline=entered + 3.1,
+                    max_chars=2_000,
+                )
                 _stdout_json(
                     _context_output(
                         "SessionStart",
-                        _active_context(updated, updated.last_frontier),
+                        context,
                     ),
                     stdout,
                 )

@@ -464,6 +464,15 @@ agent-side rule (a current grant read before asserting authorization, Cursor's v
 control for the exact held call, no downgrade), and admission remains the durable fix.
 Mirror the Claude ingress if Cursor publishes a post-decision denial event.
 
+The Cursor session-start context can also name `yoetz integrate cursor admission grant`
+when a fresh repository-bound read confirms an external-review grant and project admission is
+absent. It reports a startup snapshot only: active MCP route and host approval remain unconfirmed.
+The shared path requires active observation consent, skips deferred/local-only work, preserves
+existing context, and spends at most 500 ms of remaining hook time on the grant read. No route
+cache, host subprocess, settings change or retry is introduced. A missing notice proves nothing
+about consent. The stdout contract is regression-tested; new native macOS/Linux/WSL acceptance
+is still open on #857.
+
 ## Upgrading Yoetz under a running service
 
 The local-control handshake pins the exact schema-manifest digest, so after installing a new Yoetz
