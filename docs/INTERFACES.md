@@ -2033,6 +2033,28 @@ thread, so the two sources reconcile into one annotation. `agent_path`, `agent_n
 they are never lineage identity or aliases. A `SubAgentActivity` `kind` of `interacted` is a known
 non-lifecycle kind: it carries no phase and is not a coverage gap.
 
+**Codex v2 child lanes under the shared root session (#841).** v2 writes one root `session_id`
+into every thread of a delegation tree, so a delegated child's callbacks carry the parent's
+session and its rollout is named by the child thread. A Codex tool, permission, prompt, `Stop`, or
+compaction callback whose `transcript_path` (or `session_file`) is not the session's own rollout
+may take its host child identity from that file's first line: only a safe owner-private `.jsonl`
+beneath the Codex home's `sessions` root, whose v2 header declares a delegated child, whose
+filename carries that child thread, and whose header names the callback's session as spawning
+root. That identity is equivalent to a native `agent_id`: it publishes the child lane only through
+a validated attach result and never selects a task, route, or annotation by itself. A transcript
+that proves a delegated child but cannot name it for the session, or that contradicts a host
+alias, makes the callback an explicit attribution gap and records the payload-free hook reason
+`child_transcript_identity_conflict`. Session lifecycle and `SubagentStart`/`SubagentStop`
+callbacks are never re-attributed. A callback on a validated host-identity child lane reconciles
+that child's own rollout into the lane, so its header reaches the child-observed binding above.
+`observe reconcile` resolves a child rollout through its header to the single lane derived from a
+spawning session bound to the selected workspace alone and already mapped to another task, and
+reports `mode: recovery_child_lane`. It never creates a mapping, task, or annotation; an
+unprovable child rollout exits 20 with `observation_reconcile_failed:<reason>` for the closed
+reasons `child_identity_invalid`, `child_parent_unmapped`, `child_route_missing`, and
+`child_route_ambiguous`. Workspace-wide stream state and annotation counts are never binding
+evidence.
+
 **Project birth and coordination.** With `projects.auto_grouping` enabled, the second concurrent
 live task in one repository materializes an implicit repository project. When disabled, the task
 is admitted without creating a project row (#497). General or multi-repository projects are explicit

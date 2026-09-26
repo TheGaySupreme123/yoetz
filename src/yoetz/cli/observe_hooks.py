@@ -117,6 +117,7 @@ from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode
 from yoetz.protocol.ids import IdKind, is_valid_id
 
 if TYPE_CHECKING:
+    from yoetz.adapters.integrations.codex_session_stream import CodexSessionStreamLocator
     from yoetz.cli import hooks as hooks_cli
     from yoetz.ports.control import ControlClientKind, WorkspaceLocator
 
@@ -1031,6 +1032,44 @@ def _task_lane_for_result(
         # to this host lane. Keep it out of a future parent auto-attach path.
         return _ObservationLane(host_session_id, host_session_id, attribution_gap=True)
     return None
+
+
+def _child_lane_rollout(
+    payload: Mapping[str, JsonValue],
+    *,
+    lane: _ObservationLane,
+    locator: CodexSessionStreamLocator,
+    hook_provided_path: str | None,
+) -> Path | None:
+    """Return the delegated child's own rollout for one validated host-identity child lane.
+
+    Only a lane derived from this callback's host session and its host child identity may read a
+    child rollout, and only when that rollout's v2 header names the same child thread and this
+    session as its spawner (#841). Task-derived and explicit lanes carry no host child thread, so
+    they never select a file. The returned path is local-only.
+    """
+
+    from yoetz.cli.hooks import _child_identity_from_payload  # pyright: ignore[reportPrivateUsage]
+
+    child_id, _supplied, valid = _child_identity_from_payload(payload)
+    if not valid or child_id is None:
+        return None
+    try:
+        expected_lane = scoped_child_session_id(
+            lane.host_session_id,
+            host="codex",
+            identity=child_id,
+            identity_kind="host",
+        )
+    except ProtocolValueError, TypeError, ValueError:
+        return None
+    if expected_lane != lane.effective_session_id:
+        return None
+    path, result = locator.resolve_child_rollout(hook_provided_path, child_thread_id=child_id)
+    header = result.header
+    if path is None or header is None or lane.host_session_id not in header.spawning_sessions:
+        return None
+    return path
 
 
 def _pairing_harness(source: ObservationSource) -> Literal["claude", "codex", "cursor"]:
@@ -3071,6 +3110,19 @@ def handle_observe(
             _stdout_json({}, stdout)
             return 0
         resolved_event = raw_event
+        if source is ObservationSource.CODEX_HOOK:
+            # A v2 delegated child's callbacks carry the root session; its own transcript is
+            # the host fact that names the child (#841). Resolve it before any lane decision.
+            from yoetz.cli.hooks import with_transcript_child_identity
+
+            identity_conflict: str | None = None
+            with contextlib.suppress(Exception):
+                payload, identity_conflict = with_transcript_child_identity(
+                    payload, event_name=resolved_event
+                )
+            if identity_conflict is not None:
+                with contextlib.suppress(Exception):
+                    record_hook_diagnostic(identity_conflict, resolved_event, _state=_state)
         mapping_lifecycle_deferred = False
         # ``clear`` is a host lifecycle command, not an observation consent
         # decision. Apply or queue its mapping operation before the runtime
@@ -3733,11 +3785,14 @@ def handle_observe(
 
             # Cursor transcripts are outside its structural observation contract.
             # Only the Codex hook source may reconcile the secondary JSONL stream.
-            if source is ObservationSource.CODEX_HOOK and not lane.is_child:
+            # A validated child lane reconciles that child's own rollout (#841); every other
+            # Codex lane keeps the host-session stream.
+            if source is ObservationSource.CODEX_HOOK:
                 with contextlib.suppress(Exception):
                     from yoetz.adapters.integrations.codex_session_stream import (
                         CodexSessionStreamLocator,
                         reconcile_session_stream,
+                        reconcile_session_stream_path,
                         resolve_codex_home,
                         should_trigger_stream_reconcile,
                     )
@@ -3751,14 +3806,30 @@ def handle_observe(
                         session_source=session_source if type(session_source) is str else None,
                     ):
                         locator = CodexSessionStreamLocator(resolve_codex_home())
-                        reconcile_session_stream(
-                            store,
-                            workspace_commitment=workspace_commitment,
-                            session_commitment=session_commitment,
-                            codex_session_id=codex_session_id,
-                            locator=locator,
-                            hook_provided_path=hook_path_token,
-                        )
+                        if not lane.is_child:
+                            reconcile_session_stream(
+                                store,
+                                workspace_commitment=workspace_commitment,
+                                session_commitment=session_commitment,
+                                codex_session_id=codex_session_id,
+                                locator=locator,
+                                hook_provided_path=hook_path_token,
+                            )
+                        else:
+                            child_rollout = _child_lane_rollout(
+                                payload,
+                                lane=lane,
+                                locator=locator,
+                                hook_provided_path=hook_path_token,
+                            )
+                            if child_rollout is not None:
+                                reconcile_session_stream_path(
+                                    store,
+                                    workspace_commitment=workspace_commitment,
+                                    session_commitment=session_commitment,
+                                    codex_session_id=codex_session_id,
+                                    path=child_rollout,
+                                )
 
         stages["store"] = _elapsed_ms(store_started, _monotonic())
 
@@ -5502,7 +5573,16 @@ def handle_spool(
             workspace_locator = canonical_workspace_locator(workspace)
             if workspace_locator is None:
                 raise ValueError("workspace_locator_invalid")
-            spool_payload = dict(payload)
+            from yoetz.cli.hooks import with_transcript_child_identity
+
+            # Name a v2 delegated child while this hook still runs in the host's own
+            # environment; the service replays the spool later with its own Codex home (#841).
+            enriched, identity_conflict = with_transcript_child_identity(
+                payload, event_name=event_name
+            )
+            if identity_conflict is not None:
+                record_hook_diagnostic(identity_conflict, event_name, _state=_state)
+            spool_payload = dict(enriched)
             # Keep the safe classification, never the host command/input prose.
             if _routine_read_action(payload):
                 spool_payload["action"] = "routine_read"
