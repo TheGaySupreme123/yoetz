@@ -3225,6 +3225,11 @@ def handle_observe(
             return 0
 
         assert workspace_commitment is not None
+        # A SessionEnd must either mark the bound session ended or leave a
+        # durable deferred intent. Keep this set until the capture batch
+        # commits so failures before either lifecycle path are named too.
+        if resolved_event == "SessionEnd":
+            session_end_uncommitted = True
         native_content_reservation = (
             not skip_service
             and capture_authority_known
@@ -3356,6 +3361,12 @@ def handle_observe(
                                 clear_mapping=clear_requested,
                             )
                     else:
+                        deferred_end_already_present = any(
+                            intent.event_kind == "SessionEnd"
+                            and intent.session_commitment == session_commitment
+                            and intent.target_generation == source_generation
+                            for intent in pending
+                        )
                         deferred_lifecycle_recorded = store.record_pending_session_lifecycle(
                             workspace_commitment,
                             codex_session_id,
@@ -3363,6 +3374,17 @@ def handle_observe(
                             "SessionEnd",
                             source_generation,
                         )
+                        if not deferred_lifecycle_recorded:
+                            # No retry carrier was accepted (the bounded
+                            # pending-lifecycle queue is full). The hook can
+                            # still retain its structural event, but the
+                            # lifecycle end itself is not durable.
+                            session_end_uncommitted = False
+                            _report_session_end_unrecorded(resolved_event, _state=_state)
+                        elif deferred_end_already_present:
+                            # The exact retry intent was already durable before
+                            # this pass; a later failure cannot lose it.
+                            session_end_uncommitted = False
             gap_codes: list[str] = []
             if _ingress_gap is not None:
                 gap_codes.append(_ingress_gap)
@@ -3747,6 +3769,7 @@ def handle_observe(
                     # Teardown stays fail-open, but an end that did not persist
                     # leaves the session and any temporary override active. Name
                     # it instead of letting the lifecycle write vanish (#843).
+                    session_end_uncommitted = False
                     _report_session_end_unrecorded(resolved_event, _state=_state)
 
             # Cursor transcripts are outside its structural observation contract.

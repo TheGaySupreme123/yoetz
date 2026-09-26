@@ -18,6 +18,7 @@ import pytest
 from yoetz.adapters.integrations.codex_lifecycle import (
     LifecycleMapping,
     acquire_session_lock,
+    acquire_workspace_recovery_lock,
     is_scoped_child_session_id,
     mapping_from_start_ids,
     scoped_child_session_id,
@@ -7411,3 +7412,103 @@ def test_an_unpersisted_session_end_is_named_not_swallowed(
         assert "hook_observe_degraded: session_end_unrecorded" in err
         # Reported once, not again by the outer handler.
         assert cast(Mapping[str, object], reasons["session_end_unrecorded"])["count"] == 1
+
+
+def test_deferred_session_end_batch_failure_is_named(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A lock-contended end intent must not be swallowed by a failed batch."""
+
+    from yoetz.cli.hook_diagnostics import hook_diagnostic_summary
+
+    store = LocalObservationStore(_state=tmp_path)
+    locator = str(tmp_path.resolve())
+    workspace = store.workspace_commitment(locator)
+    store.grant_consent(workspace)
+    host_session = "codex-deferred-end"
+
+    def observe(event: str) -> int:
+        return handle_observe(
+            event_name=event,
+            stdin_bytes=json.dumps({"session_id": host_session, "hook_event_name": event}).encode(),
+            stdout=io.BytesIO(),
+            workspace=locator,
+            _state=tmp_path,
+            connect=None,
+            source=ObservationSource.CODEX_HOOK,
+        )
+
+    assert observe("SessionStart") == 0
+
+    def unsafe(*_args: object, **_kwargs: object) -> None:
+        raise PublicOperationError(
+            PublicErrorCode.STORAGE_UNSAFE,
+            "Observation state exceeds its safe local bound.",
+            retryable=False,
+        )
+
+    monkeypatch.setattr(LocalObservationStore, "_save_unchecked", unsafe)
+    capsys.readouterr()
+    with acquire_workspace_recovery_lock(workspace, _state=tmp_path) as owned:
+        assert owned
+        assert observe("SessionEnd") == 0
+
+    state = LocalObservationStore(_state=tmp_path)._load(workspace)  # pyright: ignore[reportPrivateUsage]
+    assert not state.pending_lifecycles
+    assert not state.ended_sessions
+    err = capsys.readouterr().err
+    reasons = hook_diagnostic_summary(_state=tmp_path)["reasons"]
+    assert "hook_observe_degraded: session_end_unrecorded" in err
+    assert isinstance(reasons, Mapping)
+    assert cast(Mapping[str, object], reasons["session_end_unrecorded"])["count"] == 1
+
+
+def test_deferred_session_end_pending_cap_is_named(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A full deferred-lifecycle queue leaves the missing end visible."""
+
+    from yoetz.cli.hook_diagnostics import hook_diagnostic_summary
+
+    store = LocalObservationStore(_state=tmp_path)
+    locator = str(tmp_path.resolve())
+    workspace = store.workspace_commitment(locator)
+    store.grant_consent(workspace)
+    for index in range(256):
+        assert store.record_pending_session_lifecycle(
+            workspace,
+            f"codex-pending-{index}",
+            "hmac-sha256:" + f"{index + 1:064x}",
+            "SessionEnd",
+            1,
+        )
+
+    host_session = "codex-pending-target"
+    capsys.readouterr()
+    with acquire_workspace_recovery_lock(workspace, _state=tmp_path) as owned:
+        assert owned
+        assert (
+            handle_observe(
+                event_name="SessionEnd",
+                stdin_bytes=json.dumps(
+                    {"session_id": host_session, "hook_event_name": "SessionEnd"}
+                ).encode(),
+                stdout=io.BytesIO(),
+                workspace=locator,
+                _state=tmp_path,
+                connect=None,
+                source=ObservationSource.CODEX_HOOK,
+            )
+            == 0
+        )
+
+    state = LocalObservationStore(_state=tmp_path)._load(workspace)  # pyright: ignore[reportPrivateUsage]
+    assert state.pending_lifecycles is not None and len(state.pending_lifecycles) == 256
+    assert not state.ended_sessions
+    err = capsys.readouterr().err
+    reasons = hook_diagnostic_summary(_state=tmp_path)["reasons"]
+    assert "hook_observe_degraded: session_end_unrecorded" in err
+    assert isinstance(reasons, Mapping)
+    assert cast(Mapping[str, object], reasons["session_end_unrecorded"])["count"] == 1
