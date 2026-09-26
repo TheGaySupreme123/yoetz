@@ -148,6 +148,13 @@ Prepared public-alpha release candidate; publication remains gated by #785. See
   A Claude Code or Cursor hook no longer quarantines a queued Codex row in the same workspace as a
   content-profile mismatch, and a late capture for an already delivered record stages nothing.
   `observe status --json` names each retirement under `capture_handoff_retirements` (#836).
+- A check refused before admission no longer strands its caller behind an `OPERATION_PENDING`
+  whose operation reads `absent`. A pending check whose lease has lapsed no longer defers the
+  observation delivery that later checks wait on; a capture handoff no structural row can consume
+  is retired; a refused check wakes the delivery sweep; and SQLite admission survives unrelated
+  lifecycle writes. Every remaining pre-admission refusal names its stage with a same-identity
+  replay directive and `retry_after_ms`, and `status view=operation` reports that stage on the
+  `absent` page (issue #838).
 
 ## 0.2.5 — 2026-09-23
 

@@ -252,6 +252,18 @@ _DIRECTIVES: Final = (
         guidance_uri=_WORKFLOW_RECOVERY,
         nudge="Retain and report a pending or quarantined boundary; do not claim completion.",
     ),
+    # A check refused before admission has no operation to inspect: status reads it as absent
+    # with an ``admission`` stage, so the exact replay is the whole recovery (issue #838).
+    RecoveryDirective(
+        token="check_admission_same_identity",
+        directive=(
+            "The check was not admitted, so nothing is recorded under this request_id. Wait "
+            "retry_after_ms, then replay the exact check body and request_id. After three "
+            "refusals, retain it and report the check as not admitted."
+        ),
+        guidance_uri=_WORKFLOW_RECOVERY,
+        nudge="Do not mint a new request_id, task, or check mode to escape an admission barrier.",
+    ),
     # --- local installation state (issues #220, #237) ---------------------------------------
     RecoveryDirective(
         token="service_holder_busy",

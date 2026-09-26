@@ -97,6 +97,19 @@ excepted that case with one exact replay under the same `request_id`; the direct
 carries the exception as `start_timeout_same_identity` rather than handing a first start a write
 directive it cannot follow.
 
+### A refused check admission is not a stranded operation (issue #838)
+
+`operation_pending_inspect` describes a prior operation that is still pending, and the generic
+guidance for an untyped `OPERATION_PENDING` is to read `status view=operation` once and replay only
+on an exact continuation. A check refused before admission has no operation to inspect: two native
+deterministic checks followed that rule, read `absent`, replayed once, and stopped with nothing
+recorded. Every pre-admission branch therefore names its stage with a `check_admission_*` reason
+code that maps to `check_admission_same_identity`: nothing is recorded under the `request_id`, so
+wait `retry_after_ms` and replay the exact body, and after three refusals retain the request and
+report the check as not admitted. The operation page carries the same stage on its `absent` page.
+The directive bounds the replay rather than predicting admission, and an admitted pending check
+keeps its untyped `OPERATION_PENDING`.
+
 ### Four tiers, classified at the raising site
 
 Every fact in an error belongs to exactly one tier, decided where it is known:

@@ -2818,6 +2818,7 @@ def _status_result_v1_4_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         ]
     )
     _add_status_semantic_progress(definitions)
+    _add_status_operation_admission(definitions)
     document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
     document["title"] = f"Yoetz status result {entry.schema_version}"
     return document
@@ -2896,6 +2897,63 @@ def _add_status_semantic_progress(definitions: dict[str, JsonValue]) -> None:
                     "state": {"enum": ["pending", "complete"]},
                 },
                 "required": ["operation_kind", "state"],
+            },
+        }
+    )
+
+
+def _add_status_operation_admission(definitions: dict[str, JsonValue]) -> None:
+    """Add the optional pre-admission stage to absent operation pages (issue #838)."""
+
+    definitions["check_admission"] = {
+        "additionalProperties": False,
+        "allOf": [
+            {
+                "if": {
+                    "properties": {"refusal_count": {"const": "0"}},
+                    "required": ["refusal_count"],
+                },
+                "then": {"properties": {"stage": {"const": "acquiring"}}},
+            }
+        ],
+        "properties": {
+            "elapsed_ms": {"$ref": "#/$defs/canonical_uint"},
+            "first_observed_at": {"$ref": "#/$defs/timestamp"},
+            "last_observed_at": {"$ref": "#/$defs/timestamp"},
+            "observed_at": {"$ref": "#/$defs/timestamp"},
+            "refusal_count": {"$ref": "#/$defs/canonical_uint"},
+            "retry_after_ms": {"$ref": "#/$defs/canonical_uint"},
+            "stage": {
+                "enum": [
+                    "acquiring",
+                    "capture_handoff_pending",
+                    "acquisition_contended",
+                    "import_pending",
+                ],
+                "type": "string",
+            },
+        },
+        "required": [
+            "elapsed_ms",
+            "first_observed_at",
+            "last_observed_at",
+            "observed_at",
+            "refusal_count",
+            "retry_after_ms",
+            "stage",
+        ],
+        "type": "object",
+    }
+    operation_page = cast(dict[str, JsonValue], definitions["operation_page"])
+    operation_properties = cast(dict[str, JsonValue], operation_page["properties"])
+    operation_properties["admission"] = {"$ref": "#/$defs/check_admission"}
+    operation_rules = cast(list[JsonValue], operation_page.setdefault("allOf", []))
+    operation_rules.append(
+        {
+            "if": {"required": ["admission"]},
+            "then": {
+                "properties": {"found": {"const": False}, "state": {"const": "absent"}},
+                "required": ["found", "state"],
             },
         }
     )
