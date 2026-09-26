@@ -1,5 +1,9 @@
 # Cursor local integration runbook
 
+Codex's external MCP removal reconciliation (issue #860) does not apply to Cursor IDE or CLI:
+Cursor project MCP cleanup uses its own digest-bound file mutation, not `codex mcp remove`.
+The Cursor lifecycle and outcome contracts remain unchanged.
+
 For setup prerequisites, use `yoetz setup status --next --host cursor-cli` with the same
 executable, configuration root and project. `--operation connection` inspects installation without
 provider sign-in; `local` and `review` inspect their respective vault/privacy prerequisites.

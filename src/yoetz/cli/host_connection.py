@@ -150,6 +150,15 @@ def select_installation(
 
 def connection_summary(plan: ConnectionPlan) -> tuple[str, ...]:
     body = plan.body
+    warnings = body.get("warnings")
+    removal_warning = (
+        (
+            "Keep other Codex configuration writers stopped during removal "
+            "(host_remove_not_compare_and_swap).",
+        )
+        if isinstance(warnings, list) and "host_remove_not_compare_and_swap" in warnings
+        else ()
+    )
     return (
         f"Project: {body['project_root']}",
         f"Configuration: {body['config_root']}",
@@ -163,6 +172,7 @@ def connection_summary(plan: ConnectionPlan) -> tuple[str, ...]:
         + ", ".join(str(item).replace("_", " ") for item in cast(list[JsonValue], body["changes"])),
         "Your host must open a fresh session to observe the connection.",
         "Observation and provider permissions are separate.",
+        *removal_warning,
     )
 
 
@@ -321,11 +331,24 @@ def run_host_connection(
             )
         if isinstance(error, ConnectionError) and error.status is not None:
             report["status"] = error.status
+            next_command = error.status.get("next_command")
+            if isinstance(next_command, str):
+                report["next_step"] = (
+                    "Inspect the selected registration before a fresh preview: " + next_command
+                )
         code = 1
     if json_output:
         typer.echo(json.dumps(report, sort_keys=True))
     else:
         typer.echo(f"{host}: {report['outcome']}")
+        status = report.get("status")
+        if isinstance(status, dict):
+            removal = status.get("mcp_removal")
+            if isinstance(removal, dict):
+                warnings = removal.get("warnings")
+                if isinstance(warnings, list):
+                    for warning in warnings:
+                        typer.echo(str(warning))
         if "reason" in report:
             typer.echo(str(report["reason"]))
         if "next_step" in report:

@@ -1119,6 +1119,23 @@ entry is not positively observed absent; a generic failed named lookup is not su
 Plugin-managed MCP is not this command: it goes away with the plugin artifact, not with `codex mcp
 remove`.
 
+After the removal command returns, Yoetz checks the selected home again even if Codex exited
+nonzero. A successful structural list confirming absence completes removal with exit 0 and
+`removal.warnings=["host_remove_returned_nonzero"]`; a zero-exit removal has an empty warning
+list. Setup disconnect carries the same versioned outcome in `status.mcp_removal` and prints
+the warning in its human report. No host stderr or subprocess payload is echoed.
+
+If the entry is still present or the check is unreadable, removal remains unverified (CLI exit 20).
+Its report carries the observed owned/foreign state or null, `next_action=inspect_registration`,
+and an exact `next_command` for the selected runtime, binary and home. Run that read-only command
+first. If absent, a newly accepted removal preview is a no-op and reconciles stale route metadata;
+if still owned, obtain and accept a fresh preview before retrying. Preserve foreign entries.
+Command exceptions also remain unverified. Yoetz never retries the mutation automatically.
+
+This reconciliation applies to external Codex MCP removal on macOS, Linux and Windows through
+WSL 2; it does not establish native Windows support. Deterministic adapter coverage is separate
+from host-version acceptance: issue #860 records the bounded disposable native round trip.
+
 ## 9. Bounded `codex exec --json` import
 
 The import support command is Codex-only and local. It accepts the exact request documented in

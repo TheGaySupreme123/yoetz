@@ -5079,7 +5079,18 @@ serve command, refuse an observed foreign replacement, and treat an already-abse
 `host_remove_not_compare_and_swap`; callers must quiesce concurrent host configuration writers,
 and the port does not claim atomic exclusion inside the final host subprocess window. The same
 positive-absence fallback is required after removal, so a generic failed named lookup never proves
-success. The interactive approval surface prints the exact command, route, isolated root, warnings,
+success. After a returned nonzero remove exit, the adapter still performs that bounded read-only
+probe once. Verified absence returns `UNREGISTER` with the fixed warning
+`host_remove_returned_nonzero`; no mutation is retried. `McpRegistrationResult.warnings` carries
+that token to the CLI and setup disconnect. Their nested `removal` / `status.mcp_removal` report
+uses `yoetz.mcp-removal/1` (`schemas/integrations/mcp-removal-1.0.0.schema.json`): `completed`
+requires `state_after=absent`; `unverified` carries an observed present state or null and
+`next_action=inspect_registration`. A mutating command exception or unreadable post-state remains
+`REGISTRATION_FAILED`. The CLI retains exit 20 and emits an exact runtime/home/binary-bound status
+continuation; it does not treat a failed lookup as absence. Only verified absence clears applied-route
+bookkeeping and permits subsequent cleanup. Successful zero-exit removal has no result warning.
+This is a client-local report; it adds no MCP tool, hook event, ledger receipt field, or TUI operation.
+The interactive approval surface prints the exact command, route, isolated root, warnings,
 and preview digest. The preview binds the exact command, `policy|strict` route profile, and exact
 ADR-026 isolated root when present. Ambient external registrations carry no environment. Isolated
 external Codex registrations carry exactly one native `--env` pair,
