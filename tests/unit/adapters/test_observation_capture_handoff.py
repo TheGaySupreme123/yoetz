@@ -368,3 +368,51 @@ def test_active_reservation_pins_retirement_replay_identity(tmp_path: Path) -> N
         assert _TICKET in state.capture_handoff_retirement_ids
         assert len(state.capture_handoff_retirement_ids) <= 512
         assert state.capture_handoff_retired_count == 513
+
+
+def test_full_active_reservation_set_drops_unpinned_ids_on_reload(tmp_path: Path) -> None:
+    """A zero unpinned budget must not retain stale identities after reload."""
+
+    wall = _Wall()
+    store, workspace = _store(tmp_path, wall)
+
+    def record(ticket_id: str) -> None:
+        store.record_capture_handoff_retirement(
+            workspace,
+            ticket_id=ticket_id,
+            stage=CaptureHandoffRetirementStage.SWEEP,
+            reason=CaptureHandoffRetirementReason.STRUCTURAL_ROW_ABSENT,
+            ticket_state="pending",
+            source=ObservationSource.CLAUDE_HOOK,
+            task_id=_TASK,
+            age_ms=30_000,
+        )
+
+    historical_ids = tuple("sha256:" + format(1_000 + index, "064x") for index in range(8))
+    for ticket_id in historical_ids:
+        record(ticket_id)
+
+    active_ids = tuple("sha256:" + format(index, "064x") for index in range(512))
+    for index, ticket_id in enumerate(active_ids, start=1):
+        store.reserve_capture_ticket(workspace, ticket_id, _TASK, 1)
+        assert store.bootstrap_capture_reservations(
+            workspace,
+            {_TASK: ObservationCaptureBacklog(index, index, wall.now())},
+            ticket_ids_by_task={_TASK: active_ids[:index]},
+        )
+    store.set_capture_reservation_bootstrap_required(True)
+    for ticket_id in active_ids:
+        record(ticket_id)
+
+    with store._lock:  # pyright: ignore[reportPrivateUsage]
+        state = store._load(workspace)  # pyright: ignore[reportPrivateUsage]
+        assert set(state.capture_handoff_retirement_ids) == set(active_ids)
+        assert len(state.capture_handoff_retirement_ids) == 512
+
+    reopened = LocalObservationStore(
+        _state=tmp_path / "state", _wall=wall, _monotonic=wall.monotonic
+    )
+    with reopened._lock:  # pyright: ignore[reportPrivateUsage]
+        state = reopened._load(workspace)  # pyright: ignore[reportPrivateUsage]
+        assert set(state.capture_handoff_retirement_ids) == set(active_ids)
+        assert len(state.capture_handoff_retirement_ids) == 512
