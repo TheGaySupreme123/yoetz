@@ -1116,6 +1116,68 @@ def test_claude_permission_denied_with_a_confirmed_grant_offers_the_identical_re
     assert not (tmp_path / ".claude").exists()
 
 
+def test_claude_session_start_names_a_missing_admission_entry_only_on_an_authorized_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #857: the shared observe ingress appends the admission line for Claude Code.
+
+    The serving-route record and ``.claude/settings.local.json`` are read for real; the grant
+    read is replaced so the wiring is what this test locks.
+    """
+
+    from yoetz.application.serving_route import record_serving_route
+    from yoetz.cli import host_denial_advisory
+
+    _consented_store(tmp_path)
+    captured: list[tuple[object, object, object]] = []
+
+    def facts(host: object, locator: object, **kwargs: object) -> object:
+        captured.append((host, locator, kwargs.get("skip_service")))
+        return host_denial_advisory.HostDenialFacts("confirmed", "policy", "absent")
+
+    monkeypatch.setattr(host_denial_advisory, "read_host_denial_facts", facts)
+
+    def session_start(session: str) -> str:
+        stdout = io.BytesIO()
+        assert (
+            observe_hooks.handle_claude_observe(
+                event_name="SessionStart",
+                stdin_bytes=canonical_encode(
+                    {"session_id": session, "hook_event_name": "SessionStart", "source": "startup"}
+                ),
+                stdout=stdout,
+                workspace=str(tmp_path),
+                _state=tmp_path,
+                skip_service=True,
+            )
+            == 0
+        )
+        emitted = cast(Mapping[str, JsonValue], strict_json_parse(stdout.getvalue()))
+        specific = cast(Mapping[str, JsonValue], emitted["hookSpecificOutput"])
+        return cast(str, specific["additionalContext"])
+
+    assert "admission entry" not in session_start("claude-admission-unrecorded")
+    assert captured == []
+
+    record_serving_route("claude", "strict", _state=tmp_path)
+    assert "admission entry" not in session_start("claude-admission-strict")
+    assert captured == []
+
+    record_serving_route("claude", "policy", _state=tmp_path)
+    context = session_start("claude-admission-policy")
+    assert context.endswith("The owner can run: yoetz integrate claude admission grant.")
+    assert "no ledger task is mapped yet" in context
+    assert captured == [("claude", str(tmp_path.resolve()), True)]
+
+    (tmp_path / ".claude").mkdir(mode=0o700)
+    (tmp_path / ".claude/settings.local.json").write_text(
+        json.dumps({"permissions": {"allow": ["mcp__plugin_yoetz_yoetz__check"]}}),
+        encoding="utf-8",
+    )
+    assert "admission entry" not in session_start("claude-admission-present")
+    assert len(captured) == 1
+
+
 def test_claude_permission_denied_for_any_other_tool_records_nothing(tmp_path: Path) -> None:
     _consented_store(tmp_path)
     for tool_name in ("mcp__plugin_yoetz_yoetz__start", "Bash", "mcp__other__check"):
