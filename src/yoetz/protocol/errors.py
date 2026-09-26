@@ -407,6 +407,8 @@ ADMITTED_CLAIM_REVISION_INVARIANTS: frozenset[str] = frozenset(
     {
         "claim_id_must_be_fresh",
         "claim_kind_must_match",
+        "completion_scope_must_be_explicit",
+        "empty_scope_must_not_support_obligations",
         "limitation_refs_complete",
         "limitation_refs_must_be_relevant_non_success_results",
         "replacement_must_change_effective_claim",

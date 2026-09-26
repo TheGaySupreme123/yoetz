@@ -126,6 +126,13 @@ Yoetz rechecks the exact bytes immediately before each atomic replacement or del
 the result, but an ordinary host configuration file has no portable compare-and-swap operation
 that can exclude a non-cooperating process in the final filesystem syscall window.
 
+At session start, Yoetz may show a short notice when a fresh read confirms your repository grant
+allows external AI review but the host has no project admission entry for `check`. The notice names
+the admission command for your host. It describes the grant at startup; it does not confirm the
+active connection can dispatch review or approve a held tool call. If the read cannot finish in the
+available time, or other task context fills the message, the notice is omitted. Its absence does
+not mean you revoked consent. The existing host approval flow and Yoetz's current gates still apply.
+
 ### The way out
 
 Every way in has a way out, and each is reported rather than silent:
@@ -154,24 +161,19 @@ it should. Yoetz never ships a hook that approves its own tool calls, and never 
 `yoetz observe status` records one payload-free `host_auto_review_denied` diagnostic so the hold
 is visible as what it is, not as an AI-powered review result.
 
-### When the host holds a check you already authorized
+### When Claude Code holds a check you already authorized
 
-Without admission, the host's reviewer may still hold a check you authorized. Yoetz then tells
-both you and the agent what it knows first-hand.
+In Claude Code, Yoetz can show you whether this repository's privacy grant permits external
+AI-powered review. When it confirms the grant and Claude's classifier returned a verdict, the
+hook may offer one retry in the session. Claude shows the notice to you and gives the agent a
+retry cue. The agent must preserve the exact request and ask you after another hold. A missing
+or unreadable grant, unknown verdict, or unavailable retry record produces no retry.
 
-- **Claude Code.** Yoetz checks that this repository's privacy grant permits external review and
-  that the connection runs on the policy route. If both hold, you see a short message that you
-  already authorized the review, that the host held it, and that nothing was sent. The agent is
-  told it may retry the identical check once. The retry goes back through Claude Code's own
-  permission prompt, and approving it lets that one check run. If the host holds the same check
-  again, the agent asks you instead of retrying. If Yoetz cannot confirm the grant, or one of your
-  own permission rules held the check, the agent is told to ask you and not to retry.
-- **Codex and Cursor.** Neither host reports a hold to Yoetz. At session start, Yoetz adds one line
-  when the review is authorized but the host has no admission entry. That line names the admission
-  command for that host. When a check is held, the agent asks you to approve that exact check.
-
-None of this approves anything for you or changes what Yoetz may send. The host's own prompt
-remains the decision, and host admission remains the way to stop the holds.
+The notice does not approve a tool call or change settings. Higher-priority host instructions,
+your explicit denial, the MCP route and Yoetz's disclosure gates still apply. The durable owner
+choice is `yoetz integrate claude admission grant`, with `admission revoke` as its reverse.
+Codex and Cursor retain the pause-and-ask workflow. Live acceptance of the new Claude notice and
+retry cue is still pending; it is not proof that a provider received or reviewed anything.
 
 ## Codex registration
 

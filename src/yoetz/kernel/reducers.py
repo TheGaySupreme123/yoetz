@@ -739,7 +739,10 @@ def _apply_claim(
                     )
                 prior_scope = _claim_scope(prior.payload)
                 current_scope = _claim_scope(payload)
-                if not prior_scope or not current_scope or prior_scope.isdisjoint(current_scope):
+                # An accepted empty scope has no overlap to preserve. Explicit supersession
+                # repairs that authoring mistake without inferring scope from supporting_refs.
+                # Populated targets still require overlap, including in a mixed target batch.
+                if prior_scope and (not current_scope or prior_scope.isdisjoint(current_scope)):
                     raise ClaimRevisionMismatch(
                         "obligation_refs",
                         "scope_overlap_required",

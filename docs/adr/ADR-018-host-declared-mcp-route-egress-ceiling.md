@@ -1,12 +1,11 @@
 # ADR-018 — Host-declared MCP route egress ceiling
 
 **Status:** Accepted (2026-07-29), acknowledged in
-[issue #84](https://github.com/TheGaySupreme123/yoetz/issues/84), amended 2026-08-30 for issue
-#404 external-runtime dispatch, and amended 2026-09-26 for the issue #857 host-hold advisory.
+[issue #84](https://github.com/TheGaySupreme123/yoetz/issues/84), and amended 2026-08-30 for issue
+#404 external-runtime dispatch.
 **Implemented by:** `src/yoetz/mcp/`, `src/yoetz/application/check.py`,
-`src/yoetz/ports/control.py`, `src/yoetz/service/`,
-`src/yoetz/adapters/integrations/codex_mcp.py`, `src/yoetz/application/serving_route.py`, and
-`src/yoetz/cli/host_denial_advisory.py`.
+`src/yoetz/ports/control.py`, `src/yoetz/service/`, and
+`src/yoetz/adapters/integrations/codex_mcp.py`.
 **Relates to:** ADR-006 (AI-powered review provider profiles), ADR-008 (local service/vault trust
 boundary), ADR-009 (data egress and privacy), and ADR-012 (first-run setup wizard).
 
@@ -225,57 +224,69 @@ with no external binding can differ from the independently running service confi
 
 ## Host-hold advisory amendment (2026-09-26, issue #857)
 
-Host admission (the #467 amendment) is the durable lever, but a repository without it, or after
-admission drift, still sees every policy-route `check` held by the host's automatic reviewer. The
-agent then sees only the host's fixed refusal and nothing first-hand saying the owner already
-authorized the review, and in practice downgrades to deterministic-only or abandons review. This
-amendment lets Yoetz state its own recorded fact at that moment. It is information, never
-authorization.
+The scoped Claude Code `PermissionDenied` hook reads the repository grant through the bound
+service and reports whether external review is permitted. A configured MCP route alone is not
+consent. Decision 5 and the #467 rejections stand: Yoetz emits no allow decision, changes no host
+settings, and never treats its own disclosure grant as host tool-call approval.
 
-**Claude Code `PermissionDenied`.** The scoped hook (matched to exactly the external and
-plugin-owned `check` names) keeps its payload-free `host_auto_review_denied` /
-`host_permission_rule_denied` row and now also emits one closed advisory. The hook reads three
-facts first-hand within its five-second budget: the repository grant as the running service reports
-it through the workspace-bound connection (`grant_state: granted` with the `llm_inference` channel
-enabled), the route the host's bridge recorded it is serving, and the host's own admission file.
-Three closed texts exist:
+The supported output is a bounded, fixed-text **user notice** in `systemMessage` and the host's
+`hookSpecificOutput.retry` cue. Claude Code 2.1.281's event schema and handler, checked on
+2026-09-26 alongside the [hooks reference](https://code.claude.com/docs/en/hooks#permissiondenied),
+accept only `retry` inside the event-specific object. They drop `additionalContext`; therefore
+this feature does not claim to deliver the first-hand grant explanation to the model. The shipped
+skill carries the exact-request, one-retry, and pause rules. Higher-priority host instructions and
+explicit human denials always win.
 
-- *Grant confirmed*, served on `policy`, source the auto-mode classifier. The advisory states the
-  owner's authorization and that the host, not Yoetz, held the call. It emits
-  `hookSpecificOutput.retry: true` once per `(session_id, tool_use_id)` and a user-visible
-  `systemMessage` naming the durable admission command. A second hold of the same call gets the
-  pause text with no `retry`: present the exact call for the user's manual approval.
-- *Grant not confirmed* for any reason (service unavailable, vault locked, grant absent or not
-  permitting, grant unverifiable, route unobserved, route strict). A closed reason token is
-  appended. There is no `retry`, and the agent is told to ask before any retry.
-- *Owner's own rule* (`source` `permission_rule` / `hook`, or reason `denied_by_rule`). There is
-  no `retry`, and the agent is told to ask the user.
+A retry is offered only after a confirmed repository grant permits external review, the denial
+has a classifier verdict, and a first offer is durably recorded for that host session. Current
+Claude omits `source`; the legacy `auto_mode` source is also recognized. Unknown sources, empty
+or missing reasons, the legacy `no_verdict` token, `Classifier unavailable`, and the documented
+no-verdict reason prefix produce no retry. Legacy `permission_rule` and `hook` sources remain
+no-retry defenses; current Claude does not fire this event for owner deny rules or manual denials.
+The notice describes no dispatch **for the denied invocation**, not the history of a replayed job.
+The effective MCP route and every other Yoetz gate still apply; this hook does not prove a policy
+route or authorize external dispatch.
 
-`reason: no_verdict`, a call without a bounded session and tool-use identity, or a failure to
-record the offer never produces `retry`. The offer marker stores only domain-separated SHA-256
-digests of the host identifiers, bounded to the most recent 256 offers. The advisory, the retry,
-and any host approval that follows are not Yoetz privacy, disclosure, credential, or repository
-authority. The retried call goes back through the host's own permission flow. No hook emits a
-`PermissionRequest` / `PreToolUse` allow decision, writes an admission entry, or edits host
-configuration. The rejected alternatives of the #467 amendment stand: this is Yoetz stating its
-own first-hand record only when it read that record, not the agent relaying "the user authorized
-this".
+The grant read has one 2.5 s budget including connection, RPC and cleanup, within the 5 s hook
+budget. Missing workspace binding or unreadable grants cannot become confirmed authorization.
+The owner-only retry ledger stores at most 64 domain-separated session digests. It never evicts
+an offer to admit a new session: a full, malformed, unsafe or contended ledger returns
+`unrecorded` and offers no retry. Temporary writes are exclusive, file and directory are synced,
+and existing files are read through bounded, non-following descriptors. This keeps uncertainty
+from re-enabling retries. The durable owner path remains admission grant/revoke.
 
-**Serving-route record.** A hook has no serving route of its own, and #537 forbids a host
-subprocess inside the hook budget. The bridge therefore records, at startup, the closed pair
-`(host_profile, route_profile)` for an explicit `claude`, `codex`, or `cursor` host identity in
-`integrations/serving-routes.json` under the state directory. A generic or legacy bare `mcp serve`
-records nothing, so its hook reads the route as unobserved and never offers a retry. The record is
-a snapshot of the last bridge start for that host on this machine, not a live guarantee. The next
-bridge start overwrites it, and uninstall removes it with the state directory.
+The closed diagnostics are `host_denial_retry_offered`, `host_denial_retry_exhausted`,
+`host_denial_retry_unrecorded`, and `host_denial_grant_unconfirmed`. Their vocabulary contains no
+host payload or reason prose. An unreadable grant is reported as unconfirmed, not as revoked.
 
-**All hosts, `SessionStart`.** When the host's recorded serving route is `policy`, its own
-admission file reads exactly `absent`, and the service confirms the grant permits external review,
-the `SessionStart` context gains one bounded line naming `yoetz integrate <host> admission grant`.
-Any unread fact keeps it silent. This is the only proactive surface on Codex and Cursor, which
-expose no typed post-denial event. On those hosts the agent-facing rule in guidance and skills
-remains the whole hold response.
+Codex and Cursor lack a supported post-denial event in the reviewed integrations; they retain the
+pause-and-ask rule and conditional grant wording. Live Claude auto-mode acceptance and reliable
+policy-route attribution for a held call remain on #857. This amendment does not certify those cells.
 
-**Diagnostics.** `host_denial_retry_offered`, `host_denial_retry_exhausted`, and
-`host_denial_grant_unconfirmed` join the closed hook-diagnostic vocabulary on the
-`PermissionDenied` event beside the existing hold row.
+### Session-start grant notice and route attribution correction
+
+The shared SessionStart path for Codex, Claude Code and Cursor can append a model-visible grant
+snapshot when a fresh repository-bound service read confirms external review and the host's project
+admission is absent. It states that the active route and host approval remain unconfirmed, names
+the owner's admission command, and preserves the exact-request and no-silent-downgrade rules.
+SessionStart supports context delivery; PermissionDenied still does not deliver additionalContext.
+A startup snapshot does not establish the grant at a later hold or prove classifier consumption.
+
+Reject a durable last-started route record keyed by host. Concurrent bridges can use different
+routes, a process can exit, and one host can open several repositories. The current hook contracts
+do not correlate the held call to a live serving bridge. Neither a stored registration nor another
+bridge's startup establishes this call's route. No route record is written or consulted here, and
+no route claim or new retry behavior is introduced. The #862 denial handler and strict dispatch
+fence remain authoritative for their respective layers.
+
+Existing lifecycle/task/recovery context takes priority. The notice uses at most 500 ms of spare
+hook time, with one deadline covering connection, grant RPC and cleanup after local admission reads;
+it is omitted if the existing context leaves insufficient room, the hook budget is spent, a mapping
+operation is deferred, service access is skipped, admission is not absent, or the grant is unreadable.
+Codex's mapped resume path reads the grant only once and only after an active workspace-bound status.
+The shared observation path requires active capture consent; this change does not activate capture.
+Admission files are read through bounded, non-following, nonblocking descriptors, so a FIFO cannot
+stall startup. No host settings, grants, retry markers or caches are written by this notice.
+
+The same adapters apply on macOS, Linux and WSL 2. Tests exercise host-specific stdout contracts and
+failure conditions in isolated state; fresh native host runs on those OS cells remain unverified.

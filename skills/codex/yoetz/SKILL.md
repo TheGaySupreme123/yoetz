@@ -154,7 +154,10 @@ Host authorization and a Yoetz disclosure decision are different things. `check`
 standing authority selected during setup and cannot widen it. Do not re-ask for that configured
 route. Host auto-review refusal is not a Yoetz result: Yoetz did not run. `awaiting_human` is
 nonterminal. Preserve the exact request and follow coverage guidance; do not create a new check
-request, obtain a receipt, or claim completion while approval is pending.
+request, obtain a receipt, or claim completion while approval is pending. A host hold does not establish the Yoetz grant state. State existing repository authorization
+only when a current first-hand read confirms it; configured routing alone is not consent. Keep
+host approval separate. For a confirmed grant, propose the owner's `yoetz integrate codex
+admission grant` as the durable fix rather than writing it yourself.
 
 Before setup/import or credential/vault changes, read the exact consent procedure in request
 templates. Recommendations are advisory; only the required exact user decision authorizes a

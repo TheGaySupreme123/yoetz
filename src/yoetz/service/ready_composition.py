@@ -198,6 +198,7 @@ from yoetz.domain.privacy import (
 )
 from yoetz.domain.receipts import (
     SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
+    SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
     PolicyVersionEntry,
     ReceiptVersionSlice,
     SchemaVersionEntry,
@@ -4261,6 +4262,7 @@ def _privacy_gated_semantic_evaluator(
                         "content_unselected",
                         "content_redacted",
                         "truncated_payload",
+                        SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
                     }
                 )
             )
@@ -5124,6 +5126,23 @@ async def provide_service_ready_context(
         # no repository authority; an unreadable fact (for example a vault
         # locking race) yields no fact rather than a false not-ready claim.
         try:
+            if privacy_application is None:
+                return None
+            effective = await privacy_application.policy_store.effective_policy(
+                AuthorizationScope(AuthorizationScopeKind.MACHINE, installation_id)
+            )
+            # Verification defaults alone do not express provider intent (#844).
+            # Read the current machine ceiling, not the READY-time policy snapshot;
+            # update-check egress alone must not enable provider repair advice.
+            review_intended = (
+                semantic_configured
+                and provider_endpoint_bound
+                and effective.policy.network_egress_permitted
+                and any(
+                    channel.channel is EgressChannel.LLM_INFERENCE and channel.enabled
+                    for channel in effective.policy.channel_policies
+                )
+            )
             connected_now = cast(
                 tuple[str, ...], tuple(getattr(gateway, "connected_provider_ids", lambda: ())())
             )
@@ -5141,7 +5160,7 @@ async def provide_service_ready_context(
             return None
         attention = semantic_attention.current(candidate_binding, fallback_candidate_binding)
         return ObservationCompositionFact(
-            semantic_configured=semantic_configured,
+            semantic_configured=review_intended,
             semantic_ready=structurally_usable,
             provider_factory_ids=provider_factory_ids,
             connected_provider_ids=connected_now,

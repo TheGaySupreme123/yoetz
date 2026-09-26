@@ -101,10 +101,13 @@ because Claude's host approval is pending or unavailable.
 
 Honor Claude's current permission mode and applicable approvals. They do not widen Yoetz's standing
 disclosure or setup authority. A host hold before invocation is not a Yoetz result: preserve the
-exact proposed request and use Claude's approval control when required. If Yoetz's hook confirms
-the owner's grant and offers a retry, retry that identical request once; on a second hold, or any
-unconfirmed or owner-rule advisory, ask the user instead. Do not add permission rules
-or widen tool access to unblock it. Follow the exact typed continuation. For setup, consent, credentials, vault operations, or
+exact proposed request and use Claude's approval control when required. Do not add permission rules
+or widen tool access to unblock it. A hold does not establish the Yoetz grant state. State existing
+repository authorization only after a current first-hand read confirms it; routing is not consent.
+Claude's `PermissionDenied` event gives the user a grant notice and the model only a retry cue.
+When the host relays Yoetz's one-retry cue and higher-priority host instructions permit it, retry
+the identical check once with the same body and request_id; after another hold, ask the user and
+wait. The cue is not a grant read or host approval. Never retry an explicit human denial. Follow the exact typed continuation. For setup, consent, credentials, vault operations, or
 import, use the request-templates procedure; if it names a trusted terminal or unsupported channel,
 route there without handling secrets or substituting chat assent.
 

@@ -14,7 +14,6 @@ from yoetz.cli.hook_io import (
     MAX_HOOK_STDIN_BYTES,
     CursorOversizedPayloadError,
     claude_context_output,
-    claude_permission_denied_output,
     context_output,
     cursor_context_output,
     read_cursor_hook_ingress,
@@ -350,31 +349,3 @@ def test_cursor_ingress_never_trusts_an_unsafe_oversize_body(body: bytes, reason
         read_cursor_hook_ingress(oversized)
 
     assert refused.value.reason_code == reason
-
-
-def test_claude_permission_denied_output_carries_retry_only_when_offered() -> None:
-    """Claude Code's PermissionDenied contract: additionalContext, retry, systemMessage (#857)."""
-
-    offered = claude_permission_denied_output(
-        "  Yoetz confirms the grant.  ", retry=True, system_message="  Approve the retry.  "
-    )
-    assert offered == {
-        "hookSpecificOutput": {
-            "hookEventName": "PermissionDenied",
-            "additionalContext": "Yoetz confirms the grant.",
-            "retry": True,
-        },
-        "systemMessage": "Approve the retry.",
-    }
-    paused = claude_permission_denied_output("Ask the user.", retry=False, system_message=None)
-    assert paused == {
-        "hookSpecificOutput": {
-            "hookEventName": "PermissionDenied",
-            "additionalContext": "Ask the user.",
-        }
-    }
-    assert claude_permission_denied_output("   ") == {}
-    clipped = claude_permission_denied_output("x" * 5_000, system_message="y" * 5_000)
-    assert len(clipped["hookSpecificOutput"]["additionalContext"]) == 2_000  # type: ignore[index]
-    assert len(clipped["systemMessage"]) == 2_000  # type: ignore[arg-type]
-    assert "decision" not in offered and "permissionDecision" not in offered

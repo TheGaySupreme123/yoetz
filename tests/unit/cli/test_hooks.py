@@ -812,82 +812,6 @@ class _FakeClient:
         return None
 
 
-def test_session_start_names_a_missing_admission_entry_on_an_authorized_policy_route(
-    tmp_path: Path,
-) -> None:
-    """Issue #857: one bounded line when the bridge serves policy, the grant permits review,
-    and the host's own admission file is absent; silent when the route was never recorded."""
-
-    from types import SimpleNamespace
-
-    from yoetz.application.serving_route import record_serving_route
-
-    task_id, session_id, writer_id = _task_ids()
-    store_mapping(
-        mapping_from_start_ids(
-            codex_session_id="codex-admission",
-            yoetz_task_id=task_id,
-            yoetz_session_id=session_id,
-            yoetz_writer_id=writer_id,
-            last_frontier="0:genesis",
-        ),
-        _state=tmp_path,
-    )
-
-    class _Client(_FakeClient):
-        async def service_status(self) -> object:
-            self.calls.append("service_status")
-            return SimpleNamespace(state=SimpleNamespace(value="ready"))
-
-        async def privacy_get_setup(
-            self, request: object, *, deadline_ms: int | None = None
-        ) -> object:
-            self.calls.append("privacy_get_setup")
-            return {
-                "grant_state": "granted",
-                "composed_policy": {
-                    "channel_policies": [{"channel": "llm_inference", "enabled": True}]
-                },
-            }
-
-    client = _Client()
-    client.task_id = task_id
-    client.session_id = session_id
-    client.writer_id = writer_id
-
-    async def connect(_kind: ControlClientKind) -> _Client:
-        return client
-
-    def session_start() -> str:
-        stdout = io.BytesIO()
-        assert (
-            handle_session_start(
-                stdin_bytes=json.dumps(
-                    {"session_id": "codex-admission", "source": "resume"}
-                ).encode(),
-                stdout=stdout,
-                _state=tmp_path,
-                connect=connect,
-                workspace=str(tmp_path),
-            )
-            == 0
-        )
-        return json.loads(stdout.getvalue().decode("utf-8"))["hookSpecificOutput"][
-            "additionalContext"
-        ]
-
-    silent = session_start()
-    assert task_id in silent
-    assert "admission" not in silent
-    assert client.calls == ["status"]
-
-    record_serving_route("codex", "policy", _state=tmp_path)
-    spoken = session_start()
-    assert task_id in spoken
-    assert spoken.endswith("The owner can run: yoetz integrate codex admission grant.")
-    assert client.calls == ["status", "status", "service_status", "privacy_get_setup"]
-
-
 def test_session_start_active_with_fake_service(tmp_path: Path) -> None:
     task_id, session_id, writer_id = _task_ids()
     store_mapping(
@@ -1732,3 +1656,65 @@ def test_session_start_superseded_with_invalid_replacement_ids_falls_back(tmp_pa
     assert mapping is not None
     assert text == hooks_module._stale_mapping_context(mapping)  # pyright: ignore[reportPrivateUsage]
     assert "tsk_not_an_id" not in text
+
+
+def test_mapped_resume_reads_grant_once_and_keeps_context(
+    tmp_path: Path,
+) -> None:
+    """The discarded observation pass cannot spend a second admission grant read."""
+
+    task_id, session_id, writer_id = _task_ids()
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id="codex-admission",
+            yoetz_task_id=task_id,
+            yoetz_session_id=session_id,
+            yoetz_writer_id=writer_id,
+            last_frontier="0:genesis",
+        ),
+        _state=tmp_path,
+    )
+
+    class _Client(_FakeClient):
+        async def privacy_get_setup(
+            self, request: object, *, deadline_ms: int | None = None
+        ) -> object:
+            self.calls.append("privacy_get_setup")
+            return {
+                "grant_state": "granted",
+                "composed_policy": {
+                    "channel_policies": [{"channel": "llm_inference", "enabled": True}]
+                },
+            }
+
+    client = _Client()
+    client.task_id = task_id
+    client.session_id = session_id
+    client.writer_id = writer_id
+
+    async def connect(_kind: ControlClientKind) -> _Client:
+        return client
+
+    def session_start() -> str:
+        stdout = io.BytesIO()
+        assert (
+            handle_session_start(
+                stdin_bytes=json.dumps(
+                    {"session_id": "codex-admission", "source": "resume"}
+                ).encode(),
+                stdout=stdout,
+                _state=tmp_path,
+                connect=connect,
+                workspace=str(tmp_path),
+            )
+            == 0
+        )
+        return json.loads(stdout.getvalue().decode("utf-8"))["hookSpecificOutput"][
+            "additionalContext"
+        ]
+
+    spoken = session_start()
+    assert task_id in spoken
+    assert "yoetz integrate codex admission grant" in spoken
+    assert "Route and host approval remain unconfirmed" in spoken
+    assert client.calls == ["status", "privacy_get_setup"]

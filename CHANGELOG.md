@@ -8,15 +8,18 @@ reverse-chronological released versions.
 
 ### Added
 
-- When Claude Code's auto mode holds an AI-powered review check you already authorized, Yoetz now
-  says so. It confirms your repository grant with the running service and tells the agent that the
-  host held the check, not Yoetz. The agent may retry the identical check once, through Claude
-  Code's own permission prompt, and asks you if the host holds it again. You also see a short
-  message naming the admission command that stops the holds. If Yoetz cannot confirm the grant, or
-  one of your own rules held the check, the agent is told to ask you and not retry. On Claude Code,
-  Codex, and Cursor, session start adds one line when review is authorized but the host has no
-  admission entry. `yoetz observe status` shows what each hold advisory did. Nothing here approves
-  a call or changes what Yoetz may send (#857).
+- Codex, Claude Code and Cursor session-start context can show a fresh repository-grant snapshot
+  and name the owner's missing admission command. The notice leaves route and host approval
+  unconfirmed, preserves existing context and spends only spare hook time. No cross-session
+  route cache or new retry path is introduced. Native acceptance remains tracked in #857.
+
+- Claude Code's scoped `PermissionDenied` hook now shows the user a notice based on a fresh
+  repository grant read and may emit the host's one-retry cue. The same request must be preserved;
+  a later hold goes to human approval. No-verdict denials and an unreadable, full or unsafe retry
+  ledger offer no retry. Both structural and ordinary capture profiles carry the notice. Claude
+  does not deliver `additionalContext` on this event, so the model receives only the host's retry
+  cue, not the grant explanation. Shipped guidance keeps grant claims conditional and host approval
+  separate. Live acceptance and the remaining cross-host work stay tracked in #857.
 
 ### Fixed
 

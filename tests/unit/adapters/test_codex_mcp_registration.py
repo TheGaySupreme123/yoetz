@@ -633,14 +633,15 @@ def test_preview_unregistration_of_foreign_entry_warns_without_echoing_argv() ->
     assert preview.state_before is McpRegistrationState.ABSENT
 
 
-def test_apply_unregistration_removes_owned_entry() -> None:
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_apply_unregistration_removes_owned_entry(exit_code: int) -> None:
     plan_adapter = CodexMcpAdapter(_Runner([CommandOutput(0, _yoetz_entry())]))
     preview = anyio.run(lambda: plan_adapter.preview_unregistration(_BINARY))
     runner = _Runner(
         [
             CommandOutput(0, _yoetz_entry()),
             CommandOutput(0, _yoetz_entry()),
-            CommandOutput(0, b""),
+            CommandOutput(exit_code, b"host output must not be reported"),
             CommandOutput(1, b""),
             CommandOutput(0, b"[]"),
         ]
@@ -652,7 +653,57 @@ def test_apply_unregistration_removes_owned_entry() -> None:
     )
     assert result.action is McpRegistrationAction.UNREGISTER
     assert result.state_after is McpRegistrationState.ABSENT
+    assert result.warnings == (("host_remove_returned_nonzero",) if exit_code else ())
     assert runner.calls[2] == ("/opt/harness/bin/codex", "mcp", "remove", "yoetz")
+    assert runner.calls[3:] == [
+        ("/opt/harness/bin/codex", "mcp", "get", "yoetz", "--json"),
+        ("/opt/harness/bin/codex", "mcp", "list", "--json"),
+    ]
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+@pytest.mark.parametrize(
+    ("post_outputs", "verified_state"),
+    [
+        ([CommandOutput(0, _yoetz_entry())], "yoetz_owned"),
+        ([CommandOutput(0, b'{"command":"foreign"}')], "foreign_present"),
+        (
+            [CommandOutput(1, b""), CommandOutput(0, b'[{"name":"yoetz","command":"foreign"}]')],
+            "foreign_present",
+        ),
+        ([CommandOutput(0, b"invalid")], None),
+        ([CommandOutput(1, b""), CommandOutput(0, b"invalid")], None),
+        ([CommandOutput(1, b""), CommandOutput(0, b"[]", True)], None),
+        ([CommandOutput(1, b""), CommandOutput(1, b"[]")], None),
+    ],
+)
+def test_removal_never_succeeds_without_positive_absence(
+    exit_code: int, post_outputs: list[CommandOutput], verified_state: str | None
+) -> None:
+    preview = anyio.run(
+        lambda: CodexMcpAdapter(_Runner([CommandOutput(0, _yoetz_entry())])).preview_unregistration(
+            _BINARY
+        )
+    )
+    runner = _Runner(
+        [
+            CommandOutput(0, _yoetz_entry()),
+            CommandOutput(0, _yoetz_entry()),
+            CommandOutput(exit_code, b"private-host-payload"),
+            *post_outputs,
+        ]
+    )
+    with pytest.raises(McpRegistrationError) as caught:
+        anyio.run(
+            lambda: CodexMcpAdapter(runner).apply_unregistration(
+                _BINARY, McpRegistrationCommand(preview.preview_digest, True)
+            )
+        )
+    assert caught.value.reason is McpRegistrationReason.REGISTRATION_FAILED
+    assert caught.value.safe_details.get("verified_state") == verified_state
+    assert caught.value.safe_details.get("exit_code_class") == ("nonzero" if exit_code else None)
+    assert "private-host-payload" not in str(caught.value.safe_details)
+    assert sum(call[1:3] == ("mcp", "remove") for call in runner.calls) == 1
 
 
 def test_apply_unregistration_refuses_replacement_before_name_based_remove() -> None:

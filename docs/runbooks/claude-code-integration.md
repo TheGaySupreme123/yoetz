@@ -1,5 +1,9 @@
 # Claude Code native integration
 
+Codex's external MCP removal reconciliation (issue #860) does not apply to Claude Code:
+Claude's plugin-managed MCP follows the plugin lifecycle below. No Claude mutation or outcome
+contract changes are required for that Codex-specific host command.
+
 For setup prerequisites, use `yoetz setup status --next --host claude` with the same
 executable, configuration root and project. `--operation connection` inspects installation without
 provider sign-in; `local` and `review` inspect their respective vault/privacy prerequisites.
@@ -654,7 +658,13 @@ keeps `hookEventName: PostToolUseFailure` even though Yoetz normalizes its inter
 to `PostToolUse`. At `Stop`, additional context is Claude Code's non-error feedback channel: it
 continues through the same `stop_hook_active` loop guard as a blocking decision, but is labelled as
 feedback rather than an error. Yoetz never emits `decision: block` to Claude Code. `SessionEnd`
-emits `{}`.
+emits `{}`. Provider-repair advice is standing advice (#844). Claude Code delivers it only on
+`SessionStart` and `Stop`, still as `additionalContext` and never as `decision: block`.
+`PostToolUse` does not carry it. A private or no-egress install, an install with no provider
+endpoint, and an install whose verification is disabled do not emit `connect_provider` or another
+provider-repair request. The service emits it only when verification is not disabled, a provider
+endpoint is bound, network egress is permitted, and an LLM inference channel is enabled, and the
+provider is still structurally unusable, including when no factory id is available.
 
 The rendered hook commands bind `--workspace "${CLAUDE_PROJECT_DIR}"`. When a hook ingests
 nothing it still exits 0 with `{}`, but records one payload-free `hook_diagnostics` reason that
@@ -946,30 +956,40 @@ check as host authorization, never as an AI-powered review status. Yoetz deliber
 `PermissionRequest` hook returning `decision: allow`, which would make the plugin the authority over
 the host's own review.
 
-Since issue #857 the same hook also answers. It reads the repository grant from the running service
-(bound to `CLAUDE_PROJECT_DIR`), the route this host's bridge recorded at startup, and
-`.claude/settings.local.json` admission, all within the five-second hook timeout, and emits one of
-three closed advisories:
+The same scoped hook reports a hold to the user (issue #857). Its stdout has
+`hookSpecificOutput.{hookEventName, retry}` and a bounded `systemMessage`. Claude Code 2.1.281's
+installed schema and handler and the [current reference](https://code.claude.com/docs/en/hooks#permissiondenied)
+were checked on 2026-09-26: `PermissionDenied` drops `additionalContext`. The user sees the
+first-hand notice; the model receives only the host's retry cue, with exact-request and pause
+rules supplied by the shipped skill. Do not claim model-visible grant delivery from PermissionDenied.
 
-| Case | When | `retry` | Agent is told |
-|---|---|---|---|
-| Grant confirmed | grant `granted` with `llm_inference` enabled, recorded route `policy`, classifier source (`auto` / `auto_mode` / absent) | `true` on the first hold of this `(session_id, tool_use_id)` only | Retry the identical call once; if held again, present it for manual approval |
-| Grant not confirmed | service unavailable, vault locked, grant absent / not permitting / unverifiable, route unobserved or strict | never | Stop and ask before any retry; closed reason token appended |
-| Owner's own rule | `source` `permission_rule` / `hook`, or reason `denied_by_rule` | never | Ask the user; do not retry |
+| Facts | User notice | `retry` | Diagnostic |
+| --- | --- | --- | --- |
+| confirmed grant, recognized classifier verdict, first recorded offer this session | external review grant present; this invocation was held; one identical retry may be offered | `true` | `host_denial_retry_offered` |
+| same session already offered a retry | present the exact call for human approval | `false` | `host_denial_retry_exhausted` |
+| no verdict or unknown source/reason | classifier verdict not established; ask the human | `false` | `host_denial_retry_exhausted` |
+| legacy `source` `permission_rule` or `hook` | owner rule held it; ask | `false` | `host_denial_retry_exhausted` |
+| grant absent or unreadable | grant unconfirmed; closed reason named | `false` | `host_denial_grant_unconfirmed` |
+| full, damaged, unsafe, contended or unwritable retry ledger | confirmation without a retry | `false` | `host_denial_retry_unrecorded` |
 
-`reason: no_verdict` never carries `retry`; Claude Code ignores it there. The `systemMessage` tells
-the user that Yoetz did not hold the call, that nothing was sent, and which admission command makes
-the hold stop. The advisory is Yoetz's first-hand record, not approval: the retried call goes back
-through Claude's own permission flow. A route registered as bare `mcp serve` without
-`--host claude` records no serving route, so its hook reads as `route_unobserved` and never offers
-a retry. `hook_diagnostics` gains `host_denial_retry_offered`, `host_denial_retry_exhausted`, and
-`host_denial_grant_unconfirmed` beside the hold row. When the recorded route is `policy`, the grant
-permits review, and this repository has no admission entry, `SessionStart` context carries one
-bounded line naming `yoetz integrate claude admission grant`.
+Current Claude omits `source` and does not fire this event on manual denials or deny rules.
+No-verdict detection includes the reason prefix `Auto mode could not evaluate this action and is
+blocking it for safety`, `Classifier unavailable`, and the legacy `no_verdict` token. Unknown
+sources and missing reasons fail closed. Host payloads are never echoed.
 
-Live acceptance for this flow is open on issue #857: auto mode without admission, hold, advisory,
-one retry, host prompt, user approves, identical request dispatches with real provenance; user
-denies, zero dispatch and no completion claim. The unit tests lock the texts and conditions only.
+The repository-bound grant read has a 2.5 s deadline covering connect, request and cleanup.
+`observation/host-hold-retries.json` stores at most 64 session digests under the owner-only state
+directory. Old offers are never evicted to make room: at capacity, new sessions need human
+approval. Damaged or unsafe ledgers are preserved without offering another retry. Admission
+remains the durable owner choice; revoke it through `yoetz integrate claude admission revoke`.
+A grant notice is not MCP route verification. The strict route still blocks external dispatch.
+SessionStart can deliver a separate first-hand grant snapshot to the model when the shared
+observation path is consented, local admission is absent, and spare context/time allows a fresh
+repository-bound read. It names `yoetz integrate claude admission grant` but explicitly leaves the
+active route and host approval unconfirmed. It does not prove the grant at a later denial or that
+the classifier consumed the notice. Local-only, deferred and unreadable paths add nothing.
+Policy-route attribution for a held call and the live Claude auto-mode approval/denial cell remain
+unverified and tracked in #857. No machine-wide last-started bridge record is used.
 
 Claude Code surfaces MCP initialize `instructions` as server instructions in the model's context.
 Whether the auto-mode classifier reads them is not documented, so the policy-route destination
@@ -1289,3 +1309,16 @@ bootstrap. A later successful mapping permits their normal drain. Missing transi
 remains a coverage gap; a recovered queue is not recovered content. Existing host/OS capability
 and consent requirements still apply. Automated host-contract tests do not establish native
 macOS, Linux, or Windows/WSL 2 acceptance. Native cold-start coverage remains tracked in #670.
+
+## Repairing an accepted empty-scope claim (#859)
+
+Use the shared `publish_work` operation (CLI: `publish-work`) and
+[claim correction guidance](../../guidance/publication-policy.md#claim-correction-and-limitation-linkage).
+Publish `claim_recorded/1.1.0` with a fresh claim ID, explicit `obligation_refs`, and every replaced
+claim ID in sorted `supersedes_claim_refs`. An empty-scope target needs no overlap; each populated
+target still does. For an empty C0 plus scoped C1, replace both in C2. Preview the exact batch first,
+then append, recheck and request a receipt. History and unresolved evidence/review limits remain.
+New completion claims must declare scope explicitly; obligation support is not scope. Intentional
+`[]` remains coverage-incomplete and cannot carry obligation support. No host hook invents scope or
+performs this repair. The shared service behavior applies on macOS, Linux and Windows through WSL 2;
+source tests do not establish native host/platform acceptance.

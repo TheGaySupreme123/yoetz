@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import io
 import os
 import re
 import sys
@@ -3010,6 +3011,7 @@ def handle_observe(
     _content_capture_profile: str | None = None,
     _content_payload: Mapping[str, JsonValue] | None = None,
     _ingress_gap: str | None = None,
+    _include_admission_notice: bool = True,
 ) -> int:
     """Bounded observation ingress for Codex lifecycle hooks. Always exits 0.
 
@@ -4384,28 +4386,27 @@ def handle_observe(
                         and len(additional) + 1 + len(recommendation) <= _MAX_ADVICE_CONTEXT
                     ):
                         additional = f"{additional} {recommendation}"
-                # One bounded line when this host reaches Yoetz on a policy route the owner
-                # authorized but carries no admission entry, so its automatic reviewer may
-                # hold each check (issue #857). Two local reads gate the one service read;
-                # an unread fact keeps the line silent.
-                with contextlib.suppress(Exception):
-                    from yoetz.cli.host_denial_advisory import admission_absent_advisory
 
-                    admission_line = admission_absent_advisory(
+                if (
+                    _include_admission_notice
+                    and not pending_mapping_deferred
+                    and not mapping_lifecycle_deferred
+                    and _session_start_source(payload) != "clear"
+                ):
+                    from yoetz.cli.host_hold_advisory import PrivacyConnector
+                    from yoetz.cli.host_startup_advisory import append_admission_notice
+
+                    additional = append_admission_notice(
+                        additional,
                         harness_id,
                         workspace_locator,
-                        connect=connect,
-                        run_async=run_async,
+                        connect=None if connect is None else cast(PrivacyConnector, connect),
+                        run_async=_resolve_runner(),
+                        deadline=entry_started + _HOOK_TOTAL_BUDGET_SECONDS - 0.1,
+                        max_chars=_MAX_ADVICE_CONTEXT,
                         skip_service=skip_service,
-                        _state=_state,
+                        monotonic=_monotonic,
                     )
-                    if admission_line and not additional:
-                        additional = admission_line
-                    elif (
-                        admission_line
-                        and len(additional) + 1 + len(admission_line) <= _MAX_ADVICE_CONTEXT
-                    ):
-                        additional = f"{additional} {admission_line}"
 
             rendered_output = _render_context(additional) if additional else {}
             host_consumable = bool(rendered_output)
@@ -4798,59 +4799,75 @@ def _record_claude_permission_denied(
     run_async: AsyncRunner | None = None,
     skip_service: bool = False,
 ) -> dict[str, JsonValue]:
-    """Record that a host reviewer held a scoped AI-powered ``check`` and advise (issues #467, #857).
+    """Record that a host reviewer held a scoped AI-powered ``check`` and advise on it.
 
-    ``source`` is Claude Code's closed origin token (``auto`` / ``auto_mode`` for the classifier,
-    ``permission_rule`` / ``hook`` for the owner's own rules). An absent source is attributed to
-    auto mode, the only reviewer that produces a classifier / ``no_verdict`` reason. Any other
-    tool name is ignored: the rendered matcher is scoped to ``check`` and this ingress must not
-    widen it.
+    ``source`` is Claude Code's closed origin token (``auto_mode`` | ``permission_rule`` |
+    ``hook``). An absent source is attributed to auto mode, the only reviewer that produces a
+    ``classifier_denied`` / ``no_verdict`` reason (issue #467). Any other tool name is ignored:
+    the rendered matcher is scoped to ``check`` and this ingress must not widen it.
 
-    Beside the payload-free hold diagnostic, the ingress reads Yoetz's own first-hand facts
-    (repository grant, recorded serving route, host admission) and returns the closed advisory
-    for the host: model-visible context, a user-visible ``systemMessage``, and at most one
-    ``retry`` of the identical call. Nothing here approves a tool call.
+    The returned object is the hook's stdout (issue #857): Yoetz's first-hand grant and
+    admission facts, read inside the hook deadline, decide whether the advisory confirms the
+    owner's standing authorization and offers the session's one ``retry``, or tells the agent to
+    stop and ask. It is advice plus the host's own documented retry flag, never an allow
+    decision, and it echoes nothing from the host payload.
     """
 
     if payload.get("tool_name") not in _CLAUDE_CHECK_TOOL_NAMES:
         return {}
     source = payload.get("source")
-    reason = (
-        "host_permission_rule_denied"
-        if source in {"permission_rule", "hook", "rule"}
-        else "host_auto_review_denied"
+    held_by_rule = source in ("permission_rule", "hook")
+    record_hook_diagnostic(
+        "host_permission_rule_denied" if held_by_rule else "host_auto_review_denied",
+        "PermissionDenied",
+        _state=_state,
     )
-    record_hook_diagnostic(reason, "PermissionDenied", _state=_state)
-    try:
-        from yoetz.cli.host_denial_advisory import (
-            compose_permission_denied_advisory,
-            read_host_denial_facts,
-        )
-
-        locator: str | None = None
-        if workspace is not None:
-            with contextlib.suppress(Exception):
-                locator = canonical_workspace_locator(workspace)
-        facts = read_host_denial_facts(
-            "claude",
-            locator,
-            connect=connect,
-            run_async=run_async,
-            skip_service=skip_service,
-            _state=_state,
-        )
-        advisory = compose_permission_denied_advisory(payload, facts, _state=_state)
-    except Exception:
-        # The hold is already recorded; a failed advisory read must not turn into a second
-        # JSON object or a hook failure the host reports as its own.
+    tool_input = payload.get("tool_input")
+    if isinstance(tool_input, Mapping) and tool_input.get("mode") == "deterministic_only":
+        # This call explicitly opts out of external review; a semantic grant says nothing
+        # about why the host held it. Leave the ordinary host approval path intact.
         return {}
+    from yoetz.cli.hooks import resolve_session_workspace
+    from yoetz.cli.host_hold_advisory import (
+        PrivacyConnector,
+        RetryOfferOutcome,
+        classifier_verdict_present,
+        compose_host_hold_advisory,
+        note_retry_offer,
+        read_host_hold_facts,
+    )
+
+    locator = resolve_session_workspace(workspace, payload).locator
+    facts = read_host_hold_facts(
+        locator,
+        connect=None if connect is None else cast(PrivacyConnector, connect),
+        run_async=run_async if run_async is not None else _default_runner(),
+        skip_service=skip_service,
+    )
+    session = _token_or_none(payload.get("session_id"))
+    retry_offer: RetryOfferOutcome = "unrecorded"
+    if facts.grant_confirmed and classifier_verdict_present(source, payload.get("reason")):
+        # The ledger is consulted only when a retry could actually be emitted, so a session
+        # whose first hold was unconfirmed or rule-held keeps its one retry for later.
+        retry_offer = "unrecorded" if session is None else note_retry_offer(session, _state=_state)
+    advisory = compose_host_hold_advisory(
+        facts,
+        source=source,
+        reason=payload.get("reason"),
+        retry_offer=retry_offer,
+    )
     with contextlib.suppress(Exception):
         record_hook_diagnostic(advisory.diagnostic, "PermissionDenied", _state=_state)
     return hook_io.claude_permission_denied_output(
-        advisory.additional_context,
+        advisory.explanation,
         retry=advisory.retry,
-        system_message=advisory.system_message,
     )
+
+
+def _default_runner() -> AsyncRunner:
+    import anyio
+
+    return cast(AsyncRunner, anyio.run)
 
 
 def handle_claude_observe(
@@ -4934,22 +4951,30 @@ def handle_claude_observe(
             hook_io.stdout_json({}, stdout)
             return 0
         raw_event = event_name or payload.get("hook_event_name")
-        if raw_event == "PermissionDenied" and not ordinary_profile:
+        denied_output: dict[str, JsonValue] | None = None
+        if raw_event == "PermissionDenied" and (
+            not ordinary_profile or payload.get("tool_name") in _CLAUDE_CHECK_TOOL_NAMES
+        ):
             # Not an observation of work: the host refused the call before Yoetz saw it. Retain
             # only a closed reason token; tool input, reason prose, cwd, and ids are discarded.
-            # The stdout object is Yoetz's closed advisory about its own recorded facts (#857).
-            hook_io.stdout_json(
-                _record_claude_permission_denied(
+            # The stdout object is the bounded hold advisory (issue #857), or `{}` for any other
+            # tool. Nothing here may raise past the write: a second object would corrupt stdout.
+            output: dict[str, JsonValue] = {}
+            try:
+                output = _record_claude_permission_denied(
                     payload,
                     _state=_state,
                     workspace=workspace,
                     connect=connect,
                     run_async=run_async,
                     skip_service=skip_service,
-                ),
-                stdout,
-            )
-            return 0
+                )
+            except Exception:
+                output = {}
+            if not ordinary_profile:
+                hook_io.stdout_json(output, stdout)
+                return 0
+            denied_output = output
         if type(raw_event) is not str or raw_event not in event_map:
             hook_io.stdout_json({}, stdout)
             return 0
@@ -5206,10 +5231,10 @@ def handle_claude_observe(
                 # applies to a successful callback carrying child-only transcript metadata: a
                 # success bit does not authorize parent attribution.
                 child_attribution_gap = True
-        return handle_observe(
+        result = handle_observe(
             event_name=event_map[raw_event],
             stdin_bytes=canonical_encode(structural),
-            stdout=stdout,
+            stdout=io.BytesIO() if denied_output is not None else stdout,
             workspace=workspace,
             _state=_state,
             connect=connect,
@@ -5225,6 +5250,9 @@ def handle_claude_observe(
             ),
             _content_payload=payload if ordinary_profile else None,
         )
+        if denied_output is not None:
+            hook_io.stdout_json(denied_output, stdout)
+        return result
     except BaseException:
         with contextlib.suppress(BaseException):
             hook_io.stdout_json({}, stdout)
