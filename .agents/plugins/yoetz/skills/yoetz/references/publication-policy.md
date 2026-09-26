@@ -184,8 +184,9 @@ returned `session_id` and `writer_id` on later calls. A `publish_work` preview u
 and the same `request_id` for the real append. A timeout or unknown write outcome uses the exact
 start replay branch below when it is a `start` response without route ids; otherwise use `status
 view=operation` with `filter.operation_request_id` set to the exact write request ID:
-`absent` permits one replay of the exact original body and request ID, `complete` uses the stored
-outcome without replay, and `pending` permits replay only after an exact typed continuation and
+`absent` permits one replay of the exact original body and request ID (an `absent` check page with
+an `admission` stage was refused before admission: replay after its `retry_after_ms`, at most three
+times), `complete` uses the stored outcome without replay, and `pending` permits replay only after an exact typed continuation and
 its required approval complete. A pending operation without a continuation, `quarantined`, or an
 unknown state is retained and reported rather than guessed.
 

@@ -3713,10 +3713,37 @@ class StatusSemanticProgressModel(_ClosedModel):
         return self
 
 
+class StatusCheckAdmissionModel(_ClosedModel):
+    """Why a check request id has no operation record yet (issue #838).
+
+    Present only on an ``absent`` page, and only while this service holds a live acquisition
+    reservation or a recent pre-admission refusal for the exact (writer, request) key. Every
+    field is a closed token, a count, or a service timestamp; ``elapsed_ms`` runs from
+    ``first_observed_at`` to ``observed_at``. Nothing was recorded under the request id, so the
+    exact replay after ``retry_after_ms`` is the recovery.
+    """
+
+    stage: Literal[
+        "acquiring", "capture_handoff_pending", "acquisition_contended", "import_pending"
+    ]
+    refusal_count: CanonicalUInt64Wire
+    first_observed_at: TimestampWire
+    last_observed_at: TimestampWire
+    observed_at: TimestampWire
+    elapsed_ms: CanonicalUInt64Wire
+    retry_after_ms: CanonicalUInt64Wire
+
+    @model_validator(mode="after")
+    def _validate_check_admission(self) -> StatusCheckAdmissionModel:
+        if int(self.refusal_count) == 0 and self.stage != "acquiring":
+            raise ValueError("status_check_admission_invalid")
+        return self
+
+
 class StatusOperationPageModel(_ClosedModel):
     """One request-id-keyed operation recovery page within the authenticated task."""
 
-    optional_non_null_fields = frozenset({"semantic_progress"})
+    optional_non_null_fields = frozenset({"semantic_progress", "admission"})
 
     operation_request_id: RequestIdWire
     found: bool
@@ -3733,10 +3760,15 @@ class StatusOperationPageModel(_ClosedModel):
     # Issue #571 A2: structural progress of the AI-powered review job behind a check. Omitted when
     # the operation is not a check or no durable progress was recorded for it.
     semantic_progress: StatusSemanticProgressModel | None = None
+    # Issue #838: pre-admission stage of a check request that has no operation record yet.
+    # Omitted whenever the service knows of no reservation or refusal for the exact key.
+    admission: StatusCheckAdmissionModel | None = None
     next_cursor: None = None
 
     @model_validator(mode="after")
     def _validate_operation_page(self) -> StatusOperationPageModel:
+        if self.admission is not None and (self.state != "absent" or self.found):
+            raise ValueError("status_operation_page_invalid")
         if self.semantic_progress is not None and not (
             self.operation_kind == "check" and self.state in {"pending", "complete"}
         ):
@@ -4713,6 +4745,14 @@ _STATUS_OPERATION_STRUCTURAL_POINTERS: Final = (
         "/page/accepted_events/*/ingestion_sequence",
         "/page/accepted_events/*/projection_status",
         "/page/accepted_events/*/writer_sequence",
+        # Issue #838: service-derived pre-admission stage; closed tokens, counts, and timestamps.
+        "/page/admission/elapsed_ms",
+        "/page/admission/first_observed_at",
+        "/page/admission/last_observed_at",
+        "/page/admission/observed_at",
+        "/page/admission/refusal_count",
+        "/page/admission/retry_after_ms",
+        "/page/admission/stage",
         # Nullable continuation object: a leaf when null, expands when a check is suspended.
         # Every field is service-authored, so all of it is structural.
         "/page/continuation",
@@ -5158,7 +5198,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 1162:
+    if len(result) != 1169:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 

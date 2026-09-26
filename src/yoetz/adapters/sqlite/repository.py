@@ -17,8 +17,10 @@ from yoetz.adapters.memory.ledger import (
     _AttemptState,  # pyright: ignore[reportPrivateUsage]
     _case_dependency_digest,  # pyright: ignore[reportPrivateUsage]
     build_append_operation_record,
+    check_admission_record,
     compact_status_coverage,
     load_frozen_case_from_resume,
+    note_check_admission_refusal,
     quarantine_resume_object_invalid,
 )
 from yoetz.adapters.sqlite.observation import SqliteObservationStore
@@ -67,11 +69,14 @@ from yoetz.kernel.reducers import replay
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.ids import IdPort
 from yoetz.ports.ledger import (
+    CHECK_ACQUISITION_RESERVATION_SECONDS,
     AcceptedEventSummary,
     AppendCommand,
     AppendResult,
     AppendWarning,
     AttemptOutcome,
+    CheckAdmissionRecord,
+    CheckAdmissionStage,
     CheckCommitResult,
     CheckPhase,
     CheckPolicyExecution,
@@ -95,6 +100,8 @@ from yoetz.ports.ledger import (
     SemanticJobRecord,
     SemanticProgressRecord,
     StoredProjection,
+    check_admission_refused,
+    check_admission_stage,
 )
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef, ObjectStorePort
 from yoetz.ports.runtime import OwnershipFence
@@ -335,7 +342,7 @@ class SqliteLedger:
         self._ids = ids
         self._objects = objects
         self._lock = asyncio.Lock()
-        self._state = MemoryLedgerState()
+        self._state: MemoryLedgerState = MemoryLedgerState()
         self._requires_recovery = _head(db).sequence != 0
         self._recovery_task: asyncio.Task[None] | None = None
         self._recovery_failed = False
@@ -2046,7 +2053,9 @@ class SqliteLedger:
             if pending_capture_task_id is not None:
                 pending_capture = self._pending_capture_ticket(pending_capture_task_id)
                 if pending_capture is not None:
-                    raise _public_error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+                    # Only a new check's admission passes this task id: the handoff that landed
+                    # while it staged must be in any frozen case, so admission waits for it.
+                    raise check_admission_refused(CheckAdmissionStage.CAPTURE_HANDOFF_PENDING)
             self._persist_derived_records(new_records)
             self._sync_runtime_state()
             self._db.execute("COMMIT")
@@ -2169,6 +2178,90 @@ class SqliteLedger:
         request_id: str,
         request_digest: str,
     ) -> FrozenCase | CheckCommitResult:
+        key = (writer_id, request_id)
+        try:
+            result = await self._freeze_case_unrecorded(
+                session_id, writer_id, expected_frontier, request_id, request_digest
+            )
+        except PublicOperationError as exc:
+            stage = check_admission_stage(exc)
+            if stage is not None:
+                # No await separates this from the refusal, so the stable live state is current;
+                # the oracle's own note landed in its discarded clone.
+                note_check_admission_refusal(self._state, key, stage, self._terminal_at())
+            raise
+        self._state.check_admissions.pop(key, None)
+        return result
+
+    async def lookup_check_admission(
+        self, writer_id: str, operation_id: str
+    ) -> CheckAdmissionRecord | None:
+        await self._ensure_recovered()
+        async with self._lock:
+            return check_admission_record(
+                self._state, (writer_id, operation_id), self._terminal_at()
+            )
+
+    def _merge_freeze_over_lifecycle_motion(
+        self,
+        current: MemoryLedgerState,
+        baseline: tuple[object, ...],
+        staged: MemoryLedgerState,
+        operation_key: tuple[str, str],
+    ) -> MemoryLedgerState | None:
+        """Carry one acquisition's own delta over lifecycle writes that moved no ledger record.
+
+        Staging releases the repository lock, so another check's lease renewal, phase advance,
+        or AI-powered review bookkeeping may commit meanwhile. None of that can change this case:
+        it was built from the unchanged record prefix, projection, writers, and object inventory.
+        Adopting the staged clone wholesale would overwrite those writes, and discarding the
+        admission turned them into a no-record ``OPERATION_PENDING`` (issue #838). Only this
+        key's operation row and frozen case move; any change to the case's own inputs or to this
+        key refuses as contended instead.
+        """
+
+        (
+            _records,
+            operations,
+            writers,
+            projection,
+            frozen_cases,
+            check_results,
+            check_errors,
+            *_rest,
+        ) = baseline
+        operations_before = cast(dict[tuple[str, str], object], operations)
+        frozen_before = cast(dict[tuple[str, str], object], frozen_cases)
+        results_before = cast(dict[tuple[str, str], object], check_results)
+        errors_before = cast(dict[tuple[str, str], object], check_errors)
+        object_refs_before = baseline[11]
+        if (
+            current.projection is not projection
+            or current.writers != writers
+            or current.object_refs != object_refs_before
+            or current.operations.get(operation_key) is not operations_before.get(operation_key)
+            or current.frozen_cases.get(operation_key) is not frozen_before.get(operation_key)
+            or current.check_results.get(operation_key) is not results_before.get(operation_key)
+            or current.check_errors.get(operation_key) is not errors_before.get(operation_key)
+        ):
+            return None
+        admitted = staged.operations.get(operation_key)
+        case = staged.frozen_cases.get(operation_key)
+        if admitted is None or case is None:
+            return None
+        merged = self._clone_state()
+        merged.operations[operation_key] = admitted
+        merged.frozen_cases[operation_key] = case
+        return merged
+
+    async def _freeze_case_unrecorded(
+        self,
+        session_id: str,
+        writer_id: str,
+        expected_frontier: int | None,
+        request_id: str,
+        request_digest: str,
+    ) -> FrozenCase | CheckCommitResult:
         await self._ensure_recovered()
         async with self._lock:
             operation_key = (writer_id, request_id)
@@ -2182,7 +2275,7 @@ class SqliteLedger:
             if new_freeze:
                 pending_capture = self._pending_capture_ticket(self._task_id)
                 if pending_capture is not None:
-                    raise _public_error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+                    raise check_admission_refused(CheckAdmissionStage.CAPTURE_HANDOFF_PENDING)
                 now = self._terminal_at()
                 reservations = cast(dict[tuple[str, str], object], prior.check_reservations)
                 existing_reservation = reservations.get(operation_key)
@@ -2191,13 +2284,15 @@ class SqliteLedger:
                 ):
                     raise _public_error(PublicErrorCode.STORAGE_CORRUPT)
                 if existing_reservation is not None and existing_reservation.expires_at > now:
-                    raise _public_error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+                    raise check_admission_refused(CheckAdmissionStage.ACQUIRING)
 
                 # Install the transient barrier in the live state before releasing the repository
                 # lock.  The clone deliberately precedes this write: the oracle must create its
                 # own reservation and later remove it, while concurrent append calls inspect the
                 # live reservation and either defer observation or advance the real frontier.
-                reservation = _FreezeReservation(session_id, now + timedelta(seconds=60))
+                reservation = _FreezeReservation(
+                    session_id, now + timedelta(seconds=CHECK_ACQUISITION_RESERVATION_SECONDS)
+                )
                 reservations[operation_key] = reservation
 
         try:
@@ -2221,24 +2316,45 @@ class SqliteLedger:
                 current = self._state
                 reservations = cast(dict[tuple[str, str], object], current.check_reservations)
                 if reservation is not None and reservations.get(operation_key) is not reservation:
-                    raise _public_error(PublicErrorCode.OPERATION_PENDING, retryable=True)
-
-                if self._freeze_state_snapshot(current) != baseline:
-                    if reservation is not None and reservations.get(operation_key) is reservation:
-                        reservations.pop(operation_key, None)
-                    # An append moved the ledger head, so retain the adapter-parity conflict
-                    # details. Other concurrent lifecycle mutations are retryable but do not
-                    # change the event frontier and must not be misreported as one.
-                    if current.records is not baseline[0]:
-                        raise _frontier_conflict(
-                            Frontier(current.projection.frontier, current.projection.head_digest)
-                        )
-                    raise _public_error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+                    # This acquisition stalled past its reservation. A successor holding the key
+                    # is still acquiring; otherwise nothing durable was staged under it.
+                    raise check_admission_refused(
+                        CheckAdmissionStage.ACQUIRING
+                        if reservations.get(operation_key) is not None
+                        else CheckAdmissionStage.ACQUISITION_CONTENDED
+                    )
 
                 if type(result) is not FrozenCase:
+                    # A completed same-request replay is immutable and changed no state, so
+                    # concurrent motion cannot invalidate it.
                     if reservation is not None and reservations.get(operation_key) is reservation:
                         reservations.pop(operation_key, None)
                     return result
+
+                if self._freeze_state_snapshot(current) != baseline:
+                    # An append moved the ledger head, so retain the adapter-parity conflict
+                    # details. Other concurrent lifecycle mutations do not change the event
+                    # frontier and must not be misreported as one.
+                    if current.records is not baseline[0]:
+                        if (
+                            reservation is not None
+                            and reservations.get(operation_key) is reservation
+                        ):
+                            reservations.pop(operation_key, None)
+                        raise _frontier_conflict(
+                            Frontier(current.projection.frontier, current.projection.head_digest)
+                        )
+                    merged = self._merge_freeze_over_lifecycle_motion(
+                        current, baseline, clone, operation_key
+                    )
+                    if merged is None:
+                        if (
+                            reservation is not None
+                            and reservations.get(operation_key) is reservation
+                        ):
+                            reservations.pop(operation_key, None)
+                        raise check_admission_refused(CheckAdmissionStage.ACQUISITION_CONTENDED)
+                    clone = merged
 
                 # Keep reservations installed by another acquisition while adopting the durable
                 # clone. The local token is removed only by its owner, and this merge also avoids
