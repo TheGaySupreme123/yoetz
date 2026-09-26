@@ -4615,8 +4615,10 @@ stamps its closed role (`hook`, `service`, `sweep`, `coordinator`, `spool_replay
 its store phase (a code identifier) and its monotonic start into the lock file and clears it on
 release; a timed-out waiter raises `ObservationStoreLockTimeout` (a `TimeoutError` whose text stays
 `observation_store_lock_timeout`) carrying the scope (`thread` or `process`), the holder's role,
-phase and hold time, and whether an in-process holder was itself still queueing for the flock. Hooks
-record those facts, and holds of one second or more, as payload-free `store_lock` rows
+phase and hold time, and whether an in-process holder was itself still queueing for the flock.
+The exception is defined in the lightweight `yoetz.ports.observation_errors` boundary and
+re-exported by `yoetz.ports.observation` so native hooks do not load service policy or wire-model
+dependencies. Hooks record those facts, and holds of one second or more, as payload-free `store_lock` rows
 (`store_lock_timeout`, `store_lock_long_hold`) listed under `store_lock_events` in `observe status`
 hook diagnostics; the service records them as `observation.store_lock.<role>` diagnostics.
 Hook diagnostic readers discard malformed lock rows, including non-string role and scope fields.

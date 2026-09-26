@@ -1046,7 +1046,9 @@ async def test_late_result_during_bounded_cancel_window_uses_tombstone_first() -
     with pytest.raises(ControlError, match="request_timeout"):
         await timed_out
 
-    healthy = asyncio.create_task(client.receipt(_receipt_request(25), deadline_ms=500))
+    # This call checks that retiring the late result preserved correlation. The reply
+    # below drives completion; an unrelated 500 ms deadline only races CI scheduling.
+    healthy = asyncio.create_task(client.receipt(_receipt_request(25)))
     await _wait_for_sent(stream, 2)
     second = decode_control_frame(stream.sent[1])
     await stream.feed(

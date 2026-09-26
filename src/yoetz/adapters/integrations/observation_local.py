@@ -124,7 +124,7 @@ from yoetz.domain.values import (
     validate_sha256_digest,
 )
 from yoetz.ports.integrations import YOETZ_WORKFLOW_TOOL_NAMES, observation_pairing_contract
-from yoetz.ports.observation import ObservationStoreLockTimeout
+from yoetz.ports.observation_errors import ObservationStoreLockTimeout
 from yoetz.protocol.canonical import (
     MAX_JSON_DEPTH,
     CanonicalFragment,
