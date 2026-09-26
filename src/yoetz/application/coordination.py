@@ -1822,26 +1822,31 @@ class CoordinationRuntime:
                 latest[identity] = payload
         superseded_generations: dict[tuple[str, int], bool] = {}
         recorded: list[str] = []
-        for identity in sorted(latest, key=lambda item: (item[0].encode(), item[4].encode())):
+        for identity in sorted(
+            latest.keys() | closed, key=lambda item: (item[0].encode(), item[4].encode())
+        ):
             detection, project, generation, recipient, _counterpart = identity
-            if identity in closed or (detection, project, generation, recipient) not in declared:
+            if (detection, project, generation, recipient) not in declared:
                 continue
-            key = (project, generation)
-            if key not in superseded_generations:
-                superseded_generations[key] = await coordination_generation_superseded(
-                    self.projects, project, generation
+            if identity not in closed:
+                key = (project, generation)
+                if key not in superseded_generations:
+                    superseded_generations[key] = await coordination_generation_superseded(
+                        self.projects, project, generation
+                    )
+                if not superseded_generations[key]:
+                    continue
+                marker = await _awaitable(
+                    cast(
+                        Callable[[CoordinationContextRecordedPayload], _AwaitableValue[str | None]],
+                        record_superseded,
+                    )(latest[identity])
                 )
-            if not superseded_generations[key]:
-                continue
-            marker = await _awaitable(
-                cast(
-                    Callable[[CoordinationContextRecordedPayload], _AwaitableValue[str | None]],
-                    record_superseded,
-                )(latest[identity])
-            )
-            if marker is None:
-                continue
-            recorded.append(marker)
+                if marker is None:
+                    continue
+                recorded.append(marker)
+            # The recipient marker and detector invalidation have separate durable commits.
+            # A previous attempt may have closed the ledger but failed this store transition.
             stored = await self.detector.store.get_detection(detection)
             if stored is not None and stored.generation_valid:
                 await self.detector.store.replace_detection(replace(stored, generation_valid=False))

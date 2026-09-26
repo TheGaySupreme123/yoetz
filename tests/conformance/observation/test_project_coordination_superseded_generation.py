@@ -932,3 +932,47 @@ async def test_direct_reconciliation_is_idempotent_and_leaves_current_generation
         assert isinstance(findings_view.page, StatusFindingsPageModel)
         rows = {item.finding_id: item for item in findings_view.page.items}
         assert rows[stranded.finding_id].resolved is True
+
+
+@pytest.mark.parametrize("failure_stage", ("get_detection", "replace_detection"))
+async def test_committed_closure_retries_detector_invalidation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_stage: str
+) -> None:
+    """A committed recipient marker is not proof the detector update also committed."""
+
+    workspace = (tmp_path / "workspace").resolve()
+    workspace.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(workspace)], check=True, capture_output=True)
+    async with multi_agent_service(tmp_path / "state") as service:
+        tasks = await _start_pair(service, workspace)
+        detection, _obligation, _finding = await _declared_overlap(service, tasks, None)
+        coordination = _coordination(service)
+        store = coordination.detector.store
+        await _supersede(service, "opt_out", tasks, detection.project_id, workspace)
+        original = getattr(store, failure_stage)
+
+        async def fail_after_marker(*_args: object, **_kwargs: object) -> object:
+            raise OSError("synthetic detector persistence failure")
+
+        monkeypatch.setattr(store, failure_stage, fail_after_marker)
+        with pytest.raises(OSError, match="synthetic detector persistence failure"):
+            await coordination.retire_superseded_contexts(tasks[0].task_id)
+        monkeypatch.setattr(store, failure_stage, original)
+        closures = [
+            event_id
+            for event_id, payload in await _ledger_contexts(service, tasks[0])
+            if CoordinationGapCode.REVOKED in payload.gap_codes
+        ]
+        assert len(closures) == 1
+        stored = await store.get_detection(detection.detection_id)
+        assert stored is not None and stored.generation_valid
+
+        # Retry the missing store transition without appending another closure.
+        assert await coordination.retire_superseded_contexts(tasks[0].task_id) == ()
+        stored = await store.get_detection(detection.detection_id)
+        assert stored is not None and not stored.generation_valid
+        assert [
+            event_id
+            for event_id, payload in await _ledger_contexts(service, tasks[0])
+            if CoordinationGapCode.REVOKED in payload.gap_codes
+        ] == closures

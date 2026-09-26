@@ -2058,9 +2058,11 @@ that recipient's own ledger one observation-authored, engine-derived
 `gap_codes=["revoked"]`, empty `resource_identities`, `resource_count="0"`,
 `source_attributable_paths=false`, and no `detail_ref`. Its event and operation identities follow
 the ordinary context rule, so a retry replays. A replayed check operation skips this reconciliation,
-and a reconciliation failure leaves the ledger unchanged for the next check. The closure performs no
-project admission, disclosure, or delivery, and needs no current consent, grant, or membership. The
-retired detector row becomes `generation_valid=false`. In a frozen check, a delivery with a
+and a failure before the closure append leaves the ledger unchanged for the next check. The closure
+performs no project admission, disclosure, or delivery, and needs no current consent, grant, or
+membership. The retired detector row becomes `generation_valid=false` in a separate durable
+transition. If that transition fails after the closure commits, the next reconciliation retries it
+from the recorded closure without appending a duplicate marker. In a frozen check, a delivery with a
 `revoked` closure derives no `coordination_overlap` finding in any scope. The earlier finding
 resolves under the ordinary qualifying-check rule, and its status and receipt resolution explanation
 names the superseded generation instead of a disposition. A `coordination_obligation_declared` or
