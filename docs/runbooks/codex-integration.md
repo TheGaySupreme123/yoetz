@@ -1307,8 +1307,9 @@ ticket it leaves behind, and the same READY maintenance pass retires any handoff
 seconds old that no queued row can deliver, through the catalog route of the task that owns it
 rather than a session mapping. It reports `capture_handoff_retired` or, when an owning bundle cannot
 be read, `capture_handoff_unavailable` and retries. A handoff whose row is still queued keeps its
-pressure. `observe status --json` names each retirement under `capture_handoff_retirements` (stage,
-reason, ticket state, quarantine reason, and age) and records `content_capture_unavailable`,
+pressure. `observe status --json` names each retirement under `capture_handoff_retirements`
+(ticket identity, stage, reason, ticket state, quarantine reason, and age) and records
+`content_capture_unavailable`,
 because the staged bytes are not attached. In a workspace shared with Claude Code or Cursor, their
 hooks deliver queued Codex rows without their own content profile, so a Codex row is no longer
 refused as `content_capture_profile_mismatch`.

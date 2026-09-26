@@ -518,7 +518,11 @@ limits remain in the host integration runbooks.
     content profile only with rows of its own host; another host's row carries no profile and its
     ticket supplies it, so a Codex row drained by a Claude Code or Cursor hook is no longer refused
     as a terminal profile mismatch. Each such retirement records `content_capture_unavailable` and
-    a bounded, payload-free local entry naming its stage, reason, ticket state, and age.
+    a bounded, payload-free local entry naming its ticket identity, stage, reason, ticket state, and
+    age. That account commits before tombstoning the ticket or releasing its reservation; a failed
+    or cancelled account leaves the handoff retryable, and a replay of the same ticket identity is
+    idempotent. Active reservations pin their accounted identities within the outstanding-ticket
+    bound, so repeated retirement failures cannot evict a replay key.
 
     At most 512 `staging` or `pending` tickets are outstanding per workspace. Revoked tickets are
     excluded from that quota but retained as metadata-only tombstones to prevent reuse after an

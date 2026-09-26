@@ -130,7 +130,18 @@ authority no longer backs it or no outbox row or selected input can still delive
 ordering (structural rows read before tickets, under the capture lock) cannot retire a handoff that
 is about to be consumed. Genuinely pending handoffs keep their pressure: this does not relax the
 pending-age limit, raise a capture ceiling, or clear pressure directly. Once the stranded age is
-gone, hard admission reopens at once and optional detail follows the unchanged recovery dwell.
+gone, hard admission reopens at once and optional detail follows the unchanged recovery dwell. The
+coordinator rotates a bounded per-workspace cursor through that deterministic candidate order after
+each attempted batch, so an unavailable prefix cannot starve a later route. The cursor is only a
+scheduling hint and does not change route, task, or capture authority.
+
+Retirement accounting is a durable boundary before destructive cleanup. The local
+`content_capture_unavailable` marker and payload-free retirement record commit under the stable
+ticket identity before the ticket is tombstoned or its central reservation is released. A failure
+or cancellation leaves the handoff active and retryable. A retry reuses the ticket identity and
+does not duplicate the loss count or diagnostic when accounting already committed before the
+failure. Replay identities for tickets with active reservations are pinned within the bounded
+outstanding-ticket set, so repeated retirement failures cannot evict an accounted handoff's key.
 
 A sweep rotates through at most four workspace candidates with a shared five-second cooperative
 recovery budget inside its ordinary sweep budget. A workspace turn rotates through at most eight

@@ -471,9 +471,12 @@ requirements.
 A handoff that its structural row can no longer consume (the row was already acknowledged,
 quarantined, or refused) is retired by that row's own delivery, by the READY maintenance sweep once
 it is 30 seconds old, or by a new CHECK's preflight, instead of holding shared oldest-age pressure
-at the hard limit (#836). `observe status --json` names each retirement under
-`capture_handoff_retirements` and records `content_capture_unavailable`. A handoff whose row is
-still queued keeps counting toward pending age. This hook sends its Claude Code content profile only with
+at the hard limit (#836). Its payload-free retirement account and
+`content_capture_unavailable` marker commit before the ticket is tombstoned or its reservation is
+released; a failed or cancelled account leaves the handoff retryable, and a replay is idempotent by
+ticket identity. `observe status --json` names each retirement under
+`capture_handoff_retirements`. A handoff whose row is still queued keeps counting toward pending age.
+This hook sends its Claude Code content profile only with
 Claude Code rows; a queued Codex or Cursor row drained from the same workspace carries no profile, so
 it is not refused as `content_capture_profile_mismatch`.
 

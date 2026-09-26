@@ -4160,7 +4160,11 @@ old and has no deliverable row. The ordering is sound under the capture lock: no
 staged during the pass, and a delivery deletes its ticket before the drain acknowledges or
 quarantines the row. Each visited task's backlog is republished, which also releases a reservation
 that outlived its completed or tombstoned ticket. A handoff kept by current authority and a queued
-row is retained and still counts toward the unchanged pending-age limit.
+row is retained and still counts toward the unchanged pending-age limit. The coordinator keeps a
+bounded per-workspace cursor after the last attempted task route; each turn rotates the deterministic
+oldest-first candidate list from that cursor before taking eight routes. An unavailable prefix
+therefore cannot starve a later owning route, and the cursor changes scheduling only, never task or
+capture authority.
 
 The closed internal recovery outcomes are `capture_inventory_recovered`,
 `capture_inventory_mapping_missing`, `capture_inventory_route_unavailable`,
@@ -4176,14 +4180,20 @@ The shared writable catalog connection never crosses to that worker.
 Every stranded-handoff retirement is also named locally. `record_capture_handoff_retirement`
 records `content_capture_unavailable`, increments `capture_handoff_retired_count`, and keeps the
 last 16 entries in the owner-private workspace state as `capture_handoff_retirements`. An entry
-holds `stage` (`structural_committed`, `structural_refused`, `sweep`, or `check_preflight`),
+holds the opaque `ticket_id`, `stage` (`structural_committed`, `structural_refused`, `sweep`, or
+`check_preflight`),
 `reason` (`content_not_admitted`, `terminal_refusal`, `structural_row_absent`,
 `structural_row_quarantined`, `authority_absent`, `authority_inactive`, `runtime_disabled`,
 `authority_generation_changed`, or `profile_unselected`), `ticket_state` (`staging` or `pending`),
 `source`, `task_id`, `age_ms`, the closed `quarantine_reason` of a quarantined row or null, and
 `retired_at`. It carries no source identity, content, path, or exception text. `yoetz observe
 status` reports the account as `capture_handoff_retirements` (`retired_count` and `recent`); it is
-local-only and outside the frozen control-result schema, like `summary_refusals`.
+local-only and outside the frozen control-result schema, like `summary_refusals`. The account is
+committed before the ticket is tombstoned or its central reservation is released. Its ticket
+identity makes a replay after cancellation, crash, or a later store failure idempotent; if the
+account cannot be committed, the ticket and reservation remain active for retry. Accounted
+identities whose reservations are still active are pinned within the outstanding-reservation bound,
+so repeated retirement failures cannot evict their replay key and inflate the loss count.
 
 `LocalObservationStore.pending_selection_losses(workspace)` returns at most 64 retained,
 fully validated and routed lanes; `selection_loss_workspaces(task_id)` filters the returned

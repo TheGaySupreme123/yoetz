@@ -1248,6 +1248,10 @@ class _WorkspaceState:
     # holding capture pressure. The count covers entries that rolled off.
     capture_handoff_retirements: tuple[JsonObject, ...] = ()
     capture_handoff_retired_count: int = 0
+    # Ticket identities stay bounded by the active-ticket ceiling so an
+    # accounting commit can be replayed after a crash between recording and
+    # ticket retirement without incrementing the loss count twice.
+    capture_handoff_retirement_ids: tuple[str, ...] = ()
     # (codex_session_id, envelope, reason, quarantined_at). The timestamp is
     # store-authored at quarantine time so the age bound measures time *in*
     # quarantine, never the (possibly much older) envelope receipt time.
@@ -1597,6 +1601,7 @@ def _capture_handoff_retirement_valid(entry: Mapping[str, JsonValue]) -> bool:
     """Keep only closed-vocabulary, payload-free retirement diagnostics."""
 
     quarantine_reason = entry.get("quarantine_reason")
+    ticket_id = entry.get("ticket_id")
     age_ms = entry.get("age_ms")
     retired_at = entry.get("retired_at")
     try:
@@ -1605,6 +1610,12 @@ def _capture_handoff_retirement_valid(entry: Mapping[str, JsonValue]) -> bool:
         Timestamp(retired_at)
     except ProtocolValueError, TypeError, ValueError:
         return False
+    if ticket_id is not None:
+        try:
+            if type(ticket_id) is not str or validate_sha256_digest(ticket_id) != ticket_id:
+                return False
+        except ProtocolValueError, TypeError, ValueError:
+            return False
     return (
         entry.get("stage") in _CAPTURE_HANDOFF_STAGES
         and entry.get("reason") in _CAPTURE_HANDOFF_REASONS
@@ -1622,6 +1633,24 @@ def _capture_handoff_retirement_valid(entry: Mapping[str, JsonValue]) -> bool:
             )
         )
     )
+
+
+def _capture_handoff_retirement_ids_from_json(raw: object) -> tuple[str, ...]:
+    """Decode bounded ticket identities used to make retirement accounting idempotent."""
+
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    identities: list[str] = []
+    for item in cast(Sequence[object], raw)[-_MAX_CAPTURE_TICKET_RESERVATIONS:]:
+        if type(item) is not str:
+            continue
+        try:
+            ticket_id = validate_sha256_digest(item)
+        except ProtocolValueError, TypeError, ValueError:
+            continue
+        if ticket_id not in identities:
+            identities.append(ticket_id)
+    return tuple(identities)
 
 
 def _capture_handoff_retirements_from_json(raw: object) -> tuple[JsonObject, ...]:
@@ -1875,6 +1904,7 @@ def _copy_state(state: _WorkspaceState) -> _WorkspaceState:
         capture_reservations=dict(state.capture_reservations or {}),
         capture_backlog_scope_unknown=state.capture_backlog_scope_unknown,
         capture_reservation_bootstrap=state.capture_reservation_bootstrap,
+        capture_handoff_retirement_ids=state.capture_handoff_retirement_ids,
         pressure_snapshots=dict(state.pressure_snapshots or {}),
     )
 
@@ -6254,6 +6284,7 @@ class LocalObservationStore:
         self,
         workspace: str,
         *,
+        ticket_id: str,
         stage: CaptureHandoffRetirementStage,
         reason: CaptureHandoffRetirementReason,
         ticket_state: str,
@@ -6266,13 +6297,17 @@ class LocalObservationStore:
 
         The staged content of a retired handoff will never be attached to its
         structural observation, so ``content_capture_unavailable`` is recorded.
-        The bounded entry names the stage, ticket state, and reason; it never
-        carries a source identity, content, path, or exception text.
+        The bounded entry names the ticket identity, stage, ticket state, and
+        reason; it never carries a source identity, content, path, or exception
+        text. Ticket identity makes the accounting commit safe to replay before
+        the destructive ticket retirement.
         """
 
         workspace = validate_commitment(workspace)
         if (
-            type(stage) is not CaptureHandoffRetirementStage
+            type(ticket_id) is not str
+            or validate_sha256_digest(ticket_id) != ticket_id
+            or type(stage) is not CaptureHandoffRetirementStage
             or type(reason) is not CaptureHandoffRetirementReason
             or ticket_state not in {"staging", "pending"}
             or type(source) is not ObservationSource
@@ -6294,6 +6329,7 @@ class LocalObservationStore:
             {
                 "stage": stage.value,
                 "reason": reason.value,
+                "ticket_id": ticket_id,
                 "ticket_state": ticket_state,
                 "source": source.value,
                 "task_id": task_id,
@@ -6304,6 +6340,8 @@ class LocalObservationStore:
         )
         with self._lock:
             state = self._load(workspace)
+            if ticket_id in state.capture_handoff_retirement_ids:
+                return
             self._note_gap_state(state, ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
             state.capture_handoff_retirements = (
                 *state.capture_handoff_retirements,
@@ -6312,6 +6350,17 @@ class LocalObservationStore:
             state.capture_handoff_retired_count = min(
                 _MAX_SAFE_INTEGER, state.capture_handoff_retired_count + 1
             )
+            retirement_ids = [*state.capture_handoff_retirement_ids, ticket_id]
+            # Keep every accounted identity whose reservation is still active:
+            # if tombstoning keeps failing, a long stream of other retirements
+            # must not evict this retry key and inflate the loss count later.
+            pinned = {
+                reservation.ticket_id for reservation in (state.capture_reservations or {}).values()
+            }
+            pinned_ids = [item for item in retirement_ids if item in pinned]
+            unpinned_ids = [item for item in retirement_ids if item not in pinned]
+            available = max(0, _MAX_CAPTURE_TICKET_RESERVATIONS - len(pinned_ids))
+            state.capture_handoff_retirement_ids = tuple(pinned_ids + unpinned_ids[-available:])
             self._save(workspace, state)
 
     def capture_handoff_retirements(self, workspace: str) -> JsonObject:
@@ -9795,6 +9844,8 @@ class LocalObservationStore:
         if state.capture_handoff_retirements or state.capture_handoff_retired_count:
             payload["capture_handoff_retirements"] = state.capture_handoff_retirements
             payload["capture_handoff_retired_count"] = state.capture_handoff_retired_count
+        if state.capture_handoff_retirement_ids:
+            payload["capture_handoff_retirement_ids"] = state.capture_handoff_retirement_ids
         if state.pressure_snapshots:
             payload["pressure_snapshots"] = _pressure_snapshots_to_json(state.pressure_snapshots)
         return payload
@@ -10539,6 +10590,9 @@ class LocalObservationStore:
                 raw.get("capture_handoff_retirements")
             ),
             capture_handoff_retired_count=_bounded_count(raw.get("capture_handoff_retired_count")),
+            capture_handoff_retirement_ids=_capture_handoff_retirement_ids_from_json(
+                raw.get("capture_handoff_retirement_ids")
+            ),
             session_workspaces=session_workspaces,
             cursors=cursors,
             dedup=set(dedup_order),

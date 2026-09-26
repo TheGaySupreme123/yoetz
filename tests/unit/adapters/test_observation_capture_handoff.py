@@ -208,8 +208,10 @@ def test_retirement_account_is_bounded_payload_free_and_durable(tmp_path: Path) 
     assert store.capture_handoff_retirements(workspace) == {"retired_count": 0, "recent": ()}
 
     for index in range(20):
+        ticket_id = "sha256:" + format(index, "064x")
         store.record_capture_handoff_retirement(
             workspace,
+            ticket_id=ticket_id,
             stage=CaptureHandoffRetirementStage.SWEEP,
             reason=CaptureHandoffRetirementReason.STRUCTURAL_ROW_QUARANTINED,
             ticket_state="pending",
@@ -226,6 +228,7 @@ def test_retirement_account_is_bounded_payload_free_and_durable(tmp_path: Path) 
     assert recent[-1] == {
         "stage": "sweep",
         "reason": "structural_row_quarantined",
+        "ticket_id": "sha256:" + format(19, "064x"),
         "ticket_state": "pending",
         "source": "codex_hook",
         "task_id": _TASK,
@@ -245,6 +248,7 @@ def test_retirement_account_is_bounded_payload_free_and_durable(tmp_path: Path) 
         {"quarantine_reason": "Not Closed"},
     ):
         arguments: dict[str, object] = {
+            "ticket_id": _TICKET,
             "stage": CaptureHandoffRetirementStage.SWEEP,
             "reason": CaptureHandoffRetirementReason.STRUCTURAL_ROW_ABSENT,
             "ticket_state": "pending",
@@ -262,6 +266,7 @@ def test_malformed_persisted_retirements_are_dropped(tmp_path: Path) -> None:
     store, workspace = _store(tmp_path, wall)
     store.record_capture_handoff_retirement(
         workspace,
+        ticket_id=_TICKET,
         stage=CaptureHandoffRetirementStage.CHECK_PREFLIGHT,
         reason=CaptureHandoffRetirementReason.STRUCTURAL_ROW_ABSENT,
         ticket_state="staging",
@@ -291,6 +296,7 @@ def test_recording_a_retirement_records_the_honest_content_gap(tmp_path: Path) -
     store, workspace = _store(tmp_path, wall)
     store.record_capture_handoff_retirement(
         workspace,
+        ticket_id=_TICKET,
         stage=CaptureHandoffRetirementStage.STRUCTURAL_COMMITTED,
         reason=CaptureHandoffRetirementReason.CONTENT_NOT_ADMITTED,
         ticket_state="pending",
@@ -302,3 +308,63 @@ def test_recording_a_retirement_records_the_honest_content_gap(tmp_path: Path) -
         state = store._load(workspace)  # pyright: ignore[reportPrivateUsage]
         assert state.gaps is not None
         assert ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value in state.gaps
+
+
+def test_retirement_account_replay_is_idempotent_by_ticket(tmp_path: Path) -> None:
+    wall = _Wall()
+    store, workspace = _store(tmp_path, wall)
+
+    def record(ticket_id: str, reason: CaptureHandoffRetirementReason) -> None:
+        store.record_capture_handoff_retirement(
+            workspace,
+            ticket_id=ticket_id,
+            stage=CaptureHandoffRetirementStage.SWEEP,
+            reason=reason,
+            ticket_state="pending",
+            source=ObservationSource.CLAUDE_HOOK,
+            task_id=_TASK,
+            age_ms=30_000,
+        )
+
+    record(_TICKET, CaptureHandoffRetirementReason.STRUCTURAL_ROW_ABSENT)
+    # A retry after the ticket mutation failed must not add a second loss or
+    # increment the retirement count again.
+    record(_TICKET, CaptureHandoffRetirementReason.TERMINAL_REFUSAL)
+    account = store.capture_handoff_retirements(workspace)
+    assert account["retired_count"] == 1
+    assert len(cast(tuple[Mapping[str, object], ...], account["recent"])) == 1
+
+
+def test_active_reservation_pins_retirement_replay_identity(tmp_path: Path) -> None:
+    wall = _Wall()
+    store, workspace = _store(tmp_path, wall)
+    store.set_capture_reservation_bootstrap_required(True)
+    assert store.bootstrap_capture_reservations(
+        workspace, {_TASK: ObservationCaptureBacklog(0, 0, None)}
+    )
+    store.reserve_capture_ticket(workspace, _TICKET, _TASK, 144)
+
+    def record(ticket_id: str) -> None:
+        store.record_capture_handoff_retirement(
+            workspace,
+            ticket_id=ticket_id,
+            stage=CaptureHandoffRetirementStage.SWEEP,
+            reason=CaptureHandoffRetirementReason.STRUCTURAL_ROW_ABSENT,
+            ticket_state="pending",
+            source=ObservationSource.CLAUDE_HOOK,
+            task_id=_TASK,
+            age_ms=30_000,
+        )
+
+    record(_TICKET)
+    for index in range(512):
+        record("sha256:" + format(index + 1, "064x"))
+
+    # The active reservation pins its accounted identity even after the
+    # bounded history has received more than 512 other retirements.
+    record(_TICKET)
+    with store._lock:  # pyright: ignore[reportPrivateUsage]
+        state = store._load(workspace)  # pyright: ignore[reportPrivateUsage]
+        assert _TICKET in state.capture_handoff_retirement_ids
+        assert len(state.capture_handoff_retirement_ids) <= 512
+        assert state.capture_handoff_retired_count == 513

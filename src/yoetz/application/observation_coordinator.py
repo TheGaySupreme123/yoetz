@@ -221,8 +221,9 @@ _CAPTURED_CONTENT_MEDIA_TYPE: Final = "application/vnd.yoetz.observation-content
 # actual manifest-byte check at its durable boundary.
 _MAX_CAPTURE_CONTENT_BYTES: Final = 128 * 1024 * 1024
 _MAX_CAPTURE_BOOTSTRAP_WORKSPACES: Final = 256
-# One maintenance turn opens at most this many task routes for aged handoffs,
-# oldest first; the next sweep continues with any that remain (#836).
+# One maintenance turn opens at most this many task routes for aged handoffs.
+# A bounded cursor rotates through the deterministic oldest-first candidate list
+# so unavailable early routes cannot starve later ones (#836).
 _MAX_CAPTURE_HANDOFF_TASKS_PER_TURN: Final = 8
 _CAPTURE_TICKET_RETRYABLE_REJECTION_REASONS: Final = frozenset(
     {
@@ -813,6 +814,9 @@ class ObservationCoordinator:
         default_factory=lambda: dict[str, str](), init=False, repr=False
     )
     _selection_loss_after: dict[str, str] = field(
+        default_factory=lambda: dict[str, str](), init=False, repr=False
+    )
+    _capture_handoff_after: dict[str, str] = field(
         default_factory=lambda: dict[str, str](), init=False, repr=False
     )
     _capture_bootstrap_verified_workspaces: set[str] = field(
@@ -1507,6 +1511,30 @@ class ObservationCoordinator:
             return ()
         return cast(tuple[str, ...], raw)
 
+    def _select_capture_handoff_candidates(
+        self, workspace: str, candidates: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        """Rotate bounded maintenance work past the last attempted task route."""
+
+        if not candidates:
+            self._capture_handoff_after.pop(workspace, None)
+            return ()
+        after = self._capture_handoff_after.get(workspace)
+        start = 0
+        if after is not None:
+            try:
+                start = (candidates.index(after) + 1) % len(candidates)
+            except ValueError:
+                # A retired route disappearing is progress; restart from the
+                # current authority-ordered list without inventing a route.
+                start = 0
+        ordered = candidates[start:] + candidates[:start]
+        selected = ordered[:_MAX_CAPTURE_HANDOFF_TASKS_PER_TURN]
+        if workspace not in self._capture_handoff_after and len(self._capture_handoff_after) >= 256:
+            self._capture_handoff_after.pop(next(iter(self._capture_handoff_after)))
+        self._capture_handoff_after[workspace] = selected[-1]
+        return selected
+
     def _capture_handoff_age_ms(self, ticket: ObservationCaptureTicket) -> int:
         """Age a durable ticket against the service clock; unknown clocks read as fresh."""
 
@@ -1527,17 +1555,24 @@ class ObservationCoordinator:
         stage: CaptureHandoffRetirementStage,
         reason: CaptureHandoffRetirementReason,
         quarantine_reason: str | None = None,
-    ) -> None:
-        """Name the stage and reason of one retirement; accounting never fails ingest."""
+    ) -> bool:
+        """Durably account for one retirement before its ticket is destroyed.
+
+        The local account is keyed by the immutable ticket identity, so a
+        cancellation or crash after this write but before ticket retirement
+        can safely replay the accounting without duplicating the loss marker.
+        A failed account leaves the ticket active for a later retry.
+        """
 
         recorder = getattr(self.local, "record_capture_handoff_retirement", None)
         if not callable(recorder) or ticket.state not in {"staging", "pending"}:
-            return
+            return False
         try:
             await self._local(
                 partial(
                     recorder,
                     workspace,
+                    ticket_id=observation_capture_ticket_id(ticket),
                     stage=stage,
                     reason=reason,
                     ticket_state=ticket.state,
@@ -1553,6 +1588,8 @@ class ObservationCoordinator:
                 component="application.observation_coordinator",
                 operation="capture_handoff_retirement_record_failed",
             )
+            return False
+        return True
 
     async def _retire_stranded_capture_handoff(
         self,
@@ -1595,10 +1632,11 @@ class ObservationCoordinator:
                     or ticket.cursor != envelope.cursor
                 ):
                     return
-                await self._retire_capture_ticket(workspace, runtime, store, ticket)
-                await self._record_capture_handoff_retirement(
+                if not await self._record_capture_handoff_retirement(
                     workspace, ticket, stage=stage, reason=reason
-                )
+                ):
+                    return
+                await self._retire_capture_ticket(workspace, runtime, store, ticket)
         except Exception as exc:
             record_unexpected_exception_without_raising(
                 exc,
@@ -1684,14 +1722,15 @@ class ObservationCoordinator:
             if decision is None:
                 continue
             reason, quarantine_reason = decision
-            await self._retire_capture_ticket(current_workspace, runtime, store, ticket)
-            await self._record_capture_handoff_retirement(
+            if not await self._record_capture_handoff_retirement(
                 current_workspace,
                 ticket,
                 stage=stage,
                 reason=reason,
                 quarantine_reason=quarantine_reason,
-            )
+            ):
+                continue
+            await self._retire_capture_ticket(current_workspace, runtime, store, ticket)
             retired += 1
         for current_workspace in sorted(structural_states, key=str.encode):
             await self._publish_capture_backlog(current_workspace, runtime, store)
@@ -1730,13 +1769,12 @@ class ObservationCoordinator:
         that turn reports no outcome.
         """
 
-        task_ids = (await self._capture_handoff_candidates(workspace))[
-            :_MAX_CAPTURE_HANDOFF_TASKS_PER_TURN
-        ]
-        if not task_ids:
+        candidates = await self._capture_handoff_candidates(workspace)
+        if not candidates:
             return None
         if self._capture_lock.locked():
             return ObservationCaptureRecoveryOutcome.BUSY
+        task_ids = self._select_capture_handoff_candidates(workspace, candidates)
         retired = 0
 
         async def visit(task_runtime: TaskRuntime, task_store: TaskObservationPort) -> int:

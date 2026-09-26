@@ -241,9 +241,10 @@ Yoetz retires the handoff instead of letting its age hold the whole workspace at
 limit. The local service does this in the background, normally within about a minute and a half,
 even when no new host input arrives; a new check does it for its own task. The retired content is
 not attached, so status reports `content_capture_unavailable`, and `yoetz observe status --json`
-lists recent retirements under `capture_handoff_retirements` with the stage, the reason, and the
-handoff's age. A handoff whose record is still waiting keeps counting toward the unchanged
-pending-age limit.
+lists recent retirements under `capture_handoff_retirements` with the ticket identity, stage, the
+reason, and the handoff's age. The service commits that account before releasing the ticket's
+reservation; a failed or cancelled account leaves the handoff available for retry. A handoff whose
+record is still waiting keeps counting toward the unchanged pending-age limit.
 
 A single hook event is also bounded. Yoetz fully reads a host body of at most 256 KiB. An edit to
 a large enough file can exceed that, because a host sends the whole new file content inside the

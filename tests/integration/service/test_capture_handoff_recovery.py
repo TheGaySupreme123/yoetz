@@ -48,6 +48,7 @@ from yoetz.domain.observation_profiles import (
 )
 from yoetz.domain.values import JsonObject, timestamp_from_datetime
 from yoetz.ports.ledger import FrozenCase
+from yoetz.ports.observation import TaskObservationPort
 from yoetz.ports.runtime import BundleRuntimePort, TaskRuntime
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind
@@ -259,6 +260,92 @@ async def test_sweep_retires_a_handoff_whose_structural_row_is_gone(
         assert len(handoff.world.routes.calls) == calls
     finally:
         sweeper.close()
+        handoff.world.coordinator.close()
+
+
+@pytest.mark.anyio
+async def test_retirement_account_failure_keeps_handoff_for_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed accounting write cannot discard the only recovery evidence."""
+
+    handoff = await _handoff(tmp_path)
+    ticket = handoff.strand("accounting-write-fails")
+    handoff.publish_inventory()
+    original = handoff.world.local.record_capture_handoff_retirement
+
+    def unavailable(*_args: object, **_kwargs: object) -> None:
+        raise OSError("synthetic-accounting-store-failure")
+
+    monkeypatch.setattr(handoff.world.local, "record_capture_handoff_retirement", unavailable)
+    try:
+        assert (
+            await handoff.world.coordinator.reconcile_task_capture_handoffs(handoff.world.runtime)
+            == 0
+        )
+        kept = handoff.load(ticket)
+        assert kept is not None and kept.state == "staging"
+        assert handoff.world.local.capture_backlog(handoff.workspace)["reservation_count"] == 1
+        assert handoff.retirements() == ()
+
+        monkeypatch.setattr(handoff.world.local, "record_capture_handoff_retirement", original)
+        assert (
+            await handoff.world.coordinator.reconcile_task_capture_handoffs(handoff.world.runtime)
+            == 1
+        )
+        retired = handoff.load(ticket)
+        assert retired is not None and retired.state == "revoked"
+        assert handoff.world.local.capture_backlog(handoff.workspace)["reservation_count"] == 0
+        assert len(handoff.retirements()) == 1
+    finally:
+        handoff.world.coordinator.close()
+
+
+@pytest.mark.anyio
+async def test_retirement_replay_after_cancellation_does_not_duplicate_loss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cancellation after accounting commits leaves an idempotent retry point."""
+
+    handoff = await _handoff(tmp_path)
+    ticket = handoff.strand("accounting-before-cancel")
+    handoff.publish_inventory()
+    original = handoff.world.coordinator._retire_capture_ticket  # pyright: ignore[reportPrivateUsage]
+    cancelled = True
+
+    async def cancel_once(
+        workspace: str,
+        runtime: TaskRuntime,
+        store: TaskObservationPort,
+        ticket: ObservationCaptureTicket,
+        *,
+        delete: bool = False,
+    ) -> None:
+        nonlocal cancelled
+        if cancelled:
+            cancelled = False
+            raise asyncio.CancelledError
+        await original(workspace, runtime, store, ticket, delete=delete)
+
+    monkeypatch.setattr(handoff.world.coordinator, "_retire_capture_ticket", cancel_once)
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await handoff.world.coordinator.reconcile_task_capture_handoffs(handoff.world.runtime)
+        kept = handoff.load(ticket)
+        assert kept is not None and kept.state == "staging"
+        assert handoff.world.local.capture_backlog(handoff.workspace)["reservation_count"] == 1
+        assert len(handoff.retirements()) == 1
+
+        monkeypatch.setattr(handoff.world.coordinator, "_retire_capture_ticket", original)
+        assert (
+            await handoff.world.coordinator.reconcile_task_capture_handoffs(handoff.world.runtime)
+            == 1
+        )
+        retired = handoff.load(ticket)
+        assert retired is not None and retired.state == "revoked"
+        assert handoff.world.local.capture_backlog(handoff.workspace)["reservation_count"] == 0
+        assert len(handoff.retirements()) == 1
+    finally:
         handoff.world.coordinator.close()
 
 
