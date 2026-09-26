@@ -986,12 +986,134 @@ def test_claude_permission_denied_on_a_scoped_check_records_one_payload_free_dia
         )
         == 0
     )
-    assert stdout.getvalue() == b"{}\n"
-    assert _recorded_diagnostics(tmp_path) == [(expected, "PermissionDenied")]
+    # A local-only pass cannot confirm the grant, so the advisory is the closed pause text
+    # with no retry (issue #857); the owner's own rule gets its own closed text.
+    emitted = strict_json_parse(stdout.getvalue())
+    assert isinstance(emitted, Mapping)
+    specific = emitted["hookSpecificOutput"]
+    assert isinstance(specific, Mapping)
+    assert specific["hookEventName"] == "PermissionDenied"
+    assert "retry" not in specific
+    context = specific["additionalContext"]
+    assert isinstance(context, str)
+    if expected == "host_permission_rule_denied":
+        assert context.startswith("The owner's own permission rule held")
+    else:
+        assert "(reason: service_unavailable)" in context
+    assert isinstance(emitted["systemMessage"], str)
+    assert _recorded_diagnostics(tmp_path) == [
+        (expected, "PermissionDenied"),
+        ("host_denial_grant_unconfirmed", "PermissionDenied"),
+    ]
     assert store.list_envelopes(store.workspace_commitment(str(tmp_path.resolve()))) == ()
     diagnostics_bytes = (tmp_path / "observation/hook-diagnostics.jsonl").read_bytes()
     for canary in (b"CANARY", b"classifier_denied", str(tmp_path).encode()):
         assert canary not in diagnostics_bytes
+        assert canary not in stdout.getvalue()
+
+
+def test_claude_permission_denied_with_a_confirmed_grant_offers_the_identical_retry_once(
+    tmp_path: Path,
+) -> None:
+    """Issue #857: Yoetz states its own recorded fact and lets the same call be retried once.
+
+    The grant comes from the running service, the route from the bridge's serving record, and
+    the admission state from the host's own file; the second hold of the same call gets the
+    pause advisory with no ``retry``. Nothing here emits a permission decision.
+    """
+
+    from types import SimpleNamespace
+
+    from yoetz.application.serving_route import record_serving_route
+    from yoetz.cli import hooks as hooks_cli
+
+    _consented_store(tmp_path)
+    record_serving_route("claude", "policy", _state=tmp_path)
+    calls: list[str] = []
+
+    class _Client:
+        async def service_status(self) -> object:
+            calls.append("service_status")
+            return SimpleNamespace(state=SimpleNamespace(value="ready"))
+
+        async def privacy_get_setup(
+            self, request: object, *, deadline_ms: int | None = None
+        ) -> object:
+            calls.append("privacy_get_setup")
+            return {
+                "grant_state": "granted",
+                "composed_policy": {
+                    "channel_policies": [{"channel": "llm_inference", "enabled": True}]
+                },
+            }
+
+        async def close(self) -> None:
+            calls.append("close")
+
+    async def connect(_kind: object) -> hooks_cli._StatusClient:  # pyright: ignore[reportPrivateUsage]
+        return cast(hooks_cli._StatusClient, _Client())  # pyright: ignore[reportPrivateUsage]
+
+    def held(tool_use_id: str) -> Mapping[str, JsonValue]:
+        stdout = io.BytesIO()
+        assert (
+            observe_hooks.handle_claude_observe(
+                event_name="PermissionDenied",
+                stdin_bytes=canonical_encode(
+                    {
+                        "session_id": "claude-held",
+                        "hook_event_name": "PermissionDenied",
+                        "tool_name": "mcp__plugin_yoetz_yoetz__check",
+                        "tool_input": {"claim": "CLAIM_CANARY"},
+                        "tool_use_id": tool_use_id,
+                        "reason": "denied_by_classifier",
+                        "source": "auto",
+                        "cwd": "/private/CWD_CANARY",
+                    }
+                ),
+                stdout=stdout,
+                workspace=str(tmp_path),
+                _state=tmp_path,
+                connect=connect,
+            )
+            == 0
+        )
+        raw = stdout.getvalue()
+        for canary in (b"CANARY", b"claude-held", str(tmp_path).encode()):
+            assert canary not in raw
+        emitted = strict_json_parse(raw)
+        assert isinstance(emitted, Mapping)
+        return emitted
+
+    first = held("toolu_CANARY")
+    specific = first["hookSpecificOutput"]
+    assert isinstance(specific, Mapping)
+    assert specific["retry"] is True
+    assert specific["hookEventName"] == "PermissionDenied"
+    assert "Retry the identical check once" in cast(str, specific["additionalContext"])
+    assert "yoetz integrate claude admission grant" in cast(str, first["systemMessage"])
+    assert "decision" not in first and "permissionDecision" not in str(specific)
+
+    second = held("toolu_CANARY")
+    specific = second["hookSpecificOutput"]
+    assert isinstance(specific, Mapping)
+    assert "retry" not in specific
+    assert "Do not retry on your own" in cast(str, specific["additionalContext"])
+
+    third = held("toolu_OTHER")
+    specific = third["hookSpecificOutput"]
+    assert isinstance(specific, Mapping)
+    assert specific["retry"] is True
+
+    assert _recorded_diagnostics(tmp_path) == [
+        ("host_auto_review_denied", "PermissionDenied"),
+        ("host_denial_retry_offered", "PermissionDenied"),
+        ("host_auto_review_denied", "PermissionDenied"),
+        ("host_denial_retry_exhausted", "PermissionDenied"),
+        ("host_auto_review_denied", "PermissionDenied"),
+        ("host_denial_retry_offered", "PermissionDenied"),
+    ]
+    assert calls == ["service_status", "privacy_get_setup", "close"] * 3
+    assert not (tmp_path / ".claude").exists()
 
 
 def test_claude_permission_denied_for_any_other_tool_records_nothing(tmp_path: Path) -> None:

@@ -418,7 +418,13 @@ def test_host_denial_reasons_are_admitted_tokens_on_the_permission_denied_event(
 ) -> None:
     """Claude Code's PermissionDenied hook lands here as a closed token (issue #467)."""
 
-    for reason in ("host_auto_review_denied", "host_permission_rule_denied"):
+    for reason in (
+        "host_auto_review_denied",
+        "host_permission_rule_denied",
+        "host_denial_retry_offered",
+        "host_denial_retry_exhausted",
+        "host_denial_grant_unconfirmed",
+    ):
         record_hook_diagnostic(reason, "PermissionDenied", _state=tmp_path)
     rows = [
         json.loads(line)
@@ -429,6 +435,9 @@ def test_host_denial_reasons_are_admitted_tokens_on_the_permission_denied_event(
     assert [(row["reason"], row["event"]) for row in rows] == [
         ("host_auto_review_denied", "PermissionDenied"),
         ("host_permission_rule_denied", "PermissionDenied"),
+        ("host_denial_retry_offered", "PermissionDenied"),
+        ("host_denial_retry_exhausted", "PermissionDenied"),
+        ("host_denial_grant_unconfirmed", "PermissionDenied"),
     ]
 
 

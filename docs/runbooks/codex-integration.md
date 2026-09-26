@@ -318,6 +318,17 @@ before the decision and may allow, so it is not a denial. A held check is visibl
 The 2026-08-30 source read is not a live cell; the `auto_review` acceptance cell in issue #467
 remains to be run.
 
+Issue #857 decision for Codex: no denial hook, because Codex has no post-decision event, and the
+`PermissionRequest` hook is never used to approve. Two surfaces cover the gap. First, the
+`SessionStart` context carries one bounded line naming `yoetz integrate codex admission grant` when
+the bridge recorded a `policy` serving route for `--host codex`, `.codex/config.toml` has no
+admission entry, and the service confirms the grant permits external review. Second, the agent
+follows the guidance rule for a held check: present the exact call for manual approval, keep its
+request id, and never downgrade. The 2026-09-26 concurrent dogfood on Codex Testing 0.153.4
+reproduced the hold twice on a native reviewer's `semantic_required` check under a confirmed
+Expanded grant. The user approved the exact held call, and the original request completed with real
+evaluator provenance. If Codex ships a typed post-denial event, mirror the Claude handler onto it.
+
 ## Upgrading Yoetz under a running service
 
 The local-control handshake pins the exact schema-manifest digest, so after installing a new Yoetz

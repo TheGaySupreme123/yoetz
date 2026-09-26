@@ -172,6 +172,14 @@ _REASONS: Final = frozenset(
         # not a Yoetz AI-powered review result: no AI-powered review status can be inferred.
         "host_auto_review_denied",
         "host_permission_rule_denied",
+        # What the Claude Code ``PermissionDenied`` ingress did beside recording the hold
+        # (issue #857): offered the one permitted retry of the identical call after
+        # confirming the owner's grant first-hand, declined a second retry of the same call,
+        # or could not confirm the grant (service, vault, grant, or route) and advised a
+        # pause. Payload-free; each row sits beside its ``host_*_denied`` row.
+        "host_denial_retry_offered",
+        "host_denial_retry_exhausted",
+        "host_denial_grant_unconfirmed",
         # The durable applied route and the live host registration disagree:
         # policy was applied but the host now serves strict (or vice versa),
         # so a fresh Codex process is still on the old route (issue #537).

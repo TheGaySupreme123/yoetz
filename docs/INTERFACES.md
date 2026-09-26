@@ -4550,7 +4550,24 @@ as recent, so a fixed historical failure cannot masquerade as live degradation (
 Workspace-global rejections (`vault_locked`, disabled, paused) end the pass. A host's automatic
 reviewer holding a scoped AI-powered `check` before Yoetz receives it is recorded on the
 `PermissionDenied` event as `host_auto_review_denied` or `host_permission_rule_denied` (issue #467);
-it is host tool-call authorization, so no AI-powered review status is ever inferred from it. Every
+it is host tool-call authorization, so no AI-powered review status is ever inferred from it. Beside
+that row the Claude Code ingress records what it advised (issue #857): `host_denial_retry_offered`
+(grant confirmed first-hand, policy serving route, classifier source, first hold of this
+`(session_id, tool_use_id)`), `host_denial_retry_exhausted` (confirmed, but the retry was already
+offered or cannot be bounded, including `reason: no_verdict`), or `host_denial_grant_unconfirmed`
+(service, vault, grant, or route not confirmed, or the owner's own rule). Its stdout is Claude
+Code's documented `PermissionDenied` shape: closed `hookSpecificOutput.additionalContext`,
+`retry: true` only on the offered case, and a closed `systemMessage`. It never carries a permission
+decision, and no tool input, path, reason prose, or identifier is echoed. The unconfirmed text
+appends exactly one token from `service_unavailable|vault_locked|grant_absent|grant_not_permitting|
+grant_unverifiable|route_unobserved|route_strict`. The one-retry marker
+`observation/host-denial-retries.json` holds only domain-separated SHA-256 digests of the host
+identifiers, bounded to 256. The bridge's serving-route record
+`integrations/serving-routes.json` (`yoetz.serving-routes/1`) holds, per explicit `claude|codex|cursor`
+host identity, only `route_profile` (`policy|strict`) and a second-precision `recorded_at`; an absent
+or invalid record reads as route unobserved, never as strict or policy. A `SessionStart` pass on any
+host appends one bounded admission line only when that record says `policy`, the host's admission
+file reads exactly `absent`, and the service confirms the grant permits external review. Every
 host ingress (Codex, Claude Code, Cursor) that ingests nothing because of workspace binding records
 one payload-free diagnostic naming the dropped layer: `workspace_unresolvable` when an explicit
 `--workspace` locator cannot be canonicalized (an empty value from an unset `CLAUDE_PROJECT_DIR`, a

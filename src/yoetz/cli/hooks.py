@@ -1622,6 +1622,27 @@ def handle_session_start(
 
             selection = resolve_session_workspace(workspace, payload)
 
+            def _session_context(text: str) -> dict[str, JsonValue]:
+                """Render mapped-session context plus the bounded admission line (#857).
+
+                The mapped path emits its own context and discards the observe pass's
+                stdout, so the line the observe pass would have appended is added here.
+                """
+
+                with contextlib.suppress(Exception):
+                    from yoetz.cli.host_denial_advisory import admission_absent_advisory
+
+                    line = admission_absent_advisory(
+                        "codex",
+                        selection.locator,
+                        connect=connect,
+                        run_async=run_async,
+                        _state=_state,
+                    )
+                    if line:
+                        text = f"{text} {line}"
+                return _context_output("SessionStart", text)
+
             async def _run() -> StatusOutcome:
                 return await _read_status(
                     mapping,
@@ -1646,8 +1667,7 @@ def handle_session_start(
             if kind == "active" and updated is not None:
                 store_mapping(updated, _state=_state)
                 _stdout_json(
-                    _context_output(
-                        "SessionStart",
+                    _session_context(
                         _active_context(updated, updated.last_frontier),
                     ),
                     stdout,
@@ -1661,9 +1681,7 @@ def handle_session_start(
                 with contextlib.suppress(Exception):
                     record_hook_diagnostic("mapping_stale", "SessionStart", _state=_state)
                 _stdout_json(
-                    _context_output(
-                        "SessionStart", _stale_mapping_context(mapping, outcome.replacement)
-                    ),
+                    _session_context(_stale_mapping_context(mapping, outcome.replacement)),
                     stdout,
                 )
                 return 0
@@ -1681,8 +1699,7 @@ def handle_session_start(
                         selection.diagnostic_reason, "SessionStart", _state=_state
                     )
                 _stdout_json(
-                    _context_output(
-                        "SessionStart",
+                    _session_context(
                         _WORKSPACE_UNBOUND_CONTEXT
                         if kind == "workspace_unbound"
                         else _WORKSPACE_MISMATCH_CONTEXT,
@@ -1691,13 +1708,13 @@ def handle_session_start(
                 )
                 return 0
             if kind == "locked":
-                _stdout_json(_context_output("SessionStart", _LOCKED_CONTEXT), stdout)
+                _stdout_json(_session_context(_LOCKED_CONTEXT), stdout)
                 return 0
             if kind == "retry":
-                _stdout_json(_context_output("SessionStart", _RETRY_CONTEXT), stdout)
+                _stdout_json(_session_context(_RETRY_CONTEXT), stdout)
                 return 0
             if kind == "privacy":
-                _stdout_json(_context_output("SessionStart", _PRIVACY_CONTEXT), stdout)
+                _stdout_json(_session_context(_PRIVACY_CONTEXT), stdout)
                 return 0
             if kind in {"storage_unsafe", "storage_corrupt"}:
                 from yoetz.cli.hook_diagnostics import record_hook_diagnostic
@@ -1705,8 +1722,7 @@ def handle_session_start(
                 with contextlib.suppress(Exception):
                     record_hook_diagnostic(kind, "SessionStart", _state=_state)
                 _stdout_json(
-                    _context_output(
-                        "SessionStart",
+                    _session_context(
                         _STORAGE_UNSAFE_CONTEXT
                         if kind == "storage_unsafe"
                         else _STORAGE_CORRUPT_CONTEXT,
@@ -1714,7 +1730,7 @@ def handle_session_start(
                     stdout,
                 )
                 return 0
-            _stdout_json(_context_output("SessionStart", _UNAVAILABLE_CONTEXT), stdout)
+            _stdout_json(_session_context(_UNAVAILABLE_CONTEXT), stdout)
             return 0
     except Exception as exc:
         _note_oversize_hook_ingress(exc, "SessionStart", workspace=workspace, _state=_state)

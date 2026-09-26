@@ -292,6 +292,14 @@ or repository decision. After a host denial, cancellation, or approval expiry, t
 AI-powered review dispatch. Continue without AI-powered review only if the user explicitly selects
 that fallback after the limitation is shown; otherwise leave the task pending.
 
+A Yoetz hook may add its own first-hand fact to a hold. It is one of three closed advisories. When
+it says the owner's grant is confirmed and the route is policy, you may retry the identical `check`
+once, with the same body and `request_id`. That retry still passes through the host's own
+permission flow. If the host holds it again, stop and present the exact call for manual approval.
+When it says the grant could not be confirmed, with a reason token, or that the owner's own rule
+held the call, do not retry; ask the user. No advisory is approval, and none widens Yoetz privacy,
+disclosure, or credential authority. Without an advisory, the paragraphs above apply unchanged.
+
 
 ## When a check is waiting on a local decision
 

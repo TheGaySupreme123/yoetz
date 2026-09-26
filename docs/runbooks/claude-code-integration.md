@@ -946,6 +946,31 @@ check as host authorization, never as an AI-powered review status. Yoetz deliber
 `PermissionRequest` hook returning `decision: allow`, which would make the plugin the authority over
 the host's own review.
 
+Since issue #857 the same hook also answers. It reads the repository grant from the running service
+(bound to `CLAUDE_PROJECT_DIR`), the route this host's bridge recorded at startup, and
+`.claude/settings.local.json` admission, all within the five-second hook timeout, and emits one of
+three closed advisories:
+
+| Case | When | `retry` | Agent is told |
+|---|---|---|---|
+| Grant confirmed | grant `granted` with `llm_inference` enabled, recorded route `policy`, classifier source (`auto` / `auto_mode` / absent) | `true` on the first hold of this `(session_id, tool_use_id)` only | Retry the identical call once; if held again, present it for manual approval |
+| Grant not confirmed | service unavailable, vault locked, grant absent / not permitting / unverifiable, route unobserved or strict | never | Stop and ask before any retry; closed reason token appended |
+| Owner's own rule | `source` `permission_rule` / `hook`, or reason `denied_by_rule` | never | Ask the user; do not retry |
+
+`reason: no_verdict` never carries `retry`; Claude Code ignores it there. The `systemMessage` tells
+the user that Yoetz did not hold the call, that nothing was sent, and which admission command makes
+the hold stop. The advisory is Yoetz's first-hand record, not approval: the retried call goes back
+through Claude's own permission flow. A route registered as bare `mcp serve` without
+`--host claude` records no serving route, so its hook reads as `route_unobserved` and never offers
+a retry. `hook_diagnostics` gains `host_denial_retry_offered`, `host_denial_retry_exhausted`, and
+`host_denial_grant_unconfirmed` beside the hold row. When the recorded route is `policy`, the grant
+permits review, and this repository has no admission entry, `SessionStart` context carries one
+bounded line naming `yoetz integrate claude admission grant`.
+
+Live acceptance for this flow is open on issue #857: auto mode without admission, hold, advisory,
+one retry, host prompt, user approves, identical request dispatches with real provenance; user
+denies, zero dispatch and no completion claim. The unit tests lock the texts and conditions only.
+
 Claude Code surfaces MCP initialize `instructions` as server instructions in the model's context.
 Whether the auto-mode classifier reads them is not documented, so the policy-route destination
 disclosure (issue #479: provider, endpoint profile, and host, or the Codex runtime class, plus the

@@ -456,6 +456,13 @@ walks from the launch directory to the repository root, so a subdirectory cwd do
 the #187 pause/approval flow, while a held local call has no Yoetz-side denial diagnostic; that
 gap is documented, not diagnosed.
 
+Issue #857 decision for Cursor: no denial hook, because Cursor exposes no denial event, and
+`beforeMCPExecution` is never used to allow. The durable answer stays admission. `sessionStart`
+context carries one bounded line naming `yoetz integrate cursor admission grant` when the bridge
+recorded a `policy` serving route for `--host cursor`, both `.cursor/permissions.json` and
+`.cursor/cli.json` lack the entry so the aggregate reads `absent` rather than `partial`, and the
+service confirms the grant permits external review.
+
 ## Upgrading Yoetz under a running service
 
 The local-control handshake pins the exact schema-manifest digest, so after installing a new Yoetz

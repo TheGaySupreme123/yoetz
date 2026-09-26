@@ -6,6 +6,18 @@ reverse-chronological released versions.
 
 ## Unreleased
 
+### Added
+
+- When Claude Code's auto mode holds an AI-powered review check you already authorized, Yoetz now
+  says so. It confirms your repository grant with the running service and tells the agent that the
+  host held the check, not Yoetz. The agent may retry the identical check once, through Claude
+  Code's own permission prompt, and asks you if the host holds it again. You also see a short
+  message naming the admission command that stops the holds. If Yoetz cannot confirm the grant, or
+  one of your own rules held the check, the agent is told to ask you and not retry. On Claude Code,
+  Codex, and Cursor, session start adds one line when review is authorized but the host has no
+  admission entry. `yoetz observe status` shows what each hold advisory did. Nothing here approves
+  a call or changes what Yoetz may send (#857).
+
 ### Fixed
 
 - A Codex multi-agent v2 child that attaches with its delegation handle now binds its host

@@ -4384,6 +4384,28 @@ def handle_observe(
                         and len(additional) + 1 + len(recommendation) <= _MAX_ADVICE_CONTEXT
                     ):
                         additional = f"{additional} {recommendation}"
+                # One bounded line when this host reaches Yoetz on a policy route the owner
+                # authorized but carries no admission entry, so its automatic reviewer may
+                # hold each check (issue #857). Two local reads gate the one service read;
+                # an unread fact keeps the line silent.
+                with contextlib.suppress(Exception):
+                    from yoetz.cli.host_denial_advisory import admission_absent_advisory
+
+                    admission_line = admission_absent_advisory(
+                        harness_id,
+                        workspace_locator,
+                        connect=connect,
+                        run_async=run_async,
+                        skip_service=skip_service,
+                        _state=_state,
+                    )
+                    if admission_line and not additional:
+                        additional = admission_line
+                    elif (
+                        admission_line
+                        and len(additional) + 1 + len(admission_line) <= _MAX_ADVICE_CONTEXT
+                    ):
+                        additional = f"{additional} {admission_line}"
 
             rendered_output = _render_context(additional) if additional else {}
             host_consumable = bool(rendered_output)
@@ -4768,25 +4790,67 @@ def _native_outcome_facts(
 
 
 def _record_claude_permission_denied(
-    payload: Mapping[str, JsonValue], *, _state: Path | None
-) -> None:
-    """Record that a host reviewer held a scoped AI-powered ``check`` (issue #467).
+    payload: Mapping[str, JsonValue],
+    *,
+    _state: Path | None,
+    workspace: str | None = None,
+    connect: ServiceConnector | None = None,
+    run_async: AsyncRunner | None = None,
+    skip_service: bool = False,
+) -> dict[str, JsonValue]:
+    """Record that a host reviewer held a scoped AI-powered ``check`` and advise (issues #467, #857).
 
-    ``source`` is Claude Code's closed origin token (``auto_mode`` | ``permission_rule`` |
-    ``hook``). An absent source is attributed to auto mode, the only reviewer that produces a
-    ``classifier_denied`` / ``no_verdict`` reason. Any other tool name is ignored: the rendered
-    matcher is scoped to ``check`` and this ingress must not widen it.
+    ``source`` is Claude Code's closed origin token (``auto`` / ``auto_mode`` for the classifier,
+    ``permission_rule`` / ``hook`` for the owner's own rules). An absent source is attributed to
+    auto mode, the only reviewer that produces a classifier / ``no_verdict`` reason. Any other
+    tool name is ignored: the rendered matcher is scoped to ``check`` and this ingress must not
+    widen it.
+
+    Beside the payload-free hold diagnostic, the ingress reads Yoetz's own first-hand facts
+    (repository grant, recorded serving route, host admission) and returns the closed advisory
+    for the host: model-visible context, a user-visible ``systemMessage``, and at most one
+    ``retry`` of the identical call. Nothing here approves a tool call.
     """
 
     if payload.get("tool_name") not in _CLAUDE_CHECK_TOOL_NAMES:
-        return
+        return {}
     source = payload.get("source")
     reason = (
         "host_permission_rule_denied"
-        if source in {"permission_rule", "hook"}
+        if source in {"permission_rule", "hook", "rule"}
         else "host_auto_review_denied"
     )
     record_hook_diagnostic(reason, "PermissionDenied", _state=_state)
+    try:
+        from yoetz.cli.host_denial_advisory import (
+            compose_permission_denied_advisory,
+            read_host_denial_facts,
+        )
+
+        locator: str | None = None
+        if workspace is not None:
+            with contextlib.suppress(Exception):
+                locator = canonical_workspace_locator(workspace)
+        facts = read_host_denial_facts(
+            "claude",
+            locator,
+            connect=connect,
+            run_async=run_async,
+            skip_service=skip_service,
+            _state=_state,
+        )
+        advisory = compose_permission_denied_advisory(payload, facts, _state=_state)
+    except Exception:
+        # The hold is already recorded; a failed advisory read must not turn into a second
+        # JSON object or a hook failure the host reports as its own.
+        return {}
+    with contextlib.suppress(Exception):
+        record_hook_diagnostic(advisory.diagnostic, "PermissionDenied", _state=_state)
+    return hook_io.claude_permission_denied_output(
+        advisory.additional_context,
+        retry=advisory.retry,
+        system_message=advisory.system_message,
+    )
 
 
 def handle_claude_observe(
@@ -4873,8 +4937,18 @@ def handle_claude_observe(
         if raw_event == "PermissionDenied" and not ordinary_profile:
             # Not an observation of work: the host refused the call before Yoetz saw it. Retain
             # only a closed reason token; tool input, reason prose, cwd, and ids are discarded.
-            _record_claude_permission_denied(payload, _state=_state)
-            hook_io.stdout_json({}, stdout)
+            # The stdout object is Yoetz's closed advisory about its own recorded facts (#857).
+            hook_io.stdout_json(
+                _record_claude_permission_denied(
+                    payload,
+                    _state=_state,
+                    workspace=workspace,
+                    connect=connect,
+                    run_async=run_async,
+                    skip_service=skip_service,
+                ),
+                stdout,
+            )
             return 0
         if type(raw_event) is not str or raw_event not in event_map:
             hook_io.stdout_json({}, stdout)

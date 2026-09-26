@@ -2769,6 +2769,13 @@ def main(
         isolation_root=registration_isolation_root,
     )
     record_startup_route_drift(runtime.route_profile, host_profile=runtime.host_profile)
+    # The bridge is the one process that knows the route this host reaches Yoetz through.
+    # Leave that closed fact behind so a later hook can state it without a host subprocess
+    # (issue #857). Fail-soft: the record never gates serving.
+    with contextlib.suppress(Exception):
+        from yoetz.application.serving_route import record_serving_route
+
+        record_serving_route(runtime.host_profile, runtime.route_profile)
     anyio.run(
         run_stdio,
         runtime,

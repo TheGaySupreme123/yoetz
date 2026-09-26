@@ -31,6 +31,7 @@ __all__ = [
     "STOP_CONTROL_EVENTS",
     "CursorOversizedPayloadError",
     "claude_context_output",
+    "claude_permission_denied_output",
     "context_output",
     "cursor_context_output",
     "read_cursor_hook_ingress",
@@ -232,6 +233,38 @@ def claude_context_output(event_name: str, additional_context: str) -> dict[str,
             }
         }
     return {}
+
+
+def claude_permission_denied_output(
+    additional_context: str,
+    *,
+    retry: bool = False,
+    system_message: str | None = None,
+) -> dict[str, JsonValue]:
+    """Return the Claude Code-valid stdout object for one ``PermissionDenied`` advisory.
+
+    Claude Code documents this event's ``hookSpecificOutput`` as ``additionalContext``
+    (model-visible) plus ``retry`` (``true`` tells the model it may retry the denied call;
+    ignored when the classifier produced ``no_verdict``), and honors the common
+    ``systemMessage`` (user-visible, never sent to the model). Exit code 2 is not honored on
+    this event (``code.claude.com/docs/en/hooks``, re-read 2026-09-26). ``retry`` is emitted
+    only when ``True`` so a hook that offers nothing stays byte-identical to the pre-#857 shape
+    apart from its context. Every text is clipped to the shared advice bound.
+    """
+
+    text = additional_context.strip()
+    output: dict[str, JsonValue] = {}
+    if text or retry:
+        specific: dict[str, JsonValue] = {"hookEventName": "PermissionDenied"}
+        if text:
+            specific["additionalContext"] = text[:_MAX_CONTEXT_CHARS]
+        if retry:
+            specific["retry"] = True
+        output["hookSpecificOutput"] = specific
+    message = None if system_message is None else system_message.strip()
+    if message:
+        output["systemMessage"] = message[:_MAX_CONTEXT_CHARS]
+    return output
 
 
 def cursor_context_output(

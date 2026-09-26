@@ -1,11 +1,12 @@
 # ADR-018 — Host-declared MCP route egress ceiling
 
 **Status:** Accepted (2026-07-29), acknowledged in
-[issue #84](https://github.com/TheGaySupreme123/yoetz/issues/84), and amended 2026-08-30 for issue
-#404 external-runtime dispatch.
+[issue #84](https://github.com/TheGaySupreme123/yoetz/issues/84), amended 2026-08-30 for issue
+#404 external-runtime dispatch, and amended 2026-09-26 for the issue #857 host-hold advisory.
 **Implemented by:** `src/yoetz/mcp/`, `src/yoetz/application/check.py`,
-`src/yoetz/ports/control.py`, `src/yoetz/service/`, and
-`src/yoetz/adapters/integrations/codex_mcp.py`.
+`src/yoetz/ports/control.py`, `src/yoetz/service/`,
+`src/yoetz/adapters/integrations/codex_mcp.py`, `src/yoetz/application/serving_route.py`, and
+`src/yoetz/cli/host_denial_advisory.py`.
 **Relates to:** ADR-006 (AI-powered review provider profiles), ADR-008 (local service/vault trust
 boundary), ADR-009 (data egress and privacy), and ADR-012 (first-run setup wizard).
 
@@ -221,3 +222,60 @@ The startup disclosure is a configuration snapshot, not a guarantee about the li
 Absent or invalid configuration remains unknown; a policy-route check may still reach an
 external reviewer whose destination the bridge could not determine. Even a valid snapshot
 with no external binding can differ from the independently running service configuration.
+
+## Host-hold advisory amendment (2026-09-26, issue #857)
+
+Host admission (the #467 amendment) is the durable lever, but a repository without it, or after
+admission drift, still sees every policy-route `check` held by the host's automatic reviewer. The
+agent then sees only the host's fixed refusal and nothing first-hand saying the owner already
+authorized the review, and in practice downgrades to deterministic-only or abandons review. This
+amendment lets Yoetz state its own recorded fact at that moment. It is information, never
+authorization.
+
+**Claude Code `PermissionDenied`.** The scoped hook (matched to exactly the external and
+plugin-owned `check` names) keeps its payload-free `host_auto_review_denied` /
+`host_permission_rule_denied` row and now also emits one closed advisory. The hook reads three
+facts first-hand within its five-second budget: the repository grant as the running service reports
+it through the workspace-bound connection (`grant_state: granted` with the `llm_inference` channel
+enabled), the route the host's bridge recorded it is serving, and the host's own admission file.
+Three closed texts exist:
+
+- *Grant confirmed*, served on `policy`, source the auto-mode classifier. The advisory states the
+  owner's authorization and that the host, not Yoetz, held the call. It emits
+  `hookSpecificOutput.retry: true` once per `(session_id, tool_use_id)` and a user-visible
+  `systemMessage` naming the durable admission command. A second hold of the same call gets the
+  pause text with no `retry`: present the exact call for the user's manual approval.
+- *Grant not confirmed* for any reason (service unavailable, vault locked, grant absent or not
+  permitting, grant unverifiable, route unobserved, route strict). A closed reason token is
+  appended. There is no `retry`, and the agent is told to ask before any retry.
+- *Owner's own rule* (`source` `permission_rule` / `hook`, or reason `denied_by_rule`). There is
+  no `retry`, and the agent is told to ask the user.
+
+`reason: no_verdict`, a call without a bounded session and tool-use identity, or a failure to
+record the offer never produces `retry`. The offer marker stores only domain-separated SHA-256
+digests of the host identifiers, bounded to the most recent 256 offers. The advisory, the retry,
+and any host approval that follows are not Yoetz privacy, disclosure, credential, or repository
+authority. The retried call goes back through the host's own permission flow. No hook emits a
+`PermissionRequest` / `PreToolUse` allow decision, writes an admission entry, or edits host
+configuration. The rejected alternatives of the #467 amendment stand: this is Yoetz stating its
+own first-hand record only when it read that record, not the agent relaying "the user authorized
+this".
+
+**Serving-route record.** A hook has no serving route of its own, and #537 forbids a host
+subprocess inside the hook budget. The bridge therefore records, at startup, the closed pair
+`(host_profile, route_profile)` for an explicit `claude`, `codex`, or `cursor` host identity in
+`integrations/serving-routes.json` under the state directory. A generic or legacy bare `mcp serve`
+records nothing, so its hook reads the route as unobserved and never offers a retry. The record is
+a snapshot of the last bridge start for that host on this machine, not a live guarantee. The next
+bridge start overwrites it, and uninstall removes it with the state directory.
+
+**All hosts, `SessionStart`.** When the host's recorded serving route is `policy`, its own
+admission file reads exactly `absent`, and the service confirms the grant permits external review,
+the `SessionStart` context gains one bounded line naming `yoetz integrate <host> admission grant`.
+Any unread fact keeps it silent. This is the only proactive surface on Codex and Cursor, which
+expose no typed post-denial event. On those hosts the agent-facing rule in guidance and skills
+remains the whole hold response.
+
+**Diagnostics.** `host_denial_retry_offered`, `host_denial_retry_exhausted`, and
+`host_denial_grant_unconfirmed` join the closed hook-diagnostic vocabulary on the
+`PermissionDenied` event beside the existing hold row.
