@@ -405,11 +405,22 @@ class ObservationOutboxSweeper:
             running = [work for work in self._inflight if not work.done()]
         if not running:
             return True
+        waiters = [asyncio.wrap_future(work) for work in running]
+        for waiter in waiters:
+            # This wrapper only observes completion of an abandoned pass. Consume its
+            # exception even if this join times out or is cancelled, so asyncio cannot
+            # send the worker's raw exception/traceback to its default error handler.
+            waiter.add_done_callback(self._consume_stranded_outcome)
         _done, pending = await asyncio.wait(
-            [asyncio.wrap_future(work) for work in running],
+            waiters,
             timeout=_STRANDED_WORKER_JOIN_SECONDS,
         )
         return not pending
+
+    @staticmethod
+    def _consume_stranded_outcome(waiter: Future[Any]) -> None:
+        if not waiter.cancelled():
+            waiter.exception()
 
     def close(self) -> None:
         """Release the sweeper's worker pool; any running lock wait is itself bounded."""

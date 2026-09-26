@@ -4640,7 +4640,9 @@ Coordinator and sweeper calls use separate bounded executors, so cancellation ca
 exit-blocking flock wait or exhaust the shared default executor. The sweeper tracks every worker hop
 it submitted; a pass that finds a hop from a cancelled pass still running waits up to five seconds
 for it and otherwise yields an empty summary with `observation_store_busy`, so a stranded worker is
-never joined by new store work beside it (issue #689). `observation_storage_corrupt` is
+never joined by new store work beside it (issue #689). Join observers consume worker exceptions
+even after a join timeout or cancellation, keeping raw exceptions out of the event loop's default
+error handler; pending rows retain their replay semantics. `observation_storage_corrupt` is
 terminal for its Codex session in the current READY generation: the coordinator remembers that
 session only after a bundle-level `STORAGE_CORRUPT`, later ingests are rejected without reopening
 the bundle, and the sweeper atomically moves that session's pending backlog to quarantine while

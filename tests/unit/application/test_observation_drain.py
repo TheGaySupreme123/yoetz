@@ -1414,6 +1414,53 @@ async def test_next_pass_never_overlaps_a_worker_a_cancelled_pass_left_running(
     assert store.max_active == 1
 
 
+@pytest.mark.anyio
+async def test_joining_a_failed_stranded_worker_does_not_report_raw_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import gc
+
+    class FailingStore(_StrandingStore):
+        def maintain_selected_admission(self, workspace: str, *, force: bool = False) -> None:
+            super().maintain_selected_admission(workspace, force=force)
+            if self.entries == 1:
+                raise OSError("synthetic stranded worker failure")
+
+    store = FailingStore(_state=tmp_path)
+    workspace, outcomes = _accepted_backlog(store, tmp_path, rows=2)
+    sweeper = ObservationOutboxSweeper(store, _Coordinator(outcomes))
+    loop = asyncio.get_running_loop()
+    previous_handler = loop.get_exception_handler()
+    unhandled: list[object] = []
+    loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
+    original_wait = asyncio.wait
+
+    async def release_at_join(
+        waiters: list[asyncio.Future[object]], *, timeout: float
+    ) -> tuple[set[asyncio.Future[object]], set[asyncio.Future[object]]]:
+        # The join has wrapped the stranded worker before it is allowed to fail.
+        store.block = False
+        store.release.set()
+        return await original_wait(waiters, timeout=timeout)
+
+    try:
+        first = asyncio.create_task(sweeper.sweep())
+        assert await asyncio.to_thread(store.entered.wait, 30)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        monkeypatch.setattr(asyncio, "wait", release_at_join)
+        delivered = await sweeper.sweep()
+        assert delivered.acknowledged == 2
+        assert store.list_pending_outbox_rows(workspace) == ()
+        gc.collect()
+        assert not unhandled
+    finally:
+        store.release.set()
+        sweeper.close()
+        loop.set_exception_handler(previous_handler)
+
+
 class _ContendedMaintenanceStore(LocalObservationStore):
     contended: str | None = None
 
