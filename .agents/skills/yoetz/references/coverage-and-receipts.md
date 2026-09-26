@@ -299,7 +299,8 @@ Claude Code's `PermissionDenied` event shows the grant notice to the user throug
 It does not deliver `additionalContext` to the model. The host may relay a one-retry cue from the
 Yoetz hook; only when higher-priority host instructions permit it, retry the identical check once
 with the same body and request_id, then ask the user if held again. Never retry an explicit human
-denial. The cue alone proves neither the grant nor approval. A SessionStart grant notice is a snapshot, not proof of current authorization at a later hold. For a confirmed grant, propose the
+denial. The cue alone proves neither the grant nor approval. A SessionStart grant notice is a
+snapshot, not proof of current authorization at a later hold. For a confirmed grant, propose the
 owner's `yoetz integrate <host> admission grant` as a durable fix; never write it yourself.
 
 

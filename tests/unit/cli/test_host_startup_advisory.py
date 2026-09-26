@@ -6,6 +6,7 @@ import io
 import json
 import os
 import time
+from functools import partial
 from pathlib import Path
 from typing import cast
 
@@ -254,8 +255,8 @@ def test_real_hook_ingress_delivers_only_on_supported_context_channel(
         "source": "startup",
     }
     handler = {
-        "claude": observe_hooks.handle_claude_observe,
-        "cursor": observe_hooks.handle_cursor_observe,
+        "claude": partial(observe_hooks.handle_claude_observe, observation_profile=profile),
+        "cursor": partial(observe_hooks.handle_cursor_observe, observation_profile=profile),
         "codex": observe_hooks.handle_observe,
     }[host]
     assert (
@@ -267,7 +268,6 @@ def test_real_hook_ingress_delivers_only_on_supported_context_channel(
             _state=tmp_path,
             connect=cast(ServiceConnector, client.connect),
             skip_service=skip_service,
-            **({"observation_profile": profile} if profile is not None else {}),
         )
         == 0
     )  # type: ignore[arg-type]

@@ -5824,6 +5824,7 @@ the model receives only the host's retry cue. `read_host_hold_facts` reads the r
 through the bound service with one `GRANT_READ_DEADLINE_MS` = 2 500 ms budget covering connection,
 `privacy_get_setup`, and cleanup. `GrantReadReason` is `grant_confirmed` only when `grant_state =
 granted` and `llm_inference` is enabled; other outcomes remain closed unconfirmed reasons.
+
 SessionStart's separate `cli/host_startup_advisory.py` can append a fresh grant snapshot and the
 host-specific admission command on Codex/Claude `additionalContext` or Cursor `additional_context`.
 It names absent project admission, explicitly leaves route and host approval unconfirmed, and
