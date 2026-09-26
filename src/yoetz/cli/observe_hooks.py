@@ -4768,25 +4768,78 @@ def _native_outcome_facts(
 
 
 def _record_claude_permission_denied(
-    payload: Mapping[str, JsonValue], *, _state: Path | None
-) -> None:
-    """Record that a host reviewer held a scoped AI-powered ``check`` (issue #467).
+    payload: Mapping[str, JsonValue],
+    *,
+    _state: Path | None,
+    workspace: str | None = None,
+    connect: ServiceConnector | None = None,
+    run_async: AsyncRunner | None = None,
+    skip_service: bool = False,
+) -> dict[str, JsonValue]:
+    """Record that a host reviewer held a scoped AI-powered ``check`` and advise on it.
 
     ``source`` is Claude Code's closed origin token (``auto_mode`` | ``permission_rule`` |
     ``hook``). An absent source is attributed to auto mode, the only reviewer that produces a
-    ``classifier_denied`` / ``no_verdict`` reason. Any other tool name is ignored: the rendered
-    matcher is scoped to ``check`` and this ingress must not widen it.
+    ``classifier_denied`` / ``no_verdict`` reason (issue #467). Any other tool name is ignored:
+    the rendered matcher is scoped to ``check`` and this ingress must not widen it.
+
+    The returned object is the hook's stdout (issue #857): Yoetz's first-hand grant and
+    admission facts, read inside the hook deadline, decide whether the advisory confirms the
+    owner's standing authorization and offers the session's one ``retry``, or tells the agent to
+    stop and ask. It is advice plus the host's own documented retry flag, never an allow
+    decision, and it echoes nothing from the host payload.
     """
 
     if payload.get("tool_name") not in _CLAUDE_CHECK_TOOL_NAMES:
-        return
+        return {}
     source = payload.get("source")
-    reason = (
-        "host_permission_rule_denied"
-        if source in {"permission_rule", "hook"}
-        else "host_auto_review_denied"
+    held_by_rule = source in {"permission_rule", "hook"}
+    record_hook_diagnostic(
+        "host_permission_rule_denied" if held_by_rule else "host_auto_review_denied",
+        "PermissionDenied",
+        _state=_state,
     )
-    record_hook_diagnostic(reason, "PermissionDenied", _state=_state)
+    from yoetz.cli.hooks import resolve_session_workspace
+    from yoetz.cli.host_hold_advisory import (
+        PrivacyConnector,
+        RetryOfferOutcome,
+        compose_host_hold_advisory,
+        note_retry_offer,
+        read_host_hold_facts,
+    )
+
+    locator = resolve_session_workspace(workspace, payload).locator
+    facts = read_host_hold_facts(
+        locator,
+        connect=None if connect is None else cast(PrivacyConnector, connect),
+        run_async=run_async if run_async is not None else _default_runner(),
+        skip_service=skip_service,
+    )
+    session = _token_or_none(payload.get("session_id"))
+    retry_offer: RetryOfferOutcome = "unrecorded"
+    if facts.grant_confirmed and not held_by_rule and payload.get("reason") != "no_verdict":
+        # The ledger is consulted only when a retry could actually be emitted, so a session
+        # whose first hold was unconfirmed or rule-held keeps its one retry for later.
+        retry_offer = "unrecorded" if session is None else note_retry_offer(session, _state=_state)
+    advisory = compose_host_hold_advisory(
+        facts,
+        source=source,
+        reason=payload.get("reason"),
+        retry_offer=retry_offer,
+    )
+    with contextlib.suppress(Exception):
+        record_hook_diagnostic(advisory.diagnostic, "PermissionDenied", _state=_state)
+    return hook_io.claude_permission_denied_output(
+        advisory.additional_context,
+        retry=advisory.retry,
+        system_message=advisory.system_message,
+    )
+
+
+def _default_runner() -> AsyncRunner:
+    import anyio
+
+    return cast(AsyncRunner, anyio.run)
 
 
 def handle_claude_observe(
@@ -4873,8 +4926,21 @@ def handle_claude_observe(
         if raw_event == "PermissionDenied" and not ordinary_profile:
             # Not an observation of work: the host refused the call before Yoetz saw it. Retain
             # only a closed reason token; tool input, reason prose, cwd, and ids are discarded.
-            _record_claude_permission_denied(payload, _state=_state)
-            hook_io.stdout_json({}, stdout)
+            # The stdout object is the bounded hold advisory (issue #857), or `{}` for any other
+            # tool. Nothing here may raise past the write: a second object would corrupt stdout.
+            output: dict[str, JsonValue] = {}
+            try:
+                output = _record_claude_permission_denied(
+                    payload,
+                    _state=_state,
+                    workspace=workspace,
+                    connect=connect,
+                    run_async=run_async,
+                    skip_service=skip_service,
+                )
+            except Exception:
+                output = {}
+            hook_io.stdout_json(output, stdout)
             return 0
         if type(raw_event) is not str or raw_event not in event_map:
             hook_io.stdout_json({}, stdout)

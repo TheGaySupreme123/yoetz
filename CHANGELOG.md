@@ -6,6 +6,18 @@ reverse-chronological released versions.
 
 ## Unreleased
 
+### Added
+
+- When Claude Code's auto mode holds an AI-powered `check` in a repository whose privacy grant
+  already permits external review, the Yoetz hook now says so in the chat: the agent is told,
+  authoritatively, that the owner already authorized the review, that the host and not Yoetz held
+  the call, and that nothing was sent, and it may retry the identical check exactly once per
+  session before the decision goes to you; you see a one-line notice naming the durable fix
+  (`yoetz integrate claude admission grant`). Without a confirmed grant, on your own permission
+  rule, or without a classifier verdict there is no retry and the agent asks you. The advisory
+  approves nothing and edits no settings; `yoetz observe status` records what it said. Codex and
+  Cursor publish no denial event, so their agent-side rule keeps the same wording (#857).
+
 ### Fixed
 
 - A Codex multi-agent v2 child that attaches with its delegation handle now binds its host

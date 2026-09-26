@@ -154,6 +154,23 @@ it should. Yoetz never ships a hook that approves its own tool calls, and never 
 `yoetz observe status` records one payload-free `host_auto_review_denied` diagnostic so the hold
 is visible as what it is, not as an AI-powered review result.
 
+### When Claude Code holds a check you already authorized
+
+In Claude Code, the same hook that records the hold also answers it. Yoetz reads its own record
+first: whether this repository's privacy grant permits external AI-powered review. If it does,
+the agent is told plainly that you already authorized this review in `yoetz --privacy`, that
+Claude Code and not Yoetz held the call, that nothing was sent, and that it may retry the
+identical check exactly once; you see a one-line notice in the transcript with the durable fix
+(`yoetz integrate claude admission grant`). If Claude Code holds the retry, or holds a later
+check in the same session, the agent is told to stop and present that exact call for your
+approval. If the grant cannot be confirmed, or your own permission rule held the call, or Claude
+Code produced no classifier verdict, there is no retry and the agent asks you.
+
+The advisory is information, not authorization: it approves nothing, edits no settings, and the
+retried call goes back through Claude Code's own permission flow. Codex and Cursor publish no
+event after a denial, so on those hosts the agent follows the pause-and-ask rule above and the
+fix is admission.
+
 ## Codex registration
 
 `yoetz setup run` and `yoetz integrate codex mcp preview` show the exact command, route profile, and

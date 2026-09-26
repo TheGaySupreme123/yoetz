@@ -31,6 +31,7 @@ __all__ = [
     "STOP_CONTROL_EVENTS",
     "CursorOversizedPayloadError",
     "claude_context_output",
+    "claude_permission_denied_output",
     "context_output",
     "cursor_context_output",
     "read_cursor_hook_ingress",
@@ -232,6 +233,38 @@ def claude_context_output(event_name: str, additional_context: str) -> dict[str,
             }
         }
     return {}
+
+
+def claude_permission_denied_output(
+    additional_context: str,
+    *,
+    retry: bool,
+    system_message: str = "",
+) -> dict[str, JsonValue]:
+    """Return the Claude Code-valid stdout object for one ``PermissionDenied`` advisory.
+
+    ``hookSpecificOutput.additionalContext`` reaches the model, ``hookSpecificOutput.retry``
+    tells the host the model may retry the denied call (the host ignores it without a classifier
+    verdict), and the common ``systemMessage`` is shown to the user and never to the model
+    (code.claude.com/docs/en/hooks, read 2026-09-26). Exit code 2 is not honored on this event, so
+    JSON is the only channel. Nothing here is a permission decision: the event fires after the
+    denial and can allow nothing (issue #857).
+    """
+
+    text = additional_context.strip()[:_MAX_CONTEXT_CHARS]
+    if not text:
+        return {}
+    output: dict[str, JsonValue] = {
+        "hookSpecificOutput": {
+            "hookEventName": "PermissionDenied",
+            "additionalContext": text,
+            "retry": retry,
+        }
+    }
+    shown = system_message.strip()[:_MAX_CONTEXT_CHARS]
+    if shown:
+        output["systemMessage"] = shown
+    return output
 
 
 def cursor_context_output(

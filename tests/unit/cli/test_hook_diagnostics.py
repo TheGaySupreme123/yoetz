@@ -432,6 +432,29 @@ def test_host_denial_reasons_are_admitted_tokens_on_the_permission_denied_event(
     ]
 
 
+def test_host_hold_advisory_outcomes_are_admitted_tokens_on_the_permission_denied_event(
+    tmp_path: Path,
+) -> None:
+    """What the hook then said about the hold is recorded beside the hold itself (issue #857)."""
+
+    outcomes = (
+        "host_denial_retry_offered",
+        "host_denial_retry_exhausted",
+        "host_denial_retry_unrecorded",
+        "host_denial_grant_unconfirmed",
+    )
+    for reason in outcomes:
+        record_hook_diagnostic(reason, "PermissionDenied", _state=tmp_path)
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "observation/hook-diagnostics.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert [row["reason"] for row in rows] == list(outcomes)
+    assert {row["event"] for row in rows} == {"PermissionDenied"}
+
+
 def test_drain_diagnostics_keep_cause_without_payload_and_report_rotation(tmp_path: Path) -> None:
     from yoetz.adapters.integrations.observation_local import LocalObservationStore
     from yoetz.application.observation_drain import observation_control_failure

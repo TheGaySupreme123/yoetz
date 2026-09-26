@@ -70,7 +70,9 @@ Host recovery follows that integration's reported continuation; installed plugin
 live MCP runtime. Read the Recovery section of
 [coverage-and-receipts.md](references/coverage-and-receipts.md) when a route or binding fails.
 A host auto-review hold is not a Yoetz result; preserve the exact proposed
-request and do not switch to local-only while required approval is pending.
+request and do not switch to local-only while required approval is pending. A hold is not a
+withheld authorization: the owner already authorized the configured review route in the Yoetz
+privacy ceremony, which the host's reviewer cannot see; say so when presenting the held call.
 
 Capacity and cost changes need a disclosed choice: never choose a larger or uncapped local
 observation capacity for an ordinary task. When the user asks, run `yoetz observe

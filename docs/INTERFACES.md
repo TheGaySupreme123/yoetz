@@ -4550,7 +4550,13 @@ as recent, so a fixed historical failure cannot masquerade as live degradation (
 Workspace-global rejections (`vault_locked`, disabled, paused) end the pass. A host's automatic
 reviewer holding a scoped AI-powered `check` before Yoetz receives it is recorded on the
 `PermissionDenied` event as `host_auto_review_denied` or `host_permission_rule_denied` (issue #467);
-it is host tool-call authorization, so no AI-powered review status is ever inferred from it. Every
+it is host tool-call authorization, so no AI-powered review status is ever inferred from it. The
+same event records what the hook then said about the hold (issue #857): `host_denial_retry_offered`
+(grant confirmed first-hand, the session's one `retry` emitted), `host_denial_retry_exhausted`
+(grant confirmed but the retry was already spent, the owner's own rule held the call, or the host
+produced no verdict), `host_denial_retry_unrecorded` (the retry ledger could not be written, so no
+retry was emitted), or `host_denial_grant_unconfirmed` (the grant could not be read inside the hook
+deadline). Every
 host ingress (Codex, Claude Code, Cursor) that ingests nothing because of workspace binding records
 one payload-free diagnostic naming the dropped layer: `workspace_unresolvable` when an explicit
 `--workspace` locator cannot be canonicalized (an empty value from an unset `CLAUDE_PROJECT_DIR`, a
@@ -5775,7 +5781,22 @@ matched to exactly the external `mcp__yoetz__check` and plugin-owned
 `mcp__plugin_yoetz_yoetz__check` names. It produces no observation and records
 one payload-free `hook_diagnostics` reason, `host_auto_review_denied` (`source` `auto_mode` or
 absent) or `host_permission_rule_denied` (`permission_rule|hook`), on the `PermissionDenied`
-event (issue #467), and any other tool name records nothing. But the
+event (issue #467), and any other tool name records nothing and emits `{}`. For the scoped
+`check` its stdout is the **host-hold advisory** (`cli/host_hold_advisory.py`, issue #857):
+`hookSpecificOutput.additionalContext` (model-visible, fixed text from closed tokens only, ≤ 2 000
+chars), `hookSpecificOutput.retry` (Claude Code's documented "the model may retry the denied
+call" flag; ignored by the host on `no_verdict`), and `systemMessage` (user-visible, never
+model-visible). `read_host_hold_facts` reads the repository grant through the repository-bound
+service (`privacy_get_setup`, deadline `GRANT_READ_DEADLINE_MS` = 2 500 ms) into a closed
+`GrantReadReason` — `grant_confirmed` only when `grant_state = granted` and the `llm_inference`
+channel is enabled, else `grant_absent|grant_unread|service_unavailable|vault_locked|
+privacy_authority_required|workspace_unbound|service_skipped` — and the host's project-scoped
+admission state from `host_admission_observation`. `note_retry_offer` keeps an owner-only
+`observation/host-hold-retries.json` ledger of domain-separated session-id digests (at most 64,
+oldest evicted) and answers `first|repeat|unrecorded`. `compose_host_hold_advisory` emits
+`retry: true` only for a confirmed grant, a classifier denial with a verdict, and a `first`
+offer; every other branch says stop and present the exact call to the human. The hook emits no
+permission decision and edits no host file. But the
 `CLAUDE_CODE_HARNESS_PROFILE` hook capability cell advertises no observation events: the recorded
 evidence case observed no accepted observation, so the cell stays unpopulated until each event has
 installed-host delivery, privacy, and accepted-observation evidence. `ObservationSource` adds

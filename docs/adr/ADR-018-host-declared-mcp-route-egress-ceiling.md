@@ -221,3 +221,55 @@ The startup disclosure is a configuration snapshot, not a guarantee about the li
 Absent or invalid configuration remains unknown; a policy-route check may still reach an
 external reviewer whose destination the bridge could not determine. Even a valid snapshot
 with no external binding can differ from the independently running service configuration.
+
+## Host-hold advisory amendment (2026-09-26, issue #857)
+
+The #467 amendment gave the owner a durable lever (host admission) and gave Yoetz a typed record
+of a Claude Code hold (`host_auto_review_denied`), but the hook that recorded it said nothing.
+Users kept reporting that AI-powered review "was not allowed" in repositories where they had
+completed the privacy ceremony: without admission, or after admission drift, the agent saw only
+the host's fixed refusal and routinely downgraded the review the owner had already authorized.
+
+Decision 5 and the #467 rejections stand: annotations stay honest, Yoetz ships no hook that
+approves its own tool, and the *agent* still may not assert "the user authorized this" to sway a
+reviewer. What changes is what Yoetz itself says on the one host that publishes a post-decision
+denial event. On a Claude Code `PermissionDenied` for the scoped `check`, the hook reads two
+first-hand facts inside its deadline — whether the repository grant permits external review, from
+the running service over the repository-bound connection, and the host's project-scoped admission
+state — and emits a bounded advisory built only from closed tokens (`cli/host_hold_advisory.py`):
+
+- grant confirmed and the denial came from the auto-mode classifier with a verdict: the model is
+  told, authoritatively, that the owner already authorized this review through the trusted
+  ceremony, that the host and not Yoetz held the call, and that no dispatch occurred; the host's
+  documented `hookSpecificOutput.retry: true` is emitted **once per host session**, recorded in an
+  owner-only digest ledger; the second hold of the same session gets the same confirmation with no
+  retry and the instruction to present the exact call to the human;
+- grant confirmed but `source` is `permission_rule` or `hook`, or `reason` is `no_verdict`: no
+  retry, ask the human (the owner's own rule is never argued with; the host ignores a retry
+  without a verdict);
+- grant not confirmed (`grant_absent|grant_unread|service_unavailable|vault_locked|
+  privacy_authority_required|workspace_unbound|service_skipped`): the hold is treated as
+  unauthorized, no retry, ask the human, reason token disclosed. An unreadable grant is never
+  confirmed.
+
+Every branch repeats the #187 rules (no `deterministic_only` downgrade, no new semantic job, no
+completion claim or receipt while the decision is pending; host approval permits the tool call
+only) and names the owner's durable fix from the admission state (`admission grant` when absent,
+"already present, check folder trust" when present, "review the wider rule" when foreign). A
+`systemMessage` tells the user the same in one sentence; the host shows it and the model never
+sees it. The hook emits no permission decision — the event fires after the denial and can allow
+nothing — and the retried call goes back through the host's own permission flow. The advisory's
+outcome is recorded beside the hold as `host_denial_retry_offered|retry_exhausted|
+retry_unrecorded|grant_unconfirmed`.
+
+Per host: Codex's `PermissionRequest` fires before the decision and Cursor publishes no denial
+event, so neither can carry this advisory; both keep the #187 agent-side rule, whose shipped
+wording now states the owner's standing authorization with the same authority, and both runbooks
+record the gap. A route fact is deliberately not asserted here: reading the Claude route needs
+host roots the hook does not have, and a strict route's retried check is refused by Yoetz itself
+as `blocked_by_policy` / `route_semantic_ceiling`, which is the honest answer.
+
+Rejected: unbounded or per-call retries (a classifier that denies twice has answered; the human
+decides), a retry on the owner's own rule, asserting the grant from provider readiness or an
+unlocked vault instead of reading it, echoing any payload field into the advisory, and writing
+the admission entry from the hook.
