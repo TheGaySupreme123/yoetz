@@ -31,12 +31,19 @@ from types import MappingProxyType
 from typing import Final, Protocol, TypeVar, cast
 
 from yoetz.domain.coordination import (
+    SESSION_LEASE_SECONDS,
     LineageAcceptance,
     LineageOrigin,
     SessionHealth,
     WorkState,
 )
-from yoetz.domain.values import Frontier, format_rfc3339_millis, validate_commitment
+from yoetz.domain.values import (
+    Frontier,
+    Timestamp,
+    format_rfc3339_millis,
+    timestamp_from_datetime,
+    validate_commitment,
+)
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.host_lineage import HostLineageRegistryPort
 from yoetz.ports.ids import IdPort
@@ -65,6 +72,7 @@ __all__ = [
     "LineageStore",
     "LineageProjectAdmission",
     "LineageProjectAdmissionResolver",
+    "HostSessionCommitmentLookup",
     "HostLineageAnnotationMerger",
     "MemoryLineageStore",
     "SessionHealth",
@@ -85,6 +93,7 @@ HostLineageAnnotationMerger = Callable[[Mapping[str, JsonValue]], Awaitable[None
 # bounded refusal; a successful result freezes the project and membership generation used by the
 # admission check.  Later C9 reads perform their own current-generation check.
 LineageProjectAdmissionResolver = Callable[[str, str], Awaitable["LineageProjectAdmission | None"]]
+HostSessionCommitmentLookup = Callable[[str, str], Awaitable[str | None]]
 _AttachOperationResult = TypeVar("_AttachOperationResult")
 
 
@@ -239,12 +248,17 @@ class LineageConfig:
     contact_lost_recovery_seconds: int = 300
     max_depth: int = 8
     max_fanout: int = 32
+    # Upper bound on how long one host-declared child operation (a native subagent observed
+    # starting but not yet stopping) keeps its parent session in contact.  It bounds how late a
+    # host that dies mid-operation is noticed; it is service policy, not user configuration.
+    native_operation_hold_seconds: int = 3_600
 
     def __post_init__(self) -> None:
         for value in (
             self.start_lease_seconds,
             self.attach_handle_ttl_seconds,
             self.contact_lost_recovery_seconds,
+            self.native_operation_hold_seconds,
         ):
             _bounded_int(value, minimum=1, maximum=86_400)
         _bounded_int(self.max_depth, minimum=0, maximum=64)
@@ -943,6 +957,7 @@ class LineageCoordinator:
         bundle_provisioner: Callable[[str, int], Awaitable[None]] | None = None,
         host_annotation_merger: HostLineageAnnotationMerger | None = None,
         host_lineage_registry: HostLineageRegistryPort | None = None,
+        host_session_commitment_lookup: HostSessionCommitmentLookup | None = None,
         project_admission_resolver: LineageProjectAdmissionResolver | None = None,
     ) -> None:
         # Runtime-checkable protocols are intentionally avoided; duck typing here permits the
@@ -979,6 +994,10 @@ class LineageCoordinator:
             raise TypeError("lineage_host_annotation_merger_invalid")
         if project_admission_resolver is not None and not callable(project_admission_resolver):
             raise TypeError("lineage_project_admission_resolver_invalid")
+        if host_session_commitment_lookup is not None and not callable(
+            host_session_commitment_lookup
+        ):
+            raise TypeError("lineage_host_session_commitment_lookup_invalid")
         if host_lineage_registry is not None and any(
             not callable(getattr(host_lineage_registry, name, None))
             for name in (
@@ -1000,7 +1019,9 @@ class LineageCoordinator:
         self._bundle_provisioner = bundle_provisioner
         self._host_annotation_merger = host_annotation_merger
         self._host_lineage_registry = host_lineage_registry
+        self._host_session_commitment_lookup = host_session_commitment_lookup
         self._project_admission_resolver = project_admission_resolver
+        self._host_session_commitments: dict[tuple[str, str], str] = {}
         self._lock = asyncio.Lock()
 
     @property
@@ -1144,6 +1165,11 @@ class LineageCoordinator:
                     reason="lineage_task_not_found",
                 )
             if snapshot.work_state is not WorkState.OPEN:
+                if snapshot.active_session_id == session:
+                    # Replaying a start whose route already names this session has nothing to
+                    # mirror.  Returning the recorded binding keeps that exact start replayable
+                    # after its work became terminal without touching health or work state.
+                    return snapshot
                 raise _error(
                     PublicErrorCode.SESSION_CONFLICT,
                     "The task is no longer open.",
@@ -1222,10 +1248,17 @@ class LineageCoordinator:
                     "The parent task was not found.",
                     reason="lineage_parent_not_found",
                 )
+            if parent.work_state is not WorkState.OPEN:
+                # Terminal work is never reopened by later activity; the parent continues new
+                # delegation from a successor task instead (#837).
+                raise _error(
+                    PublicErrorCode.SESSION_CONFLICT,
+                    "The parent task's work is terminal and cannot start new child work.",
+                    reason="lineage_parent_work_terminal",
+                )
             if (
                 parent.session_health is not SessionHealth.ACTIVE
                 or parent.active_session_id != request.parent_session_id
-                or parent.work_state is not WorkState.OPEN
             ):
                 raise _error(
                     PublicErrorCode.SESSION_CONFLICT,
@@ -1800,11 +1833,16 @@ class LineageCoordinator:
                     reason="lineage_parent_not_found",
                 )
             parent = await self._store.get_task(parent_task_id)
+            if parent is not None and parent.work_state is not WorkState.OPEN:
+                raise _error(
+                    PublicErrorCode.SESSION_CONFLICT,
+                    "The parent task's work is terminal and cannot start new child work.",
+                    reason="lineage_parent_work_terminal",
+                )
             if (
                 parent is None
                 or parent.session_health is not SessionHealth.ACTIVE
                 or parent.active_session_id != parent_session
-                or parent.work_state is not WorkState.OPEN
             ):
                 raise _error(
                     PublicErrorCode.SESSION_CONFLICT,
@@ -2418,34 +2456,196 @@ class LineageCoordinator:
         *,
         task_id: str,
         session_id: str,
-        renew_lease: Callable[[], Awaitable[None]],
-    ) -> None:
-        """Renew authenticated current hook contact under the abandonment transition lock.
+        renew_lease: Callable[[datetime], Awaitable[bool | None]],
+        observed_at: datetime | None = None,
+    ) -> bool:
+        """Apply one piece of authenticated host contact at its own time.
 
-        The adapter admits only fresh current-session hook activity. Explicitly ended sessions
-        remain ended; late evidence may renew contact without changing terminal work outcome.
+        ``observed_at`` is when the admitted host event was received; the adapter may deliver it
+        much later (a queued or retried row).  That evidence holds contact until ``observed_at``
+        plus the session lease, never from its delivery time:
+
+        * while that lease end is still ahead, the session is active until then and any earlier
+          contact-loss deadline is cleared (``renew_lease`` receives the lease end);
+        * once it has passed, the evidence cannot make the session active after the fact.  It
+          can only move a recorded contact loss that began before the evidence ran out to the
+          point where it did, and the abandonment deadline with it.
+
+        Renewal is monotonic and idempotent, so a duplicate delivery or evidence older than the
+        recorded contact changes nothing.  Explicitly ended sessions remain ended and terminal
+        work is never reopened.  Returns whether the evidence applied to the current session.
         """
 
         task = _id(IdKind.TASK, task_id)
         session = _id(IdKind.SESSION, session_id)
+        now = self._now()
+        observed = now if observed_at is None else _timestamp(observed_at)
+        if observed > now:
+            return False
+        evidence_until = observed + timedelta(seconds=SESSION_LEASE_SECONDS)
         async with self._lock:
+            # The lineage lock may be queued behind a slow recovery or publication.  The
+            # evidence decision is made at the commit boundary, not at call entry: a lease can
+            # expire while this coroutine waits for the lock.
+            now = self._now()
+            if observed > now:
+                return False
             snapshot = await self._store.get_task(task)
+            # The store read is awaited too.  A queued read must not let evidence cross its
+            # lease boundary and then take the active-state branch using the earlier clock.
+            now = self._now()
             if (
                 snapshot is None
                 or snapshot.active_session_id != session
                 or snapshot.session_health is SessionHealth.ENDED
             ):
-                return
-            await renew_lease()
+                return False
+            if evidence_until > now:
+                lease_offered = await renew_lease(evidence_until)
+                if lease_offered is False:
+                    return False
+                now = self._now()
+                if evidence_until <= now:
+                    # The catalog offer may have waited long enough for this evidence to run out.
+                    # Fall through to the delayed-evidence rule rather than reviving contact.
+                    pass
+                elif (
+                    snapshot.session_health is SessionHealth.ACTIVE
+                    and snapshot.contact_lost_at is None
+                    and snapshot.abandonment_deadline is None
+                ):
+                    return True
+                else:
+                    await self._store.save_task(
+                        replace(
+                            snapshot,
+                            session_health=SessionHealth.ACTIVE,
+                            contact_lost_at=None,
+                            abandonment_deadline=None,
+                            lineage_authority_revision=snapshot.lineage_authority_revision + 1,
+                        )
+                    )
+                    return True
+            lost_at = snapshot.contact_lost_at
+            if (
+                snapshot.session_health is not SessionHealth.CONTACT_LOST
+                or lost_at is None
+                or lost_at >= evidence_until
+            ):
+                return False
+            deadline = evidence_until + timedelta(
+                seconds=self._config.contact_lost_recovery_seconds
+            )
+            if snapshot.abandonment_deadline is not None:
+                deadline = max(deadline, snapshot.abandonment_deadline)
             await self._store.save_task(
                 replace(
                     snapshot,
-                    session_health=SessionHealth.ACTIVE,
-                    contact_lost_at=None,
-                    abandonment_deadline=None,
+                    contact_lost_at=evidence_until,
+                    abandonment_deadline=deadline,
                     lineage_authority_revision=snapshot.lineage_authority_revision + 1,
                 )
             )
+            return True
+
+    async def bind_host_session_commitment(
+        self, *, task_id: str, session_id: str, session_commitment: str
+    ) -> None:
+        """Record the exact host session currently bound to a live Yoetz route.
+
+        Host observations are admitted only after the routing layer has checked the active route.
+        Recovery uses this process-local binding as a second fence, so an open annotation from a
+        predecessor host session cannot renew a reattached task.  Missing binding deliberately
+        fails closed; a later admitted event re-establishes it.
+        """
+
+        task = _id(IdKind.TASK, task_id)
+        session = _id(IdKind.SESSION, session_id)
+        commitment = _commitment(session_commitment, optional=False)
+        assert commitment is not None
+        async with self._lock:
+            self._host_session_commitments[(task, session)] = commitment
+
+    async def hold_in_flight_contact(
+        self,
+        renew_lease: Callable[[str, str, datetime], Awaitable[bool | None]],
+    ) -> tuple[str, ...]:
+        """Keep contact for open work whose host declared an operation that has not ended.
+
+        A native subagent observed starting (and not yet stopping) under a parent session is
+        authenticated host evidence that the parent is waiting on it: hosts emit no event from
+        the parent for the whole run.  The recovery sweep therefore renews one ordinary lease for
+        such a session instead of expiring it, until the host reports the stop or the start is
+        older than ``native_operation_hold_seconds``.  No event is published, terminal or ended
+        work is untouched, and a session whose host never reports the stop is released by the
+        bound.  Returns the held task ids.
+        """
+
+        registry = self._host_lineage_registry
+        latest_open = getattr(registry, "latest_open_host_operation", None)
+        if registry is None or not callable(latest_open):
+            return ()
+        lookup = cast(Callable[..., Awaitable[Timestamp | None]], latest_open)
+        held: list[str] = []
+        async with self._lock:
+            for snapshot in await self._store.list_tasks():
+                session = snapshot.active_session_id
+                if (
+                    snapshot.work_state is not WorkState.OPEN
+                    or session is None
+                    or snapshot.session_health is not SessionHealth.CONTACT_LOST
+                ):
+                    continue
+                session_commitment = self._host_session_commitments.get((snapshot.task_id, session))
+                if self._host_session_commitment_lookup is not None:
+                    try:
+                        persisted_commitment = await self._host_session_commitment_lookup(
+                            snapshot.task_id, session
+                        )
+                        persisted_commitment = _commitment(persisted_commitment, optional=True)
+                    except Exception:
+                        # Durable bootstrap is advisory evidence.  An unavailable route cannot
+                        # replace a binding already established by admitted ingress; without a
+                        # cached binding, the hold still fails closed below.
+                        persisted_commitment = None
+                    if persisted_commitment is not None:
+                        session_commitment = persisted_commitment
+                        self._host_session_commitments[(snapshot.task_id, session)] = (
+                            persisted_commitment
+                        )
+                if session_commitment is None:
+                    continue
+                now = self._now()
+                current_not_before = timestamp_from_datetime(
+                    now - timedelta(seconds=self._config.native_operation_hold_seconds)
+                )
+                started = await lookup(
+                    snapshot.task_id,
+                    not_before=current_not_before,
+                    session_commitment=session_commitment,
+                )
+                now = self._now()
+                if started is None or started.as_datetime() < now - timedelta(
+                    seconds=self._config.native_operation_hold_seconds
+                ):
+                    continue
+                lease_until = now + timedelta(seconds=SESSION_LEASE_SECONDS)
+                lease_offered = await renew_lease(snapshot.task_id, session, lease_until)
+                if lease_offered is False:
+                    continue
+                if lease_until <= self._now():
+                    continue
+                await self._store.save_task(
+                    replace(
+                        snapshot,
+                        session_health=SessionHealth.ACTIVE,
+                        contact_lost_at=None,
+                        abandonment_deadline=None,
+                        lineage_authority_revision=snapshot.lineage_authority_revision + 1,
+                    )
+                )
+                held.append(snapshot.task_id)
+        return tuple(held)
 
     async def mark_contact_lost(self, *, session_id: str) -> LineageSnapshot:
         session = _id(IdKind.SESSION, session_id)

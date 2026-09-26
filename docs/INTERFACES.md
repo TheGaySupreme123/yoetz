@@ -1945,8 +1945,9 @@ session.
 
 Successful routed activity renews session health and clears any previous contact-loss deadline;
 it does not reopen terminal work. After lease loss, work remains open for
-`lineage.contact_lost_recovery_seconds` (default 300 seconds). Expiry appends one authenticated,
-service-stamped `work_abandoned` event to the child ledger before updating the catalog. Recovery
+`lineage.contact_lost_recovery_seconds` (default 300 seconds). The policy applies to root and child
+tasks alike. Expiry appends one authenticated, service-stamped `work_abandoned` event to that task's
+own ledger before updating the catalog. Recovery
 replays that event idempotently after interruption. A parent-minted child whose handle expires
 without any attach is abandoned with reason `attach_handle_expired`; its session health stays
 `ended`, since no attached session lost contact. Cancellation and write-off preserve the accepted
@@ -1958,10 +1959,42 @@ only the request whose start operation the catalog already recorded as complete 
 may finish consuming the still-unconsumed handle. Every other request is refused as expired
 before any callback can rotate the child route.
 
-Admitted native hook activity also renews its current task session when first accepted within
-60 seconds of its receipt timestamp. Duplicate delivery, session-stream history, stale or future
-timestamps, predecessor routes, and terminal host events do not renew a lease. The catalog binding
-is revalidated before renewal; an ended session is not revived by observation replay.
+Admitted native hook activity is contact evidence at its own receipt timestamp, not at the time a
+hook drain, the sweeper, or a retry delivers it (#837). One piece of evidence holds its current
+task session active until that receipt time plus the 60-second session lease
+(`SESSION_LEASE_SECONDS`). If that end is still ahead, the session is active until then and any
+contact-loss deadline is cleared. If it has already passed, the evidence can only move a recorded
+contact loss that began earlier to the point where the evidence ran out, restarting the recovery
+window from there; it never makes a session active after the fact. Renewal is monotonic and
+idempotent, so a duplicate delivery re-offers the same evidence without extending it, and a lease
+already recorded by a newer call is never shortened. Every hook event except `SessionEnd` counts,
+including `Stop` and `SubagentStop`, which prove the host was alive when they fired. Session-stream
+history, future timestamps, predecessor routes, and evidence older than the lease plus the longest
+configurable recovery window are not offered. The catalog binding is revalidated before renewal;
+an ended session is not revived by observation replay, and terminal work is never reopened.
+
+A host-declared child operation also holds contact. While the host lineage registry records a
+native subagent start under a parent task without its stop, the recovery sweep renews the parent's
+session for one lease per sweep instead of expiring it, because the host emits no parent event for
+the whole run. The hold ends when the stop is recorded, and is bounded by the service policy
+`LineageConfig.native_operation_hold_seconds` (3,600 seconds; not user configuration) for a host
+that dies before reporting the stop. The hold publishes no event and never touches terminal or
+ended work. The READY maintenance loop delivers queued host events before each ordinary recovery
+turn and defers a due recovery while consecutive passes are still resolving rows, for at most one
+extra interval.
+
+Terminal work stays terminal. Resuming a task whose work is `closed`, `cancelled`, `abandoned`, or
+`written_off` (`start` attach by session, attach or `create_or_attach` by pair) is refused inside
+the start-catalog transaction with `SESSION_CONFLICT` reason `lineage_resume_work_terminal`, before
+any session is reserved or the route rotates, so a session the caller still holds keeps reading
+and publishing that task's history. A parent whose work is terminal is refused new child work
+(delegation or self-registration) with reason `lineage_parent_work_terminal`, even when late
+activity has restored its session. Both reasons carry continuation `lineage_successor_task`: keep
+the held session for status, late publications, checks, and receipts, and start one successor
+task with `mode=create`, a new `external_ref`, and a bounded handoff naming the predecessor for new
+work and delegation. `lineage_parent_session_invalid` (the parent's own session is not current)
+now maps to `lineage_state_refresh`. A replayed start whose route already names its session still
+returns its recorded result after the task's work became terminal.
 
 **Origin, acceptance, and creation.** `origin` is immutable: `parent_minted | self_registered |
 host_observed`. Acceptance is parent-controlled: `pending → accepted` or `pending → rejected`,
@@ -1995,6 +2028,24 @@ restrictions. Project membership is unnecessary for lineage; cross-repository li
 prohibited in increment A. The candidate's Increment-B cross-repository path requires an explicit
 current project-generation coordination grant at admission and delivery; `AuthorizationScope.contains()`
 stays unchanged.
+
+`HostLineageRegistryPort.latest_open_host_operation(parent_task_id, not_before, session_commitment)`
+returns the newest first-observation time of a recorded start without its stop under that parent,
+bound or provisional, only when the annotation's `last_session_commitment` exactly matches the
+currently bound host session commitment. It ignores starts before `not_before`; it is the only
+input to the in-flight contact hold and never mints, binds, or accepts a child. The service records
+the commitment from an admitted event routed to the exact current session. A missing or stale
+binding fails closed; after restart, the service may bootstrap the commitment only from the
+durable observation route for that exact task/session pair. Task or project membership never
+selects a host session. Native lifecycle events persist that route at admission, before optional
+verification or advice work. An ended or rerouted predecessor remains structural evidence only;
+its event cannot bind the successor, and a durable route's host-session commitment is a
+compare-and-set fence that a later envelope cannot replace.
+
+Session lease extension is an atomic, monotonic catalog operation. A newer observation, an ended
+session, or a rotated session fence wins over a delayed renewal and cannot be overwritten by its
+stale read. Callers revalidate the clock after awaited catalog or adapter work before committing
+an active state.
 
 `HostLineageRegistryPort.find_host_lineage_observation` resolves an already recorded host
 observation within its installation, parent task, and host. It returns the persisted annotation,

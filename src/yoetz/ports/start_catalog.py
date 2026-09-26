@@ -677,6 +677,15 @@ class StartCatalogPort(Protocol):
         actor_id: str | None = None,
     ) -> SessionState: ...
 
+    async def extend_session_lease(
+        self,
+        task_id: str,
+        session_id: str,
+        *,
+        changed_at: datetime,
+        lease_expires_at: datetime,
+    ) -> SessionState: ...
+
     async def expire_session_leases(
         self, now: datetime | None = None, *, limit: int = 256
     ) -> tuple[SessionState, ...]: ...

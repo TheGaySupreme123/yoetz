@@ -491,6 +491,14 @@ child identity source is Codex-only on the same boundary: it reads a Codex rollo
 header, and Cursor has no session-stream family of its own, so its native-subagent decision and
 capability cell are unchanged.
 
+Liveness follows the shared #837 rule. Admitted Cursor hook events count as contact at their own
+receipt time, including late sweeper delivery and `stop`, while `sessionEnd` ends contact. Cursor
+registers no subagent lifecycle hooks, so no in-flight hold applies. A quiet period past the lease
+plus the recovery window with no workflow call or hook event is the recorded Cursor gap, and
+raising `lineage.contact_lost_recovery_seconds` is the supported mitigation. After abandonment,
+refusals carry `lineage_successor_task`: keep the held session for history and receipts, and start
+one successor task for new work.
+
 Cursor subagents inherit the parent's MCP tools, so delegated workers reach the same `yoetz`
 bridge process. The bridge latches the first availability failure of that binding
 (`service_unavailable`, `service_incompatible`, `protocol_mismatch`, `endpoint_unsafe`,

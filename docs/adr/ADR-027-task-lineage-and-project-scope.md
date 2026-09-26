@@ -220,6 +220,56 @@ than implementation notes.
    original request may still finish consumption after expiry; a fresh request is refused as
    expired and cannot rotate the child route.
 
+   **Liveness evidence clarification (2026-09-25, #837).** A native Claude parent that waited on
+   its own subagents was abandoned while it kept working, then could not delegate. The session
+   lease and the 300-second recovery window are unchanged. What changed is which authenticated
+   evidence holds contact, and what a terminal task allows:
+
+   - **Evidence counts at its own time.** Admitted host activity counts at the time it was
+     received, not when a hook drain, the maintenance sweeper, or a retry delivers it. It holds
+     the session until that time plus one lease. Evidence that arrives after its lease ended can
+     only move a recorded contact loss later. It never makes a session active after the fact.
+   - **Renewal is idempotent.** A duplicate delivery re-offers the same evidence and changes
+     nothing.
+   - **Only `SessionEnd` ends contact.** `Stop` and `SubagentStop` prove the host was alive when
+     they fired.
+   - **Queued evidence is delivered first.** The maintenance loop delivers queued host events
+     before it judges lease expiry and abandonment.
+   - **A running native subagent holds its parent's contact.** A subagent the host reported
+     starting, with no recorded stop, keeps the parent session in contact. The hosts emit no
+     parent event while the parent waits on it. The recovery sweep renews one lease at a time
+     until the stop is recorded, bounded by a fixed 3,600-second service policy for a host that
+     never reports it. This is a hold on existing authenticated host evidence. It is not a
+     heartbeat publication, and it never touches terminal or ended work.
+   - **The hold uses the current host session binding.** The sweep queries an open annotation
+     with the exact `last_session_commitment` recorded for the active host session. The service
+     obtains that commitment from an admitted event routed to the exact current session; a missing
+     or stale binding fails closed. After restart, it may bootstrap only from the durable
+     observation route for that exact task/session pair. Task or project membership cannot select a
+     predecessor host session. Native lifecycle events persist that route at admission, before
+     optional verification or advice work. An ended or rerouted predecessor remains structural
+     evidence only, and the durable route's host-session commitment is a compare-and-set fence
+     that a later envelope cannot replace.
+   - **Lease renewal is monotonic and fenced.** Renewal is an atomic catalog update that cannot
+     replace a newer lease or revive an ended or rotated session. Recovery rechecks the clock after
+     awaited work and before saving an active state, so evidence that expired during the wait is
+     recorded as contact loss.
+   - **Terminal work cannot be resumed or delegate.** A resume of terminal work is refused
+     before any session is reserved or the route rotates (`lineage_resume_work_terminal`). A
+     terminal parent is refused new child work (`lineage_parent_work_terminal`) even after late
+     activity restored its session.
+   - **Recovery goes through a successor task.** Continue with a session you still hold for
+     history, late evidence, checks, and receipts. Start new work, including delegation, in one
+     successor task created with `mode=create`, a new `external_ref`, and a bounded handoff that
+     names the predecessor. The successor does not inherit the predecessor's children, findings,
+     or receipts, and the predecessor's receipts stay immutable.
+
+   Work shorter than the lease plus the recovery window stays covered without extra host
+   evidence. Longer operations with no qualifying evidence remain a recorded capability gap in
+   the host integration runbooks. Such operations include one long native tool call, a turn
+   awaiting its user, and a host without subagent lifecycle hooks. Raising
+   `lineage.contact_lost_recovery_seconds` is the supported mitigation.
+
 4. **Parent rollup is one level and severity-dependent.** A parent receipt projects only direct
    children from the frozen manifest. Current actionable findings on accepted children block
    clean-completion wording; the receipt is still produced and names the child and finding.

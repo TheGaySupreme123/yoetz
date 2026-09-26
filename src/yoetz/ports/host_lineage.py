@@ -221,6 +221,23 @@ class HostLineageRegistryPort(Protocol):
         after_correlation_id: str | None = None,
     ) -> tuple[HostLineageAnnotation, ...]: ...
 
+    async def latest_open_host_operation(
+        self,
+        parent_task_id: str,
+        *,
+        not_before: Timestamp,
+        session_commitment: str,
+    ) -> Timestamp | None:
+        """Return the newest first observation of a started, not yet stopped host child.
+
+        Bound and provisional annotations both count: the host operation runs under the parent
+        session whether or not a Yoetz child task was ever bound to it.  Starts observed before
+        ``not_before`` are ignored.  The operation must also belong to the exact currently bound
+        host session; a parent task can rotate its Yoetz session while an older host annotation
+        remains open.
+        """
+        ...
+
     async def bind_provisional_annotation(
         self,
         parent_task_id: str,
