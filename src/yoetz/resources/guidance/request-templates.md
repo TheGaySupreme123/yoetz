@@ -1010,7 +1010,9 @@ project ID, current membership generation, recipient task, and obligation from s
 real evidence or results that establish the agreement. The disposition is exactly one of
 `shared_work`, `sequencing`, or `scope_revision`; each is an alternative, not three sequential
 requirements. This addresses the obligation but does not resolve a recorded finding: recheck
-with the local coordination pack. A bare `respond` acknowledgement is insufficient.
+with the local coordination pack. A bare `respond` acknowledgement is insufficient. A disposition
+naming a superseded membership generation returns `coordination_generation_superseded`; do not
+reauthorize it. Run `check`, which records the superseded context as history.
 
 ```json
 {
