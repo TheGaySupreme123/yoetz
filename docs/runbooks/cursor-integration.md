@@ -1,5 +1,9 @@
 # Cursor local integration runbook
 
+Codex's external MCP removal reconciliation (issue #860) does not apply to Cursor IDE or CLI:
+Cursor project MCP cleanup uses its own digest-bound file mutation, not `codex mcp remove`.
+The Cursor lifecycle and outcome contracts remain unchanged.
+
 For setup prerequisites, use `yoetz setup status --next --host cursor-cli` with the same
 executable, configuration root and project. `--operation connection` inspects installation without
 provider sign-in; `local` and `review` inspect their respective vault/privacy prerequisites.
@@ -454,7 +458,11 @@ stops external review sweeps it; `provider status` reports `host_admission_drift
 walks from the launch directory to the repository root, so a subdirectory cwd does not read as
 `absent`. Cursor publishes no hook for a classifier denial. A held `check` is visible only through
 the #187 pause/approval flow, while a held local call has no Yoetz-side denial diagnostic; that
-gap is documented, not diagnosed.
+gap is documented, not diagnosed. The host-hold advisory Claude Code's `PermissionDenied` hook
+emits (issue #857) therefore has no Cursor carrier either: the shipped skill carries the
+agent-side rule (a current grant read before asserting authorization, Cursor's visible approval
+control for the exact held call, no downgrade), and admission remains the durable fix.
+Mirror the Claude ingress if Cursor publishes a post-decision denial event.
 
 ## Upgrading Yoetz under a running service
 
@@ -817,7 +825,13 @@ Advice uses Cursor's native output contract rather than the Codex/Claude Code en
 would auto-submit it as a new user message. `afterFileEdit`, `afterMCPExecution`, and `sessionEnd`
 have no advice output channel and emit `{}`. Only a successfully written, nonempty `sessionStart`
 object commits advice delivery; output-less events do not acquire the delivery lease or consume a
-frontier-motion notice.
+frontier-motion notice. Provider-repair advice uses that `sessionStart` channel only (#844).
+A private or no-egress install, an install with no provider endpoint, and an install whose
+verification is disabled do not put `connect_provider` or another provider-repair request in
+`additional_context`. The service emits it only when verification is not disabled, a provider
+endpoint is bound, network egress is permitted, and an LLM inference channel is enabled, and the
+provider is still structurally unusable, including when no factory id is available. `stop` still
+emits `{}` and leaves that delivery pending.
 
 Workspace binding does not trust plugin-hook CWD. It selects a single `workspace_roots` entry first,
 then `CURSOR_PROJECT_DIR`, then the explicit `--workspace` value. A multiroot workspace selects the
@@ -1390,3 +1404,16 @@ bootstrap. A later successful mapping permits their normal drain. Missing transi
 remains a coverage gap; a recovered queue is not recovered content. Existing host/OS capability
 and consent requirements still apply. Automated host-contract tests do not establish native
 macOS, Linux, or Windows/WSL 2 acceptance. Native cold-start coverage remains tracked in #670.
+
+## Repairing an accepted empty-scope claim (#859)
+
+Use the shared `publish_work` operation (CLI: `publish-work`) and
+[claim correction guidance](../../guidance/publication-policy.md#claim-correction-and-limitation-linkage).
+Publish `claim_recorded/1.1.0` with a fresh claim ID, explicit `obligation_refs`, and every replaced
+claim ID in sorted `supersedes_claim_refs`. An empty-scope target needs no overlap; each populated
+target still does. For an empty C0 plus scoped C1, replace both in C2. Preview the exact batch first,
+then append, recheck and request a receipt. History and unresolved evidence/review limits remain.
+New completion claims must declare scope explicitly; obligation support is not scope. Intentional
+`[]` remains coverage-incomplete and cannot carry obligation support. No host hook invents scope or
+performs this repair. The shared service behavior applies on macOS, Linux and Windows through WSL 2;
+source tests do not establish native host/platform acceptance.

@@ -31,6 +31,7 @@ __all__ = [
     "STOP_CONTROL_EVENTS",
     "CursorOversizedPayloadError",
     "claude_context_output",
+    "claude_permission_denied_output",
     "context_output",
     "cursor_context_output",
     "read_cursor_hook_ingress",
@@ -232,6 +233,23 @@ def claude_context_output(event_name: str, additional_context: str) -> dict[str,
             }
         }
     return {}
+
+
+def claude_permission_denied_output(system_message: str, *, retry: bool) -> dict[str, JsonValue]:
+    """Render only fields supported by Claude's PermissionDenied event.
+
+    The user sees systemMessage; the model receives the host's retry cue only. Unlike
+    several other hook events, PermissionDenied does not accept additionalContext
+    (Claude Code 2.1.281 schema and docs checked 2026-09-26).
+    """
+
+    shown = system_message.strip()[:_MAX_CONTEXT_CHARS]
+    if not shown:
+        return {}
+    return {
+        "hookSpecificOutput": {"hookEventName": "PermissionDenied", "retry": retry},
+        "systemMessage": shown,
+    }
 
 
 def cursor_context_output(

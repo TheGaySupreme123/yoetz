@@ -315,6 +315,11 @@ a no-op, because the route state and the project admission state are independent
 Codex exposes no typed denial signal for a guardian refusal: its `PermissionRequest` hook fires
 before the decision and may allow, so it is not a denial. A held check is visible only as the
 #187 pause/approval flow in the transcript. This is a documented gap, not a Yoetz diagnostic.
+For the same reason the host-hold advisory that Claude Code's `PermissionDenied` hook emits
+(issue #857: a first-hand grant notice for the user and a separate host retry cue)
+has no Codex carrier. The shipped skill and guidance require a current first-hand grant read
+before asserting existing authorization, and the durable answer remains admission above. If a later Codex release publishes a
+post-decision denial event, mirror the Claude ingress (`cli/host_hold_advisory.py`) onto it.
 The 2026-08-30 source read is not a live cell; the `auto_review` acceptance cell in issue #467
 remains to be run.
 
@@ -819,6 +824,17 @@ from AI-powered review selection. The current hook path may still stage consente
 chunks locally pending the follow-up staging filter. Codex keeps its existing replay semantics; the
 shared operation-replay, source-generation fencing, and teardown repairs apply to all host adapters.
 
+Provider-repair advice is standing advice, so Codex delivers it only at session boundaries (#844).
+`SessionStart` carries it in `hookSpecificOutput.additionalContext`. `Stop` carries it as
+`decision: block` plus `reason`, which Codex treats as a continuation rather than a rejected turn.
+`PostToolUse` and `UserPromptSubmit` do not carry it. A private or no-egress install, an install
+with no provider endpoint, and an install whose verification is disabled do not emit
+`connect_provider`, `renew_provider_sign_in`, or `repair_semantic_provider`. The service emits
+that advice only when verification is not disabled, a provider endpoint is bound, network egress
+is permitted, and an LLM inference channel is enabled, and the provider is still structurally
+unusable, including when no factory id is available. `SessionEnd` still emits `{}` and does not
+consume a pending delivery.
+
 Legacy synchronous `hooks spool` is a separate structural fast path. It only appends the owner-only
 structural spool record and returns; it does not normalize or pair the event, open the service, drain
 an outbox, or carry native content. The READY forwarder later consumes the spool and performs normal
@@ -1113,6 +1129,23 @@ inside the final subprocess scheduling window. Post-apply verification still fai
 entry is not positively observed absent; a generic failed named lookup is not success.
 Plugin-managed MCP is not this command: it goes away with the plugin artifact, not with `codex mcp
 remove`.
+
+After the removal command returns, Yoetz checks the selected home again even if Codex exited
+nonzero. A successful structural list confirming absence completes removal with exit 0 and
+`removal.warnings=["host_remove_returned_nonzero"]`; a zero-exit removal has an empty warning
+list. Setup disconnect carries the same versioned outcome in `status.mcp_removal` and prints
+the warning in its human report. No host stderr or subprocess payload is echoed.
+
+If the entry is still present or the check is unreadable, removal remains unverified (CLI exit 20).
+Its report carries the observed owned/foreign state or null, `next_action=inspect_registration`,
+and an exact `next_command` for the selected runtime, binary and home. Run that read-only command
+first. If absent, a newly accepted removal preview is a no-op and reconciles stale route metadata;
+if still owned, obtain and accept a fresh preview before retrying. Preserve foreign entries.
+Command exceptions also remain unverified. Yoetz never retries the mutation automatically.
+
+This reconciliation applies to external Codex MCP removal on macOS, Linux and Windows through
+WSL 2; it does not establish native Windows support. Deterministic adapter coverage is separate
+from host-version acceptance: issue #860 records the bounded disposable native round trip.
 
 ## 9. Bounded `codex exec --json` import
 
@@ -1559,3 +1592,16 @@ bootstrap. A later successful mapping permits their normal drain. Missing transi
 remains a coverage gap; a recovered queue is not recovered content. Existing host/OS capability
 and consent requirements still apply. Automated host-contract tests do not establish native
 macOS, Linux, or Windows/WSL 2 acceptance. Native cold-start coverage remains tracked in #670.
+
+## Repairing an accepted empty-scope claim (#859)
+
+Use the shared `publish_work` operation (CLI: `publish-work`) and
+[claim correction guidance](../../guidance/publication-policy.md#claim-correction-and-limitation-linkage).
+Publish `claim_recorded/1.1.0` with a fresh claim ID, explicit `obligation_refs`, and every replaced
+claim ID in sorted `supersedes_claim_refs`. An empty-scope target needs no overlap; each populated
+target still does. For an empty C0 plus scoped C1, replace both in C2. Preview the exact batch first,
+then append, recheck and request a receipt. History and unresolved evidence/review limits remain.
+New completion claims must declare scope explicitly; obligation support is not scope. Intentional
+`[]` remains coverage-incomplete and cannot carry obligation support. No host hook invents scope or
+performs this repair. The shared service behavior applies on macOS, Linux and Windows through WSL 2;
+source tests do not establish native host/platform acceptance.

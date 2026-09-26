@@ -28,6 +28,7 @@ from yoetz.domain.receipts import (
     OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
     OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP,
     SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
+    SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
     SEMANTIC_CHALLENGES_REJECTED_GAP,
     SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
     SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP,
@@ -956,6 +957,7 @@ class FinalSemanticEvaluation:
                 "truncated_payload",
                 "content_unselected",
                 "content_redacted",
+                SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
             }
         ):
             raise _invalid("semantic_judgment_invalid")

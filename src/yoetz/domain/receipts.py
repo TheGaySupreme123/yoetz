@@ -89,6 +89,7 @@ __all__ = [
     "ReceiptSectionKey",
     "ReceiptVersionSlice",
     "SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP",
+    "SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP",
     "SEMANTIC_CHALLENGES_REJECTED_GAP",
     "SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP",
     "SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP",
@@ -142,6 +143,12 @@ SEMANTIC_REVIEW_NOT_REQUESTED_GAP: Final = "semantic_review_not_requested"
 # gap names that window; without it the drop was reported as an ordinary `not_selected` omission
 # and read as a selection-policy choice the author had already made.
 SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP: Final = "semantic_case_content_over_item_limit"
+# A local finding may cite up to 64 subjects, but one AI-powered review case item links at most
+# 16. A finding wider than that keeps its complete local identity and its place in the check
+# result; the case carries no prose or projected assessment for it and says so with this gap
+# beside the explicit `not_selected` omissions, instead of failing the whole review as a
+# generic coordinator failure (issue #858).
+SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP: Final = "semantic_case_finding_refs_over_limit"
 OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP: Final = "optional_semantic_review_blocked_by_policy"
 # The strict route ceiling blocked this process, but the durable applied-route record says the
 # last install applied the policy route (issue #537). The disagreement is the whole claim: a

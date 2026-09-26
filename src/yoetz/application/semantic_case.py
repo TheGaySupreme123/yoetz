@@ -55,7 +55,10 @@ from yoetz.domain.privacy import (
     ReviewContextProfile,
     ReviewSelectionPolicy,
 )
-from yoetz.domain.receipts import SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP
+from yoetz.domain.receipts import (
+    SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
+    SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
+)
 from yoetz.domain.values import (
     SubjectStateRelation,
     session_id,
@@ -76,6 +79,7 @@ from yoetz.kernel.lineage import LineageEvaluation
 from yoetz.kernel.projections import EvidenceProjectionRecord
 from yoetz.ports.objects import ObjectKind, ObjectRef
 from yoetz.ports.semantic import (
+    MAX_SEMANTIC_ITEM_SUBJECT_REFS,
     ChangeObservation,
     ExcerptDigestProvenance,
     ReviewAssessment,
@@ -1532,6 +1536,7 @@ def build_semantic_case(
 
     # --- Local assessments + optional finding prose ---
     review_assessments: list[ReviewAssessment] = []
+    finding_refs_over_limit = False
     if "deterministic_assessments" in sections:
         matched = _match_assessments(frozen_case, findings)
         for finding, assessment in matched[: selection.max_assessments]:
@@ -1542,7 +1547,20 @@ def build_semantic_case(
                 linked = tuple(str(ref) for ref in finding.subject_refs)
                 # Prose requires exact-match allowlist on every subject_ref; otherwise keep the
                 # local assessment without summary/detail content items.
-                if linked and set(linked) <= allowed:
+                if linked and len(linked) > MAX_SEMANTIC_ITEM_SUBJECT_REFS:
+                    # A finding may cite up to 64 subjects; one case item links at most 16. The
+                    # complete tuple used to reach SemanticCaseItem and fail its bound, which
+                    # surfaced as coordinator_failure with no review at all (issue #858). Slicing
+                    # the tuple would present a partial subject list as the finding's own, so the
+                    # prose is omitted whole and named: the finding keeps its identity in
+                    # local_check_refs and the check result, the omission says which category was
+                    # withheld, and coverage carries the capacity reason. The projected
+                    # assessment below skips itself for the same width with its own omission.
+                    omissions.append(
+                        _omit(finding_ref, DataCategory.FINDING_SUMMARY, "finding", "not_selected")
+                    )
+                    finding_refs_over_limit = True
+                elif linked and set(linked) <= allowed:
                     summary_id = f"finding-summary-{finding_ref}"
                     detail_id = f"finding-detail-{finding_ref}"
                     items.append(
@@ -2156,6 +2174,23 @@ def build_semantic_case(
             known_gaps=tuple(
                 sorted(
                     {*coverage.known_gaps, SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP},
+                    key=str.encode,
+                )
+            ),
+        )
+    if finding_refs_over_limit:
+        # The finding is still a local check result the reviewer can cite; only its prose and
+        # projected basis are absent from this case. Coverage says so, as with shortened prose.
+        coverage = replace(
+            coverage,
+            ledger_freshness=(
+                LedgerFreshness.PARTIAL
+                if coverage.ledger_freshness is LedgerFreshness.CURRENT
+                else coverage.ledger_freshness
+            ),
+            known_gaps=tuple(
+                sorted(
+                    {*coverage.known_gaps, SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP},
                     key=str.encode,
                 )
             ),

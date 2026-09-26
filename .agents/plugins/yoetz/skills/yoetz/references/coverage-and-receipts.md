@@ -292,6 +292,16 @@ or repository decision. After a host denial, cancellation, or approval expiry, t
 AI-powered review dispatch. Continue without AI-powered review only if the user explicitly selects
 that fallback after the limitation is shown; otherwise leave the task pending.
 
+A host hold establishes neither a Yoetz grant nor a Yoetz privacy denial. State that the owner
+already authorized external review only when a current first-hand read confirms the repository
+grant; configured routing alone is not consent. Host tool-call approval remains separate.
+Claude Code's `PermissionDenied` event shows the grant notice to the user through `systemMessage`.
+It does not deliver `additionalContext` to the model. The host may relay a one-retry cue from the
+Yoetz hook; only when higher-priority host instructions permit it, retry the identical check once
+with the same body and request_id, then ask the user if held again. Never retry an explicit human
+denial. The cue alone proves neither the grant nor approval. For a confirmed grant, propose the
+owner's `yoetz integrate <host> admission grant` as a durable fix; never write it yourself.
+
 
 ## When a check is waiting on a local decision
 
