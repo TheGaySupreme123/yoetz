@@ -67,6 +67,10 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "byte_order_mark_forbidden",
     "catalog_busy",
     "catalog_maintenance_busy",
+    "check_admission_capture_pending",
+    "check_admission_contended",
+    "check_admission_import_pending",
+    "check_admission_in_progress",
     "child_check_frontier_ahead_of_child",
     "child_check_frontier_missing",
     "child_check_frontier_without_check",
@@ -348,7 +352,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
 )
 
 _REASON_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
-assert len(_PROTOCOL_REASON_CODE_VALUES) == 291
+assert len(_PROTOCOL_REASON_CODE_VALUES) == 295
 assert len(_PROTOCOL_REASON_CODE_VALUES) == len(set(_PROTOCOL_REASON_CODE_VALUES))
 assert _PROTOCOL_REASON_CODE_VALUES == tuple(sorted(_PROTOCOL_REASON_CODE_VALUES, key=str.encode))
 assert all(_REASON_CODE_PATTERN.fullmatch(value) for value in _PROTOCOL_REASON_CODE_VALUES)
@@ -429,6 +433,7 @@ _BOOLEAN_DETAIL_KEYS = frozenset({"availability_inherited"})
 # directive, or the reverse, is a build failure rather than a bare token reaching an agent.
 ADMITTED_CONTINUATION_TOKENS: frozenset[str] = frozenset(
     {
+        "check_admission_same_identity",
         "consent_ceremony_required",
         "field_ownership_repair",
         "frontier_refresh_required",
@@ -500,6 +505,12 @@ ADMITTED_CONTINUATION_TOKENS: frozenset[str] = frozenset(
 # boundary that knows it (``continuation_for_reason``).
 REASON_CODE_CONTINUATIONS: Mapping[str, str] = MappingProxyType(
     {
+        # A check refused before admission recorded nothing under its request identity, so the
+        # exact replay is the recovery; it must never read as a stranded operation (issue #838).
+        "check_admission_capture_pending": "check_admission_same_identity",
+        "check_admission_contended": "check_admission_same_identity",
+        "check_admission_import_pending": "check_admission_same_identity",
+        "check_admission_in_progress": "check_admission_same_identity",
         "duplicate_set_member": "sorted_set_required",
         "endpoint_unsafe": "storage_root_unsafe",
         "expected_frontier_required": "frontier_refresh_required",

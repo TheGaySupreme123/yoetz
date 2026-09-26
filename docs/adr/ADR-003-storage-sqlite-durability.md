@@ -119,7 +119,7 @@ writable ledger.
    exact routed task against current local content authority before one freeze retry. It tombstones
    only tickets whose authority is absent, inactive, revoked, runtime-disabled, profile-unselected,
    or from an old authority generation, so a direct capture-only request with no structural outbox
-   row cannot leave a permanent barrier. Matching active tickets remain retryable; a completed
+   row cannot leave a permanent barrier. Matching active tickets remain retryable as `check_admission_capture_pending`; a completed
    same-request replay returns without inspecting newer tickets, and encrypted objects and
    captured history are unchanged. When the capture lock is free, the preflight also tombstones an
    active ticket at least 30 seconds old whose structural row is no longer queued, and the READY

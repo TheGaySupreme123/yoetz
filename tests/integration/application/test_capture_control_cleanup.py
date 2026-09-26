@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import cast
 
@@ -38,7 +39,12 @@ from yoetz.domain.observation import (
     ObservationSource,
 )
 from yoetz.domain.observation_profiles import CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
-from yoetz.ports.ledger import FrozenCase
+from yoetz.ports.ledger import (
+    CheckAdmissionStage,
+    FrozenCase,
+    check_admission_refused,
+    check_admission_stage,
+)
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind
 
@@ -479,3 +485,172 @@ async def test_completed_check_replay_skips_capture_reconciliation() -> None:
     replayed = await _execute_check_commit(app, _check_request())
 
     assert replayed is first
+
+
+class _At:
+    """A reconciliation clock pinned to one instant."""
+
+    def __init__(self, now: datetime) -> None:
+        self.now = now
+
+    def now_utc(self) -> datetime:
+        return self.now
+
+    def monotonic_seconds(self) -> float:
+        return 1.0
+
+
+@pytest.mark.anyio
+async def test_check_preflight_retires_an_orphaned_live_authority_ticket(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A handoff no structural row can ever consume no longer blocks the task (issue #838).
+
+    Authority stays active throughout. The ticket is kept while it is young and while its
+    structural row is still pending; only once that row is gone and the grace window has passed
+    is it retired, after which the check admits.
+    """
+
+    profile = CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
+    (
+        project,
+        workspace,
+        _session_commitment,
+        local,
+        observation,
+        ledger,
+        runtime,
+        coordinator,
+        client,
+        connect,
+    ) = await _pipeline(tmp_path, codex_session_id="claude:orphan-check", profile=profile)
+    run_hook = _claude_hook_runner(
+        project=project,
+        state=tmp_path / "state",
+        connect=connect,
+        profile=profile,
+    )
+    assert (
+        await asyncio.to_thread(
+            run_hook,
+            "PreToolUse",
+            {
+                "hook_event_name": "PreToolUse",
+                "session_id": "orphan-check",
+                "tool_name": "Bash",
+                "tool_use_id": "orphan-check-tool",
+            },
+        )
+        == 0
+    )
+    captured = await _capture_claude_post_requests(
+        client=client,
+        monkeypatch=monkeypatch,
+        run_hook=run_hook,
+        session_id="orphan-check",
+        tool_use_id="orphan-check-tool",
+        marker=b"orphan-check-marker",
+    )
+    capture = next(item for item in captured if item.capture_only)
+    staged = await coordinator.ingest_request(capture)
+    assert staged.reason == OBSERVATION_CONTENT_CAPTURE_PENDING_REASON
+    logical_identity = observation_content_identity(capture.envelope)
+    pending = observation.load_capture_ticket(
+        workspace=workspace, logical_identity=logical_identity
+    )
+    assert pending is not None and pending.state == "pending"
+    after_grace = _At(pending.captured_at.as_datetime() + timedelta(seconds=121))
+    reconcile = coordinator.reconcile_task_capture_handoffs
+    original_clock = coordinator.clock
+
+    # The structural row that will consume this handoff is still queued: keep it.
+    rows = local.list_pending_outbox_rows(workspace, codex_session_id="claude:orphan-check")
+    assert rows
+    monkeypatch.setattr(coordinator, "clock", after_grace)
+    await reconcile(runtime)
+    kept = observation.load_capture_ticket(workspace=workspace, logical_identity=logical_identity)
+    assert kept is not None and kept.state == "pending"
+
+    # The row leaves without consuming the handoff (delivered or quarantined elsewhere).
+    for row in rows:
+        assert local.acknowledge_outbox_row(workspace, row)
+    young = _At(pending.captured_at.as_datetime() + timedelta(seconds=29))
+    monkeypatch.setattr(coordinator, "clock", young)
+    await reconcile(runtime)
+    kept = observation.load_capture_ticket(workspace=workspace, logical_identity=logical_identity)
+    assert kept is not None and kept.state == "pending"
+    monkeypatch.setattr(coordinator, "clock", original_clock)
+    await reconcile(runtime)
+    kept = observation.load_capture_ticket(workspace=workspace, logical_identity=logical_identity)
+    assert kept is not None and kept.state == "pending"
+
+    monkeypatch.setattr(coordinator, "clock", after_grace)
+    await reconcile(runtime)
+    retired = observation.load_capture_ticket(
+        workspace=workspace, logical_identity=logical_identity
+    )
+    assert retired is not None and retired.state == "revoked"
+    frontier = await ledger.load_frontier()
+    frozen = await ledger.freeze_case(
+        runtime.session_id,
+        cast(str, runtime.writer_id),
+        frontier.sequence,
+        _ids(IdKind.REQUEST, 9_838),
+        _ZERO_DIGEST,
+    )
+    assert isinstance(frozen, FrozenCase)
+
+
+def _refuse_first(app: _CheckApp, stage: CheckAdmissionStage) -> list[str]:
+    original_freeze = app.ledger.freeze_case
+    calls: list[str] = []
+
+    async def freeze(*args: object) -> object:
+        calls.append("freeze")
+        if len(calls) == 1:
+            raise check_admission_refused(stage)
+        return await original_freeze(*args)
+
+    async def reconcile(_runtime: object) -> None:
+        calls.append("reconcile")
+
+    app.ledger.freeze_case = freeze  # type: ignore[method-assign]
+    setattr(app, "reconcile_observation_capture", reconcile)
+    return calls
+
+
+@pytest.mark.anyio
+async def test_typed_capture_refusal_reconciles_then_retries_the_exact_freeze() -> None:
+    app = _CheckApp()
+    calls = _refuse_first(app, CheckAdmissionStage.CAPTURE_HANDOFF_PENDING)
+    result = await _execute_check_commit(app, _check_request())
+    assert result.outcome == "committed"
+    assert calls == ["freeze", "reconcile", "freeze"]
+
+
+@pytest.mark.anyio
+async def test_lost_acquisition_race_retries_once_without_capture_reconciliation() -> None:
+    app = _CheckApp()
+    calls = _refuse_first(app, CheckAdmissionStage.ACQUISITION_CONTENDED)
+    result = await _execute_check_commit(app, _check_request())
+    assert result.outcome == "committed"
+    assert calls == ["freeze", "freeze"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "stage", (CheckAdmissionStage.ACQUIRING, CheckAdmissionStage.IMPORT_PENDING)
+)
+async def test_in_flight_or_import_refusal_returns_its_typed_stage_unretried(
+    stage: CheckAdmissionStage,
+) -> None:
+    """A retry inside the call cannot help, so the caller gets the typed same-identity path."""
+
+    app = _CheckApp()
+    calls = _refuse_first(app, stage)
+    with pytest.raises(PublicOperationError) as refused:
+        await _execute_check_commit(app, _check_request())
+    assert check_admission_stage(refused.value) is stage
+    assert refused.value.safe_details["continuation"] == "check_admission_same_identity"
+    assert calls == ["freeze"]

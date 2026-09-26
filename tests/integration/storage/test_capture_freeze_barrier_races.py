@@ -22,7 +22,7 @@ from integration.storage.test_capture_freeze_barrier import (
 )
 from yoetz.adapters.sqlite.migrations import initialize_bundle
 from yoetz.adapters.sqlite.repository import SqliteLedger
-from yoetz.ports.ledger import CheckPhase, FrozenCase
+from yoetz.ports.ledger import CheckAdmissionStage, CheckPhase, FrozenCase, check_admission_stage
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 
 
@@ -138,7 +138,12 @@ async def test_capture_ticket_sync_failure_releases_freeze_reservation() -> None
     with pytest.raises(PublicOperationError) as caught:
         await asyncio.wait_for(freeze, timeout=1)
     assert caught.value.code is PublicErrorCode.OPERATION_PENDING
+    # The handoff that landed mid-staging is named precisely, not as a stranded operation.
+    assert check_admission_stage(caught.value) is CheckAdmissionStage.CAPTURE_HANDOFF_PENDING
     assert (command.writer_id, request_id) not in ledger._state.check_reservations  # pyright: ignore[reportPrivateUsage]
+    admission = await ledger.lookup_check_admission(command.writer_id, request_id)
+    assert admission is not None
+    assert admission.stage is CheckAdmissionStage.CAPTURE_HANDOFF_PENDING
 
     store.tombstone_capture_ticket(ticket)
     resumed = await asyncio.wait_for(
@@ -193,13 +198,12 @@ async def test_freeze_does_not_overwrite_concurrent_non_record_state() -> None:
     )
     gate.release_freeze.set()
 
-    try:
-        result = await asyncio.wait_for(second, timeout=1)
-    except PublicOperationError as caught:
-        assert caught.retryable is True
-    else:
-        assert isinstance(result, FrozenCase)
+    # Lifecycle motion that moved no record cannot change the staged case, so the admission is
+    # carried over it instead of surfacing a no-record OPERATION_PENDING (issue #838).
+    result = await asyncio.wait_for(second, timeout=1)
+    assert isinstance(result, FrozenCase)
     operation = await ledger.lookup_operation(command.writer_id, first_request)
     assert operation is not None
     assert operation.phase is CheckPhase.LOCAL_READY
+    assert await ledger.lookup_operation(command.writer_id, second_request) is not None
     db.close()

@@ -16,6 +16,7 @@ from yoetz.protocol.models import (
     PublicErrorModel,
     ReceiptSuccessModel,
     StatusAdvicePageModel,
+    StatusCheckAdmissionModel,
     StatusFindingsPageModel,
     StatusLineagePageModel,
     StatusObligationsPageModel,
@@ -255,6 +256,24 @@ def render_semantic_progress_lines(progress: StatusSemanticProgressModel) -> tup
     return tuple(lines)
 
 
+def render_check_admission_lines(admission: StatusCheckAdmissionModel) -> tuple[str, ...]:
+    """Render why a check request id has no operation yet, exactly as the JSON page states it.
+
+    Only the closed stage token, a count, and whole seconds derived by the service appear. The
+    stage is a transient service observation, not a verdict about the work (issue #838).
+    """
+
+    if type(admission) is not StatusCheckAdmissionModel:
+        raise TypeError("status_check_admission_invalid")
+    elapsed = int(admission.elapsed_ms) // 1000
+    return (
+        f"Check admission: {_token(admission.stage)} "
+        f"(refusals {admission.refusal_count}); elapsed {elapsed}s",
+        "Nothing is recorded under this request ID yet. Wait "
+        f"{admission.retry_after_ms} ms, then replay the exact same check request.",
+    )
+
+
 def render_human_status(result: StatusSuccessModel) -> str:
     """Render current structural status without dumping the ledger."""
 
@@ -282,6 +301,8 @@ def render_human_status(result: StatusSuccessModel) -> str:
             )
         if result.page.semantic_progress is not None:
             lines.extend(render_semantic_progress_lines(result.page.semantic_progress))
+        if result.page.admission is not None:
+            lines.extend(render_check_admission_lines(result.page.admission))
     elif isinstance(result.page, StatusLineagePageModel):
         lines.extend(_render_lineage(result.page))
     elif isinstance(result.page, StatusAdvicePageModel):

@@ -626,6 +626,17 @@ def _operation_progress_clause(source: Mapping[str, JsonValue]) -> str:
         f"operation state: {_safe_token(typed.get('state'))}; "
         f"kind: {_safe_token(typed.get('operation_kind'), fallback='none')}; "
     )
+    admission = typed.get("admission")
+    if isinstance(admission, Mapping):
+        # Issue #838: an absent page with an admission stage is a refused or in-flight admission,
+        # not an unknown request; the exact replay after the named wait is the recovery.
+        admitted = cast(Mapping[str, JsonValue], admission)
+        return clause + (
+            f"admission stage: {_safe_token(admitted.get('stage'))}; "
+            f"refusals: {_safe_count(admitted.get('refusal_count'))}; "
+            f"elapsed ms: {_safe_count(admitted.get('elapsed_ms'))}; "
+            f"retry after ms: {_safe_count(admitted.get('retry_after_ms'))}; "
+        )
     progress = typed.get("semantic_progress")
     if not isinstance(progress, Mapping):
         return clause + "semantic progress: none; "
