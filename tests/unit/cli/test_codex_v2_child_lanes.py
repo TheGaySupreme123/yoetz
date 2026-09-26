@@ -130,9 +130,9 @@ def _short_child_rollout(
     return path
 
 
-def test_transcript_identity_preserves_valid_prefix_ids(codex_home: Path) -> None:
+@pytest.mark.parametrize("child", ["root-child", "root_child"])
+def test_transcript_identity_preserves_valid_prefix_ids(codex_home: Path, child: str) -> None:
     parent = "root"
-    child = "root-child"
     rollout = _short_child_rollout(
         codex_home,
         parent=parent,
@@ -163,6 +163,29 @@ def test_transcript_identity_rejects_a_child_suffix_collision(codex_home: Path) 
     enriched, conflict = with_transcript_child_identity(payload, event_name="PreToolUse")
 
     assert (enriched, conflict) == (payload, None)
+
+
+def test_parent_session_rollout_suffix_remains_an_ordinary_callback(codex_home: Path) -> None:
+    path = (
+        codex_home
+        / "sessions"
+        / "2026"
+        / "08"
+        / "22"
+        / "rollout-2026-08-22T12-00-00-root_child.jsonl"
+    )
+    path.write_bytes(
+        encode_lines(
+            session_meta(
+                cli_version="0.153.4",
+                history_mode="paginated",
+                session_id="root",
+            )
+        )
+    )
+    payload = {"session_id": "root", "transcript_path": str(path)}
+
+    assert with_transcript_child_identity(payload, event_name="PreToolUse") == (payload, None)
 
 
 # --- A callback's own transcript names the delegated child ------------------------------------
