@@ -79,6 +79,10 @@ _REASONS: Final = frozenset(
         # handler as the bare `observe` reason, so a permanently wedged flush
         # was indistinguishable from any other hook fault (issue #753).
         "admission_flush_invalid",
+        # A teardown hook could not persist its session end. The hook stays
+        # fail-open, so this is the only record that the session and any
+        # temporary selection override are still active (issue #843).
+        "session_end_unrecorded",
         # One host event refused at stdin ingress for exceeding
         # ``MAX_HOOK_STDIN_BYTES``, named per host because the reading process
         # is the only thing that still knows which host it was: the body was

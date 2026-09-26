@@ -266,6 +266,10 @@ _STORE_LOCK_POLL_SECONDS: Final = 0.01
 # Fraction of the state bound a save must leave free before an eviction gap is
 # treated as healed (#310).
 _STATE_HEADROOM_DIVISOR: Final = 8
+# Fixed room kept for loss accounting and lifecycle writes while accepted rows
+# exceed a lowered selection. It is not scaled by any profile, and it ends with
+# the over-target transition (#843).
+_OVER_TARGET_ACCOUNTING_RESERVE_BYTES: Final = _DEFAULT_STATE_BYTES // _STATE_HEADROOM_DIVISOR
 
 # Yoetz's own MCP tools as Codex spells them (bare registry name or the
 # ``mcp__yoetz__`` server prefix). Derived from the one registry tuple so this
@@ -1969,6 +1973,21 @@ def _dedup_key(workspace: str, envelope: ObservationEnvelope) -> str:
                 "cursor": observation_cursor_to_json(envelope.cursor),
             }
         )
+    )
+
+
+def _outbox_row_to_json(row: ObservationOutboxRow) -> JsonObject:
+    """Return one pending row exactly as the workspace state persists it."""
+
+    return JsonObject(
+        {
+            "codex_session_id": row.codex_session_id,
+            "envelope": observation_envelope_to_json(row.envelope),
+            "attempts": row.attempts,
+            "last_reason": row.last_reason,
+            "last_attempt_at": (None if row.last_attempt_at is None else row.last_attempt_at.wire),
+            "consecutive_reason_attempts": row.consecutive_reason_attempts,
+        }
     )
 
 
@@ -4748,7 +4767,13 @@ class LocalObservationStore:
             else BudgetLimits.for_capacity(capacity).queue_count
         )
 
-    def _state_byte_limit(self, workspace_commitment: str, state: _WorkspaceState) -> int:
+    def _state_byte_limit(
+        self,
+        workspace_commitment: str,
+        state: _WorkspaceState,
+        *,
+        required: int | None = None,
+    ) -> int:
         """Return the active state bound while preserving prior larger occupancy.
 
         A capacity override may be lowered while rows accepted under a larger
@@ -4757,23 +4782,92 @@ class LocalObservationStore:
         profile.  Small standard-profile files continue to honor the historic
         ``_MAX_STATE_BYTES`` test/deployment seam, so a temporary pressure cap
         can still exercise the standard retention ladder.
+
+        ``required`` is the size of the state a caller is about to write.  When
+        it does not fit and the accepted queue is over its selected target, the
+        bound becomes :meth:`_over_target_state_limit`, so a refused event or a
+        lifecycle transition is still recorded (#843).  The cheaper bound is
+        returned whenever the write already fits.
         """
 
         settings = state.selection_settings or ObservationSelectionSettings()
-        capacity = settings.aggregate_capacity(now=self._wall_timestamp())
+        now = self._wall_timestamp()
+        capacity = settings.aggregate_capacity(now=now)
         selected = (
             _MAX_STATE_BYTES
             if capacity.profile is CapacityProfile.STANDARD
             else BudgetLimits.for_capacity(capacity).state_bytes
         )
+        limit = selected
         path = self._workspace_path(workspace_commitment)
         current_size = 0
         key = self._stat_key(path)
         if key is not None:
             current_size = key[1]
         if current_size > _DEFAULT_STATE_BYTES and current_size > selected:
-            selected = current_size
-        return min(_MAX_EXPANDED_STATE_BYTES, max(1, selected))
+            limit = current_size
+        if required is not None and required > limit:
+            limit = max(
+                limit,
+                self._over_target_state_limit(state, capacity, selected, now=now),
+            )
+        return min(_MAX_EXPANDED_STATE_BYTES, max(1, limit))
+
+    def _over_target_state_limit(
+        self,
+        state: _WorkspaceState,
+        capacity: ObservationCapacity,
+        selected_state_bytes: int,
+        *,
+        now: Timestamp,
+    ) -> int:
+        """Return the finite bound for accepted rows above a lowered selection.
+
+        Accepted rows are never deleted to fit a lower selection, and admission
+        stops new rows while they exceed it.  The bound is the selected state
+        budget, plus the persisted bytes of accepted rows beyond the selected
+        queue budget, plus a fixed accounting reserve.  Loss accounting and
+        lifecycle writes cannot raise it: it moves only with the accepted rows
+        and shrinks as they drain.  Outside an over-target transition it is 0,
+        so an ordinary full queue keeps its standard retention ladder.
+        """
+
+        rows = tuple(state.pending_outbox or ())
+        buffered = tuple(state.admission_buffer.inputs)
+        if not rows and not buffered:
+            return 0
+        queue_budget = BudgetLimits.for_capacity(capacity).queue_bytes
+        # Measure in admission units first; only a queue that admission would
+        # already refuse is over target.
+        if len(rows) + len(buffered) <= self._aggregate_outbox_limit(state, now=now):
+            admitted_bytes = sum(
+                len(
+                    canonical_encode(
+                        JsonObject(
+                            {
+                                "codex_session_id": row.codex_session_id,
+                                "envelope": observation_envelope_to_json(row.envelope),
+                            }
+                        )
+                    )
+                )
+                for row in rows
+            ) + sum(
+                len(canonical_encode(observation_envelope_to_json(item.envelope)))
+                for item in buffered
+            )
+            if admitted_bytes <= queue_budget:
+                return 0
+        persisted_bytes = sum(len(canonical_encode(_outbox_row_to_json(row))) for row in rows)
+        if buffered:
+            persisted_bytes += len(
+                canonical_encode(admission_buffer_to_json(state.admission_buffer))
+            )
+        return (
+            selected_state_bytes
+            + max(0, persisted_bytes - queue_budget)
+            + _OVER_TARGET_ACCOUNTING_RESERVE_BYTES
+        )
 
     def _admission_allowed(
         self,
@@ -4964,7 +5058,7 @@ class LocalObservationStore:
                 # the bytes _save would otherwise re-encode: one encode, not three.
                 self._resolve_gap_state(state, _LOCAL_OUTBOX_OVERFLOW_GAP)
             projected = self._encode_state(workspace, state)
-            if len(projected) > self._state_byte_limit(workspace, state):
+            if len(projected) > self._state_byte_limit(workspace, state, required=len(projected)):
                 if reclaimed:
                     # The speculative candidate failed the final bound. Keep
                     # the accepted queue and quarantine exactly as they were.
@@ -5396,9 +5490,8 @@ class LocalObservationStore:
             candidate.pending_outbox.append(
                 ObservationOutboxRow(codex_session_id=codex_session_id, envelope=envelope)
             )
-        return len(self._encode_state(workspace, candidate)) <= self._state_byte_limit(
-            workspace, candidate
-        )
+        encoded_size = len(self._encode_state(workspace, candidate))
+        return encoded_size <= self._state_byte_limit(workspace, candidate, required=encoded_size)
 
     def commit_selected_admission(
         self,
@@ -7726,7 +7819,7 @@ class LocalObservationStore:
             ObservationOutboxRow(codex_session_id=codex_session_id, envelope=envelope)
         )
         projected = self._encode_state(workspace, candidate)
-        if len(projected) > self._state_byte_limit(workspace, candidate):
+        if len(projected) > self._state_byte_limit(workspace, candidate, required=len(projected)):
             return None
         return candidate
 
@@ -8722,7 +8815,6 @@ class LocalObservationStore:
         directory = self._root / "workspaces"
         _ensure_dir(directory)
         path = self._workspace_path(workspace_commitment)
-        state_limit = self._state_byte_limit(workspace_commitment, state)
         quarantined_before = len(state.quarantine or ())
         notices_before = len(state.frontier_motion_notices or ())
         delivered_before = len(state.frontier_motion_delivered or ())
@@ -8741,6 +8833,12 @@ class LocalObservationStore:
             payload = projected
         else:
             payload = self._encode_state(workspace_commitment, state)
+        # Retention and the final check use the bound for this exact write,
+        # which includes a finite over-target allowance when accepted rows
+        # exceed a lowered selection (#843). Healing an eviction gap still
+        # requires headroom under the ordinary bound.
+        selected_limit = self._state_byte_limit(workspace_commitment, state)
+        state_limit = self._state_byte_limit(workspace_commitment, state, required=len(payload))
         partials = state.stream_partials
         dropped_sessions = state.stream_partial_dropped_sessions
         assert partials is not None
@@ -8811,7 +8909,7 @@ class LocalObservationStore:
             not truncated
             and truncation is not None
             and truncation.active
-            and len(payload) + state_limit // _STATE_HEADROOM_DIVISOR <= state_limit
+            and len(payload) + selected_limit // _STATE_HEADROOM_DIVISOR <= selected_limit
         ):
             # Landing with a full headroom margin, having shed nothing, is live
             # proof the store is no longer losing observations to the bound.
@@ -9369,19 +9467,7 @@ class LocalObservationStore:
                 None if state.monotonic_epoch is None else round(state.monotonic_epoch * 1000)
             ),
             "pending_outbox": tuple(
-                JsonObject(
-                    {
-                        "codex_session_id": row.codex_session_id,
-                        "envelope": observation_envelope_to_json(row.envelope),
-                        "attempts": row.attempts,
-                        "last_reason": row.last_reason,
-                        "last_attempt_at": (
-                            None if row.last_attempt_at is None else row.last_attempt_at.wire
-                        ),
-                        "consecutive_reason_attempts": row.consecutive_reason_attempts,
-                    }
-                )
-                for row in (state.pending_outbox or ())
+                _outbox_row_to_json(row) for row in (state.pending_outbox or ())
             ),
             "quarantine": tuple(
                 JsonObject(
