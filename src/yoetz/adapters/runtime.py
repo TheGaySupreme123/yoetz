@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Protocol, cast
 
 from yoetz.domain.values import Frontier
@@ -266,8 +266,40 @@ def _observation_for(ledger: LedgerPort) -> TaskObservationPort | None:
     return cast(_ObservationCapableLedger, ledger).open_observation_store()
 
 
+class _StructuralLedger:
+    """A keyless read facade: record envelopes without their decoded payloads.
+
+    ``STRUCTURAL_READ`` never loads bundle keys when it opens a task, so it has no authority over
+    encrypted payload content.  A warm entry opened earlier for payload or write access does hold
+    decoded payloads, and before this facade a structural lease on such an entry saw them anyway.
+    Code built on that saw payloads only while some other caller kept the entry warm, and it
+    failed once the entry was evicted, restarted, or relocked (#839).  This facade removes the
+    payload, which is exactly the record a keyless decode produces, and it omits every
+    payload-derived projection read.  Warm or cold, a structural lease never sees payload content.
+    """
+
+    __slots__ = ("_value",)
+
+    def __init__(self, value: LedgerPort) -> None:
+        self._value = value
+
+    async def _structural_events(
+        self, session_id: str, after: int, through: int | None
+    ) -> AsyncIterator[LedgerRecord]:
+        async for record in self._value.load_events(session_id, after=after, through=through):
+            yield record if record.payload is None else replace(record, payload=None)
+
+    def load_events(
+        self, session_id: str, *, after: int = 0, through: int | None = None
+    ) -> AsyncIterator[LedgerRecord]:
+        return self._structural_events(session_id, after, through)
+
+    async def load_frontier(self) -> Frontier:
+        return await self._value.load_frontier()
+
+
 class _ReadLedger:
-    """A structural read facade with no mutator attributes."""
+    """A payload read facade with no mutator attributes."""
 
     __slots__ = ("_value",)
 
@@ -1157,7 +1189,12 @@ class LocalBundleRuntime(BundleRuntimePort):
                 if RuntimeCapability.WRITE in admitted:
                     observation = _observation_for(entry.ledger)
             else:
-                ledger = cast(LedgerPort, _ReadLedger(entry.ledger))
+                ledger = cast(
+                    LedgerPort,
+                    _ReadLedger(entry.ledger)
+                    if access is RouteAccess.PAYLOAD_READ
+                    else _StructuralLedger(entry.ledger),
+                )
                 objects = cast(
                     ObjectStorePort,
                     _PayloadObjects(entry.objects)

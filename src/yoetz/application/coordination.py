@@ -72,12 +72,13 @@ from yoetz.domain.values import (
     validate_commitment,
     validate_sha256_digest,
 )
+from yoetz.observability.logging import record_classified_exception_without_raising
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.ledger import AppendCommand, AppendEntry, OperationKind
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef, ObjectSource, ObjectStorePort
 from yoetz.ports.runtime import BundleRuntimePort, RouteAccess, RouteCommand, TaskRuntime
-from yoetz.ports.start_catalog import TaskRoute, TaskRouteState
+from yoetz.ports.start_catalog import TaskRoute, TaskRouteState, TaskSourceProvenance
 from yoetz.protocol.canonical import canonical_digest, canonical_encode, strict_json_parse
 from yoetz.protocol.coverage import PublicationChannel, coverage_for_channel
 from yoetz.protocol.ids import IdKind, validate_id
@@ -1247,7 +1248,7 @@ class LedgerCoordinationInputProvider:
     ) -> None:
         if not callable(
             getattr(getattr(projects, "catalog", None), "task_source_provenance", None)
-        ):
+        ) or not callable(getattr(projects, "admit", None)):
             raise TypeError("coordination_projects_invalid")
         if not callable(getattr(runtime, "route", None)) or not callable(
             getattr(runtime, "release", None)
@@ -1263,6 +1264,61 @@ class LedgerCoordinationInputProvider:
         self.resource_provider = resource_provider
         self.case_sensitive = case_sensitive
 
+    async def _payload_runtime(self, route: TaskRoute) -> TaskRuntime | None:
+        """Lease one exact task route with payload-read authority, or return ``None``.
+
+        Detector input is extracted from typed accepted payloads: requested items, attempted edit
+        items, obligation identities, and coordination declarations.  Those payloads are
+        encrypted bundle objects, so reading them requires the task's bundle keys.  A structural
+        lease is keyless by design: a cold entry cannot open the production object store, and a
+        warm entry exposes no payload.  Requesting ``PAYLOAD_READ`` gives an evicted, restarted,
+        or relocked runtime entry the same input as a warm one (#839).  The lease stays inside
+        this provider; only the normalized typed identities extracted from it reach the detector.
+        """
+
+        runtime = await self.runtime.route(
+            RouteCommand(
+                route.session_id,
+                None,
+                RouteAccess.PAYLOAD_READ,
+                frozenset({RuntimeCapability.STRUCTURAL_READ, RuntimeCapability.PAYLOAD_READ}),
+            )
+        )
+        if (
+            type(runtime) is not TaskRuntime
+            or runtime.task_id != route.task_id
+            or RuntimeCapability.PAYLOAD_READ not in runtime.capabilities
+        ):
+            if type(runtime) is TaskRuntime:
+                await self.runtime.release(runtime)
+            return None
+        return runtime
+
+    async def _source_admitted(
+        self, task: str, project: str, provenance: TaskSourceProvenance
+    ) -> bool:
+        """Return whether the task's source is currently admitted to ``project``.
+
+        This is the authority for the payload read in :meth:`_load_ledger_material`.  It applies
+        the same checks as delivery (workspace consent, source policy, project membership, and a
+        general or cross-repository grant where one is required).  The consent check reads only
+        the task's authenticated session-opened locator; the typed work payloads of a task that is
+        unconsented, revoked, or outside the project are never extracted as detector input.
+        """
+
+        workspace = provenance.workspace_ref_commitment
+        if workspace is None:
+            return False
+        try:
+            await self.projects.admit(
+                source_task_id=task,
+                source_workspace_commitment=workspace,
+                project=project,
+            )
+        except CoordinationError:
+            return False
+        return True
+
     async def _load_ledger_material(
         self, route: TaskRoute
     ) -> tuple[
@@ -1271,17 +1327,8 @@ class LedgerCoordinationInputProvider:
         set[str],
         tuple[CoordinationObligationDeclaredPayload, ...],
     ]:
-        runtime = await self.runtime.route(
-            RouteCommand(
-                route.session_id,
-                None,
-                RouteAccess.STRUCTURAL_READ,
-                frozenset({RuntimeCapability.STRUCTURAL_READ}),
-            )
-        )
-        if type(runtime) is not TaskRuntime or runtime.task_id != route.task_id:
-            if type(runtime) is TaskRuntime:
-                await self.runtime.release(runtime)
+        runtime = await self._payload_runtime(route)
+        if runtime is None:
             raise CoordinationError(CoordinationErrorCode.INVALID)
         resources: set[str] = set()
         structured: list[Mapping[str, JsonValue]] = []
@@ -1320,7 +1367,9 @@ class LedgerCoordinationInputProvider:
 
         Coordination state must be tied to a participant's own published obligation.  This read
         is intentionally task scoped and consumes only typed ledger payloads; it never treats a
-        plan reference, prose label, or detector argument as an obligation declaration.
+        plan reference, prose label, or detector argument as an obligation declaration.  The
+        obligation identity and status are payload fields, so the read uses the same payload lease
+        as :meth:`input_for` and answers identically from a warm or a cold runtime entry.
         """
 
         task = _task(task_id)
@@ -1332,17 +1381,8 @@ class LedgerCoordinationInputProvider:
             or route.state is not TaskRouteState.ACTIVE
         ):
             return False
-        runtime = await self.runtime.route(
-            RouteCommand(
-                route.session_id,
-                None,
-                RouteAccess.STRUCTURAL_READ,
-                frozenset({RuntimeCapability.STRUCTURAL_READ}),
-            )
-        )
-        if type(runtime) is not TaskRuntime or runtime.task_id != task:
-            if type(runtime) is TaskRuntime:
-                await self.runtime.release(runtime)
+        runtime = await self._payload_runtime(route)
+        if runtime is None:
             return False
         latest_status: ObligationStatus | None = None
         try:
@@ -1388,6 +1428,11 @@ class LedgerCoordinationInputProvider:
                 return None
             project_value = _project(project_ids[0])
         if resources is None:
+            if not await self._source_admitted(task, project_value, provenance):
+                # Ledger material is decrypted task payload.  Prove current project admission
+                # before extracting it; a source that coordination may not read contributes no
+                # input and, like any refused admission, no coverage row.
+                return None
             (
                 derived_resources,
                 derived_structured,
@@ -1533,6 +1578,32 @@ class CoordinationRuntime:
             if inspect.isawaitable(result):
                 await result
 
+    async def _unreadable_input(
+        self, task: str, project: str, exc: Exception
+    ) -> DeclaredCoordinationInput | None:
+        """Record one bounded input-read failure and return a coverage-only placeholder.
+
+        The diagnostic carries only the reviewed exception-class token and a correlation id; no
+        exception text, path, or payload is recorded.  The placeholder is built from catalog
+        provenance with no resources and no ledger read, so it can only become the per-task
+        ``unobservable`` coverage row after the same admission check as any other coverage row.
+        """
+
+        record_classified_exception_without_raising(
+            exc,
+            component="application.coordination",
+            operation="coordination_input_unavailable",
+        )
+        try:
+            return await self.inputs.input_for(
+                task,
+                project,
+                resources=(),
+                source_has_attributable_paths=False,
+            )
+        except Exception:
+            return None
+
     async def detect(
         self,
         project_id_value: str,
@@ -1544,6 +1615,7 @@ class CoordinationRuntime:
         expected_generation: int | None = None,
     ) -> tuple[CoordinationAdvice, ...]:
         project = _project(project_id_value)
+        unreadable: list[DeclaredCoordinationInput] = []
         if inputs is None:
             selected_ids = (
                 tuple(_task(item) for item in task_ids)
@@ -1552,14 +1624,25 @@ class CoordinationRuntime:
             )
             loaded: dict[str, DeclaredCoordinationInput] = {}
             for task in sorted(set(selected_ids), key=str.encode):
-                item = await self.inputs.input_for(
-                    task,
-                    project,
-                    resources=None if resources_by_task is None else resources_by_task.get(task),
-                    structured_items=()
-                    if structured_items_by_task is None
-                    else structured_items_by_task.get(task, ()),
-                )
+                try:
+                    item = await self.inputs.input_for(
+                        task,
+                        project,
+                        resources=None
+                        if resources_by_task is None
+                        else resources_by_task.get(task),
+                        structured_items=()
+                        if structured_items_by_task is None
+                        else structured_items_by_task.get(task, ()),
+                    )
+                except Exception as exc:
+                    # One task whose ledger cannot be read (a busy, locked, or unavailable
+                    # runtime) must not discard every other pair in the project.  It is kept out
+                    # of pair detection and reported as bounded coverage instead.
+                    placeholder = await self._unreadable_input(task, project, exc)
+                    if placeholder is not None:
+                        unreadable.append(placeholder)
+                    continue
                 if item is not None:
                     loaded[task] = item
             selected = tuple(loaded.values())
@@ -1568,21 +1651,37 @@ class CoordinationRuntime:
                 raise CoordinationError(CoordinationErrorCode.INVALID)
             selected = tuple(item for item in inputs.values() if item.project_id == project)
         ordered = tuple(sorted(selected, key=lambda item: item.task_id.encode()))
+        declarations_by_task: dict[str, tuple[CoordinationObligationDeclaredPayload, ...]] = {}
+        readable: list[DeclaredCoordinationInput] = []
+        for item in ordered:
+            task = item.task_id
+            declarations = item.coordination_declarations
+            if any(
+                declaration.project_id != project or declaration.recipient_task_id != task
+                for declaration in declarations
+            ):
+                raise CoordinationError(CoordinationErrorCode.INVALID)
+            try:
+                owned = [
+                    await self.inputs.owns_obligation(task, str(declaration.obligation_id))
+                    for declaration in declarations
+                ]
+            except Exception as exc:
+                # Ownership revalidation opens another payload lease. A failure here has
+                # the same per-task coverage boundary as the first input read.
+                placeholder = await self._unreadable_input(task, project, exc)
+                if placeholder is not None:
+                    unreadable.append(placeholder)
+                continue
+            if not all(owned):
+                raise CoordinationError(CoordinationErrorCode.INVALID)
+            declarations_by_task[task] = declarations
+            readable.append(item)
+        ordered = tuple(readable)
         await self.record_unobservable_coverage(
-            ordered,
+            tuple(sorted((*ordered, *unreadable), key=lambda item: item.task_id.encode())),
             expected_generation=expected_generation,
         )
-        declarations_by_task: dict[str, tuple[CoordinationObligationDeclaredPayload, ...]] = {
-            item.task_id: item.coordination_declarations for item in ordered
-        }
-        for task, declarations in declarations_by_task.items():
-            for declaration in declarations:
-                if (
-                    declaration.project_id != project
-                    or declaration.recipient_task_id != task
-                    or not await self.inputs.owns_obligation(task, str(declaration.obligation_id))
-                ):
-                    raise CoordinationError(CoordinationErrorCode.INVALID)
         outputs: list[CoordinationAdvice] = []
         for index, left in enumerate(ordered):
             for right in ordered[index + 1 :]:

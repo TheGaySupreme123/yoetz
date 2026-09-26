@@ -472,7 +472,14 @@ async def _current_task_findings(
     app: Application,
     task_id: str,
 ) -> tuple[Finding, ...]:
-    """Read only current unresolved finding identities from an admitted task ledger."""
+    """Read only current unresolved finding identities from an admitted task ledger.
+
+    Finding kinds and subject references are fields of encrypted accepted payloads, so the read
+    needs payload authority.  A keyless structural lease would open no object store on a cold
+    runtime entry and expose no payload on a warm one (#839).  The caller admits the counterpart
+    through ``live_admitted_member_task_ids`` and the coordination input provider before this
+    read, and only the typed finding signature leaves this function.
+    """
 
     catalog = getattr(app, "start_catalog", None)
     runtime_port = getattr(app, "runtime", None)
@@ -489,8 +496,8 @@ async def _current_task_findings(
             RouteCommand(
                 session_id,
                 None,
-                RouteAccess.STRUCTURAL_READ,
-                frozenset({RuntimeCapability.STRUCTURAL_READ}),
+                RouteAccess.PAYLOAD_READ,
+                frozenset({RuntimeCapability.STRUCTURAL_READ, RuntimeCapability.PAYLOAD_READ}),
             )
         )
         if type(child_runtime) is not TaskRuntime or child_runtime.task_id != task_id:

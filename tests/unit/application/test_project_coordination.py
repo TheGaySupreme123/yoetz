@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import cast
@@ -49,7 +49,11 @@ from yoetz.domain.coordination import (
 from yoetz.domain.events import CoordinationObligationDeclaredPayload
 from yoetz.domain.privacy import DataCategory, DataClass, LocalDisclosureSink
 from yoetz.domain.values import JsonObject, JsonValue, event_id, obligation_id, task_id
-from yoetz.ports.objects import ObjectKind
+from yoetz.ports.diagnostics import RuntimeCapability
+from yoetz.ports.importer import ImporterPort
+from yoetz.ports.ledger import LedgerPort
+from yoetz.ports.objects import ObjectKind, ObjectStorePort
+from yoetz.ports.runtime import OwnershipFence, RouteAccess, RouteCommand, TaskRuntime
 from yoetz.ports.start_catalog import (
     SessionState,
     TaskRoute,
@@ -1583,7 +1587,13 @@ async def test_input_provider_drops_declarations_for_closed_obligations() -> Non
             )
 
     catalog = _RoutedCatalog({task: provenance})
-    app = ProjectApplication(catalog, ids=FixedIds())
+    # Ledger material is a payload read, so the provider admits the source before loading it.
+    app = ProjectApplication(
+        catalog,
+        ids=FixedIds(),
+        workspace_consent=lambda _workspace: True,
+        coordination_source_authorizer=_allow_coordination_source,
+    )
     project = await catalog.ensure_repository_project(repository)
     stale_obligation = new_id(IdKind.OBLIGATION)
     open_obligation = new_id(IdKind.OBLIGATION)
@@ -1627,6 +1637,117 @@ async def test_input_provider_drops_declarations_for_closed_obligations() -> Non
     assert result is not None
     assert result.obligation_ids == (open_obligation,)
     assert result.coordination_declarations == (current,)
+
+
+@pytest.mark.anyio
+async def test_input_provider_admits_the_source_before_one_payload_lease() -> None:
+    """#839: detector input is typed payload, read only after admission and with payload keys."""
+
+    task = new_id(IdKind.TASK)
+    session = new_id(IdKind.SESSION)
+    repository = _commitment("1")
+    workspace = _commitment("2")
+    provenance = TaskSourceProvenance(
+        task,
+        workspace,
+        _commitment("e"),
+        repository,
+        1,
+        canonical_digest(
+            {"task_id": task, "bundle_relpath": f"tasks/{task}", "route_generation": 1}
+        ),
+    )
+
+    class _RoutedCatalog(_Catalog):
+        async def task_route_generation(self, task_id: str) -> int:
+            assert task_id == task
+            return provenance.route_generation
+
+        async def task_route(self, task_id: str) -> TaskRoute | None:
+            if task_id != task:
+                return None
+            return TaskRoute(
+                task_id,
+                session,
+                f"tasks/{task_id}",
+                provenance.route_generation,
+                TaskRouteState.ACTIVE,
+                provenance.route_identity_digest,
+                repository,
+            )
+
+    class _EmptyLedger:
+        async def _events(self) -> AsyncIterator[object]:
+            for record in ():
+                yield record
+
+        def load_events(
+            self, session_id: str, *, after: int = 0, through: int | None = None
+        ) -> AsyncIterator[object]:
+            del session_id, after, through
+            return self._events()
+
+    class _RecordingRuntime:
+        def __init__(self, capabilities: frozenset[RuntimeCapability]) -> None:
+            self.capabilities = capabilities
+            self.commands: list[RouteCommand] = []
+            self.released: list[TaskRuntime] = []
+
+        async def route(self, command: RouteCommand) -> TaskRuntime:
+            self.commands.append(command)
+            return TaskRuntime(
+                task,
+                session,
+                None,
+                self.capabilities,
+                cast(LedgerPort, _EmptyLedger()),
+                cast(ObjectStorePort, object()),
+                cast(ImporterPort, object()),
+                "1.0.0",
+                "1.0.0",
+                "1.0.0",
+                "1.0.0",
+                OwnershipFence(new_id(IdKind.SERVICE_INSTANCE), 1, 1, "nonce_value_123456"),
+            )
+
+        async def release(self, runtime: TaskRuntime) -> None:
+            self.released.append(runtime)
+
+    consent = {workspace: False}
+    catalog = _RoutedCatalog({task: provenance})
+    app = ProjectApplication(
+        catalog,
+        ids=FixedIds(),
+        workspace_consent=lambda value: consent.get(value, False),
+        coordination_source_authorizer=_allow_coordination_source,
+    )
+    project = await catalog.ensure_repository_project(repository)
+    payload_read = frozenset({RuntimeCapability.STRUCTURAL_READ, RuntimeCapability.PAYLOAD_READ})
+    runtime = _RecordingRuntime(payload_read)
+    provider = LedgerCoordinationInputProvider(app, runtime)  # type: ignore[arg-type]
+
+    assert await provider.input_for(task, project.project_id) is None
+    assert runtime.commands == []
+
+    consent[workspace] = True
+    loaded = await provider.input_for(task, project.project_id)
+    assert loaded is not None
+    assert loaded.source_has_attributable_paths is False
+    expected = RouteCommand(session, None, RouteAccess.PAYLOAD_READ, payload_read)
+    assert runtime.commands == [expected]
+    assert len(runtime.released) == 1
+    assert await provider.owns_obligation(task, new_id(IdKind.OBLIGATION)) is False
+    assert runtime.commands == [expected, expected]
+    assert len(runtime.released) == 2
+
+    # A lease that did not receive payload authority is released and never read.
+    keyless = _RecordingRuntime(frozenset({RuntimeCapability.STRUCTURAL_READ}))
+    keyless_provider = LedgerCoordinationInputProvider(app, keyless)  # type: ignore[arg-type]
+    with pytest.raises(CoordinationError) as refused:
+        await keyless_provider.input_for(task, project.project_id)
+    assert refused.value.code is CoordinationErrorCode.INVALID
+    assert await keyless_provider.owns_obligation(task, new_id(IdKind.OBLIGATION)) is False
+    assert len(keyless.released) == 2
 
 
 @pytest.mark.anyio
@@ -1792,3 +1913,93 @@ async def test_journal_retries_unlink_after_catalog_effect_before_response_compl
     )
     assert replay.unbound_at is not None
     assert journal.records[request].completed
+
+
+@pytest.mark.anyio
+async def test_declaration_ownership_read_failure_is_isolated_to_its_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dataclasses import replace
+
+    from yoetz.application import coordination as coordination_module
+    from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
+
+    tasks = tuple(new_id(IdKind.TASK) for _ in range(3))
+    busy, left, right = tasks
+    repository = _commitment("a")
+    workspaces = dict(zip(tasks, (_commitment("b"), _commitment("c"), _commitment("d"))))
+    catalog = _Catalog({task: _provenance(task, workspaces[task], repository) for task in tasks})
+    app = ProjectApplication(
+        catalog,
+        ids=FixedIds(),
+        workspace_consent=lambda _workspace: True,
+        coordination_source_authorizer=_allow_coordination_source,
+    )
+    project = await catalog.ensure_repository_project(repository)
+    declaration = CoordinationObligationDeclaredPayload(
+        event_id(new_id(IdKind.EVENT)),
+        project.project_id,
+        project.membership_generation,
+        task_id(busy),
+        obligation_id(new_id(IdKind.OBLIGATION)),
+    )
+    inputs = {
+        task: DeclaredCoordinationInput(
+            task,
+            project.project_id,
+            repository,
+            workspaces[task],
+            1,
+            ("src/shared.py",),
+            coordination_declarations=(declaration,) if task == busy else (),
+        )
+        for task in tasks
+    }
+
+    class _Inputs:
+        async def route(self, _command: object) -> object:
+            raise AssertionError("test supplies accepted inputs")
+
+        async def release(self, _runtime: object) -> None:
+            return None
+
+        async def owns_obligation(self, task: str, obligation: str) -> bool:
+            assert task == busy and obligation == declaration.obligation_id
+            raise PublicOperationError(
+                PublicErrorCode.BUNDLE_BUSY, "The task is temporarily busy.", True
+            )
+
+        async def input_for(
+            self, task: str, project_id: str, **kwargs: object
+        ) -> DeclaredCoordinationInput:
+            assert task == busy and project_id == project.project_id
+            assert kwargs == {"resources": (), "source_has_attributable_paths": False}
+            return replace(
+                inputs[task],
+                resources=(),
+                source_has_attributable_paths=False,
+                coordination_declarations=(),
+            )
+
+    diagnostics: list[tuple[str, str, str]] = []
+
+    def record(exc: BaseException, *, component: str, operation: str, **_: object) -> str:
+        diagnostics.append((type(exc).__name__, component, operation))
+        return new_id(IdKind.CORRELATION)
+
+    monkeypatch.setattr(coordination_module, "record_classified_exception_without_raising", record)
+    store = InMemoryCoordinationStore()
+    stub = _Inputs()
+    provider = LedgerCoordinationInputProvider(app, stub)  # type: ignore[arg-type]
+    monkeypatch.setattr(provider, "owns_obligation", stub.owns_obligation)
+    monkeypatch.setattr(provider, "input_for", stub.input_for)
+    runtime = CoordinationRuntime(app, CoordinationDetector(app, store), provider)
+    await runtime.detect(project.project_id, inputs=inputs)
+    detections = await store.list_detections(project.project_id)
+    assert len(detections) == 1
+    assert {detections[0].left_task_id, detections[0].right_task_id} == {left, right}
+    coverage = await store.coverage_for(project.project_id, project.membership_generation)
+    assert [(row.task_id, row.coverage) for row in coverage] == [(busy, "unobservable")]
+    assert diagnostics == [
+        ("PublicOperationError", "application.coordination", "coordination_input_unavailable")
+    ]
