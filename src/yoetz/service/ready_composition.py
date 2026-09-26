@@ -39,6 +39,7 @@ from yoetz.adapters.providers.codex_app_server import (
     CodexAppServerProfile,
     codex_binding_from_config,
 )
+from yoetz.adapters.providers.codex_evaluator_runtime import diagnose_codex_binding
 from yoetz.adapters.providers.factory import external_factory_builders_from_config
 from yoetz.adapters.providers.local_model import InstalledLocalModelProfileRegistry
 from yoetz.adapters.providers.openai_responses_factory import provider_binding_from_config
@@ -2760,6 +2761,7 @@ def _privacy_gated_semantic_evaluator(
     resolve_fallback: Callable[[], Awaitable[ProviderBinding | None]] | None = None,
     fallback_timeout_seconds: int = 60,
     fallback_max_retries: int = 2,
+    external_runtime_state: Callable[[], str | None] | None = None,
     configured_primary: ProviderBinding | None = None,
     local_observation: object | None = None,
 ):
@@ -2931,6 +2933,9 @@ def _privacy_gated_semantic_evaluator(
                         )
                         fallback_binding = None
                 if provider is None and fallback_binding is None:
+                    _record_external_runtime_state(
+                        external_runtime_state, frozen.lease.operation_id
+                    )
                     record_bounded_event_without_raising(
                         component="semantic_composition",
                         operation="semantic_not_dispatched_credential_unavailable",
@@ -2950,6 +2955,9 @@ def _privacy_gated_semantic_evaluator(
                         None if provider is not None else SemanticReason.CREDENTIAL_UNAVAILABLE,
                     )
                     if provider is None:
+                        _record_external_runtime_state(
+                            external_runtime_state, frozen.lease.operation_id
+                        )
                         record_bounded_event_without_raising(
                             component="semantic_composition",
                             operation="semantic_primary_unresolved_fallback_engaged",
@@ -3478,6 +3486,30 @@ def _policy_packs(manifest: Mapping[str, CanonicalJsonValue]) -> tuple[str, ...]
     return tuple(cast(list[str], values))
 
 
+def _record_external_runtime_state(state: Callable[[], str | None] | None, request_id: str) -> None:
+    """Name the exact structural refusal behind an unresolved Codex subscription endpoint.
+
+    The public outcome stays ``credential_unavailable``; this request-joined companion record
+    carries the closed structural token (a replaced executable, an outdated capability identity,
+    a changed isolated config, ...) so the diagnosis never depends on a login probe (#855).
+    """
+
+    if state is None:
+        return
+    try:
+        token = state()
+    except Exception:
+        return
+    if token is None or token == "ready":
+        return
+    record_bounded_event_without_raising(
+        component="semantic_composition",
+        operation="semantic_external_runtime_unready",
+        reason=token,
+        request_id=request_id,
+    )
+
+
 def subscription_runtime_structurally_ready(runtime: object) -> bool:
     """READY fact for Codex OAuth: exact binding, digest, and dedicated home.
 
@@ -3561,6 +3593,13 @@ async def provide_service_ready_context(
 
     candidate_binding = _binding_of(primary_config)
     fallback_candidate_binding = _binding_of(fallback_config)
+
+    def external_runtime_state() -> str | None:
+        # Local structure only: no Codex process, login probe, or credential read (#855).
+        runtime = config.external_runtime
+        if runtime is None:
+            return None
+        return diagnose_codex_binding(runtime).state
 
     def binding_not_connected(_binding: ProviderBinding) -> bool:
         return False
@@ -3783,6 +3822,7 @@ async def provide_service_ready_context(
                 60 if fallback_config is None else int(fallback_config.timeout_seconds)
             ),
             fallback_max_retries=2 if fallback_config is None else int(fallback_config.max_retries),
+            external_runtime_state=external_runtime_state,
             configured_primary=candidate_binding,
             local_observation=local_observation,
         )

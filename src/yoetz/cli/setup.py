@@ -103,8 +103,8 @@ _NEXT_UNLOCK: Final = "run 'yoetz service unlock' from a local terminal if the v
 _NEXT_PRIVACY: Final = "run 'yoetz --privacy' to review or change the privacy policy"
 _NEXT_PROVIDER_TOML: Final = (
     "run 'yoetz provider endpoint' for an API provider, or "
-    "'yoetz provider codex-subscription setup --executable <absolute-path>' for "
-    "Codex-managed ChatGPT login — never put credentials in TOML"
+    "'yoetz provider codex-subscription setup' for Codex-managed ChatGPT login (it offers "
+    "Yoetz's verified evaluator runtime) — never put credentials in TOML"
 )
 _NEXT_CREDENTIAL: Final = (
     "run 'yoetz provider credential set' from a local terminal to provision the "
@@ -135,6 +135,14 @@ _PROVIDER_SETUP_DIRECT_REASONS: Final = frozenset(
         "codex_runtime_unavailable",
         "codex_subscription_timeout",
         "codex_subscription_failed",
+        # Evaluator-runtime selection and retention (#855): each names its own next step.
+        "codex_runtime_capability_unsupported",
+        "codex_evaluator_runtime_unavailable",
+        "codex_evaluator_runtime_store_unsafe",
+        "codex_evaluator_runtime_store_unavailable",
+        "codex_evaluator_runtime_download_failed",
+        "codex_evaluator_runtime_download_timeout",
+        "codex_evaluator_runtime_package_manager_unavailable",
     }
 )
 

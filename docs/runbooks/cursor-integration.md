@@ -970,6 +970,13 @@ the [subscription evaluator runbook](codex-subscription-evaluator.md) and keep h
 accepted observation, runtime evidence, privacy receipt, corrective influence, and workflow receipt
 as separate cells.
 
+Evaluator runtime retention and repair (issue #855) is host-independent. From Cursor, the prompt
+menu, or `/provider`, `yoetz provider codex-subscription repair` and `runtime
+status|install|remove` behave exactly as documented in the
+[subscription evaluator runbook](codex-subscription-evaluator.md#evaluator-runtime-retention-and-repair).
+Decision for this host: supported through the shared provider surfaces, with no Cursor-specific
+step. Native Cursor acceptance of a post-repair check is pending.
+
 Fallback endpoint pairing (issue #582) is host-independent: whether the evaluator or a paired
 API provider serves a given attempt is a service-side dispatch decision recorded in provenance
 (`fallback_from`), with no Cursor-specific behaviour, plugin, or route input — the route ceiling

@@ -1048,6 +1048,14 @@ The reason is a closed structural token; provider identity, exception text, payl
 remain forbidden from this sink. Exceptions contained inside the production composition evaluator
 retain the existing `semantic_evaluation_failed` operation.
 
+When the unresolved endpoint is a Codex subscription runtime whose local structure is not ready
+(issue #855), the credential-unavailable record, and the fallback-engaged record when a paired
+fallback serves instead, are preceded by one `semantic_external_runtime_unready` record with the
+same `request_id`. Its reason is the closed structural state from the ADR-006 retention amendment,
+for example `codex_runtime_executable_changed` or `codex_runtime_profile_outdated`. The public
+`semantic_status` / `semantic_reason` pair is unchanged. The state is read from the binding,
+executable bytes, and dedicated home only: no login probe, no Codex process, no credential read.
+
 Two further check-path operations describe a review that did reach a provider:
 `semantic_judgment_rejected` records a structurally unusable judgment, and
 `semantic_review_accounting` is appended once per dispatched review carrying counts only —
@@ -4468,6 +4476,29 @@ moves `semantic_ready` or the exit code, and the report never removes anything.
 An unbound repository session reports `repository_grant_state=null` and `semantic_ready=false`
 rather than treating the machine ceiling as authority. Provider status remains structural readiness
 evidence, not installed-wheel proof of dispatch or receipts.
+
+When a Codex subscription runtime is bound (issue #855), the report adds `external_runtime`:
+`role` (`primary|fallback`), the closed structural `state` from the ADR-006 retention amendment
+(`ready` or one refusal token), the independent `capability`, `executable`, and `home` axes,
+`uses_managed_runtime` (`true` when the binding points at Yoetz's retained runtime copy, `null`
+when unknowable), and `next_command`. It is computed locally from the binding, executable bytes,
+and dedicated home; it starts no Codex process and checks no sign-in. A non-`ready` state adds an
+`external_runtime_structure` blocker with `state`, `role`, and the exact continuation. The
+credential blockers for that runtime name the same continuation instead of the status probe. A
+non-`ready` primary runtime makes `semantic_ready` false even while a service composed earlier
+still reports the credential connected. A `ready` binding on a host installation keeps
+`next_command: "yoetz provider codex-subscription repair"` as advice, with no blocker.
+`next_commands` lists each continuation once.
+
+`yoetz provider codex-subscription runtime status --json` emits
+`yoetz.codex-evaluator-runtime-status/1`. It carries `platform_cell`, `admitted_runtime_version`,
+`managed_runtime` (`path`, `state` exactly `absent|verified|changed|invalid|unsafe`), `binding`
+(the same axes plus `executable_path`, `uses_managed_runtime`, `capability_profile`,
+`runtime_version`, `codex_home`, `endpoint_role`), `login_checked: false`, and `next_command`. It
+exits `0` when no binding exists or the binding is `ready`, otherwise `20`. `repair` emits the
+subscription status shape plus `state_before`, `source`, `changed_fields`, `login_reused`,
+`endpoint_role`, and `config_path`. `runtime install` and `runtime remove` report
+`binding_changed: false` and `host_installation_changed: false`; neither edits the binding.
 
 Every `integration_preview` preview/status body and every `integration_execute` body carries an
 explicit required `harness` discriminator. Its frozen v0.1 schema value is exactly `codex`; omission,

@@ -22,6 +22,7 @@ from yoetz.config.models import (
     ConfigError,
     ExternalRuntimeProfileConfig,
     ProviderProfileConfig,
+    YoetzConfig,
     fallback_external_endpoint,
     primary_external_endpoint,
 )
@@ -564,6 +565,52 @@ def machine_scope_request() -> JsonObject:
     return JsonObject(body)
 
 
+def external_runtime_fact(config: YoetzConfig) -> dict[str, JsonValue] | None:
+    """Local structural state of the bound Codex subscription runtime, or ``None`` when unbound.
+
+    Read from the binding, executable bytes, and dedicated home only: no Codex process, login
+    probe, or credential read (#855). It names the exact repair when the service can only say the
+    external credential is not connected.
+    """
+
+    runtime = config.external_runtime
+    if runtime is None:
+        return None
+    from yoetz.adapters.providers.codex_evaluator_runtime import (
+        host_codex_evaluator_cell,
+        managed_runtime_path,
+    )
+    from yoetz.cli.codex_subscription import (
+        binding_continuation,
+        diagnose_bound_runtime,
+        runtime_bundle,
+    )
+
+    diagnosis = diagnose_bound_runtime(runtime)
+    pairing = config.semantic_fallback
+    role = "fallback" if pairing is not None and pairing.primary == "api_provider" else "primary"
+    next_command = binding_continuation(diagnosis.state)
+    uses_managed: bool | None
+    try:
+        managed = managed_runtime_path(runtime_bundle(), host_codex_evaluator_cell())
+    except ValueError:
+        uses_managed = None
+    else:
+        uses_managed = runtime.executable_path == str(managed)
+    if next_command is None and uses_managed is False:
+        # Ready today, but bound to a host installation its package manager can replace.
+        next_command = "yoetz provider codex-subscription repair"
+    return {
+        "role": role,
+        "state": diagnosis.state,
+        "capability": diagnosis.capability,
+        "executable": diagnosis.executable,
+        "home": diagnosis.home,
+        "uses_managed_runtime": uses_managed,
+        "next_command": next_command,
+    }
+
+
 async def provider_status_report(
     *,
     workspace_locator: Path | None = None,
@@ -583,6 +630,21 @@ async def provider_status_report(
     # A declared pairing reports both endpoints; single-endpoint installs read as before with
     # ``fallback_endpoint`` absent rather than null-shaped (#582).
     fallback_endpoint = _endpoint_facts(fallback_config, role="fallback")
+    runtime_fact = external_runtime_fact(config)
+    runtime_unready = runtime_fact is not None and runtime_fact["state"] != "ready"
+    runtime_next = None if runtime_fact is None else runtime_fact.get("next_command")
+
+    def credential_command(
+        endpoint_config: ProviderProfileConfig | ExternalRuntimeProfileConfig | None,
+    ) -> str:
+        # A structurally stranded runtime needs its exact repair, not a login status probe.
+        if (
+            type(endpoint_config) is ExternalRuntimeProfileConfig
+            and runtime_unready
+            and type(runtime_next) is str
+        ):
+            return runtime_next
+        return _credential_command(endpoint_config)
 
     service_state: str | None = None
     service_state_reason: str | None = None
@@ -726,7 +788,7 @@ async def provider_status_report(
                 "state": "unbound",
                 "next_command": (
                     "yoetz provider endpoint --provider <preset> --model <model> OR "
-                    "yoetz provider codex-subscription setup --executable <path>"
+                    "yoetz provider codex-subscription setup"
                 ),
             }
         )
@@ -737,7 +799,7 @@ async def provider_status_report(
             {
                 "condition": "provider_credential",
                 "state": "not_connected",
-                "next_command": _credential_command(primary_config),
+                "next_command": credential_command(primary_config),
             }
         )
     # The fallback's credential is a blocker of the fallback only: the primary dispatches
@@ -751,9 +813,19 @@ async def provider_status_report(
                 {
                     "condition": "fallback_provider_credential",
                     "state": "not_connected",
-                    "next_command": _credential_command(fallback_config),
+                    "next_command": credential_command(fallback_config),
                 }
             )
+    if runtime_fact is not None and runtime_unready:
+        # Known without the service and before any login: the exact structural refusal.
+        blockers.append(
+            {
+                "condition": "external_runtime_structure",
+                "state": runtime_fact["state"],
+                "role": runtime_fact["role"],
+                **({} if type(runtime_next) is not str else {"next_command": runtime_next}),
+            }
+        )
     if llm_inference_enabled is None:
         blockers.append({"condition": "llm_inference_channel", "state": "unknown"})
     elif llm_inference_enabled is False:
@@ -845,11 +917,16 @@ async def provider_status_report(
         and credential_connected is True
         and llm_inference_enabled is True
         and repository_grant_state == "granted"
+        # A service composed before the runtime changed can still report the credential as
+        # connected; the live structural fact is what the next dispatch will meet (#855).
+        and not (runtime_unready and runtime_fact is not None and runtime_fact["role"] == "primary")
     )
     next_commands = tuple(
-        cast(str, item["next_command"])
-        for item in blockers
-        if type(item.get("next_command")) is str
+        dict.fromkeys(
+            cast(str, item["next_command"])
+            for item in blockers
+            if type(item.get("next_command")) is str
+        )
     )
 
     return {
@@ -860,6 +937,7 @@ async def provider_status_report(
         "endpoint_bound": endpoint_bound,
         "endpoint": endpoint,
         "credential_connected": credential_connected,
+        **({} if runtime_fact is None else {"external_runtime": runtime_fact}),
         **(
             {}
             if fallback_endpoint is None
@@ -892,6 +970,8 @@ async def provider_status_report(
             "For external_runtime_oauth, READY credential presence is the exact binding, digest, "
             "and dedicated home; ChatGPT login and model availability are proven inside evaluate() "
             "or by 'yoetz provider codex-subscription status'. Yoetz never reads the credential.",
+            "external_runtime is a local structural diagnosis of the bound Codex subscription "
+            "runtime; it starts no Codex process and does not check sign-in.",
             "A credential for a different provider than the bound endpoint does not count.",
             "unknown means the service could not be read, not that the step is incomplete.",
             "agent_route_semantic_ready describes one exclusively observed Codex MCP owner; "
