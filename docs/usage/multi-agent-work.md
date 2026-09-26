@@ -115,6 +115,16 @@ Detections normally produce advice. A finding requires an explicitly declared co
 obligation that remains unaddressed; a recorded disposition addresses it, and a later qualifying
 check can resolve the finding.
 
+Opting out or in, revoking consent or approval, and linking, unlinking, or dissolving a project each
+start a new membership generation. A coordination obligation declared under an older generation no
+longer describes current coordination, and that generation cannot be approved again. Before the
+task's next check, Yoetz records the older context in that task's own history as superseded. That
+check derives no current coordination finding from it and can resolve the earlier finding. The
+receipt says that the generation was superseded rather than that a disposition addressed it.
+Declaring or disposing against the older generation returns `coordination_generation_superseded`;
+run a check instead. If the overlap still applies, declare against the current detection shown in
+coordination advice.
+
 For an admitted detection, each affected task can receive the repository-relative overlap paths
 through the project status projection. Yoetz rechecks both participants' current project
 generation and workspace consent, then applies the source and recipient disclosure policies before

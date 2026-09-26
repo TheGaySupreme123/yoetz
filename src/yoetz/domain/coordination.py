@@ -154,6 +154,9 @@ class CoordinationGapCode(str, Enum):  # noqa: UP042 - exact wire vocabulary
     """Why an overlap detail is bounded or unavailable."""
 
     SOURCE_UNAVAILABLE = "source_unavailable"
+    # On a service-stamped context, ``revoked`` closes the recipient's earlier delivery of the
+    # same detection: its project generation was superseded, so it is history, not a current
+    # coordination obligation (#842).
     REVOKED = "revoked"
     NOT_OBSERVABLE = "not_observable"
     DETAILS_TRUNCATED = "details_truncated"

@@ -272,6 +272,26 @@ than implementation notes.
    attributable paths, and the failure is recorded as one bounded diagnostic; the next sweep
    retries it (#839).
 
+   **Superseded-generation closure clarification (2026-09-25, #842).** A generation change fences
+   authority, but a context and declaration already in a recipient ledger are frozen facts. They
+   must not keep deriving a current `coordination_overlap` finding that no disposition can address,
+   because a disposition is admitted only at its declared, now retired, generation. When a declared
+   context's generation is superseded (any later generation, or dissolution), the service closes it
+   before the recipient's next new check. It appends one service-stamped
+   `coordination_context_recorded/1.0.0` to that recipient's own ledger for the same detection,
+   project, generation, recipient, and counterpart. The closure carries the released closed gap code
+   `revoked`, no resource identities, no detail reference, and no attributable-path claim. The
+   closure is not an admission, disclosure, or delivery: it never re-admits the old generation,
+   never writes to the counterpart, and never mints or answers a successor detection, whose identity
+   already differs by generation. It needs no current consent, grant, or membership, because it
+   copies only structural facts already in that ledger and narrows what the ledger claims. A frozen
+   check treats a closed delivery as historical context and derives no finding from it, so the
+   earlier finding resolves through the ordinary qualifying-check rule and its receipt explanation
+   names the superseded generation. A declaration or disposition that names a superseded generation
+   stays refused with `coordination_generation_superseded`, whose directive points to that check and
+   to the current successor detection, not to reauthorization. The retired detector row is marked
+   generation-invalid so it cannot be redelivered.
+
 8. **Only shared-mutable state moves out of task bundles.** The #498 inventory records each table
    and cache by owner, key, provenance, object root, retention, and concurrency rule. The candidate's
    catalog migration `0004` moves only the shared-mutable workspace-to-session routing and the
