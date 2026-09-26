@@ -6360,7 +6360,8 @@ class LocalObservationStore:
             pinned_ids = [item for item in retirement_ids if item in pinned]
             unpinned_ids = [item for item in retirement_ids if item not in pinned]
             available = max(0, _MAX_CAPTURE_TICKET_RESERVATIONS - len(pinned_ids))
-            state.capture_handoff_retirement_ids = tuple(pinned_ids + unpinned_ids[-available:])
+            retained_unpinned = unpinned_ids[-available:] if available else []
+            state.capture_handoff_retirement_ids = tuple(pinned_ids + retained_unpinned)
             self._save(workspace, state)
 
     def capture_handoff_retirements(self, workspace: str) -> JsonObject:
