@@ -1115,7 +1115,7 @@ the readable effective current plan declares zero obligations, exactly one appli
 Both force `coverage_incomplete`, `insufficient_coverage`, and an insufficient-coverage receipt.
 The typed declaration records the participant's scope decision but never purchases a clean verdict.
 
-Three further codes describe a review that did run but could not deliver everything it produced:
+Four further codes describe a review that did run but could not deliver everything it produced:
 
 - `semantic_review_context_withheld` — the review ran without categories its own profile selected;
 - `semantic_challenges_rejected` — the reviewer returned challenges and post-validation dropped at
@@ -1125,6 +1125,13 @@ Three further codes describe a review that did run but could not deliver everyth
   the case shortened it or replaced the payload with a `yoetz.bounded-content-omission/1` marker.
   The marker's `reason` is `over_case_item_limit`, distinguishing a size drop from the
   `not_selected` omission the selection policy raises for material it declined to carry.
+- `semantic_case_finding_refs_over_limit` — a local finding cites more subjects than one case
+  item may link (`MAX_SEMANTIC_ITEM_SUBJECT_REFS`, 16; a finding may cite up to 64). The finding
+  keeps its identity in `local_check_refs` and in the check result, but the case carries neither
+  its prose nor its projected assessment: both appear as explicit `not_selected` omissions
+  (`finding_summary` and `bounded_structural_metadata`) and this gap names the capacity reason.
+  References are never sliced to fit; a partial subject list presented as the finding's own would
+  be a different finding. The review still dispatches once with the other findings.
 
 Post-validation fences each challenge independently: a rejected challenge costs only itself, the
 challenges beside it still become findings, and the drop is declared through this gap. A judgment
@@ -1728,7 +1735,8 @@ AI-powered review absence/weakness codes
 semantic_relevance_review_not_run|optional_semantic_review_blocked_by_policy|
 optional_semantic_review_registration_drift|
 semantic_review_context_withheld|semantic_challenges_rejected|
-semantic_case_content_over_item_limit`) plus the evidence-strength codes
+semantic_case_content_over_item_limit|semantic_case_finding_refs_over_limit`) plus the
+evidence-strength codes
 (`evidence_content_digest_only|evidence_content_withheld|evidence_digest_subject_legacy_unknown`)
 and the host-observation codes (`captured_object_unavailable|content_unselected|
 host_outcome_unavailable|unpaired_event`). Those host codes remain receipt coverage limitations;
