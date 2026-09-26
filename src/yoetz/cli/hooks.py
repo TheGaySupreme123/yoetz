@@ -627,13 +627,10 @@ def with_transcript_child_identity(
     from yoetz.adapters.integrations.codex_session_stream import (
         CodexSessionStreamLocator,
         resolve_codex_home,
-        rollout_filename_matches_token,
     )
 
-    if rollout_filename_matches_token(Path(raw_path).name, host_session_id):
-        # The session's own rollout: an ordinary callback of the thread that owns this session.
-        return payload, None
-
+    # A ``session_id_rollout_id`` filename also matches a parent session whose id prefixes a
+    # child id containing ``_``. Let the bounded header reader distinguish those cases.
     _path, result = CodexSessionStreamLocator(resolve_codex_home(codex_home)).resolve_child_rollout(
         raw_path
     )
