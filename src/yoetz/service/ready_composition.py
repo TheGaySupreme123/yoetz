@@ -32,6 +32,9 @@ from yoetz.adapters.integrations.hook_spool import (
 )
 from yoetz.adapters.integrations.observation_local import (
     LocalObservationStore,
+    ObservationStoreLockEvent,
+    set_observation_store_lock_reporter,
+    set_observation_store_lock_role,
 )
 from yoetz.adapters.objects.encrypted_files import EncryptedFilesObjectStore
 from yoetz.adapters.privacy.catalog import CatalogPrivacyAudit, CatalogPrivacyPolicyStore
@@ -517,6 +520,36 @@ class _ReadyObservationSweep:
 
     async def __call__(self) -> ObservationDrainSummary:
         return await self.callback()
+
+
+def _record_observation_store_lock_event(event: ObservationStoreLockEvent) -> None:
+    """Record one payload-free store-lock ownership fact in the diagnostic ring (#689).
+
+    The component names the waiting (or long-holding) role, the reason names the holder's
+    role, ``reason_code`` its store phase and ``duration_ms`` how long it had held the lock.
+    Every value is a closed role, a code identifier or an integer.
+    """
+
+    if event.kind == "timeout" and event.timeout is not None:
+        timeout = event.timeout
+        record_bounded_counts_without_raising(
+            component=f"observation.store_lock.{event.role}",
+            operation=f"observation_store_{timeout.scope}_lock_timeout",
+            outcome=f"holder_{timeout.holder_role}",
+            counts={
+                "reason_code": timeout.holder_phase,
+                "duration_ms": timeout.holder_held_ms
+                if timeout.holder_held_ms is not None
+                else timeout.waited_ms,
+            },
+        )
+    elif event.kind == "long_hold" and event.held_ms is not None:
+        record_bounded_counts_without_raising(
+            component=f"observation.store_lock.{event.role}",
+            operation="observation_store_lock_long_hold",
+            outcome=f"holder_{event.role}",
+            counts={"reason_code": event.phase, "duration_ms": event.held_ms},
+        )
 
 
 def _replay_legacy_hook_spool(state: Path, *, stop: threading.Event | None = None) -> None:
@@ -5227,6 +5260,11 @@ async def provide_service_ready_context(
         )
 
     versions = _receipt_versions(manifest)
+    # Name this process's store-lock ownership and route lock timeouts and long holds, with the
+    # holder's role and phase, to the diagnostic ring. Hook replays on the spool worker keep their
+    # own scoped attribution (#689).
+    set_observation_store_lock_role("service")
+    set_observation_store_lock_reporter(_record_observation_store_lock_event)
     local_observation = LocalObservationStore(_state=paths.state)
     # Publish the loaded config gate before AI-powered review composition can resolve
     # retained bytes. The owner-private store is also the authoritative consent

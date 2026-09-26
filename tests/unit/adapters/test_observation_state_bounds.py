@@ -469,6 +469,7 @@ def test_store_stage_timings_attribute_hydrate_encode_write(tmp_path: Path) -> N
         "hydrate": 0.0,
         "encode": 0.0,
         "lock_wait": 0.0,
+        "lock_hold": 0.0,
         "write": 0.0,
     }
     store.note_coverage_gap(workspace, ObservationGapCode.SERVICE_UNAVAILABLE.value)
@@ -477,6 +478,8 @@ def test_store_stage_timings_attribute_hydrate_encode_write(tmp_path: Path) -> N
     assert store.stage_timings_ms["write"] > 0.0
     # Uncontended acquisition still registers as time spent on the lock (#310).
     assert store.stage_timings_ms["lock_wait"] > 0.0
+    # The critical section itself is attributed separately from queueing (#689).
+    assert store.stage_timings_ms["lock_hold"] >= store.stage_timings_ms["write"]
 
 
 def test_stream_profile_round_trips_and_clears(tmp_path: Path) -> None:

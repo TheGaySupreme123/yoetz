@@ -1226,3 +1226,238 @@ def test_control_recovery_is_bounded_without_fabricated_ledger_refusal(
     decision = route_observation_ingest(failure, row=row)
     assert decision.action is expected
     assert decision.reason == "control_" + reason
+
+
+# --- Shared-store contention (#689) -------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_answered_row_settles_in_one_store_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Attempt, gap, lane reason and acknowledgement used to be up to four full saves per row."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace, outcomes = _accepted_backlog(store, tmp_path, rows=3)
+    rows = store.list_pending_outbox_rows(workspace)
+    # The last row is refused retryably: it records an attempt, a coverage gap and a lane reason.
+    outcomes[rows[-1].envelope.source_identity] = ObservationIngestResult(
+        ObservationIngestDisposition.REJECTED,
+        ObservationGapCode.SERVICE_UNAVAILABLE.value,
+        None,
+    )
+    sweeper = ObservationOutboxSweeper(store, _Coordinator(outcomes))
+    writes_per_settlement: list[int] = []
+    writes = 0
+    original_write = store._save_unchecked  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+
+    def counting_write(*args: object, **kwargs: object) -> None:
+        nonlocal writes
+        writes += 1
+        original_write(*args, **kwargs)  # type: ignore[arg-type]
+
+    store._save_unchecked = counting_write  # type: ignore[method-assign]  # noqa: SLF001
+    settle = ObservationOutboxSweeper._settle_row  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+
+    def counting_settle(self: ObservationOutboxSweeper, *args: object) -> int | None:
+        nonlocal writes
+        writes = 0
+        result = settle(self, *args)  # type: ignore[arg-type]
+        writes_per_settlement.append(writes)
+        return result
+
+    monkeypatch.setattr(ObservationOutboxSweeper, "_settle_row", counting_settle)
+    try:
+        summary = await sweeper.sweep()
+    finally:
+        sweeper.close()
+    assert summary.acknowledged == 2 and summary.retry_pending == 1
+    assert writes_per_settlement == [1, 1, 1]
+    remaining = store.list_pending_outbox_rows(workspace)
+    assert [row.last_reason for row in remaining] == [ObservationGapCode.SERVICE_UNAVAILABLE.value]
+    assert (
+        ObservationGapCode.SERVICE_UNAVAILABLE.value
+        in store.status(ObservationStatusQuery(workspace)).gaps
+    )
+
+
+class _HeldLock:
+    """Hold the store's process-local lock on another thread until released."""
+
+    def __init__(self, store: LocalObservationStore) -> None:
+        self._store = store
+        self.held = threading.Event()
+        self._release = threading.Event()
+        self._thread = threading.Thread(target=self._run)
+
+    def _run(self) -> None:
+        with self._store._lock:  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+            self.held.set()
+            self._release.wait(timeout=30)
+
+    def start(self) -> None:
+        self._thread.start()
+        assert self.held.wait(timeout=30)
+
+    def release(self) -> None:
+        self._release.set()
+        self._thread.join(timeout=30)
+
+
+@pytest.mark.anyio
+async def test_contended_settlement_yields_and_the_accepted_row_replays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lost acknowledgement race stops the pass, keeps the row, and deduplicates on replay."""
+
+    import yoetz.adapters.integrations.observation_local as local
+
+    monkeypatch.setattr(local, "_STORE_LOCK_TIMEOUT_SECONDS", 0.2)
+    store = LocalObservationStore(_state=tmp_path)
+    workspace, outcomes = _accepted_backlog(store, tmp_path, rows=2)
+    holder = _HeldLock(store)
+
+    class _AcceptThenContend(_Coordinator):
+        async def ingest_request(
+            self, request: ObservationIngestRequest
+        ) -> ObservationIngestResult:
+            result = await super().ingest_request(request)
+            if len(self.calls) == 1:
+                # The service accepted the row; another writer takes the store before the
+                # sweeper can record that.
+                await asyncio.to_thread(holder.start)
+            return result
+
+    coordinator = _AcceptThenContend(outcomes)
+    sweeper = ObservationOutboxSweeper(store, coordinator)
+    try:
+        summary = await sweeper.sweep()
+        assert summary.attempted == 1
+        assert summary.acknowledged == 0
+        assert dict(summary.reasons) == {"observation_store_busy": 1}
+    finally:
+        await asyncio.to_thread(holder.release)
+    # Nothing was committed for the answered row; it is still the head of its lane.
+    assert len(store.list_pending_outbox_rows(workspace)) == 2
+    assert (
+        ObservationGapCode.SERVICE_UNAVAILABLE.value
+        not in store.status(ObservationStatusQuery(workspace)).gaps
+    )
+    try:
+        replay = await sweeper.sweep()
+    finally:
+        sweeper.close()
+    assert replay.acknowledged == 2
+    assert store.list_pending_outbox_rows(workspace) == ()
+    # The first row reached the coordinator twice: once accepted, once as its exact replay.
+    assert len(coordinator.calls) == 3
+
+
+class _StrandingStore(LocalObservationStore):
+    """Block admission maintenance on an event and record how many workers ever overlap."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.block = True
+        self.active = 0
+        self.max_active = 0
+        self.entries = 0
+        self._guard = threading.Lock()
+
+    def maintain_selected_admission(self, workspace: str, *, force: bool = False) -> None:
+        with self._guard:
+            self.active += 1
+            self.entries += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            self.entered.set()
+            if self.block:
+                assert self.release.wait(timeout=30)
+            super().maintain_selected_admission(workspace, force=force)
+        finally:
+            with self._guard:
+                self.active -= 1
+
+
+@pytest.mark.anyio
+async def test_next_pass_never_overlaps_a_worker_a_cancelled_pass_left_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import yoetz.application.observation_drain as drain
+
+    monkeypatch.setattr(drain, "_STRANDED_WORKER_JOIN_SECONDS", 0.05)
+    store = _StrandingStore(_state=tmp_path)
+    workspace, outcomes = _accepted_backlog(store, tmp_path, rows=2)
+    sweeper = ObservationOutboxSweeper(store, _Coordinator(outcomes))
+    try:
+        first = asyncio.create_task(sweeper.sweep())
+        assert await asyncio.to_thread(store.entered.wait, 30)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        # The cancelled pass's worker is still inside the store. The next pass must not start
+        # store work beside it: it yields a busy summary instead.
+        yielded = await sweeper.sweep()
+        assert dict(yielded.reasons) == {"observation_store_busy": 1}
+        assert yielded.attempted == 0
+        assert store.entries == 1
+        store.block = False
+        store.release.set()
+        delivered = await sweeper.sweep()
+    finally:
+        store.release.set()
+        sweeper.close()
+    assert delivered.acknowledged == 2
+    assert store.list_pending_outbox_rows(workspace) == ()
+    assert store.max_active == 1
+
+
+class _ContendedMaintenanceStore(LocalObservationStore):
+    contended: str | None = None
+
+    def maintain_selected_admission(self, workspace: str, *, force: bool = False) -> None:
+        if workspace == self.contended:
+            from yoetz.ports.observation import ObservationStoreLockTimeout
+
+            raise ObservationStoreLockTimeout(
+                scope="process",
+                waited_ms=2_000,
+                holder_role="hook",
+                holder_phase="handle_observe",
+                holder_held_ms=2_100,
+            )
+        super().maintain_selected_admission(workspace, force=force)
+
+
+@pytest.mark.anyio
+async def test_contended_maintenance_sits_out_only_its_own_workspace(tmp_path: Path) -> None:
+    store = _ContendedMaintenanceStore(_state=tmp_path)
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    outcomes: dict[str, ObservationIngestResult | Exception] = {}
+    workspaces: list[str] = []
+    for index, root in enumerate((first, second)):
+        workspace = store.workspace_commitment(str(root.resolve()))
+        store.grant_consent(workspace)
+        session = store.bind_codex_session(workspace, f"lane-{index}")
+        envelope = _envelope(session, f"hook:ws:{index}", 1)
+        store.enqueue_outbox(workspace, f"lane-{index}", envelope)
+        outcomes[envelope.source_identity] = ObservationIngestResult(
+            ObservationIngestDisposition.DUPLICATE, "duplicate", None
+        )
+        workspaces.append(workspace)
+    store.contended = workspaces[0]
+    sweeper = ObservationOutboxSweeper(store, _Coordinator(outcomes))
+    try:
+        summary = await sweeper.sweep()
+    finally:
+        sweeper.close()
+    # Fail-closed for the contended workspace only; the other one still drains.
+    assert summary.acknowledged == 1
+    assert dict(summary.reasons) == {"observation_store_busy": 1}
+    assert len(store.list_pending_outbox_rows(workspaces[0])) == 1
+    assert store.list_pending_outbox_rows(workspaces[1]) == ()

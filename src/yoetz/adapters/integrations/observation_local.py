@@ -11,19 +11,23 @@ import base64
 import contextlib
 import dataclasses
 import errno
+import functools
 import hashlib
+import json
 import os
 import re
 import stat
+import sys
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Generator, Iterable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Final, TypeVar, cast
+from typing import Concatenate, Final, TypeVar, cast
 
 from yoetz.adapters.integrations.observation_admission import (
     ROUTINE_SUMMARY_INVALID_GAP,
@@ -120,7 +124,18 @@ from yoetz.domain.values import (
     validate_sha256_digest,
 )
 from yoetz.ports.integrations import YOETZ_WORKFLOW_TOOL_NAMES, observation_pairing_contract
-from yoetz.protocol.canonical import canonical_digest, canonical_encode, strict_json_parse
+from yoetz.ports.observation import ObservationStoreLockTimeout
+from yoetz.protocol.canonical import (
+    MAX_JSON_DEPTH,
+    CanonicalFragment,
+    canonical_digest,
+    canonical_encode,
+    canonical_fragment,
+    container_levels,
+    ensure_canonical_value,
+    strict_json_parse,
+)
+from yoetz.protocol.canonical import JsonValue as ParsedJsonValue
 from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind, validate_id
 
@@ -140,6 +155,8 @@ __all__ = [
     "LocalObservationConsent",
     "LocalObservationStore",
     "ObservationOutboxRow",
+    "ObservationStoreLockEvent",
+    "ObservationStoreLockTimeout",
     "PendingSessionLifecycle",
     "ReadProtection",
     "STREAM_MAPPING_VERSION",
@@ -147,8 +164,13 @@ __all__ = [
     "YOETZ_READ_TOOL_NAMES",
     "YOETZ_TOOL_NAMES",
     "observation_dir",
+    "observation_store_lock_deadline",
+    "observation_store_lock_remaining",
+    "observation_store_lock_scope",
     "self_observation_deliverable",
     "session_commitment_from_codex_id",
+    "set_observation_store_lock_reporter",
+    "set_observation_store_lock_role",
     "workspace_commitment_for_path",
 ]
 
@@ -377,19 +399,256 @@ def self_observation_deliverable(phase: str, structural: Mapping[str, JsonValue]
 _SESSION_DOMAIN: Final = b"yoetz/observation-session/v1\x00"
 
 
+# Payload-free ownership vocabulary for the shared store lock (#689). A role
+# names which kind of process or service worker held or waited for the lock; a
+# phase names the store operation (a code identifier from this module or its
+# callers, never a value). Both are closed to the diagnostic token grammar.
+_STORE_LOCK_ROLES: Final = frozenset(
+    {
+        "cli",
+        "coordinator",
+        "hook",
+        "local",
+        "service",
+        "spool_replay",
+        "sweep",
+        "unknown",
+    }
+)
+# The service's store-owning worker pools name their threads; mapping the
+# prefix to a role separates a sweep hop from a coordinator hop inside one
+# process without recording any thread-specific value.
+_STORE_LOCK_THREAD_ROLES: Final = (
+    ("yoetz-obs-sweep", "sweep"),
+    ("yoetz-obs-local", "coordinator"),
+    ("yoetz-hook-spool", "spool_replay"),
+)
+_STORE_LOCK_PHASE_PATTERN: Final = re.compile(r"[a-z][a-z0-9_]{0,63}", re.ASCII)
+_STORE_LOCK_STAMP_MAX_BYTES: Final = 256
+# A hold at least this long is reported to the process's lock reporter with its
+# phase, so the expensive critical section is attributable without a timeout.
+_STORE_LOCK_LONG_HOLD_SECONDS: Final = 1.0
+_STORE_LOCK_PROCESS_ROLE: list[str] = ["local"]
+_STORE_LOCK_CONTEXT = threading.local()
+
+
+def _store_lock_phase(name: object) -> str:
+    """Normalize a code identifier to one bounded diagnostic token."""
+
+    if type(name) is not str:
+        return "unknown"
+    token = name.lower().lstrip("_")
+    return token if _STORE_LOCK_PHASE_PATTERN.fullmatch(token) else "unknown"
+
+
+def _store_lock_role() -> str:
+    """Return this thread's closed ownership role."""
+
+    thread_name = threading.current_thread().name
+    for prefix, role in _STORE_LOCK_THREAD_ROLES:
+        if thread_name.startswith(prefix):
+            return role
+    scoped = getattr(_STORE_LOCK_CONTEXT, "role", None)
+    if type(scoped) is str:
+        return scoped
+    return _STORE_LOCK_PROCESS_ROLE[0]
+
+
+def set_observation_store_lock_role(role: str) -> None:
+    """Name this process's store-lock role (``hook``, ``service`` or ``cli``)."""
+
+    if type(role) is not str or role not in _STORE_LOCK_ROLES:
+        raise ValueError("observation_store_lock_role_invalid")
+    _STORE_LOCK_PROCESS_ROLE[0] = role
+
+
+@contextlib.contextmanager
+def observation_store_lock_deadline(deadline: float | None) -> Generator[None]:
+    """Bound every store-lock wait in this thread by one ``time.monotonic`` deadline.
+
+    The two-second per-acquisition cap stays in force; this only shortens it.
+    A hook pass or a sweep that has spent its budget therefore fails one
+    acquisition fast instead of queueing a fresh two seconds per call, so the
+    complete invocation, not each call, is what the budget bounds (#689).
+    Nested scopes keep the earlier deadline.
+    """
+
+    previous = cast(float | None, getattr(_STORE_LOCK_CONTEXT, "deadline", None))
+    effective = previous
+    if deadline is not None:
+        effective = deadline if previous is None else min(previous, deadline)
+    _STORE_LOCK_CONTEXT.deadline = effective
+    try:
+        yield
+    finally:
+        _STORE_LOCK_CONTEXT.deadline = previous
+
+
+def observation_store_lock_remaining() -> float | None:
+    """Return the seconds left under this thread's lock deadline, if one is set."""
+
+    deadline = cast(float | None, getattr(_STORE_LOCK_CONTEXT, "deadline", None))
+    return None if deadline is None else deadline - time.monotonic()
+
+
+@dataclass(frozen=True, slots=True)
+class ObservationStoreLockEvent:
+    """One payload-free lock ownership observation for a process reporter."""
+
+    kind: str  # "timeout" or "long_hold"
+    role: str
+    phase: str
+    held_ms: int | None = None
+    timeout: ObservationStoreLockTimeout | None = None
+
+
+_STORE_LOCK_REPORTER: list[Callable[[ObservationStoreLockEvent], None] | None] = [None]
+
+
+def set_observation_store_lock_reporter(
+    reporter: Callable[[ObservationStoreLockEvent], None] | None,
+) -> Callable[[ObservationStoreLockEvent], None] | None:
+    """Install this process's lock-event sink; return the previous one.
+
+    The store never chooses a sink itself: hooks record into their bounded hook
+    diagnostics and the service into its diagnostic ring. Reporter failures
+    are swallowed so observability can never fail a store operation.
+    """
+
+    previous = _STORE_LOCK_REPORTER[0]
+    _STORE_LOCK_REPORTER[0] = reporter
+    return previous
+
+
+@contextlib.contextmanager
+def observation_store_lock_scope(
+    *,
+    role: str | None = None,
+    reporter: Callable[[ObservationStoreLockEvent], None] | None = None,
+) -> Generator[None]:
+    """Attribute and report this thread's store-lock activity for one bounded scope.
+
+    A hook pass names itself and records its own lock events into hook
+    diagnostics without replacing the process sink: the service replays legacy
+    spool records through the same pass on one of its own threads.
+    """
+
+    if role is not None and role not in _STORE_LOCK_ROLES:
+        raise ValueError("observation_store_lock_role_invalid")
+    previous_role = getattr(_STORE_LOCK_CONTEXT, "role", None)
+    previous_reporter = getattr(_STORE_LOCK_CONTEXT, "reporter", None)
+    if role is not None:
+        _STORE_LOCK_CONTEXT.role = role
+    if reporter is not None:
+        _STORE_LOCK_CONTEXT.reporter = reporter
+    try:
+        yield
+    finally:
+        _STORE_LOCK_CONTEXT.role = previous_role
+        _STORE_LOCK_CONTEXT.reporter = previous_reporter
+
+
+def _report_store_lock_event(event: ObservationStoreLockEvent) -> None:
+    reporter = cast(
+        Callable[[ObservationStoreLockEvent], None] | None,
+        getattr(_STORE_LOCK_CONTEXT, "reporter", None),
+    )
+    if reporter is None:
+        reporter = _STORE_LOCK_REPORTER[0]
+    if reporter is None:
+        return
+    with contextlib.suppress(Exception):
+        reporter(event)
+
+
+class _LockedWriteRequired(BaseException):  # noqa: N818 - internal control flow
+    """A lock-free committed read reached a write and must rerun under the lock.
+
+    A ``BaseException`` so no ``except Exception`` between the write and the
+    enclosing :meth:`LocalObservationStore._read` can swallow it and silently
+    skip the write.
+    """
+
+
+_OPTIMISTIC_READS = threading.local()
+
+
+def _optimistic_read_depth() -> int:
+    return cast(int, getattr(_OPTIMISTIC_READS, "depth", 0))
+
+
+def _read_mostly[**ParamsT, ResultT](
+    method: Callable[Concatenate[LocalObservationStore, ParamsT], ResultT],
+) -> Callable[Concatenate[LocalObservationStore, ParamsT], ResultT]:
+    """Serve a read-mostly store method without queueing for the store lock.
+
+    The method body uses :meth:`LocalObservationStore._reading` where it once
+    took the lock. It runs against the committed document first; only if it
+    reaches a write (a legacy repair, an expiring setting) does it rerun under
+    the lock, so the write and the reads it depends on stay one transaction.
+    """
+
+    @functools.wraps(method)
+    def wrapper(
+        self: LocalObservationStore, *args: ParamsT.args, **kwargs: ParamsT.kwargs
+    ) -> ResultT:
+        return self._read(lambda: method(self, *args, **kwargs))  # pyright: ignore[reportPrivateUsage]
+
+    return wrapper
+
+
 class _StoreLockState:
     def __init__(self) -> None:
         self.thread_lock = threading.RLock()
         self.depth = 0
         self.descriptor: int | None = None
+        # The thread that holds ``thread_lock`` at depth one, with the facts a
+        # timed-out waiter reports. ``flock_held`` is False while that owner is
+        # still queueing for the cross-process flock.
+        self.owner: int | None = None
+        self.owner_role = "unknown"
+        self.owner_phase = "unknown"
+        self.owner_since = 0.0
+        self.flock_held = False
 
 
 _STORE_LOCK_REGISTRY_GUARD = threading.Lock()
 _STORE_LOCK_REGISTRY: dict[str, _StoreLockState] = {}
 
 
+def _read_lock_stamp(descriptor: int) -> tuple[str, str, int | None]:
+    """Return the flock holder's stamped role, phase and hold time, if legible."""
+
+    try:
+        raw = os.pread(descriptor, _STORE_LOCK_STAMP_MAX_BYTES, 0)
+        parsed = json.loads(raw.decode("ascii")) if raw else None
+    except OSError, UnicodeDecodeError, ValueError:
+        return "unknown", "unknown", None
+    if type(parsed) is not dict:
+        return "unknown", "unknown", None
+    stamp = cast(dict[str, object], parsed)
+    role = stamp.get("role")
+    phase = stamp.get("phase")
+    since = stamp.get("since_ms")
+    held: int | None = None
+    if type(since) is int and since >= 0:
+        held = max(0, int(time.monotonic() * 1000) - since)
+    return (
+        role if type(role) is str and role in _STORE_LOCK_ROLES else "unknown",
+        _store_lock_phase(phase),
+        held,
+    )
+
+
 class _InterprocessStoreLock:
-    """Reentrant process-local lock plus POSIX serialization across hook/daemon."""
+    """Reentrant process-local lock plus POSIX serialization across hook/daemon.
+
+    Ownership is observable without payloads (#689): the depth-one holder of
+    the flock stamps its role, store phase and ``time.monotonic`` start (a
+    system-wide clock on the supported POSIX hosts) into the lock file, and
+    clears it on release. A waiter whose bounded wait expires reads that stamp,
+    or the in-process owner facts, into :class:`ObservationStoreLockTimeout`.
+    """
 
     def __init__(self, path: Path, *, waits_ms: MutableMapping[str, float] | None = None) -> None:
         self._path = path
@@ -397,29 +656,122 @@ class _InterprocessStoreLock:
         # window could see: the wait lands inside and outside the timed 'store'
         # window alike, so it accumulates here, once per acquisition, wherever
         # in the pass it happens (#310/#311). Reentrant acquisitions return
-        # immediately and contribute ~0.
+        # immediately and contribute ~0. Hold time accumulates as 'lock_hold'
+        # so a pass can tell its own critical section from its queueing (#689).
         self._waits_ms = waits_ms
         key = str(path.absolute())
         with _STORE_LOCK_REGISTRY_GUARD:
             self._state = _STORE_LOCK_REGISTRY.setdefault(key, _StoreLockState())
 
+    def held_by_current_thread(self) -> bool:
+        """Return whether this thread already owns the process-local store lock."""
+
+        return self._state.owner == threading.get_ident()
+
     def __enter__(self) -> _InterprocessStoreLock:
+        return self.enter(sys._getframe(1).f_code.co_name)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+
+    def enter(
+        self, phase: str, *, prepare: Callable[[], None] | None = None
+    ) -> _InterprocessStoreLock:
+        """Acquire under one bounded deadline, naming the store operation.
+
+        ``prepare`` runs once the process-local lock is held and before the
+        cross-process flock is requested: in-process callers keep their arrival
+        order, while other processes never wait on it. Its duration is neither
+        charged to the flock wait budget nor reported as queueing.
+        """
+
         started = time.monotonic()
+        token = _store_lock_phase(phase)
+        prepared: list[float] = [0.0]
         try:
-            return self._acquire(started + _STORE_LOCK_TIMEOUT_SECONDS)
+            return self._acquire(started, token, prepare, prepared)
+        except ObservationStoreLockTimeout as timeout:
+            # Reported once every lock this attempt took has been released.
+            _report_store_lock_event(
+                ObservationStoreLockEvent(
+                    kind="timeout",
+                    role=_store_lock_role(),
+                    phase=token,
+                    timeout=timeout,
+                )
+            )
+            raise
         finally:
             if self._waits_ms is not None:
                 # Recorded on the timeout path too: a pass that waited two
                 # seconds and then failed spent those seconds queueing.
-                self._waits_ms["lock_wait"] = (
-                    self._waits_ms.get("lock_wait", 0.0) + (time.monotonic() - started) * 1000
+                waited = time.monotonic() - started - prepared[0]
+                self._waits_ms["lock_wait"] = self._waits_ms.get("lock_wait", 0.0) + max(
+                    0.0, waited * 1000
                 )
 
-    def _acquire(self, deadline: float) -> _InterprocessStoreLock:
+    def _deadline(self, started: float) -> float:
+        deadline = started + _STORE_LOCK_TIMEOUT_SECONDS
+        bound = cast(float | None, getattr(_STORE_LOCK_CONTEXT, "deadline", None))
+        return deadline if bound is None else min(deadline, bound)
+
+    def _timeout(
+        self,
+        scope: str,
+        started: float,
+        *,
+        descriptor: int | None = None,
+    ) -> ObservationStoreLockTimeout:
+        waited_ms = max(0, int((time.monotonic() - started) * 1000))
         state = self._state
-        if not state.thread_lock.acquire(timeout=_STORE_LOCK_TIMEOUT_SECONDS):
-            raise TimeoutError("observation_store_lock_timeout")
+        if descriptor is not None:
+            role, holder_phase, held = _read_lock_stamp(descriptor)
+            waiting = False
+        else:
+            # Unsynchronized reads of the in-process owner's facts: at worst
+            # they describe the previous owner, which is still the thread the
+            # waiter queued behind.
+            role = state.owner_role
+            holder_phase = state.owner_phase
+            since = state.owner_since
+            held = None if since <= 0.0 else max(0, int((time.monotonic() - since) * 1000))
+            waiting = not state.flock_held
+        return ObservationStoreLockTimeout(
+            scope=scope,
+            waited_ms=waited_ms,
+            holder_role=role,
+            holder_phase=holder_phase,
+            holder_held_ms=held,
+            holder_waiting=waiting,
+        )
+
+    def _acquire(
+        self,
+        started: float,
+        phase: str,
+        prepare: Callable[[], None] | None = None,
+        prepared: list[float] | None = None,
+    ) -> _InterprocessStoreLock:
+        state = self._state
+        deadline = self._deadline(started)
+        if not state.thread_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            raise self._timeout("thread", started)
         if state.depth == 0:
+            state.owner = threading.get_ident()
+            state.owner_role = _store_lock_role()
+            state.owner_phase = phase
+            state.owner_since = time.monotonic()
+            state.flock_held = False
+            if prepare is not None:
+                began = time.monotonic()
+                with contextlib.suppress(Exception):
+                    prepare()
+                spent = time.monotonic() - began
+                if prepared is not None:
+                    prepared[0] = spent
+                # Preparation is not queueing: the flock keeps its full wait,
+                # still bounded by any caller deadline in scope.
+                bound = cast(float | None, getattr(_STORE_LOCK_CONTEXT, "deadline", None))
+                deadline = started + _STORE_LOCK_TIMEOUT_SECONDS + spent
+                if bound is not None:
+                    deadline = min(deadline, bound)
             flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC
             if hasattr(os, "O_NOFOLLOW"):
                 flags |= os.O_NOFOLLOW
@@ -437,11 +789,30 @@ class _InterprocessStoreLock:
                                 raise
                             remaining = deadline - time.monotonic()
                             if remaining <= 0:
-                                raise TimeoutError("observation_store_lock_timeout") from exc
+                                raise self._timeout(
+                                    "process", started, descriptor=descriptor
+                                ) from exc
                             time.sleep(min(_STORE_LOCK_POLL_SECONDS, remaining))
+                acquired = time.monotonic()
+                state.owner_since = acquired
+                state.flock_held = True
+                with contextlib.suppress(OSError):
+                    stamp = json.dumps(
+                        {
+                            "phase": phase,
+                            "role": state.owner_role,
+                            "since_ms": int(acquired * 1000),
+                        },
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ).encode("ascii")
+                    os.pwrite(descriptor, stamp, 0)
+                    os.ftruncate(descriptor, len(stamp))
             except BaseException:
                 if descriptor is not None:
                     os.close(descriptor)
+                state.owner = None
+                state.flock_held = False
                 state.thread_lock.release()
                 raise
             assert descriptor is not None
@@ -452,19 +823,37 @@ class _InterprocessStoreLock:
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
         del exc_type, exc, traceback
         state = self._state
+        long_hold: ObservationStoreLockEvent | None = None
         try:
             state.depth -= 1
             if state.depth == 0:
                 descriptor = state.descriptor
                 state.descriptor = None
+                held = time.monotonic() - state.owner_since
+                if held >= _STORE_LOCK_LONG_HOLD_SECONDS:
+                    long_hold = ObservationStoreLockEvent(
+                        kind="long_hold",
+                        role=state.owner_role,
+                        phase=state.owner_phase,
+                        held_ms=int(held * 1000),
+                    )
+                state.owner = None
+                state.flock_held = False
+                if self._waits_ms is not None:
+                    self._waits_ms["lock_hold"] = self._waits_ms.get("lock_hold", 0.0) + held * 1000
                 if descriptor is not None:
                     try:
+                        with contextlib.suppress(OSError):
+                            os.ftruncate(descriptor, 0)
                         if fcntl is not None:
                             fcntl.flock(descriptor, fcntl.LOCK_UN)
                     finally:
                         os.close(descriptor)
         finally:
             state.thread_lock.release()
+        if long_hold is not None:
+            # Reported after release so a slow sink never extends the hold.
+            _report_store_lock_event(long_hold)
 
 
 def _error(code: PublicErrorCode, message: str, *, retryable: bool) -> PublicOperationError:
@@ -754,11 +1143,12 @@ class ObservationOutboxRow:
     @property
     def row_identity(self) -> str:
         return canonical_digest(
-            JsonObject(
+            cast(
+                JsonValue,
                 {
                     "codex_session_id": self.codex_session_id,
-                    "envelope": observation_envelope_to_json(self.envelope),
-                }
+                    "envelope": _envelope_fragment(self.envelope),
+                },
             )
         )
 
@@ -1988,16 +2378,25 @@ class _ObservationBatch(contextlib.AbstractContextManager[None]):
     generator context managers try to assign their traceback on propagation.
     """
 
-    def __init__(self, store: LocalObservationStore, workspace: str) -> None:
+    def __init__(self, store: LocalObservationStore, workspace: str, phase: str) -> None:
         self.store = store
         self.workspace = workspace
+        self.phase = phase
         self.state: _WorkspaceState | None = None
         self.before: _WorkspaceState | None = None
         self.nested = False
         self.was_dirty = False
 
     def __enter__(self) -> None:
-        self.store._lock.__enter__()  # pyright: ignore[reportPrivateUsage]
+        lock = self.store._lock  # pyright: ignore[reportPrivateUsage]
+        # Parse the committed document and encode its members before queueing
+        # for the cross-process flock (in-process arrival order is kept). When
+        # no other process commits meanwhile, the transaction starts from this
+        # parse and the flock covers only mutation and the save (#689).
+        lock.enter(
+            self.phase,
+            prepare=functools.partial(self.store._prewarm, self.workspace),  # pyright: ignore[reportPrivateUsage]
+        )
         try:
             self.nested = self.workspace in self.store._batch  # pyright: ignore[reportPrivateUsage]
             self.was_dirty = self.workspace in self.store._batch_dirty  # pyright: ignore[reportPrivateUsage]
@@ -2111,23 +2510,259 @@ def _content_capture_profiles_from_json(row: Mapping[str, JsonValue]) -> tuple[s
     return tuple(sorted(set(profiles), key=str.encode))[:2]
 
 
-def _dedup_key(workspace: str, envelope: ObservationEnvelope) -> str:
-    return canonical_digest(
-        JsonObject(
-            {
-                "workspace_commitment": workspace,
-                "session_commitment": envelope.session_commitment,
-                "source": envelope.source.value,
-                "source_identity": envelope.source_identity,
-                "event_kind": envelope.event_kind,
-                "cursor": observation_cursor_to_json(envelope.cursor),
-            }
+# Enough for the largest selected queue plus the retained envelope and
+# quarantine caches of one workspace; a larger working set only loses reuse.
+_CODEC_MEMO_ENTRIES: Final = 12_288
+
+
+class _EnvelopeCodec:
+    """Process-local, bounded, exact memo of envelope JSON conversions (#689).
+
+    Every hook pass and service write re-encoded, and after any other writer's
+    commit re-parsed, the whole workspace document while holding the shared
+    store lock, although only a row or two changed. The envelopes, outbox rows
+    and quarantine entries that dominate that document are immutable, so:
+
+    - encoding caches one :class:`CanonicalFragment` per object identity (the
+      memo holds the object, so its identity cannot be reused while cached),
+      and splicing it yields exactly the bytes inline encoding would;
+    - decoding caches the envelope built from one persisted JSON object, keyed
+      by that object's key-sorted C-encoded text, which is equal exactly for
+      equal JSON values; ``observation_envelope_from_json`` is a pure function
+      of that value, so a hit returns the same validated envelope.
+
+    A process that already read the committed document therefore holds the
+    lock only for what changed, not for the size of the whole state.
+    """
+
+    def __init__(self, capacity: int) -> None:
+        self._capacity = capacity
+        self._guard = threading.Lock()
+        # Decoded envelope and the container depth of the JSON it came from.
+        self._decoded: OrderedDict[str, tuple[ObservationEnvelope, int]] = OrderedDict()
+        self._encoded: OrderedDict[int, tuple[object, CanonicalFragment]] = OrderedDict()
+        self._dedup: OrderedDict[tuple[str, int], tuple[ObservationEnvelope, str]] = OrderedDict()
+
+    @staticmethod
+    def decode_key(raw: object) -> str | None:
+        """Return the key-sorted C encoding of a parsed JSON object, equal for equal values."""
+
+        if type(raw) is not dict:
+            return None
+        try:
+            return json.dumps(raw, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        except TypeError, ValueError:
+            return None
+
+    def validated_levels(self, key: str) -> int | None:
+        """Return the container depth of an envelope JSON this process already validated.
+
+        Entries exist only for JSON that passed the full canonical profile, both in the
+        document walk and in ``JsonObject`` construction, so an equal value needs no walk.
+        """
+
+        with self._guard:
+            cached = self._decoded.get(key)
+        return None if cached is None else cached[1]
+
+    def decode(self, raw: Mapping[str, JsonValue], key: str | None = None) -> ObservationEnvelope:
+        if key is None:
+            key = self.decode_key(raw)
+        if key is None:
+            return observation_envelope_from_json(JsonObject(raw))
+        with self._guard:
+            cached = self._decoded.get(key)
+            if cached is not None:
+                self._decoded.move_to_end(key)
+                return cached[0]
+        envelope = observation_envelope_from_json(JsonObject(raw))
+        levels = container_levels(raw)
+        with self._guard:
+            self._decoded[key] = (envelope, levels)
+            while len(self._decoded) > self._capacity:
+                self._decoded.popitem(last=False)
+        return envelope
+
+    def fragment(self, item: object, build: Callable[[], JsonValue]) -> CanonicalFragment:
+        key = id(item)
+        with self._guard:
+            cached = self._encoded.get(key)
+            if cached is not None and cached[0] is item:
+                self._encoded.move_to_end(key)
+                return cached[1]
+        fragment = canonical_fragment(build())
+        with self._guard:
+            self._encoded[key] = (item, fragment)
+            while len(self._encoded) > self._capacity:
+                self._encoded.popitem(last=False)
+        return fragment
+
+    def dedup_key(self, workspace: str, envelope: ObservationEnvelope) -> str:
+        key = (workspace, id(envelope))
+        with self._guard:
+            cached = self._dedup.get(key)
+            if cached is not None and cached[0] is envelope:
+                self._dedup.move_to_end(key)
+                return cached[1]
+        digest = canonical_digest(
+            JsonObject(
+                {
+                    "workspace_commitment": workspace,
+                    "session_commitment": envelope.session_commitment,
+                    "source": envelope.source.value,
+                    "source_identity": envelope.source_identity,
+                    "event_kind": envelope.event_kind,
+                    "cursor": observation_cursor_to_json(envelope.cursor),
+                }
+            )
+        )
+        with self._guard:
+            self._dedup[key] = (envelope, digest)
+            while len(self._dedup) > self._capacity:
+                self._dedup.popitem(last=False)
+        return digest
+
+
+_CODEC: Final = _EnvelopeCodec(_CODEC_MEMO_ENTRIES)
+
+
+def _validate_state_document(parsed: object) -> dict[int, str]:
+    """Apply the canonical profile to a lexically strict state document (#689).
+
+    Equivalent to validating the whole document at once, member by member at the same depths,
+    except that an envelope JSON value this process already validated (an equal value, with its
+    recorded depth still inside the nesting bound) is not walked again. A re-read after another
+    writer's commit therefore validates only what changed. Returns each envelope object's decode
+    key by identity, so decoding does not encode it a second time.
+    """
+
+    keys: dict[int, str] = {}
+    if type(parsed) is not dict:
+        ensure_canonical_value(cast(ParsedJsonValue, parsed))
+        return keys
+
+    def envelope(item: ParsedJsonValue, depth: int) -> None:
+        key = _CODEC.decode_key(item)
+        if key is not None:
+            keys[id(item)] = key
+            levels = _CODEC.validated_levels(key)
+            if levels is not None and depth + levels < MAX_JSON_DEPTH:
+                return
+        ensure_canonical_value(item, depth=depth)
+
+    document = cast(dict[str, ParsedJsonValue], parsed)
+    for name, value in document.items():
+        ensure_canonical_value(name, depth=1)
+        if name == "envelopes" and type(value) is list:
+            for item in cast(list[ParsedJsonValue], value):
+                envelope(item, 2)
+        elif name in {"pending_outbox", "quarantine"} and type(value) is list:
+            for item in cast(list[ParsedJsonValue], value):
+                if type(item) is not dict:
+                    ensure_canonical_value(item, depth=2)
+                    continue
+                for field, member in cast(dict[str, ParsedJsonValue], item).items():
+                    ensure_canonical_value(field, depth=3)
+                    if field == "envelope":
+                        envelope(member, 3)
+                    else:
+                        ensure_canonical_value(member, depth=3)
+        else:
+            ensure_canonical_value(value, depth=1)
+    return keys
+
+
+def _envelope_fragment(envelope: ObservationEnvelope) -> CanonicalFragment:
+    return _CODEC.fragment(envelope, functools.partial(observation_envelope_to_json, envelope))
+
+
+def _envelope_bytes(envelope: ObservationEnvelope) -> int:
+    """Return the canonical byte length of one envelope's persisted JSON."""
+
+    return _envelope_fragment(envelope).byte_length
+
+
+def _delivery_unit_bytes(codex_session_id: str, envelope: ObservationEnvelope) -> int:
+    """Return the canonical byte length of one ``{codex_session_id, envelope}`` unit."""
+
+    return len(
+        canonical_encode(
+            cast(
+                JsonValue,
+                {"codex_session_id": codex_session_id, "envelope": _envelope_fragment(envelope)},
+            )
         )
     )
 
 
-def _outbox_row_to_json(row: ObservationOutboxRow) -> JsonObject:
-    """Return one pending row exactly as the workspace state persists it."""
+def _outbox_row_fragment(row: ObservationOutboxRow) -> CanonicalFragment:
+    return _CODEC.fragment(row, functools.partial(_outbox_row_to_spliced_json, row))
+
+
+def _outbox_row_bytes(row: ObservationOutboxRow) -> int:
+    return _outbox_row_fragment(row).byte_length
+
+
+def _quarantine_entry_fragment(
+    entry: tuple[str, ObservationEnvelope, str, Timestamp],
+) -> CanonicalFragment:
+    return _CODEC.fragment(
+        entry,
+        lambda: cast(
+            JsonValue,
+            {
+                "codex_session_id": entry[0],
+                "envelope": _envelope_fragment(entry[1]),
+                "reason": entry[2],
+                "quarantined_at": entry[3].wire,
+            },
+        ),
+    )
+
+
+def _dedup_key(workspace: str, envelope: ObservationEnvelope) -> str:
+    return _CODEC.dedup_key(workspace, envelope)
+
+
+def _prime_codec(state: _WorkspaceState) -> None:
+    """Fill the codec memo for one committed state's immutable members.
+
+    ``state`` is a cached committed parse that nobody mutates, so reading its
+    lists here needs no lock.
+    """
+
+    for envelope in state.envelopes or ():
+        _envelope_fragment(envelope)
+    for row in state.pending_outbox or ():
+        _outbox_row_fragment(row)
+    for entry in state.quarantine or ():
+        _quarantine_entry_fragment(entry)
+    for item in state.admission_buffer.inputs:
+        _envelope_fragment(item.envelope)
+
+
+def _outbox_row_to_spliced_json(row: ObservationOutboxRow) -> JsonValue:
+    """Return :func:`_outbox_row_to_json`'s value with the envelope as a cached fragment."""
+
+    return cast(
+        JsonValue,
+        {
+            "codex_session_id": row.codex_session_id,
+            "envelope": _envelope_fragment(row.envelope),
+            "attempts": row.attempts,
+            "last_reason": row.last_reason,
+            "last_attempt_at": (None if row.last_attempt_at is None else row.last_attempt_at.wire),
+            "consecutive_reason_attempts": row.consecutive_reason_attempts,
+        },
+    )
+
+
+def _outbox_row_to_json(row: ObservationOutboxRow) -> JsonObject:  # pyright: ignore[reportUnusedFunction]
+    """Return one pending row exactly as the workspace state persists it.
+
+    The inline reference for :func:`_outbox_row_to_spliced_json`, which the
+    store now encodes; tests pin the two to identical bytes (#689).
+    """
 
     return JsonObject(
         {
@@ -2231,6 +2866,7 @@ class LocalObservationStore:
             "hydrate": 0.0,
             "encode": 0.0,
             "lock_wait": 0.0,
+            "lock_hold": 0.0,
             "write": 0.0,
         }
         self._lock = _InterprocessStoreLock(
@@ -2248,6 +2884,11 @@ class LocalObservationStore:
         # workspace on its sweep loop, never accretes one parsed object graph
         # per workspace it has ever seen.
         self._state_cache: dict[str, tuple[tuple[int, int, int, int], _WorkspaceState]] = {}
+        # Committed reads run without the store lock (#689), so the service's
+        # worker threads may consult and refresh the parse cache concurrently.
+        # The guard covers only dictionary access; cached states are never
+        # mutated in place, and every reader receives its own copy.
+        self._cache_guard = threading.Lock()
         self._key_material_cache: bytes | None = None
         # Open write batches keyed by workspace commitment. Inside a batch
         # `_load` hands back the held mutable state and `_save` only marks it
@@ -2288,8 +2929,16 @@ class LocalObservationStore:
         return epoch is not None and abs(self._boot_epoch() - epoch) <= _EPOCH_TOLERANCE_SECONDS
 
     def key_material(self) -> bytes:
+        path = self._root / "key-material.bin"
+        # The key is created once by an atomic replace and never rewritten, so
+        # an existing complete file is authoritative without the store lock.
+        # Every hook resolves its workspace commitment through this read;
+        # queueing it behind a contended batch turned a lock timeout into a
+        # dropped event misreported as an unconsented workspace (#689).
+        existing = _read_bytes(path, maximum=_KEY_BYTES)
+        if existing is not None and len(existing) == _KEY_BYTES:
+            return existing
         with self._lock:
-            path = self._root / "key-material.bin"
             existing = _read_bytes(path, maximum=_KEY_BYTES)
             if existing is not None and len(existing) == _KEY_BYTES:
                 return existing
@@ -2474,17 +3123,18 @@ class LocalObservationStore:
         return self._runtime_gate_facts()[1]
 
     def workspace_commitment(self, path: str) -> str:
-        return workspace_commitment_from_path(self.key_material(), path)
+        return workspace_commitment_from_path(self._cached_key_material(), path)
 
     def session_commitment(self, codex_session_id: str) -> str:
-        return session_commitment_from_codex_id(self.key_material(), codex_session_id)
+        return session_commitment_from_codex_id(self._cached_key_material(), codex_session_id)
 
+    @_read_mostly
     def pending_consent_revocation(
         self, workspace_commitment: str
     ) -> tuple[str, tuple[tuple[str, int], ...] | None] | None:
         """Return the durable source-consent fence awaiting project invalidation."""
 
-        with self._lock:
+        with self._reading():
             state = self._load(workspace_commitment)
             token = state.pending_consent_revocation
             if token is None:
@@ -2708,19 +3358,21 @@ class LocalObservationStore:
             state.consent = next_consent
             self._save(workspace_commitment, state)
 
+    @_read_mostly
     def content_capture_profiles(self, workspace_commitment: str) -> tuple[str, ...]:
         """Return the persisted content arms, including while observation is paused."""
 
-        with self._lock:
+        with self._reading():
             consent = self._load(workspace_commitment).consent
             return () if consent is None else consent.content_capture_profiles
 
+    @_read_mostly
     def content_capture_authority(
         self, workspace_commitment: str
     ) -> LocalContentCaptureAuthority | None:
         """Read the authoritative local content fence under the store lock."""
 
-        with self._lock:
+        with self._reading():
             state = self._load(workspace_commitment)
             prior_epoch = state.content_capture_epoch
             content_capture_epoch = _ensure_content_capture_epoch(state)
@@ -2743,6 +3395,7 @@ class LocalObservationStore:
                 profiles=consent.content_capture_profiles,
             )
 
+    @_read_mostly
     def content_capture_authority_is_current(
         self,
         workspace_commitment: str,
@@ -2761,7 +3414,7 @@ class LocalObservationStore:
             validate_sha256_digest(generation)
         except ProtocolValueError, TypeError, ValueError:
             return False
-        with self._lock:
+        with self._reading():
             state = self._load(workspace_commitment)
             prior_epoch = state.content_capture_epoch
             content_capture_epoch = _ensure_content_capture_epoch(state)
@@ -2782,6 +3435,7 @@ class LocalObservationStore:
                 and consent.content_capture_profiles == profiles
             )
 
+    @_read_mostly
     def selection_settings_for(
         self,
         workspace_commitment: str,
@@ -2796,7 +3450,7 @@ class LocalObservationStore:
         lock, so a concurrent hook cannot continue using an expired override.
         """
 
-        with self._lock:
+        with self._reading():
             state = self._load(workspace_commitment)
             current = state.selection_settings or ObservationSelectionSettings()
             stamp = now if now is not None else self._wall_timestamp()
@@ -3169,6 +3823,7 @@ class LocalObservationStore:
                 }
             )
 
+    @_read_mostly
     def read_is_protected(
         self,
         workspace_commitment: str,
@@ -3192,7 +3847,7 @@ class LocalObservationStore:
             attempt_id = read_protection_attempt_identity(envelope)
         except ProtocolValueError, TypeError, ValueError:
             return False
-        with self._lock:
+        with self._reading():
             state = self._load(workspace_commitment)
             now = self._wall_timestamp()
             prior_epoch = state.content_capture_epoch
@@ -3234,6 +3889,7 @@ class LocalObservationStore:
             self._save(workspace_commitment, state)
             return True
 
+    @_read_mostly
     def read_protection_reference(
         self,
         workspace_commitment: str,
@@ -3257,7 +3913,7 @@ class LocalObservationStore:
             attempt_id = read_protection_attempt_identity(envelope)
         except ProtocolValueError, TypeError, ValueError:
             return None
-        with self._lock:
+        with self._reading():
             state = self._load(workspace_commitment)
             now = self._wall_timestamp()
             prior_epoch = state.content_capture_epoch
@@ -3494,12 +4150,14 @@ class LocalObservationStore:
             LocalObservationStore._resolve_gap_state(state, _LOCAL_STREAM_PARTIAL_DROPPED_GAP)
         return generation
 
+    @_read_mostly
     def current_session_generation(self, workspace_commitment: str, session_commitment: str) -> int:
-        with self._lock:
+        with self._reading():
             state = self._load(workspace_commitment)
             assert state.session_generations is not None
             return state.session_generations.get(session_commitment, 1)
 
+    @_read_mostly
     def persisted_session_generation(
         self, workspace_commitment: str, session_commitment: str
     ) -> int:
@@ -3512,7 +4170,7 @@ class LocalObservationStore:
         a legacy ended binding to generation two.
         """
 
-        with self._lock:
+        with self._reading():
             state = self._load(workspace_commitment)
             assert state.session_generations is not None
             return state.session_generations.get(session_commitment, 0)
@@ -3693,6 +4351,7 @@ class LocalObservationStore:
         except Exception:
             return False
 
+    @_read_mostly
     def codex_session_ended(self, workspace_commitment: str, codex_session_id: str) -> bool:
         """Whether the bound Codex session is marked ended for its current generation.
 
@@ -3703,7 +4362,7 @@ class LocalObservationStore:
         ``begin_session_generation``.
         """
 
-        with self._lock:
+        with self._reading():
             state = self._load(workspace_commitment)
             assert state.codex_session_bindings is not None
             assert state.ended_sessions is not None
@@ -3733,8 +4392,9 @@ class LocalObservationStore:
                 return 0
             return self.quarantine_outbox_session(workspace, codex_session_id, reason)
 
+    @_read_mostly
     def find_workspace_for_codex_session(self, codex_session_id: str) -> str | None:
-        with self._lock:
+        with self._reading():
             owners = self._session_workspace_owners_unlocked(
                 self.session_commitment(codex_session_id)
             )
@@ -3758,28 +4418,31 @@ class LocalObservationStore:
                 return active[0]
             return None
 
+    @_read_mostly
     def codex_sessions_for_workspace(self, workspace_commitment: str) -> tuple[str, ...]:
         """Return the bounded structural session IDs already bound to one workspace."""
 
-        with self._lock:
+        with self._reading():
             state = self._load(workspace_commitment)
             assert state.codex_session_bindings is not None
             return tuple(sorted(state.codex_session_bindings, key=str.encode))
 
+    @_read_mostly
     def codex_session_workspace_owners(self, codex_session_id: str) -> frozenset[str]:
         """Return every local workspace that records one host session or derived child lane."""
 
-        with self._lock:
+        with self._reading():
             return self._session_workspace_owners_unlocked(
                 self.session_commitment(codex_session_id)
             )
 
+    @_read_mostly
     def unambiguous_codex_sessions_for_workspace(
         self, workspace_commitment: str
     ) -> tuple[str, ...]:
         """Return host session IDs recorded in this workspace and no other local workspace."""
 
-        with self._lock:
+        with self._reading():
             target = self._load(workspace_commitment)
             assert target.codex_session_bindings is not None
             return tuple(
@@ -3794,6 +4457,7 @@ class LocalObservationStore:
                 )
             )
 
+    @_read_mostly
     def codex_session_lifecycles_for_workspace(
         self, workspace_commitment: str
     ) -> tuple[tuple[str, bool], ...]:
@@ -3804,7 +4468,7 @@ class LocalObservationStore:
         per call outside a batch, so the scan cost grew with the binding count (#549).
         """
 
-        with self._lock:
+        with self._reading():
             state = self._load(workspace_commitment)
             assert state.codex_session_bindings is not None
             assert state.ended_sessions is not None
@@ -3886,12 +4550,14 @@ class LocalObservationStore:
                 self._save(workspace_commitment, state)
             return removed
 
+    @_read_mostly
     def consent_for(self, workspace_commitment: str) -> LocalObservationConsent | None:
-        with self._lock:
+        with self._reading():
             return self._load(workspace_commitment).consent
 
+    @_read_mostly
     def list_consented_workspaces(self) -> tuple[str, ...]:
-        with self._lock:
+        with self._reading():
             result = [
                 workspace
                 for workspace, state in self._iter_workspaces()
@@ -4048,6 +4714,7 @@ class LocalObservationStore:
             self._save(workspace, state)
             return entry.event_kind
 
+    @_read_mostly
     def has_open_pre(
         self,
         workspace: str,
@@ -4057,7 +4724,7 @@ class LocalObservationStore:
         session_commitment: str | None = None,
         source_generation: int | None = None,
     ) -> bool:
-        with self._lock:
+        with self._reading():
             state = self._load(workspace)
             assert state.open_pre is not None
             changed = self._prune_open_pre(state, self._wall_timestamp())
@@ -4138,6 +4805,7 @@ class LocalObservationStore:
                 state.session_advice[yoetz_session_id] = snapshot
             self._save(workspace, state)
 
+    @_read_mostly
     def peek_advice_for_delivery(
         self,
         workspace: str,
@@ -4173,7 +4841,7 @@ class LocalObservationStore:
             select_standing_item,
         )
 
-        with self._lock:
+        with self._reading():
             state = self._load(workspace)
             snapshot = _task_scoped_delivery_snapshot(
                 state,
@@ -4370,10 +5038,11 @@ class LocalObservationStore:
             _touch_frontier_motion_notice(state, codex_session_id, clamped)
             self._save(workspace, state)
 
+    @_read_mostly
     def peek_frontier_motion(
         self, workspace: str, codex_session_id: str
     ) -> FrontierMotionNotice | None:
-        with self._lock:
+        with self._reading():
             state = self._load(workspace)
             return (state.frontier_motion_notices or {}).get(codex_session_id)
 
@@ -4479,14 +5148,16 @@ class LocalObservationStore:
             )
             self._save(workspace, state)
 
+    @_read_mostly
     def advice_snapshot_for(self, workspace: str) -> AdviceSnapshot | None:
         """Non-consuming read of the current advice snapshot for status views."""
 
-        with self._lock:
+        with self._reading():
             return self._load(workspace).advice_snapshot
 
+    @_read_mostly
     def list_envelopes(self, workspace: str) -> tuple[ObservationEnvelope, ...]:
-        with self._lock:
+        with self._reading():
             state = self._load(workspace)
             assert state.envelopes is not None
             return tuple(state.envelopes)
@@ -4571,10 +5242,11 @@ class LocalObservationStore:
                 self._save(workspace, state)
             return snapshot
 
+    @_read_mostly
     def get_stream_cursor(
         self, workspace: str, session_commitment: str
     ) -> ObservationCursor | None:
-        with self._lock:
+        with self._reading():
             state = self._load(workspace)
             assert state.stream_cursors is not None
             return state.stream_cursors.get(session_commitment)
@@ -4588,6 +5260,7 @@ class LocalObservationStore:
             state.stream_cursors[session_commitment] = cursor
             self._save(workspace, state)
 
+    @_read_mostly
     def stream_call_tools_for_session(
         self,
         workspace: str,
@@ -4595,7 +5268,7 @@ class LocalObservationStore:
         *,
         source_generation: int,
     ) -> dict[str, str]:
-        with self._lock:
+        with self._reading():
             state = self._load(workspace)
             assert state.stream_call_tools is not None
             assert state.stream_call_tool_generations is not None
@@ -4647,10 +5320,11 @@ class LocalObservationStore:
                 state.stream_call_tool_generations[session_commitment] = source_generation
             self._save(workspace, state)
 
+    @_read_mostly
     def stream_source_identity_for_session(
         self, workspace: str, session_commitment: str
     ) -> str | None:
-        with self._lock:
+        with self._reading():
             state = self._load(workspace)
             assert state.stream_source_identities is not None
             return state.stream_source_identities.get(session_commitment)
@@ -4676,10 +5350,11 @@ class LocalObservationStore:
                 state.stream_source_identities[session_commitment] = source_identity
             self._save(workspace, state)
 
+    @_read_mostly
     def stream_profile_for_session(self, workspace: str, session_commitment: str) -> str | None:
         """Return the exact rollout profile id the session's current generation admitted."""
 
-        with self._lock:
+        with self._reading():
             state = self._load(workspace)
             assert state.stream_profiles is not None
             return state.stream_profiles.get(session_commitment)
@@ -4785,8 +5460,9 @@ class LocalObservationStore:
                 state.stream_profiles[session_commitment] = profile_id
             self._save(workspace, state)
 
+    @_read_mostly
     def get_stream_partial(self, workspace: str, session_commitment: str) -> bytes:
-        with self._lock:
+        with self._reading():
             state = self._load(workspace)
             assert state.stream_partials is not None
             return state.stream_partials.get(session_commitment, b"")
@@ -4827,8 +5503,9 @@ class LocalObservationStore:
             state.monotonic_epoch = self._boot_epoch()
             self._save(workspace, state)
 
+    @_read_mostly
     def last_stream_reconcile_mono(self, workspace: str) -> float | None:
-        with self._lock:
+        with self._reading():
             value = self._load(workspace).last_stream_reconcile_mono_ms
             return None if value is None else value / 1000.0
 
@@ -4991,24 +5668,11 @@ class LocalObservationStore:
         # already refuse is over target.
         if len(rows) + len(buffered) <= self._aggregate_outbox_limit(state, now=now):
             admitted_bytes = sum(
-                len(
-                    canonical_encode(
-                        JsonObject(
-                            {
-                                "codex_session_id": row.codex_session_id,
-                                "envelope": observation_envelope_to_json(row.envelope),
-                            }
-                        )
-                    )
-                )
-                for row in rows
-            ) + sum(
-                len(canonical_encode(observation_envelope_to_json(item.envelope)))
-                for item in buffered
-            )
+                _delivery_unit_bytes(row.codex_session_id, row.envelope) for row in rows
+            ) + sum(_envelope_bytes(item.envelope) for item in buffered)
             if admitted_bytes <= queue_budget:
                 return 0
-        persisted_bytes = sum(len(canonical_encode(_outbox_row_to_json(row))) for row in rows)
+        persisted_bytes = sum(_outbox_row_bytes(row) for row in rows)
         if buffered:
             persisted_bytes += len(
                 canonical_encode(admission_buffer_to_json(state.admission_buffer))
@@ -5106,18 +5770,12 @@ class LocalObservationStore:
     ) -> bool:
         """Check one pending outbox row against the active budget."""
 
-        candidate = JsonObject(
-            {
-                "codex_session_id": codex_session_id,
-                "envelope": observation_envelope_to_json(envelope),
-            }
-        )
         return self._admission_allowed(
             workspace,
             state,
             envelope,
-            len(canonical_encode(candidate)),
-            len(canonical_encode(observation_envelope_to_json(envelope))),
+            _delivery_unit_bytes(codex_session_id, envelope),
+            _envelope_bytes(envelope),
             accepted_transfer=accepted_transfer,
         )
 
@@ -5129,7 +5787,7 @@ class LocalObservationStore:
     ) -> bool:
         """Check one newly buffered input before it becomes durable state."""
 
-        envelope_bytes = len(canonical_encode(observation_envelope_to_json(envelope)))
+        envelope_bytes = _envelope_bytes(envelope)
         return self._admission_allowed(
             workspace,
             state,
@@ -5234,8 +5892,9 @@ class LocalObservationStore:
         rows = self.list_pending_outbox_rows(workspace, codex_session_id=codex_session_id)
         return tuple((row.codex_session_id, row.envelope) for row in rows)
 
+    @_read_mostly
     def selection_epoch(self, workspace: str) -> int:
-        with self._lock:
+        with self._reading():
             return self._load(workspace).selection_epoch
 
     def record_admission_loss(self, workspace: str, envelope: ObservationEnvelope) -> bool:
@@ -5335,6 +5994,7 @@ class LocalObservationStore:
             }
         )
 
+    @_read_mostly
     def selection_history_gaps(
         self, workspace: str, envelope: ObservationEnvelope
     ) -> tuple[str, ...]:
@@ -5348,7 +6008,7 @@ class LocalObservationStore:
         route = self._selection_loss_route(envelope)
         if any(value is None for value in route.values()):
             return ()
-        with self._lock:
+        with self._reading():
             state = self._load(workspace)
             matched = any(
                 entry.get("source") == envelope.source.value
@@ -5359,6 +6019,7 @@ class LocalObservationStore:
             )
             return (ObservationGapCode.OBSERVATION_INPUT_LOSS.value,) if matched else ()
 
+    @_read_mostly
     def pending_selection_losses(self, workspace: str) -> tuple[JsonObject, ...]:
         """Return bounded, exactly routed historical losses awaiting durable reporting.
 
@@ -5367,7 +6028,7 @@ class LocalObservationStore:
         Reporting one permanent gap per lane does not clear or reset its count.
         """
 
-        with self._lock:
+        with self._reading():
             return self._pending_selection_losses(self._load(workspace))
 
     @staticmethod
@@ -5427,6 +6088,7 @@ class LocalObservationStore:
             )
             self._save(workspace, state)
 
+    @_read_mostly
     def selection_loss_workspaces(self, task_id: str | None = None) -> tuple[str, ...]:
         """Discover durable maintenance demand without requiring a host event.
 
@@ -5435,7 +6097,7 @@ class LocalObservationStore:
         durable workspace discovery.
         """
 
-        with self._lock:
+        with self._reading():
             workspaces: list[str] = []
             for workspace, state in self._iter_workspaces():
                 pending = self._pending_selection_losses(state)
@@ -5459,6 +6121,7 @@ class LocalObservationStore:
             self._save(workspace, state)
             return True
 
+    @_read_mostly
     def prepare_selected_admission(
         self,
         workspace: str,
@@ -5473,7 +6136,7 @@ class LocalObservationStore:
     ) -> AdmissionPlan:
         """Prepare admission from a held state; this operation writes nothing."""
 
-        with self._lock:
+        with self._reading():
             state = self._load(workspace)
             return plan_admission(
                 state.admission_buffer,
@@ -5772,6 +6435,7 @@ class LocalObservationStore:
         if recorded:
             state.selection_summary_refusal_notice_pending = True
 
+    @_read_mostly
     def summary_refusals(self, workspace: str) -> tuple[JsonObject, ...]:
         """Return the bounded account of every refused routine-read summary.
 
@@ -5781,7 +6445,7 @@ class LocalObservationStore:
         owner's diagnostics.
         """
 
-        with self._lock:
+        with self._reading():
             return self._load(workspace).selection_summary_refusals
 
     def consume_summary_refusal_notice(self, workspace: str) -> bool:
@@ -5824,10 +6488,11 @@ class LocalObservationStore:
                 self._save(workspace, state)
             return accepted
 
+    @_read_mostly
     def selection_accounting(self, workspace: str) -> JsonObject:
         """Read bounded retention accounting without changing pressure or state."""
 
-        with self._lock:
+        with self._reading():
             state = self._load(workspace)
             return JsonObject(
                 {
@@ -6377,11 +7042,12 @@ class LocalObservationStore:
             item.needs_reconcile for item in (state.capture_reservations or {}).values()
         )
 
+    @_read_mostly
     def capture_inventory_recovery_needed(self, workspace: str) -> bool:
         """Read durable recovery demand independently of native-input admission."""
 
         workspace = validate_commitment(workspace)
-        with self._lock:
+        with self._reading():
             return self._capture_inventory_recovery_pending(self._load(workspace))
 
     @staticmethod
@@ -6420,6 +7086,7 @@ class LocalObservationStore:
         candidates.extend(sorted(pending_tasks.difference(candidates), key=str.encode))
         return tuple(candidates)
 
+    @_read_mostly
     def capture_handoff_candidates(
         self,
         workspace: str,
@@ -6443,9 +7110,10 @@ class LocalObservationStore:
         ):
             raise ProtocolValueError("invalid_event_value_type")
         now = self._wall_timestamp()
-        with self._lock:
+        with self._reading():
             return self._capture_handoff_candidates(self._load(workspace), now, older_than_ms)
 
+    @_read_mostly
     def capture_handoff_structural_state(self, workspace: str) -> CaptureHandoffStructuralState:
         """Name the structural rows that could still consume a native handoff.
 
@@ -6455,7 +7123,7 @@ class LocalObservationStore:
         """
 
         workspace = validate_commitment(workspace)
-        with self._lock:
+        with self._reading():
             state = self._load(workspace)
             pending: set[tuple[str, str, str]] = set()
             for row in state.pending_outbox or ():
@@ -6659,12 +7327,13 @@ class LocalObservationStore:
                 state.capture_handoff_retirement_pending = pending or None
                 self._save(workspace, state)
 
+    @_read_mostly
     def capture_handoff_retirement_workspaces(self, task_id: str) -> tuple[str, ...]:
         """Find workspaces with accounting still awaiting retirement confirmation."""
 
         if type(task_id) is not str or _CAPTURE_BACKLOG_ROUTE_RE.fullmatch(task_id) is None:
             raise ProtocolValueError("invalid_event_value_type")
-        with self._lock:
+        with self._reading():
             return tuple(
                 sorted(
                     (
@@ -6676,6 +7345,7 @@ class LocalObservationStore:
                 )
             )
 
+    @_read_mostly
     def capture_handoff_retirements(self, workspace: str) -> JsonObject:
         """Return the bounded local-only account of retired native handoffs.
 
@@ -6684,7 +7354,7 @@ class LocalObservationStore:
         """
 
         workspace = validate_commitment(workspace)
-        with self._lock:
+        with self._reading():
             state = self._load(workspace)
             return JsonObject(
                 {
@@ -6693,6 +7363,7 @@ class LocalObservationStore:
                 }
             )
 
+    @_read_mostly
     def capture_reservation_bootstrap_ready(
         self, workspace: str, task_id: str | None = None
     ) -> bool:
@@ -6703,7 +7374,7 @@ class LocalObservationStore:
             type(task_id) is not str or _CAPTURE_BACKLOG_ROUTE_RE.fullmatch(task_id) is None
         ):
             raise ProtocolValueError("invalid_event_value_type")
-        with self._lock:
+        with self._reading():
             state = self._load(workspace)
             if state.capture_reservation_bootstrap is None or state.capture_backlog_scope_unknown:
                 return False
@@ -6787,6 +7458,7 @@ class LocalObservationStore:
             state.capture_backlogs[key] = snapshot
             self._save(workspace, state)
 
+    @_read_mostly
     def capture_backlog(self, workspace: str) -> JsonObject:
         """Return conservative aggregate feedback from known task routes.
 
@@ -6796,7 +7468,7 @@ class LocalObservationStore:
         snapshot is read-only and contains counts and timestamps only.
         """
 
-        with self._lock:
+        with self._reading():
             state = self._load(workspace)
             snapshots = state.capture_backlogs or {}
             reservations = state.capture_reservations or {}
@@ -6892,20 +7564,9 @@ class LocalObservationStore:
 
         rows = tuple(state.pending_outbox or ())
         buffered = tuple(state.admission_buffer.inputs)
-        row_payloads = tuple(
-            JsonObject(
-                {
-                    "codex_session_id": row.codex_session_id,
-                    "envelope": observation_envelope_to_json(row.envelope),
-                }
-            )
-            for row in rows
-        )
         queue_count = len(rows) + len(buffered)
-        row_sizes = tuple(len(canonical_encode(item)) for item in row_payloads)
-        buffered_sizes = tuple(
-            len(canonical_encode(observation_envelope_to_json(item.envelope))) for item in buffered
-        )
+        row_sizes = tuple(_delivery_unit_bytes(row.codex_session_id, row.envelope) for row in rows)
+        buffered_sizes = tuple(_envelope_bytes(item.envelope) for item in buffered)
         queue_bytes = sum(row_sizes) + sum(buffered_sizes)
         protected_count = sum(_outbox_row_is_protected(row.envelope) for row in rows) + len(
             buffered
@@ -6923,12 +7584,8 @@ class LocalObservationStore:
         session_buffered = tuple(
             item for item in buffered if item.envelope.session_commitment == session_commitment
         )
-        session_bytes = sum(
-            len(canonical_encode(observation_envelope_to_json(row.envelope)))
-            for row in session_rows
-        ) + sum(
-            len(canonical_encode(observation_envelope_to_json(item.envelope)))
-            for item in session_buffered
+        session_bytes = sum(_envelope_bytes(row.envelope) for row in session_rows) + sum(
+            _envelope_bytes(item.envelope) for item in session_buffered
         )
         # Retries must not make a stalled row look young.  The envelope
         # receipt is the original observation time; ``last_attempt_at`` is
@@ -7047,6 +7704,7 @@ class LocalObservationStore:
                 self._save(workspace, state)
             return evaluation
 
+    @_read_mostly
     def selection_runtime_status(
         self,
         workspace: str,
@@ -7061,7 +7719,7 @@ class LocalObservationStore:
         the hook/sweeper writer advances hysteresis snapshots.
         """
 
-        with self._lock:
+        with self._reading():
             state = self._load(workspace)
             now = self._wall_timestamp()
             settings = state.selection_settings or ObservationSelectionSettings()
@@ -7356,12 +8014,13 @@ class LocalObservationStore:
                 }
             )
 
+    @_read_mostly
     def list_pending_outbox_rows(
         self, workspace: str, *, codex_session_id: str | None = None
     ) -> tuple[ObservationOutboxRow, ...]:
         """Return immutable pending rows including bounded delivery-attempt metadata."""
 
-        with self._lock:
+        with self._reading():
             state = self._load(workspace)
             assert state.pending_outbox is not None
             if codex_session_id is None:
@@ -7370,11 +8029,12 @@ class LocalObservationStore:
                 row for row in state.pending_outbox if row.codex_session_id == codex_session_id
             )
 
+    @_read_mostly
     def pending_workspaces(self) -> tuple[str, ...]:
         """Return opaque commitments with delivery, lifecycle, or capture recovery work."""
 
         now = self._wall_timestamp()
-        with self._lock:
+        with self._reading():
             pending: list[str] = []
             for workspace, state in self._iter_workspaces():
                 assert state.pending_outbox is not None
@@ -7401,12 +8061,13 @@ class LocalObservationStore:
                     pending.append(workspace)
             return tuple(sorted(pending, key=str.encode))
 
+    @_read_mostly
     def list_pending_session_lifecycles(
         self, workspace_commitment: str, codex_session_id: str | None = None
     ) -> tuple[PendingSessionLifecycle, ...]:
         """Return immutable deferred lifecycle intents in capture order."""
 
-        with self._lock:
+        with self._reading():
             state = self._load(workspace_commitment)
             assert state.pending_lifecycles is not None
             if codex_session_id is None:
@@ -7417,12 +8078,13 @@ class LocalObservationStore:
                 if intent.codex_session_id == codex_session_id
             )
 
+    @_read_mostly
     def lifecycle_reconciliation_snapshot(
         self, workspace_commitment: str
     ) -> tuple[frozenset[str], frozenset[str]]:
         """Return bound and deferred raw session ids from one state read."""
 
-        with self._lock:
+        with self._reading():
             state = self._load(workspace_commitment)
             assert state.codex_session_bindings is not None
             assert state.pending_lifecycles is not None
@@ -7431,6 +8093,7 @@ class LocalObservationStore:
                 frozenset(intent.codex_session_id for intent in state.pending_lifecycles),
             )
 
+    @_read_mostly
     def effective_session_generation(
         self,
         workspace_commitment: str,
@@ -7439,7 +8102,7 @@ class LocalObservationStore:
     ) -> int:
         """Return the generation future envelopes must use while intents are queued."""
 
-        with self._lock:
+        with self._reading():
             state = self._load(workspace_commitment)
             assert state.session_generations is not None
             generation = state.session_generations.get(session_commitment, 0) or 1
@@ -7721,16 +8384,18 @@ class LocalObservationStore:
                     return updated
             return None
 
+    @_read_mostly
     def pending_outbox_count(self, workspace: str) -> int:
-        with self._lock:
+        with self._reading():
             state = self._load(workspace)
             assert state.pending_outbox is not None
             return len(state.pending_outbox)
 
+    @_read_mostly
     def last_successful_drain_mono(self, workspace: str) -> float | None:
         """Return the current-boot monotonic drain sample, if one is comparable."""
 
-        with self._lock:
+        with self._reading():
             state = self._load(workspace)
             if not self._epoch_matches(state.monotonic_epoch):
                 return None
@@ -8011,12 +8676,14 @@ class LocalObservationStore:
             self._save(workspace, state)
             return len(moved)
 
+    @_read_mostly
     def quarantined_count(self, workspace: str) -> int:
-        with self._lock:
+        with self._reading():
             state = self._load(workspace)
             assert state.quarantine is not None
             return len(state.quarantine)
 
+    @_read_mostly
     def quarantine_facts(self, workspace: str) -> tuple[int, int, int]:
         """Return (quarantine depth, involuntary evictions, operator reclaims).
 
@@ -8026,7 +8693,7 @@ class LocalObservationStore:
         voluntary cleanup read as data loss, or vice versa.
         """
 
-        with self._lock:
+        with self._reading():
             state = self._load(workspace)
             assert state.quarantine is not None
             return (
@@ -8059,10 +8726,11 @@ class LocalObservationStore:
             self._save(workspace, state)
             return reclaimed
 
+    @_read_mostly
     def list_quarantine(
         self, workspace: str
     ) -> tuple[tuple[str, ObservationEnvelope, str, Timestamp], ...]:
-        with self._lock:
+        with self._reading():
             state = self._load(workspace)
             assert state.quarantine is not None
             return tuple(state.quarantine)
@@ -8093,10 +8761,11 @@ class LocalObservationStore:
                 self._note_session_gap_state(state, session_commitment, gap_code)
             self._save(workspace, state)
 
+    @_read_mostly
     def session_gap_codes(self, workspace: str, session_commitment: str) -> tuple[str, ...]:
         """Return active bounded-loss codes for one session lane."""
 
-        with self._lock:
+        with self._reading():
             state = self._load(workspace)
             assert state.session_gaps is not None
             return tuple(sorted(state.session_gaps.get(session_commitment, ()), key=str.encode))
@@ -8341,11 +9010,12 @@ class LocalObservationStore:
             ).hexdigest()
             self._save(workspace, state)
 
+    @_read_mostly
     def policy_digest_is_trusted(self, workspace: str, policy_digest: str) -> bool:
         import hashlib
         import hmac
 
-        with self._lock:
+        with self._reading():
             state = self._load(workspace)
             expected = hmac.new(
                 self.key_material(),
@@ -8837,8 +9507,9 @@ class LocalObservationStore:
                     )
             return result, envelope
 
+    @_read_mostly
     def status(self, query: ObservationStatusQuery) -> ObservationStatus:
-        with self._lock:
+        with self._reading():
             return self._status_unlocked(query.workspace_commitment)
 
     def pause(self, command: ObservationControlCommand) -> ObservationStatus:
@@ -8949,7 +9620,8 @@ class LocalObservationStore:
         exception rolls back the current batch, including a nested savepoint,
         so ingest identity cannot commit without its selected admission.
         """
-        return _ObservationBatch(self, workspace_commitment)
+        caller = sys._getframe(1).f_code.co_name  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        return _ObservationBatch(self, workspace_commitment, caller)
 
     def _workspace_path(self, workspace_commitment: str) -> Path:
         digest = workspace_commitment.removeprefix("hmac-sha256:")
@@ -8985,18 +9657,95 @@ class LocalObservationStore:
         key: tuple[int, int, int, int],
         state: _WorkspaceState,
     ) -> None:
-        self._state_cache.pop(workspace_commitment, None)
-        self._state_cache[workspace_commitment] = (key, _copy_state(state))
-        while len(self._state_cache) > _MAX_STATE_CACHE_ENTRIES:
-            self._state_cache.pop(next(iter(self._state_cache)))
+        entry = (key, _copy_state(state))
+        with self._cache_guard:
+            self._state_cache.pop(workspace_commitment, None)
+            self._state_cache[workspace_commitment] = entry
+            while len(self._state_cache) > _MAX_STATE_CACHE_ENTRIES:
+                self._state_cache.pop(next(iter(self._state_cache)))
+
+    def _drop_cached_state(self, workspace_commitment: str) -> None:
+        with self._cache_guard:
+            self._state_cache.pop(workspace_commitment, None)
+
+    def _prewarm(self, workspace_commitment: str) -> None:
+        """Parse the committed document into the cache without the store lock.
+
+        A no-op when the cache already matches the file. The parse is only a
+        cache fill: the locked transaction still re-validates the file
+        identity and re-reads under the lock if a writer committed meanwhile.
+        """
+
+        with contextlib.suppress(Exception):
+            path = self._workspace_path(workspace_commitment)
+            key = self._stat_key(path)
+            if key is None:
+                return
+            with self._cache_guard:
+                cached = self._state_cache.get(workspace_commitment)
+            if cached is None or cached[0] != key:
+                self._load(workspace_commitment)
+                with self._cache_guard:
+                    cached = self._state_cache.get(workspace_commitment)
+            if cached is not None:
+                # Encode each immutable member once here, outside the lock, so
+                # the transaction's size projections and save only splice.
+                _prime_codec(cached[1])
+
+    @contextlib.contextmanager
+    def _reading(self) -> Generator[None]:
+        """Serve the enclosed reads from committed state unless this thread holds the lock.
+
+        A write inside raises :class:`_LockedWriteRequired`; :func:`_read_mostly`
+        methods turn that into one rerun under the store lock.
+        """
+
+        if self._lock.held_by_current_thread():
+            yield
+            return
+        depth = _optimistic_read_depth()
+        _OPTIMISTIC_READS.depth = depth + 1
+        try:
+            yield
+        finally:
+            _OPTIMISTIC_READS.depth = depth
+
+    def _read[ResultT](self, operation: Callable[[], ResultT]) -> ResultT:
+        """Run a read-mostly operation against the committed state, lock-free.
+
+        Every workspace document is replaced atomically, so a read outside the
+        lock observes exactly one committed version, as a locked read would at
+        a slightly different instant. Pure reads therefore never queue behind
+        a hook batch or a sweep (#689). If the operation reaches a write (a
+        legacy repair on first read, for example) its in-memory copy is
+        discarded and it reruns under the store lock. A caller that already
+        holds the lock keeps reading its own open transaction.
+        """
+
+        if self._lock.held_by_current_thread():
+            return operation()
+        depth = _optimistic_read_depth()
+        _OPTIMISTIC_READS.depth = depth + 1
+        try:
+            return operation()
+        except _LockedWriteRequired:
+            pass
+        finally:
+            _OPTIMISTIC_READS.depth = depth
+        with self._lock:
+            return operation()
 
     def _load(self, workspace_commitment: str) -> _WorkspaceState:
-        held = self._batch.get(workspace_commitment)
-        if held is not None:
-            return held
+        # Only the lock owner may see an open batch: another thread's batch is
+        # uncommitted, and a committed read must see the file instead.
+        if self._lock.held_by_current_thread():
+            held = self._batch.get(workspace_commitment)
+            if held is not None:
+                return held
         path = self._workspace_path(workspace_commitment)
         before = self._stat_key(path)
-        cached = self._state_cache.get(workspace_commitment)
+        with self._cache_guard:
+            cached = self._state_cache.get(workspace_commitment)
         if cached is not None and before is not None and cached[0] == before:
             return _copy_state(cached[1])
         raw = _read_bytes(path, maximum=_MAX_LEGACY_STATE_BYTES)
@@ -9005,12 +9754,15 @@ class LocalObservationStore:
         hydrate_started = self._now_mono()
         try:
             try:
-                parsed = strict_json_parse(raw)
+                parsed = strict_json_parse(raw, validate=False)
+                envelope_keys = _validate_state_document(parsed)
             except ProtocolValueError:
                 return _WorkspaceState()
             if not isinstance(parsed, Mapping):
                 return _WorkspaceState()
-            state = self._state_from_json(cast(Mapping[str, JsonValue], parsed))
+            state = self._state_from_json(
+                cast(Mapping[str, JsonValue], parsed), envelope_keys=envelope_keys
+            )
             self._hydrate_dedup_metadata(workspace_commitment, state)
         finally:
             self.stage_timings_ms["hydrate"] += (self._now_mono() - hydrate_started) * 1000
@@ -9255,6 +10007,8 @@ class LocalObservationStore:
         callers, batches, and the parse cache when the write is rejected.
         """
 
+        if _optimistic_read_depth() and not self._lock.held_by_current_thread():
+            raise _LockedWriteRequired
         if self._batch.get(workspace_commitment) is state:
             self._batch_dirty.add(workspace_commitment)
             return
@@ -9413,7 +10167,7 @@ class LocalObservationStore:
         self.stage_timings_ms["write"] += (self._now_mono() - write_started) * 1000
         key = self._stat_key(path)
         if key is None:
-            self._state_cache.pop(workspace_commitment, None)
+            self._drop_cached_state(workspace_commitment)
         else:
             self._cache_state(workspace_commitment, key, state)
 
@@ -9859,7 +10613,11 @@ class LocalObservationStore:
                     )
                 }
             ),
-            "envelopes": tuple(observation_envelope_to_json(item) for item in state.envelopes),
+            # Immutable members are spliced from cached canonical fragments;
+            # the encoded bytes are identical to inline encoding (#689).
+            "envelopes": cast(
+                JsonValue, tuple(_envelope_fragment(item) for item in state.envelopes)
+            ),
             "gaps": tuple(sorted(state.gaps, key=str.encode)),
             "gap_history": JsonObject(
                 {
@@ -9932,19 +10690,13 @@ class LocalObservationStore:
             "monotonic_epoch_ms": (
                 None if state.monotonic_epoch is None else round(state.monotonic_epoch * 1000)
             ),
-            "pending_outbox": tuple(
-                _outbox_row_to_json(row) for row in (state.pending_outbox or ())
+            "pending_outbox": cast(
+                JsonValue,
+                tuple(_outbox_row_fragment(row) for row in (state.pending_outbox or ())),
             ),
-            "quarantine": tuple(
-                JsonObject(
-                    {
-                        "codex_session_id": entry[0],
-                        "envelope": observation_envelope_to_json(entry[1]),
-                        "reason": entry[2],
-                        "quarantined_at": entry[3].wire,
-                    }
-                )
-                for entry in (state.quarantine or ())
+            "quarantine": cast(
+                JsonValue,
+                tuple(_quarantine_entry_fragment(entry) for entry in (state.quarantine or ())),
             ),
             "quarantine_evicted_count": state.quarantine_evicted_count,
             "quarantine_reclaimed_count": state.quarantine_reclaimed_count,
@@ -10167,7 +10919,13 @@ class LocalObservationStore:
             payload["pressure_snapshots"] = _pressure_snapshots_to_json(state.pressure_snapshots)
         return payload
 
-    def _state_from_json(self, raw: Mapping[str, JsonValue]) -> _WorkspaceState:
+    def _state_from_json(
+        self,
+        raw: Mapping[str, JsonValue],
+        *,
+        envelope_keys: Mapping[int, str] | None = None,
+    ) -> _WorkspaceState:
+        keys: Mapping[int, str] = {} if envelope_keys is None else envelope_keys
         consent_raw = raw.get("consent")
         consent: LocalObservationConsent | None = None
         if isinstance(consent_raw, Mapping):
@@ -10524,7 +11282,7 @@ class LocalObservationStore:
         for item in cast(tuple[JsonValue, ...] | list[JsonValue], envelopes_raw):
             if isinstance(item, Mapping):
                 envelopes.append(
-                    observation_envelope_from_json(JsonObject(cast(Mapping[str, JsonValue], item)))
+                    _CODEC.decode(cast(Mapping[str, JsonValue], item), keys.get(id(item)))
                 )
             else:
                 envelopes.append(observation_envelope_from_json(item))
@@ -10589,8 +11347,9 @@ class LocalObservationStore:
                 pending_outbox.append(
                     ObservationOutboxRow(
                         codex_session_id=session,
-                        envelope=observation_envelope_from_json(
-                            JsonObject(cast(Mapping[str, JsonValue], envelope_raw))
+                        envelope=_CODEC.decode(
+                            cast(Mapping[str, JsonValue], envelope_raw),
+                            keys.get(id(envelope_raw)),
                         ),
                         attempts=attempts,
                         last_reason=last_reason,
@@ -10628,8 +11387,9 @@ class LocalObservationStore:
                 quarantine.append(
                     (
                         session,
-                        observation_envelope_from_json(
-                            JsonObject(cast(Mapping[str, JsonValue], envelope_raw))
+                        _CODEC.decode(
+                            cast(Mapping[str, JsonValue], envelope_raw),
+                            keys.get(id(envelope_raw)),
                         ),
                         reason,
                         quarantined_at,

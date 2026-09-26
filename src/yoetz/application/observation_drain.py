@@ -6,18 +6,22 @@ import asyncio
 import contextlib
 import heapq
 import math
+import threading
+import time
 from asyncio import Future
 from collections.abc import Awaitable, Callable
+from concurrent.futures import Future as ConcurrentFuture
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import partial
-from typing import Final, Protocol, cast
+from typing import Any, Final, Protocol, cast
 
 from yoetz.adapters.integrations.observation_local import (
     LocalObservationStore,
     ObservationOutboxRow,
+    observation_store_lock_deadline,
 )
 from yoetz.domain.observation import (
     OBSERVATION_BACKPRESSURE_REASON,
@@ -28,12 +32,14 @@ from yoetz.domain.observation import (
     ObservationIngestResult,
 )
 from yoetz.ports.control import ControlError
+from yoetz.ports.observation import ObservationStoreLockTimeout
 
 __all__ = [
     "DEFAULT_OBSERVATION_SWEEP_BUDGET_SECONDS",
     "DEFAULT_OBSERVATION_SWEEP_LIMIT",
     "EXPECTED_OBSERVATION_BACKPRESSURE_REASONS",
     "MAX_CONSECUTIVE_OBSERVATION_REJECTIONS",
+    "OBSERVATION_STORE_BUSY_REASON",
     "ObservationCaptureRecoveryOutcome",
     "ObservationDrainAction",
     "ObservationDrainDecision",
@@ -56,6 +62,14 @@ MAX_CONSECUTIVE_OBSERVATION_REJECTIONS: Final = 128
 # handful of stranded threads (a deadline expiring against a parked flock) cannot wedge the
 # next pass outright.
 _SWEEP_EXECUTOR_WORKERS: Final = 4
+# A pass that meets a contended local store stops where it is and counts this reason. It is
+# designed back-pressure, never a coverage gap: rows it did not settle stay pending, and a row the
+# service already accepted replays as a duplicate on the next pass (#689).
+OBSERVATION_STORE_BUSY_REASON: Final = "observation_store_busy"
+# Cancelling a pass cannot stop a worker already inside the store. The next pass waits this long
+# for such a worker instead of starting new store work beside it; every hop is bounded by the
+# store-lock cap plus one critical section, so the wait normally ends far sooner (#689).
+_STRANDED_WORKER_JOIN_SECONDS: Final = 5.0
 # Designed coordination, not delivery failure (#351): the row stays pending and
 # retries, but the reason never becomes a coverage gap or a failure-shaped hook
 # diagnostic. ADR-022's check barrier is the canonical producer.
@@ -261,6 +275,12 @@ class ObservationOutboxSweeper:
     _selection_seen_workspaces: set[str] = field(
         default_factory=lambda: set[str](), init=False, repr=False
     )
+    # Every worker hop this sweeper submitted that has not finished, including hops whose
+    # awaiting pass was cancelled. Done-callbacks run on worker threads, hence the guard.
+    _inflight: set[ConcurrentFuture[Any]] = field(
+        default_factory=lambda: set[ConcurrentFuture[Any]](), init=False, repr=False
+    )
+    _inflight_guard: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if type(self.limit) is not int or isinstance(self.limit, bool) or self.limit < 1:
@@ -312,6 +332,9 @@ class ObservationOutboxSweeper:
             try:
                 async with asyncio.timeout(available):
                     result = await recover(workspace)
+            except ObservationStoreLockTimeout:
+                # Local-store contention is not this lane's recovery deadline (#689).
+                result = ObservationCaptureRecoveryOutcome.BUSY
             except TimeoutError:
                 result = ObservationCaptureRecoveryOutcome.TIMEOUT
             except Exception:
@@ -330,7 +353,9 @@ class ObservationOutboxSweeper:
                 )
         return tuple(outcomes)
 
-    def _off_loop[ResultT](self, call: Callable[[], ResultT]) -> Future[ResultT]:
+    def _off_loop[ResultT](
+        self, call: Callable[[], ResultT], *, lock_deadline: float | None = None
+    ) -> Future[ResultT]:
         """Run one blocking local-store call off the caller's event loop.
 
         Every ``LocalObservationStore`` method takes a blocking cross-process lock and re-encodes
@@ -356,7 +381,35 @@ class ObservationOutboxSweeper:
                 thread_name_prefix="yoetz-obs-sweep",
             )
             self._executor = executor
-        return loop.run_in_executor(executor, call)
+
+        def bounded() -> ResultT:
+            # Store-lock waits inside the hop never outlast the pass budget, so a spent pass
+            # fails its next acquisition fast and yields instead of being cancelled mid-wait.
+            with observation_store_lock_deadline(lock_deadline):
+                return call()
+
+        work = executor.submit(bounded)
+        with self._inflight_guard:
+            self._inflight.add(work)
+        work.add_done_callback(self._forget_worker)
+        return asyncio.wrap_future(work, loop=loop)
+
+    def _forget_worker(self, work: ConcurrentFuture[Any]) -> None:
+        with self._inflight_guard:
+            self._inflight.discard(work)
+
+    async def _join_stranded_workers(self) -> bool:
+        """Wait briefly for hops a cancelled pass left running; report whether none remain."""
+
+        with self._inflight_guard:
+            running = [work for work in self._inflight if not work.done()]
+        if not running:
+            return True
+        _done, pending = await asyncio.wait(
+            [asyncio.wrap_future(work) for work in running],
+            timeout=_STRANDED_WORKER_JOIN_SECONDS,
+        )
+        return not pending
 
     def close(self) -> None:
         """Release the sweeper's worker pool; any running lock wait is itself bounded."""
@@ -376,10 +429,27 @@ class ObservationOutboxSweeper:
         loop = asyncio.get_running_loop()
         monotonic = loop.time if self._monotonic is None else self._monotonic
         deadline = None if self.budget_seconds is None else monotonic() + self.budget_seconds
+        # The same budget in the store lock's clock. Pre-delivery hops inherit it; settling a row
+        # the service already answered keeps the ordinary per-acquisition cap instead.
+        lock_deadline = (
+            None if self.budget_seconds is None else time.monotonic() + self.budget_seconds
+        )
+        if not await self._join_stranded_workers():
+            # A worker from a cancelled pass still holds or awaits the store. Starting beside it
+            # would only queue behind it and amplify the contention that stranded it (#689).
+            return ObservationDrainSummary(
+                attempted=0,
+                acknowledged=0,
+                retry_pending=0,
+                quarantined=0,
+                reasons=((OBSERVATION_STORE_BUSY_REASON, 1),),
+            )
         preparation_error: Exception | None = None
+        busy_workspaces: frozenset[str] = frozenset()
         try:
-            rows, lifecycle_workspaces = await self._off_loop(
-                self._prepare_pending_rows_and_lifecycle_workspaces
+            rows, lifecycle_workspaces, busy_workspaces = await self._off_loop(
+                self._prepare_pending_rows_and_lifecycle_workspaces,
+                lock_deadline=lock_deadline,
             )
         except asyncio.CancelledError:
             raise
@@ -397,6 +467,9 @@ class ObservationOutboxSweeper:
         quarantined = 0
         reasons: dict[str, int] = {}
         retired_sessions: set[tuple[str, str]] = set()
+        # Set when a hop inside the delivery loop meets a contended store; that stops the pass.
+        # A workspace whose maintenance was contended only sits this pass out.
+        store_busy = False
 
         workspaces = tuple(
             dict.fromkeys((*lifecycle_workspaces, *(workspace for workspace, _row in rows)))
@@ -407,6 +480,12 @@ class ObservationOutboxSweeper:
         if preparation_error is not None:
             raise preparation_error
         for workspace in workspaces:
+            if store_busy:
+                # The store is contended right now; every further hop would queue behind the
+                # same holder. Stop with the partial summary and let the next pass continue.
+                break
+            if workspace in busy_workspaces:
+                continue
             if deadline is not None and monotonic() >= deadline:
                 # Budget spent: return what this pass resolved so far. The rows
                 # left are still pending and the next pass selects them fairly.
@@ -436,7 +515,8 @@ class ObservationOutboxSweeper:
                 )
                 if pending_lifecycle_sessions:
                     reconciled = await self._off_loop(
-                        partial(self.local.reconcile_pending_session_lifecycles, workspace)
+                        partial(self.local.reconcile_pending_session_lifecycles, workspace),
+                        lock_deadline=lock_deadline,
                     )
                     if reconciled:
                         # Re-read the same bounded snapshot after the pass.
@@ -478,7 +558,8 @@ class ObservationOutboxSweeper:
                         row.codex_session_id not in bound_sessions
                         or row.codex_session_id in pending_lifecycle_sessions
                     ) and not await self._off_loop(
-                        partial(self.local.reconcile_outbox_session_lifecycle, workspace, row)
+                        partial(self.local.reconcile_outbox_session_lifecycle, workspace, row),
+                        lock_deadline=lock_deadline,
                     ):
                         retired_sessions.add(session_key)
                         continue
@@ -496,28 +577,19 @@ class ObservationOutboxSweeper:
                             None,
                         )
                     decision = route_observation_ingest(result, row=row)
-                    attempted_row = await self._off_loop(
-                        partial(
-                            self.local.bump_outbox_row_attempt,
-                            workspace,
-                            row,
-                            reason=decision.reason,
-                        )
+                    # One local transaction for the row's whole bookkeeping, after the service
+                    # answered. It never runs before that answer, so an acknowledgement still
+                    # cannot become durable ahead of the ingest it acknowledges.
+                    settled = await self._off_loop(
+                        partial(self._settle_row, workspace, row, decision)
                     )
-                    if attempted_row is None:
+                    if settled is None:
                         # The row changed under the lease -- the lane's true order is no longer
                         # what this pass selected, so it sits out the rest of the pass.
                         retired_sessions.add(session_key)
                         continue
                     if decision.reason is not None:
                         reasons[decision.reason] = reasons.get(decision.reason, 0) + 1
-                        if decision.reason not in EXPECTED_OBSERVATION_BACKPRESSURE_REASONS:
-                            # A deferral behind a check barrier is designed
-                            # coordination; recording it as a coverage gap would
-                            # project a false current condition (#351).
-                            await self._off_loop(
-                                partial(self.local.note_coverage_gap, workspace, decision.reason)
-                            )
 
                     if decision.action is ObservationDrainAction.RETRY:
                         # The head of this lane stays pending, so no later row of the same
@@ -540,8 +612,6 @@ class ObservationOutboxSweeper:
                             if moved:
                                 quarantined += moved
                                 continue
-                        retry_pending += 1
-                        if decision.reason is not None:
                             await self._off_loop(
                                 partial(
                                     self.local.note_outbox_session_reason,
@@ -550,6 +620,7 @@ class ObservationOutboxSweeper:
                                     decision.reason,
                                 )
                             )
+                        retry_pending += 1
                         if decision.reason in WORKSPACE_GLOBAL_OBSERVATION_STOP_REASONS:
                             # This condition cannot heal for another lane in the
                             # same workspace during this pass. Preserve the
@@ -560,35 +631,24 @@ class ObservationOutboxSweeper:
                     if decision.action is ObservationDrainAction.QUARANTINE:
                         if decision.reason == ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value:
                             retired_sessions.add(session_key)
-                            quarantined += await self._off_loop(
-                                partial(
-                                    self.local.quarantine_outbox_session,
-                                    workspace,
-                                    row.codex_session_id,
-                                    decision.reason,
-                                )
-                            )
-                            continue
-                        if await self._off_loop(
-                            partial(
-                                self.local.quarantine_outbox_row,
-                                workspace,
-                                attempted_row,
-                                decision.reason or ObservationGapCode.SERVICE_UNAVAILABLE.value,
-                            )
-                        ):
-                            quarantined += 1
+                        quarantined += settled
                         continue
-                    if await self._off_loop(
-                        partial(self.local.acknowledge_outbox_row, workspace, attempted_row)
-                    ):
-                        acknowledged += 1
+                    acknowledged += settled
+            except ObservationStoreLockTimeout:
+                # Contention, not a sweep fault: nothing the timed-out hop would have written
+                # was committed. A delivered row whose acknowledgement lost this race stays
+                # pending and deduplicates on replay; the lock reporter keeps the holder facts.
+                store_busy = True
             finally:
                 if entered:
                     await self._off_loop(partial(lease.__exit__, None, None, None))
                 else:
                     entering.add_done_callback(partial(_release_entered_lease, lease))
 
+        if store_busy or busy_workspaces:
+            reasons[OBSERVATION_STORE_BUSY_REASON] = (
+                reasons.get(OBSERVATION_STORE_BUSY_REASON, 0) + 1
+            )
         return ObservationDrainSummary(
             attempted=attempted,
             acknowledged=acknowledged,
@@ -596,6 +656,60 @@ class ObservationOutboxSweeper:
             quarantined=quarantined,
             reasons=tuple(sorted(reasons.items(), key=lambda item: item[0].encode())),
         )
+
+    def _settle_row(
+        self,
+        workspace: str,
+        row: ObservationOutboxRow,
+        decision: ObservationDrainDecision,
+    ) -> int | None:
+        """Apply one answered row's bookkeeping in one local transaction (#689).
+
+        Attempt accounting, the coverage gap, the lane reason and the terminal acknowledgement or
+        quarantine were up to four separate lock holds, each a full parse and save of the
+        workspace document while hooks queued behind it. One batch commits them together with a
+        single save, and any failure rolls all of them back so the row simply stays pending.
+
+        Returns ``None`` when the row changed under the lease, otherwise the number of rows the
+        decision resolved (acknowledged or quarantined; zero for a retry).
+        """
+
+        with self.local.batched(workspace):
+            attempted_row = self.local.bump_outbox_row_attempt(
+                workspace, row, reason=decision.reason
+            )
+            if attempted_row is None:
+                return None
+            if (
+                decision.reason is not None
+                and decision.reason not in EXPECTED_OBSERVATION_BACKPRESSURE_REASONS
+            ):
+                # A deferral behind a check barrier is designed coordination; recording it as a
+                # coverage gap would project a false current condition (#351).
+                self.local.note_coverage_gap(workspace, decision.reason)
+            if decision.action is ObservationDrainAction.RETRY:
+                if (
+                    decision.reason is not None
+                    and decision.reason != ObservationGapCode.MAPPING_MISSING.value
+                ):
+                    # MAPPING_MISSING first tries terminalization under the session lock, which
+                    # is never taken inside a store transaction; its reason follows separately.
+                    self.local.note_outbox_session_reason(
+                        workspace, row.codex_session_id, decision.reason
+                    )
+                return 0
+            if decision.action is ObservationDrainAction.QUARANTINE:
+                if decision.reason == ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value:
+                    return self.local.quarantine_outbox_session(
+                        workspace, row.codex_session_id, decision.reason
+                    )
+                moved = self.local.quarantine_outbox_row(
+                    workspace,
+                    attempted_row,
+                    decision.reason or ObservationGapCode.SERVICE_UNAVAILABLE.value,
+                )
+                return 1 if moved else 0
+            return 1 if self.local.acknowledge_outbox_row(workspace, attempted_row) else 0
 
     def _fair_pending_rows(self) -> tuple[tuple[str, ObservationOutboxRow], ...]:
         return self._fair_pending_rows_and_lifecycle_workspaces()[0]
@@ -605,24 +719,38 @@ class ObservationOutboxSweeper:
     ) -> tuple[
         tuple[tuple[str, ObservationOutboxRow], ...],
         tuple[str, ...],
+        frozenset[str],
     ]:
+        busy: set[str] = set()
         for workspace in self.local.pending_workspaces():
             # A fresh service flushes accounts from the preceding runtime
             # before extending them. Later sweeps observe due deadlines and
             # recovery dwell even when the host emits no further hook.
-            self.local.maintain_selected_admission(
-                workspace,
-                force=workspace not in self._selection_seen_workspaces,
-            )
+            try:
+                self.local.maintain_selected_admission(
+                    workspace,
+                    force=workspace not in self._selection_seen_workspaces,
+                )
+            except ObservationStoreLockTimeout:
+                # Maintenance is a prerequisite for delivery, so a workspace whose store is
+                # contended right now sits this pass out (fail-closed) without failing the
+                # others; it is maintained first on the next pass (#689).
+                busy.add(workspace)
+                continue
             self._selection_seen_workspaces.add(workspace)
             if len(self._selection_seen_workspaces) > 256:
                 # Forgetting an entry only forces a conservative flush next
                 # time; it never acknowledges or discards accepted inputs.
                 self._selection_seen_workspaces.remove(min(self._selection_seen_workspaces))
-        return self._fair_pending_rows_and_lifecycle_workspaces()
+        rows, lifecycle_workspaces = self._fair_pending_rows_and_lifecycle_workspaces(
+            excluded=frozenset(busy)
+        )
+        return rows, lifecycle_workspaces, frozenset(busy)
 
     def _fair_pending_rows_and_lifecycle_workspaces(
         self,
+        *,
+        excluded: frozenset[str] = frozenset(),
     ) -> tuple[
         tuple[tuple[str, ObservationOutboxRow], ...],
         tuple[str, ...],
@@ -632,7 +760,9 @@ class ObservationOutboxSweeper:
         # newer rows ahead of its older, more-attempted ones, which advanced the ingest cursor
         # past the older rows and destroyed them as terminal cursor_stale quarantine (#272).
         lanes: dict[tuple[str, str], list[ObservationOutboxRow]] = {}
-        lifecycle_workspaces = self.local.pending_workspaces()
+        lifecycle_workspaces = tuple(
+            workspace for workspace in self.local.pending_workspaces() if workspace not in excluded
+        )
         for workspace in lifecycle_workspaces:
             for row in self.local.list_pending_outbox_rows(workspace):
                 lanes.setdefault((workspace, row.codex_session_id), []).append(row)

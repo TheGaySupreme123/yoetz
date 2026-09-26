@@ -285,6 +285,43 @@ async def test_failed_loss_reconciliation_prevents_new_check_freeze() -> None:
 
 
 @pytest.mark.anyio
+async def test_store_contention_during_loss_reconciliation_is_a_retryable_refusal() -> None:
+    """#689: a contended local store is not an internal failure of the child recheck."""
+
+    from yoetz.ports.ledger import CheckAdmissionStage, check_admission_stage
+    from yoetz.ports.observation import ObservationStoreLockTimeout
+    from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
+
+    app = _App()
+
+    async def contended(_runtime: object) -> None:
+        raise ObservationStoreLockTimeout(
+            scope="thread",
+            waited_ms=2_000,
+            holder_role="sweep",
+            holder_phase="bump_outbox_row_attempt",
+            holder_held_ms=2_300,
+            holder_waiting=True,
+        )
+
+    setattr(app, "reconcile_observation_losses", contended)
+    with pytest.raises(PublicOperationError) as caught:
+        await execute_check_commit(app, _request())
+    assert caught.value.code is PublicErrorCode.OPERATION_PENDING
+    assert caught.value.retryable
+    assert check_admission_stage(caught.value) is CheckAdmissionStage.ACQUISITION_CONTENDED
+    assert caught.value.safe_details["reason_code"] == "check_admission_contended"
+    # Nothing was admitted, so the exact replay converges once the store is free.
+    assert app.ledger.operation is None
+
+    async def reconciled(_runtime: object) -> None:
+        return None
+
+    setattr(app, "reconcile_observation_losses", reconciled)
+    assert await execute_check_commit(app, _request()) is not None
+
+
+@pytest.mark.anyio
 async def test_wrong_runtime_cannot_retarget_a_loss(tmp_path: Path) -> None:
     world = await _world(tmp_path)
     try:

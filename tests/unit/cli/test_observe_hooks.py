@@ -5789,10 +5789,10 @@ def test_hook_invocation_parses_the_state_file_once_not_seventeen_times(
     parses = 0
     original = LocalObservationStore._state_from_json  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
 
-    def counting(self: LocalObservationStore, raw: object):
+    def counting(self: LocalObservationStore, raw: object, **kwargs: object):
         nonlocal parses
         parses += 1
-        return original(self, raw)  # pyright: ignore[reportArgumentType]
+        return original(self, raw, **kwargs)  # pyright: ignore[reportArgumentType]
 
     monkeypatch.setattr(LocalObservationStore, "_state_from_json", counting)
 

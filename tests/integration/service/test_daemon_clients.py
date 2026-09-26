@@ -3754,3 +3754,46 @@ async def test_observation_sweep_wake_survives_timeout_boundary(
 
     assert wake.is_set()
     await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_store_contention_inside_a_deadlined_handler_stays_retryable() -> None:
+    """#689: the closed wire vocabulary keeps a store lock timeout a retryable timeout."""
+
+    from yoetz.ports.observation import ObservationStoreLockTimeout
+
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+
+    async def contended(request: object) -> JsonObject:
+        del request
+        raise ObservationStoreLockTimeout(
+            scope="thread",
+            waited_ms=2_000,
+            holder_role="sweep",
+            holder_phase="bump_outbox_row_attempt",
+            holder_held_ms=2_100,
+            holder_waiting=True,
+        )
+
+    application.observation_ingest = contended  # type: ignore[method-assign]
+    try:
+        response = await asyncio.wait_for(
+            daemon.dispatch(
+                ControlClientKind.CLI,
+                _request(
+                    daemon,
+                    ControlMethod.OBSERVATION_INGEST,
+                    _capture_gate_body(capture_only=False),
+                    deadline_ms=5_000,
+                ),
+            ),
+            timeout=10.0,
+        )
+        assert response.outcome == "error"
+        assert isinstance(response.body, ControlError)
+        assert response.body.reason == "request_timeout"
+        assert response.body.retryable
+        assert not daemon.composition.maintenance_gate.locked()
+    finally:
+        await daemon.close()

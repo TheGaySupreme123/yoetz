@@ -39,11 +39,19 @@ from yoetz.adapters.integrations.observation_local import (
     LocalObservationConsent,
     LocalObservationStore,
     ObservationOutboxRow,
+    ObservationStoreLockEvent,
+    ObservationStoreLockTimeout,
+    observation_store_lock_deadline,
+    observation_store_lock_scope,
     self_observation_deliverable,
 )
 from yoetz.adapters.workspace_binding import canonical_workspace_locator, resolve_workspace_locator
 from yoetz.cli import hook_io
-from yoetz.cli.hook_diagnostics import record_hook_diagnostic, record_hook_timing
+from yoetz.cli.hook_diagnostics import (
+    record_hook_diagnostic,
+    record_hook_timing,
+    record_store_lock_event,
+)
 from yoetz.cli.hook_io import (
     MAX_HOOK_SKIM_BYTES,
     MAX_HOOK_STDIN_BYTES,
@@ -215,6 +223,27 @@ _HOOK_TOTAL_BUDGET_SECONDS: Final = (
     + _HOOK_DRAIN_BUDGET_SECONDS
     + _HOOK_LOCAL_STAGE_ALLOWANCE_SECONDS
 )
+# Every observation-store lock wait in one hook pass ends by this long after
+# entry, chosen from the host window the pass runs in (the rendered hook
+# timeouts): 5 s for Claude Code and Cursor tool events, 10 s for their
+# SessionStart/Stop and for every Codex observe hook, 3 s for SessionEnd on
+# all three. A pass can therefore no longer queue a fresh two seconds per
+# acquisition past its host deadline; the complete invocation, not each call,
+# is bounded, and the remainder is kept for the output write and interpreter
+# start. Individual acquisitions keep their own two-second cap (#689).
+_HOOK_STORE_LOCK_BUDGET_BY_WINDOW: Final = {3: 2.0, 5: 3.5, 10: 7.0}
+
+
+def _hook_host_window_seconds(source: ObservationSource, event: str | None) -> int:
+    """Return the rendered host timeout for one observe pass (#689)."""
+
+    if event == "SessionEnd":
+        return 3
+    if source is ObservationSource.CODEX_HOOK or event in {"SessionStart", "Stop"}:
+        return 10
+    return 5
+
+
 _TIMING_REPORT_EVENTS: Final = frozenset({"SessionStart", "Stop", "SessionEnd"})
 # The stages that partition one pass end to end, in order. Advice refresh is
 # deliberately outside the local capture batch, so it is accounted for as its
@@ -3051,7 +3080,30 @@ def handle_observe(
     # True from a SessionEnd's local end until its capture batch commits. The
     # end is saved with that batch, so a failed batch loses it (#843).
     session_end_uncommitted = False
+    # True once the capture batch commits; a later lock timeout then only cost
+    # follow-up work, never the input itself.
+    capture_committed = False
+    lock_context = contextlib.ExitStack()
     try:
+        # Attribute this pass's store-lock events to a hook and record them in
+        # hook diagnostics, then bound every lock wait in the pass by one
+        # deadline measured from process entry (#689).
+        lock_event_name = event_name or "observe"
+
+        def _record_lock_event(lock_event: ObservationStoreLockEvent) -> None:
+            record_store_lock_event(lock_event_name, lock_event, _state=_state)
+
+        lock_budget = _HOOK_STORE_LOCK_BUDGET_BY_WINDOW[
+            _hook_host_window_seconds(source, event_name)
+        ]
+        lock_context.enter_context(
+            observation_store_lock_scope(role="hook", reporter=_record_lock_event)
+        )
+        lock_context.enter_context(
+            observation_store_lock_deadline(
+                time.monotonic() + max(0.0, lock_budget - (_monotonic() - entry_started))
+            )
+        )
         if source is ObservationSource.CODEX_HOOK:
             # Cold imports are pure preparation. Importing this runtime inside
             # the ingress batch serialized every new Codex process behind it.
@@ -3262,6 +3314,9 @@ def handle_observe(
             else:
                 try:
                     workspace_commitment = store.workspace_commitment(workspace_locator)
+                except ObservationStoreLockTimeout:
+                    # Contention while creating the key is not a missing consent.
+                    raise
                 except Exception:
                     workspace_commitment = None
                     workspace_locator = None
@@ -3886,6 +3941,7 @@ def handle_observe(
                                     path=child_rollout,
                                 )
         session_end_uncommitted = False
+        capture_committed = True
 
         stages["store"] = _elapsed_ms(store_started, _monotonic())
 
@@ -4438,11 +4494,25 @@ def handle_observe(
             ),
         )
         return 0
-    except BaseException:
-        with contextlib.suppress(BaseException):
-            _stderr_line("hook_observe_degraded: observe; observation durability unknown")
-        with contextlib.suppress(BaseException):
-            record_hook_diagnostic("observe", event_name or "observe", _state=_state)
+    except BaseException as failure:
+        if isinstance(failure, ObservationStoreLockTimeout):
+            # The store stayed contended past this pass's lock budget. The
+            # lock reporter already recorded a `store_lock_timeout` row with
+            # the holder's role and phase, so no second reason is added (#689).
+            with contextlib.suppress(BaseException):
+                _stderr_line(
+                    "hook_observe_degraded: store_lock_timeout; "
+                    + (
+                        "observation input retained; follow-up skipped"
+                        if capture_committed
+                        else "observation input not retained; see observe status"
+                    )
+                )
+        else:
+            with contextlib.suppress(BaseException):
+                _stderr_line("hook_observe_degraded: observe; observation durability unknown")
+            with contextlib.suppress(BaseException):
+                record_hook_diagnostic("observe", event_name or "observe", _state=_state)
         if session_end_uncommitted:
             with contextlib.suppress(BaseException):
                 _report_session_end_unrecorded("SessionEnd", _state=_state)
@@ -4457,6 +4527,8 @@ def handle_observe(
         return 0
     finally:
         _release_native_drain_lease()
+        with contextlib.suppress(BaseException):
+            lock_context.close()
 
 
 _CLAUDE_SESSION_PREFIX: Final = "claude:"

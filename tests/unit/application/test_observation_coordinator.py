@@ -6,7 +6,6 @@ import hashlib
 import json
 import subprocess
 import sys
-import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import replace
@@ -1695,17 +1694,23 @@ def test_quarantined_retry_reason_survives_later_success(tmp_path: Path) -> None
     assert ObservationGapCode.OUTBOX_QUARANTINED.value in status.gaps
 
 
-def test_local_store_lock_serializes_a_separate_process(tmp_path: Path) -> None:
+def test_local_store_lock_serializes_a_separate_process_writer(tmp_path: Path) -> None:
+    """Writes serialize across processes; committed reads deliberately do not (#689)."""
+
     store = LocalObservationStore(_state=tmp_path)
     workspace = store.workspace_commitment(str(tmp_path.resolve()))
     store.grant_consent(workspace)
     code = (
         "from pathlib import Path; "
         "from yoetz.adapters.integrations.observation_local import LocalObservationStore; "
-        f"print(LocalObservationStore(_state=Path({str(tmp_path)!r}))"
-        f".pending_outbox_count({workspace!r}), flush=True)"
+        f"store = LocalObservationStore(_state=Path({str(tmp_path)!r})); "
+        f"print(store.pending_outbox_count({workspace!r}), flush=True); "
+        f"store.note_coverage_gap({workspace!r}, 'service_unavailable'); "
+        "print('written', flush=True)"
     )
+    path = store._workspace_path(workspace)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
     with store._lock:  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        committed = path.read_bytes()
         process = subprocess.Popen(
             [sys.executable, "-c", code],
             cwd=tmp_path,
@@ -1713,11 +1718,15 @@ def test_local_store_lock_serializes_a_separate_process(tmp_path: Path) -> None:
             stderr=subprocess.PIPE,
             text=True,
         )
-        time.sleep(0.1)
-        assert process.poll() is None
-    stdout, stderr = process.communicate(timeout=5)
+        assert process.stdout is not None
+        # The read completes while the lock is held: it never queues behind a writer.
+        assert process.stdout.readline().strip() == "0"
+        # The write cannot commit until this holder releases.
+        assert path.read_bytes() == committed
+    stdout, stderr = process.communicate(timeout=30)
     assert process.returncode == 0, stderr
-    assert stdout.strip() == "0"
+    assert stdout.strip() == "written"
+    assert path.read_bytes() != committed
 
 
 def test_first_key_creation_is_identical_across_processes(tmp_path: Path) -> None:
