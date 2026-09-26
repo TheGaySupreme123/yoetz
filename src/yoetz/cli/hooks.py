@@ -624,13 +624,15 @@ def with_transcript_child_identity(
     raw_path = payload.get("session_file") or payload.get("transcript_path")
     if type(raw_path) is not str or not raw_path or "\0" in raw_path:
         return payload, None
-    if host_session_id in Path(raw_path).name:
-        # The session's own rollout: an ordinary callback of the thread that owns this session.
-        return payload, None
     from yoetz.adapters.integrations.codex_session_stream import (
         CodexSessionStreamLocator,
         resolve_codex_home,
+        rollout_filename_matches_token,
     )
+
+    if rollout_filename_matches_token(Path(raw_path).name, host_session_id):
+        # The session's own rollout: an ordinary callback of the thread that owns this session.
+        return payload, None
 
     _path, result = CodexSessionStreamLocator(resolve_codex_home(codex_home)).resolve_child_rollout(
         raw_path

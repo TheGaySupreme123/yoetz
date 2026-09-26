@@ -28,6 +28,7 @@ from yoetz.adapters.integrations.codex_session_stream import (
     read_codex_child_rollout_header,
     reconcile_session_stream_path,
     resolve_codex_home,
+    rollout_filename_matches_token,
 )
 from yoetz.adapters.integrations.codex_session_stream import (
     reconcile_session_stream as advance_session_stream,
@@ -248,6 +249,8 @@ def _child_rollout_route(
     header = result.header
     if result.status != "child" or header is None:
         return _ChildRolloutRoute(reason="child_identity_invalid")
+    if not rollout_filename_matches_token(path.name, header.child_thread_id):
+        return _ChildRolloutRoute()
     bound = frozenset(store.unambiguous_codex_sessions_for_workspace(workspace_commitment))
     spawning_mapped = False
     lanes: set[str] = set()

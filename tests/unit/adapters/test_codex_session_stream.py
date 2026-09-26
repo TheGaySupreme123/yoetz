@@ -1135,6 +1135,44 @@ def test_locator_exact_session_match_and_rejects_ambiguous(tmp_path: Path) -> No
     assert locator.resolve(session_id=session_id) is None
 
 
+@pytest.mark.parametrize(
+    ("filename", "token", "expected"),
+    [
+        ("rollout-2026-07-23T12-00-00-root.jsonl", "root", True),
+        ("rollout-2026-07-23T12-00-00-root_child.jsonl", "root", True),
+        ("rollout-2026-07-23T12-00-00-root-child.jsonl", "root", False),
+        ("rollout-2026-07-23T12-00-00-child-2.jsonl", "child", False),
+        ("rollout-2026-07-23T12-00-00-child.jsonl", "child", True),
+    ],
+)
+def test_rollout_filename_token_matching_rejects_prefix_and_suffix_collisions(
+    filename: str, token: str, expected: bool
+) -> None:
+    assert stream_module.rollout_filename_matches_token(filename, token) is expected
+
+
+@pytest.mark.parametrize(
+    ("session_id", "name"),
+    [
+        ("root", "rollout-2026-07-23T12-00-00-root-child.jsonl"),
+        ("child", "rollout-2026-07-23T12-00-00-child-2.jsonl"),
+    ],
+)
+def test_locator_does_not_select_colliding_rollout_names(
+    tmp_path: Path, session_id: str, name: str
+) -> None:
+    home = tmp_path / "codex-home"
+    sessions = home / "sessions" / "2026" / "07" / "23"
+    sessions.mkdir(parents=True)
+    home.chmod(0o700)
+    sessions.chmod(0o700)
+    candidate = sessions / name
+    candidate.write_bytes(failed_shell_rollout())
+    os.chmod(candidate, 0o600)
+
+    assert CodexSessionStreamLocator(home).resolve(session_id=session_id) is None
+
+
 def test_locator_rejects_symlink_and_outside_home(tmp_path: Path) -> None:
     home = tmp_path / "codex-home"
     sessions = home / "sessions"

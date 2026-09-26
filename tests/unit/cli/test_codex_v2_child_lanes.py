@@ -18,6 +18,7 @@ from typing import cast
 
 import pytest
 
+from builders.codex_rollout import encode_lines, session_meta
 from fixture_loader import build_fixture_loader
 from yoetz.adapters.integrations.codex_lifecycle import (
     LifecycleMapping,
@@ -93,6 +94,75 @@ def _callback(transcript: Path | None, **extra: JsonValue) -> dict[str, JsonValu
         payload["transcript_path"] = str(transcript)
     payload.update(extra)
     return payload
+
+
+def _short_child_rollout(
+    home: Path,
+    *,
+    parent: str,
+    filename_child: str,
+    header_child: str,
+) -> Path:
+    path = (
+        home
+        / "sessions"
+        / "2026"
+        / "08"
+        / "22"
+        / f"rollout-2026-08-22T12-00-00-{filename_child}.jsonl"
+    )
+    path.write_bytes(
+        encode_lines(
+            session_meta(
+                cli_version="0.153.4",
+                history_mode="paginated",
+                session_id=parent,
+                extra={
+                    "id": header_child,
+                    "multi_agent_version": "v2",
+                    "thread_source": "subagent",
+                    "parent_thread_id": parent,
+                    "source": {"subagent": {"thread_spawn": {"parent_thread_id": parent}}},
+                },
+            )
+        )
+    )
+    return path
+
+
+def test_transcript_identity_preserves_valid_prefix_ids(codex_home: Path) -> None:
+    parent = "root"
+    child = "root-child"
+    rollout = _short_child_rollout(
+        codex_home,
+        parent=parent,
+        filename_child=child,
+        header_child=child,
+    )
+
+    enriched, conflict = with_transcript_child_identity(
+        {"session_id": parent, "transcript_path": str(rollout)},
+        event_name="PreToolUse",
+    )
+
+    assert conflict is None
+    assert enriched["subagent_id"] == child
+
+
+def test_transcript_identity_rejects_a_child_suffix_collision(codex_home: Path) -> None:
+    parent = "root"
+    payload = {"session_id": parent, "transcript_path": ""}
+    rollout = _short_child_rollout(
+        codex_home,
+        parent=parent,
+        filename_child="child-2",
+        header_child="child",
+    )
+    payload["transcript_path"] = str(rollout)
+
+    enriched, conflict = with_transcript_child_identity(payload, event_name="PreToolUse")
+
+    assert (enriched, conflict) == (payload, None)
 
 
 # --- A callback's own transcript names the delegated child ------------------------------------

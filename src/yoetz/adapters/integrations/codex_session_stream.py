@@ -67,6 +67,7 @@ __all__ = [
     "read_codex_child_rollout_header",
     "reconcile_session_stream",
     "reconcile_session_stream_path",
+    "rollout_filename_matches_token",
     "resolve_codex_home",
     "should_trigger_stream_reconcile",
     "stream_admission",
@@ -144,6 +145,31 @@ _SUBAGENT_THREAD_SOURCE: Final = "subagent"
 
 
 _JSONL_SUFFIXES: Final = (".jsonl", ".jsonl.zst")
+
+
+def rollout_filename_matches_token(filename: str | Path, token: str) -> bool:
+    """Return whether *token* occupies an admitted rollout filename slot.
+
+    Codex rollout names end in ``-<session>`` or ``-<session>_<rollout>`` before
+    the JSONL suffix. A raw substring is insufficient because one valid opaque
+    id may prefix another (or occur in the timestamp).
+    """
+
+    if type(token) is not str or _token(token) is None:
+        return False
+    try:
+        name = Path(filename).name
+    except TypeError, ValueError:
+        return False
+    lower_name = name.lower()
+    for suffix in _JSONL_SUFFIXES:
+        if not lower_name.endswith(suffix):
+            continue
+        stem = name[: -len(suffix)]
+        return stem == token or stem.endswith(f"-{token}") or f"-{token}_" in stem
+    return False
+
+
 # Union vocabularies are only a fallback for callers that map a record without naming the
 # profile that admitted it; the reader always passes the exact admitted profile.
 _ROLLOUT_ITEM_TYPES: Final = frozenset(
@@ -448,7 +474,7 @@ class CodexSessionStreamLocator:
                 # Never descend through symlinked directories.
                 dirnames[:] = [name for name in dirnames if not (Path(dirpath) / name).is_symlink()]
                 for name in filenames:
-                    if session_id not in name:
+                    if not rollout_filename_matches_token(name, session_id):
                         continue
                     candidate = Path(dirpath) / name
                     validated = self._validate_candidate(
@@ -504,7 +530,7 @@ class CodexSessionStreamLocator:
         header = result.header
         if header is None:
             return None, result
-        if header.child_thread_id not in candidate.name or (
+        if not rollout_filename_matches_token(candidate.name, header.child_thread_id) or (
             expected is not None and header.child_thread_id != expected
         ):
             # A header copied under another thread's filename, or a different child than the
@@ -543,7 +569,7 @@ class CodexSessionStreamLocator:
             return None
         if not self._is_beneath(resolved, home):
             return None
-        if session_id not in resolved.name:
+        if not rollout_filename_matches_token(resolved.name, session_id):
             return None
         if not self._owner_safe(resolved):
             return None
