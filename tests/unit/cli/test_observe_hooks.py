@@ -18,6 +18,7 @@ import pytest
 from yoetz.adapters.integrations.codex_lifecycle import (
     LifecycleMapping,
     acquire_session_lock,
+    acquire_workspace_recovery_lock,
     is_scoped_child_session_id,
     mapping_from_start_ids,
     scoped_child_session_id,
@@ -7218,3 +7219,296 @@ def test_non_attachment_hooks_never_spawn_a_service(
         == 0
     )
     assert spawned == []
+
+
+# --- #843: session end after capacity is lowered above the 1 MiB fallback ---
+
+
+def _lowered_over_target_session(
+    tmp_path: Path, source: ObservationSource, host_session: str
+) -> tuple[LocalObservationStore, str, str, Callable[[str], int]]:
+    """Start a real host session, accept a backlog under Largest, then revoke it."""
+
+    from yoetz.adapters.integrations.observation_local import ObservationOutboxRow
+    from yoetz.domain.observation import ObservationCursor
+    from yoetz.domain.observation_budget import LARGEST_CAPACITY
+    from yoetz.domain.observation_settings import ObservationDetailProfile, ObservationSelection
+    from yoetz.domain.values import JsonObject, Timestamp
+
+    store = LocalObservationStore(_state=tmp_path)
+    locator = str(tmp_path.resolve())
+    workspace = store.workspace_commitment(locator)
+    store.grant_consent(workspace)
+
+    def observe(event: str) -> int:
+        return handle_observe(
+            event_name=event,
+            stdin_bytes=json.dumps(
+                {
+                    "session_id": host_session,
+                    "hook_event_name": event,
+                    "source": "startup" if event == "SessionStart" else "other",
+                }
+            ).encode(),
+            stdout=io.BytesIO(),
+            workspace=locator,
+            _state=tmp_path,
+            connect=None,
+            source=source,
+        )
+
+    assert observe("SessionStart") == 0
+    bindings = store._load(workspace).codex_session_bindings  # pyright: ignore[reportPrivateUsage]
+    assert bindings is not None
+    session = bindings[host_session]
+    store.set_session_selection(
+        workspace,
+        session,
+        ObservationSelection(detail=ObservationDetailProfile.FOCUSED, capacity=LARGEST_CAPACITY),
+    )
+    with store._lock:  # pyright: ignore[reportPrivateUsage]
+        state = store._load(workspace)  # pyright: ignore[reportPrivateUsage]
+        assert state.pending_outbox is not None
+        state.pending_outbox.extend(
+            ObservationOutboxRow(
+                codex_session_id=host_session,
+                envelope=ObservationEnvelope(
+                    session_commitment=session,
+                    event_kind="PostToolUse",
+                    source_identity=f"backlog:{index}",
+                    source=source,
+                    cursor=ObservationCursor(
+                        source_generation=1,
+                        byte_position=0,
+                        event_position=index + 1,
+                        last_source_commitment="hmac-sha256:" + "a" * 64,
+                        mapping_version="codex-obs-hook/1.0.0",
+                    ),
+                    receipt_time=Timestamp("2026-09-10T00:01:00.000Z"),
+                    structural_payload=JsonObject({"tool_name": "shell", "exit_status": 1}),
+                    content_object_refs=(),
+                    gap_codes=(),
+                ),
+            )
+            for index in range(3_000)
+        )
+        store._save(workspace, state)  # pyright: ignore[reportPrivateUsage]
+    size = store._workspace_path(workspace).stat().st_size  # pyright: ignore[reportPrivateUsage]
+    assert size > 1_048_576
+    store.clear_session_selection(workspace, session)
+    return store, workspace, session, observe
+
+
+_OVER_TARGET_HOSTS = pytest.mark.parametrize(
+    ("source", "host_session"),
+    [
+        (ObservationSource.CODEX_HOOK, "codex-over-target"),
+        (ObservationSource.CLAUDE_HOOK, "claude:over-target"),
+        (ObservationSource.CURSOR_HOOK, "cursor:over-target"),
+    ],
+)
+
+
+@_OVER_TARGET_HOSTS
+def test_session_end_is_recorded_after_capacity_is_lowered_above_the_byte_ceiling(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    source: ObservationSource,
+    host_session: str,
+) -> None:
+    from yoetz.cli.hook_diagnostics import hook_diagnostic_summary
+
+    store, workspace, session, observe = _lowered_over_target_session(
+        tmp_path, source, host_session
+    )
+    accepted = len(store.list_pending_outbox_rows(workspace))
+    capsys.readouterr()
+
+    assert observe("SessionEnd") == 0
+
+    reopened = LocalObservationStore(_state=tmp_path)
+    state = reopened._load(workspace)  # pyright: ignore[reportPrivateUsage]
+    assert state.ended_sessions is not None and session in state.ended_sessions
+    assert len(reopened.list_pending_outbox_rows(workspace)) == accepted
+    # The over-target queue refuses the SessionEnd observation itself; the
+    # refusal is durably accounted instead of rolled back with the end.
+    assert reopened.selection_accounting(workspace)["unrecoverable_input_count"] == 1
+    assert state.gaps is not None and state.gaps["_local_outbox_overflow"].active
+    err = capsys.readouterr().err
+    assert "hook_observe_degraded: outbox_overflow; loss accounted" in err
+    assert "durability unknown" not in err
+    reasons = hook_diagnostic_summary(_state=tmp_path)["reasons"]
+    assert isinstance(reasons, Mapping)
+    assert "outbox_overflow" in reasons
+    assert "observe" not in reasons
+    assert "session_end_unrecorded" not in reasons
+
+
+@_OVER_TARGET_HOSTS
+@pytest.mark.parametrize("failure", ["end_call", "capture_commit", "after_commit"])
+def test_an_unpersisted_session_end_is_named_not_swallowed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    source: ObservationSource,
+    host_session: str,
+    failure: str,
+) -> None:
+    from yoetz.cli.hook_diagnostics import hook_diagnostic_summary
+
+    store = LocalObservationStore(_state=tmp_path)
+    locator = str(tmp_path.resolve())
+    workspace = store.workspace_commitment(locator)
+    store.grant_consent(workspace)
+
+    def observe(event: str) -> int:
+        return handle_observe(
+            event_name=event,
+            stdin_bytes=json.dumps({"session_id": host_session, "hook_event_name": event}).encode(),
+            stdout=io.BytesIO(),
+            workspace=locator,
+            _state=tmp_path,
+            connect=None,
+            source=source,
+        )
+
+    assert observe("SessionStart") == 0
+    bindings = store._load(workspace).codex_session_bindings  # pyright: ignore[reportPrivateUsage]
+    assert bindings is not None
+    session = bindings[host_session]
+
+    def unsafe(*_args: object, **_kwargs: object) -> None:
+        raise PublicOperationError(
+            PublicErrorCode.STORAGE_UNSAFE,
+            "Observation state exceeds its safe local bound.",
+            retryable=False,
+        )
+
+    if failure == "end_call":
+        monkeypatch.setattr(LocalObservationStore, "note_session_end", unsafe)
+    elif failure == "capture_commit":
+        # The end is saved with the capture batch; a refused batch loses it.
+        monkeypatch.setattr(LocalObservationStore, "_save_unchecked", unsafe)
+    else:
+        # A fault after the batch committed must not claim the end was lost.
+        monkeypatch.setattr(observe_hooks_module, "_record_pass_timing", unsafe)
+    capsys.readouterr()
+
+    # Teardown stays fail-open for the host either way.
+    assert observe("SessionEnd") == 0
+
+    err = capsys.readouterr().err
+    reasons = hook_diagnostic_summary(_state=tmp_path)["reasons"]
+    assert isinstance(reasons, Mapping)
+    ended = session in (
+        LocalObservationStore(_state=tmp_path)._load(workspace).ended_sessions or set()  # pyright: ignore[reportPrivateUsage]
+    )
+    if failure == "after_commit":
+        assert ended
+        assert "session_end_unrecorded" not in err
+        assert "session_end_unrecorded" not in reasons
+    else:
+        assert not ended
+        assert "hook_observe_degraded: session_end_unrecorded" in err
+        # Reported once, not again by the outer handler.
+        assert cast(Mapping[str, object], reasons["session_end_unrecorded"])["count"] == 1
+
+
+def test_deferred_session_end_batch_failure_is_named(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A lock-contended end intent must not be swallowed by a failed batch."""
+
+    from yoetz.cli.hook_diagnostics import hook_diagnostic_summary
+
+    store = LocalObservationStore(_state=tmp_path)
+    locator = str(tmp_path.resolve())
+    workspace = store.workspace_commitment(locator)
+    store.grant_consent(workspace)
+    host_session = "codex-deferred-end"
+
+    def observe(event: str) -> int:
+        return handle_observe(
+            event_name=event,
+            stdin_bytes=json.dumps({"session_id": host_session, "hook_event_name": event}).encode(),
+            stdout=io.BytesIO(),
+            workspace=locator,
+            _state=tmp_path,
+            connect=None,
+            source=ObservationSource.CODEX_HOOK,
+        )
+
+    assert observe("SessionStart") == 0
+
+    def unsafe(*_args: object, **_kwargs: object) -> None:
+        raise PublicOperationError(
+            PublicErrorCode.STORAGE_UNSAFE,
+            "Observation state exceeds its safe local bound.",
+            retryable=False,
+        )
+
+    monkeypatch.setattr(LocalObservationStore, "_save_unchecked", unsafe)
+    capsys.readouterr()
+    with acquire_workspace_recovery_lock(workspace, _state=tmp_path) as owned:
+        assert owned
+        assert observe("SessionEnd") == 0
+
+    state = LocalObservationStore(_state=tmp_path)._load(workspace)  # pyright: ignore[reportPrivateUsage]
+    assert not state.pending_lifecycles
+    assert not state.ended_sessions
+    err = capsys.readouterr().err
+    reasons = hook_diagnostic_summary(_state=tmp_path)["reasons"]
+    assert "hook_observe_degraded: session_end_unrecorded" in err
+    assert isinstance(reasons, Mapping)
+    assert cast(Mapping[str, object], reasons["session_end_unrecorded"])["count"] == 1
+
+
+def test_deferred_session_end_pending_cap_is_named(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A full deferred-lifecycle queue leaves the missing end visible."""
+
+    from yoetz.cli.hook_diagnostics import hook_diagnostic_summary
+
+    store = LocalObservationStore(_state=tmp_path)
+    locator = str(tmp_path.resolve())
+    workspace = store.workspace_commitment(locator)
+    store.grant_consent(workspace)
+    for index in range(256):
+        assert store.record_pending_session_lifecycle(
+            workspace,
+            f"codex-pending-{index}",
+            "hmac-sha256:" + f"{index + 1:064x}",
+            "SessionEnd",
+            1,
+        )
+
+    host_session = "codex-pending-target"
+    capsys.readouterr()
+    with acquire_workspace_recovery_lock(workspace, _state=tmp_path) as owned:
+        assert owned
+        assert (
+            handle_observe(
+                event_name="SessionEnd",
+                stdin_bytes=json.dumps(
+                    {"session_id": host_session, "hook_event_name": "SessionEnd"}
+                ).encode(),
+                stdout=io.BytesIO(),
+                workspace=locator,
+                _state=tmp_path,
+                connect=None,
+                source=ObservationSource.CODEX_HOOK,
+            )
+            == 0
+        )
+
+    state = LocalObservationStore(_state=tmp_path)._load(workspace)  # pyright: ignore[reportPrivateUsage]
+    assert state.pending_lifecycles is not None and len(state.pending_lifecycles) == 256
+    assert not state.ended_sessions
+    err = capsys.readouterr().err
+    reasons = hook_diagnostic_summary(_state=tmp_path)["reasons"]
+    assert "hook_observe_degraded: session_end_unrecorded" in err
+    assert isinstance(reasons, Mapping)
+    assert cast(Mapping[str, object], reasons["session_end_unrecorded"])["count"] == 1

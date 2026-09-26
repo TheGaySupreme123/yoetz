@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterator, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Final, cast
 
@@ -12,7 +13,10 @@ import pytest
 from typer.testing import CliRunner, Result
 
 from yoetz.adapters.integrations.codex_lifecycle import LifecycleMapping, store_mapping
-from yoetz.adapters.integrations.observation_local import LocalObservationStore
+from yoetz.adapters.integrations.observation_local import (
+    LocalObservationStore,
+    ObservationOutboxRow,
+)
 from yoetz.cli import observe as observe_cli
 from yoetz.cli.app import app
 from yoetz.cli.exits import exit_code_for
@@ -21,6 +25,7 @@ from yoetz.cli.observe import (
     apply_selection_preview,
     build_selection_preview,
 )
+from yoetz.domain.observation import ObservationCursor, ObservationEnvelope, ObservationSource
 from yoetz.domain.observation_budget import (
     ObservationCapacity,
     ObservationMode,
@@ -28,6 +33,7 @@ from yoetz.domain.observation_budget import (
     parse_capacity_request,
 )
 from yoetz.domain.observation_capacity_policy import render_capacity_disclosure_lines
+from yoetz.domain.values import JsonObject, Timestamp
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.recovery import RECOVERY_DIRECTIVES
 
@@ -648,3 +654,89 @@ def test_effective_budget_line_is_unknown_without_a_record() -> None:
     line = observe_cli._effective_budget_line(None)  # pyright: ignore[reportPrivateUsage]
     assert "selected=unknown(unknown)" in line
     assert "no_cap=unknown; " in line
+
+
+# --- #843: lowering above the fallback byte ceiling keeps a finite drain ---
+
+
+def _accept_backlog(env: Env, count: int) -> None:
+    """Persist rows as if admitted under the larger selection, in one save."""
+
+    store = LocalObservationStore(_state=env.root)
+    with store._lock:  # pyright: ignore[reportPrivateUsage]
+        state = store._load(env.commitment)  # pyright: ignore[reportPrivateUsage]
+        assert state.pending_outbox is not None
+        state.pending_outbox.extend(
+            ObservationOutboxRow(
+                codex_session_id=HOST,
+                envelope=ObservationEnvelope(
+                    session_commitment=env.session,
+                    event_kind="PostToolUse",
+                    source_identity=f"backlog:{index}",
+                    source=ObservationSource.CODEX_HOOK,
+                    cursor=ObservationCursor(
+                        source_generation=1,
+                        byte_position=0,
+                        event_position=index + 1,
+                        last_source_commitment="hmac-sha256:" + "a" * 64,
+                        mapping_version="codex-obs-hook/1.0.0",
+                    ),
+                    receipt_time=Timestamp("2026-09-10T00:01:00.000Z"),
+                    structural_payload=JsonObject({"tool_name": "shell", "exit_status": 1}),
+                    content_object_refs=(),
+                    gap_codes=(),
+                ),
+            )
+            for index in range(count)
+        )
+        store._save(env.commitment, state)  # pyright: ignore[reportPrivateUsage]
+    size = store._workspace_path(env.commitment).stat().st_size  # pyright: ignore[reportPrivateUsage]
+    assert size > 1_048_576
+
+
+def _refused_sibling(env: Env, index: int) -> str | None:
+    store = LocalObservationStore(_state=env.root)
+    (row,) = store.list_pending_outbox_rows(env.commitment)[:1]
+    sibling = "hmac-sha256:" + f"{index + 2:x}" * 64
+    envelope = replace(
+        row.envelope,
+        session_commitment=sibling,
+        source_identity=f"sibling:{index}",
+    )
+    return store.enqueue_outbox(env.commitment, f"codex-sibling-{index}", envelope)
+
+
+def test_revoke_above_the_fallback_ceiling_keeps_accounting_writable(env: Env) -> None:
+    env.preview_and_apply("--capacity", "largest", "--persist")
+    _accept_backlog(env, 3_000)
+
+    revoked = env.json("selection-revoke", "--persist")
+    assert revoked["fallback"]["capacity"] == 512
+    assert [_refused_sibling(env, index) for index in range(3)] == ["outbox_overflow"] * 3
+
+    # Accepted rows are preserved; the loss is visible, not silently dropped.
+    selection = env.json("selection-status")
+    assert selection["effective_capacity"] == 512
+    assert selection["queue_count"] == 3_000
+    assert selection["admission_allowed"] is False
+    assert selection["pressure_state"] == "hard_limit"
+    status = env.json("status")
+    assert status["undelivered_count"] == 3_000
+    assert "outbox_overflow" in status["status"]["gaps"]
+
+
+def test_session_end_after_a_session_revoke_above_the_ceiling_persists(env: Env) -> None:
+    env.preview_and_apply("--capacity", "largest", "--session-id", HOST)
+    _accept_backlog(env, 3_000)
+    revoked = env.json("selection-revoke", "--session-id", HOST)
+    assert revoked["fallback"]["capacity"] == 512
+    assert _refused_sibling(env, 0) == "outbox_overflow"
+
+    LocalObservationStore(_state=env.root).note_session_end(env.commitment, env.session)
+
+    store = LocalObservationStore(_state=env.root)
+    state = store._load(env.commitment)  # pyright: ignore[reportPrivateUsage]
+    assert state.ended_sessions is not None and env.session in state.ended_sessions
+    assert store.selection_settings_for(env.commitment).session(env.session) is None
+    assert len(store.list_pending_outbox_rows(env.commitment)) == 3_000
+    assert env.json("selection-status", "--session-id", HOST)["selected_capacity"] == 512
