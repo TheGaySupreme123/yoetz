@@ -57,6 +57,16 @@ def _ambient_config_environment(  # pyright: ignore[reportUnusedFunction]
         return bundle
 
     monkeypatch.setattr(module, "runtime_bundle", runtime_bundle)
+
+    # This module stubs runtime retention; store-path safety is covered by the adapter tests.
+    # Keep the real lock while allowing the synthetic shared temporary test bundle.
+    def allow_private(_path: Path) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "yoetz.adapters.providers.codex_evaluator_runtime.verify_private_local_bundle",
+        allow_private,
+    )
     monkeypatch.setattr(
         "yoetz.adapters.integrations.codex_discovery.discover_codex_binaries", lambda: ()
     )

@@ -352,6 +352,10 @@ exact-version admission and separates the **evaluator runtime** from the **host 
 7. **Reverse operations stay distinct.** `runtime remove` refuses while the binding uses the copy.
    Disconnect and rollback leave the copy in place. A stranded binding can still be disconnected:
    the admitted runtime is used in memory for that one logout.
+   Setup, repair, install, and removal hold one owner-private lock per runtime store. Setup and
+   repair keep it through the readiness probe and configuration write, so removal cannot delete
+   a runtime between those steps. Contention fails immediately as `codex_evaluator_runtime_busy`;
+   the operator retries after the other command finishes. The lock is released on every exit.
 
 Evidence expiry is unchanged: after `2026-11-30T00:00:00Z` every cell reports
 `codex_runtime_capability_evidence_stale`, which only a Yoetz release carrying renewed evidence

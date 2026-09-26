@@ -113,8 +113,9 @@ Codex release the evaluator admits, in Yoetz's data directory, and binds that co
 Codex installation. Updating or replacing your everyday Codex therefore leaves AI-powered review
 working. `--executable` is optional: setup uses Yoetz's copy first, then any installation that
 already holds the admitted release. It never offers a newer Codex that the evaluator does not
-admit. When nothing eligible is found, guided setup offers to download the admitted release. You
-can also do that yourself:
+admit. When nothing eligible is found, first-run setup and the prompt menu offer to download the
+admitted release. The terminal interface's `/provider` shows the download command. You can also
+run it yourself:
 
 ```text
 yoetz provider codex-subscription runtime status              # what is bound, and what to do next

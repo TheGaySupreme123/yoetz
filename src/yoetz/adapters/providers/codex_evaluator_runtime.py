@@ -21,6 +21,7 @@ retained, bound, or launched.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import os
 import platform
@@ -29,7 +30,8 @@ import stat
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Generator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -57,6 +59,7 @@ __all__ = [
     "provision_codex_runtime",
     "remove_managed_runtime",
     "retain_codex_runtime",
+    "runtime_mutation_lock",
 ]
 
 _STORE_PARTS: Final = ("external-runtimes", "codex-evaluator")
@@ -116,6 +119,46 @@ def managed_runtime_path(bundle: Path, cell: CodexEvaluatorCell) -> Path:
     """The one stable path the retained runtime for ``cell`` is bound at."""
 
     return managed_runtime_root(bundle) / cell.source_identity / _EXECUTABLE_NAME
+
+
+@contextmanager
+def runtime_mutation_lock(bundle: Path) -> Generator[None]:
+    """Fence retention/removal and the complete setup or repair binding transaction.
+
+    Contention refuses immediately, including while another command awaits a login probe.
+    The lock file is never unlinked, so concurrent openers always fence the same inode.
+    """
+
+    root = managed_runtime_root(bundle)
+    descriptor: int | None = None
+    try:
+        try:
+            ensure_owner_only_dir(root)
+            verify_private_local_bundle(root)
+            descriptor = os.open(
+                root / ".mutation.lock",
+                os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o600,
+            )
+            facts = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(facts.st_mode)
+                or facts.st_uid != os.geteuid()
+                or stat.S_IMODE(facts.st_mode) & 0o077
+            ):
+                raise ValueError("codex_evaluator_runtime_store_unsafe")
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise ValueError("codex_evaluator_runtime_busy") from None
+        except PathSafetyError as error:
+            raise ValueError("codex_evaluator_runtime_store_unsafe") from error
+        except OSError as error:
+            raise ValueError("codex_evaluator_runtime_store_unavailable") from error
+        yield
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def _open_regular(path: Path) -> tuple[int, os.stat_result]:

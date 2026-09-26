@@ -231,6 +231,12 @@ the unchanged `verify_local_binding` fence. Updating or replacing the everyday C
 instance keeps its own copy in its own data bundle. Admission is unchanged: only the exact cell
 above is retained, bound, or launched.
 
+Setup, repair, install, and removal serialize mutations of this store. A concurrent command fails
+with `codex_evaluator_runtime_busy`; retry it after the first command finishes. The lock remains
+held through setup or repair's readiness probe and binding write, preventing removal from leaving
+a newly successful binding pointed at a missing runtime. Service readiness and structural
+diagnostics both use the current service clock to reject expired capability evidence.
+
 ```text
 yoetz provider codex-subscription runtime status --json      # no Codex process, no sign-in check
 yoetz provider codex-subscription runtime install --from /absolute/path/to/codex
@@ -242,8 +248,10 @@ yoetz provider codex-subscription runtime remove             # refused while the
 - **Selection.** With no `--executable`, setup and repair take the retained copy, then the
   existing binding's executable when it still holds the admitted bytes, then the first discovered
   installation that resolves to the admitted cell. A discovered binary that is not the admitted cell
-  is never offered. Guided setup (first run, the prompt menu, `/provider`) offers the same default
-  and, when nothing eligible exists, offers the consented download instead of a newer host binary.
+  is never offered. Guided setup (first run, the prompt menu, `/provider`) offers the same default.
+  When nothing eligible exists, first-run setup and the prompt menu offer a consented download;
+  `/provider` shows `yoetz provider codex-subscription runtime install --download` and lets the
+  operator enter a local admitted path or return after installing.
 - **Download.** `runtime install --download` runs the operator's own `npm install --prefix
   <owner-private staging> --ignore-scripts --no-audit --no-fund --no-package-lock
   @openai/codex@0.150.1` under their registry settings, keeps only the native executable matching

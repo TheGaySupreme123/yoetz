@@ -177,3 +177,23 @@ async def test_setup_preselects_the_existing_reasoning_effort(make_app: MakeApp)
             True,
         )
     ]
+
+
+async def test_setup_without_a_runtime_shows_the_consented_download_command(
+    make_app: MakeApp,
+) -> None:
+    runtime = _RepairRuntime()
+    runtime.codex_subscription_defaults = lambda: (  # type: ignore[method-assign]
+        "",
+        "/var/lib/yoetz/codex-home",
+        "gpt-5.6-sol",
+        "high",
+    )
+    app = make_app(runtime=runtime)
+    async with app.run_test(size=WIDE) as pilot:
+        await pilot.pause()
+        await _choose(pilot, app, "switch")
+        assert "yoetz provider codex-subscription runtime install --download" in transcript(app)
+        assert "asks before downloading" in transcript(app)
+        assert getattr(app.open_view, "view_name", None) == "codex-subscription-executable"
+        assert runtime.subscription_setups == []

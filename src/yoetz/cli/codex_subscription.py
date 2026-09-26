@@ -38,6 +38,7 @@ from yoetz.adapters.providers.codex_evaluator_runtime import (
     provision_codex_runtime,
     remove_managed_runtime,
     retain_codex_runtime,
+    runtime_mutation_lock,
 )
 from yoetz.config.load import load_config
 from yoetz.config.models import ConfigError, ExternalRuntimeProfileConfig, YoetzConfig
@@ -175,6 +176,10 @@ _SUBSCRIPTION_REMEDIATIONS: Final[Mapping[str, str]] = {
     "codex_evaluator_runtime_store_unavailable": (
         "the retained runtime copy could not be written or verified; check free space and "
         "permissions of the Yoetz data directory, then retry"
+    ),
+    "codex_evaluator_runtime_busy": (
+        "another evaluator setup, repair, install, or removal is running; wait for it to finish, "
+        "then retry this command"
     ),
     "codex_evaluator_runtime_in_use": (
         "the current binding uses this retained runtime; run 'yoetz provider codex-subscription "
@@ -825,80 +830,83 @@ async def codex_subscription_setup(
     existing binding's timeout and retry budgets are preserved.
     """
 
-    target = _target_config_path(config_path)
-    base, expected_bytes = _config_snapshot(target)
-    if executable is None:
-        selected = select_codex_evaluator_executable(base)
-        if selected is None:
-            raise ValueError("codex_evaluator_runtime_unavailable")
-        executable = selected[1]
-    validated = _binding(
-        executable=executable,
-        codex_home=codex_home,
-        model=model,
-        reasoning_effort=reasoning_effort,
-        existing=base.external_runtime,
-    )
-    bundle = runtime_bundle()
-    binding = _retained_binding(validated, bundle=bundle)
-    _bounded_config_operation(
-        lambda: preflight_config_write(
-            external_runtime_binding_config(binding, base=base, as_fallback=as_fallback),
-            target,
-            expected_bytes=expected_bytes,
+    with runtime_mutation_lock(runtime_bundle()):
+        target = _target_config_path(config_path)
+        base, expected_bytes = _config_snapshot(target)
+        if executable is None:
+            selected = select_codex_evaluator_executable(base)
+            if selected is None:
+                raise ValueError("codex_evaluator_runtime_unavailable")
+            executable = selected[1]
+        validated = _binding(
+            executable=executable,
+            codex_home=codex_home,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            existing=base.external_runtime,
         )
-    )
-    _retain_binding_runtime(binding, source=Path(validated.executable_path), bundle=bundle)
-    prepare_codex_home(codex_home)
-    profile = _profile(binding)
-    login_reused = False
-    if switch_account:
-        logout_status = await codex_logout(profile)
-        if logout_status.cleanup == "failed":
-            raise ValueError("codex_logout_unconfirmed")
-        status: CodexRuntimeStatus | None = None
-    else:
-        status = await codex_account_status(profile)
-        if status.cleanup == "failed":
-            raise ValueError("codex_subscription_readiness_unproven")
-        if _already_ready(status):
-            login_reused = True
-            typer.echo("")
-            typer.echo(
-                "Codex reports this dedicated home is already signed in with the exact model "
-                "available; reusing it without a new sign-in."
+        bundle = runtime_bundle()
+        binding = _retained_binding(validated, bundle=bundle)
+        _bounded_config_operation(
+            lambda: preflight_config_write(
+                external_runtime_binding_config(binding, base=base, as_fallback=as_fallback),
+                target,
+                expected_bytes=expected_bytes,
             )
-        else:
-            status = None
-
-    def present(challenge: CodexLoginChallenge) -> None:
-        typer.echo("")
-        typer.echo("Codex owns this ChatGPT sign-in. Yoetz does not receive the credentials.")
-        typer.echo(f"Open: {challenge.url}")
-        if challenge.user_code is not None:
-            typer.echo(f"One-time code: {challenge.user_code}")
-        if open_browser and challenge.mode == "browser":
-            if not webbrowser.open(challenge.url):
-                raise ValueError("codex_login_browser_unavailable")
-
-    if status is None:
-        status = await codex_login(profile, mode=login_mode, present_challenge=present)
-        if not _already_ready(status) or status.cleanup == "failed":
-            raise ValueError("codex_subscription_readiness_unproven")
-    selected_config = external_runtime_binding_config(binding, base=base, as_fallback=as_fallback)
-    _bounded_config_operation(
-        lambda: write_config_toml_if_unchanged(
-            selected_config,
-            expected_bytes=expected_bytes,
-            path=target,
         )
-    )
-    result = _safe_status(binding, status)
-    result["login_reused"] = login_reused
-    # An existing pairing keeps its selector, so report the role the written config holds.
-    result["endpoint_role"] = _endpoint_role(selected_config)
-    result["runtime_retained_from"] = validated.executable_path
-    return result
+        _retain_binding_runtime(binding, source=Path(validated.executable_path), bundle=bundle)
+        prepare_codex_home(codex_home)
+        profile = _profile(binding)
+        login_reused = False
+        if switch_account:
+            logout_status = await codex_logout(profile)
+            if logout_status.cleanup == "failed":
+                raise ValueError("codex_logout_unconfirmed")
+            status: CodexRuntimeStatus | None = None
+        else:
+            status = await codex_account_status(profile)
+            if status.cleanup == "failed":
+                raise ValueError("codex_subscription_readiness_unproven")
+            if _already_ready(status):
+                login_reused = True
+                typer.echo("")
+                typer.echo(
+                    "Codex reports this dedicated home is already signed in with the exact model "
+                    "available; reusing it without a new sign-in."
+                )
+            else:
+                status = None
+
+        def present(challenge: CodexLoginChallenge) -> None:
+            typer.echo("")
+            typer.echo("Codex owns this ChatGPT sign-in. Yoetz does not receive the credentials.")
+            typer.echo(f"Open: {challenge.url}")
+            if challenge.user_code is not None:
+                typer.echo(f"One-time code: {challenge.user_code}")
+            if open_browser and challenge.mode == "browser":
+                if not webbrowser.open(challenge.url):
+                    raise ValueError("codex_login_browser_unavailable")
+
+        if status is None:
+            status = await codex_login(profile, mode=login_mode, present_challenge=present)
+            if not _already_ready(status) or status.cleanup == "failed":
+                raise ValueError("codex_subscription_readiness_unproven")
+        selected_config = external_runtime_binding_config(
+            binding, base=base, as_fallback=as_fallback
+        )
+        _bounded_config_operation(
+            lambda: write_config_toml_if_unchanged(
+                selected_config,
+                expected_bytes=expected_bytes,
+                path=target,
+            )
+        )
+        result = _safe_status(binding, status)
+        result["login_reused"] = login_reused
+        # An existing pairing keeps its selector, so report the role the written config holds.
+        result["endpoint_role"] = _endpoint_role(selected_config)
+        result["runtime_retained_from"] = validated.executable_path
+        return result
 
 
 def _prompt_evaluator_executable() -> Path:
@@ -1235,54 +1243,59 @@ def codex_evaluator_runtime_install(
     only the native executable that hashes to the pinned digest. Neither path edits the binding.
     """
 
-    cell = host_codex_evaluator_cell()
-    config = _base_config(config_path)
-    bundle = runtime_bundle()
-    kind, selected = _install_source(config, source, download=download)
-    if selected is None:
-        retained = provision_codex_runtime(
-            bundle=bundle,
-            cell=cell,
-            runtime_version=CODEX_EVALUATOR_RUNTIME_VERSION,
-            npm=_which_npm() if npm is None else npm,
-            resolve_wrapper=lambda wrapper: resolve_supported_codex_executable(wrapper)[0],
-        )
-    else:
-        native = admitted_native_executable(selected)
-        if native is None:
-            raise ValueError("codex_runtime_capability_unsupported")
-        retained = retain_codex_runtime(native, bundle=bundle, cell=cell)
-    return {
-        "schema": "yoetz.codex-evaluator-runtime-install/1",
-        "source": kind,
-        "managed_runtime_path": str(retained),
-        "managed_runtime_state": inspect_managed_runtime(bundle, cell),
-        "runtime_version": CODEX_EVALUATOR_RUNTIME_VERSION,
-        "executable_sha256": cell.executable_sha256,
-        "binding_changed": False,
-        "host_installation_changed": False,
-        "next_command": _SETUP if config.external_runtime is None else _REPAIR,
-    }
+    with runtime_mutation_lock(runtime_bundle()):
+        cell = host_codex_evaluator_cell()
+        config = _base_config(config_path)
+        bundle = runtime_bundle()
+        kind, selected = _install_source(config, source, download=download)
+        if selected is None:
+            retained = provision_codex_runtime(
+                bundle=bundle,
+                cell=cell,
+                runtime_version=CODEX_EVALUATOR_RUNTIME_VERSION,
+                npm=_which_npm() if npm is None else npm,
+                resolve_wrapper=lambda wrapper: resolve_supported_codex_executable(wrapper)[0],
+            )
+        else:
+            native = admitted_native_executable(selected)
+            if native is None:
+                raise ValueError("codex_runtime_capability_unsupported")
+            retained = retain_codex_runtime(native, bundle=bundle, cell=cell)
+        return {
+            "schema": "yoetz.codex-evaluator-runtime-install/1",
+            "source": kind,
+            "managed_runtime_path": str(retained),
+            "managed_runtime_state": inspect_managed_runtime(bundle, cell),
+            "runtime_version": CODEX_EVALUATOR_RUNTIME_VERSION,
+            "executable_sha256": cell.executable_sha256,
+            "binding_changed": False,
+            "host_installation_changed": False,
+            "next_command": _SETUP if config.external_runtime is None else _REPAIR,
+        }
 
 
 def codex_evaluator_runtime_remove(*, config_path: Path | None = None) -> dict[str, JsonValue]:
     """Delete only an unreferenced retained runtime; the binding and home are untouched."""
 
-    cell = host_codex_evaluator_cell()
-    config = _base_config(config_path)
-    bundle = runtime_bundle()
-    managed = str(managed_runtime_path(bundle, cell))
-    if config.external_runtime is not None and config.external_runtime.executable_path == managed:
-        raise ValueError("codex_evaluator_runtime_in_use")
-    removed = remove_managed_runtime(bundle, cell)
-    return {
-        "schema": "yoetz.codex-evaluator-runtime-remove/1",
-        "managed_runtime_path": managed,
-        "removed": removed,
-        "binding_changed": False,
-        "codex_home_preserved": True,
-        "host_installation_changed": False,
-    }
+    with runtime_mutation_lock(runtime_bundle()):
+        cell = host_codex_evaluator_cell()
+        config = _base_config(config_path)
+        bundle = runtime_bundle()
+        managed = str(managed_runtime_path(bundle, cell))
+        if (
+            config.external_runtime is not None
+            and config.external_runtime.executable_path == managed
+        ):
+            raise ValueError("codex_evaluator_runtime_in_use")
+        removed = remove_managed_runtime(bundle, cell)
+        return {
+            "schema": "yoetz.codex-evaluator-runtime-remove/1",
+            "managed_runtime_path": managed,
+            "removed": removed,
+            "binding_changed": False,
+            "codex_home_preserved": True,
+            "host_installation_changed": False,
+        }
 
 
 def _repair_target(
@@ -1360,34 +1373,35 @@ async def codex_subscription_repair(
     logs out, or switches accounts; privacy grants are not part of the binding and do not move.
     """
 
-    target = _target_config_path(config_path)
-    base, expected_bytes = _config_snapshot(target)
-    existing, repaired, state, kind, source = _repair_target(base, executable)
-    selected_config = external_runtime_binding_config(repaired, base=base)
-    _bounded_config_operation(
-        lambda: preflight_config_write(selected_config, target, expected_bytes=expected_bytes)
-    )
-    _retain_binding_runtime(repaired, source=source, bundle=runtime_bundle())
-    prepare_codex_home(Path(repaired.codex_home))
-    status = await codex_account_status(_profile(repaired))
-    if status.cleanup == "failed":
-        raise ValueError("codex_subscription_readiness_unproven")
-    if not _already_ready(status):
-        raise ValueError("codex_subscription_login_required")
-    written = _bounded_config_operation(
-        lambda: write_config_toml_if_unchanged(
-            selected_config, expected_bytes=expected_bytes, path=target
+    with runtime_mutation_lock(runtime_bundle()):
+        target = _target_config_path(config_path)
+        base, expected_bytes = _config_snapshot(target)
+        existing, repaired, state, kind, source = _repair_target(base, executable)
+        selected_config = external_runtime_binding_config(repaired, base=base)
+        _bounded_config_operation(
+            lambda: preflight_config_write(selected_config, target, expected_bytes=expected_bytes)
         )
-    )
-    result = _safe_status(repaired, status)
-    result.update(
-        {
-            "state_before": state,
-            "source": kind,
-            "changed_fields": _changed_fields(existing, repaired),
-            "login_reused": True,
-            "endpoint_role": _endpoint_role(selected_config),
-            "config_path": str(written),
-        }
-    )
-    return result
+        _retain_binding_runtime(repaired, source=source, bundle=runtime_bundle())
+        prepare_codex_home(Path(repaired.codex_home))
+        status = await codex_account_status(_profile(repaired))
+        if status.cleanup == "failed":
+            raise ValueError("codex_subscription_readiness_unproven")
+        if not _already_ready(status):
+            raise ValueError("codex_subscription_login_required")
+        written = _bounded_config_operation(
+            lambda: write_config_toml_if_unchanged(
+                selected_config, expected_bytes=expected_bytes, path=target
+            )
+        )
+        result = _safe_status(repaired, status)
+        result.update(
+            {
+                "state_before": state,
+                "source": kind,
+                "changed_fields": _changed_fields(existing, repaired),
+                "login_reused": True,
+                "endpoint_role": _endpoint_role(selected_config),
+                "config_path": str(written),
+            }
+        )
+        return result

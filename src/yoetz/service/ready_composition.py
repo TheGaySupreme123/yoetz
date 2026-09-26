@@ -13,7 +13,7 @@ import threading
 from collections.abc import Awaitable, Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
 from typing import Final, Literal, Protocol, cast
@@ -3510,8 +3510,10 @@ def _record_external_runtime_state(state: Callable[[], str | None] | None, reque
     )
 
 
-def subscription_runtime_structurally_ready(runtime: object) -> bool:
-    """READY fact for Codex OAuth: exact binding, digest, and dedicated home.
+def subscription_runtime_structurally_ready(
+    runtime: object, *, now: datetime | None = None
+) -> bool:
+    """READY fact for Codex OAuth: unexpired evidence, exact binding, digest, and home.
 
     Login and model availability stay inside the evaluate() child. A READY snapshot
     must not spawn a preflight app-server process group.
@@ -3520,7 +3522,9 @@ def subscription_runtime_structurally_ready(runtime: object) -> bool:
     if type(runtime) is not ExternalRuntimeProfileConfig:
         return False
     try:
-        CodexAppServerProfile.from_config(runtime).verify_local_binding()
+        profile = CodexAppServerProfile.from_config(runtime)
+        profile.verify_capability_evidence(datetime.now(UTC) if now is None else now)
+        profile.verify_local_binding()
     except (OSError, TypeError, ValueError):  # fmt: skip
         return False
     return True
@@ -3599,7 +3603,7 @@ async def provide_service_ready_context(
         runtime = config.external_runtime
         if runtime is None:
             return None
-        return diagnose_codex_binding(runtime).state
+        return diagnose_codex_binding(runtime, now=clock.now_utc()).state
 
     def binding_not_connected(_binding: ProviderBinding) -> bool:
         return False
@@ -3611,7 +3615,7 @@ async def provide_service_ready_context(
         if endpoint is None or binding is None:
             return False
         if type(endpoint) is ExternalRuntimeProfileConfig:
-            return subscription_runtime_structurally_ready(endpoint)
+            return subscription_runtime_structurally_ready(endpoint, now=clock.now_utc())
         credential_binding = provider_credential_profile_binding(
             binding.provider_id,
             binding.model_id,

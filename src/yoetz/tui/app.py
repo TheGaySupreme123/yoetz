@@ -1457,6 +1457,17 @@ class YoetzTui(App[int]):
         executable_default, home_default, model_default, effort_default = (
             self.runtime.codex_subscription_defaults()
         )
+        if not executable_default:
+            self.say(
+                Level.OPTIONAL,
+                "No eligible Codex evaluator runtime was found",
+                (
+                    "To download the admitted release, run this in your shell:",
+                    "yoetz provider codex-subscription runtime install --download",
+                    "The command asks before downloading. Then return to /provider, or enter "
+                    "the path to a local admitted runtime below.",
+                ),
+            )
         entries = (
             TextEntryView(
                 name="codex-subscription-executable",

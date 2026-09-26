@@ -342,6 +342,64 @@ async def test_repair_preserves_a_concurrent_config_edit(
     assert "# owner edit" in env.config_path.read_text(encoding="utf-8")
 
 
+@pytest.mark.parametrize("operation", ("setup", "repair"))
+async def test_runtime_removal_cannot_interrupt_a_binding_transaction(
+    env: _Env, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    env.write_config(env.binding(env.executable("npm-prefix/codex", _NEWER), **_V1))
+    source = env.executable("evaluator/codex")
+    attempts: list[str] = []
+
+    async def remove_during_probe(profile: CodexAppServerProfile) -> CodexRuntimeStatus:
+        assert env.managed.exists()
+        with pytest.raises(ValueError, match="codex_evaluator_runtime_busy"):
+            module.codex_evaluator_runtime_remove(config_path=env.config_path)
+        attempts.append("refused")
+        return await env.codex.account_status(profile)
+
+    monkeypatch.setattr(module, "codex_account_status", remove_during_probe)
+    if operation == "repair":
+        await module.codex_subscription_repair(config_path=env.config_path, executable=source)
+    else:
+        await module.codex_subscription_setup(
+            executable=source,
+            codex_home=env.home(),
+            model="gpt-5.6-sol",
+            reasoning_effort="high",
+            login_mode="browser",
+            open_browser=False,
+            switch_account=False,
+            config_path=env.config_path,
+        )
+    assert attempts == ["refused"]
+    binding = env.written().external_runtime
+    assert binding is not None and module.diagnose_bound_runtime(binding).ready
+    # The transaction released the lock; the binding itself now protects removal.
+    with pytest.raises(ValueError, match="codex_evaluator_runtime_in_use"):
+        module.codex_evaluator_runtime_remove(config_path=env.config_path)
+
+
+def test_install_contends_and_failed_mutation_releases_the_lock(env: _Env) -> None:
+    env.write_config(None)
+    source = env.executable("evaluator/codex")
+    with runtime_store.runtime_mutation_lock(env.bundle):
+        with pytest.raises(ValueError, match="codex_evaluator_runtime_busy"):
+            module.codex_evaluator_runtime_install(
+                source=source, npm=None, download=False, config_path=env.config_path
+            )
+    with pytest.raises(ValueError, match="codex_runtime_capability_unsupported"):
+        module.codex_evaluator_runtime_install(
+            source=env.executable("unsupported/codex", _NEWER),
+            npm=None,
+            download=False,
+            config_path=env.config_path,
+        )
+    installed = module.codex_evaluator_runtime_install(
+        source=source, npm=None, download=False, config_path=env.config_path
+    )
+    assert installed["managed_runtime_state"] == "verified"
+
+
 async def test_repair_keeps_the_fallback_role_of_a_pairing(env: _Env) -> None:
     env.write_config(
         env.binding(env.executable("npm-prefix/codex", _NEWER), **_V1), fallback_behind_api=True

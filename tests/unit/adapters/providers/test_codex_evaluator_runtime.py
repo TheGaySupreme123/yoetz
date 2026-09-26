@@ -492,6 +492,30 @@ def test_expired_evidence_needs_a_timezone_aware_clock(
         module.diagnose_codex_binding(binding, now=datetime(2026, 9, 26))
 
 
+@pytest.mark.parametrize("unsafe", ("symlink", "permissions", "directory"))
+def test_runtime_mutation_lock_refuses_unsafe_lock_files(
+    cell: CodexEvaluatorCell, tmp_path: Path, unsafe: str
+) -> None:
+    del cell  # The fixture supplies the synthetic platform and private-path boundary.
+    root = module.managed_runtime_root(tmp_path / "bundle")
+    root.mkdir(parents=True, mode=0o700)
+    lock = root / ".mutation.lock"
+    if unsafe == "symlink":
+        target = tmp_path / "unrelated"
+        target.write_text("preserved")
+        lock.symlink_to(target)
+    elif unsafe == "permissions":
+        lock.write_text("")
+        lock.chmod(0o644)
+    else:
+        lock.mkdir()
+    with pytest.raises(ValueError, match="codex_evaluator_runtime_store_"):
+        with module.runtime_mutation_lock(tmp_path / "bundle"):
+            pytest.fail("unsafe lock must not admit a mutation")
+    if unsafe == "symlink":
+        assert lock.read_text() == "preserved"
+
+
 def test_an_unsupported_host_platform_is_its_own_state(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
