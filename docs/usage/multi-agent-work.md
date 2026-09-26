@@ -41,6 +41,42 @@ Work and contact are different facts. Work stays open until an explicit closure 
 cancellation, abandonment, or write-off. A missing host end event eventually means contact was
 lost. It does not establish permanent activity or immediately mean the work was abandoned.
 
+## Staying in contact during long work
+
+A task session stays in contact through the work itself. Two kinds of activity count:
+
+- Yoetz calls from the agent: start, publish, check, status, respond, or receipt.
+- Host events Yoetz observes, such as tool use, the end of a turn, or a subagent finishing.
+
+Each observed event counts from the moment the host reported it, even if Yoetz processes it
+later. When the host reports that the agent started a native subagent, the parent stays in
+contact until the host reports that subagent finished. That holds for up to an hour, which covers
+a host that closes without reporting it. You never need to add polling calls or filler updates
+to keep work alive.
+
+When nothing is reported for about a minute, contact is lost. After the recovery window (five
+minutes by default), Yoetz records the open work as abandoned. This can still happen during
+ordinary work with no observable activity: one long command, a reply that waits for the user, or
+a host that reports no subagent events. If your work often goes quiet for longer than that, raise
+the `lineage.contact_lost_recovery_seconds` setting.
+
+## When your own task was abandoned
+
+Abandoned work is final. Yoetz does not reopen it, and later activity cannot undo it. Until you
+move on:
+
+- **The original session keeps working for history.** It can still read status, record late
+  evidence, run checks, and request receipts. Every receipt says the work is incomplete.
+  Receipts issued before abandonment stay exactly as they were.
+- **It cannot continue the work.** It cannot resume the task or start new child work. Yoetz
+  refuses both and points you to a successor task.
+
+To continue, start one new task in the same workspace with a new external reference. Open it with
+a short handoff that names the abandoned task, and delegate from the new task. It starts with its
+own plan, children, evidence, and receipts. Nothing moves over from the abandoned task, so never
+present the new task's receipt as proof that the abandoned work was completed. The same applies to
+work that was closed, cancelled, or written off.
+
 Publishing `delegation_cancelled` revokes the Yoetz delegation capability. It does not stop the host
 process. Writing off or cancelling an accepted child keeps the dependency and its incomplete
 outcome visible. Requesting a receipt never closes work.

@@ -29,6 +29,7 @@ from yoetz.application.lineage import (
     LineageStore,
 )
 from yoetz.domain.coordination import (
+    SESSION_LEASE_SECONDS,
     LineageAcceptance,
     LineageOrigin,
     SessionHealth,
@@ -555,10 +556,28 @@ class SqliteLineageStore(LineageStore):
         )
         if snapshot.active_session_id is not None:
             lease = (
-                format_rfc3339_millis(now + timedelta(seconds=60))
+                format_rfc3339_millis(now + timedelta(seconds=SESSION_LEASE_SECONDS))
                 if snapshot.session_health is SessionHealth.ACTIVE
                 else None
             )
+            changed_wire = now_wire
+            if snapshot.session_health is SessionHealth.ACTIVE:
+                # An unexpired lease already records this session's contact, possibly anchored at
+                # an earlier host event.  Saving lineage metadata neither extends nor shortens it;
+                # only a session entering ``active`` receives a fresh lease here (#837).
+                current = self._rows(
+                    "SELECT health, changed_at, lease_expires_at FROM task_sessions "
+                    "WHERE task_id = ? AND session_id = ? LIMIT 2",
+                    (task, route_session),
+                )
+                if (
+                    len(current) == 1
+                    and current[0][0] == SessionHealth.ACTIVE.value
+                    and current[0][2] is not None
+                    and _timestamp(current[0][2]) > now
+                ):
+                    lease = _text(current[0][2])
+                    changed_wire = _text(current[0][1])
             self._db.execute(
                 "INSERT INTO task_sessions(session_id, task_id, health, changed_at, created_at, ended_at, "
                 "lease_expires_at, actor_id) VALUES (?, ?, ?, ?, ?, ?, ?, NULL) ON CONFLICT(session_id) DO UPDATE SET "
@@ -568,7 +587,7 @@ class SqliteLineageStore(LineageStore):
                     route_session,
                     task,
                     snapshot.session_health.value,
-                    now_wire,
+                    changed_wire,
                     now_wire,
                     now_wire if snapshot.session_health is SessionHealth.ENDED else None,
                     lease,

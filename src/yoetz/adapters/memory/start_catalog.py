@@ -941,6 +941,50 @@ class MemoryStartCatalogAdapter:
                 self._state.revision += 1
             return state
 
+    async def extend_session_lease(
+        self,
+        task_id: str,
+        session_id: str,
+        *,
+        changed_at: datetime,
+        lease_expires_at: datetime,
+    ) -> SessionState:
+        """Atomically offer a later lease without overwriting newer catalog state."""
+
+        try:
+            task = validate_id(IdKind.TASK, task_id)
+            session = validate_id(IdKind.SESSION, session_id)
+            format_rfc3339_millis(changed_at)
+            format_rfc3339_millis(lease_expires_at)
+            if lease_expires_at <= changed_at:
+                raise ValueError("session_lease_expired")
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        async with self._lock:
+            if task not in self._state.routes:
+                raise _error(PublicErrorCode.SESSION_NOT_FOUND)
+            current = self._state.session_states.get(session)
+            if current is None:
+                raise _error(PublicErrorCode.SESSION_NOT_FOUND)
+            if current.task_id != task:
+                raise _error(PublicErrorCode.SESSION_CONFLICT)
+            if current.health is SessionHealth.ENDED:
+                return current
+            if current.changed_at > changed_at or (
+                current.lease_expires_at is not None
+                and current.lease_expires_at >= lease_expires_at
+            ):
+                return current
+            updated = replace(
+                current,
+                health=SessionHealth.ACTIVE,
+                changed_at=changed_at,
+                lease_expires_at=lease_expires_at,
+            )
+            self._state.session_states[session] = updated
+            self._state.revision += 1
+            return updated
+
     async def expire_session_leases(
         self, now: datetime | None = None, *, limit: int = 256
     ) -> tuple[SessionState, ...]:
@@ -1567,6 +1611,12 @@ class MemoryStartCatalogAdapter:
                 )
             if request.mode is StartMode.ATTACH and route is None:
                 raise _error(PublicErrorCode.SESSION_NOT_FOUND)
+            if route is not None and route.work_state is not WorkState.OPEN:
+                # Mirrors the SQLite catalog: terminal work is refused before any reservation.
+                raise _error(
+                    PublicErrorCode.SESSION_CONFLICT,
+                    safe_details={"reason_code": "lineage_resume_work_terminal"},
+                )
             if route is not None:
                 expected = route.repository_privacy_commitment
                 actual = request.repository_privacy_commitment

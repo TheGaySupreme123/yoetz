@@ -6164,11 +6164,12 @@ async def test_native_activity_releases_runtime_before_lineage_callback(tmp_path
             assert value is runtime
             released.set()
 
-    async def renew(task_id: str, session_id: str, writer_id: str) -> None:
+    async def renew(task_id: str, session_id: str, writer_id: str, observed_at: object) -> None:
         # This event stands for attach's runtime-drained condition. Awaiting it while
         # retaining the ingest runtime would deterministically deadlock until the deadline.
         async with asyncio.timeout(1):
             await released.wait()
+        assert observed_at == clock.now_utc()
         calls.append((task_id, session_id, writer_id))
 
     class Coordinator(ObservationCoordinator):
@@ -6200,7 +6201,8 @@ async def test_native_activity_releases_runtime_before_lineage_callback(tmp_path
         assert calls == [(mapping.yoetz_task_id, mapping.yoetz_session_id, mapping.yoetz_writer_id)]
         duplicate = await coordinator.ingest_request(request)
         assert duplicate.disposition is ObservationIngestDisposition.DUPLICATE
-        assert len(calls) == 1
+        # The duplicate re-offers the same evidence time; lineage applies it idempotently.
+        assert len(calls) == 2 and calls[0] == calls[1]
     finally:
         db.close(force=True)
 
