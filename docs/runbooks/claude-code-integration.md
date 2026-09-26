@@ -522,6 +522,42 @@ Claude Code does not have. Claude keeps its native `SubagentStart`/`SubagentStop
 unchanged, and no Claude capability cell moves. Existing Claude cooperative identity and native
 evidence boundaries below remain in force.
 
+### Parent liveness while native subagents run (#837)
+
+In the 2026-09-25 dogfood, a Claude parent's last accepted hook was a `SubagentStart`. Its
+native subagents then ran for about twelve minutes with no parent event. Yoetz abandoned the
+parent while it kept working, and a later delegation was refused. Injected-clock conformance
+reproduces the same sequence on the released source. The per-profile decisions are:
+
+- **Structural profile (default).** These count as parent contact, each at its own receipt time:
+  - workflow calls;
+  - scoped-Yoetz `PostToolUse` and `PostToolUseFailure`;
+  - `SessionStart`, `Stop`, `SubagentStart`, and `SubagentStop`.
+
+  Only `SessionEnd` ends contact. A `SubagentStart` recorded without its `SubagentStop` holds the
+  parent in contact until the stop, for at most 3,600 seconds.
+- **Ordinary profile.** It registers no `SubagentStart` or `SubagentStop`, so it has no subagent
+  hold:
+  - Subagent `PreToolUse`, `PermissionRequest`, and `PermissionDenied` events route to the parent
+    lane and count as parent contact at their receipt time, even when the sweeper delivers them
+    late.
+  - Subagent `PostToolUse` carries the child identity and never renews the parent.
+  - Adding the lifecycle hooks to this profile needs its own installed-artifact evidence. It is
+    not claimed here.
+- **Remaining gap (both profiles).** Some quiet periods produce no qualifying evidence:
+  - one native tool call that runs past the lease and recovery window;
+  - a turn waiting on the user;
+  - in the ordinary profile, a subagent that stays silent.
+
+  Such periods still lose contact after the lease and abandon the work after
+  `lineage.contact_lost_recovery_seconds`, which operators can raise.
+- **After abandonment.** Refusals carry `lineage_resume_work_terminal` or
+  `lineage_parent_work_terminal` with the `lineage_successor_task` continuation. Keep the held
+  session for history and receipts, and start one successor task for new work and delegation.
+
+No Claude capability cell moves. Native re-verification of this path is still owed on a pinned
+instance.
+
 The exact pinned capability cell remains `claude-code-cli-local-project-2.1.241`. The earlier
 installed Claude Code `2.1.261` fixture proves native child-hook delivery in an evidence-only
 plugin. The latest installed binary reported `2.1.263`; it was exercised in a fresh isolated
