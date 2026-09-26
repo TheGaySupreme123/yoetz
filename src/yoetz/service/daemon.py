@@ -107,6 +107,7 @@ from yoetz.ports.control import (
 from yoetz.ports.diagnostics import StartupCheckResult
 from yoetz.ports.keys import KeyStorePort, MacKeyPurpose
 from yoetz.ports.ledger import CheckAdmissionStage, check_admission_stage
+from yoetz.ports.observation import ObservationStoreLockTimeout
 from yoetz.ports.secret_memory import (
     HumanAuthorizationProof,
     SecretHandle,
@@ -1215,6 +1216,9 @@ class ServiceDaemon:
                             handler, request, repository_privacy_context
                         )
                 except TimeoutError as exc:
+                    # Includes local observation-store contention inside the handler: the wire
+                    # vocabulary is closed, so it stays the retryable ``request_timeout`` while
+                    # the store's lock reporter names the contention and its holder (#689).
                     raise ControlError("request_timeout", retryable=True) from exc
             # The handler has returned, so a write may already be durable. Everything below only
             # shapes the response; an unexpected failure there must not be reported as a failed
@@ -1935,6 +1939,14 @@ class ServiceDaemon:
                 await asyncio.wait_for(
                     coordination_sweep(), timeout=_OBSERVATION_SWEEP_DEADLINE_SECONDS
                 )
+            except ObservationStoreLockTimeout:
+                # Store contention inside the pass, not its deadline (#689); the lock reporter
+                # already recorded the holder's role and phase.
+                record_bounded_event_without_raising(
+                    component="service.daemon",
+                    operation="coordination_sweep_failed",
+                    reason="observation_store_busy",
+                )
             except TimeoutError:
                 record_bounded_event_without_raising(
                     component="service.daemon",
@@ -1957,6 +1969,12 @@ class ServiceDaemon:
             try:
                 await asyncio.wait_for(
                     lineage_recovery(), timeout=_LINEAGE_RECOVERY_DEADLINE_SECONDS
+                )
+            except ObservationStoreLockTimeout:
+                record_bounded_event_without_raising(
+                    component="service.daemon",
+                    operation="lineage_recovery_failed",
+                    reason="observation_store_busy",
                 )
             except TimeoutError:
                 record_bounded_event_without_raising(
@@ -1995,7 +2013,15 @@ class ServiceDaemon:
             # ``asyncio.TimeoutError`` is the builtin ``TimeoutError``, so any socket or OS
             # timeout raised inside the sweep lands here too and must not be reported as the
             # deadline. The flag above is the discriminator.
-            if raised_inside:
+            if raised_inside and isinstance(exc, ObservationStoreLockTimeout):
+                # Store contention inside the pass (a spool replay batch, for example), not the
+                # deadline and not a fault; the lock reporter recorded the holder (#689).
+                record_bounded_event_without_raising(
+                    component="service.daemon",
+                    operation="observation_sweep_failed",
+                    reason="observation_store_busy",
+                )
+            elif raised_inside:
                 record_unexpected_exception_without_raising(
                     exc,
                     component="service.daemon",

@@ -91,9 +91,11 @@ from yoetz.ports.ledger import (
     OperationLease,
     OperationRecord,
     OperationState,
+    check_admission_refused,
     check_admission_stage,
 )
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef, ObjectSource
+from yoetz.ports.observation import ObservationStoreLockTimeout
 from yoetz.ports.runtime import BundleRuntimePort, RouteAccess, RouteCommand, TaskRuntime
 from yoetz.ports.semantic import ReviewerChallenge, SemanticJudgment
 from yoetz.protocol.canonical import (
@@ -2098,7 +2100,18 @@ async def execute_check_commit(
             existing = await runtime.ledger.lookup_operation(request.writer_id, request.request_id)
             if existing is None:
                 if callable(reconcile_losses):
-                    await cast(Callable[[TaskRuntime], Awaitable[None]], reconcile_losses)(runtime)
+                    try:
+                        await cast(Callable[[TaskRuntime], Awaitable[None]], reconcile_losses)(
+                            runtime
+                        )
+                    except ObservationStoreLockTimeout as exc:
+                        # Hooks held the shared local store through the bounded wait. Nothing
+                        # was admitted or recorded for this request, so the honest answer is
+                        # the retryable same-identity refusal, not a terminal internal error
+                        # (issue #689).
+                        raise check_admission_refused(
+                            CheckAdmissionStage.ACQUISITION_CONTENDED
+                        ) from exc
                 if retire_superseded is not None:
                     await _retire_superseded_coordination(
                         retire_superseded, runtime, request.request_id
@@ -2129,7 +2142,12 @@ async def execute_check_commit(
                 reconcile_capture = getattr(app, "reconcile_observation_capture", None)
                 if not callable(reconcile_capture):
                     raise
-                await cast(Callable[[TaskRuntime], Awaitable[None]], reconcile_capture)(runtime)
+                try:
+                    await cast(Callable[[TaskRuntime], Awaitable[None]], reconcile_capture)(runtime)
+                except ObservationStoreLockTimeout as timeout:
+                    # Store contention during the one task-local reconciliation leaves the
+                    # capture barrier exactly as refused: keep its typed refusal (#689).
+                    raise exc from timeout
             else:
                 raise
             frozen_or_replay = await runtime.ledger.freeze_case(

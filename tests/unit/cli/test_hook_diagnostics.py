@@ -547,3 +547,115 @@ def test_control_reason_survives_diagnostic_roundtrip(tmp_path: Path, reason: st
     assert len(rows) == 1
     assert rows[0]["control_reason"] == reason
     assert rows[0]["reason"] == "control_" + reason
+
+
+def _lock_timeout_event(**overrides: object) -> object:
+    from yoetz.adapters.integrations.observation_local import (
+        ObservationStoreLockEvent,
+        ObservationStoreLockTimeout,
+    )
+
+    facts: dict[str, object] = {
+        "scope": "process",
+        "waited_ms": 1_931,
+        "holder_role": "sweep",
+        "holder_phase": "bump_outbox_row_attempt",
+        "holder_held_ms": 1_204,
+        "holder_waiting": False,
+    }
+    facts.update(overrides)
+    return ObservationStoreLockEvent(
+        kind="timeout",
+        role="hook",
+        phase="handle_observe",
+        timeout=ObservationStoreLockTimeout(**facts),  # type: ignore[arg-type]
+    )
+
+
+def test_store_lock_rows_name_the_holder_and_count_as_reasons(tmp_path: Path) -> None:
+    """#689: a lock timeout is named with its holder, never folded into `observe`."""
+
+    from yoetz.adapters.integrations.observation_local import ObservationStoreLockEvent
+    from yoetz.cli.hook_diagnostics import record_store_lock_event
+
+    assert record_store_lock_event("PreToolUse", _lock_timeout_event(), _state=tmp_path)
+    assert record_store_lock_event(
+        "PostToolUse",
+        ObservationStoreLockEvent(
+            kind="long_hold", role="hook", phase="handle_observe", held_ms=1_500
+        ),
+        _state=tmp_path,
+    )
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "observation/hook-diagnostics.jsonl").read_text().splitlines()
+    ]
+    assert rows[0]["kind"] == "store_lock"
+    assert {key: rows[0][key] for key in rows[0] if key != "ts"} == {
+        "event": "PreToolUse",
+        "holder_held_ms": 1_204,
+        "holder_phase": "bump_outbox_row_attempt",
+        "holder_role": "sweep",
+        "holder_waiting": False,
+        "kind": "store_lock",
+        "phase": "handle_observe",
+        "reason": "store_lock_timeout",
+        "role": "hook",
+        "scope": "process",
+        "waited_ms": 1_931,
+    }
+    summary = hook_diagnostic_summary(_state=tmp_path)
+    reasons = cast(Mapping[str, Mapping[str, object]], summary["reasons"])
+    assert reasons["store_lock_timeout"]["count"] == 1
+    assert reasons["store_lock_long_hold"]["count"] == 1
+    events = cast(tuple[Mapping[str, object], ...], summary["store_lock_events"])
+    assert [event["reason"] for event in events] == ["store_lock_timeout", "store_lock_long_hold"]
+    assert events[1]["holder_held_ms"] == 1_500 and events[1]["scope"] is None
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        {"holder_role": "/example/private"},
+        {"holder_role": []},
+        {"holder_phase": "rm -rf"},
+        {"holder_phase": "A" * 65},
+        {"scope": "network"},
+        {"scope": {}},
+        {"holder_waiting": "no"},
+    ),
+)
+def test_store_lock_rows_refuse_open_values(tmp_path: Path, overrides: dict[str, object]) -> None:
+    from yoetz.cli.hook_diagnostics import record_store_lock_event
+
+    assert not record_store_lock_event(
+        "PreToolUse", _lock_timeout_event(**overrides), _state=tmp_path
+    )
+    assert not (tmp_path / "observation/hook-diagnostics.jsonl").exists()
+
+
+def test_tampered_store_lock_rows_are_dropped_on_read(tmp_path: Path) -> None:
+    from yoetz.cli.hook_diagnostics import record_store_lock_event
+
+    assert record_store_lock_event("PreToolUse", _lock_timeout_event(), _state=tmp_path)
+    path = tmp_path / "observation/hook-diagnostics.jsonl"
+    row = json.loads(path.read_text())
+    tampered = [
+        {**row, "holder_phase": "../secret"},
+        {**row, "extra": "payload"},
+        {**row, "reason": "store_lock_long_hold"},
+        {**row, "waited_ms": -1},
+    ]
+    invalid_values: tuple[object, ...] = ([], {})
+    tampered.extend(
+        {**row, field: value}
+        for field in ("reason", "event", "role", "holder_role", "scope")
+        for value in invalid_values
+    )
+    with path.open("a", encoding="utf-8") as handle:
+        for item in tampered:
+            handle.write(json.dumps(item) + "\n")
+    summary = hook_diagnostic_summary(_state=tmp_path)
+    assert len(cast(tuple[object, ...], summary["store_lock_events"])) == 1
+    reasons = cast(Mapping[str, Mapping[str, object]], summary["reasons"])
+    assert reasons["store_lock_timeout"]["count"] == 1

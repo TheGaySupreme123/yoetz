@@ -27,7 +27,12 @@ try:
 except ImportError:  # pragma: no cover - supported hook hosts are POSIX
     fcntl = None  # type: ignore[assignment]
 
-__all__ = ["hook_diagnostic_summary", "record_hook_diagnostic", "record_hook_timing"]
+__all__ = [
+    "hook_diagnostic_summary",
+    "record_hook_diagnostic",
+    "record_hook_timing",
+    "record_store_lock_event",
+]
 
 _MAX_DIAGNOSTIC_BYTES: Final = 64 * 1024
 _FILE_NAME: Final = "hook-diagnostics.jsonl"
@@ -185,6 +190,13 @@ _REASONS: Final = frozenset(
         # policy was applied but the host now serves strict (or vice versa),
         # so a fresh Codex process is still on the old route (issue #537).
         "registration_drift",
+        # A bounded wait for the shared observation-store lock expired in this
+        # pass, and a critical section that held the lock unusually long
+        # (issue #689). Both come with a `store_lock` row naming the holder's
+        # role and store phase; before these a timeout surfaced as the generic
+        # `observe` token or, at workspace resolution, as `workspace_unconsented`.
+        "store_lock_timeout",
+        "store_lock_long_hold",
     }
 )
 _STAGES: Final = frozenset(
@@ -208,12 +220,37 @@ _STAGES: Final = frozenset(
         # whole pass rather than partitioning any one window.
         "store_encode",
         "store_hydrate",
+        "store_lock_hold",
         "store_lock_wait",
         "store_write",
         "total",
     }
 )
 _MAX_STAGE_MS: Final = 3_600_000
+# Closed ownership vocabulary shared with the observation store's lock
+# (#689). Phases are store operation names, validated to one token shape.
+_STORE_LOCK_ROLES: Final = frozenset(
+    {"cli", "coordinator", "hook", "local", "service", "spool_replay", "sweep", "unknown"}
+)
+_STORE_LOCK_SCOPES: Final = frozenset({"thread", "process"})
+_STORE_LOCK_ROW_KEYS: Final = frozenset(
+    {
+        "event",
+        "holder_held_ms",
+        "holder_phase",
+        "holder_role",
+        "holder_waiting",
+        "kind",
+        "phase",
+        "reason",
+        "role",
+        "scope",
+        "ts",
+        "waited_ms",
+    }
+)
+# The newest store-lock rows reported beside the reason tallies.
+_STORE_LOCK_SUMMARY_ROWS: Final = 16
 # The retained file spans days, so an all-time tally reports a failure that was
 # diagnosed and fixed two days ago exactly like one happening right now (#310).
 # Every count is therefore paired with a recent-window count, and every extreme
@@ -275,6 +312,131 @@ def record_hook_diagnostic(
     ):
         row["candidate_count"] = candidate_count
     _append_row(row, _state=_state)
+
+
+def _store_lock_phase_valid(value: object) -> bool:
+    return (
+        type(value) is str
+        and 0 < len(value) <= 64
+        and value.isascii()
+        and value[0].isalpha()
+        and value.islower()
+        and all(character.isalnum() or character == "_" for character in value)
+    ) or value == "unknown"
+
+
+def _bounded_ms(value: object) -> int | None:
+    if type(value) is not int or value < 0:
+        return None
+    return min(value, _MAX_STAGE_MS)
+
+
+def record_store_lock_event(
+    event: str,
+    lock_event: object,
+    *,
+    _state: Path | None = None,
+) -> bool:
+    """Append one payload-free store-lock ownership row for a hook pass (#689).
+
+    ``lock_event`` is the store's ``ObservationStoreLockEvent``. Only closed
+    roles, validated phase tokens, a scope, booleans and bounded millisecond
+    counts are kept; a malformed event records nothing.
+    """
+
+    kind = getattr(lock_event, "kind", None)
+    role = getattr(lock_event, "role", None)
+    phase = getattr(lock_event, "phase", None)
+    if type(role) is not str or role not in _STORE_LOCK_ROLES or not _store_lock_phase_valid(phase):
+        return False
+    row: dict[str, object] = {
+        "event": _closed(event, _EVENTS, "unknown_event"),
+        "kind": "store_lock",
+        "phase": phase,
+        "role": role,
+        "ts": _timestamp(),
+        "holder_role": None,
+        "holder_phase": None,
+        "holder_held_ms": None,
+        "holder_waiting": None,
+        "scope": None,
+        "waited_ms": None,
+    }
+    if kind == "timeout":
+        timeout = getattr(lock_event, "timeout", None)
+        holder_role = getattr(timeout, "holder_role", None)
+        holder_phase = getattr(timeout, "holder_phase", None)
+        scope = getattr(timeout, "scope", None)
+        waiting = getattr(timeout, "holder_waiting", None)
+        if (
+            type(holder_role) is not str
+            or holder_role not in _STORE_LOCK_ROLES
+            or not _store_lock_phase_valid(holder_phase)
+            or type(scope) is not str
+            or scope not in _STORE_LOCK_SCOPES
+            or type(waiting) is not bool
+        ):
+            return False
+        row.update(
+            {
+                "reason": "store_lock_timeout",
+                "holder_role": holder_role,
+                "holder_phase": holder_phase,
+                "holder_held_ms": _bounded_ms(getattr(timeout, "holder_held_ms", None)),
+                "holder_waiting": waiting,
+                "scope": scope,
+                "waited_ms": _bounded_ms(getattr(timeout, "waited_ms", None)),
+            }
+        )
+    elif kind == "long_hold":
+        held = _bounded_ms(getattr(lock_event, "held_ms", None))
+        if held is None:
+            return False
+        row.update({"reason": "store_lock_long_hold", "holder_held_ms": held})
+    else:
+        return False
+    return _append_row(row, _state=_state)
+
+
+def _store_lock_row(row: Mapping[str, object]) -> JsonObject | None:
+    """Validate one retained store-lock row read back from the mutable file."""
+
+    if frozenset(row) != _STORE_LOCK_ROW_KEYS or row.get("kind") != "store_lock":
+        return None
+    # The file is mutable: reject containers before any set membership lookup.
+    if any(type(row.get(key)) is not str for key in ("reason", "event", "role")):
+        return None
+    reason = row.get("reason")
+    if reason not in {"store_lock_timeout", "store_lock_long_hold"}:
+        return None
+    if row.get("event") not in _EVENTS and row.get("event") != "unknown_event":
+        return None
+    if row.get("role") not in _STORE_LOCK_ROLES or not _store_lock_phase_valid(row.get("phase")):
+        return None
+    stamp = row.get("ts")
+    if type(stamp) is not str or _parse_timestamp(stamp) is None:
+        return None
+    held = row.get("holder_held_ms")
+    if held is not None and _bounded_ms(held) != held:
+        return None
+    if reason == "store_lock_timeout":
+        waited = row.get("waited_ms")
+        if (
+            type(row.get("holder_role")) is not str
+            or row.get("holder_role") not in _STORE_LOCK_ROLES
+            or not _store_lock_phase_valid(row.get("holder_phase"))
+            or type(row.get("scope")) is not str
+            or row.get("scope") not in _STORE_LOCK_SCOPES
+            or type(row.get("holder_waiting")) is not bool
+            or (waited is not None and _bounded_ms(waited) != waited)
+        ):
+            return None
+    elif held is None or any(
+        row.get(key) is not None
+        for key in ("holder_role", "holder_phase", "holder_waiting", "scope", "waited_ms")
+    ):
+        return None
+    return JsonObject(cast(dict[str, JsonValue], dict(row)))
 
 
 def record_drain_failure(
@@ -549,12 +711,18 @@ class _Timings:
 
 def _read_rows(
     directory: Path,
-) -> tuple[list[dict[str, str]], list[tuple[int, str, str | None]], list[JsonObject]]:
-    """Return retained failure rows and timing rows, oldest retained file first."""
+) -> tuple[
+    list[dict[str, str]],
+    list[tuple[int, str, str | None]],
+    list[JsonObject],
+    list[JsonObject],
+]:
+    """Return retained failure, timing, drain and store-lock rows, oldest file first."""
 
     rows: list[dict[str, str]] = []
     timings: list[tuple[int, str, str | None]] = []
     attempts: list[JsonObject] = []
+    locks: list[JsonObject] = []
     try:
         ensure_owner_only_dir(directory)
         for path in (
@@ -583,6 +751,20 @@ def _read_rows(
                 if type(parsed) is not dict:
                     continue
                 row = cast(dict[str, object], parsed)
+                if row.get("kind") == "store_lock":
+                    lock_row = _store_lock_row(row)
+                    if lock_row is not None:
+                        locks.append(lock_row)
+                        # The reason also counts toward the ordinary tallies, so a
+                        # contended store is visible where every other failure is.
+                        rows.append(
+                            {
+                                "event": cast(str, row["event"]),
+                                "reason": cast(str, row["reason"]),
+                                "ts": cast(str, row["ts"]),
+                            }
+                        )
+                    continue
                 if row.get("kind") == "drain_failure":
                     allowed = {
                         "kind",
@@ -688,8 +870,8 @@ def _read_rows(
                     }
                 )
     except OSError, PathSafetyError:
-        return [], [], []
-    return rows, timings, attempts
+        return [], [], [], []
+    return rows, timings, attempts, locks
 
 
 def hook_diagnostic_summary(
@@ -705,7 +887,7 @@ def hook_diagnostic_summary(
     """
 
     root = state_dir() if _state is None else _state
-    rows, timings, attempts = _read_rows(root / "observation")
+    rows, timings, attempts, locks = _read_rows(root / "observation")
     now = datetime.now(UTC) if _now is None else _now.astimezone(UTC)
     horizon = now - timedelta(seconds=_RECENT_WINDOW_SECONDS)
     overall = _Recency()
@@ -744,6 +926,9 @@ def hook_diagnostic_summary(
                 }
             ),
             "recent_count": overall.recent,
+            # Newest payload-free ownership facts for lock timeouts and long
+            # holds: which role and store phase held the lock, and for how long.
+            "store_lock_events": tuple(locks[-_STORE_LOCK_SUMMARY_ROWS:]),
             "timings": timing.as_json(),
             "window_seconds": _RECENT_WINDOW_SECONDS,
         }

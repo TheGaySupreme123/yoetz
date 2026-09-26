@@ -31,6 +31,7 @@ from yoetz.domain.observation_loss import ObservationSelectionLoss
 from yoetz.domain.values import Timestamp
 from yoetz.kernel.policies.observation_advice import ObservationCheckFact
 from yoetz.ports.objects import ObjectRef
+from yoetz.ports.observation_errors import ObservationStoreLockTimeout
 
 __all__ = [
     "AdviceItem",
@@ -54,6 +55,7 @@ __all__ = [
     "ObservationSource",
     "ObservationStatus",
     "ObservationStatusQuery",
+    "ObservationStoreLockTimeout",
     "TaskObservationPort",
     "observation_earns_hook_observed",
     "workspace_commitment_from_path",

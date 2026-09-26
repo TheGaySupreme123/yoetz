@@ -23,7 +23,9 @@ explicit); 2026-09-06 for the native capture handoff and FIFO/check barrier cont
 for the source-qualified, profileless Codex hook capture handoff and its independent AI-powered review
 selection fence; 2026-09-25 for issue #836 (a handoff its own structural row can no longer consume
 is retired at delivery, by the READY sweep, or at the CHECK preflight, and drains send a content
-profile only with their own host's rows).
+profile only with their own host's rows); 2026-09-26 for the reopened issue #689 (shared-store
+contention: observable lock ownership, lock-free committed reads, host-window lock budgets,
+change-proportional critical sections, and non-overlapping sweep settlement, decision 23).
 **Implemented by:** `src/yoetz/application/observation_materialize.py`,
 `src/yoetz/application/observation_coordinator.py`, `src/yoetz/cli/observe_hooks.py`,
 `src/yoetz/adapters/memory/ledger.py`,
@@ -563,6 +565,35 @@ limits remain in the host integration runbooks.
     source, correlation, task/session, authority-generation, multipart, cancellation, restart, and
     retry fences. Metadata-only objects, a successful structural receipt, or a typed MCP result
     alone do not prove that native Codex bytes became eligible provider input.
+
+23. The owner-private local observation store stays one atomically replaced JSON document per
+    workspace behind one process-local lock and one cross-process flock, and concurrent native
+    hosts, their delegates and the service share it without the lock becoming the bottleneck
+    (issue #689). Reads take no lock: an atomic replace makes every read observe exactly one
+    committed version, never another writer's open transaction, and a read-mostly operation that
+    reaches a write reruns under the lock. Writers keep one transaction per hook capture and one per
+    answered sweep row (attempt, coverage gap, lane reason and acknowledgement or quarantine
+    together, after the service answered), and both parse the committed document before queueing for
+    the cross-process flock (under the process-local lock, so in-process arrival order is kept).
+    Immutable envelopes, outbox rows and quarantine entries are encoded once per process and
+    spliced as canonical fragments, and a re-read after another writer's commit neither
+    re-validates nor re-decodes an envelope whose equal JSON the process already validated, so a
+    critical section is proportional to what changed; persisted bytes are identical to inline
+    encoding, and a re-read accepts exactly the documents whole-document validation accepts. Each acquisition keeps its two-second
+    cap, and a caller may shorten it with one deadline for its whole scope: a hook pass is bounded by
+    its rendered host window rather than by two seconds per call, and a sweep by its pass budget. The
+    depth-one flock holder stamps a closed role, a code-identifier phase and its monotonic start into
+    the lock file; a timed-out waiter reports them in `ObservationStoreLockTimeout`, and hooks and
+    the service record timeouts and holds of a second or more as payload-free diagnostics. A
+    contended hook capture fails open with `store_lock_timeout` and does not retain that input; a
+    contended sweep stops with `observation_store_busy`, and an answered row whose settlement lost
+    the race stays pending and replays as a duplicate; a contended pre-admission loss reconciliation
+    refuses the CHECK retryably as `acquisition_contended` instead of failing it internally. A
+    cancelled sweep cannot stop a worker already inside the store, so the next pass waits for such a
+    worker and otherwise yields rather than overlapping it. This decision does not change the
+    document format, retention priority, protected pending rows, loss commitments, pairing,
+    ordering, or commit-before-acknowledge; an append-oriented representation remains the
+    alternative if a measured workload still saturates the serialized write.
 
 ## Security and privacy consequences
 

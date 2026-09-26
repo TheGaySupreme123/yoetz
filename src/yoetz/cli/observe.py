@@ -36,6 +36,7 @@ from yoetz.adapters.integrations.codex_session_stream import (
 from yoetz.adapters.integrations.observation_local import (
     LocalObservationStore,
     ObservationOutboxRow,
+    observation_store_lock_scope,
 )
 from yoetz.adapters.workspace_binding import canonical_workspace_locator
 from yoetz.application.observation_check_policy import load_observation_check_policy
@@ -379,7 +380,9 @@ def _bounded_operation(operation: str) -> Callable[[Callable[_P, int]], Callable
         def wrapped(*args: _P.args, **kwargs: _P.kwargs) -> int:
             json_output = kwargs.get("json_output", False) is True
             try:
-                return function(*args, **kwargs)
+                # Attribute any store-lock hold or wait to this command (#689).
+                with observation_store_lock_scope(role="cli"):
+                    return function(*args, **kwargs)
             except ValueError as error:
                 if str(error) != _WORKSPACE_LOCATOR_INVALID:
                     raise

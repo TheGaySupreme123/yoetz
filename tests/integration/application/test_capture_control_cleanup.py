@@ -471,6 +471,42 @@ async def test_check_reconciles_once_after_capture_barrier_before_retrying_freez
 
 
 @pytest.mark.anyio
+async def test_store_contention_during_capture_reconciliation_keeps_the_typed_refusal() -> None:
+    """#689: a contended local store leaves the capture barrier's own retryable refusal."""
+
+    from yoetz.ports.ledger import CheckAdmissionStage, check_admission_refused
+    from yoetz.ports.observation import ObservationStoreLockTimeout
+
+    app = _CheckApp()
+    refusal = check_admission_refused(CheckAdmissionStage.CAPTURE_HANDOFF_PENDING)
+    freezes = 0
+
+    async def refused(*args: object) -> object:
+        nonlocal freezes
+        del args
+        freezes += 1
+        raise refusal
+
+    async def contended(_runtime: object) -> None:
+        raise ObservationStoreLockTimeout(
+            scope="process",
+            waited_ms=2_000,
+            holder_role="hook",
+            holder_phase="handle_observe",
+            holder_held_ms=2_400,
+        )
+
+    app.ledger.freeze_case = refused  # type: ignore[method-assign]
+    setattr(app, "reconcile_observation_capture", contended)
+    with pytest.raises(PublicOperationError) as caught:
+        await _execute_check_commit(app, _check_request())
+    assert caught.value is refusal
+    assert caught.value.retryable
+    assert freezes == 1
+    assert app.ledger.operation is None
+
+
+@pytest.mark.anyio
 async def test_completed_check_replay_skips_capture_reconciliation() -> None:
     """An idempotent replay returns before inspecting newer capture tickets."""
 
