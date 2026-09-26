@@ -1304,3 +1304,16 @@ bootstrap. A later successful mapping permits their normal drain. Missing transi
 remains a coverage gap; a recovered queue is not recovered content. Existing host/OS capability
 and consent requirements still apply. Automated host-contract tests do not establish native
 macOS, Linux, or Windows/WSL 2 acceptance. Native cold-start coverage remains tracked in #670.
+
+## Repairing an accepted empty-scope claim (#859)
+
+Use the shared `publish_work` operation (CLI: `publish-work`) and
+[claim correction guidance](../../guidance/publication-policy.md#claim-correction-and-limitation-linkage).
+Publish `claim_recorded/1.1.0` with a fresh claim ID, explicit `obligation_refs`, and every replaced
+claim ID in sorted `supersedes_claim_refs`. An empty-scope target needs no overlap; each populated
+target still does. For an empty C0 plus scoped C1, replace both in C2. Preview the exact batch first,
+then append, recheck and request a receipt. History and unresolved evidence/review limits remain.
+New completion claims must declare scope explicitly; obligation support is not scope. Intentional
+`[]` remains coverage-incomplete and cannot carry obligation support. No host hook invents scope or
+performs this repair. The shared service behavior applies on macOS, Linux and Windows through WSL 2;
+source tests do not establish native host/platform acceptance.
