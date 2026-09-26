@@ -1,7 +1,6 @@
 """Advisory for an AI-powered ``check`` that a host's automatic reviewer held (issue #857).
 
-Claude Code's ``PermissionDenied`` hook fires after auto mode (or a permission rule or another
-hook) denies a tool call. Until this module the Yoetz hook recorded one payload-free diagnostic
+Claude Code's ``PermissionDenied`` hook fires after auto mode denies a tool call. Until this module the Yoetz hook recorded one payload-free diagnostic
 and said nothing, so the agent saw only the host's fixed refusal text and routinely downgraded a
 review the owner had already authorized in the trusted privacy ceremony (issues #187, #467).
 
@@ -23,11 +22,15 @@ import contextlib
 import hashlib
 import json
 import os
+import stat
+import tempfile
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal, Protocol, cast
+
+import anyio
 
 from yoetz.config.paths import ensure_owner_only_dir, state_dir
 from yoetz.domain.values import JsonObject
@@ -47,6 +50,7 @@ __all__ = [
     "HostHoldFacts",
     "PrivacyConnector",
     "RetryOfferOutcome",
+    "classifier_verdict_present",
     "compose_host_hold_advisory",
     "grant_from_setup",
     "note_retry_offer",
@@ -64,7 +68,6 @@ type GrantReadReason = Literal[
     "workspace_unbound",
 ]
 type RetryOfferOutcome = Literal["first", "repeat", "unrecorded"]
-type HoldSource = Literal["auto_mode", "permission_rule", "hook"]
 
 # The privacy read must fit inside the rendered 5 s PermissionDenied hook timeout together with
 # process start, the admission file read, and the stdout write.
@@ -91,13 +94,14 @@ GRANT_REASONS: Final = frozenset(
 _ADMISSION_COMMAND: Final = "yoetz integrate claude admission grant"
 _PRIVACY_COMMAND: Final = "yoetz --privacy"
 
-# --- Model-visible texts (``hookSpecificOutput.additionalContext``). Fixed; closed tokens only.
+# --- User-visible explanations. PermissionDenied does not support additionalContext.
 
 _CONFIRMED_PREFIX: Final = (
     "Yoetz confirms: the repository owner already authorized external AI-powered review for this "
     "repository through the trusted Yoetz privacy ceremony (repository grant present, external "
     "review permitted). Claude Code's automatic reviewer held this check; Yoetz did not, and no "
-    "provider dispatch occurred."
+    "provider dispatch occurred for this denied invocation. The MCP route and all remaining "
+    "Yoetz gates still apply."
 )
 _CONFIRMED_RETRY: Final = (
     " Retry the identical check exactly once now: same request body and request_id. If the host "
@@ -108,7 +112,7 @@ _CONFIRMED_NO_RETRY: Final = (
     "request_id) for the user's approval and wait."
 )
 _CONFIRMED_NO_VERDICT: Final = (
-    " Claude Code produced no classifier verdict for this call, so the host ignores a retry: "
+    " A classifier verdict was not established for this call, so no retry is offered: "
     "stop and present this exact check (same request body and request_id) for the user's "
     "approval and wait."
 )
@@ -120,14 +124,14 @@ _PENDING_RULES: Final = (
 _RULE_HELD: Final = (
     "Yoetz: the owner's own Claude Code permission rule or another hook held this AI-powered "
     "check, not the auto-mode classifier. Do not retry. Present this exact check (same request "
-    "body and request_id) for the user's decision and wait. No provider dispatch occurred."
+    "body and request_id) for the user's decision and wait. No provider dispatch occurred for this denied invocation."
     + _PENDING_RULES
 )
 _UNCONFIRMED_PREFIX: Final = (
     "Yoetz could not confirm a repository grant for external AI-powered review for this "
-    "repository (reason: {reason}). Treat this hold as unauthorized: do not retry on your own. "
+    "repository (reason: {reason}). Authorization remains unconfirmed: do not retry on your own. "
     "Present this exact check (same request body and request_id) for the user's decision and "
-    "wait. No provider dispatch occurred."
+    "wait. No provider dispatch occurred for this denied invocation."
 )
 _ADMISSION_NOTES: Final[Mapping[str, str]] = {
     "absent": (
@@ -151,36 +155,6 @@ _ADMISSION_NOTES: Final[Mapping[str, str]] = {
 }
 _GRANT_ABSENT_NOTE: Final = (
     " The owner can authorize external review for this repository with '" + _PRIVACY_COMMAND + "'."
-)
-
-# --- User-visible texts (``systemMessage``; the host shows them, the model does not see them).
-
-_SYSTEM_CONFIRMED_RETRY: Final = (
-    "Yoetz: you already authorized AI-powered review for this repository ("
-    + _PRIVACY_COMMAND
-    + "). "
-    "Claude Code's auto mode held the check; Yoetz did not, and nothing was sent. The agent may "
-    "retry once; approve it if Claude Code prompts you. To stop these holds, run '"
-    + _ADMISSION_COMMAND
-    + " --project-root <repository root>'."
-)
-_SYSTEM_CONFIRMED_NO_RETRY: Final = (
-    "Yoetz: you already authorized AI-powered review for this repository ("
-    + _PRIVACY_COMMAND
-    + "). "
-    "Claude Code's auto mode held the check again; nothing was sent. Decide on the held call "
-    "when Claude Code asks. To stop these holds, run '"
-    + _ADMISSION_COMMAND
-    + " --project-root <repository root>'."
-)
-_SYSTEM_RULE_HELD: Final = (
-    "Yoetz: your own Claude Code permission rule held an AI-powered check. Nothing was sent. "
-    "Decide on the call when Claude Code asks."
-)
-_SYSTEM_UNCONFIRMED: Final = (
-    "Yoetz: Claude Code held an AI-powered check and Yoetz could not confirm a repository grant "
-    "for external review (reason: {reason}). Nothing was sent. Decide on the held call when "
-    "Claude Code asks; '" + _PRIVACY_COMMAND + "' reviews this repository's policy."
 )
 
 
@@ -212,8 +186,7 @@ class HostHoldFacts:
 class HostHoldAdvisory:
     """What the hook says and does about one held check."""
 
-    additional_context: str
-    system_message: str
+    explanation: str
     retry: bool
     diagnostic: Literal[
         "host_denial_retry_offered",
@@ -266,21 +239,21 @@ def _grant_from_control_error(error: ControlError) -> GrantReadReason:
 
 
 async def _read_grant(connect: PrivacyConnector) -> GrantReadReason:
-    client: _PrivacyClient | None = None
+    # Bound connection/handshake, request, and cleanup together, not just the RPC.
     try:
-        client = await connect(ControlClientKind.CLI)
-        effective = await client.privacy_get_setup(
-            JsonObject({"schema_version": "2.0.0"}), deadline_ms=GRANT_READ_DEADLINE_MS
-        )
+        with anyio.fail_after(GRANT_READ_DEADLINE_MS / 1_000):
+            client = await connect(ControlClientKind.CLI)
+            try:
+                effective = await client.privacy_get_setup(
+                    JsonObject({"schema_version": "2.0.0"}), deadline_ms=GRANT_READ_DEADLINE_MS
+                )
+            finally:
+                await client.close()
+        return grant_from_setup(effective)
     except ControlError as error:
         return _grant_from_control_error(error)
     except Exception:
         return "service_unavailable"
-    finally:
-        if client is not None:
-            with contextlib.suppress(Exception):
-                await client.close()
-    return grant_from_setup(effective)
 
 
 def _admission_state(workspace_locator: str | None) -> str:
@@ -314,7 +287,7 @@ def read_host_hold_facts(
     admission = _admission_state(workspace_locator)
     if skip_service:
         return HostHoldFacts("service_skipped", admission)
-    if workspace_locator is None and connect is None:
+    if workspace_locator is None:
         return HostHoldFacts("workspace_unbound", admission)
     if connect is None:
         from yoetz.cli.hooks import bound_connector
@@ -336,80 +309,128 @@ def _retry_key(session_id: str) -> str:
     return digest.hexdigest()
 
 
-def _load_retry_ledger(path: Path) -> dict[str, int]:
+def _private_regular_file(descriptor: int) -> bool:
+    facts = os.fstat(descriptor)
+    return (
+        stat.S_ISREG(facts.st_mode)
+        and facts.st_uid == os.getuid()
+        and stat.S_IMODE(facts.st_mode) == 0o600
+        and facts.st_nlink == 1
+    )
+
+
+def _load_retry_ledger(path: Path) -> dict[str, int] | None:
     try:
-        if path.is_symlink():
-            return {}
-        raw = path.read_bytes()
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC)
     except FileNotFoundError:
         return {}
+    try:
+        if not _private_regular_file(descriptor):
+            return None
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            raw = stream.read(_MAX_RETRY_FILE_BYTES + 1)
+    finally:
+        os.close(descriptor)
     if len(raw) > _MAX_RETRY_FILE_BYTES:
-        return {}
+        return None
     try:
         parsed = json.loads(raw.decode("utf-8"))
     except UnicodeDecodeError, ValueError:
-        return {}
+        return None
     if not isinstance(parsed, dict):
-        return {}
+        return None
+    if len(cast(dict[object, object], parsed)) > _MAX_RETRY_ENTRIES:
+        return None
     ledger: dict[str, int] = {}
     for key, value in cast(dict[object, object], parsed).items():
-        if type(key) is str and len(key) == 64 and type(value) is int and value >= 0:
-            ledger[key] = value
+        if (
+            type(key) is not str
+            or len(key) != 64
+            or any(char not in "0123456789abcdef" for char in key)
+            or type(value) is not int
+            or value < 0
+        ):
+            return None
+        ledger[key] = value
     return ledger
 
 
 def note_retry_offer(
     session_id: str, *, _state: Path | None = None, _now_ms: int | None = None
 ) -> RetryOfferOutcome:
-    """Record that this session was offered its one retry; say whether it already had one.
+    """Durably reserve at most one retry per session, failing closed on uncertainty.
 
-    ``first`` means the offer was recorded now and a retry may be emitted. ``repeat`` means this
-    session already received its retry, so the hold goes to the human. ``unrecorded`` means the
-    ledger could not be written: exactly-once cannot be guaranteed, so no retry is emitted.
-    Keys are domain-separated digests of the host session id; the id itself is never stored.
+    A full or damaged ledger never forgets a prior offer. At capacity, new sessions need
+    human approval. Lock contention also returns immediately without offering a retry.
     """
 
+    if fcntl is None:
+        return "unrecorded"
     root = state_dir() if _state is None else _state
     directory = root / "observation"
     path = directory / _RETRY_FILE_NAME
     lock_path = directory / _RETRY_LOCK_NAME
     key = _retry_key(session_id)
     now_ms = _now_ms if _now_ms is not None else int(time.time() * 1000)
+    temporary: Path | None = None
     try:
         ensure_owner_only_dir(directory)
-        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
-        flags |= getattr(os, "O_NOFOLLOW", 0)
+        flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
         lock_descriptor = os.open(lock_path, flags, 0o600)
         try:
-            os.fchmod(lock_descriptor, 0o600)
-            if fcntl is not None:
-                fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
+            if not _private_regular_file(lock_descriptor):
+                return "unrecorded"
+            fcntl.flock(lock_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
             ledger = _load_retry_ledger(path)
+            if ledger is None:
+                return "unrecorded"
             if key in ledger:
                 return "repeat"
+            if len(ledger) >= _MAX_RETRY_ENTRIES:
+                return "unrecorded"
             ledger[key] = now_ms
-            while len(ledger) > _MAX_RETRY_ENTRIES:
-                oldest = min(ledger, key=lambda item: (ledger[item], item))
-                del ledger[oldest]
             encoded = json.dumps(ledger, separators=(",", ":"), sort_keys=True).encode("utf-8")
-            temporary = directory / f".{_RETRY_FILE_NAME}.{os.getpid()}.tmp"
-            descriptor = os.open(
-                temporary,
-                os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_CLOEXEC", 0),
-                0o600,
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=".host-hold-retries-", dir=directory
             )
-            try:
-                os.fchmod(descriptor, 0o600)
-                os.write(descriptor, encoded)
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
+            temporary = Path(temporary_name)
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(encoded)
+                stream.flush()
+                os.fsync(stream.fileno())
             os.replace(temporary, path)
+            directory_descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
             return "first"
         finally:
             os.close(lock_descriptor)
     except Exception:
         return "unrecorded"
+    finally:
+        if temporary is not None:
+            with contextlib.suppress(OSError):
+                temporary.unlink(missing_ok=True)
+
+
+def classifier_verdict_present(source: object, reason: object) -> bool:
+    """Recognize the host's denial forms without echoing its untrusted reason prose.
+
+    Current Claude omits source; older adapters supply auto_mode. Unknown sources and
+    missing reasons cannot establish a classifier verdict. Keep the historical token too.
+    """
+
+    return (
+        source in (None, "auto_mode")
+        and type(reason) is str
+        and bool(reason.strip())
+        and reason not in {"no_verdict", "Classifier unavailable"}
+        and not reason.startswith(
+            "Auto mode could not evaluate this action and is blocking it for safety"
+        )
+    )
 
 
 def compose_host_hold_advisory(
@@ -421,59 +442,41 @@ def compose_host_hold_advisory(
 ) -> HostHoldAdvisory:
     """Compose the bounded advisory for one held check from closed inputs only.
 
-    ``source`` and ``reason`` are the host payload's tokens; anything outside the documented
-    closed sets is treated as the auto-mode classifier with a verdict, which is the only reviewer
-    that produces a denial without a source. A retry is emitted only when every gate holds: the
-    grant was confirmed first-hand, the denial came from the classifier with a verdict, and this
-    session has not yet had its one retry.
+    Only a recognized classifier verdict and a durably recorded first offer permit retry.
+    The explanation is user-visible; Claude's event contract carries only the retry flag
+    to the model. Shipped guidance supplies the exact-request and pause rules.
     """
 
-    held_by_rule = source in {"permission_rule", "hook"}
-    no_verdict = reason == "no_verdict"
+    held_by_rule = source in ("permission_rule", "hook")
+    no_verdict = not classifier_verdict_present(source, reason)
     admission_note = _ADMISSION_NOTES.get(facts.admission_state, "")
     if held_by_rule:
         return HostHoldAdvisory(
-            additional_context=_RULE_HELD,
-            system_message=_SYSTEM_RULE_HELD,
+            explanation=_RULE_HELD,
             retry=False,
             diagnostic="host_denial_retry_exhausted",
         )
     if not facts.grant_confirmed:
         note = _GRANT_ABSENT_NOTE if facts.grant == "grant_absent" else ""
         return HostHoldAdvisory(
-            additional_context=(
-                _UNCONFIRMED_PREFIX.format(reason=facts.grant) + _PENDING_RULES + note
-            ),
-            system_message=_SYSTEM_UNCONFIRMED.format(reason=facts.grant),
+            explanation=(_UNCONFIRMED_PREFIX.format(reason=facts.grant) + _PENDING_RULES + note),
             retry=False,
             diagnostic="host_denial_grant_unconfirmed",
         )
     if no_verdict:
         return HostHoldAdvisory(
-            additional_context=_CONFIRMED_PREFIX
-            + _CONFIRMED_NO_VERDICT
-            + _PENDING_RULES
-            + admission_note,
-            system_message=_SYSTEM_CONFIRMED_NO_RETRY,
+            explanation=_CONFIRMED_PREFIX + _CONFIRMED_NO_VERDICT + _PENDING_RULES + admission_note,
             retry=False,
             diagnostic="host_denial_retry_exhausted",
         )
     if retry_offer == "first":
         return HostHoldAdvisory(
-            additional_context=_CONFIRMED_PREFIX
-            + _CONFIRMED_RETRY
-            + _PENDING_RULES
-            + admission_note,
-            system_message=_SYSTEM_CONFIRMED_RETRY,
+            explanation=_CONFIRMED_PREFIX + _CONFIRMED_RETRY + _PENDING_RULES + admission_note,
             retry=True,
             diagnostic="host_denial_retry_offered",
         )
     return HostHoldAdvisory(
-        additional_context=_CONFIRMED_PREFIX
-        + _CONFIRMED_NO_RETRY
-        + _PENDING_RULES
-        + admission_note,
-        system_message=_SYSTEM_CONFIRMED_NO_RETRY,
+        explanation=_CONFIRMED_PREFIX + _CONFIRMED_NO_RETRY + _PENDING_RULES + admission_note,
         retry=False,
         diagnostic=(
             "host_denial_retry_unrecorded"

@@ -235,36 +235,21 @@ def claude_context_output(event_name: str, additional_context: str) -> dict[str,
     return {}
 
 
-def claude_permission_denied_output(
-    additional_context: str,
-    *,
-    retry: bool,
-    system_message: str = "",
-) -> dict[str, JsonValue]:
-    """Return the Claude Code-valid stdout object for one ``PermissionDenied`` advisory.
+def claude_permission_denied_output(system_message: str, *, retry: bool) -> dict[str, JsonValue]:
+    """Render only fields supported by Claude's PermissionDenied event.
 
-    ``hookSpecificOutput.additionalContext`` reaches the model, ``hookSpecificOutput.retry``
-    tells the host the model may retry the denied call (the host ignores it without a classifier
-    verdict), and the common ``systemMessage`` is shown to the user and never to the model
-    (code.claude.com/docs/en/hooks, read 2026-09-26). Exit code 2 is not honored on this event, so
-    JSON is the only channel. Nothing here is a permission decision: the event fires after the
-    denial and can allow nothing (issue #857).
+    The user sees systemMessage; the model receives the host's retry cue only. Unlike
+    several other hook events, PermissionDenied does not accept additionalContext
+    (Claude Code 2.1.281 schema and docs checked 2026-09-26).
     """
 
-    text = additional_context.strip()[:_MAX_CONTEXT_CHARS]
-    if not text:
-        return {}
-    output: dict[str, JsonValue] = {
-        "hookSpecificOutput": {
-            "hookEventName": "PermissionDenied",
-            "additionalContext": text,
-            "retry": retry,
-        }
-    }
     shown = system_message.strip()[:_MAX_CONTEXT_CHARS]
-    if shown:
-        output["systemMessage"] = shown
-    return output
+    if not shown:
+        return {}
+    return {
+        "hookSpecificOutput": {"hookEventName": "PermissionDenied", "retry": retry},
+        "systemMessage": shown,
+    }
 
 
 def cursor_context_output(

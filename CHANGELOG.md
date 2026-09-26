@@ -8,15 +8,13 @@ reverse-chronological released versions.
 
 ### Added
 
-- When Claude Code's auto mode holds an AI-powered `check` in a repository whose privacy grant
-  already permits external review, the Yoetz hook now says so in the chat: the agent is told,
-  authoritatively, that the owner already authorized the review, that the host and not Yoetz held
-  the call, and that nothing was sent, and it may retry the identical check exactly once per
-  session before the decision goes to you; you see a one-line notice naming the durable fix
-  (`yoetz integrate claude admission grant`). Without a confirmed grant, on your own permission
-  rule, or without a classifier verdict there is no retry and the agent asks you. The advisory
-  approves nothing and edits no settings; `yoetz observe status` records what it said. Codex and
-  Cursor publish no denial event, so their agent-side rule keeps the same wording (#857).
+- Claude Code's scoped `PermissionDenied` hook now shows the user a notice based on a fresh
+  repository grant read and may emit the host's one-retry cue. The same request must be preserved;
+  a later hold goes to human approval. No-verdict denials and an unreadable, full or unsafe retry
+  ledger offer no retry. Both structural and ordinary capture profiles carry the notice. Claude
+  does not deliver `additionalContext` on this event, so the model receives only the host's retry
+  cue, not the grant explanation. Shipped guidance keeps grant claims conditional and host approval
+  separate. Live acceptance and the remaining cross-host work stay tracked in #857.
 
 ### Fixed
 

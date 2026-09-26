@@ -54,30 +54,55 @@ def test_retry_ledger_offers_each_session_one_retry_and_stores_only_digests(
     assert oct((tmp_path / "observation").stat().st_mode & 0o777) == "0o700"
 
 
-def test_retry_ledger_is_bounded_and_evicts_the_oldest_offer(tmp_path: Path) -> None:
-    for index in range(70):
+def test_retry_ledger_is_bounded_without_forgetting_previous_offers(tmp_path: Path) -> None:
+    for index in range(64):
         assert (
             advisory.note_retry_offer(f"session-{index}", _state=tmp_path, _now_ms=index) == "first"
         )
     ledger = json.loads((tmp_path / "observation/host-hold-retries.json").read_bytes())
     assert len(ledger) == 64
-    # The six oldest sessions were evicted, so they are offered a retry again; recent ones are not.
-    assert advisory.note_retry_offer("session-0", _state=tmp_path, _now_ms=100) == "first"
-    assert advisory.note_retry_offer("session-69", _state=tmp_path, _now_ms=101) == "repeat"
+    # A full ledger retains old offers and routes new sessions to human approval.
+    assert advisory.note_retry_offer("session-0", _state=tmp_path, _now_ms=100) == "repeat"
+    assert advisory.note_retry_offer("session-new", _state=tmp_path, _now_ms=101) == "unrecorded"
 
 
-def test_retry_ledger_ignores_a_symlinked_or_malformed_file_without_raising(
-    tmp_path: Path,
-) -> None:
+@pytest.mark.parametrize("content", [b"not json", b"x" * 20_000, b'{"bad-key":1}', b"[]"])
+def test_retry_ledger_corruption_never_grants_another_retry(tmp_path: Path, content: bytes) -> None:
     directory = tmp_path / "observation"
     directory.mkdir(mode=0o700)
-    (directory / "host-hold-retries.json").write_text("not json", encoding="utf-8")
-    assert advisory.note_retry_offer("session-A", _state=tmp_path, _now_ms=1) == "first"
-    assert json.loads((directory / "host-hold-retries.json").read_bytes())
-    oversized = directory / "host-hold-retries.json"
-    oversized.write_bytes(b"{" + b'"a":1,' * 4_000 + b"}")
-    assert advisory.note_retry_offer("session-C", _state=tmp_path, _now_ms=2) == "first"
-    assert len(json.loads(oversized.read_bytes())) == 1
+    path = directory / "host-hold-retries.json"
+    path.write_bytes(content)
+    path.chmod(0o600)
+    assert advisory.note_retry_offer("session-A", _state=tmp_path) == "unrecorded"
+    assert path.read_bytes() == content
+
+
+def test_retry_ledger_does_not_follow_links_or_wait_on_fifo(tmp_path: Path) -> None:
+    directory = tmp_path / "observation"
+    directory.mkdir(mode=0o700)
+    target = tmp_path / "target"
+    target.write_bytes(b"{}")
+    target.chmod(0o600)
+    path = directory / "host-hold-retries.json"
+    path.symlink_to(target)
+    assert advisory.note_retry_offer("session-A", _state=tmp_path) == "unrecorded"
+    assert target.read_bytes() == b"{}" and path.is_symlink()
+    path.unlink()
+    os.mkfifo(path, 0o600)
+    assert advisory.note_retry_offer("session-A", _state=tmp_path) == "unrecorded"
+
+
+def test_retry_ledger_lock_contention_does_not_block_hook(tmp_path: Path) -> None:
+    import fcntl
+
+    directory = tmp_path / "observation"
+    directory.mkdir(mode=0o700)
+    descriptor = os.open(directory / ".host-hold-retries.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert advisory.note_retry_offer("session-A", _state=tmp_path) == "unrecorded"
+    finally:
+        os.close(descriptor)
 
 
 def test_retry_ledger_write_failure_is_reported_not_raised(tmp_path: Path) -> None:
@@ -107,25 +132,22 @@ def test_every_composed_advisory_is_bounded_fixed_text_with_closed_tokens_only()
                         )
     assert cases
     for case in cases:
-        rendered = claude_permission_denied_output(
-            case.additional_context, retry=case.retry, system_message=case.system_message
-        )
+        rendered = claude_permission_denied_output(case.explanation, retry=case.retry)
         specific = rendered["hookSpecificOutput"]
         assert isinstance(specific, dict)
-        assert specific["additionalContext"] == case.additional_context
-        assert len(case.additional_context) <= 2_000
-        assert len(case.system_message) <= 2_000
-        assert case.additional_context.startswith("Yoetz")
-        assert case.system_message.startswith("Yoetz:")
-        assert "{" not in case.additional_context and "}" not in case.additional_context
-        assert "no provider dispatch occurred" in case.additional_context.lower()
-        assert "do not switch to deterministic_only" in case.additional_context
+        assert "additionalContext" not in specific
+        assert rendered["systemMessage"] == case.explanation
+        assert len(case.explanation) <= 2_000
+        assert case.explanation.startswith("Yoetz")
+        assert "{" not in case.explanation and "}" not in case.explanation
+        assert "no provider dispatch occurred" in case.explanation.lower()
+        assert "do not switch to deterministic_only" in case.explanation
         # A retry is emitted only with a confirmed grant, a classifier verdict and a first offer.
         if case.retry:
             assert case.diagnostic == "host_denial_retry_offered"
-            assert "Retry the identical check exactly once now" in case.additional_context
+            assert "Retry the identical check exactly once now" in case.explanation
         else:
-            assert "exactly once now" not in case.additional_context
+            assert "exactly once now" not in case.explanation
 
 
 def test_retry_requires_every_gate() -> None:
@@ -170,7 +192,7 @@ def test_retry_requires_every_gate() -> None:
         )
         assert unconfirmed.retry is False
         assert unconfirmed.diagnostic == "host_denial_grant_unconfirmed"
-        assert f"(reason: {grant})" in unconfirmed.additional_context
+        assert f"(reason: {grant})" in unconfirmed.explanation
 
 
 def test_admission_state_steers_the_durable_fix_line() -> None:
@@ -180,7 +202,7 @@ def test_admission_state_steers_the_durable_fix_line() -> None:
             source="auto_mode",
             reason="classifier_denied",
             retry_offer="first",
-        ).additional_context
+        ).explanation
 
     assert "yoetz integrate claude admission grant" in text("absent")
     assert "already carries Claude Code's admission entry" in text("present")
@@ -193,7 +215,7 @@ def test_admission_state_steers_the_durable_fix_line() -> None:
         source="auto_mode",
         reason="classifier_denied",
         retry_offer="first",
-    ).additional_context
+    ).explanation
     assert "admission grant" not in unconfirmed
 
 
@@ -218,31 +240,79 @@ def test_read_facts_fail_soft_to_closed_unread_tokens(tmp_path: Path) -> None:
     assert not failed.grant_confirmed
 
 
-def test_claude_permission_denied_output_shape_bounds_and_blank_handling() -> None:
-    rendered = claude_permission_denied_output(
-        "  advice  ", retry=True, system_message="  shown to the user  "
-    )
-    assert rendered == {
-        "hookSpecificOutput": {
-            "hookEventName": "PermissionDenied",
-            "additionalContext": "advice",
-            "retry": True,
-        },
+def test_claude_permission_denied_output_matches_native_event_schema() -> None:
+    # The installed Claude Code 2.1.281 schema admits retry only for this event.
+    # additionalContext is supported on other events, but silently dropped here.
+    assert claude_permission_denied_output("  shown to the user  ", retry=True) == {
+        "hookSpecificOutput": {"hookEventName": "PermissionDenied", "retry": True},
         "systemMessage": "shown to the user",
     }
-    assert claude_permission_denied_output("advice", retry=False) == {
-        "hookSpecificOutput": {
-            "hookEventName": "PermissionDenied",
-            "additionalContext": "advice",
-            "retry": False,
-        }
-    }
-    assert claude_permission_denied_output("   ", retry=True, system_message="ignored") == {}
-    long = claude_permission_denied_output("x" * 2_500, retry=False, system_message="y" * 2_500)
-    specific = long["hookSpecificOutput"]
-    assert isinstance(specific, dict)
-    assert specific["additionalContext"] == "x" * 2_000
-    assert long["systemMessage"] == "y" * 2_000
+    assert claude_permission_denied_output("   ", retry=True) == {}
+    rendered = claude_permission_denied_output("x" * 2_500, retry=False)
+    assert rendered["systemMessage"] == "x" * 2_000
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "no_verdict",
+        "Classifier unavailable",
+        "",
+        "Auto mode could not evaluate this action and is blocking it for safety: CANARY",
+        None,
+    ],
+)
+def test_current_no_verdict_forms_never_offer_retry(reason: object) -> None:
+    assert not advisory.classifier_verdict_present(None, reason)
+    result = advisory.compose_host_hold_advisory(
+        _facts("grant_confirmed"), source=None, reason=reason, retry_offer="first"
+    )
+    assert not result.retry
+    assert "CANARY" not in result.explanation
+
+
+@pytest.mark.parametrize("phase", ["connect", "request", "close"])
+def test_grant_deadline_bounds_connection_request_and_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    import asyncio
+    from collections.abc import Awaitable, Callable
+
+    import anyio
+
+    monkeypatch.setattr(advisory, "GRANT_READ_DEADLINE_MS", 20)
+
+    class Client:
+        async def privacy_get_setup(
+            self, request: object, *, deadline_ms: int | None = None
+        ) -> object:
+            if phase == "request":
+                await anyio.sleep_forever()
+            return {
+                "grant_state": "granted",
+                "composed_policy": {
+                    "channel_policies": [{"channel": "llm_inference", "enabled": True}]
+                },
+            }
+
+        async def close(self) -> None:
+            if phase == "close":
+                await anyio.sleep_forever()
+
+    async def connect(kind: object) -> Client:
+        if phase == "connect":
+            await anyio.sleep_forever()
+        return Client()
+
+    def run(fn: Callable[[], Awaitable[object]]) -> object:
+        async def bounded() -> object:
+            with anyio.fail_after(1):
+                return await fn()
+
+        return asyncio.run(bounded())
+
+    facts = advisory.read_host_hold_facts(str(tmp_path), connect=connect, run_async=run)
+    assert facts.grant == "service_unavailable"
 
 
 @pytest.mark.skipif(os.name != "posix", reason="owner-only modes are POSIX")
@@ -250,3 +320,24 @@ def test_retry_ledger_lock_file_is_owner_only(tmp_path: Path) -> None:
     advisory.note_retry_offer("session-A", _state=tmp_path, _now_ms=1)
     lock = tmp_path / "observation/.host-hold-retries.lock"
     assert oct(lock.stat().st_mode & 0o777) == "0o600"
+
+
+@pytest.mark.parametrize("source", ["unexpected", {}, ["auto_mode"]])
+def test_unknown_denial_source_never_authorizes_retry(source: object) -> None:
+    result = advisory.compose_host_hold_advisory(
+        _facts("grant_confirmed"), source=source, reason="[Rule]", retry_offer="first"
+    )
+    assert not result.retry
+
+
+def test_injected_connector_cannot_confirm_an_unbound_repository(tmp_path: Path) -> None:
+    def run(fn: object) -> object:
+        pytest.fail("unbound repository must not query a grant")
+
+    async def connect(kind: object) -> object:
+        pytest.fail("unbound repository must not connect")
+
+    result = advisory.read_host_hold_facts(
+        None, connect=cast(advisory.PrivacyConnector, connect), run_async=run
+    )
+    assert result.grant == "workspace_unbound"

@@ -94,9 +94,9 @@ only when review is known to be optional. Keep a strict route's AI-powered revie
 If Cursor asks for MCP approval, preserve the exact proposed request and request ID while it is
 held. Do not retry with a new request, switch to local-only, or use `--approve-mcps` as a
 workaround. Do not change Cursor privacy, auto-run, or MCP settings without the user's decision.
-A hold is not a withheld authorization: the owner already authorized the configured review route
-in the Yoetz privacy ceremony, which Cursor's reviewer cannot see; say so when presenting the held
-call, and propose the owner's `yoetz integrate cursor admission grant` as the durable fix.
+A host hold does not establish the Yoetz grant state. State existing repository authorization
+only after a current first-hand read confirms it; configured routing alone is not consent. For a
+confirmed grant, propose the owner's `yoetz integrate cursor admission grant` as the durable fix.
 
 Capacity and cost changes need a disclosed choice: never choose a larger or uncapped local
 observation capacity for an ordinary task. When the user asks, run `yoetz observe

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import io
 import os
 import re
 import sys
@@ -4793,16 +4794,22 @@ def _record_claude_permission_denied(
     if payload.get("tool_name") not in _CLAUDE_CHECK_TOOL_NAMES:
         return {}
     source = payload.get("source")
-    held_by_rule = source in {"permission_rule", "hook"}
+    held_by_rule = source in ("permission_rule", "hook")
     record_hook_diagnostic(
         "host_permission_rule_denied" if held_by_rule else "host_auto_review_denied",
         "PermissionDenied",
         _state=_state,
     )
+    tool_input = payload.get("tool_input")
+    if isinstance(tool_input, Mapping) and tool_input.get("mode") == "deterministic_only":
+        # This call explicitly opts out of external review; a semantic grant says nothing
+        # about why the host held it. Leave the ordinary host approval path intact.
+        return {}
     from yoetz.cli.hooks import resolve_session_workspace
     from yoetz.cli.host_hold_advisory import (
         PrivacyConnector,
         RetryOfferOutcome,
+        classifier_verdict_present,
         compose_host_hold_advisory,
         note_retry_offer,
         read_host_hold_facts,
@@ -4817,7 +4824,7 @@ def _record_claude_permission_denied(
     )
     session = _token_or_none(payload.get("session_id"))
     retry_offer: RetryOfferOutcome = "unrecorded"
-    if facts.grant_confirmed and not held_by_rule and payload.get("reason") != "no_verdict":
+    if facts.grant_confirmed and classifier_verdict_present(source, payload.get("reason")):
         # The ledger is consulted only when a retry could actually be emitted, so a session
         # whose first hold was unconfirmed or rule-held keeps its one retry for later.
         retry_offer = "unrecorded" if session is None else note_retry_offer(session, _state=_state)
@@ -4830,9 +4837,8 @@ def _record_claude_permission_denied(
     with contextlib.suppress(Exception):
         record_hook_diagnostic(advisory.diagnostic, "PermissionDenied", _state=_state)
     return hook_io.claude_permission_denied_output(
-        advisory.additional_context,
+        advisory.explanation,
         retry=advisory.retry,
-        system_message=advisory.system_message,
     )
 
 
@@ -4923,7 +4929,10 @@ def handle_claude_observe(
             hook_io.stdout_json({}, stdout)
             return 0
         raw_event = event_name or payload.get("hook_event_name")
-        if raw_event == "PermissionDenied" and not ordinary_profile:
+        denied_output: dict[str, JsonValue] | None = None
+        if raw_event == "PermissionDenied" and (
+            not ordinary_profile or payload.get("tool_name") in _CLAUDE_CHECK_TOOL_NAMES
+        ):
             # Not an observation of work: the host refused the call before Yoetz saw it. Retain
             # only a closed reason token; tool input, reason prose, cwd, and ids are discarded.
             # The stdout object is the bounded hold advisory (issue #857), or `{}` for any other
@@ -4940,8 +4949,10 @@ def handle_claude_observe(
                 )
             except Exception:
                 output = {}
-            hook_io.stdout_json(output, stdout)
-            return 0
+            if not ordinary_profile:
+                hook_io.stdout_json(output, stdout)
+                return 0
+            denied_output = output
         if type(raw_event) is not str or raw_event not in event_map:
             hook_io.stdout_json({}, stdout)
             return 0
@@ -5198,10 +5209,10 @@ def handle_claude_observe(
                 # applies to a successful callback carrying child-only transcript metadata: a
                 # success bit does not authorize parent attribution.
                 child_attribution_gap = True
-        return handle_observe(
+        result = handle_observe(
             event_name=event_map[raw_event],
             stdin_bytes=canonical_encode(structural),
-            stdout=stdout,
+            stdout=io.BytesIO() if denied_output is not None else stdout,
             workspace=workspace,
             _state=_state,
             connect=connect,
@@ -5217,6 +5228,9 @@ def handle_claude_observe(
             ),
             _content_payload=payload if ordinary_profile else None,
         )
+        if denied_output is not None:
+            hook_io.stdout_json(denied_output, stdout)
+        return result
     except BaseException:
         with contextlib.suppress(BaseException):
             hook_io.stdout_json({}, stdout)

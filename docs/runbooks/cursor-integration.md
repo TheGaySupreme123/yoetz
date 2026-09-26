@@ -456,8 +456,8 @@ walks from the launch directory to the repository root, so a subdirectory cwd do
 the #187 pause/approval flow, while a held local call has no Yoetz-side denial diagnostic; that
 gap is documented, not diagnosed. The host-hold advisory Claude Code's `PermissionDenied` hook
 emits (issue #857) therefore has no Cursor carrier either: the shipped skill carries the
-agent-side rule with the same wording (the owner's standing authorization, Cursor's visible
-approval control for the exact held call, no downgrade), and admission remains the durable fix.
+agent-side rule (a current grant read before asserting authorization, Cursor's visible approval
+control for the exact held call, no downgrade), and admission remains the durable fix.
 Mirror the Claude ingress if Cursor publishes a post-decision denial event.
 
 ## Upgrading Yoetz under a running service

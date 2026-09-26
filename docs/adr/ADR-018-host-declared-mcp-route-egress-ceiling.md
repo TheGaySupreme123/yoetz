@@ -224,52 +224,42 @@ with no external binding can differ from the independently running service confi
 
 ## Host-hold advisory amendment (2026-09-26, issue #857)
 
-The #467 amendment gave the owner a durable lever (host admission) and gave Yoetz a typed record
-of a Claude Code hold (`host_auto_review_denied`), but the hook that recorded it said nothing.
-Users kept reporting that AI-powered review "was not allowed" in repositories where they had
-completed the privacy ceremony: without admission, or after admission drift, the agent saw only
-the host's fixed refusal and routinely downgraded the review the owner had already authorized.
+The scoped Claude Code `PermissionDenied` hook reads the repository grant through the bound
+service and reports whether external review is permitted. A configured MCP route alone is not
+consent. Decision 5 and the #467 rejections stand: Yoetz emits no allow decision, changes no host
+settings, and never treats its own disclosure grant as host tool-call approval.
 
-Decision 5 and the #467 rejections stand: annotations stay honest, Yoetz ships no hook that
-approves its own tool, and the *agent* still may not assert "the user authorized this" to sway a
-reviewer. What changes is what Yoetz itself says on the one host that publishes a post-decision
-denial event. On a Claude Code `PermissionDenied` for the scoped `check`, the hook reads two
-first-hand facts inside its deadline — whether the repository grant permits external review, from
-the running service over the repository-bound connection, and the host's project-scoped admission
-state — and emits a bounded advisory built only from closed tokens (`cli/host_hold_advisory.py`):
+The supported output is a bounded, fixed-text **user notice** in `systemMessage` and the host's
+`hookSpecificOutput.retry` cue. Claude Code 2.1.281's event schema and handler, checked on
+2026-09-26 alongside the [hooks reference](https://code.claude.com/docs/en/hooks#permissiondenied),
+accept only `retry` inside the event-specific object. They drop `additionalContext`; therefore
+this feature does not claim to deliver the first-hand grant explanation to the model. The shipped
+skill carries the exact-request, one-retry, and pause rules. Higher-priority host instructions and
+explicit human denials always win.
 
-- grant confirmed and the denial came from the auto-mode classifier with a verdict: the model is
-  told, authoritatively, that the owner already authorized this review through the trusted
-  ceremony, that the host and not Yoetz held the call, and that no dispatch occurred; the host's
-  documented `hookSpecificOutput.retry: true` is emitted **once per host session**, recorded in an
-  owner-only digest ledger; the second hold of the same session gets the same confirmation with no
-  retry and the instruction to present the exact call to the human;
-- grant confirmed but `source` is `permission_rule` or `hook`, or `reason` is `no_verdict`: no
-  retry, ask the human (the owner's own rule is never argued with; the host ignores a retry
-  without a verdict);
-- grant not confirmed (`grant_absent|grant_unread|service_unavailable|vault_locked|
-  privacy_authority_required|workspace_unbound|service_skipped`): the hold is treated as
-  unauthorized, no retry, ask the human, reason token disclosed. An unreadable grant is never
-  confirmed.
+A retry is offered only after a confirmed repository grant permits external review, the denial
+has a classifier verdict, and a first offer is durably recorded for that host session. Current
+Claude omits `source`; the legacy `auto_mode` source is also recognized. Unknown sources, empty
+or missing reasons, the legacy `no_verdict` token, `Classifier unavailable`, and the documented
+no-verdict reason prefix produce no retry. Legacy `permission_rule` and `hook` sources remain
+no-retry defenses; current Claude does not fire this event for owner deny rules or manual denials.
+The notice describes no dispatch **for the denied invocation**, not the history of a replayed job.
+The effective MCP route and every other Yoetz gate still apply; this hook does not prove a policy
+route or authorize external dispatch.
 
-Every branch repeats the #187 rules (no `deterministic_only` downgrade, no new semantic job, no
-completion claim or receipt while the decision is pending; host approval permits the tool call
-only) and names the owner's durable fix from the admission state (`admission grant` when absent,
-"already present, check folder trust" when present, "review the wider rule" when foreign). A
-`systemMessage` tells the user the same in one sentence; the host shows it and the model never
-sees it. The hook emits no permission decision — the event fires after the denial and can allow
-nothing — and the retried call goes back through the host's own permission flow. The advisory's
-outcome is recorded beside the hold as `host_denial_retry_offered|retry_exhausted|
-retry_unrecorded|grant_unconfirmed`.
+The grant read has one 2.5 s budget including connection, RPC and cleanup, within the 5 s hook
+budget. Missing workspace binding or unreadable grants cannot become confirmed authorization.
+The owner-only retry ledger stores at most 64 domain-separated session digests. It never evicts
+an offer to admit a new session: a full, malformed, unsafe or contended ledger returns
+`unrecorded` and offers no retry. Temporary writes are exclusive, file and directory are synced,
+and existing files are read through bounded, non-following descriptors. This keeps uncertainty
+from re-enabling retries. The durable owner path remains admission grant/revoke.
 
-Per host: Codex's `PermissionRequest` fires before the decision and Cursor publishes no denial
-event, so neither can carry this advisory; both keep the #187 agent-side rule, whose shipped
-wording now states the owner's standing authorization with the same authority, and both runbooks
-record the gap. A route fact is deliberately not asserted here: reading the Claude route needs
-host roots the hook does not have, and a strict route's retried check is refused by Yoetz itself
-as `blocked_by_policy` / `route_semantic_ceiling`, which is the honest answer.
+The closed diagnostics are `host_denial_retry_offered`, `host_denial_retry_exhausted`,
+`host_denial_retry_unrecorded`, and `host_denial_grant_unconfirmed`. Their vocabulary contains no
+host payload or reason prose. An unreadable grant is reported as unconfirmed, not as revoked.
 
-Rejected: unbounded or per-call retries (a classifier that denies twice has answered; the human
-decides), a retry on the owner's own rule, asserting the grant from provider readiness or an
-unlocked vault instead of reading it, echoing any payload field into the advisory, and writing
-the admission entry from the hook.
+Codex and Cursor lack a supported post-denial event in the reviewed integrations; they retain the
+pause-and-ask rule and conditional grant wording. Live Claude auto-mode acceptance, a supported
+model-visible first-hand notice, policy-route observation before retry, and the cross-host
+SessionStart admission-gap notice remain on #857. This amendment does not certify those cells.

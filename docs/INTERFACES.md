@@ -4554,7 +4554,7 @@ it is host tool-call authorization, so no AI-powered review status is ever infer
 same event records what the hook then said about the hold (issue #857): `host_denial_retry_offered`
 (grant confirmed first-hand, the session's one `retry` emitted), `host_denial_retry_exhausted`
 (grant confirmed but the retry was already spent, the owner's own rule held the call, or the host
-produced no verdict), `host_denial_retry_unrecorded` (the retry ledger could not be written, so no
+produced no verdict), `host_denial_retry_unrecorded` (the retry ledger was full, unsafe, damaged, contended or unwritable, so no
 retry was emitted), or `host_denial_grant_unconfirmed` (the grant could not be read inside the hook
 deadline). Every
 host ingress (Codex, Claude Code, Cursor) that ingests nothing because of workspace binding records
@@ -5783,19 +5783,18 @@ one payload-free `hook_diagnostics` reason, `host_auto_review_denied` (`source` 
 absent) or `host_permission_rule_denied` (`permission_rule|hook`), on the `PermissionDenied`
 event (issue #467), and any other tool name records nothing and emits `{}`. For the scoped
 `check` its stdout is the **host-hold advisory** (`cli/host_hold_advisory.py`, issue #857):
-`hookSpecificOutput.additionalContext` (model-visible, fixed text from closed tokens only, ≤ 2 000
-chars), `hookSpecificOutput.retry` (Claude Code's documented "the model may retry the denied
-call" flag; ignored by the host on `no_verdict`), and `systemMessage` (user-visible, never
-model-visible). `read_host_hold_facts` reads the repository grant through the repository-bound
-service (`privacy_get_setup`, deadline `GRANT_READ_DEADLINE_MS` = 2 500 ms) into a closed
-`GrantReadReason` — `grant_confirmed` only when `grant_state = granted` and the `llm_inference`
-channel is enabled, else `grant_absent|grant_unread|service_unavailable|vault_locked|
-privacy_authority_required|workspace_unbound|service_skipped` — and the host's project-scoped
-admission state from `host_admission_observation`. `note_retry_offer` keeps an owner-only
-`observation/host-hold-retries.json` ledger of domain-separated session-id digests (at most 64,
-oldest evicted) and answers `first|repeat|unrecorded`. `compose_host_hold_advisory` emits
-`retry: true` only for a confirmed grant, a classifier denial with a verdict, and a `first`
-offer; every other branch says stop and present the exact call to the human. The hook emits no
+`hookSpecificOutput.{hookEventName, retry}` and `systemMessage` (user-visible fixed text from
+closed tokens only, ≤ 2 000 chars). Claude Code 2.1.281 drops `additionalContext` on this event;
+the model receives only the host's retry cue. `read_host_hold_facts` reads the repository grant
+through the bound service with one `GRANT_READ_DEADLINE_MS` = 2 500 ms budget covering connection,
+`privacy_get_setup`, and cleanup. `GrantReadReason` is `grant_confirmed` only when `grant_state =
+granted` and `llm_inference` is enabled; other outcomes remain closed unconfirmed reasons.
+`note_retry_offer` uses an owner-only `observation/host-hold-retries.json` ledger of up to 64
+session digests and answers `first|repeat|unrecorded`. Full or damaged ledgers never forget a
+prior offer; unsafe files and lock contention fail closed. `classifier_verdict_present` rejects
+unknown sources, missing reasons, legacy `no_verdict`, the current no-verdict reason prefix and
+`Classifier unavailable`. `compose_host_hold_advisory` emits retry only for a confirmed grant,
+a recognized verdict and a durably recorded first offer. The hook emits no
 permission decision and edits no host file. But the
 `CLAUDE_CODE_HARNESS_PROFILE` hook capability cell advertises no observation events: the recorded
 evidence case observed no accepted observation, so the cell stays unpopulated until each event has

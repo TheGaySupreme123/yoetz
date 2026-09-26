@@ -946,35 +946,35 @@ check as host authorization, never as an AI-powered review status. Yoetz deliber
 `PermissionRequest` hook returning `decision: allow`, which would make the plugin the authority over
 the host's own review.
 
-The same hook is also the one place a hold can be answered on this host (issue #857). Its stdout
-is a bounded advisory: `hookSpecificOutput.additionalContext` for the model,
-`hookSpecificOutput.retry`, and a `systemMessage` the user sees and the model does not
-(`code.claude.com/docs/en/hooks`, re-read 2026-09-26: `retry: true` tells the model it may retry
-the denied call and is ignored when the classifier produced no verdict; exit code 2 is not honored
-on this event). Inside its 5 s budget the hook reads the repository grant through the
-repository-bound service (2.5 s deadline) and the project's `.claude/settings.local.json`
-admission state, and composes fixed text from closed tokens:
+The same scoped hook reports a hold to the user (issue #857). Its stdout has
+`hookSpecificOutput.{hookEventName, retry}` and a bounded `systemMessage`. Claude Code 2.1.281's
+installed schema and handler and the [current reference](https://code.claude.com/docs/en/hooks#permissiondenied)
+were checked on 2026-09-26: `PermissionDenied` drops `additionalContext`. The user sees the
+first-hand notice; the model receives only the host's retry cue, with exact-request and pause
+rules supplied by the shipped skill. Do not claim model-visible grant delivery.
 
-| Facts | Model sees | `retry` | Diagnostic |
+| Facts | User notice | `retry` | Diagnostic |
 | --- | --- | --- | --- |
-| grant confirmed, `source` auto mode (or absent), verdict present, first hold this session | owner already authorized this review through the privacy ceremony; host held it, Yoetz did not, nothing sent; retry the identical check once, then present it to the user | `true` | `host_denial_retry_offered` |
-| same, later hold in the same session | same confirmation; do not retry, present the exact call to the user | `false` | `host_denial_retry_exhausted` |
-| grant confirmed, `reason: no_verdict` | same confirmation; host ignores a retry, present the call | `false` | `host_denial_retry_exhausted` |
-| `source` `permission_rule` or `hook` | the owner's own rule held it; do not retry, ask | `false` | `host_denial_retry_exhausted` |
-| grant not confirmed (`grant_absent`, `grant_unread`, `service_unavailable`, `vault_locked`, `privacy_authority_required`, `workspace_unbound`) | treat the hold as unauthorized; do not retry, ask; reason token named | `false` | `host_denial_grant_unconfirmed` |
-| retry ledger unwritable | confirmation without retry | `false` | `host_denial_retry_unrecorded` |
+| confirmed grant, recognized classifier verdict, first recorded offer this session | external review grant present; this invocation was held; one identical retry may be offered | `true` | `host_denial_retry_offered` |
+| same session already offered a retry | present the exact call for human approval | `false` | `host_denial_retry_exhausted` |
+| no verdict or unknown source/reason | classifier verdict not established; ask the human | `false` | `host_denial_retry_exhausted` |
+| legacy `source` `permission_rule` or `hook` | owner rule held it; ask | `false` | `host_denial_retry_exhausted` |
+| grant absent or unreadable | grant unconfirmed; closed reason named | `false` | `host_denial_grant_unconfirmed` |
+| full, damaged, unsafe, contended or unwritable retry ledger | confirmation without a retry | `false` | `host_denial_retry_unrecorded` |
 
-Every branch repeats the #187 rules (no `deterministic_only` downgrade, no new semantic job, no
-completion claim or receipt while the decision is pending; host approval permits the tool call
-only) and, when the grant is confirmed, names the durable fix from the admission state: `yoetz
-integrate claude admission grant` when absent, "entry present but held — confirm Claude Code
-trusts the folder" when present, "review the wider rule" when foreign. The one-retry ledger is
-`observation/host-hold-retries.json` under the state directory (owner-only, session-id digests,
-64 entries). The advisory never carries tool input, the host's reason prose, paths, or ids, never
-emits a permission decision, and never edits a host file. The route is not asserted: a strict
-route's retried check is refused by Yoetz as `blocked_by_policy` / `route_semantic_ceiling`.
-Live acceptance of this advisory in Claude Code auto mode is not yet recorded; the output shape is
-documentation-verified only.
+Current Claude omits `source` and does not fire this event on manual denials or deny rules.
+No-verdict detection includes the reason prefix `Auto mode could not evaluate this action and is
+blocking it for safety`, `Classifier unavailable`, and the legacy `no_verdict` token. Unknown
+sources and missing reasons fail closed. Host payloads are never echoed.
+
+The repository-bound grant read has a 2.5 s deadline covering connect, request and cleanup.
+`observation/host-hold-retries.json` stores at most 64 session digests under the owner-only state
+directory. Old offers are never evicted to make room: at capacity, new sessions need human
+approval. Damaged or unsafe ledgers are preserved without offering another retry. Admission
+remains the durable owner choice; revoke it through `yoetz integrate claude admission revoke`.
+A grant notice is not MCP route verification. The strict route still blocks external dispatch.
+Policy-route observation before retry, a model-visible first-hand notice, and the live Claude
+auto-mode approval/denial cell remain unverified and tracked in #857.
 
 Claude Code surfaces MCP initialize `instructions` as server instructions in the model's context.
 Whether the auto-mode classifier reads them is not documented, so the policy-route destination

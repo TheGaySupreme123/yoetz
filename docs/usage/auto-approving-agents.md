@@ -156,20 +156,17 @@ is visible as what it is, not as an AI-powered review result.
 
 ### When Claude Code holds a check you already authorized
 
-In Claude Code, the same hook that records the hold also answers it. Yoetz reads its own record
-first: whether this repository's privacy grant permits external AI-powered review. If it does,
-the agent is told plainly that you already authorized this review in `yoetz --privacy`, that
-Claude Code and not Yoetz held the call, that nothing was sent, and that it may retry the
-identical check exactly once; you see a one-line notice in the transcript with the durable fix
-(`yoetz integrate claude admission grant`). If Claude Code holds the retry, or holds a later
-check in the same session, the agent is told to stop and present that exact call for your
-approval. If the grant cannot be confirmed, or your own permission rule held the call, or Claude
-Code produced no classifier verdict, there is no retry and the agent asks you.
+In Claude Code, Yoetz can show you whether this repository's privacy grant permits external
+AI-powered review. When it confirms the grant and Claude's classifier returned a verdict, the
+hook may offer one retry in the session. Claude shows the notice to you and gives the agent a
+retry cue. The agent must preserve the exact request and ask you after another hold. A missing
+or unreadable grant, unknown verdict, or unavailable retry record produces no retry.
 
-The advisory is information, not authorization: it approves nothing, edits no settings, and the
-retried call goes back through Claude Code's own permission flow. Codex and Cursor publish no
-event after a denial, so on those hosts the agent follows the pause-and-ask rule above and the
-fix is admission.
+The notice does not approve a tool call or change settings. Higher-priority host instructions,
+your explicit denial, the MCP route and Yoetz's disclosure gates still apply. The durable owner
+choice is `yoetz integrate claude admission grant`, with `admission revoke` as its reverse.
+Codex and Cursor retain the pause-and-ask workflow. Live acceptance of the new Claude notice and
+retry cue is still pending; it is not proof that a provider received or reviewed anything.
 
 ## Codex registration
 

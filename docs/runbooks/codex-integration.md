@@ -316,9 +316,9 @@ Codex exposes no typed denial signal for a guardian refusal: its `PermissionRequ
 before the decision and may allow, so it is not a denial. A held check is visible only as the
 #187 pause/approval flow in the transcript. This is a documented gap, not a Yoetz diagnostic.
 For the same reason the host-hold advisory that Claude Code's `PermissionDenied` hook emits
-(issue #857: the owner's standing authorization stated first-hand, one host retry, then the human)
-has no Codex carrier; the shipped skill and guidance carry the agent-side rule with the same
-wording, and the durable answer remains admission above. If a later Codex release publishes a
+(issue #857: a first-hand grant notice for the user and a separate host retry cue)
+has no Codex carrier. The shipped skill and guidance require a current first-hand grant read
+before asserting existing authorization, and the durable answer remains admission above. If a later Codex release publishes a
 post-decision denial event, mirror the Claude ingress (`cli/host_hold_advisory.py`) onto it.
 The 2026-08-30 source read is not a live cell; the `auto_review` acceptance cell in issue #467
 remains to be run.

@@ -994,7 +994,7 @@ def test_claude_permission_denied_on_a_scoped_check_records_one_payload_free_dia
     assert isinstance(specific, Mapping)
     assert specific["hookEventName"] == "PermissionDenied"
     assert specific["retry"] is False
-    context = specific["additionalContext"]
+    context = emitted["systemMessage"]
     assert isinstance(context, str)
     if source in {"permission_rule", "hook"}:
         assert context.startswith("Yoetz: the owner's own Claude Code permission rule")
@@ -1051,7 +1051,8 @@ def _run_denied_hook(
     client: _FakePrivacyClient,
     session_id: str = "claude-held",
     source: str | None = "auto_mode",
-    reason: str = "classifier_denied",
+    observation_profile: str | None = None,
+    reason: str = "[Safety Rule]",
 ) -> tuple[Mapping[str, JsonValue], bytes]:
     import asyncio
 
@@ -1077,6 +1078,7 @@ def _run_denied_hook(
             stdin_bytes=canonical_encode(cast(JsonValue, payload)),
             stdout=stdout,
             workspace=str(tmp_path),
+            observation_profile=observation_profile,
             _state=tmp_path,
             connect=cast("observe_hooks.ServiceConnector", connect),
             run_async=lambda fn: asyncio.run(cast("Coroutine[object, object, object]", fn())),
@@ -1105,7 +1107,7 @@ def test_claude_permission_denied_with_a_confirmed_grant_offers_exactly_one_retr
     assert isinstance(specific, Mapping)
     assert specific["hookEventName"] == "PermissionDenied"
     assert specific["retry"] is True
-    context = specific["additionalContext"]
+    context = first["systemMessage"]
     assert isinstance(context, str)
     assert context.startswith(
         "Yoetz confirms: the repository owner already authorized external AI-powered review"
@@ -1117,7 +1119,7 @@ def test_claude_permission_denied_with_a_confirmed_grant_offers_exactly_one_retr
     assert len(context) <= 2_000
     shown = first["systemMessage"]
     assert isinstance(shown, str)
-    assert shown.startswith("Yoetz: you already authorized AI-powered review")
+    assert shown.startswith("Yoetz confirms:")
     assert "decision" not in specific and "permissionDecision" not in specific
     assert client.closed
     assert client.deadlines == [2_500]
@@ -1128,7 +1130,7 @@ def test_claude_permission_denied_with_a_confirmed_grant_offers_exactly_one_retr
     again = second["hookSpecificOutput"]
     assert isinstance(again, Mapping)
     assert again["retry"] is False
-    repeat_context = again["additionalContext"]
+    repeat_context = second["systemMessage"]
     assert isinstance(repeat_context, str)
     assert repeat_context.startswith("Yoetz confirms:")
     assert "Do not retry on your own" in repeat_context
@@ -1164,18 +1166,20 @@ def test_claude_permission_denied_never_retries_on_the_owners_rule_or_without_a_
     ruled_specific = ruled["hookSpecificOutput"]
     assert isinstance(ruled_specific, Mapping)
     assert ruled_specific["retry"] is False
-    assert str(ruled_specific["additionalContext"]).startswith(
+    assert str(ruled["systemMessage"]).startswith(
         "Yoetz: the owner's own Claude Code permission rule"
     )
     assert not (tmp_path / "observation/host-hold-retries.json").exists()
 
     unverdicted, _ = _run_denied_hook(
-        tmp_path, client=_FakePrivacyClient(_granted_setup()), reason="no_verdict"
+        tmp_path,
+        client=_FakePrivacyClient(_granted_setup()),
+        reason="Auto mode could not evaluate this action and is blocking it for safety",
     )
     unverdicted_specific = unverdicted["hookSpecificOutput"]
     assert isinstance(unverdicted_specific, Mapping)
     assert unverdicted_specific["retry"] is False
-    assert "produced no classifier verdict" in str(unverdicted_specific["additionalContext"])
+    assert "classifier verdict was not established" in str(unverdicted["systemMessage"])
     # Neither branch consulted the retry ledger, so the session's one retry is still available.
     assert not (tmp_path / "observation/host-hold-retries.json").exists()
     assert [reason for reason, _event in _recorded_diagnostics(tmp_path)] == [
@@ -1225,10 +1229,10 @@ def test_claude_permission_denied_without_a_confirmed_grant_tells_the_agent_to_a
     specific = emitted["hookSpecificOutput"]
     assert isinstance(specific, Mapping)
     assert specific["retry"] is False
-    context = str(specific["additionalContext"])
+    context = str(emitted["systemMessage"])
     assert context.startswith("Yoetz could not confirm a repository grant")
     assert f"(reason: {expected_reason})" in context
-    assert "Treat this hold as unauthorized" in context
+    assert "Authorization remains unconfirmed" in context
     assert ("yoetz --privacy" in context) == (expected_reason == "grant_absent")
     assert f"(reason: {expected_reason})" in str(emitted["systemMessage"])
     assert b"boom" not in raw
@@ -1255,7 +1259,7 @@ def test_claude_permission_denied_maps_control_refusals_to_closed_grant_reasons(
         )
         specific = emitted["hookSpecificOutput"]
         assert isinstance(specific, Mapping)
-        assert f"(reason: {expected})" in str(specific["additionalContext"])
+        assert f"(reason: {expected})" in str(emitted["systemMessage"])
         assert specific["retry"] is False
 
 
@@ -1353,3 +1357,50 @@ def test_claude_unknown_version_keeps_untested_token_and_paired_contract() -> No
         "post_only",
         "tool_call_id",
     )
+
+
+def test_claude_ordinary_profile_keeps_denial_observation_and_returns_supported_advisory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list[dict[str, object]] = []
+
+    def observe(**kwargs: object) -> int:
+        captured.append(kwargs)
+        output = cast(io.BytesIO, kwargs["stdout"])
+        output.write(b"{}\n")
+        return 0
+
+    monkeypatch.setattr(observe_hooks, "handle_observe", observe)
+    emitted, raw = _run_denied_hook(
+        tmp_path,
+        client=_FakePrivacyClient(_granted_setup()),
+        observation_profile=CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
+    )
+    assert len(captured) == 1 and captured[0]["event_name"] == "PermissionDecision"
+    assert emitted["hookSpecificOutput"] == {"hookEventName": "PermissionDenied", "retry": True}
+    assert "Yoetz confirms" in str(emitted["systemMessage"])
+    assert len(raw.splitlines()) == 1
+
+
+def test_claude_local_only_check_does_not_get_a_semantic_retry_notice(tmp_path: Path) -> None:
+    output = io.BytesIO()
+    payload: dict[str, JsonValue] = {
+        "session_id": "local-check",
+        "hook_event_name": "PermissionDenied",
+        "tool_name": "mcp__yoetz__check",
+        "tool_input": {"mode": "deterministic_only"},
+        "reason": "[Rule]",
+    }
+    assert (
+        observe_hooks.handle_claude_observe(
+            event_name="PermissionDenied",
+            stdin_bytes=canonical_encode(payload),
+            stdout=output,
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+    assert output.getvalue() == b"{}\n"
+    assert not (tmp_path / "observation/host-hold-retries.json").exists()
