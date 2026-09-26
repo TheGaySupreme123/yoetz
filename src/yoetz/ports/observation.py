@@ -235,6 +235,10 @@ class TaskObservationPort(Protocol):
 
     def tombstone_capture_ticket(self, ticket: ObservationCaptureTicket) -> None: ...
 
+    def structural_envelope_accepted(
+        self, workspace: str, envelope: ObservationEnvelope
+    ) -> bool: ...
+
     def bind_workspace_locator(
         self,
         *,
