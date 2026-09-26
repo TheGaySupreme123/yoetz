@@ -347,7 +347,7 @@ def record_store_lock_event(
     kind = getattr(lock_event, "kind", None)
     role = getattr(lock_event, "role", None)
     phase = getattr(lock_event, "phase", None)
-    if role not in _STORE_LOCK_ROLES or not _store_lock_phase_valid(phase):
+    if type(role) is not str or role not in _STORE_LOCK_ROLES or not _store_lock_phase_valid(phase):
         return False
     row: dict[str, object] = {
         "event": _closed(event, _EVENTS, "unknown_event"),
@@ -369,8 +369,10 @@ def record_store_lock_event(
         scope = getattr(timeout, "scope", None)
         waiting = getattr(timeout, "holder_waiting", None)
         if (
-            holder_role not in _STORE_LOCK_ROLES
+            type(holder_role) is not str
+            or holder_role not in _STORE_LOCK_ROLES
             or not _store_lock_phase_valid(holder_phase)
+            or type(scope) is not str
             or scope not in _STORE_LOCK_SCOPES
             or type(waiting) is not bool
         ):
@@ -401,6 +403,9 @@ def _store_lock_row(row: Mapping[str, object]) -> JsonObject | None:
 
     if frozenset(row) != _STORE_LOCK_ROW_KEYS or row.get("kind") != "store_lock":
         return None
+    # The file is mutable: reject containers before any set membership lookup.
+    if any(type(row.get(key)) is not str for key in ("reason", "event", "role")):
+        return None
     reason = row.get("reason")
     if reason not in {"store_lock_timeout", "store_lock_long_hold"}:
         return None
@@ -417,8 +422,10 @@ def _store_lock_row(row: Mapping[str, object]) -> JsonObject | None:
     if reason == "store_lock_timeout":
         waited = row.get("waited_ms")
         if (
-            row.get("holder_role") not in _STORE_LOCK_ROLES
+            type(row.get("holder_role")) is not str
+            or row.get("holder_role") not in _STORE_LOCK_ROLES
             or not _store_lock_phase_valid(row.get("holder_phase"))
+            or type(row.get("scope")) is not str
             or row.get("scope") not in _STORE_LOCK_SCOPES
             or type(row.get("holder_waiting")) is not bool
             or (waited is not None and _bounded_ms(waited) != waited)

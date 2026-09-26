@@ -616,10 +616,12 @@ def test_store_lock_rows_name_the_holder_and_count_as_reasons(tmp_path: Path) ->
 @pytest.mark.parametrize(
     "overrides",
     (
-        {"holder_role": "/Users/someone"},
+        {"holder_role": "/example/private"},
+        {"holder_role": []},
         {"holder_phase": "rm -rf"},
         {"holder_phase": "A" * 65},
         {"scope": "network"},
+        {"scope": {}},
         {"holder_waiting": "no"},
     ),
 )
@@ -644,6 +646,12 @@ def test_tampered_store_lock_rows_are_dropped_on_read(tmp_path: Path) -> None:
         {**row, "reason": "store_lock_long_hold"},
         {**row, "waited_ms": -1},
     ]
+    invalid_values: tuple[object, ...] = ([], {})
+    tampered.extend(
+        {**row, field: value}
+        for field in ("reason", "event", "role", "holder_role", "scope")
+        for value in invalid_values
+    )
     with path.open("a", encoding="utf-8") as handle:
         for item in tampered:
             handle.write(json.dumps(item) + "\n")

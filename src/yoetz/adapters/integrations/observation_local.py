@@ -759,24 +759,28 @@ class _InterprocessStoreLock:
             state.owner_phase = phase
             state.owner_since = time.monotonic()
             state.flock_held = False
-            if prepare is not None:
-                began = time.monotonic()
-                with contextlib.suppress(Exception):
-                    prepare()
-                spent = time.monotonic() - began
-                if prepared is not None:
-                    prepared[0] = spent
-                # Preparation is not queueing: the flock keeps its full wait,
-                # still bounded by any caller deadline in scope.
-                bound = cast(float | None, getattr(_STORE_LOCK_CONTEXT, "deadline", None))
-                deadline = started + _STORE_LOCK_TIMEOUT_SECONDS + spent
-                if bound is not None:
-                    deadline = min(deadline, bound)
             flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC
             if hasattr(os, "O_NOFOLLOW"):
                 flags |= os.O_NOFOLLOW
             descriptor: int | None = None
             try:
+                # Preparation already owns the thread lock. Interruptions must unwind it
+                # just like a failed flock acquisition, or every later writer stays blocked.
+                if prepare is not None:
+                    began = time.monotonic()
+                    try:
+                        with contextlib.suppress(Exception):
+                            prepare()
+                    finally:
+                        spent = time.monotonic() - began
+                        if prepared is not None:
+                            prepared[0] = spent
+                    # Preparation is not queueing: the flock keeps its full wait,
+                    # still bounded by any caller deadline in scope.
+                    bound = cast(float | None, getattr(_STORE_LOCK_CONTEXT, "deadline", None))
+                    deadline = started + _STORE_LOCK_TIMEOUT_SECONDS + spent
+                    if bound is not None:
+                        deadline = min(deadline, bound)
                 descriptor = os.open(self._path, flags, 0o600)
                 os.fchmod(descriptor, 0o600)
                 if fcntl is not None:

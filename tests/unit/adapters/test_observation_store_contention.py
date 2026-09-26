@@ -252,6 +252,39 @@ def test_long_holds_are_reported_after_release_with_their_phase(
     store.note_coverage_gap(workspace, ObservationGapCode.SERVICE_UNAVAILABLE.value)
 
 
+def test_interrupted_preparation_releases_the_thread_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, workspace, _session = _store(tmp_path)
+    monkeypatch.setattr(local, "_STORE_LOCK_TIMEOUT_SECONDS", 0.2)
+
+    def interrupt(_workspace: str) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(store, "_prewarm", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        with store.batched(workspace):
+            pytest.fail("interrupted preparation must not enter the transaction")
+
+    failures: list[BaseException] = []
+
+    def write_after_interruption() -> None:
+        try:
+            store.note_coverage_gap(workspace, ObservationGapCode.SERVICE_UNAVAILABLE.value)
+        except BaseException as error:
+            failures.append(error)
+
+    worker = threading.Thread(target=write_after_interruption)
+    worker.start()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert not failures
+    assert (
+        ObservationGapCode.SERVICE_UNAVAILABLE.value
+        in store.status(ObservationStatusQuery(workspace)).gaps
+    )
+
+
 def test_thread_scope_reporter_and_role_override_and_restore(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

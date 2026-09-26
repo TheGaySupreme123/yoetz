@@ -4618,8 +4618,11 @@ release; a timed-out waiter raises `ObservationStoreLockTimeout` (a `TimeoutErro
 phase and hold time, and whether an in-process holder was itself still queueing for the flock. Hooks
 record those facts, and holds of one second or more, as payload-free `store_lock` rows
 (`store_lock_timeout`, `store_lock_long_hold`) listed under `store_lock_events` in `observe status`
-hook diagnostics; the service records them as `observation.store_lock.<role>` diagnostics. Hook
-timing rows attribute queueing as `store_lock_wait` and the pass's own critical sections as
+hook diagnostics; the service records them as `observation.store_lock.<role>` diagnostics.
+Hook diagnostic readers discard malformed lock rows, including non-string role and scope fields.
+An interrupted pre-flock preparation releases its process-local lock before propagating the
+interruption, so subsequent writers can proceed. Hook timing rows attribute queueing as
+`store_lock_wait` and the pass's own critical sections as
 `store_lock_hold`, cover the previously unwindowed resolve/deliver regions, and name any remaining
 wall-time difference as `unattributed`; nested store sub-stages are reported separately from the
 end-to-end partition (issues #310 and #311). A hook pass whose capture batch cannot take the lock
