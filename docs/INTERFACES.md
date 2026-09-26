@@ -4147,7 +4147,8 @@ under the local-store publication lock. A false or failed guard leaves accountin
 A stranded native handoff is the same kind of admission-independent maintenance demand (issue
 #836). `LocalObservationStore.capture_handoff_candidates(workspace, older_than_ms=30_000)` returns,
 oldest first, the task routes whose central reservation or cached task snapshot is at least that
-old; `pending_workspaces()` includes such a workspace even with an empty outbox. After inventory is
+old; it also returns routes with pending retirement confirmation so restart cleanup is retried;
+`pending_workspaces()` includes such a workspace even with an empty outbox. After inventory is
 known, `recover_capture_inventory(workspace)` reconciles at most eight of those tasks per turn under
 the shared capture lock, and returns a tuple when both steps report. READY supplies
 `ObservationCoordinator.capture_handoff_reconcile`, which opens each named task through its active
@@ -4194,6 +4195,13 @@ identity makes a replay after cancellation, crash, or a later store failure idem
 account cannot be committed, the ticket and reservation remain active for retry. Accounted
 identities whose reservations are still active are pinned within the outstanding-reservation bound,
 so repeated retirement failures cannot evict their replay key and inflate the loss count.
+The store also keeps up to 512 pending ticket-to-task accounting bindings until destructive
+retirement and reservation release are confirmed; this covers legacy tickets that have no central
+reservation to pin. A full pending set fails closed and leaves the ticket active for retry. On a
+restart or uncertain confirmation, reconciliation compares each binding with the complete active
+ticket listing for its task and drops only bindings whose tickets are absent. A task bundle must
+report the native-ticket schema as available and return fewer than the 512-row listing cap; an
+unavailable schema or capped listing preserves every pending binding and retries later.
 
 `LocalObservationStore.pending_selection_losses(workspace)` returns at most 64 retained,
 fully validated and routed lanes; `selection_loss_workspaces(task_id)` filters the returned
