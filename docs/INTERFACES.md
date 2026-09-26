@@ -5824,6 +5824,16 @@ the model receives only the host's retry cue. `read_host_hold_facts` reads the r
 through the bound service with one `GRANT_READ_DEADLINE_MS` = 2 500 ms budget covering connection,
 `privacy_get_setup`, and cleanup. `GrantReadReason` is `grant_confirmed` only when `grant_state =
 granted` and `llm_inference` is enabled; other outcomes remain closed unconfirmed reasons.
+
+SessionStart's separate `cli/host_startup_advisory.py` can append a fresh grant snapshot and the
+host-specific admission command on Codex/Claude `additionalContext` or Cursor `additional_context`.
+It names absent project admission, explicitly leaves route and host approval unconfirmed, and
+introduces no retry. Existing context keeps priority; no partial notice is emitted. The read uses
+up to 500 ms of spare hook budget, including connect/RPC/close. Local-only, deferred, out-of-budget,
+out-of-space, unreadable-grant and non-absent-admission paths remain silent. No bridge route cache
+is created: a host name is not a current transport identity. This notice requires a bound workspace;
+the ordinary shared path also requires active observation consent. See ADR-018's correction.
+
 `note_retry_offer` uses an owner-only `observation/host-hold-retries.json` ledger of up to 64
 session digests and answers `first|repeat|unrecorded`. Full or damaged ledgers never forget a
 prior offer; unsafe files and lock contention fail closed. `classifier_verdict_present` rejects

@@ -961,7 +961,7 @@ The same scoped hook reports a hold to the user (issue #857). Its stdout has
 installed schema and handler and the [current reference](https://code.claude.com/docs/en/hooks#permissiondenied)
 were checked on 2026-09-26: `PermissionDenied` drops `additionalContext`. The user sees the
 first-hand notice; the model receives only the host's retry cue, with exact-request and pause
-rules supplied by the shipped skill. Do not claim model-visible grant delivery.
+rules supplied by the shipped skill. Do not claim model-visible grant delivery from PermissionDenied.
 
 | Facts | User notice | `retry` | Diagnostic |
 | --- | --- | --- | --- |
@@ -983,8 +983,13 @@ directory. Old offers are never evicted to make room: at capacity, new sessions 
 approval. Damaged or unsafe ledgers are preserved without offering another retry. Admission
 remains the durable owner choice; revoke it through `yoetz integrate claude admission revoke`.
 A grant notice is not MCP route verification. The strict route still blocks external dispatch.
-Policy-route observation before retry, a model-visible first-hand notice, and the live Claude
-auto-mode approval/denial cell remain unverified and tracked in #857.
+SessionStart can deliver a separate first-hand grant snapshot to the model when the shared
+observation path is consented, local admission is absent, and spare context/time allows a fresh
+repository-bound read. It names `yoetz integrate claude admission grant` but explicitly leaves the
+active route and host approval unconfirmed. It does not prove the grant at a later denial or that
+the classifier consumed the notice. Local-only, deferred and unreadable paths add nothing.
+Policy-route attribution for a held call and the live Claude auto-mode approval/denial cell remain
+unverified and tracked in #857. No machine-wide last-started bridge record is used.
 
 Claude Code surfaces MCP initialize `instructions` as server instructions in the model's context.
 Whether the auto-mode classifier reads them is not documented, so the policy-route destination
