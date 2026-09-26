@@ -15,13 +15,14 @@ from yoetz.application.status import (
     Application,
     _lineage_readiness_gaps,  # pyright: ignore[reportPrivateUsage]
 )
+from yoetz.application.status_faults import StatusFault, StatusFaultStage, classify_status_fault
 from yoetz.application.task_views import lineage_status_page
 from yoetz.domain.coordination import LineageAcceptance, LineageOrigin, SessionHealth, WorkState
 from yoetz.domain.values import Frontier, Timestamp
 from yoetz.ports.host_lineage import HostLineageAnnotation, HostLineageRegistryPort
 from yoetz.ports.runtime import TaskRuntime
 from yoetz.ports.start_catalog import SessionState, StartCatalogPort, TaskLineage
-from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
+from yoetz.protocol.errors import PublicErrorCode
 
 pytestmark = pytest.mark.anyio
 _PARENT = "tsk_53000000-0000-4000-8000-000000000001"
@@ -156,9 +157,10 @@ async def test_lineage_status_reads_every_provisional_host_annotation(count: int
     assert page.annotations[0].origin == "host_observed"
     assert page.annotations[0].acceptance == "pending"
 
-    # A registry cannot expand the exact selector to a different observed child.
+    # A registry cannot expand the exact selector to a different observed child. The view tags
+    # the invalid stored rows; the status boundary classifies them with a joinable diagnostic.
     registry.list_provisional_annotations = AsyncMock(return_value=(annotation,))
-    with pytest.raises(PublicOperationError) as exc_info:
+    with pytest.raises(StatusFault) as exc_info:
         await lineage_status_page(
             cast(StartCatalogPort, catalog),
             runtime,
@@ -166,4 +168,7 @@ async def test_lineage_status_reads_every_provisional_host_annotation(count: int
             host_lineage_registry=cast(HostLineageRegistryPort, registry),
             correlation_id="hmac-sha256:" + "d" * 64,
         )
-    assert exc_info.value.code is PublicErrorCode.STORAGE_CORRUPT
+    assert exc_info.value.stage is StatusFaultStage.REPLAY
+    classified = classify_status_fault(exc_info.value, view="lineage", request_id=None)
+    assert classified.code is PublicErrorCode.STORAGE_CORRUPT
+    assert classified.message == "Host lineage status is inconsistent."

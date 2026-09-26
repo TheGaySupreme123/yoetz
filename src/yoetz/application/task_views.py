@@ -7,6 +7,12 @@ from dataclasses import dataclass
 from typing import cast
 
 from yoetz.application.projects import ProjectApplication, ProjectCommandError, ProjectStatus
+from yoetz.application.status_faults import (
+    StatusFault,
+    StatusFaultStage,
+    record_status_member_unavailable,
+    status_stage,
+)
 from yoetz.domain.coordination import LineageAcceptance, SessionHealth
 from yoetz.domain.events import AcceptedEvent, ReceiptRecordedPayload
 from yoetz.domain.values import Frontier
@@ -67,17 +73,18 @@ async def lineage_status_page(
         raise PublicOperationError(
             PublicErrorCode.SESSION_NOT_FOUND, "The task lineage was not found.", False
         )
-    records = tuple(
-        [
-            record
-            async for record in runtime.ledger.load_events(
-                runtime.session_id, through=frontier.sequence
-            )
-        ]
-    )
-    manifest = lineage_manifest_from_records(records)
-    rollups = {str(item.child_task_id): item for item in evaluate_lineage(manifest).children}
-    snapshots = {str(item.child_task_id): item for item in manifest.children}
+    with status_stage(StatusFaultStage.REPLAY):
+        records = tuple(
+            [
+                record
+                async for record in runtime.ledger.load_events(
+                    runtime.session_id, through=frontier.sequence
+                )
+            ]
+        )
+        manifest = lineage_manifest_from_records(records)
+        rollups = {str(item.child_task_id): item for item in evaluate_lineage(manifest).children}
+        snapshots = {str(item.child_task_id): item for item in manifest.children}
     children: list[StatusLineageChildModel] = []
     for child_id in await catalog.list_child_task_ids(runtime.task_id):
         if permitted_children is not None and child_id not in permitted_children:
@@ -118,21 +125,22 @@ async def lineage_status_page(
             else:
                 state = rollup.state.value
                 blocking = rollup.blockers
-        children.append(
-            StatusLineageChildModel.model_validate(
-                {
-                    "task_id": child.task_id,
-                    "parent_task_id": child.parent_task_id,
-                    "origin": child.origin.value,
-                    "acceptance": child.acceptance.value,
-                    "work_state": child.work_state.value,
-                    "session_health": health.value,
-                    "depth": str(child.depth),
-                    "rollup_state": state,
-                    "blocking_conditions": blocking,
-                }
+        with status_stage(StatusFaultStage.MODEL):
+            children.append(
+                StatusLineageChildModel.model_validate(
+                    {
+                        "task_id": child.task_id,
+                        "parent_task_id": child.parent_task_id,
+                        "origin": child.origin.value,
+                        "acceptance": child.acceptance.value,
+                        "work_state": child.work_state.value,
+                        "session_health": health.value,
+                        "depth": str(child.depth),
+                        "rollup_state": state,
+                        "blocking_conditions": blocking,
+                    }
+                )
             )
-        )
     annotations: tuple[StatusLineageAnnotationModel, ...] = ()
     if host_lineage_registry is not None:
         try:
@@ -168,10 +176,8 @@ async def lineage_status_page(
             annotations = tuple(observed)
         except HostLineageRegistryError as exc:
             if exc.reason is HostLineageRegistryReason.STORAGE_CORRUPT:
-                raise PublicOperationError(
-                    PublicErrorCode.STORAGE_CORRUPT,
-                    "Host lineage storage is inconsistent.",
-                    False,
+                raise StatusFault(
+                    StatusFaultStage.REPLAY, "Host lineage status is inconsistent."
                 ) from exc
             raise PublicOperationError(
                 PublicErrorCode.SERVICE_UNAVAILABLE,
@@ -179,10 +185,10 @@ async def lineage_status_page(
                 True,
             ) from exc
         except (TypeError, ValueError) as exc:
-            raise PublicOperationError(
-                PublicErrorCode.STORAGE_CORRUPT,
-                "Host lineage status is inconsistent.",
-                False,
+            # Registry rows failed their stored-order, scope, or annotation shape: invalid stored
+            # state. The status boundary records the class and origin under the public id.
+            raise StatusFault(
+                StatusFaultStage.REPLAY, "Host lineage status is inconsistent."
             ) from exc
     return LineageStatusSnapshot(
         parent_task_id=parent.parent_task_id,
@@ -226,8 +232,15 @@ async def project_status_snapshot(
     project_id: str | None,
     host_lineage_registry: HostLineageRegistryPort | None = None,
     correlation_id: str | None = None,
+    request_id: str | None = None,
 ) -> ProjectStatusSnapshot | LineageStatusSnapshot:
-    """Read only admitted sources and revalidate consent after every source has been read."""
+    """Read only admitted sources and revalidate consent after every source has been read.
+
+    One member that cannot be read or projected is disclosed as ``project_member_unavailable``
+    and recorded under ``request_id``; it never fails the other members' view (issue #840).
+    Project-level rows (detections, coverage) and the page itself still fail the request with a
+    classified public error.
+    """
 
     async def admitted(generation: int | None = None) -> ProjectStatus | TaskLineage:
         try:
@@ -263,38 +276,42 @@ async def project_status_snapshot(
     children: dict[str, StatusLineageChildModel] = {}
     receipts: list[StatusProjectReceiptModel] = []
     gaps: set[str] = set()
-    own_lineage = await catalog.task_lineage(requester.task_id)
+    own_lineage: TaskLineage | None = None
     for identifier in sorted(task_ids):
-        lineage = await catalog.task_lineage(identifier)
-        sessions = await catalog.task_session_states(identifier)
-        route = await catalog.task_route(identifier)
-        if lineage is None:
-            gaps.add("project_member_unavailable")
-            continue
-        health = SessionHealth.CONTACT_LOST
-        if any(item.health is SessionHealth.ACTIVE for item in sessions):
-            health = SessionHealth.ACTIVE
-        elif sessions and all(item.health is SessionHealth.ENDED for item in sessions):
-            health = SessionHealth.ENDED
-        latest_session = max(
-            sessions, key=lambda item: (item.changed_at, item.session_id), default=None
-        )
-        members.append(
-            StatusProjectMemberModel.model_validate(
-                {
-                    "task_id": identifier,
-                    "actor_id": None if latest_session is None else latest_session.actor_id,
-                    "work_state": lineage.work_state.value,
-                    "session_health": health.value,
-                    "parent_task_id": lineage.parent_task_id,
-                }
-            )
-        )
-        if route is None or route.state is TaskRouteState.QUARANTINED:
-            gaps.add("project_member_unavailable")
-            continue
         member_runtime: TaskRuntime | None = None
+        member_receipt: StatusProjectReceiptModel | None = None
+        tree: LineageStatusSnapshot | None = None
         try:
+            lineage = await catalog.task_lineage(identifier)
+            sessions = await catalog.task_session_states(identifier)
+            route = await catalog.task_route(identifier)
+            if lineage is None:
+                gaps.add("project_member_unavailable")
+                continue
+            if identifier == requester.task_id:
+                own_lineage = lineage
+            health = SessionHealth.CONTACT_LOST
+            if any(item.health is SessionHealth.ACTIVE for item in sessions):
+                health = SessionHealth.ACTIVE
+            elif sessions and all(item.health is SessionHealth.ENDED for item in sessions):
+                health = SessionHealth.ENDED
+            latest_session = max(
+                sessions, key=lambda item: (item.changed_at, item.session_id), default=None
+            )
+            with status_stage(StatusFaultStage.MODEL):
+                member = StatusProjectMemberModel.model_validate(
+                    {
+                        "task_id": identifier,
+                        "actor_id": None if latest_session is None else latest_session.actor_id,
+                        "work_state": lineage.work_state.value,
+                        "session_health": health.value,
+                        "parent_task_id": lineage.parent_task_id,
+                    }
+                )
+            members.append(member)
+            if route is None or route.state is TaskRouteState.QUARANTINED:
+                gaps.add("project_member_unavailable")
+                continue
             member_runtime = (
                 requester
                 if identifier == requester.task_id
@@ -322,37 +339,46 @@ async def project_status_snapshot(
                 member_frontier,
                 permitted_children=task_ids,
             )
-            children.update((item.task_id, item) for item in tree.children)
             latest_receipt: ReceiptRecordedPayload | None = None
-            async for record in member_runtime.ledger.load_events(
-                member_runtime.session_id, through=member_frontier.sequence
-            ):
-                if record.task_id != identifier:
-                    raise PublicOperationError(
-                        PublicErrorCode.STORAGE_CORRUPT,
-                        "The project member ledger is inconsistent.",
-                        False,
-                    )
-                if isinstance(record, AcceptedEvent) and isinstance(
-                    record.payload, ReceiptRecordedPayload
+            with status_stage(StatusFaultStage.REPLAY):
+                async for record in member_runtime.ledger.load_events(
+                    member_runtime.session_id, through=member_frontier.sequence
                 ):
-                    latest_receipt = record.payload
+                    if record.task_id != identifier:
+                        raise PublicOperationError(
+                            PublicErrorCode.STORAGE_CORRUPT,
+                            "The project member ledger is inconsistent.",
+                            False,
+                        )
+                    if isinstance(record, AcceptedEvent) and isinstance(
+                        record.payload, ReceiptRecordedPayload
+                    ):
+                        latest_receipt = record.payload
             if latest_receipt is not None:
-                receipts.append(
-                    StatusProjectReceiptModel.model_validate(
+                with status_stage(StatusFaultStage.MODEL):
+                    member_receipt = StatusProjectReceiptModel.model_validate(
                         {
                             "task_id": identifier,
                             "receipt_id": latest_receipt.receipt_id,
-                            "frontier": latest_receipt.subject_frontier.as_wire(),
+                            # ``Frontier.as_wire`` is a deeply frozen ``JsonObject``; the strict
+                            # nested ``FrontierModel`` admits only a plain mapping.  Passing the
+                            # frozen object rejected every member with a recorded receipt and
+                            # blinded the whole project view (issue #840).
+                            "frontier": dict(latest_receipt.subject_frontier.as_wire().items()),
                             "conclusion": latest_receipt.conclusion_code.value,
                         }
                     )
-                )
-        except PublicOperationError:
+        except (PublicOperationError, StatusFault, TypeError, ValueError) as exc:
+            record_status_member_unavailable(exc, request_id=request_id)
             gaps.add("project_member_unavailable")
+            continue
         finally:
             if member_runtime is not None and member_runtime is not requester:
                 await bundles.release(member_runtime)
+        # Admit one member's lineage and receipt rows together, only after both were read.
+        children.update((item.task_id, item) for item in tree.children)
+        if member_receipt is not None:
+            receipts.append(member_receipt)
     latest = await admitted(generation)
     if (
         not isinstance(latest, ProjectStatus)
@@ -376,12 +402,14 @@ async def project_status_snapshot(
         resource_count = wire.get("resource_count")
         if type(resource_count) is int:
             wire["resource_count"] = str(resource_count)
-        detection_rows.append(StatusProjectDetectionModel.model_validate(wire))
+        with status_stage(StatusFaultStage.MODEL):
+            detection_rows.append(StatusProjectDetectionModel.model_validate(wire))
     detections = tuple(detection_rows)
     detections = tuple(item for item in detections if set(item.task_ids) <= task_ids)
-    coverage_rows = tuple(
-        StatusProjectCoverageModel.model_validate(dict(item)) for item in latest.coverage
-    )
+    with status_stage(StatusFaultStage.MODEL):
+        coverage_rows = tuple(
+            StatusProjectCoverageModel.model_validate(dict(item)) for item in latest.coverage
+        )
     coverage = tuple(item for item in coverage_rows if item.task_id in task_ids)
     descriptor = latest.project
     metadata: dict[str, JsonValue] = {
