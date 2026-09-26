@@ -225,6 +225,10 @@ _MAX_CAPTURE_BOOTSTRAP_WORKSPACES: Final = 256
 # A bounded cursor rotates through the deterministic oldest-first candidate list
 # so unavailable early routes cannot starve later ones (#836).
 _MAX_CAPTURE_HANDOFF_TASKS_PER_TURN: Final = 8
+# ``SqliteObservationStore.list_pending_capture_tickets`` caps one task route
+# at the same bound. A result below the cap is the only listing we can treat as
+# complete for pending-account confirmation.
+_MAX_CAPTURE_TICKETS_PER_TASK: Final = 512
 _CAPTURE_TICKET_RETRYABLE_REJECTION_REASONS: Final = frozenset(
     {
         OBSERVATION_BACKPRESSURE_REASON,
@@ -1671,8 +1675,21 @@ class ObservationCoordinator:
         ):
             return 0
 
-        def listing() -> tuple[ObservationCaptureTicket, ...]:
-            raw = list_pending(runtime.task_id)
+        schema_probe = getattr(store, "capture_ticket_schema_available", None)
+        schema_available = False
+        if callable(schema_probe):
+            try:
+                schema_available = await self._local(schema_probe) is True
+            except Exception:
+                return 0
+            if not schema_available:
+                # An older bundle cannot provide a complete active-ticket
+                # authority. Preserve pending accounting and leave the ticket
+                # lane for a later migration-aware pass.
+                return 0
+
+        def listing() -> tuple[tuple[ObservationCaptureTicket, ...], bool]:
+            raw: object = list_pending(runtime.task_id)
             values = cast(tuple[object, ...], raw)
             if type(raw) is not tuple or any(
                 type(item) is not ObservationCaptureTicket or item.task_id != runtime.task_id
@@ -1683,15 +1700,36 @@ class ObservationCoordinator:
                     "Observation capture ticket listing is invalid.",
                     retryable=False,
                 )
-            return tuple(
+            typed_raw = cast(tuple[ObservationCaptureTicket, ...], raw)
+            complete = len(typed_raw) < _MAX_CAPTURE_TICKETS_PER_TASK
+            filtered = tuple(
                 item
-                for item in cast(tuple[ObservationCaptureTicket, ...], raw)
+                for item in typed_raw
                 if workspace is None or item.workspace_commitment == workspace
             )
+            return filtered, complete
 
-        workspaces = {item.workspace_commitment for item in listing()}
+        initial_tickets, _initial_listing_complete = listing()
+        workspaces = {item.workspace_commitment for item in initial_tickets}
         if workspace is not None:
             workspaces.add(workspace)
+        elif callable(getattr(self.local, "capture_handoff_retirement_workspaces", None)):
+            pending_workspaces = await self._local(
+                partial(
+                    self.local.capture_handoff_retirement_workspaces,
+                    runtime.task_id,
+                )
+            )
+            pending_values = cast(tuple[object, ...], pending_workspaces)
+            if type(pending_workspaces) is not tuple or any(
+                type(item) is not str for item in pending_values
+            ):
+                raise PublicOperationError(
+                    PublicErrorCode.STORAGE_CORRUPT,
+                    "Observation capture retirement workspace listing is invalid.",
+                    retryable=False,
+                )
+            workspaces.update(pending_workspaces)
         structural_states: dict[str, CaptureHandoffStructuralState | None] = {}
         reader = getattr(self.local, "capture_handoff_structural_state", None)
         for current_workspace in sorted(workspaces, key=str.encode):
@@ -1702,9 +1740,26 @@ class ObservationCoordinator:
                     await self._local(partial(reader, current_workspace)),
                 )
             structural_states[current_workspace] = state
+        tickets, listing_complete = listing()
+        reconciler = getattr(self.local, "reconcile_capture_handoff_retirements", None)
+        if callable(reconciler) and schema_available and listing_complete:
+            for current_workspace in sorted(structural_states, key=str.encode):
+                active_ticket_ids = tuple(
+                    observation_capture_ticket_id(item)
+                    for item in tickets
+                    if item.workspace_commitment == current_workspace
+                )
+                await self._local(
+                    partial(
+                        reconciler,
+                        current_workspace,
+                        runtime.task_id,
+                        active_ticket_ids,
+                    )
+                )
         authorities: dict[str, LocalContentCaptureAuthority | None] = {}
         retired = 0
-        for ticket in listing():
+        for ticket in tickets:
             current_workspace = ticket.workspace_commitment
             if current_workspace not in structural_states:
                 # Staged after the structural read: never classified this pass.
@@ -2345,13 +2400,23 @@ class ObservationCoordinator:
         *,
         delete: bool = False,
     ) -> None:
-        """Retire one durable ticket, then release its global reservation."""
+        """Retire one durable ticket, release its reservation, and confirm accounting."""
 
         if delete:
             store.delete_capture_ticket(ticket)
         else:
             self._tombstone_capture_ticket(store, ticket)
         await self._release_capture_ticket_reservation(workspace, runtime, ticket)
+        confirmer = getattr(self.local, "confirm_capture_handoff_retirement", None)
+        if callable(confirmer):
+            await self._local(
+                partial(
+                    confirmer,
+                    workspace,
+                    observation_capture_ticket_id(ticket),
+                    runtime.task_id,
+                )
+            )
 
     @staticmethod
     def _tombstone_capture_tickets(

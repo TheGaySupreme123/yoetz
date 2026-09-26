@@ -24,7 +24,7 @@ from yoetz.domain.observation import (
 from yoetz.domain.observation_budget import LARGEST_CAPACITY
 from yoetz.domain.observation_settings import ObservationDetailProfile, ObservationSelection
 from yoetz.domain.values import JsonObject, Timestamp, timestamp_from_datetime
-from yoetz.protocol.errors import ProtocolValueError
+from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
 
 # The oldest capture receipt in the issue's native run.
 _START = datetime(2026, 9, 25, 7, 47, 6, 537_000, tzinfo=UTC)
@@ -358,7 +358,9 @@ def test_active_reservation_pins_retirement_replay_identity(tmp_path: Path) -> N
 
     record(_TICKET)
     for index in range(512):
-        record("sha256:" + format(index + 1, "064x"))
+        ticket_id = "sha256:" + format(index + 1, "064x")
+        record(ticket_id)
+        store.confirm_capture_handoff_retirement(workspace, ticket_id, _TASK)
 
     # The active reservation pins its accounted identity even after the
     # bounded history has received more than 512 other retirements.
@@ -391,6 +393,7 @@ def test_full_active_reservation_set_drops_unpinned_ids_on_reload(tmp_path: Path
     historical_ids = tuple("sha256:" + format(1_000 + index, "064x") for index in range(8))
     for ticket_id in historical_ids:
         record(ticket_id)
+        store.confirm_capture_handoff_retirement(workspace, ticket_id, _TASK)
 
     active_ids = tuple("sha256:" + format(index, "064x") for index in range(512))
     for index, ticket_id in enumerate(active_ids, start=1):
@@ -404,10 +407,20 @@ def test_full_active_reservation_set_drops_unpinned_ids_on_reload(tmp_path: Path
     for ticket_id in active_ids:
         record(ticket_id)
 
+    overflow_id = "sha256:" + "f" * 64
+    with pytest.raises(PublicOperationError) as overflow:
+        record(overflow_id)
+    assert overflow.value.code is PublicErrorCode.LIMIT_EXCEEDED
+
     with store._lock:  # pyright: ignore[reportPrivateUsage]
         state = store._load(workspace)  # pyright: ignore[reportPrivateUsage]
         assert set(state.capture_handoff_retirement_ids) == set(active_ids)
         assert len(state.capture_handoff_retirement_ids) == 512
+        assert state.capture_handoff_retirement_pending is not None
+        assert set(state.capture_handoff_retirement_pending) == set(active_ids)
+        # Eight confirmed historical entries remain in the aggregate count;
+        # the refused overflow must not add a ninth pending identity.
+        assert state.capture_handoff_retired_count == 520
 
     reopened = LocalObservationStore(
         _state=tmp_path / "state", _wall=wall, _monotonic=wall.monotonic
@@ -416,3 +429,5 @@ def test_full_active_reservation_set_drops_unpinned_ids_on_reload(tmp_path: Path
         state = reopened._load(workspace)  # pyright: ignore[reportPrivateUsage]
         assert set(state.capture_handoff_retirement_ids) == set(active_ids)
         assert len(state.capture_handoff_retirement_ids) == 512
+        assert state.capture_handoff_retirement_pending is not None
+        assert set(state.capture_handoff_retirement_pending) == set(active_ids)

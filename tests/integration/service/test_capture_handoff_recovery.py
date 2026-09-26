@@ -31,6 +31,8 @@ from yoetz.application.semantic_content import resolve_captured_semantic_content
 from yoetz.cli.observe_hooks import map_hook_payload_to_envelope
 from yoetz.domain.observation import (
     OBSERVATION_CONTENT_CAPTURE_PENDING_REASON,
+    CaptureHandoffRetirementReason,
+    CaptureHandoffRetirementStage,
     ObservationCaptureBacklog,
     ObservationCaptureTicket,
     ObservationContentChunk,
@@ -345,6 +347,211 @@ async def test_retirement_replay_after_cancellation_does_not_duplicate_loss(
         assert retired is not None and retired.state == "revoked"
         assert handoff.world.local.capture_backlog(handoff.workspace)["reservation_count"] == 0
         assert len(handoff.retirements()) == 1
+    finally:
+        handoff.world.coordinator.close()
+
+
+@pytest.mark.anyio
+async def test_legacy_handoff_account_stays_retryable_past_512_other_retirements(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A legacy ticket without a reservation cannot lose its replay identity."""
+
+    handoff = await _handoff(tmp_path)
+    ticket = handoff.strand("legacy-no-reservation", reserve=False)
+    handoff.publish_inventory()
+    assert handoff.world.local.capture_backlog(handoff.workspace)["reservation_count"] == 0
+    original = handoff.world.coordinator._retire_capture_ticket  # pyright: ignore[reportPrivateUsage]
+
+    async def fail_retirement(
+        _workspace: str,
+        _runtime: TaskRuntime,
+        _store: TaskObservationPort,
+        _ticket: ObservationCaptureTicket,
+        *,
+        delete: bool = False,
+    ) -> None:
+        del delete
+        raise OSError("synthetic-ticket-retirement-failure")
+
+    monkeypatch.setattr(handoff.world.coordinator, "_retire_capture_ticket", fail_retirement)
+    try:
+        with pytest.raises(OSError):
+            await handoff.world.coordinator.reconcile_task_capture_handoffs(handoff.world.runtime)
+        ticket_id = observation_capture_ticket_id(ticket)
+        with handoff.world.local._lock:  # pyright: ignore[reportPrivateUsage]
+            state = handoff.world.local._load(handoff.workspace)  # pyright: ignore[reportPrivateUsage]
+            assert state.capture_handoff_retirement_pending == {ticket_id: ticket.task_id}
+
+        def account_and_confirm(ticket_id: str) -> None:
+            handoff.world.local.record_capture_handoff_retirement(
+                handoff.workspace,
+                ticket_id=ticket_id,
+                stage=CaptureHandoffRetirementStage.SWEEP,
+                reason=CaptureHandoffRetirementReason.STRUCTURAL_ROW_ABSENT,
+                ticket_state="pending",
+                source=ticket.source,
+                task_id=ticket.task_id,
+                age_ms=61_000,
+            )
+            handoff.world.local.confirm_capture_handoff_retirement(
+                handoff.workspace, ticket_id, ticket.task_id
+            )
+
+        for index in range(513):
+            account_and_confirm("sha256:" + format(2_000 + index, "064x"))
+        with handoff.world.local._lock:  # pyright: ignore[reportPrivateUsage]
+            state = handoff.world.local._load(handoff.workspace)  # pyright: ignore[reportPrivateUsage]
+            assert state.capture_handoff_retirement_pending == {ticket_id: ticket.task_id}
+            assert ticket_id in state.capture_handoff_retirement_ids
+            assert state.capture_handoff_retired_count == 514
+
+        monkeypatch.setattr(handoff.world.coordinator, "_retire_capture_ticket", original)
+        assert (
+            await handoff.world.coordinator.reconcile_task_capture_handoffs(handoff.world.runtime)
+            == 1
+        )
+        retired = handoff.load(ticket)
+        assert retired is not None and retired.state == "revoked"
+        assert handoff.world.local.capture_handoff_retirement_workspaces(ticket.task_id) == ()
+        assert (
+            handoff.world.local.capture_handoff_retirements(handoff.workspace)["retired_count"]
+            == 514
+        )
+    finally:
+        handoff.world.coordinator.close()
+
+
+@pytest.mark.anyio
+async def test_tombstone_before_confirmation_is_reconciled_after_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A confirmation failure after tombstoning is cleaned from durable pending state."""
+
+    handoff = await _handoff(tmp_path)
+    ticket = handoff.strand("tombstone-before-confirm", reserve=False)
+    handoff.publish_inventory()
+
+    def confirmation_unavailable(*_args: object, **_kwargs: object) -> None:
+        raise OSError("synthetic-confirmation-failure")
+
+    monkeypatch.setattr(
+        handoff.world.local,
+        "confirm_capture_handoff_retirement",
+        confirmation_unavailable,
+    )
+    try:
+        with pytest.raises(OSError):
+            await handoff.world.coordinator.reconcile_task_capture_handoffs(handoff.world.runtime)
+        retired = handoff.load(ticket)
+        assert retired is not None and retired.state == "revoked"
+        ticket_id = observation_capture_ticket_id(ticket)
+        with handoff.world.local._lock:  # pyright: ignore[reportPrivateUsage]
+            state = handoff.world.local._load(handoff.workspace)  # pyright: ignore[reportPrivateUsage]
+            assert state.capture_handoff_retirement_pending == {ticket_id: ticket.task_id}
+
+        world = handoff.world
+        prior_coordinator = world.coordinator
+        prior_coordinator.close()
+        world.local = LocalObservationStore(_state=tmp_path / "state")
+        world.coordinator = ObservationCoordinator(
+            runtime=cast(BundleRuntimePort, world.routes),
+            local=world.local,
+            clock=_ServiceClock(),
+            ids=prior_coordinator.ids,
+            state_root=tmp_path / "state",
+        )
+        world.wire()
+        assert world.local.capture_handoff_retirement_workspaces(ticket.task_id) == (
+            handoff.workspace,
+        )
+        assert await world.coordinator.reconcile_task_capture_handoffs(world.runtime) == 0
+        assert world.local.capture_handoff_retirement_workspaces(ticket.task_id) == ()
+        assert world.local.capture_handoff_retirements(handoff.workspace)["retired_count"] == 1
+    finally:
+        handoff.world.coordinator.close()
+
+
+@pytest.mark.anyio
+async def test_schema_unavailable_preserves_pending_retirement_account(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unavailable capture-ticket schema cannot authorize pending cleanup."""
+
+    handoff = await _handoff(tmp_path)
+    ticket = handoff.strand("schema-unavailable", reserve=False)
+    ticket_id = observation_capture_ticket_id(ticket)
+    handoff.world.local.record_capture_handoff_retirement(
+        handoff.workspace,
+        ticket_id=ticket_id,
+        stage=CaptureHandoffRetirementStage.SWEEP,
+        reason=CaptureHandoffRetirementReason.STRUCTURAL_ROW_ABSENT,
+        ticket_state=ticket.state,
+        source=ticket.source,
+        task_id=ticket.task_id,
+        age_ms=61_000,
+    )
+    handoff.world.observation.tombstone_capture_ticket(ticket)
+    monkeypatch.setattr(handoff.world.observation, "capture_ticket_schema_available", lambda: False)
+    try:
+        assert (
+            await handoff.world.coordinator.reconcile_task_capture_handoffs(handoff.world.runtime)
+            == 0
+        )
+        with handoff.world.local._lock:  # pyright: ignore[reportPrivateUsage]
+            state = handoff.world.local._load(handoff.workspace)  # pyright: ignore[reportPrivateUsage]
+            assert state.capture_handoff_retirement_pending == {ticket_id: ticket.task_id}
+    finally:
+        handoff.world.coordinator.close()
+
+
+@pytest.mark.anyio
+async def test_capped_ticket_listing_preserves_pending_retirement_account(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A capped task listing is not treated as proof that a pending ticket is absent."""
+
+    handoff = await _handoff(tmp_path)
+    ticket = handoff.strand("capped-listing", reserve=False)
+    handoff.publish_inventory()
+    pending_id = "sha256:" + "b" * 64
+    handoff.world.local.record_capture_handoff_retirement(
+        handoff.workspace,
+        ticket_id=pending_id,
+        stage=CaptureHandoffRetirementStage.SWEEP,
+        reason=CaptureHandoffRetirementReason.STRUCTURAL_ROW_ABSENT,
+        ticket_state="pending",
+        source=ticket.source,
+        task_id=ticket.task_id,
+        age_ms=61_000,
+    )
+    assert (
+        handoff.world.local.enqueue_outbox(
+            handoff.workspace,
+            handoff.world.host_session,
+            handoff.envelope("capped-listing"),
+        )
+        is None
+    )
+    capped = tuple(ticket for _index in range(512))
+
+    def capped_listing(_task_id: str) -> tuple[ObservationCaptureTicket, ...]:
+        return capped
+
+    monkeypatch.setattr(
+        handoff.world.observation,
+        "list_pending_capture_tickets",
+        capped_listing,
+    )
+    try:
+        assert (
+            await handoff.world.coordinator.reconcile_task_capture_handoffs(handoff.world.runtime)
+            == 0
+        )
+        with handoff.world.local._lock:  # pyright: ignore[reportPrivateUsage]
+            state = handoff.world.local._load(handoff.workspace)  # pyright: ignore[reportPrivateUsage]
+            assert state.capture_handoff_retirement_pending == {pending_id: ticket.task_id}
+            assert state.capture_handoff_retired_count == 1
     finally:
         handoff.world.coordinator.close()
 

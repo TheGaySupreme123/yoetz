@@ -1276,6 +1276,11 @@ class _WorkspaceState:
     # accounting commit can be replayed after a crash between recording and
     # ticket retirement without incrementing the loss count twice.
     capture_handoff_retirement_ids: tuple[str, ...] = ()
+    # An accounted ticket stays bound to its task route until the destructive
+    # retirement and reservation release have been confirmed.  This is
+    # separate from the bounded history because legacy tickets may have no
+    # central reservation to pin their replay identity.
+    capture_handoff_retirement_pending: dict[str, str] | None = None
     # (codex_session_id, envelope, reason, quarantined_at). The timestamp is
     # store-authored at quarantine time so the age bound measures time *in*
     # quarantine, never the (possibly much older) envelope receipt time.
@@ -1677,6 +1682,30 @@ def _capture_handoff_retirement_ids_from_json(raw: object) -> tuple[str, ...]:
     return tuple(identities)
 
 
+def _capture_handoff_retirement_pending_from_json(raw: object) -> dict[str, str]:
+    """Decode bounded ticket-to-task bindings awaiting retirement confirmation."""
+
+    if not isinstance(raw, Mapping):
+        return {}
+    pending: dict[str, str] = {}
+    entries = cast(Mapping[object, object], raw)
+    for raw_ticket_id, raw_task_id in sorted(
+        entries.items(), key=lambda item: str(item[0]).encode()
+    ):
+        if len(pending) >= _MAX_CAPTURE_TICKET_RESERVATIONS:
+            break
+        if type(raw_ticket_id) is not str or type(raw_task_id) is not str:
+            continue
+        try:
+            ticket_id = validate_sha256_digest(raw_ticket_id)
+        except ProtocolValueError, TypeError, ValueError:
+            continue
+        if ticket_id != raw_ticket_id or _CAPTURE_BACKLOG_ROUTE_RE.fullmatch(raw_task_id) is None:
+            continue
+        pending[ticket_id] = raw_task_id
+    return pending
+
+
 def _capture_handoff_retirements_from_json(raw: object) -> tuple[JsonObject, ...]:
     """Decode the bounded retirement account; malformed entries are dropped."""
 
@@ -1929,6 +1958,11 @@ def _copy_state(state: _WorkspaceState) -> _WorkspaceState:
         capture_backlog_scope_unknown=state.capture_backlog_scope_unknown,
         capture_reservation_bootstrap=state.capture_reservation_bootstrap,
         capture_handoff_retirement_ids=state.capture_handoff_retirement_ids,
+        capture_handoff_retirement_pending=(
+            None
+            if state.capture_handoff_retirement_pending is None
+            else dict(state.capture_handoff_retirement_pending)
+        ),
         pressure_snapshots=dict(state.pressure_snapshots or {}),
     )
 
@@ -6377,7 +6411,14 @@ class LocalObservationStore:
             ),
             key=lambda item: (item[0].wire, item[1].encode()),
         )
-        return tuple(task_id for _stamp, task_id in eligible)
+        candidates = [task_id for _stamp, task_id in eligible]
+        # An account committed before ticket destruction is maintenance demand
+        # even when the ticket was legacy and had no central reservation.  Its
+        # task route must be revisited after a restart so the durable binding
+        # can be confirmed against the authoritative ticket listing.
+        pending_tasks = set((state.capture_handoff_retirement_pending or {}).values())
+        candidates.extend(sorted(pending_tasks.difference(candidates), key=str.encode))
+        return tuple(candidates)
 
     def capture_handoff_candidates(
         self,
@@ -6385,11 +6426,13 @@ class LocalObservationStore:
         *,
         older_than_ms: int = CAPTURE_HANDOFF_RECONCILE_AGE_MS,
     ) -> tuple[str, ...]:
-        """Return task routes, oldest first, with a handoff old enough to reconcile.
+        """Return task routes with an aged handoff or pending accounting confirmation.
 
         Central reservations and cached task snapshots both count, so a legacy
-        ticket without a reservation is still found. This read never changes
-        pressure, admission, or accounting (#836).
+        ticket without a reservation is still found. A pending accounting
+        binding remains a maintenance candidate until the task's complete
+        ticket listing confirms retirement. This read never changes pressure,
+        admission, or accounting (#836).
         """
 
         workspace = validate_commitment(workspace)
@@ -6501,8 +6544,27 @@ class LocalObservationStore:
         )
         with self._lock:
             state = self._load(workspace)
+            pending = dict(state.capture_handoff_retirement_pending or {})
+            prior_task = pending.get(ticket_id)
+            if prior_task is not None:
+                if prior_task != task_id:
+                    raise _error(
+                        PublicErrorCode.STORAGE_CORRUPT,
+                        "Observation capture retirement conflicts.",
+                        retryable=False,
+                    )
+                return
             if ticket_id in state.capture_handoff_retirement_ids:
                 return
+            if len(pending) >= _MAX_CAPTURE_TICKET_RESERVATIONS:
+                # Do not evict an unconfirmed identity: doing so would let a
+                # later replay increment the loss account a second time.
+                raise _error(
+                    PublicErrorCode.LIMIT_EXCEEDED,
+                    "Observation capture retirement confirmation is pending.",
+                    retryable=False,
+                )
+            pending[ticket_id] = task_id
             self._note_gap_state(state, ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
             state.capture_handoff_retirements = (
                 *state.capture_handoff_retirements,
@@ -6511,19 +6573,108 @@ class LocalObservationStore:
             state.capture_handoff_retired_count = min(
                 _MAX_SAFE_INTEGER, state.capture_handoff_retired_count + 1
             )
-            retirement_ids = [*state.capture_handoff_retirement_ids, ticket_id]
-            # Keep every accounted identity whose reservation is still active:
-            # if tombstoning keeps failing, a long stream of other retirements
-            # must not evict this retry key and inflate the loss count later.
-            pinned = {
+            state.capture_handoff_retirement_pending = pending
+            retirement_ids: list[str] = []
+            for item in (*state.capture_handoff_retirement_ids, *pending, ticket_id):
+                if item not in retirement_ids:
+                    retirement_ids.append(item)
+            # Keep every accounted identity whose retirement confirmation is
+            # still pending, then active reservation identities.  The pending
+            # map is authoritative for legacy tickets without reservations;
+            # the bounded history only needs to preserve confirmed replays.
+            reservation_ids = {
                 reservation.ticket_id for reservation in (state.capture_reservations or {}).values()
             }
-            pinned_ids = [item for item in retirement_ids if item in pinned]
-            unpinned_ids = [item for item in retirement_ids if item not in pinned]
+            pinned_ids: list[str] = []
+            seen_pinned: set[str] = set()
+            for item in retirement_ids:
+                if item in pending and item not in seen_pinned:
+                    seen_pinned.add(item)
+                    pinned_ids.append(item)
+            for item in retirement_ids:
+                if len(pinned_ids) >= _MAX_CAPTURE_TICKET_RESERVATIONS:
+                    break
+                if item in reservation_ids and item not in seen_pinned:
+                    seen_pinned.add(item)
+                    pinned_ids.append(item)
+            unpinned_ids = [item for item in retirement_ids if item not in seen_pinned]
             available = max(0, _MAX_CAPTURE_TICKET_RESERVATIONS - len(pinned_ids))
             retained_unpinned = unpinned_ids[-available:] if available else []
             state.capture_handoff_retirement_ids = tuple(pinned_ids + retained_unpinned)
             self._save(workspace, state)
+
+    def confirm_capture_handoff_retirement(
+        self, workspace: str, ticket_id: str, task_id: str
+    ) -> None:
+        """Drop one pending accounting binding after destructive retirement succeeds."""
+
+        workspace = validate_commitment(workspace)
+        ticket_id = validate_sha256_digest(ticket_id)
+        if type(task_id) is not str or _CAPTURE_BACKLOG_ROUTE_RE.fullmatch(task_id) is None:
+            raise ProtocolValueError("invalid_event_value_type")
+        with self._lock:
+            state = self._load(workspace)
+            pending = dict(state.capture_handoff_retirement_pending or {})
+            prior_task = pending.get(ticket_id)
+            if prior_task is None:
+                return
+            if prior_task != task_id:
+                raise _error(
+                    PublicErrorCode.STORAGE_CORRUPT,
+                    "Observation capture retirement conflicts.",
+                    retryable=False,
+                )
+            del pending[ticket_id]
+            state.capture_handoff_retirement_pending = pending or None
+            self._save(workspace, state)
+
+    def reconcile_capture_handoff_retirements(
+        self, workspace: str, task_id: str, active_ticket_ids: tuple[str, ...]
+    ) -> None:
+        """Confirm accounted tickets absent from a complete active-ticket listing."""
+
+        workspace = validate_commitment(workspace)
+        if type(task_id) is not str or _CAPTURE_BACKLOG_ROUTE_RE.fullmatch(task_id) is None:
+            raise ProtocolValueError("invalid_event_value_type")
+        if type(active_ticket_ids) is not tuple:
+            raise ProtocolValueError("invalid_event_value_type")
+        active: set[str] = set()
+        for ticket_id in active_ticket_ids:
+            try:
+                normalized = validate_sha256_digest(ticket_id)
+            except (ProtocolValueError, TypeError, ValueError) as exc:
+                raise ProtocolValueError("invalid_event_value_type") from exc
+            if normalized in active:
+                raise ProtocolValueError("duplicate_set_member")
+            active.add(normalized)
+        with self._lock:
+            state = self._load(workspace)
+            pending = dict(state.capture_handoff_retirement_pending or {})
+            changed = False
+            for ticket_id, owner in tuple(pending.items()):
+                if owner == task_id and ticket_id not in active:
+                    del pending[ticket_id]
+                    changed = True
+            if changed:
+                state.capture_handoff_retirement_pending = pending or None
+                self._save(workspace, state)
+
+    def capture_handoff_retirement_workspaces(self, task_id: str) -> tuple[str, ...]:
+        """Find workspaces with accounting still awaiting retirement confirmation."""
+
+        if type(task_id) is not str or _CAPTURE_BACKLOG_ROUTE_RE.fullmatch(task_id) is None:
+            raise ProtocolValueError("invalid_event_value_type")
+        with self._lock:
+            return tuple(
+                sorted(
+                    (
+                        workspace
+                        for workspace, state in self._iter_workspaces()
+                        if task_id in (state.capture_handoff_retirement_pending or {}).values()
+                    ),
+                    key=str.encode,
+                )
+            )
 
     def capture_handoff_retirements(self, workspace: str) -> JsonObject:
         """Return the bounded local-only account of retired native handoffs.
@@ -7240,6 +7391,7 @@ class LocalObservationStore:
                     or pressure_active
                     or self._capture_inventory_recovery_pending(state)
                     or self._pending_selection_losses(state)
+                    or state.capture_handoff_retirement_pending
                     # An aged native handoff is maintenance demand even with an
                     # empty outbox: its structural row may be gone (#836).
                     or self._capture_handoff_candidates(
@@ -10001,6 +10153,16 @@ class LocalObservationStore:
             payload["capture_handoff_retired_count"] = state.capture_handoff_retired_count
         if state.capture_handoff_retirement_ids:
             payload["capture_handoff_retirement_ids"] = state.capture_handoff_retirement_ids
+        if state.capture_handoff_retirement_pending:
+            payload["capture_handoff_retirement_pending"] = JsonObject(
+                {
+                    ticket_id: task_id
+                    for ticket_id, task_id in sorted(
+                        state.capture_handoff_retirement_pending.items(),
+                        key=lambda item: item[0].encode(),
+                    )
+                }
+            )
         if state.pressure_snapshots:
             payload["pressure_snapshots"] = _pressure_snapshots_to_json(state.pressure_snapshots)
         return payload
@@ -10747,6 +10909,9 @@ class LocalObservationStore:
             capture_handoff_retired_count=_bounded_count(raw.get("capture_handoff_retired_count")),
             capture_handoff_retirement_ids=_capture_handoff_retirement_ids_from_json(
                 raw.get("capture_handoff_retirement_ids")
+            ),
+            capture_handoff_retirement_pending=_capture_handoff_retirement_pending_from_json(
+                raw.get("capture_handoff_retirement_pending")
             ),
             session_workspaces=session_workspaces,
             cursors=cursors,
