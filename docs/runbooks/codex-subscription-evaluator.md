@@ -306,7 +306,11 @@ the same token as an owner-only diagnostic line (`semantic_composition` /
 | `request_failed`, `transport_failed`, `deadline_expired`, `cleanup_unconfirmed`, `event_limit`, `runtime_warning`, `unclassified` | Runtime transport, deadline, event-budget, warning, or cleanup ambiguity. | Per ADR-006: pre-acknowledgement transients may retry; post-acknowledgement ambiguity is `outcome_unknown` and is not retried. No invalid-answer classification. |
 
 `semantic_case_content_over_item_limit` is a separate coverage gap on the disclosed case; it is
-reported alongside a stage, never inferred from one.
+reported alongside a stage, never inferred from one. `semantic_case_finding_refs_over_limit` is the
+same kind of case-composition gap: a local finding cited more than 16 subjects, so its prose and
+projected assessment were omitted from the case while the review still dispatched. It is decided
+by the service before any evaluator runs, so it applies identically to every host and evaluator,
+and it is never a `coordinator_failure`.
 
 ## Packaged live-evidence checklist
 
