@@ -25,6 +25,7 @@ from yoetz.adapters.sqlite.observation import SqliteObservationStore
 from yoetz.application.observation_control import build_observation_support_handlers
 from yoetz.application.observation_coordinator import ObservationCoordinator
 from yoetz.application.observation_drain import (
+    ObservationCaptureRecoveryOutcome,
     ObservationDrainAction,
     ObservationOutboxSweeper,
     route_observation_ingest,
@@ -2549,6 +2550,51 @@ async def test_coordinator_rejects_disabled_stream_before_mapping_or_runtime(
     )
     assert result.disposition is ObservationIngestDisposition.REJECTED
     assert result.reason == "observation_disabled"
+
+
+@pytest.mark.anyio
+async def test_capture_handoff_recovery_rotates_past_unavailable_routes() -> None:
+    """A permanently unavailable prefix cannot starve the ninth route."""
+
+    task_ids = tuple(f"task-{index}" for index in range(9))
+
+    class _Local:
+        def capture_handoff_candidates(self, workspace: str) -> tuple[str, ...]:
+            del workspace
+            return task_ids
+
+    calls: list[tuple[str, ...]] = []
+
+    async def reconcile(
+        workspace: str,
+        candidates: tuple[str, ...],
+        visit: object,
+    ) -> bool:
+        del workspace, visit
+        calls.append(candidates)
+        # Model a route opener that cannot reach any named task this turn.
+        return False
+
+    coordinator = ObservationCoordinator(
+        runtime=object(),  # type: ignore[arg-type]
+        local=cast(LocalObservationStore, _Local()),
+        clock=object(),  # type: ignore[arg-type]
+        ids=object(),  # type: ignore[arg-type]
+        capture_handoff_reconcile=reconcile,
+    )
+    try:
+        first = await coordinator._reconcile_capture_handoffs(  # pyright: ignore[reportPrivateUsage]
+            "workspace"
+        )
+        second = await coordinator._reconcile_capture_handoffs(  # pyright: ignore[reportPrivateUsage]
+            "workspace"
+        )
+    finally:
+        coordinator.close()
+
+    assert first is ObservationCaptureRecoveryOutcome.HANDOFF_UNAVAILABLE
+    assert second is ObservationCaptureRecoveryOutcome.HANDOFF_UNAVAILABLE
+    assert calls == [task_ids[:8], (task_ids[8], *task_ids[:7])]
 
 
 def _obs(

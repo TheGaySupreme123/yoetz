@@ -31,7 +31,6 @@ from yoetz.adapters.integrations.hook_spool import (
     HookSpool,
 )
 from yoetz.adapters.integrations.observation_local import (
-    LocalContentCaptureAuthority,
     LocalObservationStore,
 )
 from yoetz.adapters.objects.encrypted_files import EncryptedFilesObjectStore
@@ -203,7 +202,6 @@ from yoetz.domain.receipts import (
 from yoetz.domain.values import (
     Frontier,
     JsonObject,
-    Timestamp,
     disclosure_continuation,
     format_rfc3339_millis,
     parse_rfc3339_millis,
@@ -3812,111 +3810,81 @@ async def _bootstrap_capture_reservations(
         return False
 
 
-async def _reconcile_observation_capture(
-    runtime: TaskRuntime,
-    local_observation: LocalObservationStore,
-    clock: ClockPort | None = None,
-) -> None:
-    """Retire stale native handoffs and publish the task backlog to local pressure state."""
+async def _reconcile_capture_handoffs(
+    workspace: str,
+    task_ids: tuple[str, ...],
+    visit: Callable[[TaskRuntime, TaskObservationPort], Awaitable[int]],
+    *,
+    catalog: StartCatalogPort,
+    runtime: BundleRuntimePort,
+    generation_is_current: Callable[[], bool],
+) -> bool:
+    """Open each task that owns an aged native handoff and reconcile it (#836).
 
-    store = runtime.observation
-    if store is None:
-        return
-    list_pending = getattr(store, "list_pending_capture_tickets", None)
-    tombstone = getattr(store, "tombstone_capture_ticket", None)
-    if not callable(list_pending) or not callable(tombstone):
-        return
-    tickets_raw = list_pending(runtime.task_id)
-    if type(tickets_raw) is not tuple:
-        raise PublicOperationError(
-            PublicErrorCode.STORAGE_CORRUPT,
-            "Observation capture ticket listing is invalid.",
-            retryable=False,
-        )
-    tickets = cast(tuple[object, ...], tickets_raw)
-    if any(type(ticket) is not ObservationCaptureTicket for ticket in tickets):
-        raise PublicOperationError(
-            PublicErrorCode.STORAGE_CORRUPT,
-            "Observation capture ticket listing is invalid.",
-            retryable=False,
-        )
-    authorities: dict[str, LocalContentCaptureAuthority | None] = {}
-    retired_ids: set[str] = set()
-    for ticket in cast(tuple[ObservationCaptureTicket, ...], tickets):
-        if ticket.task_id != runtime.task_id:
-            raise PublicOperationError(
-                PublicErrorCode.STORAGE_CORRUPT,
-                "Observation capture ticket task ownership is invalid.",
-                retryable=False,
+    The coordinator calls this under its capture lock with task identities
+    read from the workspace's own capture reservations and task snapshots, so
+    no host-session mapping is needed: a handoff left by an ended session is
+    still reachable. Every opened runtime must match its active catalog route;
+    an unavailable route is reported as incomplete and retried by the next
+    sweep. Tickets are only ever tombstoned, never deleted, by ``visit``.
+    """
+
+    del workspace  # ``visit`` is already bound to the workspace it reconciles.
+    if not generation_is_current():
+        return False
+    recovery_routes = getattr(catalog, "recovery_routes", None)
+    if not callable(recovery_routes):
+        return False
+    raw_routes = await cast(Callable[[], Awaitable[tuple[TaskRoute, ...]]], recovery_routes)()
+    if type(raw_routes) is not tuple:
+        return False
+    routes = {
+        route.task_id: route
+        for route in raw_routes
+        if type(route) is TaskRoute and route.state is TaskRouteState.ACTIVE
+    }
+    complete = True
+    for candidate_task in task_ids:
+        if not generation_is_current():
+            return False
+        route = routes.get(candidate_task)
+        if route is None:
+            complete = False
+            continue
+        task_runtime: TaskRuntime | None = None
+        try:
+            binding = await catalog.session_binding(route.session_id)
+            if (
+                binding is None
+                or binding.task_id != route.task_id
+                or binding.session_id != route.session_id
+            ):
+                complete = False
+                continue
+            task_runtime = await runtime.route(
+                RouteCommand(
+                    session_id=route.session_id,
+                    writer_id=binding.writer_id,
+                    access=RouteAccess.WRITE,
+                    required_capabilities=frozenset({RuntimeCapability.WRITE}),
+                )
             )
-        if ticket.workspace_commitment not in authorities:
-            authorities[ticket.workspace_commitment] = local_observation.content_capture_authority(
-                ticket.workspace_commitment
-            )
-        authority = authorities[ticket.workspace_commitment]
-        if (
-            authority is None
-            or not authority.active
-            or not authority.runtime_enabled
-            or ticket.authority_generation != authority.generation
-            or (
-                ticket.content_capture_profile is not None
-                and ticket.content_capture_profile not in authority.profiles
-            )
-        ):
-            tombstone(ticket)
-            retired_ids.add(observation_capture_ticket_id(ticket))
-    reader = getattr(store, "capture_backlog", None)
-    updater = getattr(local_observation, "update_capture_backlog", None)
-    workspace = _observation_workspace_for_runtime(runtime)
-    if workspace is None and len(authorities) == 1:
-        workspace = next(iter(authorities))
-    if workspace is None:
-        return
-    reconcile = getattr(local_observation, "reconcile_capture_ticket_reservations", None)
-    if callable(reconcile):
-        with contextlib.suppress(Exception):
-            reconcile(
-                workspace,
-                runtime.task_id,
-                tuple(
-                    observation_capture_ticket_id(ticket)
-                    for ticket in cast(tuple[ObservationCaptureTicket, ...], tickets)
-                    if observation_capture_ticket_id(ticket) not in retired_ids
-                ),
-            )
-    if not callable(reader) or not callable(updater):
-        return
-    try:
-        if clock is None:
-            observed_at = local_observation._wall_timestamp()  # pyright: ignore[reportPrivateUsage]
-        else:
-            raw_now = cast(object, clock.now_utc())
-            observed_at = (
-                raw_now if type(raw_now) is Timestamp else timestamp_from_datetime(raw_now)
-            )
-    except Exception:
-        return
-    try:
-        backlog = reader(workspace)
-        count = getattr(backlog, "count")
-        byte_count = getattr(backlog, "byte_count")
-        oldest_receipt_time = getattr(backlog, "oldest_receipt_time")
-    except Exception:
-        # A task read failure must retain conservative unknown scope rather
-        # than make a zero-valued snapshot look complete.
-        with contextlib.suppress(Exception):
-            updater(workspace, 0, 0, None, observed_at)
-        return
-    with contextlib.suppress(Exception):
-        updater(
-            workspace,
-            count,
-            byte_count,
-            oldest_receipt_time,
-            observed_at,
-            route_id=runtime.task_id,
-        )
+            store = task_runtime.observation
+            if (
+                task_runtime.task_id != route.task_id
+                or task_runtime.session_id != route.session_id
+                or store is None
+            ):
+                complete = False
+                continue
+            await visit(task_runtime, store)
+        except Exception:
+            complete = False
+        finally:
+            if task_runtime is not None:
+                with contextlib.suppress(Exception):
+                    await runtime.release(task_runtime)
+    return complete
 
 
 def _privacy_gated_semantic_evaluator(
@@ -5206,13 +5174,25 @@ async def provide_service_ready_context(
         )
 
     async def reconcile_observation_capture(runtime: TaskRuntime) -> None:
-        store = runtime.observation
-        if store is None:
-            return
-        await _reconcile_observation_capture(
-            runtime,
-            local_observation,
-            clock,
+        # The CHECK barrier preflight: current local authority first, then (when
+        # the capture lock is free) the structural row of each aged handoff, so
+        # a ticket with no deliverable row cannot hold the freeze (#836).
+        await observation_coordinator.reconcile_task_capture_handoffs(runtime)
+
+    async def reconcile_capture_handoffs(
+        workspace: str,
+        task_ids: tuple[str, ...],
+        visit: Callable[[TaskRuntime, TaskObservationPort], Awaitable[int]],
+    ) -> bool:
+        return await _reconcile_capture_handoffs(
+            workspace,
+            task_ids,
+            visit,
+            catalog=catalog,
+            runtime=runtime,
+            generation_is_current=lambda: generation_is_current(
+                service_generation, vault_generation
+            ),
         )
 
     if not semantic_configured:
@@ -5940,6 +5920,7 @@ async def provide_service_ready_context(
         host_lineage_registry=host_lineage_registry,
         observed_activity_hook=renew_observed_activity,
         capture_budget_bootstrap=bootstrap_capture_reservations,
+        capture_handoff_reconcile=reconcile_capture_handoffs,
     )
     observation_sweeper = ObservationOutboxSweeper(
         local_observation,
