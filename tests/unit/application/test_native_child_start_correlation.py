@@ -264,6 +264,9 @@ async def test_current_native_activity_is_offered_with_its_own_time(
         disposition=ObservationIngestDisposition(disposition),
         predecessor_session_id=ids["session_id"],
         predecessor_writer_id=ids["writer_id"],
+        route_bound=True,
+        workspace="hmac-sha256:" + "a" * 64,
+        codex_session_id="native-correlation",
     )
     assert hook.await_count == int(expected)
     if expected:

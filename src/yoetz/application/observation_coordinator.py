@@ -2647,7 +2647,7 @@ class ObservationCoordinator:
             store: TaskObservationPort | None = None
             route_history: list[LifecycleMapping] = []
             completed_ingest: (
-                tuple[TaskRuntime, ObservationEnvelope, ObservationIngestResult] | None
+                tuple[TaskRuntime, ObservationEnvelope, ObservationIngestResult, bool] | None
             ) = None
             stage = "runtime_route"
             handoff = _StructuralCaptureHandoff()
@@ -2948,6 +2948,22 @@ class ObservationCoordinator:
                             reason=CaptureHandoffRetirementReason.TERMINAL_REFUSAL,
                         )
                     return result
+
+                # Persist the host/session binding at native admission, before optional lineage,
+                # verification, or advice work can fail.  The mapping selected above is the
+                # request's original route; a retired predecessor may have been followed to a
+                # successor runtime, in which case this returns False and the envelope remains
+                # structural evidence only.
+                stage = "host_session_route"
+                route_bound = await self._record_current_host_session_route(
+                    runtime,
+                    store,
+                    workspace=workspace,
+                    codex_session_id=codex_session_id,
+                    envelope=envelope,
+                    expected_session_id=predecessor_session_id,
+                    expected_writer_id=predecessor_writer_id,
+                )
 
                 # Keep host attribution in the service-owned catalog alongside the local
                 # envelope. ACCEPTED and DUPLICATE both pass through this idempotent path so a
@@ -3374,7 +3390,7 @@ class ObservationCoordinator:
                     stage=CaptureHandoffRetirementStage.STRUCTURAL_COMMITTED,
                     reason=CaptureHandoffRetirementReason.CONTENT_NOT_ADMITTED,
                 )
-                completed_ingest = (runtime, envelope, result)
+                completed_ingest = (runtime, envelope, result, route_bound)
             except PublicOperationError as exc:
                 if exc.retryable and exc.code in {
                     PublicErrorCode.OPERATION_PENDING,
@@ -3494,7 +3510,7 @@ class ObservationCoordinator:
                             self._pending_releases.add(pending)
                             pending.add_done_callback(self._release_finished)
                             await asyncio.shield(pending)
-            completed_runtime, completed_envelope, completed_result = completed_ingest
+            completed_runtime, completed_envelope, completed_result, route_bound = completed_ingest
             try:
                 # Never wait for the lineage mutation lock while retaining a runtime lease:
                 # attach holds that lock while it waits to rebind the same runtime.
@@ -3504,6 +3520,9 @@ class ObservationCoordinator:
                     disposition=completed_result.disposition,
                     predecessor_session_id=predecessor_session_id,
                     predecessor_writer_id=predecessor_writer_id,
+                    route_bound=route_bound,
+                    workspace=workspace,
+                    codex_session_id=codex_session_id,
                 )
                 await self._sweep_lineage(completed_runtime.task_id)
             except Exception as exc:
@@ -3631,6 +3650,67 @@ class ObservationCoordinator:
             )
         return store
 
+    async def _record_current_host_session_route(
+        self,
+        runtime: TaskRuntime,
+        store: TaskObservationPort,
+        *,
+        workspace: str,
+        codex_session_id: str,
+        envelope: ObservationEnvelope,
+        expected_session_id: str,
+        expected_writer_id: str,
+    ) -> bool:
+        """Persist the current host binding before liveness can use the envelope.
+
+        Lifecycle recovery can rewrite an ended host mapping to a successor Yoetz session.  An
+        envelope drained from that predecessor must therefore remain structural evidence only: its
+        ended host-session fence is checked before a route write, and the observation adapter's
+        first-writer commitment fence refuses a conflicting host binding for an existing Yoetz
+        session.  A missing route recorder is retained for compatibility doubles; READY has the
+        durable implementation.
+        """
+
+        if (
+            envelope.source
+            not in {
+                ObservationSource.CODEX_HOOK,
+                ObservationSource.CLAUDE_HOOK,
+                ObservationSource.CURSOR_HOOK,
+            }
+            or envelope.event_kind == "SessionEnd"
+            or runtime.writer_id is None
+            or runtime.session_id != expected_session_id
+            or runtime.writer_id
+            not in {
+                expected_writer_id,
+                observation_writer_id(runtime.task_id, expected_session_id),
+            }
+        ):
+            return True
+        ended_lookup = getattr(getattr(self, "local", None), "codex_session_ended", None)
+        if callable(ended_lookup):
+            try:
+                if await self._local(partial(ended_lookup, workspace, codex_session_id)):
+                    return False
+            except Exception:
+                return False
+        recorder = getattr(store, "record_workspace_session_route", None)
+        if not callable(recorder):
+            return True
+        try:
+            result = recorder(
+                workspace=workspace,
+                yoetz_session_id=runtime.session_id,
+                yoetz_task_id=runtime.task_id,
+                yoetz_writer_id=runtime.writer_id,
+                codex_session_commitment=envelope.session_commitment,
+                bound_at=timestamp_from_datetime(self.clock.now_utc()),
+            )
+        except Exception:
+            return False
+        return result is not False
+
     async def _renew_observed_activity(
         self,
         runtime: TaskRuntime,
@@ -3639,6 +3719,9 @@ class ObservationCoordinator:
         disposition: ObservationIngestDisposition,
         predecessor_session_id: str,
         predecessor_writer_id: str,
+        route_bound: bool,
+        workspace: str,
+        codex_session_id: str,
     ) -> None:
         """Offer admitted native activity as contact evidence for its unchanged session.
 
@@ -3655,6 +3738,7 @@ class ObservationCoordinator:
         hook = self.observed_activity_hook
         if (
             hook is None
+            or not route_bound
             or disposition
             not in {ObservationIngestDisposition.ACCEPTED, ObservationIngestDisposition.DUPLICATE}
             or envelope.source
@@ -3672,6 +3756,13 @@ class ObservationCoordinator:
             }
         ):
             return
+        ended_lookup = getattr(getattr(self, "local", None), "codex_session_ended", None)
+        if callable(ended_lookup):
+            try:
+                if await self._local(partial(ended_lookup, workspace, codex_session_id)):
+                    return
+            except Exception:
+                return
         observed_at = envelope.receipt_time.as_datetime()
         age = (self.clock.now_utc() - observed_at).total_seconds()
         if not 0 <= age <= self.observed_activity_max_age_seconds:
@@ -5357,14 +5448,32 @@ class ObservationCoordinator:
             envelope.event_kind, envelope.structural_payload
         ):
             return None
-        # Bind the service-owned task/session route before any optional verification setup.
-        # Policy loading and subject inspection are allowed to decline this event (for example
-        # when the workspace has no approved-check policy), but AI-powered review captured-content
-        # selection still needs this durable task fence.  Recording it here keeps the route
-        # coupled to the accepted PostToolUse envelope instead of making content visibility
-        # depend on verification policy availability.
+        # Older READY generations may rediscover a pending verification row without the original
+        # ingest callback.  Repair its route only when the durable mapping still names this exact
+        # runtime/session and the raw host session is not ended.  Normal ingest records the route
+        # at admission above; this gate keeps the recovery repair from becoming a predecessor
+        # binding bypass when an ended mapping was rewritten to a successor.
         route_recorder = getattr(store, "record_workspace_session_route", None)
-        if callable(route_recorder) and type(runtime.writer_id) is str:
+        route_allowed = (
+            type(legacy_session_id) is str
+            and runtime.session_id == legacy_session_id
+            and type(runtime.writer_id) is str
+            and runtime.writer_id
+            in {
+                legacy_writer_id,
+                observation_writer_id(runtime.task_id, legacy_session_id),
+            }
+        )
+        if route_allowed and codex_session_id is not None:
+            ended_lookup = getattr(self.local, "codex_session_ended", None)
+            if callable(ended_lookup):
+                try:
+                    route_allowed = not await self._local(
+                        partial(ended_lookup, workspace, codex_session_id)
+                    )
+                except Exception:
+                    route_allowed = False
+        if callable(route_recorder) and route_allowed:
             now = timestamp_from_datetime(self.clock.now_utc())
             route_recorder(
                 workspace=workspace,

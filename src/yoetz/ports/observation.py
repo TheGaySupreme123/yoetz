@@ -147,7 +147,7 @@ class TaskObservationPort(Protocol):
         yoetz_writer_id: str,
         codex_session_commitment: str,
         bound_at: Timestamp,
-    ) -> None: ...
+    ) -> bool: ...
 
     def record_inspection_snapshot(
         self,

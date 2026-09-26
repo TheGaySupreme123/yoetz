@@ -19,6 +19,7 @@ import yoetz.adapters.sqlite.connection as connection_module
 import yoetz.adapters.sqlite.recovery as recovery_module
 import yoetz.service.ready_composition as ready_composition_module
 from builders.privacy_policies import minimal_external_policy
+from yoetz.adapters.integrations.codex_lifecycle import mapping_from_start_ids, store_mapping
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.adapters.keys.encrypted_vault import EncryptedVaultStore
 from yoetz.adapters.keys.secret_memory import LocalSecretMemory
@@ -32,9 +33,23 @@ from yoetz.adapters.sqlite.migrations import (
 from yoetz.application.service import ClientProjectionContext, ControlProjectionBinding
 from yoetz.config.models import YoetzConfig
 from yoetz.config.write import fireworks_provider
-from yoetz.domain.observation import ObservationLifecycle
+from yoetz.domain.host_lineage import host_lineage_from_payload
+from yoetz.domain.observation import (
+    ObservationCursor,
+    ObservationEnvelope,
+    ObservationIngestRequest,
+    ObservationLifecycle,
+    ObservationSource,
+    observation_ingest_request_to_json,
+)
 from yoetz.domain.privacy import AuthorizationScope, AuthorizationScopeKind
-from yoetz.domain.values import Frontier, JsonObject, format_rfc3339_millis, task_id
+from yoetz.domain.values import (
+    Frontier,
+    JsonObject,
+    format_rfc3339_millis,
+    task_id,
+    timestamp_from_datetime,
+)
 from yoetz.kernel.policies.observation_advice import (
     ObservationAdviceContext,
     ObservationCompositionFact,
@@ -59,7 +74,11 @@ from yoetz.ports.privacy import (
     PrivacyAuditObjectRoots,
     PrivacyReceiptAudience,
 )
-from yoetz.ports.runtime import BundleProvisionCommand, OwnershipFence, RouteAccess
+from yoetz.ports.runtime import (
+    BundleProvisionCommand,
+    OwnershipFence,
+    RouteAccess,
+)
 from yoetz.ports.secret_memory import HumanAuthorizationProof, SecretPurpose
 from yoetz.ports.start_catalog import TaskRoute, TaskRouteState
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
@@ -1630,6 +1649,202 @@ async def test_create_then_attach_same_service_generation_advances_owner_once(
             await app.close()
         await vault.close()
         memory.close()
+        await lifecycle.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.timeout(20)
+async def test_ready_lineage_bootstraps_exact_durable_host_session_route(
+    tmp_path: Path,
+) -> None:
+    """READY recovery scopes an open host operation to the current reattached session."""
+
+    tmp_path.chmod(0o700)
+    clock = _Clock()
+    memory = LocalSecretMemory()
+    lifecycle = ServiceLifecycle(
+        clock,
+        generation_store=_GenerationStore(),
+        process_start_identity_commitment="sha256:" + "1" * 64,
+        instance_id=_INSTANCE_ID,
+    )
+    await lifecycle.acquire_singleton()
+    await lifecycle.transition(ServiceState.LOCKED)
+    vault = VaultService(
+        installation_id=_INSTALLATION_ID,
+        service_generation=1,
+        mode=VaultMode.UNINITIALIZED,
+        secret_memory=memory,
+        clock=clock,
+        vault_store_factory=lambda: EncryptedVaultStore(tmp_path / "vault"),
+        pristine_state_digest="sha256:" + "2" * 64,
+    )
+    initialize = memory.capture(SecretPurpose.VAULT_INITIALIZE, bytearray(b"correct horse battery"))
+    await vault.initialize_passphrase(initialize, "sha256:" + "3" * 64)
+    app = None
+    recomposed_lifecycle: ServiceLifecycle | None = None
+    try:
+        factory = build_ready_application_factory(
+            lifecycle=lifecycle,
+            vault=vault,
+            config=YoetzConfig(),
+            paths=_Paths(tmp_path),
+            clock=clock,
+            secret_memory=memory,
+            diagnostics=_Diagnostics(),
+        )
+        app = await factory(1, vault.generation)
+        common = {
+            "protocol_version": "0.1",
+            "schema_version": "1.0.0",
+            "actor": {"actor_id": "harness:pytest", "actor_type": "harness"},
+            "client": {
+                "kind": "codex_cli",
+                "version": "0.144.6",
+                "integration": "local_cli",
+            },
+            "requested_view": "compact",
+            "task_title": "READY host session bootstrap regression",
+            "workspace_ref": "https://github.com/example/yoetz-core.git",
+            "external_ref": "plan/ready-host-session-bootstrap",
+        }
+        first = await app.start(
+            StartRequest.model_validate(
+                {
+                    **common,
+                    "request_id": "req_00000000-0000-4000-8000-000000000231",
+                    "mode": "create",
+                }
+            )
+        )
+        second = await app.start(
+            StartRequest.model_validate(
+                {
+                    **common,
+                    "request_id": "req_00000000-0000-4000-8000-000000000232",
+                    "mode": "attach",
+                    "session_id": first.session_id,
+                }
+            )
+        )
+        assert first.ok is True and second.ok is True
+        assert first.task_id == second.task_id
+        assert first.session_id != second.session_id
+        assert first.writer_id != second.writer_id
+
+        host_session_id = "ready-native-subagent-start"
+        local = LocalObservationStore(_state=tmp_path / "state")
+        workspace = local.workspace_commitment(str(tmp_path.resolve()))
+        local.grant_consent(workspace)
+        current_host_session = local.bind_codex_session(workspace, host_session_id)
+        store_mapping(
+            mapping_from_start_ids(
+                codex_session_id=host_session_id,
+                yoetz_task_id=second.task_id,
+                yoetz_session_id=second.session_id,
+                yoetz_writer_id=second.writer_id,
+                last_frontier=None,
+            ),
+            _state=tmp_path / "state",
+        )
+        # Feed the first native SubagentStart through the production coordinator. Its admission
+        # path must persist the host route before optional verification/advice work, so the next
+        # READY generation can bootstrap from this row without a process-local cache or a manual
+        # route write.
+        envelope = ObservationEnvelope(
+            session_commitment=current_host_session,
+            event_kind="SubagentStart",
+            source_identity="hook:ready-native-subagent-start",
+            source=ObservationSource.CODEX_HOOK,
+            cursor=ObservationCursor(1, 0, 1, current_host_session, "codex-obs-hook/1.0.0"),
+            receipt_time=timestamp_from_datetime(clock.now_utc()),
+            structural_payload=JsonObject({}),
+            content_object_refs=(),
+            gap_codes=(),
+        )
+        ingest = app.support_handlers[ControlMethod.OBSERVATION_INGEST]
+        ingest_result = await ingest(
+            observation_ingest_request_to_json(
+                ObservationIngestRequest(codex_session_id=host_session_id, envelope=envelope)
+            )
+        )
+        assert ingest_result["disposition"] == "accepted", ingest_result
+
+        # Recompose the application so the lookup closure and lineage process cache are fresh.
+        await app.close()
+        await lifecycle.close()
+        recomposed_lifecycle = ServiceLifecycle(
+            clock,
+            generation_store=_GenerationStore(),
+            process_start_identity_commitment="sha256:" + "1" * 64,
+            instance_id=_INSTANCE_ID,
+            singleton_lock_path=tmp_path / "singleton.lock",
+        )
+        await recomposed_lifecycle.acquire_singleton()
+        await recomposed_lifecycle.transition(ServiceState.LOCKED)
+        recomposed_factory = build_ready_application_factory(
+            lifecycle=recomposed_lifecycle,
+            vault=vault,
+            config=YoetzConfig(),
+            paths=_Paths(tmp_path),
+            clock=clock,
+            secret_memory=memory,
+            diagnostics=_Diagnostics(),
+        )
+        app = await recomposed_factory(1, vault.generation)
+
+        lineage = app.lineage
+        assert lineage is not None
+        lookup = getattr(lineage, "_host_session_commitment_lookup", None)
+        assert callable(lookup)
+        lookup_fn = cast(Callable[[str, str], Awaitable[str | None]], lookup)
+        assert await lookup_fn(second.task_id, second.session_id) == current_host_session
+        assert await lookup_fn(second.task_id, first.session_id) is None
+
+        predecessor_host_session = "hmac-sha256:" + "a" * 64
+        registry = app.host_lineage_registry
+        assert registry is not None
+        predecessor_start = host_lineage_from_payload(
+            "codex", "SubagentStart", {"subagent_id": "worker-predecessor"}
+        )
+        assert predecessor_start is not None
+        await registry.record_host_lineage_observation(
+            first.task_id,
+            predecessor_start,
+            observed_session_commitment=predecessor_host_session,
+            source=ObservationSource.CODEX_HOOK,
+        )
+
+        await lineage.mark_contact_lost(session_id=second.session_id)
+        renewed: list[tuple[str, str, datetime]] = []
+
+        async def renew(task_id: str, session_id: str, lease_until: datetime) -> None:
+            renewed.append((task_id, session_id, lease_until))
+
+        # The only open annotation belongs to the predecessor host session, so the current
+        # reattached session cannot inherit its hold.
+        assert await lineage.hold_in_flight_contact(renew) == ()
+        assert renewed == []
+
+        current_start = host_lineage_from_payload(
+            "codex", "SubagentStart", {"subagent_id": "worker-current"}
+        )
+        assert current_start is not None
+        await registry.record_host_lineage_observation(
+            second.task_id,
+            current_start,
+            observed_session_commitment=current_host_session,
+            source=ObservationSource.CODEX_HOOK,
+        )
+        assert await lineage.hold_in_flight_contact(renew) == (second.task_id,)
+        assert renewed and renewed[0][1] == second.session_id
+    finally:
+        if app is not None:
+            await app.close()
+        await vault.close()
+        memory.close()
+        if recomposed_lifecycle is not None:
+            await recomposed_lifecycle.close()
         await lifecycle.close()
 
 
