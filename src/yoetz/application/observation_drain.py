@@ -13,7 +13,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import partial
-from typing import Final, Protocol
+from typing import Final, Protocol, cast
 
 from yoetz.adapters.integrations.observation_local import (
     LocalObservationStore,
@@ -95,6 +95,11 @@ class ObservationCaptureRecoveryOutcome(str, Enum):  # noqa: UP042 - stable inte
     DISABLED = "capture_inventory_disabled"
     BUSY = "capture_inventory_busy"
     TIMEOUT = "capture_inventory_timeout"
+    # Aged native capture handoffs (#836): at least one that its structural row
+    # can no longer consume was retired, or an owning task could not be read.
+    # Handoffs still backed by a pending row and current authority report nothing.
+    HANDOFF_RETIRED = "capture_handoff_retired"
+    HANDOFF_UNAVAILABLE = "capture_handoff_unavailable"
 
 
 class ObservationDrainAction(str, Enum):  # noqa: UP042 - stable internal value
@@ -237,7 +242,15 @@ class ObservationOutboxSweeper:
     # Recovery owns no hook output and no observation row. It runs outside the
     # control/ingest gate, under the coordinator's capture lock instead.
     capture_recovery: (
-        Callable[[str], Awaitable[ObservationCaptureRecoveryOutcome | None]] | None
+        Callable[
+            [str],
+            Awaitable[
+                ObservationCaptureRecoveryOutcome
+                | tuple[ObservationCaptureRecoveryOutcome, ...]
+                | None
+            ],
+        ]
+        | None
     ) = None
     capture_recovery_budget_seconds: float = 5.0
     _capture_recovery_after: str | None = field(default=None, init=False, repr=False)
@@ -295,6 +308,7 @@ class ObservationOutboxSweeper:
             if available <= 0.0:
                 break
             self._capture_recovery_after = workspace
+            result: object
             try:
                 async with asyncio.timeout(available):
                     result = await recover(workspace)
@@ -303,10 +317,17 @@ class ObservationOutboxSweeper:
             except Exception:
                 # Do not copy exception text, paths, or payloads into diagnostics.
                 result = ObservationCaptureRecoveryOutcome.INVENTORY_UNKNOWN
-            if result is not None:
-                if type(result) is not ObservationCaptureRecoveryOutcome:
-                    result = ObservationCaptureRecoveryOutcome.INVENTORY_UNKNOWN
-                outcomes.append(result)
+            if result is None:
+                continue
+            # One workspace turn may repair inventory and then reconcile aged
+            # handoffs; each step contributes its own fixed reason count.
+            items = cast(tuple[object, ...], result) if type(result) is tuple else (result,)
+            for item in items or (ObservationCaptureRecoveryOutcome.INVENTORY_UNKNOWN,):
+                outcomes.append(
+                    item
+                    if type(item) is ObservationCaptureRecoveryOutcome
+                    else ObservationCaptureRecoveryOutcome.INVENTORY_UNKNOWN
+                )
         return tuple(outcomes)
 
     def _off_loop[ResultT](self, call: Callable[[], ResultT]) -> Future[ResultT]:

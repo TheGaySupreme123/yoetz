@@ -46,6 +46,9 @@ __all__ = [
     "AdviceItem",
     "AdviceSemanticState",
     "AdviceSnapshot",
+    "CAPTURE_HANDOFF_RECONCILE_AGE_MS",
+    "CaptureHandoffRetirementReason",
+    "CaptureHandoffRetirementStage",
     "OBSERVATION_BACKPRESSURE_REASON",
     "OBSERVATION_CONTENT_CAPTURE_PENDING_REASON",
     "OBSERVATION_HOOK_COMMITMENT_DOMAIN",
@@ -375,6 +378,44 @@ OBSERVATION_BACKPRESSURE_REASON: Final = "operation_pending"
 # ``operation_pending`` because the latter says nothing about content
 # retention.
 OBSERVATION_CONTENT_CAPTURE_PENDING_REASON: Final = "content_capture_pending"
+# A native handoff normally completes inside the hook drain that staged it, and
+# a committed or terminally refused structural row retires its own ticket.  Only
+# a handoff at least this old is compared with the structural rows that could
+# still consume it, so a handoff whose own drain is still in progress is never
+# retired as stranded.  This is half of the default pending-age ceiling: a
+# stranded handoff becomes eligible before it alone can hold oldest-age pressure
+# at the hard limit, and the READY sweep retires it on its next maintenance turn
+# (#836).
+CAPTURE_HANDOFF_RECONCILE_AGE_MS: Final = 30_000
+
+
+class CaptureHandoffRetirementStage(str, Enum):  # noqa: UP042 - stable diagnostic value
+    """The bounded transition that retired an unfinished native capture handoff."""
+
+    # The structural row committed through this delivery without consuming the
+    # handoff: its content was blocked, unauthorized, or fenced, or the handoff
+    # was staged after the row had passed its capture fence.
+    STRUCTURAL_COMMITTED = "structural_committed"
+    # The structural row was refused terminally after its handoff was matched.
+    STRUCTURAL_REFUSED = "structural_refused"
+    # The READY maintenance sweep, independent of native admission.
+    SWEEP = "sweep"
+    # The exact-task reconciliation a new CHECK runs at the capture barrier.
+    CHECK_PREFLIGHT = "check_preflight"
+
+
+class CaptureHandoffRetirementReason(str, Enum):  # noqa: UP042 - stable diagnostic value
+    """Why a handoff can no longer be consumed by its structural row."""
+
+    CONTENT_NOT_ADMITTED = "content_not_admitted"
+    TERMINAL_REFUSAL = "terminal_refusal"
+    STRUCTURAL_ROW_ABSENT = "structural_row_absent"
+    STRUCTURAL_ROW_QUARANTINED = "structural_row_quarantined"
+    AUTHORITY_ABSENT = "authority_absent"
+    AUTHORITY_INACTIVE = "authority_inactive"
+    RUNTIME_DISABLED = "runtime_disabled"
+    AUTHORITY_GENERATION_CHANGED = "authority_generation_changed"
+    PROFILE_UNSELECTED = "profile_unselected"
 
 
 class ObservationGapCode(str, Enum):  # noqa: UP042 - exact durable wire enum

@@ -121,7 +121,11 @@ writable ledger.
    or from an old authority generation, so a direct capture-only request with no structural outbox
    row cannot leave a permanent barrier. Matching active tickets remain retryable; a completed
    same-request replay returns without inspecting newer tickets, and encrypted objects and
-   captured history are unchanged.
+   captured history are unchanged. When the capture lock is free, the preflight also tombstones an
+   active ticket at least 30 seconds old whose structural row is no longer queued, and the READY
+   maintenance sweep does the same across the workspace's task bundles without waiting for a
+   CHECK or new native input (#836). A structural row that commits without consuming its matched
+   ticket, or is refused terminally, retires that ticket itself.
 
    This handoff is a local durability boundary, not an offline guarantee. It contains no
    plaintext spool. A host kill or service failure before authenticated staging completes may

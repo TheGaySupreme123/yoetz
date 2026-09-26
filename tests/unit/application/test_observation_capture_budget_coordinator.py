@@ -316,6 +316,16 @@ async def test_capture_budget_error_has_explicit_negative_reason(tmp_path: Path)
 @pytest.mark.parametrize("stage", ["prepare", "capture"])
 async def test_structural_row_keeps_both_capture_budget_gaps(tmp_path: Path, stage: str) -> None:
     coordinator, store, session_commitment, mapping = _fixture(tmp_path)
+    envelope = _envelope(session_commitment, identity="capture-budget-structural")
+    staging_ticket = replace(
+        _reservation_ticket(mapping.yoetz_task_id),
+        workspace_commitment=coordinator.local.workspace_commitment(str(tmp_path.resolve())),
+        yoetz_session_id=mapping.yoetz_session_id,
+        session_commitment=session_commitment,
+        source_identity=envelope.source_identity,
+        cursor=envelope.cursor,
+        logical_identity="capture-budget",
+    )
 
     class _BudgetCoordinator(ObservationCoordinator):
         async def _native_capture_context(  # type: ignore[override]
@@ -337,7 +347,7 @@ async def test_structural_row_keeps_both_capture_budget_gaps(tmp_path: Path, sta
                 capture_ticket_revoked=False,
                 capture_fence=None,
                 fence_generation=None,
-                capture_staging_ticket=object(),
+                capture_staging_ticket=staging_ticket,
                 staged_ticket=None,
                 expected_capture_parts=None,
                 rejection_reason=None,
@@ -371,7 +381,7 @@ async def test_structural_row_keeps_both_capture_budget_gaps(tmp_path: Path, sta
     result = await budget_coordinator.ingest_request(
         ObservationIngestRequest(
             codex_session_id=mapping.codex_session_id,
-            envelope=_envelope(session_commitment, identity="capture-budget-structural"),
+            envelope=envelope,
             content_chunks=(_chunk(),),
         )
     )

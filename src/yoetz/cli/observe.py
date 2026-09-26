@@ -1249,6 +1249,34 @@ def _delivery_facts(
     )
 
 
+def _capture_handoff_retirement_text(retirements: JsonObject) -> str:
+    """Render the bounded handoff-retirement account on one status line."""
+
+    count = retirements.get("retired_count")
+    recent = retirements.get("recent")
+    entries: tuple[Mapping[str, object], ...] = ()
+    if isinstance(recent, tuple):
+        entries = tuple(
+            cast(Mapping[str, object], item)
+            for item in cast(tuple[object, ...], recent)
+            if isinstance(item, Mapping)
+        )
+    if not count:
+        return "none"
+    details = "; ".join(
+        f"{entry.get('stage')} {entry.get('ticket_state')} {entry.get('source')} "
+        f"reason {entry.get('reason')}"
+        + (
+            f" ({entry.get('quarantine_reason')})"
+            if entry.get("quarantine_reason") is not None
+            else ""
+        )
+        + f" age {entry.get('age_ms')}ms at {entry.get('retired_at')}"
+        for entry in entries[-4:]
+    )
+    return f"{count} (recent: {details or 'none'})"
+
+
 @_bounded_operation("status")
 def observe_status(
     *,
@@ -1295,6 +1323,10 @@ def observe_status(
     # an operator must be able to name that cause instead of reading a bare
     # "incomplete or stale" coverage note (issue #753).
     summary_refusals = store.summary_refusals(commitment)
+    # A retired native capture handoff names the stage, ticket state, and reason
+    # that stranded it, so a retained ticket that held capture pressure can be
+    # traced to its transition (issue #836).
+    handoff_retirements = store.capture_handoff_retirements(commitment)
     reclaim_guidance = (
         "reclaim with 'yoetz observe reclaim --workspace .'"
         if root == Path.cwd().resolve()
@@ -1353,6 +1385,7 @@ def observe_status(
                 "mapping_present": mapping_present,
                 "hook_diagnostics": diagnostics,
                 "summary_refusals": summary_refusals,
+                "capture_handoff_retirements": handoff_retirements,
                 "plugin_activation": plugin_activation,
             },
             json_output=True,
@@ -1402,6 +1435,7 @@ def observe_status(
                 for entry in summary_refusals[-4:]
             )
         ),
+        "capture_handoff_retirements": _capture_handoff_retirement_text(handoff_retirements),
         "hook_coverage": str(status.source_coverage.get(ObservationSource.CODEX_HOOK, False)),
         "stream_coverage": str(
             status.source_coverage.get(ObservationSource.CODEX_SESSION_STREAM, False)
