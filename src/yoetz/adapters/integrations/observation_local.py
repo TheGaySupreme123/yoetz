@@ -3597,6 +3597,14 @@ class LocalObservationStore:
             assert state.codex_session_bindings is not None
             return tuple(sorted(state.codex_session_bindings, key=str.encode))
 
+    def codex_session_workspace_owners(self, codex_session_id: str) -> frozenset[str]:
+        """Return every local workspace that records one host session or derived child lane."""
+
+        with self._lock:
+            return self._session_workspace_owners_unlocked(
+                self.session_commitment(codex_session_id)
+            )
+
     def unambiguous_codex_sessions_for_workspace(
         self, workspace_commitment: str
     ) -> tuple[str, ...]:

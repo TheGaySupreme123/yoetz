@@ -50,6 +50,7 @@ from yoetz.service.client import connect_service
 
 __all__ = [
     "INACTIVE_CONTEXT",
+    "TRANSCRIPT_CHILD_IDENTITY_CONFLICT",
     "YOETZ_START_TOOL_NAMES",
     "StaleReplacement",
     "StatusOutcome",
@@ -63,6 +64,7 @@ __all__ = [
     "intake_cue_text",
     "read_hook_payload",
     "recover_pending_start_mapping",
+    "with_transcript_child_identity",
 ]
 
 
@@ -566,6 +568,97 @@ def _child_identity_from_payload(
     if any(value != values[0] for value in values[1:]):
         return None, supplied, False
     return (values[0] if values else None), supplied, True
+
+
+# Callback families that describe work performed by the thread that invoked the hook. Session and
+# lineage lifecycle events stay host-session signals and are never re-attributed from a transcript.
+_TRANSCRIPT_CHILD_IDENTITY_EVENTS: Final = frozenset(
+    {
+        "PreToolUse",
+        "PostToolUse",
+        "PermissionRequest",
+        "UserPromptSubmit",
+        "Stop",
+        "PreCompact",
+        "PostCompact",
+    }
+)
+# The empty string is never a valid host token, so every child-identity reader treats it as a
+# supplied but malformed alias. That turns a contradicted callback into an explicit attribution
+# gap without letting it inherit the host session's route.
+_CONTRADICTED_CHILD_IDENTITY: Final = ""
+TRANSCRIPT_CHILD_IDENTITY_CONFLICT: Final = "child_transcript_identity_conflict"
+
+
+def with_transcript_child_identity(
+    payload: Mapping[str, JsonValue],
+    *,
+    event_name: str,
+    codex_home: Path | None = None,
+) -> tuple[Mapping[str, JsonValue], str | None]:
+    """Name the delegated child a Codex callback came from when only its transcript says so.
+
+    Codex multi-agent v2 gives every thread of one delegation tree the root ``session_id``, so a
+    delegated child's own tool and turn callbacks arrive under the parent's session. Before #841
+    such a callback without a host child alias was indistinguishable from the parent's own work:
+    the child's attach could not publish its child lane (``start_bind_child_lane_unbound``), its
+    command and file evidence and advice landed on the parent lane, and the provisional host
+    annotation was never bound. The callback's own ``transcript_path`` (or ``session_file``) is
+    the host's record of the thread that raised it. When that file is not the session's own
+    rollout and its v2 header names a delegated child spawned by this session, the header's child
+    thread is the callback's host child identity, exactly as a native ``agent_id`` would be.
+
+    The payload is returned unchanged when the transcript is the session's own, absent, unsafe,
+    or not a delegated-child rollout, so nothing is inferred from an unprovable file. A transcript
+    that proves the callback came from a delegated child but cannot name it for this session, or
+    that contradicts a host-supplied child alias, marks the child identity malformed: the
+    callback becomes an explicit attribution gap and the second member reports
+    ``child_transcript_identity_conflict``. Only bounded thread tokens are read; the path is
+    never persisted, and no task, route, or annotation is selected here.
+    """
+
+    if event_name not in _TRANSCRIPT_CHILD_IDENTITY_EVENTS:
+        return payload, None
+    try:
+        host_session_id = validate_codex_session_id(payload.get("session_id"))
+    except ProtocolValueError:
+        return payload, None
+    raw_path = payload.get("session_file") or payload.get("transcript_path")
+    if type(raw_path) is not str or not raw_path or "\0" in raw_path:
+        return payload, None
+    from yoetz.adapters.integrations.codex_session_stream import (
+        CodexSessionStreamLocator,
+        resolve_codex_home,
+        rollout_filename_matches_token,
+    )
+
+    if rollout_filename_matches_token(Path(raw_path).name, host_session_id):
+        # The session's own rollout: an ordinary callback of the thread that owns this session.
+        return payload, None
+
+    _path, result = CodexSessionStreamLocator(resolve_codex_home(codex_home)).resolve_child_rollout(
+        raw_path
+    )
+    if result.status in {"not_child", "unreadable"}:
+        return payload, None
+    host_identity, identity_supplied, identity_valid = _child_identity_from_payload(payload)
+    if identity_supplied and not identity_valid:
+        # Already an explicit gap; a transcript cannot repair a contradictory host alias.
+        return payload, None
+    header = result.header
+    derived = (
+        header.child_thread_id
+        if header is not None and host_session_id in header.spawning_sessions
+        else None
+    )
+    enriched = dict(payload)
+    if derived is None or (host_identity is not None and host_identity != derived):
+        enriched["subagent_id"] = _CONTRADICTED_CHILD_IDENTITY
+        return enriched, TRANSCRIPT_CHILD_IDENTITY_CONFLICT
+    if host_identity == derived:
+        return payload, None
+    enriched["subagent_id"] = derived
+    return enriched, None
 
 
 def _mapping_for_lane(
@@ -1117,7 +1210,9 @@ def handle_post_tool_use(
             if stdin_bytes is not None
             else sys.stdin.buffer.read(MAX_HOOK_STDIN_BYTES + 1)
         )
-        payload = read_hook_payload(raw)
+        payload, _identity_conflict = with_transcript_child_identity(
+            read_hook_payload(raw), event_name="PostToolUse"
+        )
         record_start_bind_diagnostic(
             bind_start_mapping_outcome(payload, _state=_state), "PostToolUse", _state=_state
         )

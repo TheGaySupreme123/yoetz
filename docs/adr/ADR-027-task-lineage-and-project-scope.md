@@ -191,6 +191,16 @@ than implementation notes.
    adds no creation path — it cannot mint, accept, or reparent a child, and an observing session
    with no admitted parent keeps a bounded coverage gap instead of an attribution.
 
+   **Shared-root child route clarification (2026-09-25, #841).** When a host gives every thread
+   of one delegation tree the same session identity (Codex multi-agent v2), a child's callback
+   may take its host child identity from the host's own record of the thread that raised it — the
+   callback's transcript header — on the same terms as a native child identity field. The
+   child's route still comes only from a validated attach result, and its own transcript is
+   observed only through that validated child route. A transcript that proves a child but cannot
+   name it keeps the callback an attribution gap; it never becomes parent work. Workspace-wide
+   observation state and annotation counts are never binding evidence, and this adds no creation,
+   acceptance, or reparenting path.
+
 3. **Work and session state do not collapse.** A child may be `open`, `closed`, `cancelled`,
    `abandoned`, or `written_off` as work, while each session independently reports
    `active`, `contact_lost`, or `ended`. `abandoned` is terminal and incomplete; `cancelled` and
