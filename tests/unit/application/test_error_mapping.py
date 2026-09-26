@@ -98,7 +98,8 @@ _EXPECTED_EXIT_CODES: dict[PublicErrorCode, int] = {
     PublicErrorCode.INTERNAL_ERROR: 70,
 }
 
-# The exact closed set of public codes each six-operation module is known to raise. A module
+# The exact closed set of public codes each six-operation module and its status classifier
+# is known to raise. A module
 # widening this set (inventing a new mapping) or narrowing it silently both fail this lock.
 _MODULE_CODE_INVENTORY: dict[str, frozenset[PublicErrorCode]] = {
     "start.py": frozenset(
@@ -150,8 +151,10 @@ _MODULE_CODE_INVENTORY: dict[str, frozenset[PublicErrorCode]] = {
             PublicErrorCode.INVALID_REQUEST,
             PublicErrorCode.SERVICE_UNAVAILABLE,
             PublicErrorCode.SESSION_CONFLICT,
-            PublicErrorCode.STORAGE_CORRUPT,
         }
+    ),
+    "status_faults.py": frozenset(
+        {PublicErrorCode.INTERNAL_ERROR, PublicErrorCode.STORAGE_CORRUPT}
     ),
     "receipt.py": frozenset(
         {
