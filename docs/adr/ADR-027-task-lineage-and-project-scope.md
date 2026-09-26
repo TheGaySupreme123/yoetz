@@ -231,6 +231,16 @@ than implementation notes.
      until the stop is recorded, bounded by a fixed 3,600-second service policy for a host that
      never reports it. This is a hold on existing authenticated host evidence. It is not a
      heartbeat publication, and it never touches terminal or ended work.
+   - **The hold uses the current host session binding.** The sweep queries an open annotation
+     with the exact `last_session_commitment` recorded for the active host session. The service
+     obtains that commitment from an admitted event routed to the exact current session; a missing
+     or stale binding fails closed. After restart, it may bootstrap only from the durable
+     observation route for that exact task/session pair. Task or project membership cannot select a
+     predecessor host session.
+   - **Lease renewal is monotonic and fenced.** Renewal is an atomic catalog update that cannot
+     replace a newer lease or revive an ended or rotated session. Recovery rechecks the clock after
+     awaited work and before saving an active state, so evidence that expired during the wait is
+     recorded as contact loss.
    - **Terminal work cannot be resumed or delegate.** A resume of terminal work is refused
      before any session is reserved or the route rotates (`lineage_resume_work_terminal`). A
      terminal parent is refused new child work (`lineage_parent_work_terminal`) even after late

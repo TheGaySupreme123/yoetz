@@ -695,6 +695,9 @@ class ObservationCoordinator:
     # Host observations are recorded in the service-owned catalog after local ingest accepts the
     # envelope. The registry is optional for pre-migration/test compositions.
     host_lineage_registry: HostLineageRegistryPort | None = None
+    # Receives the authenticated host commitment only after the active task/session route has
+    # been selected.  Recovery uses this exact binding to fence predecessor annotations.
+    observed_host_session_binding: Callable[[str, str, str], Awaitable[None]] | None = None
     # Receives ``(task_id, session_id, writer_id, observed_at)``; lineage decides what the
     # evidence proves at ``observed_at``.  The age bound only drops evidence too old to postpone
     # any recorded contact loss: the session lease plus the longest configurable recovery window.
@@ -3030,6 +3033,13 @@ class ObservationCoordinator:
         age = (self.clock.now_utc() - observed_at).total_seconds()
         if not 0 <= age <= self.observed_activity_max_age_seconds:
             return
+        host_binding = getattr(self, "observed_host_session_binding", None)
+        if host_binding is not None:
+            await host_binding(
+                runtime.task_id,
+                predecessor_session_id,
+                envelope.session_commitment,
+            )
         await hook(runtime.task_id, predecessor_session_id, predecessor_writer_id, observed_at)
 
     async def _sweep_lineage(self, task_id: str) -> None:

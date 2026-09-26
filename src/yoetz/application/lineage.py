@@ -72,6 +72,7 @@ __all__ = [
     "LineageStore",
     "LineageProjectAdmission",
     "LineageProjectAdmissionResolver",
+    "HostSessionCommitmentLookup",
     "HostLineageAnnotationMerger",
     "MemoryLineageStore",
     "SessionHealth",
@@ -92,6 +93,7 @@ HostLineageAnnotationMerger = Callable[[Mapping[str, JsonValue]], Awaitable[None
 # bounded refusal; a successful result freezes the project and membership generation used by the
 # admission check.  Later C9 reads perform their own current-generation check.
 LineageProjectAdmissionResolver = Callable[[str, str], Awaitable["LineageProjectAdmission | None"]]
+HostSessionCommitmentLookup = Callable[[str, str], Awaitable[str | None]]
 _AttachOperationResult = TypeVar("_AttachOperationResult")
 
 
@@ -955,6 +957,7 @@ class LineageCoordinator:
         bundle_provisioner: Callable[[str, int], Awaitable[None]] | None = None,
         host_annotation_merger: HostLineageAnnotationMerger | None = None,
         host_lineage_registry: HostLineageRegistryPort | None = None,
+        host_session_commitment_lookup: HostSessionCommitmentLookup | None = None,
         project_admission_resolver: LineageProjectAdmissionResolver | None = None,
     ) -> None:
         # Runtime-checkable protocols are intentionally avoided; duck typing here permits the
@@ -991,6 +994,10 @@ class LineageCoordinator:
             raise TypeError("lineage_host_annotation_merger_invalid")
         if project_admission_resolver is not None and not callable(project_admission_resolver):
             raise TypeError("lineage_project_admission_resolver_invalid")
+        if host_session_commitment_lookup is not None and not callable(
+            host_session_commitment_lookup
+        ):
+            raise TypeError("lineage_host_session_commitment_lookup_invalid")
         if host_lineage_registry is not None and any(
             not callable(getattr(host_lineage_registry, name, None))
             for name in (
@@ -1012,7 +1019,9 @@ class LineageCoordinator:
         self._bundle_provisioner = bundle_provisioner
         self._host_annotation_merger = host_annotation_merger
         self._host_lineage_registry = host_lineage_registry
+        self._host_session_commitment_lookup = host_session_commitment_lookup
         self._project_admission_resolver = project_admission_resolver
+        self._host_session_commitments: dict[tuple[str, str], str] = {}
         self._lock = asyncio.Lock()
 
     @property
@@ -2447,7 +2456,7 @@ class LineageCoordinator:
         *,
         task_id: str,
         session_id: str,
-        renew_lease: Callable[[datetime], Awaitable[None]],
+        renew_lease: Callable[[datetime], Awaitable[bool | None]],
         observed_at: datetime | None = None,
     ) -> bool:
         """Apply one piece of authenticated host contact at its own time.
@@ -2475,7 +2484,16 @@ class LineageCoordinator:
             return False
         evidence_until = observed + timedelta(seconds=SESSION_LEASE_SECONDS)
         async with self._lock:
+            # The lineage lock may be queued behind a slow recovery or publication.  The
+            # evidence decision is made at the commit boundary, not at call entry: a lease can
+            # expire while this coroutine waits for the lock.
+            now = self._now()
+            if observed > now:
+                return False
             snapshot = await self._store.get_task(task)
+            # The store read is awaited too.  A queued read must not let evidence cross its
+            # lease boundary and then take the active-state branch using the earlier clock.
+            now = self._now()
             if (
                 snapshot is None
                 or snapshot.active_session_id != session
@@ -2483,23 +2501,31 @@ class LineageCoordinator:
             ):
                 return False
             if evidence_until > now:
-                await renew_lease(evidence_until)
-                if (
+                lease_offered = await renew_lease(evidence_until)
+                if lease_offered is False:
+                    return False
+                now = self._now()
+                if evidence_until <= now:
+                    # The catalog offer may have waited long enough for this evidence to run out.
+                    # Fall through to the delayed-evidence rule rather than reviving contact.
+                    pass
+                elif (
                     snapshot.session_health is SessionHealth.ACTIVE
                     and snapshot.contact_lost_at is None
                     and snapshot.abandonment_deadline is None
                 ):
                     return True
-                await self._store.save_task(
-                    replace(
-                        snapshot,
-                        session_health=SessionHealth.ACTIVE,
-                        contact_lost_at=None,
-                        abandonment_deadline=None,
-                        lineage_authority_revision=snapshot.lineage_authority_revision + 1,
+                else:
+                    await self._store.save_task(
+                        replace(
+                            snapshot,
+                            session_health=SessionHealth.ACTIVE,
+                            contact_lost_at=None,
+                            abandonment_deadline=None,
+                            lineage_authority_revision=snapshot.lineage_authority_revision + 1,
+                        )
                     )
-                )
-                return True
+                    return True
             lost_at = snapshot.contact_lost_at
             if (
                 snapshot.session_health is not SessionHealth.CONTACT_LOST
@@ -2522,9 +2548,27 @@ class LineageCoordinator:
             )
             return True
 
+    async def bind_host_session_commitment(
+        self, *, task_id: str, session_id: str, session_commitment: str
+    ) -> None:
+        """Record the exact host session currently bound to a live Yoetz route.
+
+        Host observations are admitted only after the routing layer has checked the active route.
+        Recovery uses this process-local binding as a second fence, so an open annotation from a
+        predecessor host session cannot renew a reattached task.  Missing binding deliberately
+        fails closed; a later admitted event re-establishes it.
+        """
+
+        task = _id(IdKind.TASK, task_id)
+        session = _id(IdKind.SESSION, session_id)
+        commitment = _commitment(session_commitment, optional=False)
+        assert commitment is not None
+        async with self._lock:
+            self._host_session_commitments[(task, session)] = commitment
+
     async def hold_in_flight_contact(
         self,
-        renew_lease: Callable[[str, str, datetime], Awaitable[None]],
+        renew_lease: Callable[[str, str, datetime], Awaitable[bool | None]],
     ) -> tuple[str, ...]:
         """Keep contact for open work whose host declared an operation that has not ended.
 
@@ -2542,11 +2586,6 @@ class LineageCoordinator:
         if registry is None or not callable(latest_open):
             return ()
         lookup = cast(Callable[..., Awaitable[Timestamp | None]], latest_open)
-        now = self._now()
-        not_before = timestamp_from_datetime(
-            now - timedelta(seconds=self._config.native_operation_hold_seconds)
-        )
-        lease_until = now + timedelta(seconds=SESSION_LEASE_SECONDS)
         held: list[str] = []
         async with self._lock:
             for snapshot in await self._store.list_tasks():
@@ -2557,9 +2596,45 @@ class LineageCoordinator:
                     or snapshot.session_health is not SessionHealth.CONTACT_LOST
                 ):
                     continue
-                if await lookup(snapshot.task_id, not_before=not_before) is None:
+                session_commitment = self._host_session_commitments.get((snapshot.task_id, session))
+                if self._host_session_commitment_lookup is not None:
+                    try:
+                        persisted_commitment = await self._host_session_commitment_lookup(
+                            snapshot.task_id, session
+                        )
+                        persisted_commitment = _commitment(persisted_commitment, optional=True)
+                    except Exception:
+                        # Durable bootstrap is advisory evidence.  An unavailable route cannot
+                        # replace a binding already established by admitted ingress; without a
+                        # cached binding, the hold still fails closed below.
+                        persisted_commitment = None
+                    if persisted_commitment is not None:
+                        session_commitment = persisted_commitment
+                        self._host_session_commitments[(snapshot.task_id, session)] = (
+                            persisted_commitment
+                        )
+                if session_commitment is None:
                     continue
-                await renew_lease(snapshot.task_id, session, lease_until)
+                now = self._now()
+                current_not_before = timestamp_from_datetime(
+                    now - timedelta(seconds=self._config.native_operation_hold_seconds)
+                )
+                started = await lookup(
+                    snapshot.task_id,
+                    not_before=current_not_before,
+                    session_commitment=session_commitment,
+                )
+                now = self._now()
+                if started is None or started.as_datetime() < now - timedelta(
+                    seconds=self._config.native_operation_hold_seconds
+                ):
+                    continue
+                lease_until = now + timedelta(seconds=SESSION_LEASE_SECONDS)
+                lease_offered = await renew_lease(snapshot.task_id, session, lease_until)
+                if lease_offered is False:
+                    continue
+                if lease_until <= self._now():
+                    continue
                 await self._store.save_task(
                     replace(
                         snapshot,

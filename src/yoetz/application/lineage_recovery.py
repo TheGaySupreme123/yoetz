@@ -48,18 +48,32 @@ async def extend_session_lease(
     task_id: str,
     session_id: str,
     lease_until: datetime,
-) -> None:
+) -> bool:
     """Hold one session active until ``lease_until`` without shortening a later lease.
 
     Evidence-anchored renewal and the in-flight hold both end before a lease that a newer
     workflow call or host event already recorded; only the later end is kept.
     """
 
-    record = getattr(start_catalog, "record_session_state", None)
     now = clock.now_utc()
-    if not callable(record) or lease_until <= now:
+    if lease_until <= now:
         # Evidence that ran out while this call waited cannot hold the session active now.
-        return
+        return False
+    extend = getattr(start_catalog, "extend_session_lease", None)
+    if callable(extend):
+        result = await cast(Callable[..., Awaitable[object]], extend)(
+            task_id,
+            session_id,
+            changed_at=now,
+            lease_expires_at=lease_until,
+        )
+        health = getattr(result, "health", None)
+        return True if health is None else health is SessionHealth.ACTIVE
+    # Older test-only catalog doubles may not expose the atomic operation yet.  Keep the
+    # fallback fenced by a second read and never replace a later lease with this offer.
+    record = getattr(start_catalog, "record_session_state", None)
+    if not callable(record):
+        return False
     lookup = getattr(start_catalog, "task_session_state", None)
     if callable(lookup):
         current = await cast(Callable[[str], Awaitable[SessionState | None]], lookup)(session_id)
@@ -69,14 +83,55 @@ async def extend_session_lease(
             and current.lease_expires_at is not None
             and current.lease_expires_at >= lease_until
         ):
-            return
-    await cast(Callable[..., Awaitable[object]], record)(
+            return True
+        if current is not None and current.health is SessionHealth.ENDED:
+            return False
+    result = await cast(Callable[..., Awaitable[object]], record)(
         task_id,
         session_id,
         health=SessionHealth.ACTIVE,
         changed_at=now,
         lease_expires_at=lease_until,
     )
+    health = getattr(result, "health", None)
+    return True if health is None else health is SessionHealth.ACTIVE
+
+
+def observed_host_session_binding(
+    start_catalog: object,
+    lineage: LineageCoordinator,
+) -> Callable[[str, str, str], Awaitable[None]]:
+    """Bind accepted ingress to the exact active host/Yoetz session pair.
+
+    A historical Yoetz route can still be readable for replay, so a task id alone is not enough
+    to establish that a host annotation belongs to its current session.  The catalog's active
+    route is checked before recording the commitment; missing or stale route state fails closed.
+    """
+
+    route_lookup = getattr(start_catalog, "task_route", None)
+
+    async def bind(task_id: str, session_id: str, session_commitment: str) -> None:
+        if not callable(route_lookup):
+            return
+        try:
+            route = await cast(Callable[[str], Awaitable[object | None]], route_lookup)(task_id)
+            if (
+                route is None
+                or getattr(route, "task_id", None) != task_id
+                or getattr(route, "session_id", None) != session_id
+            ):
+                return
+            await lineage.bind_host_session_commitment(
+                task_id=task_id,
+                session_id=session_id,
+                session_commitment=session_commitment,
+            )
+        except Exception:
+            # A route/storage failure must not turn an accepted observation into a retry loop;
+            # without exact proof the recovery binding remains absent and holds fail closed.
+            return
+
+    return bind
 
 
 def observed_activity_renewal(
@@ -106,8 +161,8 @@ def observed_activity_renewal(
         ):
             return
 
-        async def renew_lease(lease_until: datetime) -> None:
-            await extend_session_lease(
+        async def renew_lease(lease_until: datetime) -> bool:
+            return await extend_session_lease(
                 start_catalog,
                 clock,
                 task_id=task_id,

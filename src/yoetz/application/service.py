@@ -1193,8 +1193,8 @@ class Application:
         clock = self.clock
         catalog = self.start_catalog
 
-        async def hold_lease(task_id: str, session_id: str, lease_until: datetime) -> None:
-            await extend_session_lease(
+        async def hold_lease(task_id: str, session_id: str, lease_until: datetime) -> bool:
+            return await extend_session_lease(
                 catalog,
                 clock,
                 task_id=task_id,

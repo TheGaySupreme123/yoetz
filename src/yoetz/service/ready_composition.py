@@ -90,7 +90,10 @@ from yoetz.application.lineage_coordinator import (
     PrivacyLineageSourceGate,
     authorize_recorded_lineage,
 )
-from yoetz.application.lineage_recovery import observed_activity_renewal
+from yoetz.application.lineage_recovery import (
+    observed_activity_renewal,
+    observed_host_session_binding,
+)
 from yoetz.application.observation_advice import (
     ObservationAdviceContextBuilder,
     stable_advice_finding_id,
@@ -4942,6 +4945,84 @@ async def provide_service_ready_context(
             return None
         return result if type(result) is LineageProjectAdmission else None
 
+    # The in-process binding is populated by admitted observation envelopes.  Recovery can run
+    # after a service restart before another envelope arrives, so bootstrap the exact host
+    # commitment from the durable observation route for this task/session pair.  Every lookup is
+    # fenced by the current catalog route and fails closed when the bundle route is unavailable.
+    runtime_ref: BundleRuntimePort | None = None
+
+    async def _current_host_session_commitment(task_id: str, session_id: str) -> str | None:
+        current_runtime = runtime_ref
+        leased: TaskRuntime | None = None
+        try:
+            route = await catalog.task_route(task_id)
+            if (
+                route is None
+                or route.state is not TaskRouteState.ACTIVE
+                or route.session_id != session_id
+            ):
+                return None
+            binding = await catalog.session_binding(session_id)
+            if binding is None or binding.task_id != task_id or binding.session_id != session_id:
+                return None
+            if current_runtime is None:
+                return None
+            leased = await current_runtime.route(
+                RouteCommand(
+                    session_id,
+                    binding.writer_id,
+                    RouteAccess.MAINTENANCE,
+                    frozenset({RuntimeCapability.WRITE}),
+                )
+            )
+            if (
+                type(leased) is not TaskRuntime
+                or leased.task_id != task_id
+                or leased.session_id != session_id
+                or leased.writer_id != binding.writer_id
+            ):
+                return None
+            observation = leased.observation
+            workspace_lookup = getattr(observation, "workspace_for_yoetz_session", None)
+            route_lookup = getattr(observation, "observation_route_for_session", None)
+            if not callable(workspace_lookup) or not callable(route_lookup):
+                return None
+            workspace = workspace_lookup(session_id)
+            if type(workspace) is not str:
+                return None
+            observed_route = route_lookup(
+                workspace=workspace,
+                yoetz_session_id=session_id,
+            )
+            if type(observed_route) is not tuple:
+                return None
+            route_values = cast(tuple[object, ...], observed_route)
+            if len(route_values) != 3:
+                return None
+            commitment, routed_task, active = route_values
+            if type(commitment) is not str or routed_task != task_id or active is not True:
+                return None
+            validate_commitment(commitment)
+            latest = await catalog.task_route(task_id)
+            if (
+                latest is None
+                or latest.state is not TaskRouteState.ACTIVE
+                or latest.task_id != task_id
+                or latest.session_id != session_id
+                or latest.route_generation != route.route_generation
+                or latest.route_identity_digest != route.route_identity_digest
+            ):
+                return None
+            return commitment
+        except Exception:
+            return None
+        finally:
+            if leased is not None and current_runtime is not None:
+                try:
+                    await current_runtime.release(leased)
+                except Exception:
+                    pass
+
     lineage = LineageCoordinator(
         store=lineage_store,
         clock=clock,
@@ -4957,6 +5038,7 @@ async def provide_service_ready_context(
         owner_generation=max(1, service_generation),
         host_annotation_merger=_merge_host_annotation,
         host_lineage_registry=host_lineage_registry,
+        host_session_commitment_lookup=_current_host_session_commitment,
         project_admission_resolver=_lineage_project_admission,
     )
     manifest = _version_json()
@@ -5134,6 +5216,7 @@ async def provide_service_ready_context(
         diagnostics or _NullDiagnostics(),
         manifest,
     )
+    runtime_ref = runtime
 
     def generation_is_current(current_service: int, current_vault: int) -> bool:
         return (
@@ -5916,6 +5999,7 @@ async def provide_service_ready_context(
         observation_enabled=config.observation.enabled,
         lineage_coordinator=lineage_manifest_coordinator,
         host_lineage_registry=host_lineage_registry,
+        observed_host_session_binding=observed_host_session_binding(catalog, lineage),
         observed_activity_hook=observed_activity_renewal(catalog, lineage, clock),
         capture_budget_bootstrap=bootstrap_capture_reservations,
     )

@@ -2022,10 +2022,20 @@ prohibited in increment A. The candidate's Increment-B cross-repository path req
 current project-generation coordination grant at admission and delivery; `AuthorizationScope.contains()`
 stays unchanged.
 
-`HostLineageRegistryPort.latest_open_host_operation(parent_task_id, not_before)` returns the newest
-first-observation time of a recorded start without its stop under that parent, bound or
-provisional, ignoring starts before `not_before`; it is the only input to the in-flight contact
-hold and never mints, binds, or accepts a child.
+`HostLineageRegistryPort.latest_open_host_operation(parent_task_id, not_before, session_commitment)`
+returns the newest first-observation time of a recorded start without its stop under that parent,
+bound or provisional, only when the annotation's `last_session_commitment` exactly matches the
+currently bound host session commitment. It ignores starts before `not_before`; it is the only
+input to the in-flight contact hold and never mints, binds, or accepts a child. The service records
+the commitment from an admitted event routed to the exact current session. A missing or stale
+binding fails closed; after restart, the service may bootstrap the commitment only from the
+durable observation route for that exact task/session pair. Task or project membership never
+selects a host session.
+
+Session lease extension is an atomic, monotonic catalog operation. A newer observation, an ended
+session, or a rotated session fence wins over a delayed renewal and cannot be overwritten by its
+stale read. Callers revalidate the clock after awaited catalog or adapter work before committing
+an active state.
 
 `HostLineageRegistryPort.find_host_lineage_observation` resolves an already recorded host
 observation within its installation, parent task, and host. It returns the persisted annotation,

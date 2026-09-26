@@ -295,6 +295,11 @@ async def _offer(service: MultiAgentService, task: StartInternalResult, observed
 
     lineage = service.app.lineage
     assert lineage is not None
+    await lineage.bind_host_session_commitment(
+        task_id=task.task_id,
+        session_id=task.session_id,
+        session_commitment=_HOST_SESSION,
+    )
     renew = observed_activity_renewal(service.app.start_catalog, lineage, service.app.clock)
     await renew(task.task_id, task.session_id, task.writer_id, observed)
 

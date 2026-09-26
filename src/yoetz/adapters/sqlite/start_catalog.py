@@ -1490,6 +1490,75 @@ class SqliteStartCatalog:
                 raise _error(PublicErrorCode.STORAGE_CORRUPT)
             return _session_from_row(updated_rows[0])
 
+    async def extend_session_lease(
+        self,
+        task_id: str,
+        session_id: str,
+        *,
+        changed_at: datetime,
+        lease_expires_at: datetime,
+    ) -> SessionState:
+        """Atomically offer a later lease without overwriting newer catalog state."""
+
+        self._require_lineage_schema()
+        try:
+            task = validate_id(IdKind.TASK, task_id)
+            session = validate_id(IdKind.SESSION, session_id)
+            changed_wire = format_rfc3339_millis(changed_at)
+            lease_wire = format_rfc3339_millis(lease_expires_at)
+            if lease_expires_at <= changed_at:
+                raise ValueError("session_lease_expired")
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        with self._transaction():
+            route = self._route_for_task_id(task)
+            if route is None:
+                raise _error(PublicErrorCode.SESSION_NOT_FOUND)
+            rows = self._rows(
+                "SELECT task_id, session_id, health, changed_at, lease_expires_at, actor_id "
+                "FROM task_sessions WHERE session_id = ? LIMIT 2",
+                (session,),
+            )
+            if len(rows) > 1:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT)
+            if not rows:
+                raise _error(PublicErrorCode.SESSION_NOT_FOUND)
+            current = _session_from_row(rows[0])
+            if current.task_id != task:
+                raise _error(PublicErrorCode.SESSION_CONFLICT)
+            if current.health is SessionHealth.ENDED:
+                return current
+            current_changed_wire = format_rfc3339_millis(current.changed_at)
+            if current.changed_at <= changed_at and (
+                current.lease_expires_at is None or current.lease_expires_at < lease_expires_at
+            ):
+                self._db.execute(
+                    "UPDATE task_sessions SET health = 'active', changed_at = ?, "
+                    "ended_at = NULL, lease_expires_at = ? "
+                    "WHERE session_id = ? AND task_id = ? "
+                    "AND health IN ('active', 'contact_lost') "
+                    "AND changed_at = ? "
+                    "AND (lease_expires_at IS NULL OR lease_expires_at < ?)",
+                    (
+                        changed_wire,
+                        lease_wire,
+                        session,
+                        task,
+                        current_changed_wire,
+                        lease_wire,
+                    ),
+                )
+                if self._db.changes() not in {0, 1}:
+                    raise _error(PublicErrorCode.STORAGE_CORRUPT)
+            updated_rows = self._rows(
+                "SELECT task_id, session_id, health, changed_at, lease_expires_at, actor_id "
+                "FROM task_sessions WHERE session_id = ? LIMIT 2",
+                (session,),
+            )
+            if len(updated_rows) != 1:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT)
+            return _session_from_row(updated_rows[0])
+
     async def expire_session_leases(
         self, now: datetime | None = None, *, limit: int = 256
     ) -> tuple[SessionState, ...]:

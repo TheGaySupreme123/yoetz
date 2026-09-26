@@ -642,17 +642,25 @@ class SqliteHostLineageRegistry(HostLineageRegistryPort):
         parent_task_id: str,
         *,
         not_before: Timestamp,
+        session_commitment: str,
     ) -> Timestamp | None:
         parent = _id(IdKind.TASK, parent_task_id)
         if type(not_before) is not Timestamp:
             raise ValueError("host_lineage_timestamp_invalid")
+        session = _commitment(session_commitment)
         # ``phase_mask = 1`` is a start without its stop.  Wire timestamps share one fixed-width
         # UTC millisecond form, so text order is time order.
         rows = self._rows(
             "SELECT MAX(first_observed_at) FROM host_lineage_annotations "
             "WHERE installation_id = ? AND parent_task_id = ? AND phase_mask = ? "
-            "AND first_observed_at >= ?",
-            (self._installation_id, parent, _PHASE_BITS["start"], not_before.wire),
+            "AND first_observed_at >= ? AND last_session_commitment = ?",
+            (
+                self._installation_id,
+                parent,
+                _PHASE_BITS["start"],
+                not_before.wire,
+                session,
+            ),
         )
         if len(rows) != 1 or len(rows[0]) != 1:
             raise HostLineageRegistryError(HostLineageRegistryReason.STORAGE_CORRUPT)

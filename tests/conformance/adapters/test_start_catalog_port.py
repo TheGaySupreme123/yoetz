@@ -18,12 +18,13 @@ from yoetz.adapters.memory.start_catalog import (
     MemoryStartCatalogState,
 )
 from yoetz.adapters.sqlite.start_catalog import SqliteStartCatalog
-from yoetz.domain.coordination import WorkState
+from yoetz.domain.coordination import SessionHealth, WorkState
 from yoetz.domain.values import Frontier
 from yoetz.ports.runtime import StartCompletionEvidence, StartMilestone
 from yoetz.ports.start_catalog import (
     EncryptedResultRef,
     SafeReason,
+    SessionState,
     StartAllocation,
     StartCommand,
     StartIdentityInput,
@@ -242,6 +243,66 @@ async def test_reserve_resume_complete_parity() -> None:
     assert memory_replay == sqlite_replay
     assert memory_replay.outcome == "replayed"
     assert memory_replay.replayed_result is not None
+
+
+@pytest.mark.anyio
+async def test_session_lease_extension_is_monotonic_and_preserves_ended_fences() -> None:
+    """Memory and SQLite apply lease offers atomically and never revive an ended route."""
+
+    installation_id = _id(IdKind.INSTALLATION, 750)
+    start = datetime(2026, 7, 19, 9, 5, tzinfo=UTC)
+    memory_clock = _Clock(start)
+    sqlite_clock = _Clock(start)
+    memory, _ = _memory_catalog(installation_id, memory_clock)
+    sqlite = _sqlite_catalog(installation_id, sqlite_clock, schema_version=4)
+
+    states: list[tuple[SessionState, SessionState, SessionState, SessionState]] = []
+    for catalog in (memory, sqlite):
+        command = await _command(catalog, operation_id=_id(IdKind.REQUEST, 751))
+        allocation = await catalog.reserve_or_resume(command)
+        first = await catalog.extend_session_lease(
+            allocation.task_id,
+            allocation.session_id,
+            changed_at=start,
+            lease_expires_at=start + timedelta(seconds=60),
+        )
+        second = await catalog.extend_session_lease(
+            allocation.task_id,
+            allocation.session_id,
+            changed_at=start + timedelta(seconds=1),
+            lease_expires_at=start + timedelta(seconds=120),
+        )
+        stale = await catalog.extend_session_lease(
+            allocation.task_id,
+            allocation.session_id,
+            changed_at=start,
+            lease_expires_at=start + timedelta(seconds=90),
+        )
+        assert first.lease_expires_at == start + timedelta(seconds=60)
+        assert second.lease_expires_at == start + timedelta(seconds=120)
+        assert stale == second
+        ended = await catalog.record_session_state(
+            allocation.task_id,
+            allocation.session_id,
+            health=SessionHealth.ENDED,
+            changed_at=start + timedelta(seconds=2),
+        )
+        offered_after_end = await catalog.extend_session_lease(
+            allocation.task_id,
+            allocation.session_id,
+            changed_at=start + timedelta(seconds=3),
+            lease_expires_at=start + timedelta(seconds=180),
+        )
+        assert ended.health is SessionHealth.ENDED
+        assert offered_after_end == ended
+        states.append((second, stale, ended, offered_after_end))
+
+    memory_second, memory_stale, memory_ended, memory_after_end = states[0]
+    sqlite_second, sqlite_stale, sqlite_ended, sqlite_after_end = states[1]
+    assert memory_second == sqlite_second
+    assert memory_stale == sqlite_stale
+    assert memory_ended == sqlite_ended
+    assert memory_after_end == sqlite_after_end
 
 
 @pytest.mark.anyio

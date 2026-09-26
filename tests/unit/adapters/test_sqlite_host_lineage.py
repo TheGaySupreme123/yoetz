@@ -515,7 +515,12 @@ async def test_latest_open_host_operation_counts_only_unstopped_starts_in_bound(
     registry = _registry(db, clock)
     start = timestamp_from_datetime(clock.now_utc())
     try:
-        assert await registry.latest_open_host_operation(parent, not_before=start) is None
+        assert (
+            await registry.latest_open_host_operation(
+                parent, not_before=start, session_commitment=_SESSION
+            )
+            is None
+        )
         await registry.record_host_lineage_observation(
             parent,
             _observation("SubagentStart", "finished", parent_tool_call_id="call-1"),
@@ -529,7 +534,12 @@ async def test_latest_open_host_operation_counts_only_unstopped_starts_in_bound(
             observed_session_commitment=_SESSION,
             source=ObservationSource.CODEX_HOOK,
         )
-        assert await registry.latest_open_host_operation(parent, not_before=start) is None
+        assert (
+            await registry.latest_open_host_operation(
+                parent, not_before=start, session_commitment=_SESSION
+            )
+            is None
+        )
 
         running_at = timestamp_from_datetime(clock.now_utc())
         running = await registry.record_host_lineage_observation(
@@ -545,13 +555,41 @@ async def test_latest_open_host_operation_counts_only_unstopped_starts_in_bound(
             observed_session_commitment=_SESSION,
             source=ObservationSource.CODEX_HOOK,
         )
-        assert await registry.latest_open_host_operation(parent, not_before=start) == running_at
-        assert await registry.latest_open_host_operation(other, not_before=start) is None
+        assert (
+            await registry.latest_open_host_operation(
+                parent, not_before=start, session_commitment=_SESSION
+            )
+            == running_at
+        )
+        assert (
+            await registry.latest_open_host_operation(
+                parent,
+                not_before=start,
+                session_commitment="hmac-sha256:" + ("ef" * 32),
+            )
+            is None
+        )
+        assert (
+            await registry.latest_open_host_operation(
+                other, not_before=start, session_commitment=_SESSION
+            )
+            is None
+        )
         # Binding a Yoetz child does not end the host operation under the parent session.
         await registry.bind_provisional_annotation(parent, running.correlation_id, child)
-        assert await registry.latest_open_host_operation(parent, not_before=start) == running_at
+        assert (
+            await registry.latest_open_host_operation(
+                parent, not_before=start, session_commitment=_SESSION
+            )
+            == running_at
+        )
         # Starts older than the bound are ignored.
         later = timestamp_from_datetime(clock.now_utc() + timedelta(milliseconds=1))
-        assert await registry.latest_open_host_operation(parent, not_before=later) is None
+        assert (
+            await registry.latest_open_host_operation(
+                parent, not_before=later, session_commitment=_SESSION
+            )
+            is None
+        )
     finally:
         db.close(force=True)

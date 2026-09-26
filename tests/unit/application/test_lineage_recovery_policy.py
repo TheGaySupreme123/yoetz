@@ -194,11 +194,15 @@ class _OpenOperations:
     def __init__(self, started: dict[str, datetime]) -> None:
         self.started = started
         self.queries: list[tuple[str, str]] = []
+        self.session_commitments: dict[str, str] = {}
 
     async def latest_open_host_operation(
-        self, parent_task_id: str, *, not_before: Timestamp
+        self, parent_task_id: str, *, not_before: Timestamp, session_commitment: str
     ) -> Timestamp | None:
         self.queries.append((parent_task_id, not_before.wire))
+        expected = self.session_commitments.get(parent_task_id)
+        if expected is not None and expected != session_commitment:
+            return None
         started = self.started.get(parent_task_id)
         if started is None or started < not_before.as_datetime():
             return None
@@ -233,11 +237,21 @@ async def test_open_host_child_operation_holds_only_open_lapsed_work_within_its_
     )
     lost = start + timedelta(seconds=61)
     waiting, waiting_session = await _lost_root(coordinator, store, ids, lost_at=lost)
-    silent, _ = await _lost_root(coordinator, store, ids, lost_at=lost)
+    silent, silent_session = await _lost_root(coordinator, store, ids, lost_at=lost)
     terminal, _ = await _lost_root(
         coordinator, store, ids, lost_at=lost, work_state=WorkState.ABANDONED
     )
-    stale, _ = await _lost_root(coordinator, store, ids, lost_at=lost)
+    stale, stale_session = await _lost_root(coordinator, store, ids, lost_at=lost)
+    for task_id, session_id in (
+        (waiting, waiting_session),
+        (silent, silent_session),
+        (stale, stale_session),
+    ):
+        await coordinator.bind_host_session_commitment(
+            task_id=task_id,
+            session_id=session_id,
+            session_commitment="hmac-sha256:" + "a" * 64,
+        )
     live = ids.new(IdKind.TASK)
     await coordinator.register_root(task_id=live, session_id=ids.new(IdKind.SESSION))
     clock.advance(seconds=3_000)
@@ -286,6 +300,219 @@ async def test_hold_without_a_host_lineage_registry_holds_nothing() -> None:
         raise AssertionError((task_id, session_id, lease_until))
 
     assert await coordinator.hold_in_flight_contact(renew) == ()
+
+
+async def test_in_flight_hold_requires_the_current_host_session_binding() -> None:
+    """An unstopped predecessor operation cannot renew a reattached Yoetz session."""
+
+    store = MemoryLineageStore()
+    clock = ScenarioClock()
+    ids = FixedIds()
+    start = clock.now_utc()
+    registry = _OpenOperations({})
+    coordinator = LineageCoordinator(
+        store=store,
+        clock=clock,
+        ids=ids,
+        handle_key=b"k" * 32,
+        host_lineage_registry=registry,  # pyright: ignore[reportArgumentType]
+    )
+    task, session_one = await _lost_root(coordinator, store, ids, lost_at=start, window=300)
+    session_two = ids.new(IdKind.SESSION)
+    await coordinator.bind_host_session_commitment(
+        task_id=task,
+        session_id=session_one,
+        session_commitment="hmac-sha256:" + "a" * 64,
+    )
+    registry.started[task] = start + timedelta(seconds=5)
+    registry.session_commitments[task] = "hmac-sha256:" + "a" * 64
+    held: list[tuple[str, str, datetime]] = []
+
+    async def renew(task_id: str, session_id: str, lease_until: datetime) -> None:
+        held.append((task_id, session_id, lease_until))
+
+    assert await coordinator.hold_in_flight_contact(renew) == (task,)
+    rotated = await coordinator.bind_session(task_id=task, session_id=session_two)
+    await store.save_task(
+        replace(
+            rotated,
+            session_health=SessionHealth.CONTACT_LOST,
+            contact_lost_at=clock.now_utc(),
+            abandonment_deadline=clock.now_utc() + timedelta(seconds=300),
+        )
+    )
+    held.clear()
+    # No binding for session two exists; the open row is explicitly scoped to session one.
+    assert await coordinator.hold_in_flight_contact(renew) == ()
+    assert held == []
+
+
+async def test_in_flight_hold_bootstraps_persisted_current_host_session_binding() -> None:
+    """A restart can recover an exact durable session route without task membership inference."""
+
+    store = MemoryLineageStore()
+    clock = ScenarioClock()
+    ids = FixedIds()
+    start = clock.now_utc()
+    registry = _OpenOperations({})
+    commitment = "hmac-sha256:" + "b" * 64
+    lookups: list[tuple[str, str]] = []
+
+    async def persisted_binding(task_id: str, session_id: str) -> str | None:
+        lookups.append((task_id, session_id))
+        return commitment
+
+    coordinator = LineageCoordinator(
+        store=store,
+        clock=clock,
+        ids=ids,
+        handle_key=b"k" * 32,
+        host_lineage_registry=registry,  # pyright: ignore[reportArgumentType]
+        host_session_commitment_lookup=persisted_binding,
+    )
+    task, session = await _lost_root(coordinator, store, ids, lost_at=start)
+    registry.started[task] = start + timedelta(seconds=5)
+    registry.session_commitments[task] = commitment
+    held: list[tuple[str, str]] = []
+
+    async def renew(task_id: str, session_id: str, _lease_until: datetime) -> None:
+        held.append((task_id, session_id))
+
+    assert await coordinator.hold_in_flight_contact(renew) == (task,)
+    assert held == [(task, session)]
+    assert lookups == [(task, session)]
+
+
+async def test_in_flight_hold_rechecks_time_after_registry_waits() -> None:
+    """A delayed host lookup renews from its completion time, not its stale entry clock."""
+
+    store = MemoryLineageStore()
+    clock = ScenarioClock()
+    ids = FixedIds()
+    start = clock.now_utc()
+    commitment = "hmac-sha256:" + "c" * 64
+
+    class DelayedOperations(_OpenOperations):
+        async def latest_open_host_operation(
+            self, parent_task_id: str, *, not_before: Timestamp, session_commitment: str
+        ) -> Timestamp | None:
+            result = await super().latest_open_host_operation(
+                parent_task_id,
+                not_before=not_before,
+                session_commitment=session_commitment,
+            )
+            clock.advance(seconds=SESSION_LEASE_SECONDS + 1)
+            return result
+
+    registry = DelayedOperations({})
+    coordinator = LineageCoordinator(
+        store=store,
+        clock=clock,
+        ids=ids,
+        handle_key=b"k" * 32,
+        host_lineage_registry=registry,  # pyright: ignore[reportArgumentType]
+    )
+    task, session = await _lost_root(coordinator, store, ids, lost_at=start)
+    await coordinator.bind_host_session_commitment(
+        task_id=task,
+        session_id=session,
+        session_commitment=commitment,
+    )
+    registry.started[task] = start + timedelta(seconds=5)
+    registry.session_commitments[task] = commitment
+    renewals: list[datetime] = []
+
+    async def renew(_task_id: str, _session_id: str, lease_until: datetime) -> None:
+        renewals.append(lease_until)
+
+    assert await coordinator.hold_in_flight_contact(renew) == (task,)
+    assert renewals == [clock.now_utc() + timedelta(seconds=SESSION_LEASE_SECONDS)]
+
+
+async def test_observed_activity_rechecks_time_after_lease_offer_waits() -> None:
+    """A lease offer that outlives its evidence cannot revive contact."""
+
+    store = MemoryLineageStore()
+    clock = ScenarioClock()
+    ids = FixedIds()
+    start = clock.now_utc()
+    coordinator = LineageCoordinator(store=store, clock=clock, ids=ids, handle_key=b"k" * 32)
+    task, session = await _lost_root(coordinator, store, ids, lost_at=start)
+
+    async def renew(_lease_until: datetime) -> None:
+        # Model a catalog call that waits past the evidence-anchored 60-second lease.
+        clock.advance(seconds=SESSION_LEASE_SECONDS + 1)
+
+    assert await coordinator.renew_observed_activity(
+        task_id=task,
+        session_id=session,
+        renew_lease=renew,
+        observed_at=start,
+    )
+    snapshot = await store.get_task(task)
+    assert snapshot is not None
+    assert snapshot.session_health is SessionHealth.CONTACT_LOST
+    assert snapshot.contact_lost_at == start + timedelta(seconds=SESSION_LEASE_SECONDS)
+
+
+async def test_observed_activity_rechecks_time_after_lineage_store_waits() -> None:
+    """A delayed lineage read cannot take the active-state branch after evidence expires."""
+
+    clock = ScenarioClock()
+
+    class DelayedStore(MemoryLineageStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.delayed = True
+
+        async def get_task(self, task_id: str) -> LineageSnapshot | None:
+            snapshot = await super().get_task(task_id)
+            if self.delayed:
+                self.delayed = False
+                clock.advance(seconds=SESSION_LEASE_SECONDS + 1)
+            return snapshot
+
+    store = DelayedStore()
+    ids = FixedIds()
+    start = clock.now_utc()
+    coordinator = LineageCoordinator(store=store, clock=clock, ids=ids, handle_key=b"k" * 32)
+    task, session = await _lost_root(coordinator, store, ids, lost_at=start)
+    renewals: list[datetime] = []
+
+    async def renew(lease_until: datetime) -> None:
+        renewals.append(lease_until)
+
+    assert await coordinator.renew_observed_activity(
+        task_id=task, session_id=session, renew_lease=renew, observed_at=start
+    )
+    snapshot = await store.get_task(task)
+    assert snapshot is not None
+    assert snapshot.session_health is SessionHealth.CONTACT_LOST
+    assert snapshot.contact_lost_at == start + timedelta(seconds=SESSION_LEASE_SECONDS)
+    assert renewals == []
+
+
+async def test_observed_activity_keeps_lineage_fence_when_catalog_rejects_lease() -> None:
+    """A concurrent ended/rotated catalog row cannot be overwritten by lineage metadata."""
+
+    store = MemoryLineageStore()
+    clock = ScenarioClock()
+    ids = FixedIds()
+    coordinator = LineageCoordinator(store=store, clock=clock, ids=ids, handle_key=b"k" * 32)
+    task = ids.new(IdKind.TASK)
+    session = ids.new(IdKind.SESSION)
+    initial = await coordinator.register_root(task_id=task, session_id=session)
+
+    async def reject_lease(_lease_until: datetime) -> bool:
+        return False
+
+    assert not await coordinator.renew_observed_activity(
+        task_id=task,
+        session_id=session,
+        renew_lease=reject_lease,
+        observed_at=clock.now_utc(),
+    )
+    assert await store.get_task(task) == initial
 
 
 @pytest.mark.parametrize(
