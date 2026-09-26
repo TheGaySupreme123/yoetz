@@ -384,6 +384,7 @@ class TestClaimRevisionCorrections:
     [
         ("attach_handle_reused", "lineage_attach_review"),
         ("coordination_source_policy_denied", "coordination_policy_review"),
+        ("coordination_generation_superseded", "coordination_superseded_recheck"),
         ("lineage_event_operation_pending", "lineage_operation_recovery"),
         ("lineage_operation_quarantined", "lineage_terminal_review"),
         ("lineage_catalog_migration_required", "lineage_service_review"),

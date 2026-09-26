@@ -17,6 +17,12 @@ reverse-chronological released versions.
   resolves the same lane idempotently instead of failing `mapping_missing`; an unprovable child
   rollout is refused with a bounded `child_*` reason. Native v2 acceptance remains open (#841).
 
+- A coordination finding declared before a project opt-out, opt-in, consent or approval
+  revocation, unlink, or dissolve no longer stays open with no way to close it. The next check
+  records the superseded context as history and can resolve the finding, and the receipt says the
+  generation was superseded. Declaring or disposing against the old generation now returns
+  `coordination_generation_superseded` with a recovery step you can take (#842).
+
 ## 0.3.0 — 2026-09-21
 
 Prepared public-alpha release candidate; publication remains gated by #785. See
