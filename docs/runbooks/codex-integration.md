@@ -819,6 +819,17 @@ from AI-powered review selection. The current hook path may still stage consente
 chunks locally pending the follow-up staging filter. Codex keeps its existing replay semantics; the
 shared operation-replay, source-generation fencing, and teardown repairs apply to all host adapters.
 
+Provider-repair advice is standing advice, so Codex delivers it only at session boundaries (#844).
+`SessionStart` carries it in `hookSpecificOutput.additionalContext`. `Stop` carries it as
+`decision: block` plus `reason`, which Codex treats as a continuation rather than a rejected turn.
+`PostToolUse` and `UserPromptSubmit` do not carry it. A private or no-egress install, an install
+with no provider endpoint, and an install whose verification is disabled do not emit
+`connect_provider`, `renew_provider_sign_in`, or `repair_semantic_provider`. The service emits
+that advice only when verification is not disabled, a provider endpoint is bound, network egress
+is permitted, and an LLM inference channel is enabled, and the provider is still structurally
+unusable, including when no factory id is available. `SessionEnd` still emits `{}` and does not
+consume a pending delivery.
+
 Legacy synchronous `hooks spool` is a separate structural fast path. It only appends the owner-only
 structural spool record and returns; it does not normalize or pair the event, open the service, drain
 an outbox, or carry native content. The READY forwarder later consumes the spool and performs normal

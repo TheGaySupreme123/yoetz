@@ -799,6 +799,50 @@ def test_provider_not_ready_names_the_unusable_configured_provider() -> None:
     assert item.next_action == "connect_provider"
 
 
+def _intent_context(
+    *, intended: bool, ready: bool = False, token: str | None = None
+) -> ObservationAdviceContext:
+    return ObservationAdviceContext(
+        envelopes=(),
+        lifecycle=ObservationLifecycle.ACTIVE,
+        gaps=(),
+        composition=ObservationCompositionFact(
+            semantic_configured=intended,
+            semantic_ready=ready,
+            provider_factory_ids=(),
+            connected_provider_ids=(),
+            semantic_attention=token,
+            semantic_attention_provider=None if token is None else "openai-codex",
+        ),
+    )
+
+
+@pytest.mark.parametrize("token", [None, *sorted(SEMANTIC_ATTENTION_TOKENS)])
+@pytest.mark.parametrize("ready", [False, True])
+def test_private_or_unbound_install_gets_no_provider_repair_advice(
+    ready: bool, token: str | None
+) -> None:
+    """No external review intended means nothing to connect, sign in to, or repair (#844).
+
+    Attention memory can outlive a switch to private until recomposition, so a stale
+    sign-in or repair token must not surface once intent is gone.
+    """
+
+    candidates = observation_advice_findings(
+        _intent_context(intended=False, ready=ready, token=token)
+    )
+    assert not {item.next_action for item in candidates} & STANDING_MACHINE_ACTIONS
+
+
+def test_intended_provider_without_a_factory_still_names_not_ready() -> None:
+    """A bound, egress-permitted endpoint that cannot build stays actionable (#844)."""
+
+    candidates = observation_advice_findings(_intent_context(intended=True))
+    item = next(item for item in candidates if item.rule_code == "provider_not_ready")
+    assert item.next_action == "connect_provider"
+    assert item.evidence_refs == ("semantic:not_ready",)
+
+
 def _attention_context(
     token: str | None, *, configured: bool = True, ready: bool = True
 ) -> ObservationAdviceContext:

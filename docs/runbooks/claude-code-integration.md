@@ -654,7 +654,13 @@ keeps `hookEventName: PostToolUseFailure` even though Yoetz normalizes its inter
 to `PostToolUse`. At `Stop`, additional context is Claude Code's non-error feedback channel: it
 continues through the same `stop_hook_active` loop guard as a blocking decision, but is labelled as
 feedback rather than an error. Yoetz never emits `decision: block` to Claude Code. `SessionEnd`
-emits `{}`.
+emits `{}`. Provider-repair advice is standing advice (#844). Claude Code delivers it only on
+`SessionStart` and `Stop`, still as `additionalContext` and never as `decision: block`.
+`PostToolUse` does not carry it. A private or no-egress install, an install with no provider
+endpoint, and an install whose verification is disabled do not emit `connect_provider` or another
+provider-repair request. The service emits it only when verification is not disabled, a provider
+endpoint is bound, network egress is permitted, and an LLM inference channel is enabled, and the
+provider is still structurally unusable, including when no factory id is available.
 
 The rendered hook commands bind `--workspace "${CLAUDE_PROJECT_DIR}"`. When a hook ingests
 nothing it still exits 0 with `{}`, but records one payload-free `hook_diagnostics` reason that
