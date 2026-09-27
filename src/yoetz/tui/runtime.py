@@ -1105,7 +1105,7 @@ class YoetzRuntime:
                 provider_id="openai-codex",
                 host="openai.com",
                 base_path_prefix=" through Codex-managed login",
-                default_model="gpt-5.6-luna",
+                default_model="gpt-6-luna",
                 api_style="Codex app-server v2 (stdio)",
                 endpoint_profile_id="codex-chatgpt-subscription",
                 endpoint_profile_version="1.0.0",

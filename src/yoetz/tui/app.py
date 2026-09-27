@@ -1864,7 +1864,7 @@ class YoetzTui(App[int]):
                 title="Exact evaluator selection",
                 label="Model identifier",
                 initial=model_default,
-                placeholder="gpt-5.6-luna",
+                placeholder="gpt-6-luna",
             ),
         )
         values: list[str] = []

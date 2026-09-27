@@ -1002,7 +1002,7 @@ def test_guided_setup_offers_account_switch(
 
     anyio.run(module.prompt_codex_subscription_setup)
 
-    assert prompt_defaults["Exact model"] == "gpt-5.6-luna"
+    assert prompt_defaults["Exact model"] == "gpt-6-luna"
     assert prompt_defaults["Final review reasoning effort"] == "high"
     assert any(item.startswith("Continue to Codex sign-in") for item in confirms)
     assert any("switch ChatGPT account" in item for item in confirms)
@@ -1678,7 +1678,7 @@ def test_default_subscription_model_recommends_luna_or_preserves_existing_bindin
     tmp_path: Path,
 ) -> None:
     absent = tmp_path / "absent.toml"
-    assert module.default_codex_subscription_model(absent) == "gpt-5.6-luna"
+    assert module.default_codex_subscription_model(absent) == "gpt-6-luna"
 
     target = _bound_config_file(tmp_path, _binding(tmp_path / "codex", tmp_path / "home"))
     assert module.default_codex_subscription_model(target) == "gpt-5.6-sol"
