@@ -73,6 +73,23 @@ def _install(
 
     monkeypatch.setattr(module, "load_config", _load)
 
+    # These cases pin role-scoped credential reporting; the synthetic runtime's paths are never
+    # real executables, so its local structure is reported ready (#855 structure has its own cases).
+    def ready_fact(loaded: YoetzConfig) -> dict[str, object] | None:
+        if loaded.external_runtime is None:
+            return None
+        return {
+            "role": "fallback" if primary == "api_provider" else "primary",
+            "state": "ready",
+            "capability": "current",
+            "executable": "admitted",
+            "home": "ready",
+            "uses_managed_runtime": True,
+            "next_command": None,
+        }
+
+    monkeypatch.setattr(module, "external_runtime_fact", ready_fact)
+
     async def _connect(_kind: object, *, workspace_locator: object = None) -> _Client:
         assert workspace_locator is not None
         return client

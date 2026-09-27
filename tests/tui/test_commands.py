@@ -675,7 +675,7 @@ async def test_provider_discloses_and_reports_a_reused_codex_login(make_app: Mak
 # ---------------------------------------------------------------------------
 
 
-async def test_work_is_honest_that_no_task_index_exists(make_app: MakeApp) -> None:
+async def test_work_requests_an_explicit_session_selector(make_app: MakeApp) -> None:
     app = make_app()
     async with app.run_test(size=WIDE) as pilot:
         await pilot.pause()
@@ -684,10 +684,11 @@ async def test_work_is_honest_that_no_task_index_exists(make_app: MakeApp) -> No
         assert view is not None
         assert view.view_name == "work"
         body = "\n".join(getattr(view, "_body", ()))
-        assert "does not keep" in body
+        assert "session ID" in body
+        assert "title or workspace alone cannot select" in body
 
 
-async def test_opening_a_task_by_name_uses_the_start_operation(
+async def test_opening_a_task_passes_the_explicit_session_to_the_runtime(
     make_app: MakeApp,
 ) -> None:
     runtime = FakeRuntime()
@@ -695,14 +696,15 @@ async def test_opening_a_task_by_name_uses_the_start_operation(
     async with app.run_test(size=WIDE) as pilot:
         await pilot.pause()
         await run_command(pilot, app, "/work")
-        await pilot.press("enter")  # "Open a task by name"
+        await pilot.press("enter")  # "Open a task by session ID"
         await pilot.pause()
-        for character in "upload":
+        selector = "ses_12345678-1234-4234-8234-123456789abc"
+        for character in selector:
             await pilot.press(character)
         await pilot.press("enter")
         await pilot.pause()
-        assert runtime.opened == ["upload"]
-        assert "upload" in transcript(app)
+        assert runtime.opened == [selector]
+        assert selector in transcript(app)
 
 
 async def test_check_offers_the_three_modes_and_passes_the_chosen_one_through(

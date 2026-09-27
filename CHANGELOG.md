@@ -23,6 +23,16 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- Codex subscription AI-powered review no longer breaks when your everyday Codex updates. Setup
+  binds Yoetz's own verified private copy of the one admitted Codex release. It offers only an
+  eligible runtime as the default, and it can download that release with your npm after asking.
+  The new `yoetz provider codex-subscription repair` rebinds a binding stranded by a replaced
+  executable or an older capability identity. It reuses the existing ChatGPT sign-in and never
+  signs in, logs out, or switches accounts. Re-running setup or repair keeps the model, reasoning
+  effort, timeout, retries, and fallback role. `runtime status`, `provider status`, the prompt
+  menu and `/provider` now name the exact structural cause, such as
+  `codex_runtime_executable_changed`, and its fix, and the upgrade guide ends with that check.
+  Exact-version admission is unchanged, and native acceptance remains pending (#855).
 - Delegation guidance now tells parents to give each child its selector, distinct actor and
   complete publication/check/receipt/closure duties. Helpers assigned no child selector are
   explicitly kept off the child ledger; Claude's compact startup text states that exception
