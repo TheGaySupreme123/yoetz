@@ -10,6 +10,7 @@ import hashlib
 import inspect
 import io
 import os
+import platform
 import sys
 import threading
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
@@ -43,6 +44,7 @@ from yoetz.adapters.privacy.local_enforcer import LocalPrivacyEnforcer
 from yoetz.adapters.providers.codex_app_server import (
     CodexAppServerProfile,
     codex_binding_from_config,
+    codex_code_mode_host_path,
 )
 from yoetz.adapters.providers.codex_evaluator_runtime import diagnose_codex_binding
 from yoetz.adapters.providers.factory import external_factory_builders_from_config
@@ -346,6 +348,7 @@ __all__ = [
     "build_runtime_adapter_factories",
     "open_ready_catalog",
     "provide_service_ready_context",
+    "SubscriptionReadinessMemo",
     "subscription_runtime_structurally_ready",
 ]
 
@@ -4801,6 +4804,74 @@ def subscription_runtime_structurally_ready(
     return True
 
 
+type _StatFingerprint = tuple[int, int, int, int, int, int, int]
+
+
+def _stat_fingerprint(path: Path) -> _StatFingerprint:
+    facts = os.stat(path)
+    return (
+        facts.st_dev,
+        facts.st_ino,
+        facts.st_size,
+        facts.st_mtime_ns,
+        facts.st_ctime_ns,
+        facts.st_mode,
+        facts.st_uid,
+    )
+
+
+class SubscriptionReadinessMemo:
+    """Structural READY memo for the Codex subscription binding (#881).
+
+    ``subscription_runtime_structurally_ready`` hashes the retained executable and code-mode host
+    (hundreds of MiB). Credential presence is asked on every observation advice cycle, so this
+    memo re-runs it, off the event loop, only when the exact binding or a stat fingerprint of the
+    executable, code-mode host, dedicated home, or isolated config changed. Evidence expiry is
+    checked against the clock on every call. The launch fence is not cached: every
+    ``evaluate()`` child launch still hashes both files through ``verify_local_binding``.
+    """
+
+    def __init__(self) -> None:
+        self._key: tuple[object, ...] | None = None
+        self._ready = False
+
+    @staticmethod
+    def _fingerprint(runtime: ExternalRuntimeProfileConfig) -> tuple[object, ...] | None:
+        executable = Path(runtime.executable_path)
+        home = Path(runtime.codex_home)
+        try:
+            files = tuple(
+                _stat_fingerprint(path)
+                for path in (
+                    executable,
+                    codex_code_mode_host_path(executable),
+                    home,
+                    home / "config.toml",
+                )
+            )
+        except OSError:
+            return None
+        return (runtime.model_dump_json(), sys.platform, platform.machine(), files)
+
+    async def ready(self, runtime: object, *, now: datetime) -> bool:
+        if type(runtime) is not ExternalRuntimeProfileConfig:
+            return False
+        try:
+            CodexAppServerProfile.from_config(runtime).verify_capability_evidence(now)
+        except (TypeError, ValueError):  # fmt: skip
+            return False
+        before = self._fingerprint(runtime)
+        if before is not None and before == self._key:
+            return self._ready
+        ready = await asyncio.to_thread(subscription_runtime_structurally_ready, runtime, now=now)
+        # Remember only a result whose inputs held still while it was hashed.
+        if before is not None and self._fingerprint(runtime) == before:
+            self._key, self._ready = before, ready
+        else:
+            self._key = None
+        return ready
+
+
 class _RoutedCoordinationDetailStore:
     """Write detector details through a short-lived, generation-bound task lease."""
 
@@ -5138,6 +5209,9 @@ async def provide_service_ready_context(
     def binding_not_connected(_binding: ProviderBinding) -> bool:
         return False
 
+    # One structural memo per bound endpoint of this generation; recomposition starts clean.
+    subscription_readiness: dict[int, SubscriptionReadinessMemo] = {}
+
     async def _credential_present(
         endpoint: ExternalRuntimeProfileConfig | ProviderProfileConfig | None,
         binding: ProviderBinding | None,
@@ -5145,7 +5219,8 @@ async def provide_service_ready_context(
         if endpoint is None or binding is None:
             return False
         if type(endpoint) is ExternalRuntimeProfileConfig:
-            return subscription_runtime_structurally_ready(endpoint, now=clock.now_utc())
+            memo = subscription_readiness.setdefault(id(endpoint), SubscriptionReadinessMemo())
+            return await memo.ready(endpoint, now=clock.now_utc())
         credential_binding = provider_credential_profile_binding(
             binding.provider_id,
             binding.model_id,

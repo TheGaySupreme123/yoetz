@@ -358,6 +358,13 @@ fact is the exact binding, executable digest, isolated config, and dedicated hom
 and `model/list` run inside the same `evaluate()` child that will disclose the case, or from
 `yoetz provider codex-subscription status`.
 
+That structural fact is memoized per READY generation (#881). The exact binding, a stat
+fingerprint of the retained executable, its code-mode host, the dedicated home and its
+`config.toml` (device, inode, size, mtime, ctime, mode, owner) key the result. Both files are
+re-hashed, off the event loop, only when that key changes; evidence expiry is checked against the
+clock on every read. The launch fence is not memoized: every `evaluate()` child launch still
+hashes both files.
+
 ## Evaluator runtime retention and repair
 
 Issue #855. The evaluator runtime is kept separate from the everyday Codex installation. Setup and
