@@ -61,7 +61,10 @@ current session, pass the complete single-use `attach_handle` and a bounded assi
 intended child, and have that child call `start mode=attach` with the handle. The child uses its own
 returned session and writer while the parent keeps its binding. A child without a handle may use a
 stable child-specific pair with `parent_session_id`; that relationship is `self_registered` and
-`pending` until the parent publishes `child_accepted` or `child_rejected`. Read `status view=lineage`
+`pending` until the parent publishes `child_accepted` or `child_rejected`. A native subagent learns
+its role only from its assignment, so give each child its one selector, a distinct actor id, and
+its own closure duties (plan, evidence and completion claim, `check`, `respond`, `receipt`, then
+`work_closed`). Tell a helper given neither a handle nor a parent session to make no Yoetz call. Read `status view=lineage`
 after handoff. A receipt does not close work or refresh a child dependency manifest, and a clean
 child receipt does not prove that the parent incorporated its result. Project membership groups
 work; it is not an attach selector or permission to read sibling content. Each source workspace

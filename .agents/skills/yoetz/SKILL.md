@@ -77,6 +77,10 @@ Self-registration with `parent_session_id` starts `self_registered` and `pending
 can publish `child_accepted` or `child_rejected`; acceptance preserves origin, and accepted
 children cannot later be rejected. Read `status view=lineage` after handoff. A provisional host
 annotation is not a cooperative child ledger or evidence that it published or checked work.
+A native subagent learns its role only from its assignment, so give each child its one selector, a
+distinct actor id, and its own closure duties (plan, evidence and completion claim, `check`,
+`respond`, `receipt`, then `work_closed`). Tell a helper given neither a handle nor a parent
+session to make no Yoetz call.
 
 Work state, session health, and receipts are independent. Publish `work_closed` to close work;
 a receipt never closes it. Cancellation revokes a Yoetz capability without stopping a host

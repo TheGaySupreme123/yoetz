@@ -69,6 +69,16 @@ def test_the_claude_text_names_the_deferred_schema_load_step_and_the_catalog() -
     assert "a clean check does not mean the work is correct" in text
 
 
+def test_a_subagent_without_a_child_selector_is_exempt_from_the_trigger() -> None:
+    # Claude renders this block into native subagents with no cue that they are children
+    # (issue #509). The exemption sits in the trigger paragraph, beside the read-only exemption.
+    trigger_paragraph = CLAUDE_CODE_INITIALIZE_INSTRUCTIONS.split("\n\n")[1]
+    assert (
+        "Read-only questions skip it. So does a subagent whose assignment names no handle or "
+        "parent session." in trigger_paragraph
+    )
+
+
 def test_budget_arithmetic_derives_the_packaged_bound_from_the_observed_cap() -> None:
     budget = CLAUDE_CODE_INSTRUCTIONS_BUDGET
     assert budget["max_chars"] <= budget["observed_host_cap_chars"] == 2_048

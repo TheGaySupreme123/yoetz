@@ -23,6 +23,12 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- Delegation guidance now tells parents to give each child its selector, distinct actor and
+  complete publication/check/receipt/closure duties. Helpers assigned no child selector are
+  explicitly kept off the child ledger; Claude's compact startup text states that exception
+  within its existing budget. Named conformance rows and per-host qualification limits are
+  recorded for the multi-agent workflow (#509).
+
 - Concurrent Codex, Claude Code and Cursor sessions, including their delegates, no longer queue
   behind one another on the local observation store until hooks time out and inputs are lost.
   Reads such as `yoetz observe status`, consent checks and the service's delivery selection no

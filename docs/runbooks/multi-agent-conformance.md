@@ -43,6 +43,18 @@ Paths below are relative to `tests/conformance/observation/` unless otherwise st
 | Upgrade while lineage is live | Same lifecycle scenario covers restart and retained state only | **Open native acceptance:** execute a real older-to-newer installed package upgrade; same-version recomposition is not upgrade proof. |
 | Cross-repository parent refusal in A | `test_delegation_phase_matrix.py::test_parent_reference_failures_are_typed_and_do_not_mint_children` | Later explicitly authorized cross-repository grants have their own integration tests. |
 
+## Host qualification rows
+
+These three names are the #509 child-registration rows. Each executable scenario is a composed
+fixture under `tests/conformance/observation/`. A green fixture does not pass a native host cell.
+Record this run's native result in the acceptance table below, separately from the fixture.
+
+| Qualification row | Executable scenario | Evidence limit |
+| --- | --- | --- |
+| Delegated-attach | `test_multi_agent_public_workflow.py::test_real_delegation_attach_publication_and_child_receipt_preserve_parent_lane` | Composed READY fixture. Parent `mode=delegate` mints `origin=parent_minted` and `acceptance=accepted`. The child attaches with the handle, uses a distinct session and writer, publishes, checks, and receipts. `work_closed` is a later child publication; the receipt does not close work, and the parent task stays open. |
+| Self-registration, acceptance, and rollup | `test_self_registration_public_workflow.py::test_self_registration_pending_acceptance_closure_and_receipt_rollup` | Composed real-SQLite fixture. `parent_session_id` starts `origin=self_registered` and `acceptance=pending` (lineage annotation, not yet a blocking dependency). Parent `child_accepted` keeps that origin and sets `acceptance=accepted`. The child receipt leaves work open; `work_closed` plus a later parent check and receipt is the rollup. The parent conclusion stays coverage-bounded. |
+| Unregistered-helper and independent-root | `test_multi_agent_public_workflow.py::test_late_subagent_stop_after_parent_reattach_keeps_registry_annotation`; `test_multi_agent_public_workflow.py::test_explicit_siblings_have_independent_public_checks_receipts_and_work_state` | Composed fixtures. A host start/stop without cooperative registration leaves `children` empty and at most a pending `host_observed` annotation; advice may name that correlation and still does not grant child ownership. Two `mode=create` tasks in one workspace are independent roots: proximity is not lineage. |
+
 ## Increment B: admission and project coordination
 
 | Issue row | Executable scenario | Evidence limit |
@@ -115,3 +127,39 @@ runbook itself certifies no native cell. Any first broken boundary is assigned f
 its existing owner (#678 transport/content loss, #691 drain diagnostics, #695/#690 inventory and
 pressure, #618 evidence interpretation, #744 startup); do not infer transport failure from an empty
 packet or infer a pressure cause from a pending counter.
+
+## Per-host acceptance table
+
+Fixture rows above are source evidence only. Native cells below summarize the local macOS run
+on 2026-09-27 against candidate `3654c3d612aefcdf4bb53515c752e44ce12bdb90`. The coordinator
+integrated the three hosts' final records after their native receipts. Source guidance repairs
+were not installed into that candidate during the run. `passed` means that host actually launched
+the relationship, and the child ledger shows its own plan, publication, check, receipt, and `work_closed`. A text summary is not
+a receipt. Linux and WSL stay `untested` for these rows; installation success in
+[cursor-integration.md](cursor-integration.md#linux-and-wsl) does not admit a session cell (#722).
+#689 capture contention and #841 Codex rollout reconciliation stay separate owners when they recur.
+
+| Host | OS | Qualification row | Source fixture | This run's native evidence | Result |
+| --- | --- | --- | --- | --- | --- |
+| Cursor | macOS | Delegated-attach | Composed fixture named above | Parent `mode=delegate` minted an accepted `parent_minted` child. The child attached, published, checked with `semantic_required` (`succeeded` / `semantic_completed`), receipted, and published `work_closed`. That receipt's conclusion was `unresolved_findings_remain`, with capture gaps. Parent lineage later showed the child closed, `contact_lost`, rollup unavailable, and no host annotation. The parent had already recorded `work_abandoned`, so this session does not treat the child receipt as a parent rollup. | partial |
+| Cursor | macOS | Self-registration, acceptance, and rollup | Composed fixture named above | The start against the abandoned parent returned `SESSION_CONFLICT` / `lineage_parent_work_terminal` and created no child. On the successor, a child self-registered, was `child_accepted` with origin unchanged, published, checked (`succeeded` / `semantic_completed`), receipted with `unresolved_findings_remain`, and published `work_closed`. Parent lineage then showed that child closed, `contact_lost`, rollup unavailable, and no host annotation. | partial |
+| Cursor | macOS | Unregistered-helper and independent-root | Composed fixtures named above | One read-only helper was told not to call Yoetz and returned only the runbook title and the three evidence-level names. Lineage at sequence 36 had no annotation and no extra child. An independent-root native `mode=create` beside the parent was not launched. | partial |
+| Codex | macOS | Delegated-attach; self-registration, acceptance, and rollup | Composed fixtures named above | Both registered children had distinct identities, accepted relationships, publications, successful bounded semantic review, receipts, and explicit `work_closed`. Child receipts retained two and one blockers; host correlation remained unproven. The parent receipt retained one blocker and one open obligation. Engine-written check records caused three final publication previews to conflict, so no parent `work_closed` was accepted. | partial |
+| Codex | macOS | Unregistered-helper and independent-root | Composed fixtures named above | The unregistered native helper returned without a Yoetz ledger or receipt. A separate native independent-root control was not run. | partial |
+| Claude Code | macOS | Delegated-attach; self-registration, acceptance, and rollup | Composed fixtures named above | Both registered children published, checked, receipted, and explicitly closed. Self-registration changed from pending to accepted while preserving its origin. Child reviews reported insufficient coverage and limited receipts. Host correlation was unproven in the ordinary observation profile. The parent final review succeeded at high effort; its receipt retained four blockers with all seven obligations resolved. The parent had already recorded `work_abandoned`; later review and receipt did not reopen it. | partial |
+| Claude Code | macOS | Unregistered-helper and independent-root | Composed fixtures named above | Read-only and neutral-write helpers stayed off the ledger. A separate native independent-root control was not run. | partial |
+| Cursor, Codex, Claude Code | Linux and WSL | All three rows | None for native session qualification | Not executed | untested |
+
+### Same-workspace coordination boundary
+
+The same run recorded one automatically grouped repository project, a plan overlap between the
+Claude and Codex parents, and three physical overlaps among the Cursor predecessor, successor
+and self-registered child. Eight delivery records were corroborated by coordination-context
+ledger events. The plan detection carried unobservable coverage; the physical detections carried
+complete detection coverage. These five participating tasks do not qualify every retained route.
+
+All four detections were advisory, with no declared, addressed or resolved coordination
+obligation. Native display/consumption and the declaration-to-resolution workflow were not
+qualified. The operator's disjoint ownership prompts and shared coordination files are not
+Yoetz detection evidence. The bounded outcome and remaining cells are recorded in the
+[issue #509 qualification report](https://github.com/TheGaySupreme123/yoetz/issues/509#issuecomment-5855208779).

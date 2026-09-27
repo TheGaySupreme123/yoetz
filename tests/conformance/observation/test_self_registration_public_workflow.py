@@ -1,17 +1,28 @@
-"""Focused real SQLite proof for pending self-registration admission."""
+"""Synthetic public-workflow qualification for self-registration, separate from native proof."""
 
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 
 from builders.multi_agent import multi_agent_service
+from yoetz.application.publish_work import PublishWorkInternalResult
+from yoetz.application.start import StartInternalResult
 from yoetz.ports.control import RepositoryPrivacyContext
+from yoetz.ports.ledger import CheckCommitResult
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind, new_id
-from yoetz.protocol.models import PublishWorkRequest, StartRequest
+from yoetz.protocol.models import (
+    CheckRequest,
+    PublishWorkRequest,
+    ReceiptRequest,
+    StartRequest,
+    StatusLineagePageModel,
+    StatusRequest,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -43,7 +54,9 @@ def _identity() -> dict[str, object]:
     }
 
 
-async def test_real_sqlite_self_registration_keeps_pending_origin(tmp_path: Path) -> None:
+async def test_self_registration_pending_acceptance_closure_and_receipt_rollup(
+    tmp_path: Path,
+) -> None:
     workspace = _workspace(tmp_path / "workspace")
     async with multi_agent_service(tmp_path / "state") as service:
         parent = await service.app.start(
@@ -84,6 +97,161 @@ async def test_real_sqlite_self_registration_keeps_pending_origin(tmp_path: Path
         assert lineage.parent_task_id == parent.task_id
         assert lineage.origin is not None and lineage.origin.value == "self_registered"
         assert lineage.acceptance is not None and lineage.acceptance.value == "pending"
+
+        async def status(task: StartInternalResult, view: str = "compact"):
+            return await service.app.status(
+                StatusRequest.model_validate(
+                    {
+                        **_identity(),
+                        "session_id": task.session_id,
+                        "writer_id": task.writer_id,
+                        "view": view,
+                        "limit": "10",
+                    }
+                ),
+                repository_privacy_context=_REPOSITORY,
+            )
+
+        async def publish(task: StartInternalResult, name: str, payload: Mapping[str, object]):
+            current = await status(task)
+            result = await service.app.publish_work(
+                PublishWorkRequest.model_validate(
+                    {
+                        **_identity(),
+                        "session_id": task.session_id,
+                        "writer_id": task.writer_id,
+                        "expected_frontier": dict(current.head_frontier.as_wire().items()),
+                        "event_drafts": [
+                            {
+                                "event_id": new_id(IdKind.EVENT),
+                                "schema": {"name": name, "version": "1.0.0"},
+                                "occurred_at": "2026-09-05T12:00:00.000Z",
+                                "causal_parents": [],
+                                "payload": dict(payload),
+                                "artifact_refs": [],
+                                "evidence_refs": [],
+                            }
+                        ],
+                    }
+                ),
+                repository_privacy_context=_REPOSITORY,
+            )
+            assert isinstance(result, PublishWorkInternalResult)
+            assert result.task_id == task.task_id
+
+        async def check(task: StartInternalResult):
+            current = await status(task)
+            result = await service.app.check(
+                CheckRequest.model_validate(
+                    {
+                        **_identity(),
+                        "session_id": task.session_id,
+                        "writer_id": task.writer_id,
+                        "expected_frontier": dict(current.head_frontier.as_wire().items()),
+                        "mode": "deterministic_only",
+                        "max_findings": "10",
+                        "policy_packs": ["work-integrity/0.1.0"],
+                    }
+                ),
+                repository_privacy_context=_REPOSITORY,
+            )
+            assert isinstance(result, CheckCommitResult)
+            return result
+
+        async def receipt(task: StartInternalResult):
+            current = await status(task)
+            return await service.app.receipt(
+                ReceiptRequest.model_validate(
+                    {
+                        **_identity(),
+                        "task_id": task.task_id,
+                        "session_id": task.session_id,
+                        "writer_id": task.writer_id,
+                        "expected_frontier": dict(current.head_frontier.as_wire().items()),
+                        "format": "json",
+                        "include": "standard",
+                        "redaction_profile": "default_local_export",
+                    }
+                ),
+                repository_privacy_context=_REPOSITORY,
+            )
+
+        async def child_row():
+            result = await status(parent, "lineage")
+            assert isinstance(result.page, StatusLineagePageModel)
+            (row,) = result.page.children
+            assert row.task_id == child.task_id
+            assert row.origin == "self_registered"
+            return row
+
+        assert child.task_id != parent.task_id
+        assert child.session_id != parent.session_id
+        assert child.writer_id != parent.writer_id
+        pending = await child_row()
+        assert pending.acceptance == "pending"
+        assert pending.rollup_state == "annotation"
+
+        # Pending self-registration is visible, but is not yet a parent dependency.
+        sweep = service.app.observation_sweep
+        assert sweep is not None
+        await sweep()
+        pending_check = await check(parent)
+        assert pending_check.children is not None
+        (pending_preview,) = pending_check.children.items
+        assert pending_preview.acceptance.value == "pending"
+        assert pending_preview.rollup_state.value == "annotation"
+        assert pending_preview.blocking_conditions == ()
+
+        await publish(parent, "child_accepted", {"child_task_id": child.task_id})
+        accepted = await child_row()
+        assert accepted.acceptance == "accepted"
+        assert accepted.work_state == "open"
+        assert accepted.rollup_state != "clean"
+
+        await publish(
+            child,
+            "plan_published",
+            {
+                "plan_version": 1,
+                "summary": "Bounded child review with no material change",
+                "obligation_refs": [],
+                "no_obligations_reason": "no_material_change",
+            },
+        )
+        await check(child)
+        open_receipt = await receipt(child)
+        assert open_receipt.task_id == child.task_id
+        assert (await child_row()).work_state == "open"  # A receipt cannot close work.
+
+        await publish(child, "work_closed", {})
+        await check(child)
+        closed_receipt = await receipt(child)
+        assert closed_receipt.receipt_digest != open_receipt.receipt_digest
+        closed = await child_row()
+        assert closed.acceptance == "accepted"
+        assert closed.work_state == "closed"
+
+        # A service-owned manifest and a new parent check incorporate the child result.
+        await sweep()
+        parent_check = await check(parent)
+        assert parent_check.children is not None
+        (preview,) = parent_check.children.items
+        assert preview.child_task_id == child.task_id
+        assert preview.origin.value == "self_registered"
+        assert preview.acceptance.value == "accepted"
+        assert preview.work_state.value == "closed"
+        parent_receipt = await receipt(parent)
+        assert isinstance(parent_receipt.document, Mapping)
+        children = parent_receipt.document["children"]
+        assert isinstance(children, Mapping)
+        rows = children["children"]
+        assert isinstance(rows, list)
+        (row,) = rows
+        assert isinstance(row, Mapping)
+        assert row["child_task_id"] == child.task_id
+        assert row["tested_manifest_ref"] is not None
+        assert row["outcome"] != "clean"  # Local-only review remains coverage-bounded.
+        assert parent_receipt.conclusion != "no_unresolved_deterministic_findings"
 
 
 async def test_real_sqlite_rejects_historical_and_closed_parent_admission(
