@@ -6,8 +6,9 @@ host's package manager: a routine Codex update replaces the bytes at the bound p
 check refuses before dispatch. This module keeps the *evaluator runtime* separate from the *host
 installation*:
 
-* a verified copy of the admitted native executable lives in an owner-private directory under the
-  Yoetz data bundle, content-bound to the cell's pinned digest, so host updates cannot replace it;
+* a verified copy of the admitted native executable, and of the ``codex-code-mode-host`` helper it
+  starts from beside itself, lives in an owner-private directory under the Yoetz data bundle,
+  content-bound to the cell's pinned digests, so host updates cannot replace it;
 * the copy is made only from bytes that hash to that pinned digest — from a selected local
   executable or from an explicitly authorized package-manager download — and is re-verified on
   every launch by the unchanged ``verify_local_binding`` fence;
@@ -38,10 +39,12 @@ from pathlib import Path
 from typing import Final, Literal
 
 from yoetz.adapters.providers.codex_app_server import (
+    CODEX_CODE_MODE_HOST_NAME,
     CODEX_EVALUATOR_CONFIG,
     CODEX_EVALUATOR_RUNTIME_VERSION,
     CodexAppServerProfile,
     CodexEvaluatorCell,
+    codex_code_mode_host_path,
     codex_evaluator_cell_for_platform,
 )
 from yoetz.config.models import ExternalRuntimeProfileConfig
@@ -53,7 +56,9 @@ __all__ = [
     "ManagedRuntimeState",
     "diagnose_codex_binding",
     "host_codex_evaluator_cell",
+    "inspect_managed_code_mode_host",
     "inspect_managed_runtime",
+    "managed_code_mode_host_path",
     "managed_runtime_path",
     "managed_runtime_root",
     "provision_codex_runtime",
@@ -64,6 +69,7 @@ __all__ = [
 
 _STORE_PARTS: Final = ("external-runtimes", "codex-evaluator")
 _EXECUTABLE_NAME: Final = "codex"
+_RETAINED_NAMES: Final = frozenset({_EXECUTABLE_NAME, CODEX_CODE_MODE_HOST_NAME})
 _RETAINED_MODE: Final = 0o500
 # The admitted native executables are tens of MiB; the bound only stops an unbounded copy.
 _MAX_EXECUTABLE_BYTES: Final = 1024 * 1024 * 1024
@@ -71,7 +77,11 @@ _CHUNK_BYTES: Final = 1024 * 1024
 _NPM_TIMEOUT_SECONDS: Final = 600.0
 _CODEX_NPM_PACKAGE: Final = "@openai/codex"
 
-type ManagedRuntimeState = Literal["absent", "verified", "changed", "invalid", "unsafe"]
+# ``incomplete``: the retained executable verifies but its code-mode host is absent (a store
+# written before the host joined the cell). ``verified`` requires both files.
+type ManagedRuntimeState = Literal[
+    "absent", "verified", "incomplete", "changed", "invalid", "unsafe"
+]
 type CapabilityState = Literal[
     "current", "profile_outdated", "unsupported", "platform_unsupported", "evidence_stale"
 ]
@@ -119,6 +129,12 @@ def managed_runtime_path(bundle: Path, cell: CodexEvaluatorCell) -> Path:
     """The one stable path the retained runtime for ``cell`` is bound at."""
 
     return managed_runtime_root(bundle) / cell.source_identity / _EXECUTABLE_NAME
+
+
+def managed_code_mode_host_path(bundle: Path, cell: CodexEvaluatorCell) -> Path:
+    """The retained code-mode host, beside the retained executable where Codex looks for it."""
+
+    return codex_code_mode_host_path(managed_runtime_path(bundle, cell))
 
 
 @contextmanager
@@ -208,9 +224,9 @@ def _store_directory(bundle: Path, cell: CodexEvaluatorCell, *, create: bool) ->
     return directory
 
 
-def inspect_managed_runtime(bundle: Path, cell: CodexEvaluatorCell) -> ManagedRuntimeState:
-    """Classify the retained runtime without creating, repairing, or launching anything."""
-
+def _inspect_store_file(
+    bundle: Path, cell: CodexEvaluatorCell, name: str, expected: str
+) -> ManagedRuntimeState:
     directory = managed_runtime_root(bundle) / cell.source_identity
     try:
         directory.lstat()
@@ -222,7 +238,7 @@ def inspect_managed_runtime(bundle: Path, cell: CodexEvaluatorCell) -> ManagedRu
         verify_private_local_bundle(directory)
     except PathSafetyError, OSError:
         return "unsafe"
-    target = directory / _EXECUTABLE_NAME
+    target = directory / name
     try:
         facts = target.lstat()
     except FileNotFoundError:
@@ -235,49 +251,102 @@ def inspect_managed_runtime(bundle: Path, cell: CodexEvaluatorCell) -> ManagedRu
         digest = _file_digest(target)
     except OSError, ValueError:
         return "invalid"
-    return "verified" if digest == cell.executable_sha256 else "changed"
+    return "verified" if digest == expected else "changed"
 
 
-def retain_codex_runtime(source: Path, *, bundle: Path, cell: CodexEvaluatorCell) -> Path:
-    """Copy admitted executable bytes into the owner-private store and return the bound path.
+def inspect_managed_code_mode_host(bundle: Path, cell: CodexEvaluatorCell) -> ManagedRuntimeState:
+    """Classify only the retained code-mode host; nothing is created, repaired, or launched."""
 
-    The copy is hashed while it is written, so bytes that changed after the caller's own digest
-    check are never retained. An already verified copy is reused without rewriting it, which
-    keeps setup and repair idempotent and never disturbs an in-flight evaluator process.
+    return _inspect_store_file(bundle, cell, CODEX_CODE_MODE_HOST_NAME, cell.code_mode_host_sha256)
+
+
+def inspect_managed_runtime(bundle: Path, cell: CodexEvaluatorCell) -> ManagedRuntimeState:
+    """Classify the retained runtime without creating, repairing, or launching anything.
+
+    ``verified`` means both the executable and its code-mode host hold the cell's pinned bytes.
     """
 
-    directory = _store_directory(bundle, cell, create=True)
-    target = directory / _EXECUTABLE_NAME
-    if inspect_managed_runtime(bundle, cell) == "verified":
-        return target
+    executable = _inspect_store_file(bundle, cell, _EXECUTABLE_NAME, cell.executable_sha256)
+    if executable != "verified":
+        return executable
+    host = inspect_managed_code_mode_host(bundle, cell)
+    return "incomplete" if host == "absent" else host
+
+
+def _open_source(path: Path, *, missing_token: str) -> tuple[int, os.stat_result]:
     try:
-        descriptor, facts = _open_regular(source)
+        descriptor, facts = _open_regular(path)
     except FileNotFoundError as error:
-        raise ValueError("codex_runtime_not_found") from error
+        raise ValueError(missing_token) from error
     except OSError as error:
         raise ValueError("codex_runtime_executable_invalid") from error
+    if not stat.S_ISREG(facts.st_mode) or facts.st_size > _MAX_EXECUTABLE_BYTES:
+        os.close(descriptor)
+        raise ValueError("codex_runtime_executable_invalid")
+    return descriptor, facts
+
+
+def _copy_verified(descriptor: int, directory: Path, name: str, expected: str) -> None:
+    """Hash while copying; atomically commit ``name`` only when the bytes equal ``expected``."""
+
     temporary: Path | None = None
     try:
-        if not stat.S_ISREG(facts.st_mode) or facts.st_size > _MAX_EXECUTABLE_BYTES:
-            raise ValueError("codex_runtime_executable_invalid")
         handle, temporary_name = tempfile.mkstemp(prefix=".retain-", dir=directory)
         temporary = Path(temporary_name)
         with os.fdopen(handle, "wb") as output:
             digest = _digest_descriptor(descriptor, output.write)
             output.flush()
             os.fsync(output.fileno())
-        if digest != cell.executable_sha256:
+        if digest != expected:
             raise ValueError("codex_runtime_capability_unsupported")
         os.chmod(temporary, _RETAINED_MODE)
-        os.replace(temporary, target)
+        os.replace(temporary, directory / name)
         temporary = None
-        _fsync_directory(directory)
     except OSError as error:
         raise ValueError("codex_evaluator_runtime_store_unavailable") from error
     finally:
-        os.close(descriptor)
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+def retain_codex_runtime(source: Path, *, bundle: Path, cell: CodexEvaluatorCell) -> Path:
+    """Copy the admitted executable and its code-mode host into the owner-private store.
+
+    ``source`` is the admitted native executable; its code-mode host is taken only from beside
+    it, where Codex itself looks. Each copy is hashed while it is written, so bytes that changed
+    after the caller's own digest check are never retained. A file that already verifies is
+    reused without rewriting it, which keeps setup and repair idempotent, never disturbs an
+    in-flight evaluator process, and completes a store retained before the host joined the cell.
+    Both sources are opened before anything is written. The returned bound path is the
+    executable; the store reports ``verified`` only when both files hold the pinned bytes.
+    """
+
+    directory = _store_directory(bundle, cell, create=True)
+    target = directory / _EXECUTABLE_NAME
+    if inspect_managed_runtime(bundle, cell) == "verified":
+        return target
+    files = (
+        (source, _EXECUTABLE_NAME, cell.executable_sha256, "codex_runtime_not_found"),
+        (
+            codex_code_mode_host_path(source),
+            CODEX_CODE_MODE_HOST_NAME,
+            cell.code_mode_host_sha256,
+            "codex_runtime_code_mode_host_missing",
+        ),
+    )
+    opened: list[tuple[int, str, str]] = []
+    try:
+        for path, name, expected, missing_token in files:
+            if _inspect_store_file(bundle, cell, name, expected) == "verified":
+                continue
+            descriptor, _facts = _open_source(path, missing_token=missing_token)
+            opened.append((descriptor, name, expected))
+        for descriptor, name, expected in opened:
+            _copy_verified(descriptor, directory, name, expected)
+        _fsync_directory(directory)
+    finally:
+        for descriptor, _name, _expected in opened:
+            os.close(descriptor)
     if inspect_managed_runtime(bundle, cell) != "verified":
         raise ValueError("codex_evaluator_runtime_store_unavailable")
     return target
@@ -298,7 +367,9 @@ def _fsync_directory(directory: Path) -> None:
 
 
 def remove_managed_runtime(bundle: Path, cell: CodexEvaluatorCell) -> bool:
-    """Delete only the retained runtime for ``cell``; return whether anything was removed.
+    """Delete the retained runtime (executable and code-mode host) for ``cell``.
+
+    Returns whether anything was removed.
 
     The caller owns the in-use check. An unsafe store is refused rather than cleaned, and nothing
     outside the cell's own store directory is touched.
@@ -313,7 +384,7 @@ def remove_managed_runtime(bundle: Path, cell: CodexEvaluatorCell) -> bool:
     removed = False
     try:
         for entry in directory.iterdir():
-            if entry.name == _EXECUTABLE_NAME or entry.name.startswith(".retain-"):
+            if entry.name in _RETAINED_NAMES or entry.name.startswith(".retain-"):
                 if entry.is_dir() and not entry.is_symlink():
                     raise ValueError("codex_evaluator_runtime_store_unsafe")
                 entry.unlink()
@@ -424,6 +495,10 @@ class CodexBindingDiagnosis:
     capability: CapabilityState
     executable: ExecutableState
     home: HomeState
+    # The bound executable's sibling code-mode host. Its faults select the same
+    # ``codex_runtime_executable_*`` states (the continuation is the same repair); this axis says
+    # which file it was.
+    code_mode_host: ExecutableState = "not_checked"
 
     @property
     def ready(self) -> bool:
@@ -456,7 +531,7 @@ def _capability_state(
     return "current"
 
 
-def _executable_state(path: Path, cell: CodexEvaluatorCell) -> ExecutableState:
+def _executable_state(path: Path, expected: str) -> ExecutableState:
     try:
         facts = path.stat()
     except FileNotFoundError:
@@ -474,7 +549,7 @@ def _executable_state(path: Path, cell: CodexEvaluatorCell) -> ExecutableState:
         return "invalid"
     except OSError:
         return "unreadable"
-    return "admitted" if digest == cell.executable_sha256 else "changed"
+    return "admitted" if digest == expected else "changed"
 
 
 def _home_state(home: Path) -> HomeState:
@@ -542,20 +617,24 @@ def diagnose_codex_binding(
             "codex_runtime_platform_unsupported", "platform_unsupported", "not_checked", home
         )
     capability = _capability_state(config, selected, now)
-    executable = _executable_state(executable_path, selected)
+    executable = _executable_state(executable_path, selected.executable_sha256)
+    host = _executable_state(
+        codex_code_mode_host_path(executable_path), selected.code_mode_host_sha256
+    )
+    runtime_files = executable if executable != "admitted" else host
     if capability == "evidence_stale":
         state = "codex_runtime_capability_evidence_stale"
     elif capability == "unsupported":
         state = "codex_runtime_capability_unsupported"
-    elif executable in _EXECUTABLE_TOKENS:
-        state = _EXECUTABLE_TOKENS[executable]
+    elif runtime_files in _EXECUTABLE_TOKENS:
+        state = _EXECUTABLE_TOKENS[runtime_files]
     elif capability == "profile_outdated":
         state = "codex_runtime_profile_outdated"
     elif home in _HOME_TOKENS:
         state = _HOME_TOKENS[home]
     else:
         state = _confirm_launch_fence(config)
-    return CodexBindingDiagnosis(state, capability, executable, home)
+    return CodexBindingDiagnosis(state, capability, executable, home, host)
 
 
 def _confirm_launch_fence(config: ExternalRuntimeProfileConfig) -> str:

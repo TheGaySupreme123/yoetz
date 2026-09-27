@@ -3695,6 +3695,7 @@ def provider_codex_subscription_setup(
             "private copy; updating your everyday Codex leaves it unchanged)"
         )
         typer.echo(f"  executable_sha256: {digest}")
+        typer.echo(f"  code-mode host sha256: {cell.code_mode_host_sha256}")
         typer.echo(f"  source: {source}")
         typer.echo(f"  capability cell: {cell.capability_cell_sha256}")
         typer.echo(f"  cell evidence expires: {cell.capability_evidence_expires_at}")

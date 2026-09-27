@@ -633,6 +633,7 @@ def external_runtime_fact(config: YoetzConfig) -> dict[str, JsonValue] | None:
         "state": diagnosis.state,
         "capability": diagnosis.capability,
         "executable": diagnosis.executable,
+        "code_mode_host": diagnosis.code_mode_host,
         "home": diagnosis.home,
         "uses_managed_runtime": uses_managed,
         "next_command": next_command,

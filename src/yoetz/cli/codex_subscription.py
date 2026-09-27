@@ -18,12 +18,15 @@ from typing import Final, Literal, cast
 import typer
 
 from yoetz.adapters.providers.codex_app_server import (
+    CODEX_CODE_MODE_HOST_NAME,
     CODEX_EVALUATOR_RUNTIME_VERSION,
     CodexAppServerProfile,
     CodexEvaluatorCell,
     CodexLoginChallenge,
     CodexRuntimeStatus,
     codex_account_status,
+    codex_code_mode_host_path,
+    codex_evaluator_cell_for_binding,
     codex_evaluator_cell_for_platform,
     codex_login,
     codex_logout,
@@ -33,7 +36,9 @@ from yoetz.adapters.providers.codex_evaluator_runtime import (
     CodexBindingDiagnosis,
     diagnose_codex_binding,
     host_codex_evaluator_cell,
+    inspect_managed_code_mode_host,
     inspect_managed_runtime,
+    managed_code_mode_host_path,
     managed_runtime_path,
     provision_codex_runtime,
     remove_managed_runtime,
@@ -145,17 +150,23 @@ _INSTALL_COMMAND: Final = "'yoetz provider codex-subscription runtime install'"
 # carry a registered recovery directive; these are rendered only by subscription surfaces.
 _SUBSCRIPTION_REMEDIATIONS: Final[Mapping[str, str]] = {
     "codex_runtime_executable_changed": (
-        "the bound evaluator executable no longer holds the admitted Codex bytes (a Codex update "
-        f"usually replaced it); run {_REPAIR_COMMAND} to bind Yoetz's retained copy — the "
-        "sign-in, model, and settings are kept"
+        "the bound evaluator executable or its code-mode host no longer holds the admitted Codex "
+        f"bytes (a Codex update usually replaced it); run {_REPAIR_COMMAND} to bind Yoetz's "
+        "retained copy — the sign-in, model, and settings are kept"
     ),
     "codex_runtime_executable_missing": (
-        f"the bound evaluator executable is gone; run {_REPAIR_COMMAND} to bind Yoetz's retained "
-        "copy — the sign-in, model, and settings are kept"
+        "the bound evaluator executable or its code-mode host is gone; run "
+        f"{_REPAIR_COMMAND} to bind Yoetz's retained copy — the sign-in, model, and settings are "
+        "kept"
     ),
     "codex_runtime_executable_invalid": (
-        "the bound evaluator executable is not a regular owner-executable file; run "
-        f"{_REPAIR_COMMAND}"
+        "the bound evaluator executable or its code-mode host is not a regular owner-executable "
+        f"file; run {_REPAIR_COMMAND}"
+    ),
+    "codex_runtime_code_mode_host_missing": (
+        f"the selected Codex has no {CODEX_CODE_MODE_HOST_NAME} beside its native executable, "
+        "which the admitted evaluator runtime needs; select the npm package's bin/codex.js, or "
+        f"run {_INSTALL_COMMAND} --download"
     ),
     "codex_runtime_profile_outdated": (
         "this Yoetz release uses a newer reviewed capability identity for the same Codex runtime; "
@@ -434,7 +445,29 @@ def resolve_supported_codex_executable(selected: Path) -> tuple[Path, str, str]:
     digest = _sha256_file(resolved)
     if digest != cell.executable_sha256:
         raise ValueError("codex_runtime_capability_unsupported")
+    _verify_code_mode_host(resolved, cell)
     return resolved, digest, cell.source_identity
+
+
+def _verify_code_mode_host(native: Path, cell: CodexEvaluatorCell) -> Path:
+    """Require the admitted code-mode host beside the resolved native executable (#874).
+
+    Every supported layout (nested or hoisted npm package, or the native path itself) places it
+    in the native executable's own directory, where Codex starts it; nothing else is searched.
+    """
+
+    host = codex_code_mode_host_path(native)
+    try:
+        facts = host.lstat()
+    except FileNotFoundError as error:
+        raise ValueError("codex_runtime_code_mode_host_missing") from error
+    except OSError as error:
+        raise ValueError("codex_runtime_unavailable") from error
+    if not stat.S_ISREG(facts.st_mode) or not facts.st_mode & stat.S_IXUSR:
+        raise ValueError("codex_runtime_executable_invalid")
+    if _sha256_file(host) != cell.code_mode_host_sha256:
+        raise ValueError("codex_runtime_capability_unsupported")
+    return host
 
 
 def default_codex_home() -> Path:
@@ -565,6 +598,8 @@ def codex_subscription_preview(
         "runtime_source_identity": source_identity,
         "executable_path": str(native),
         "executable_sha256": digest,
+        "code_mode_host_path": str(codex_code_mode_host_path(native)),
+        "code_mode_host_sha256": cell.code_mode_host_sha256,
         "app_server_schema_sha256": cell.app_server_schema_sha256,
         "capability_cell_sha256": cell.capability_cell_sha256,
         "capability_profile": cell.capability_profile,
@@ -811,6 +846,24 @@ def _already_ready(status: CodexRuntimeStatus) -> bool:
     return status.runtime_ready and status.auth_mode == "chatgpt" and status.model_available
 
 
+def _bound_code_mode_host_sha256(binding: ExternalRuntimeProfileConfig) -> str | None:
+    """The host digest the binding's exact cell pins, or ``None`` for an unadmitted binding."""
+
+    try:
+        return codex_evaluator_cell_for_binding(
+            source_identity=binding.source_identity,
+            executable_sha256=binding.executable_sha256,
+            runtime_version=binding.runtime_version,
+            app_server_schema_sha256=binding.app_server_schema_sha256,
+            capability_cell_sha256=binding.capability_cell_sha256,
+            capability_profile=binding.capability_profile,
+            capability_evidence_expires_at=binding.capability_evidence_expires_at,
+            isolated_config_sha256=binding.isolated_config_sha256,
+        ).code_mode_host_sha256
+    except ValueError:
+        return None
+
+
 def _safe_status(
     binding: ExternalRuntimeProfileConfig, status: CodexRuntimeStatus
 ) -> dict[str, JsonValue]:
@@ -821,6 +874,8 @@ def _safe_status(
         "runtime_source_identity": binding.source_identity,
         "executable_path": binding.executable_path,
         "executable_sha256": binding.executable_sha256,
+        "code_mode_host_path": str(codex_code_mode_host_path(Path(binding.executable_path))),
+        "code_mode_host_sha256": _bound_code_mode_host_sha256(binding),
         "app_server_schema_sha256": binding.app_server_schema_sha256,
         "capability_cell_sha256": binding.capability_cell_sha256,
         "capability_profile": binding.capability_profile,
@@ -1030,6 +1085,7 @@ async def prompt_codex_subscription_setup() -> dict[str, JsonValue]:
         " (Yoetz's verified private copy; updating your everyday Codex leaves it unchanged)"
     )
     typer.echo(f"  executable_sha256: {preview['executable_sha256']}")
+    typer.echo(f"  code-mode host sha256: {preview['code_mode_host_sha256']}")
     typer.echo(f"  Codex version: {preview['runtime_version']}")
     typer.echo(f"  capability cell: {preview['capability_cell_sha256']}")
     typer.echo(f"  cell evidence expires: {preview['capability_evidence_expires_at']}")
@@ -1192,8 +1248,9 @@ def describe_runtime_download() -> tuple[str, ...]:
     return (
         f"package: @openai/codex@{CODEX_EVALUATOR_RUNTIME_VERSION} through your own npm and "
         "registry settings, with install scripts disabled",
-        "only the native executable matching the reviewed evaluator SHA-256 is kept, in an "
-        "owner-private Yoetz directory; the rest of the download is deleted",
+        "only the native executable and its code-mode host matching the reviewed evaluator "
+        "SHA-256 values are kept, in an owner-private Yoetz directory; the rest of the download "
+        "is deleted",
         "your everyday Codex installation, settings, and sign-ins are not changed",
         "no task content, credential, or account data is sent",
         f"remove later: {_RUNTIME_REMOVE}",
@@ -1206,6 +1263,8 @@ def codex_evaluator_runtime_status(*, config_path: Path | None = None) -> dict[s
     config = _base_config(config_path)
     managed_path: str | None = None
     managed_state: str | None = None
+    host_path: str | None = None
+    host_state: str | None = None
     try:
         cell = host_codex_evaluator_cell()
     except ValueError:
@@ -1215,9 +1274,12 @@ def codex_evaluator_runtime_status(*, config_path: Path | None = None) -> dict[s
             bundle = runtime_bundle()
         except ValueError:
             managed_state = "unsafe"
+            host_state = "unsafe"
         else:
             managed_path = str(managed_runtime_path(bundle, cell))
             managed_state = inspect_managed_runtime(bundle, cell)
+            host_path = str(managed_code_mode_host_path(bundle, cell))
+            host_state = inspect_managed_code_mode_host(bundle, cell)
     binding = config.external_runtime
     binding_report: dict[str, JsonValue] | None = None
     next_command: str | None = None
@@ -1232,8 +1294,10 @@ def codex_evaluator_runtime_status(*, config_path: Path | None = None) -> dict[s
             "state": diagnosis.state,
             "capability": diagnosis.capability,
             "executable": diagnosis.executable,
+            "code_mode_host": diagnosis.code_mode_host,
             "home": diagnosis.home,
             "executable_path": binding.executable_path,
+            "code_mode_host_path": str(codex_code_mode_host_path(Path(binding.executable_path))),
             "uses_managed_runtime": uses_managed,
             "capability_profile": binding.capability_profile,
             "runtime_version": binding.runtime_version,
@@ -1246,7 +1310,15 @@ def codex_evaluator_runtime_status(*, config_path: Path | None = None) -> dict[s
         "schema": "yoetz.codex-evaluator-runtime-status/1",
         "platform_cell": None if cell is None else cell.source_identity,
         "admitted_runtime_version": CODEX_EVALUATOR_RUNTIME_VERSION,
-        "managed_runtime": {"path": managed_path, "state": managed_state},
+        "managed_runtime": {
+            "path": managed_path,
+            "state": managed_state,
+            "code_mode_host": {
+                "path": host_path,
+                "state": host_state,
+                "sha256": None if cell is None else cell.code_mode_host_sha256,
+            },
+        },
         "binding": binding_report,
         "login_checked": False,
         "next_command": next_command,
@@ -1283,6 +1355,7 @@ def codex_evaluator_runtime_install_plan(
         "source_path": None if selected is None else str(selected),
         "runtime_version": CODEX_EVALUATOR_RUNTIME_VERSION,
         "executable_sha256": cell.executable_sha256,
+        "code_mode_host_sha256": cell.code_mode_host_sha256,
         "managed_runtime_path": str(managed_runtime_path(bundle, cell)),
         "managed_runtime_state": inspect_managed_runtime(bundle, cell),
         "download": kind == "download",
@@ -1335,6 +1408,8 @@ def codex_evaluator_runtime_install(
             "managed_runtime_state": inspect_managed_runtime(bundle, cell),
             "runtime_version": CODEX_EVALUATOR_RUNTIME_VERSION,
             "executable_sha256": cell.executable_sha256,
+            "code_mode_host_path": str(managed_code_mode_host_path(bundle, cell)),
+            "code_mode_host_sha256": cell.code_mode_host_sha256,
             "binding_changed": False,
             "host_installation_changed": False,
             "next_command": _SETUP if config.external_runtime is None else _REPAIR,

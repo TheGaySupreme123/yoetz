@@ -19,9 +19,11 @@ from yoetz.adapters.providers.codex_app_server import (
     CODEX_APP_SERVER_SCHEMA_SHA256,
     CODEX_EVALUATOR_CAPABILITY_CELL_SHA256,
     CODEX_EVALUATOR_CAPABILITY_PROFILE,
+    CODEX_EVALUATOR_CODE_MODE_HOST_SHA256,
     CODEX_EVALUATOR_CONFIG_SHA256,
     CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT,
     CODEX_EVALUATOR_LINUX_X64_CAPABILITY_CELL_SHA256,
+    CODEX_EVALUATOR_LINUX_X64_CODE_MODE_HOST_SHA256,
     CODEX_EVALUATOR_LINUX_X64_EXECUTABLE_SHA256,
     CODEX_EVALUATOR_LINUX_X64_SOURCE_IDENTITY,
     CODEX_EVALUATOR_RUNTIME_VERSION,
@@ -113,6 +115,7 @@ def test_committed_compatibility_cell_matches_runtime_constants() -> None:
         "upstream_body_observability",
         "evidence_reviewed_at",
         "evidence_expires_at",
+        "code_mode_host_sha256",
     )
     assert canonical_digest({key: cell[key] for key in identity_keys}) == (
         CODEX_EVALUATOR_CAPABILITY_CELL_SHA256
@@ -122,6 +125,8 @@ def test_committed_compatibility_cell_matches_runtime_constants() -> None:
     assert config.decode("utf-8") == module.CODEX_EVALUATOR_CONFIG
     assert cell["upstream_body_observability"] == "unavailable"
     assert cell["release_evidence"] == "pending"
+    assert cell["code_mode_host_sha256"] == CODEX_EVALUATOR_CODE_MODE_HOST_SHA256
+    assert cell["capability_profile"] == "codex-evaluator/0.157.1/v2"
 
 
 def test_committed_linux_compatibility_cell_matches_runtime_constants() -> None:
@@ -144,6 +149,7 @@ def test_committed_linux_compatibility_cell_matches_runtime_constants() -> None:
         "upstream_body_observability",
         "evidence_reviewed_at",
         "evidence_expires_at",
+        "code_mode_host_sha256",
     )
 
     assert cell["runtime_version"] == CODEX_EVALUATOR_RUNTIME_VERSION
@@ -158,6 +164,14 @@ def test_committed_linux_compatibility_cell_matches_runtime_constants() -> None:
     assert cell["platform"] == {"architecture": "x86_64", "os": "linux"}
     assert cell["release_evidence"] == "pending"
     runtime_cell = module.codex_evaluator_cell_for_platform("linux", "x86_64")
+    assert cell["code_mode_host_sha256"] == CODEX_EVALUATOR_LINUX_X64_CODE_MODE_HOST_SHA256
+    assert runtime_cell.code_mode_host_sha256 == CODEX_EVALUATOR_LINUX_X64_CODE_MODE_HOST_SHA256
+    assert (
+        cell["code_mode_host_relative"]
+        == (
+            runtime_cell.native_executable_relative.parent / module.CODEX_CODE_MODE_HOST_NAME
+        ).as_posix()
+    )
     assert cell["native_package"] == f"@openai/{runtime_cell.native_package_directory}"
     assert cell["native_executable_relative"] == (
         runtime_cell.native_executable_relative.as_posix()
@@ -249,6 +263,16 @@ def test_macos_cell_binds_the_exact_0_157_1_native_package() -> None:
     )
     assert cell.capability_cell_sha256 == CODEX_EVALUATOR_CAPABILITY_CELL_SHA256
     assert cell.native_package_spec == "npm:@openai/codex@0.157.1-darwin-arm64"
+    assert cell.code_mode_host_sha256 == (
+        "sha256:80fdf166c3da068282d5692f67a852715a327ae7dc1913abb93b8c3d3030103f"
+    )
+    assert CODEX_EVALUATOR_LINUX_X64_CODE_MODE_HOST_SHA256 == (
+        "sha256:67b86142bac5cead11b8420cf32d3a2bf88c8868d71733f351ed7c5d95a953e0"
+    )
+    assert CODEX_EVALUATOR_CAPABILITY_PROFILE == "codex-evaluator/0.157.1/v2"
+    assert module.codex_code_mode_host_path(Path("/store/codex")) == Path(
+        "/store/codex-code-mode-host"
+    )
     assert cell.native_executable_relative.as_posix() == "vendor/aarch64-apple-darwin/bin/codex"
 
 

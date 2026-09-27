@@ -154,6 +154,9 @@ def _codex_package_layout(
     native.parent.mkdir(parents=True)
     native.write_bytes(b"packaged-layout-probe")
     native.chmod(0o700)
+    host = native.parent / "codex-code-mode-host"
+    host.write_bytes(b"packaged-layout-host-probe")
+    host.chmod(0o700)
     (native_root / "package.json").write_text(
         json.dumps(
             {
@@ -169,18 +172,20 @@ def _codex_package_layout(
 
 
 @pytest.mark.parametrize(
-    ("platform_name", "machine", "executable_sha256", "source_identity"),
+    ("platform_name", "machine", "executable_sha256", "host_sha256", "source_identity"),
     [
         (
             "darwin",
             "arm64",
             "sha256:27ceb5f9b957b43a519efe4eaa3816a0bffb0a531a2c89af18840c0a3c016a7d",
+            "sha256:80fdf166c3da068282d5692f67a852715a327ae7dc1913abb93b8c3d3030103f",
             "openai-codex-npm-darwin-arm64-0.157.1",
         ),
         (
             "linux",
             "x86_64",
             "sha256:3e2584f3f3829a43a0495011a1cecb2facbe64a2403e2b682351fd9c2983f970",
+            "sha256:67b86142bac5cead11b8420cf32d3a2bf88c8868d71733f351ed7c5d95a953e0",
             "openai-codex-npm-linux-x64-0.157.1",
         ),
     ],
@@ -191,6 +196,7 @@ def test_installed_wheel_resolves_nested_and_npm_prefix_codex_layouts(
     platform_name: str,
     machine: str,
     executable_sha256: str,
+    host_sha256: str,
     source_identity: str,
 ) -> None:
     root = tmp_path / "install"
@@ -204,7 +210,8 @@ def test_installed_wheel_resolves_nested_and_npm_prefix_codex_layouts(
         "import sys; from pathlib import Path; "
         "import yoetz.cli.codex_subscription as m; "
         f"sys.platform={platform_name!r}; m.platform.machine=lambda: {machine!r}; "
-        f"m._sha256_file=lambda _path: {executable_sha256!r}; "
+        f"m._sha256_file=lambda path: {host_sha256!r} "
+        f"if path.name == 'codex-code-mode-host' else {executable_sha256!r}; "
         "print(Path(m.__file__).resolve()); "
         "print(*m.resolve_supported_codex_executable(Path(sys.argv[1])), sep='\\n')"
     )

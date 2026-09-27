@@ -45,6 +45,8 @@ from yoetz.ports.integrations import HarnessId
 pytestmark = pytest.mark.anyio
 
 _ADMITTED = b"admitted codex 0.157.1 native bytes"
+_HOST = b"admitted codex 0.157.1 code-mode host bytes"
+_HOST_NAME = "codex-code-mode-host"
 _NEWER = b"codex-cli 0.158.0 that replaced the ordinary npm path"
 _OWNER_CHOICES = ("model", "reasoning_effort", "timeout_seconds", "max_retries", "codex_home")
 _V1 = {
@@ -100,11 +102,19 @@ class _Env:
     def managed(self) -> Path:
         return runtime_store.managed_runtime_path(self.bundle, self.cell)
 
-    def executable(self, relative: str, data: bytes = _ADMITTED) -> Path:
+    def executable(
+        self, relative: str, data: bytes = _ADMITTED, host: bytes | None = _HOST
+    ) -> Path:
+        """A synthetic native executable with its code-mode host beside it unless ``host=None``."""
+
         path = self.tmp / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
         path.chmod(0o700)
+        if host is not None:
+            sibling = path.parent / _HOST_NAME
+            sibling.write_bytes(host)
+            sibling.chmod(0o700)
         return path
 
     def home(self) -> Path:
@@ -171,15 +181,20 @@ def env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _Env:
     monkeypatch.setattr(module.platform, "machine", lambda: "x86_64")
     cell = codex_evaluator_cell_for_platform("linux", "x86_64")
 
+    pinned = {
+        _plain(_ADMITTED): cell.executable_sha256,
+        _plain(_HOST): cell.code_mode_host_sha256,
+    }
+
     def admitted_digest(path: Path) -> str:
-        data = path.read_bytes()
-        return cell.executable_sha256 if data == _ADMITTED else _plain(data)
+        value = _plain(path.read_bytes())
+        return pinned.get(value, value)
 
     real_descriptor_digest = runtime_store._digest_descriptor  # pyright: ignore[reportPrivateUsage]
 
     def descriptor_digest(descriptor: int, sink: object = None) -> str:
         value = real_descriptor_digest(descriptor, sink)  # pyright: ignore[reportArgumentType]
-        return cell.executable_sha256 if value == _plain(_ADMITTED) else value
+        return pinned.get(value, value)
 
     def allow_private(_path: Path) -> None:
         return None
@@ -216,6 +231,8 @@ def env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _Env:
         source.parent.mkdir(parents=True, exist_ok=True)
         source.write_bytes(_ADMITTED)
         source.chmod(0o700)
+        (source.parent / _HOST_NAME).write_bytes(_HOST)
+        (source.parent / _HOST_NAME).chmod(0o700)
         return runtime_store.retain_codex_runtime(
             source,
             bundle=cast(Path, kwargs["bundle"]),
@@ -344,11 +361,12 @@ async def test_repair_moves_a_superseded_0_150_1_binding_onto_the_current_cell(
     assert repaired.executable_path == str(env.managed)
     assert env.managed.parent.name == "openai-codex-npm-linux-x64-0.157.1"
     assert env.managed.read_bytes() == _ADMITTED
+    assert (env.managed.parent / _HOST_NAME).read_bytes() == _HOST
     assert (repaired.runtime_version, repaired.source_identity) == (
         CODEX_EVALUATOR_RUNTIME_VERSION,
         env.cell.source_identity,
     )
-    assert repaired.capability_profile == "codex-evaluator/0.157.1/v1"
+    assert repaired.capability_profile == "codex-evaluator/0.157.1/v2"
     # Sign-in and every owner choice are kept; nothing logged in or out.
     assert (repaired.model, repaired.reasoning_effort) == ("gpt-5.6-luna", "xhigh")
     assert repaired.routine_reasoning_effort == "medium"
@@ -360,6 +378,71 @@ async def test_repair_moves_a_superseded_0_150_1_binding_onto_the_current_cell(
     # The host installation and the superseded copy are left untouched.
     assert everyday.read_bytes() == _ADMITTED
     assert old_copy.read_bytes() == b"retained codex 0.150.1 native bytes"
+
+
+async def test_repair_upgrades_a_v1_binding_whose_store_lacks_the_code_mode_host(
+    env: _Env,
+) -> None:
+    """#874: a codex-evaluator/0.157.1/v1 binding kept only ``codex``; repair adds the host."""
+
+    v1_copy = env.managed
+    v1_copy.parent.mkdir(parents=True)
+    for directory in (v1_copy.parent, *v1_copy.parent.relative_to(env.bundle).parents):
+        (env.bundle / directory).chmod(0o700)
+    v1_copy.write_bytes(_ADMITTED)
+    v1_copy.chmod(0o500)
+    inode = v1_copy.stat().st_ino
+    v1 = env.binding(
+        v1_copy,
+        capability_profile="codex-evaluator/0.157.1/v1",
+        capability_cell_sha256=(
+            "sha256:3a206f8d1c67b6b491af645c27689e05ff84c14a7fc5a69f8a6336e0f92de538"
+        ),
+        model="gpt-6-luna",
+        reasoning_effort="high",
+        routine_reasoning_effort="high",
+    )
+    env.write_config(v1)
+    assert runtime_store.inspect_managed_runtime(env.bundle, env.cell) == "incomplete"
+
+    before = module.diagnose_bound_runtime(v1)
+    assert (before.state, before.capability, before.executable, before.code_mode_host) == (
+        "codex_runtime_executable_missing",
+        "profile_outdated",
+        "admitted",
+        "missing",
+    )
+    assert module.binding_continuation(before.state) == "yoetz provider codex-subscription repair"
+    # The lone v1 copy cannot seed the repair: it has no host beside it.
+    with pytest.raises(ValueError, match="codex_evaluator_runtime_unavailable"):
+        module.codex_subscription_repair_plan(config_path=env.config_path)
+
+    everyday = env.executable("npm-prefix/codex")  # the host's everyday Codex 0.157.1 layout
+    env.discovered.append(everyday)
+    result = await module.codex_subscription_repair(config_path=env.config_path)
+
+    repaired = env.written().external_runtime
+    assert repaired is not None
+    assert result["source"] == "discovered"
+    assert result["state_before"] == "codex_runtime_executable_missing"
+    assert result["changed_fields"] == ["capability_cell_sha256", "capability_profile"]
+    assert repaired.capability_profile == "codex-evaluator/0.157.1/v2"
+    assert repaired.capability_cell_sha256 == env.cell.capability_cell_sha256
+    assert repaired.executable_path == str(v1_copy)
+    assert result["code_mode_host_path"] == str(v1_copy.parent / _HOST_NAME)
+    assert result["code_mode_host_sha256"] == env.cell.code_mode_host_sha256
+    # The retained executable is reused as-is; only the host joins it in the owner-only store.
+    assert v1_copy.stat().st_ino == inode
+    assert (v1_copy.parent / _HOST_NAME).read_bytes() == _HOST
+    assert runtime_store.inspect_managed_runtime(env.bundle, env.cell) == "verified"
+    # Sign-in and every choice are kept; nothing logged in or out.
+    assert (repaired.model, repaired.reasoning_effort) == ("gpt-6-luna", "high")
+    assert repaired.routine_reasoning_effort == "high"
+    assert (repaired.timeout_seconds, repaired.max_retries) == (37, 0)
+    assert repaired.codex_home == v1.codex_home
+    assert result["login_reused"] is True
+    assert env.codex.logins == [] and env.codex.logouts == []
+    assert module.diagnose_bound_runtime(repaired).ready
 
 
 async def test_a_later_host_update_cannot_strand_a_retained_binding(env: _Env) -> None:
@@ -759,6 +842,28 @@ def test_runtime_status_names_the_next_command_without_starting_codex(env: _Env)
     assert cast(Mapping[str, object], managed["managed_runtime"])["state"] == "verified"
     assert cast(Mapping[str, object], managed["binding"])["uses_managed_runtime"] is True
     assert managed["next_command"] is None
+    # The retained code-mode host is reported beside the executable (#874).
+    retained_host = env.managed.parent / _HOST_NAME
+    assert cast(Mapping[str, object], managed["managed_runtime"])["code_mode_host"] == {
+        "path": str(retained_host),
+        "state": "verified",
+        "sha256": env.cell.code_mode_host_sha256,
+    }
+    bound = cast(Mapping[str, object], managed["binding"])
+    assert (bound["code_mode_host"], bound["code_mode_host_path"]) == (
+        "admitted",
+        str(retained_host),
+    )
+
+    retained_host.chmod(0o700)
+    retained_host.unlink()
+    missing = module.codex_evaluator_runtime_status(config_path=env.config_path)
+    assert cast(Mapping[str, object], missing["managed_runtime"])["state"] == "incomplete"
+    assert cast(Mapping[str, object], missing["binding"])["code_mode_host"] == "missing"
+    assert cast(Mapping[str, object], missing["binding"])["state"] == (
+        "codex_runtime_executable_missing"
+    )
+    assert missing["next_command"] == "yoetz provider codex-subscription repair"
     assert env.codex.probes == []
 
 

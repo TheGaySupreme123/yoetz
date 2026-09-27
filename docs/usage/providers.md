@@ -93,9 +93,13 @@ binding while preserving the home and installation.
 The exact evaluator cells are Codex npm `0.157.1-darwin-arm64` on macOS arm64 and
 `0.157.1-linux-x64` on Linux x86_64. An x86_64 WSL2 Linux userspace follows the Linux cell when run
 there, but WSL-specific smoke evidence remains pending. Both use capability
-`codex-evaluator/0.157.1/v1`. A binding set up with Codex `0.150.1` reports
-`codex_runtime_capability_unsupported`. Run `yoetz provider codex-subscription repair` to move it
-to Yoetz's own copy of `0.157.1`; your sign-in, model and settings are kept.
+`codex-evaluator/0.157.1/v2`. Yoetz's own verified copy includes Codex's `codex-code-mode-host`
+helper, which Codex needs beside its executable. A binding set up with Codex `0.150.1` reports
+`codex_runtime_capability_unsupported`. A binding set up with the earlier `0.157.1` `v1` cell,
+whose copy lacks the helper, reports `codex_runtime_executable_missing`. In both cases, run
+`yoetz provider codex-subscription repair` with a current Codex installed, or after
+`yoetz provider codex-subscription runtime install --download`. Your sign-in, model and settings
+are kept.
 The selected native binary digest, app-server v2 schema digest,
 capability-cell identity digest and evidence expiry, strict configuration digest, model, reasoning
 effort, and dedicated owner-private `CODEX_HOME` are bound in nonsecret config and rechecked before

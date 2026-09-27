@@ -88,6 +88,8 @@ from yoetz.protocol.models import SemanticProgressPhase, SemanticStatus
 
 __all__ = [
     "CODEX_APP_SERVER_SCHEMA_SHA256",
+    "CODEX_CODE_MODE_HOST_NAME",
+    "CODEX_EVALUATOR_CODE_MODE_HOST_SHA256",
     "CODEX_EVALUATOR_CAPABILITY_PROFILE",
     "CODEX_EVALUATOR_CAPABILITY_CELL_SHA256",
     "CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT",
@@ -95,6 +97,7 @@ __all__ = [
     "CODEX_EVALUATOR_CONFIG_SHA256",
     "CODEX_EVALUATOR_RUNTIME_VERSION",
     "CODEX_EVALUATOR_LINUX_X64_CAPABILITY_CELL_SHA256",
+    "CODEX_EVALUATOR_LINUX_X64_CODE_MODE_HOST_SHA256",
     "CODEX_EVALUATOR_LINUX_X64_EXECUTABLE_SHA256",
     "CODEX_EVALUATOR_LINUX_X64_SOURCE_IDENTITY",
     "CodexAppServerExternalFactory",
@@ -105,6 +108,7 @@ __all__ = [
     "CodexRuntimeStatus",
     "codex_account_status",
     "codex_binding_from_config",
+    "codex_code_mode_host_path",
     "codex_evaluator_cell_for_binding",
     "codex_evaluator_cell_for_platform",
     "codex_factory_builders_from_config",
@@ -117,17 +121,26 @@ CODEX_EVALUATOR_RUNTIME_VERSION: Final = "0.157.1"
 CODEX_APP_SERVER_SCHEMA_SHA256: Final = (
     "sha256:2719fccd25a97a7ce355497ca5e9123a63f6dce7f9f83724a5b73fd927811f59"
 )
-CODEX_EVALUATOR_CAPABILITY_PROFILE: Final = "codex-evaluator/0.157.1/v1"
+CODEX_EVALUATOR_CAPABILITY_PROFILE: Final = "codex-evaluator/0.157.1/v2"
 CODEX_EVALUATOR_CAPABILITY_CELL_SHA256: Final = (
-    "sha256:5a421631bb9ead1f79afaed8f6777b680cc6753076250cd8e7a4b7c102dbebaf"
+    "sha256:af37da789fd12c401870768845bd73ac99c7fbffb2c5ae81c6a0ecd3c27dfd1f"
 )
 CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT: Final = "2026-11-30T00:00:00Z"
+# Codex 0.157.1 starts this sibling helper at turn start and warns when it is missing (#874). It is
+# retained, verified, and launched from beside the native executable, never searched for.
+CODEX_CODE_MODE_HOST_NAME: Final = "codex-code-mode-host"
+CODEX_EVALUATOR_CODE_MODE_HOST_SHA256: Final = (
+    "sha256:80fdf166c3da068282d5692f67a852715a327ae7dc1913abb93b8c3d3030103f"
+)
+CODEX_EVALUATOR_LINUX_X64_CODE_MODE_HOST_SHA256: Final = (
+    "sha256:67b86142bac5cead11b8420cf32d3a2bf88c8868d71733f351ed7c5d95a953e0"
+)
 CODEX_EVALUATOR_LINUX_X64_EXECUTABLE_SHA256: Final = (
     "sha256:3e2584f3f3829a43a0495011a1cecb2facbe64a2403e2b682351fd9c2983f970"
 )
 CODEX_EVALUATOR_LINUX_X64_SOURCE_IDENTITY: Final = "openai-codex-npm-linux-x64-0.157.1"
 CODEX_EVALUATOR_LINUX_X64_CAPABILITY_CELL_SHA256: Final = (
-    "sha256:3a206f8d1c67b6b491af645c27689e05ff84c14a7fc5a69f8a6336e0f92de538"
+    "sha256:fa6a65e47fb7c7f647a31ae47625a3e99e80247cd412e4fdfe1922975f2fafa3"
 )
 _CAPABILITY_EVIDENCE_EXPIRES_AT: Final = datetime(2026, 11, 30, tzinfo=UTC)
 CODEX_EVALUATOR_CONFIG: Final = """approval_policy = "never"
@@ -180,8 +193,8 @@ class CodexEvaluatorCell:
     """One exact Codex subscription runtime cell.
 
     The app-server protocol and Yoetz-owned configuration are shared by the two supported
-    cells, but the native executable, package layout, and capability identity remain bound to
-    the selected platform.  Keeping these facts together prevents a persisted Linux source
+    cells, but the native executable, its sibling code-mode host, package layout, and capability
+    identity remain bound to the selected platform.  Keeping these facts together prevents a persisted Linux source
     identity from being paired with the macOS digest (or vice versa).
     """
 
@@ -189,6 +202,7 @@ class CodexEvaluatorCell:
     platform_architecture: Literal["arm64", "x86_64"]
     source_identity: str
     executable_sha256: str
+    code_mode_host_sha256: str
     app_server_schema_sha256: str
     capability_cell_sha256: str
     capability_profile: str
@@ -211,6 +225,7 @@ _MACOS_ARM64_CELL: Final = CodexEvaluatorCell(
     platform_architecture="arm64",
     source_identity="openai-codex-npm-darwin-arm64-0.157.1",
     executable_sha256="sha256:27ceb5f9b957b43a519efe4eaa3816a0bffb0a531a2c89af18840c0a3c016a7d",
+    code_mode_host_sha256=CODEX_EVALUATOR_CODE_MODE_HOST_SHA256,
     app_server_schema_sha256=CODEX_APP_SERVER_SCHEMA_SHA256,
     capability_cell_sha256=CODEX_EVALUATOR_CAPABILITY_CELL_SHA256,
     capability_profile=CODEX_EVALUATOR_CAPABILITY_PROFILE,
@@ -225,6 +240,7 @@ _LINUX_X64_CELL: Final = CodexEvaluatorCell(
     platform_architecture="x86_64",
     source_identity=CODEX_EVALUATOR_LINUX_X64_SOURCE_IDENTITY,
     executable_sha256=CODEX_EVALUATOR_LINUX_X64_EXECUTABLE_SHA256,
+    code_mode_host_sha256=CODEX_EVALUATOR_LINUX_X64_CODE_MODE_HOST_SHA256,
     app_server_schema_sha256=CODEX_APP_SERVER_SCHEMA_SHA256,
     capability_cell_sha256=CODEX_EVALUATOR_LINUX_X64_CAPABILITY_CELL_SHA256,
     capability_profile=CODEX_EVALUATOR_CAPABILITY_PROFILE,
@@ -238,6 +254,12 @@ _EVALUATOR_CELLS_BY_PLATFORM: Final = {
     ("darwin", "arm64"): _MACOS_ARM64_CELL,
     ("linux", "x86_64"): _LINUX_X64_CELL,
 }
+
+
+def codex_code_mode_host_path(executable: Path) -> Path:
+    """The code-mode host Codex starts from beside ``executable``; the only location checked."""
+
+    return executable.parent / CODEX_CODE_MODE_HOST_NAME
 
 
 def codex_evaluator_cell_for_platform(platform_os: str, architecture: str) -> CodexEvaluatorCell:
@@ -645,6 +667,14 @@ class CodexAppServerProfile:
         if not stat.S_ISREG(facts.st_mode) or not (facts.st_mode & stat.S_IXUSR):
             raise ValueError("codex_runtime_executable_invalid")
         if _sha256_file(self.executable_path) != self.executable_sha256:
+            raise ValueError("codex_runtime_executable_changed")
+        # The sibling code-mode host is part of the same cell identity: a missing file surfaces as
+        # the executable's own FileNotFoundError, and other faults use the executable tokens.
+        host = codex_code_mode_host_path(self.executable_path)
+        host_facts = host.stat()
+        if not stat.S_ISREG(host_facts.st_mode) or not (host_facts.st_mode & stat.S_IXUSR):
+            raise ValueError("codex_runtime_executable_invalid")
+        if _sha256_file(host) != bound_cell.code_mode_host_sha256:
             raise ValueError("codex_runtime_executable_changed")
         verify_private_local_bundle(self.codex_home)
         config_path = self.codex_home / "config.toml"

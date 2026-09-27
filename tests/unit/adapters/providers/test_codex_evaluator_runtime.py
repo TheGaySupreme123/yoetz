@@ -30,7 +30,9 @@ from yoetz.config.paths import PathSafetyError
 from yoetz.config.write import codex_subscription_runtime
 
 _ADMITTED_BYTES = b"admitted evaluator runtime bytes"
+_HOST_BYTES = b"admitted code-mode host bytes"
 _OTHER_BYTES = b"a newer host codex that replaced the bound path"
+_HOST = "codex-code-mode-host"
 
 
 def _plain_digest(data: bytes) -> str:
@@ -46,13 +48,18 @@ def cell(monkeypatch: pytest.MonkeyPatch) -> CodexEvaluatorCell:
     selected = codex_evaluator_cell_for_platform("linux", "x86_64")
     real_digest = module._digest_descriptor  # pyright: ignore[reportPrivateUsage]
 
+    pinned = {
+        _plain_digest(_ADMITTED_BYTES): selected.executable_sha256,
+        _plain_digest(_HOST_BYTES): selected.code_mode_host_sha256,
+    }
+
     def digest(descriptor: int, sink: object = None) -> str:
         value = real_digest(descriptor, sink)  # pyright: ignore[reportArgumentType]
-        return selected.executable_sha256 if value == _plain_digest(_ADMITTED_BYTES) else value
+        return pinned.get(value, value)
 
     def app_server_digest(path: Path) -> str:
-        data = path.read_bytes()
-        return selected.executable_sha256 if data == _ADMITTED_BYTES else _plain_digest(data)
+        value = _plain_digest(path.read_bytes())
+        return pinned.get(value, value)
 
     def allow_private(_path: Path) -> None:
         # pytest's temp root is shared temp on Linux; the owner-only gate is locked elsewhere.
@@ -65,10 +72,18 @@ def cell(monkeypatch: pytest.MonkeyPatch) -> CodexEvaluatorCell:
     return selected
 
 
-def _executable(path: Path, data: bytes = _ADMITTED_BYTES) -> Path:
+def _executable(
+    path: Path, data: bytes = _ADMITTED_BYTES, host: bytes | None = _HOST_BYTES
+) -> Path:
+    """Write a synthetic native executable and, unless ``host`` is None, its code-mode host."""
+
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
     path.chmod(0o700)
+    if host is not None:
+        sibling = path.parent / _HOST
+        sibling.write_bytes(host)
+        sibling.chmod(0o700)
     return path
 
 
@@ -120,7 +135,75 @@ def test_retain_copies_admitted_bytes_into_an_owner_private_store(
     assert stat.S_IMODE(retained.stat().st_mode) == 0o500
     assert stat.S_IMODE(retained.parent.stat().st_mode) == 0o700
     assert module.inspect_managed_runtime(bundle, cell) == "verified"
-    assert [entry.name for entry in retained.parent.iterdir()] == ["codex"]
+    assert sorted(entry.name for entry in retained.parent.iterdir()) == ["codex", _HOST]
+    host = module.managed_code_mode_host_path(bundle, cell)
+    assert host == retained.parent / _HOST
+    assert host.read_bytes() == _HOST_BYTES
+    assert stat.S_IMODE(host.stat().st_mode) == 0o500
+    assert module.inspect_managed_code_mode_host(bundle, cell) == "verified"
+
+
+def test_a_store_without_the_code_mode_host_is_incomplete_until_retain_completes_it(
+    cell: CodexEvaluatorCell, tmp_path: Path
+) -> None:
+    """A v1 store kept only ``codex``; retain adds the host and never rewrites the executable."""
+
+    bundle = tmp_path / "bundle"
+    v1_copy = _executable(module.managed_runtime_path(bundle, cell), host=None)
+    v1_copy.chmod(0o500)
+    v1_copy.parent.chmod(0o700)
+    before = v1_copy.stat()
+    assert module.inspect_managed_runtime(bundle, cell) == "incomplete"
+    assert module.inspect_managed_code_mode_host(bundle, cell) == "absent"
+
+    retained = module.retain_codex_runtime(
+        _executable(tmp_path / "host" / "codex"), bundle=bundle, cell=cell
+    )
+
+    assert retained == v1_copy
+    assert retained.stat().st_ino == before.st_ino
+    assert module.inspect_managed_runtime(bundle, cell) == "verified"
+
+
+@pytest.mark.parametrize(
+    ("host", "token"),
+    [
+        (None, "codex_runtime_code_mode_host_missing"),
+        (_OTHER_BYTES, "codex_runtime_capability_unsupported"),
+    ],
+)
+def test_retain_refuses_a_missing_or_unadmitted_code_mode_host(
+    cell: CodexEvaluatorCell, tmp_path: Path, host: bytes | None, token: str
+) -> None:
+    bundle = tmp_path / "bundle"
+    source = _executable(tmp_path / "host" / "codex", host=host)
+
+    with pytest.raises(ValueError, match=token):
+        module.retain_codex_runtime(source, bundle=bundle, cell=cell)
+
+    assert module.inspect_managed_runtime(bundle, cell) != "verified"
+    assert module.inspect_managed_code_mode_host(bundle, cell) == "absent"
+    assert not any(
+        entry.name.startswith(".retain-")
+        for entry in module.managed_runtime_path(bundle, cell).parent.iterdir()
+    )
+
+
+@pytest.mark.parametrize(("prepare", "state"), [("changed", "changed"), ("mode", "invalid")])
+def test_a_retained_code_mode_host_fault_is_never_verified(
+    cell: CodexEvaluatorCell, tmp_path: Path, prepare: str, state: str
+) -> None:
+    bundle = tmp_path / "bundle"
+    module.retain_codex_runtime(_executable(tmp_path / "host" / "codex"), bundle=bundle, cell=cell)
+    host = module.managed_code_mode_host_path(bundle, cell)
+    host.chmod(0o700)
+    if prepare == "changed":
+        host.write_bytes(_OTHER_BYTES)
+    else:
+        host.chmod(0o600)
+
+    assert module.inspect_managed_code_mode_host(bundle, cell) == state
+    assert module.inspect_managed_runtime(bundle, cell) == state
 
 
 def test_retain_is_idempotent_and_never_rewrites_a_verified_copy(
@@ -220,6 +303,7 @@ def test_remove_deletes_only_the_cell_store(cell: CodexEvaluatorCell, tmp_path: 
     assert not retained.parent.exists()
     assert (sibling / "config.toml").exists()
     assert (tmp_path / "host" / "codex").read_bytes() == _ADMITTED_BYTES
+    assert (tmp_path / "host" / _HOST).read_bytes() == _HOST_BYTES
     assert module.remove_managed_runtime(bundle, cell) is False
 
 
@@ -371,8 +455,42 @@ def test_a_matching_binding_is_ready_only_when_the_launch_fence_agrees(
 
     diagnosis = module.diagnose_codex_binding(binding, now=datetime(2026, 9, 26, tzinfo=UTC))
 
-    assert diagnosis == module.CodexBindingDiagnosis("ready", "current", "admitted", "ready")
+    assert diagnosis == module.CodexBindingDiagnosis(
+        "ready", "current", "admitted", "ready", "admitted"
+    )
     assert diagnosis.ready
+
+
+@pytest.mark.parametrize(
+    ("prepare", "state", "host_state"),
+    [
+        ("missing", "codex_runtime_executable_missing", "missing"),
+        ("changed", "codex_runtime_executable_changed", "changed"),
+        ("not_executable", "codex_runtime_executable_invalid", "invalid"),
+    ],
+)
+def test_a_code_mode_host_fault_is_named_and_refused_by_the_launch_fence(
+    cell: CodexEvaluatorCell, tmp_path: Path, prepare: str, state: str, host_state: str
+) -> None:
+    executable = _executable(tmp_path / "codex")
+    host = tmp_path / _HOST
+    if prepare == "missing":
+        host.unlink()
+    elif prepare == "changed":
+        host.write_bytes(_OTHER_BYTES)
+    else:
+        host.chmod(0o600)
+    binding = _binding(cell, executable, _home(tmp_path / "home"))
+
+    diagnosis = module.diagnose_codex_binding(binding)
+
+    assert (diagnosis.state, diagnosis.executable, diagnosis.code_mode_host) == (
+        state,
+        "admitted",
+        host_state,
+    )
+    with pytest.raises((ValueError, FileNotFoundError)):
+        codex_app_server.CodexAppServerProfile.from_config(binding).verify_local_binding()
 
 
 def test_replaced_executable_bytes_are_named_before_any_login(
