@@ -23,6 +23,13 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- Codex subscription AI-powered review no longer stops at a `runtime_warning` on Codex `0.157.1`.
+  Yoetz's retained evaluator runtime now keeps Codex's `codex-code-mode-host` helper, pinned by
+  digest, beside the native executable. Setup, repair, launch, `runtime status` and
+  `runtime remove` now cover both files. The evaluator capability is now
+  `codex-evaluator/0.157.1/v2`, with an unchanged isolated config, so existing sign-ins keep
+  working. `yoetz provider codex-subscription repair` moves a `v1` binding and keeps its sign-in
+  and choices. Retaining Codex's bundled `bwrap` remains open (#874).
 - Codex subscription AI-powered review now admits Codex `0.157.1` on macOS arm64 and Linux
   x86_64 in place of `0.150.1`, which cannot run the `gpt-6-luna` default. Existing bindings
   report `codex_runtime_capability_unsupported`. `yoetz provider codex-subscription repair`

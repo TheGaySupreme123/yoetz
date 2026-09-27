@@ -7,7 +7,7 @@ import json
 import os
 import shutil
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 import pytest
@@ -175,6 +175,7 @@ def _write_codex_package_layout(
     native_manifest: Mapping[str, object] | None = None,
     wrapper_manifest: Mapping[str, object] | None = None,
     native_bytes: bytes = b"native-codex",
+    code_mode_host: bytes | None = b"code-mode-host",
 ) -> tuple[Path, Path]:
     wrapper_root = root / "node_modules" / "@openai" / "codex"
     wrapper_bin = wrapper_root / "bin"
@@ -217,6 +218,10 @@ def _write_codex_package_layout(
     native = native_bin / "codex"
     native.write_bytes(native_bytes)
     native.chmod(0o700)
+    if code_mode_host is not None:
+        host = native_bin / "codex-code-mode-host"
+        host.write_bytes(code_mode_host)
+        host.chmod(0o700)
     native_document: Mapping[str, object] = (
         {
             "name": "@openai/codex",
@@ -233,6 +238,17 @@ def _write_codex_package_layout(
 
 def _mac_cell() -> CodexEvaluatorCell:
     return module.codex_evaluator_cell_for_platform("darwin", "arm64")
+
+
+def _cell_digests(cell: CodexEvaluatorCell) -> Callable[[Path], str]:
+    """Stand the synthetic executable and code-mode host in for the cell's pinned digests."""
+
+    def digest(path: Path) -> str:
+        if path.name == "codex-code-mode-host":
+            return cell.code_mode_host_sha256
+        return cell.executable_sha256
+
+    return digest
 
 
 def _mock_macos_arm64_host(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -443,14 +459,12 @@ def test_direct_native_executable_support_keeps_platform_and_digest_checks(
     native.parent.mkdir(parents=True)
     native.write_bytes(b"reviewed-native")
     native.chmod(0o700)
+    (native.parent / "codex-code-mode-host").write_bytes(b"reviewed-host")
+    (native.parent / "codex-code-mode-host").chmod(0o700)
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(module.platform, "machine", lambda: "arm64")
     expected_digest = "sha256:27ceb5f9b957b43a519efe4eaa3816a0bffb0a531a2c89af18840c0a3c016a7d"
-
-    def fake_digest(_path: Path) -> str:
-        return expected_digest
-
-    monkeypatch.setattr(module, "_sha256_file", fake_digest)
+    monkeypatch.setattr(module, "_sha256_file", _cell_digests(_mac_cell()))
 
     resolved, actual_digest, source_identity = module.resolve_supported_codex_executable(native)
 
@@ -468,17 +482,64 @@ def test_linux_x64_package_layout_resolves_the_exact_musl_cell(
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(module.platform, "machine", lambda: "x86_64")
     expected_digest = "sha256:3e2584f3f3829a43a0495011a1cecb2facbe64a2403e2b682351fd9c2983f970"
-
-    def linux_digest(_path: Path) -> str:
-        return expected_digest
-
-    monkeypatch.setattr(module, "_sha256_file", linux_digest)
+    monkeypatch.setattr(
+        module,
+        "_sha256_file",
+        _cell_digests(module.codex_evaluator_cell_for_platform("linux", "x86_64")),
+    )
 
     resolved, actual_digest, source_identity = module.resolve_supported_codex_executable(wrapper)
 
     assert resolved == native
     assert actual_digest == expected_digest
     assert source_identity == "openai-codex-npm-linux-x64-0.157.1"
+
+
+@pytest.mark.parametrize("layout", ["nested", "hoisted", "native"])
+@pytest.mark.parametrize(
+    ("host", "token"),
+    [
+        (b"code-mode-host", None),
+        (None, "codex_runtime_code_mode_host_missing"),
+        (b"other-host", "codex_runtime_capability_unsupported"),
+    ],
+)
+def test_every_supported_layout_requires_the_admitted_code_mode_host_beside_codex(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    layout: str,
+    host: bytes | None,
+    token: str | None,
+) -> None:
+    """Nested, hoisted, and native selections all resolve the sibling Codex starts (#874)."""
+
+    wrapper, native = _write_codex_package_layout(
+        tmp_path, nested=layout != "hoisted", platform_name="linux", code_mode_host=host
+    )
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(module.platform, "machine", lambda: "x86_64")
+    cell = module.codex_evaluator_cell_for_platform("linux", "x86_64")
+    admitted = _cell_digests(cell)
+
+    def digest(path: Path) -> str:
+        if path.name == "codex-code-mode-host" and path.read_bytes() != b"code-mode-host":
+            return "sha256:" + "0" * 64
+        return admitted(path)
+
+    monkeypatch.setattr(module, "_sha256_file", digest)
+    selected = native if layout == "native" else wrapper
+
+    if token is None:
+        assert module.resolve_supported_codex_executable(selected) == (
+            native,
+            cell.executable_sha256,
+            cell.source_identity,
+        )
+        assert module.admitted_native_executable(selected) == native
+    else:
+        with pytest.raises(ValueError, match=token):
+            module.resolve_supported_codex_executable(selected)
+        assert module.admitted_native_executable(selected) is None
 
 
 def test_linux_cell_cannot_be_mixed_with_the_macos_capability_identity(
@@ -984,6 +1045,7 @@ def test_guided_setup_offers_account_switch(
         return {
             "executable_path": "/opt/codex",
             "executable_sha256": "sha256:" + "a" * 64,
+            "code_mode_host_sha256": "sha256:" + "c" * 64,
             "runtime_version": "0.157.1",
             "capability_cell_sha256": "sha256:" + "b" * 64,
             "capability_evidence_expires_at": "2026-11-30T00:00:00Z",
@@ -1042,6 +1104,7 @@ def test_guided_setup_preserves_existing_model_when_switching_accounts(
         return {
             "executable_path": "/opt/codex",
             "executable_sha256": "sha256:" + "a" * 64,
+            "code_mode_host_sha256": "sha256:" + "c" * 64,
             "runtime_version": "0.157.1",
             "capability_cell_sha256": "sha256:" + "b" * 64,
             "capability_evidence_expires_at": "2026-11-30T00:00:00Z",
@@ -1100,6 +1163,7 @@ def test_guided_setup_discloses_login_reuse_before_the_confirmation(
         return {
             "executable_path": "/opt/codex",
             "executable_sha256": "sha256:" + "a" * 64,
+            "code_mode_host_sha256": "sha256:" + "c" * 64,
             "runtime_version": "0.157.1",
             "capability_cell_sha256": "sha256:" + "b" * 64,
             "capability_evidence_expires_at": "2026-11-30T00:00:00Z",

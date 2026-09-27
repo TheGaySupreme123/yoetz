@@ -418,6 +418,24 @@ admission of further releases.
 Authenticated Yoetz evidence through the `0.157.1` cells is pending; the runbook records the
 exact evidence boundary.
 
+**Code-mode host amendment (2026-09-27, issue #874).** Codex `0.157.1` starts its sibling
+`codex-code-mode-host` at turn start. With that helper absent it emits a native `warning`, and the
+evaluator fails closed on it. The `v1` cell retained only `codex`, so its packaged Linux smoke
+stopped there.
+
+Profile `codex-evaluator/0.157.1/v2` makes the helper part of each exact cell:
+
+- a per-platform pinned SHA-256, covered by the capability-cell digest;
+- retained beside `codex` in the same owner-private store with the same modes and hash-while-copy
+  commit;
+- re-verified by the launch fence, and removed together with `codex`;
+- taken only from beside the resolved native executable; nothing is searched.
+
+The isolated configuration is unchanged, so dedicated homes and sign-ins carry over. A v1 binding
+moves through `repair`. Warnings keep failing closed, and disabling the host by configuration is
+not a substitute: it produces a different warning. Retaining Codex's bundled `bwrap` stays a
+separate decision on #874.
+
 ## Fallback endpoint amendment (2026-09-04, issue #582)
 
 AI-powered review may bind one primary endpoint plus exactly one fallback endpoint. The pairing is

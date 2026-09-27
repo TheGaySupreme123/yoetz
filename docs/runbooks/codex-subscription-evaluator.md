@@ -21,10 +21,12 @@ longer admitted; see *Codex 0.157.1 admission* below for how an existing binding
 | Platform | macOS arm64 |
 | Native executable | `vendor/aarch64-apple-darwin/bin/codex` |
 | Native executable SHA-256 | `27ceb5f9b957b43a519efe4eaa3816a0bffb0a531a2c89af18840c0a3c016a7d` |
+| Code-mode host | `vendor/aarch64-apple-darwin/bin/codex-code-mode-host` |
+| Code-mode host SHA-256 | `80fdf166c3da068282d5692f67a852715a327ae7dc1913abb93b8c3d3030103f` |
 | App-server schema SHA-256 | `2719fccd25a97a7ce355497ca5e9123a63f6dce7f9f83724a5b73fd927811f59` |
 | Isolated config SHA-256 | `c11ecc6c60e5618ca1b988760ef643250527757a34ef2cbb9d393306236593da` |
-| Capability-cell SHA-256 | `5a421631bb9ead1f79afaed8f6777b680cc6753076250cd8e7a4b7c102dbebaf` |
-| Capability profile | `codex-evaluator/0.157.1/v1` |
+| Capability-cell SHA-256 | `af37da789fd12c401870768845bd73ac99c7fbffb2c5ae81c6a0ecd3c27dfd1f` |
+| Capability profile | `codex-evaluator/0.157.1/v2` |
 | Capability evidence reviewed | `2026-09-27T00:00:00Z` |
 | Capability evidence expires | `2026-11-30T00:00:00Z` |
 | Transport | app-server v2, stdio JSONL |
@@ -48,10 +50,12 @@ packaged live evidence.
 | Platform | Linux x86_64; WSL2 uses this cell only inside its Linux userspace (WSL smoke pending) |
 | Native executable | `vendor/x86_64-unknown-linux-musl/bin/codex` |
 | Native executable SHA-256 | `3e2584f3f3829a43a0495011a1cecb2facbe64a2403e2b682351fd9c2983f970` |
+| Code-mode host | `vendor/x86_64-unknown-linux-musl/bin/codex-code-mode-host` |
+| Code-mode host SHA-256 | `67b86142bac5cead11b8420cf32d3a2bf88c8868d71733f351ed7c5d95a953e0` |
 | App-server schema SHA-256 | `2719fccd25a97a7ce355497ca5e9123a63f6dce7f9f83724a5b73fd927811f59` |
 | Isolated config SHA-256 | `c11ecc6c60e5618ca1b988760ef643250527757a34ef2cbb9d393306236593da` |
-| Capability-cell SHA-256 | `3a206f8d1c67b6b491af645c27689e05ff84c14a7fc5a69f8a6336e0f92de538` |
-| Capability profile | `codex-evaluator/0.157.1/v1` |
+| Capability-cell SHA-256 | `fa6a65e47fb7c7f647a31ae47625a3e99e80247cd412e4fdfe1922975f2fafa3` |
+| Capability profile | `codex-evaluator/0.157.1/v2` |
 | Capability evidence reviewed | `2026-09-27T00:00:00Z` |
 | Capability evidence expires | `2026-11-30T00:00:00Z` |
 | Transport | app-server v2, stdio JSONL |
@@ -129,6 +133,50 @@ Schema review, 0.150.1 to 0.157.1 v2, limited to what the evaluator reads:
 On Linux, Codex 0.157.1 emits a pre-disclosure `configWarning` when no system `bwrap` is on the
 evaluator's fixed `PATH` (`/usr/bin:/bin`). The guard still fails closed before disclosure, so
 install bubblewrap and run where unprivileged user namespaces work.
+
+### Retained code-mode host (2026-09-27, issue #874)
+
+Codex 0.157.1 starts a sibling helper, `codex-code-mode-host`, from beside its own executable at
+`turn/start`. When the helper is missing it emits the `warning` notification: "Code Mode is
+unavailable because failed to spawn code-mode host …". The evaluator correctly fails closed on
+that warning.
+
+The `v1` cell retained only `codex`. Its packaged Linux smoke therefore acknowledged the turn and
+stopped at `runtime_warning` (`gpt-6-luna`, `case_disclosed=true`, `process_cleanup=terminated`).
+A plain npm install, where the helper sits beside `codex`, emitted no Code Mode warning.
+
+Profile `codex-evaluator/0.157.1/v2` makes the helper part of the cell:
+
+- **Cell identity.** Each cell pins the helper's SHA-256, and the capability-cell digest covers
+  it. The native executable, schema and isolated config digests are unchanged, so existing
+  dedicated homes and sign-ins keep working.
+- **Resolution.** Every supported selection must have the admitted helper beside the resolved
+  native executable: nested npm wrapper, hoisted npm prefix, or the native path itself. A missing
+  helper fails as `codex_runtime_code_mode_host_missing`; other bytes fail as
+  `codex_runtime_capability_unsupported`.
+- **Retention.** Setup, repair and `runtime install` copy both files into the retained store, and
+  `runtime remove` deletes both. Every launch re-verifies both.
+- **No config-only fix.** Disabling the helper instead (`features.code_mode_host = false`) is not
+  a substitute. On macOS 0.157.1 it only changes the warning to "code-mode host is disabled",
+  which still fails closed.
+
+Local macOS arm64 evidence for v2, unauthenticated: Yoetz resolved the npm-prefix wrapper and
+retained both files (`0500` in a `0700` store). An app-server turn from that retained pair, with
+the unchanged isolated config, emitted no Code Mode warning. Authenticated Yoetz evidence for v2
+is pending on both platforms.
+
+**Moving a v1 binding.** A v1 binding's store holds `codex` only. It reports
+`codex_runtime_executable_missing`, with a `code_mode_host` diagnosis of `missing` and capability
+`profile_outdated`; `runtime status` shows the store as `incomplete`. Run
+`yoetz provider codex-subscription repair`:
+
+- It needs an admitted source with the helper beside it: a discovered everyday Codex 0.157.1 npm
+  install, `--executable <bin/codex.js>`, or a prior `runtime install --download`.
+- It adds the helper to the existing store without rewriting `codex`.
+- It rebinds to v2 and keeps the sign-in and every choice.
+
+Follow-up on #874: Codex's bundled `codex-resources/bwrap` is still not retained. On Linux the
+evaluator relies on a usable system bubblewrap (see the `configWarning` note above).
 
 ### Historical 0.150.1 evidence
 
@@ -313,14 +361,17 @@ and `model/list` run inside the same `evaluate()` child that will disclose the c
 ## Evaluator runtime retention and repair
 
 Issue #855. The evaluator runtime is kept separate from the everyday Codex installation. Setup and
-repair bind a verified private copy of the admitted native executable:
+repair bind a verified private copy of the admitted native executable and its code-mode host
+(#874):
 
 ```text
 <data bundle>/external-runtimes/codex-evaluator/<source identity>/codex
+<data bundle>/external-runtimes/codex-evaluator/<source identity>/codex-code-mode-host
 ```
 
-The directory is owner-only (`0700`) and the copy `0500`. The bytes are hashed while they are
-copied and committed only when they equal the admitted digest. Every launch re-verifies them with
+The directory is owner-only (`0700`) and each copy `0500`. The bytes are hashed while they are
+copied and committed only when they equal the admitted digests; a file that already verifies is
+kept as-is. Every launch re-verifies them with
 the unchanged `verify_local_binding` fence. Updating or replacing the everyday Codex, for example
 `npm install -g @openai/codex@latest`, no longer strands the binding. Each isolated or test
 instance keeps its own copy in its own data bundle. Admission is unchanged: only the exact cell
@@ -349,8 +400,8 @@ yoetz provider codex-subscription runtime remove             # refused while the
   operator enter a local admitted path or return after installing.
 - **Download.** `runtime install --download` runs the operator's own `npm install --prefix
   <owner-private staging> --ignore-scripts --no-audit --no-fund --no-package-lock
-  @openai/codex@0.157.1` under their registry settings, keeps only the native executable matching
-  the admitted digest, and always deletes the staging prefix. npm output is not captured; failures
+  @openai/codex@0.157.1` under their registry settings, keeps only the native executable and its
+  code-mode host matching the admitted digests, and always deletes the staging prefix. npm output is not captured; failures
   are the closed `codex_evaluator_runtime_download_failed|download_timeout|package_manager_unavailable`
   tokens. `--npm` selects an absolute npm; `--from` retains a local copy without any download.
 - **Repair.** `repair` rebinds an existing binding to the current cell and the retained copy. It
@@ -378,8 +429,8 @@ owner diagnostic carrying the state.
 
 | State | Meaning | Continuation |
 |---|---|---|
-| `codex_runtime_executable_changed` | The bound path now holds other bytes, usually a host update. | `repair` |
-| `codex_runtime_executable_missing` / `_invalid` | The bound executable is gone or not an owner-executable file. | `repair` |
+| `codex_runtime_executable_changed` | The bound executable or its code-mode host now holds other bytes, usually a host update. | `repair` |
+| `codex_runtime_executable_missing` / `_invalid` | The bound executable or its code-mode host is gone or not an owner-executable file. | `repair` |
 | `codex_runtime_profile_outdated` | Same runtime, older Yoetz capability identity (for example v1). | `repair` |
 | `codex_runtime_capability_unsupported` | The binding names a runtime this release does not admit. | `repair` (with an admitted runtime) |
 | `codex_runtime_config_missing` | The dedicated home's Yoetz-owned `config.toml` is absent. | `repair` restores it |
@@ -393,6 +444,16 @@ owner diagnostic carrying the state.
 Only `ready` means structurally usable, and it is reported only when the launch fence agrees. A
 `ready` binding that still points at a host installation reports `next_command: repair` as advice,
 with no blocker.
+
+The executable tokens cover both retained files. The separate `code_mode_host` field names which
+one failed: `admitted`, `missing`, `changed`, `invalid` or `unreadable`. It appears on
+`runtime status` (`binding.code_mode_host`, `binding.code_mode_host_path`) and `provider status`
+(`external_runtime.code_mode_host`).
+
+`runtime status` also reports `managed_runtime.code_mode_host` with its `path`, `state` and
+pinned `sha256`. `managed_runtime.state` is `verified` only when both files verify, and
+`incomplete` when `codex` verifies but its host is absent. `codex-subscription status`, setup and
+repair report `code_mode_host_path` and the bound cell's `code_mode_host_sha256`.
 
 ### Host and platform coverage (#855)
 

@@ -2165,6 +2165,14 @@ class YoetzTui(App[int]):
             if isinstance(managed, Mapping)
             else None
         )
+        host = (
+            cast(Mapping[str, object], managed).get("code_mode_host")
+            if isinstance(managed, Mapping)
+            else None
+        )
+        host_state = (
+            cast(Mapping[str, object], host).get("state") if isinstance(host, Mapping) else None
+        )
         binding_state = (
             cast(Mapping[str, object], binding).get("state")
             if isinstance(binding, Mapping)
@@ -2176,6 +2184,7 @@ class YoetzTui(App[int]):
             "Codex evaluator runtime",
             (
                 f"Retained runtime: {managed_state or 'unavailable on this platform'}",
+                f"Retained code-mode host: {host_state or 'unavailable on this platform'}",
                 f"Binding: {binding_state or 'not configured'}",
                 "Sign-in was not checked; use Codex subscription status for that.",
                 *(() if next_command is None else (f"Next: {next_command}",)),
