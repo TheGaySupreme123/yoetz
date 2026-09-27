@@ -16,11 +16,12 @@ from yoetz.adapters.providers.codex_app_server import (
     CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT,
     CodexAppServerProfile,
 )
+from yoetz.config.models import ExternalRuntimeProfileConfig
 from yoetz.config.write import codex_subscription_runtime
 from yoetz.service.ready_composition import subscription_runtime_structurally_ready
 
 
-def _binding(executable: Path, home: Path):
+def _binding(executable: Path, home: Path) -> ExternalRuntimeProfileConfig:
     return codex_subscription_runtime(
         executable_path=str(executable),
         executable_sha256="sha256:27ceb5f9b957b43a519efe4eaa3816a0bffb0a531a2c89af18840c0a3c016a7d",
@@ -69,3 +70,133 @@ def test_ready_credential_presence_is_binding_digest_and_home(
     assert subscription_runtime_structurally_ready(binding, now=now) is expected
     assert launches == []
     assert subscription_runtime_structurally_ready(object()) is False
+
+
+# -- structural readiness memo (#881) ------------------------------------------------------------
+
+_EXE = b"admitted codex bytes"
+_HOST = b"admitted code-mode host bytes"
+
+
+class _Hashes:
+    """Stand the synthetic bytes in for the macOS cell digests and record every hash."""
+
+    def __init__(self) -> None:
+        self.paths: list[str] = []
+        self.threads: set[int] = set()
+
+    def __call__(self, path: Path) -> str:
+        import threading
+
+        self.paths.append(path.name)
+        self.threads.add(threading.get_ident())
+        data = path.read_bytes()
+        cell = runtime_module.codex_evaluator_cell_for_platform("darwin", "arm64")
+        if data == _EXE:
+            return cell.executable_sha256
+        if data == _HOST:
+            return cell.code_mode_host_sha256
+        return "sha256:" + "0" * 64
+
+
+@pytest.fixture
+def retained(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> tuple[ExternalRuntimeProfileConfig, _Hashes]:
+    monkeypatch.setattr(runtime_module.sys, "platform", "darwin")
+    monkeypatch.setattr(runtime_module.platform, "machine", lambda: "arm64")
+
+    def allow_private(_path: Path) -> None:
+        return None
+
+    monkeypatch.setattr(runtime_module, "verify_private_local_bundle", allow_private)
+    hashes = _Hashes()
+    monkeypatch.setattr(runtime_module, "_sha256_file", hashes)
+    store = tmp_path / "store"
+    store.mkdir()
+    executable = store / "codex"
+    executable.write_bytes(_EXE)
+    host = store / "codex-code-mode-host"
+    host.write_bytes(_HOST)
+    for path in (executable, host):
+        path.chmod(0o500)
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    (home / "config.toml").write_bytes(runtime_module.CODEX_EVALUATOR_CONFIG.encode())
+    return _binding(executable, home), hashes
+
+
+_NOW = datetime(2026, 9, 27, tzinfo=UTC)
+
+
+@pytest.mark.anyio
+async def test_repeated_structural_readiness_hashes_once_off_the_event_loop(
+    retained: tuple[ExternalRuntimeProfileConfig, _Hashes],
+) -> None:
+    import threading
+
+    from yoetz.service.ready_composition import SubscriptionReadinessMemo
+
+    binding, hashes = retained
+    memo = SubscriptionReadinessMemo()
+
+    for _ in range(25):
+        assert await memo.ready(binding, now=_NOW) is True
+
+    assert sorted(hashes.paths) == ["codex", "codex-code-mode-host"]
+    assert threading.get_ident() not in hashes.threads
+    # Evidence expiry is still the clock's call on every read, without re-hashing.
+    assert await memo.ready(binding, now=datetime(2026, 11, 30, tzinfo=UTC)) is False
+    assert len(hashes.paths) == 2
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("change", ["replace_host", "rewrite_executable", "touch", "config"])
+async def test_a_changed_retained_file_forces_a_rehash(
+    retained: tuple[ExternalRuntimeProfileConfig, _Hashes], change: str
+) -> None:
+    import os
+
+    from yoetz.service.ready_composition import SubscriptionReadinessMemo
+
+    binding, hashes = retained
+    memo = SubscriptionReadinessMemo()
+    assert await memo.ready(binding, now=_NOW) is True
+    executable = Path(binding.executable_path)
+    host = executable.parent / "codex-code-mode-host"
+    config = Path(binding.codex_home) / "config.toml"
+
+    expected = True
+    if change == "replace_host":
+        replacement = executable.parent / "replacement"
+        replacement.write_bytes(b"other host bytes")
+        replacement.chmod(0o500)
+        os.replace(replacement, host)
+        expected = False
+    elif change == "rewrite_executable":
+        stat = executable.stat()
+        executable.chmod(0o700)
+        executable.write_bytes(_EXE[:-1] + b"!")
+        executable.chmod(0o500)
+        os.utime(executable, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        expected = False
+    elif change == "touch":
+        os.utime(host, ns=(1, 1))
+    else:
+        config.write_bytes(b"changed = true\n")
+        expected = False
+
+    assert await memo.ready(binding, now=_NOW) is expected
+    assert len(hashes.paths) > 2
+
+
+def test_the_launch_fence_still_hashes_both_files_every_time(
+    retained: tuple[ExternalRuntimeProfileConfig, _Hashes],
+) -> None:
+    binding, hashes = retained
+    profile = CodexAppServerProfile.from_config(binding)
+
+    for _ in range(3):
+        profile.verify_local_binding()
+
+    assert hashes.paths == ["codex", "codex-code-mode-host"] * 3

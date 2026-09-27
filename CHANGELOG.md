@@ -23,6 +23,10 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- With the Codex subscription evaluator bound, the service no longer re-hashes the retained Codex
+  runtime (about 359 MB on Linux) on the event loop for every observation advice cycle. Structural
+  readiness is memoized by binding and file fingerprints and re-checked off the event loop only
+  when they change. Every evaluator launch still verifies both files (#881).
 - Codex subscription AI-powered review no longer stops at a `runtime_warning` on Codex `0.157.1`.
   Yoetz's retained evaluator runtime now keeps Codex's `codex-code-mode-host` helper, pinned by
   digest, beside the native executable. Setup, repair, launch, `runtime status` and
