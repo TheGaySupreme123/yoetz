@@ -4,25 +4,28 @@ This runbook owns the exact `codex-chatgpt-subscription@1` cell. It is an extern
 evaluator behind the ordinary Yoetz privacy gateway, not the Codex host integration and not an
 OpenAI Platform API profile.
 
-## Exact v2 cells
+## Exact cells
 
-The evaluator has one cell per proven native runtime. The macOS binding remains byte-compatible;
-the Linux cell is a separate identity even though Codex 0.150.1 exposes the same app-server
-schema and Yoetz-owned configuration. WSL2 is eligible for the Linux userspace cell when the
-distribution is x86_64, but WSL-specific smoke evidence is still pending. This does not advertise
-a native Windows host cell.
+The evaluator has one cell per proven native runtime, and this release admits Codex npm
+`0.157.1` (issue #871). The Linux cell is a separate identity even though Codex 0.157.1 exposes
+the same app-server schema and Yoetz-owned configuration on both platforms. WSL2 is eligible for
+the Linux userspace cell when the distribution is x86_64, but WSL-specific smoke evidence is still
+pending. This does not advertise a native Windows host cell. The superseded `0.150.1` cells are no
+longer admitted; see *Codex 0.157.1 admission* below for how an existing binding moves.
 
 ### macOS arm64
 
 | Fact | Required value |
 |---|---|
-| Distribution | OpenAI Codex npm `0.150.1` |
+| Distribution | OpenAI Codex npm `0.157.1-darwin-arm64` (`@openai/codex-darwin-arm64`) |
 | Platform | macOS arm64 |
-| Native executable SHA-256 | `a14f9a907c12c8812878b70e6b7d65f81c39ed795513e46a55817d7428c0ca6b` |
-| App-server schema SHA-256 | `8cdccfc35582696d7141e7f916e0d5a664ab5b5e90b732f104284d2507f369f8` |
+| Native executable | `vendor/aarch64-apple-darwin/bin/codex` |
+| Native executable SHA-256 | `27ceb5f9b957b43a519efe4eaa3816a0bffb0a531a2c89af18840c0a3c016a7d` |
+| App-server schema SHA-256 | `2719fccd25a97a7ce355497ca5e9123a63f6dce7f9f83724a5b73fd927811f59` |
 | Isolated config SHA-256 | `c11ecc6c60e5618ca1b988760ef643250527757a34ef2cbb9d393306236593da` |
-| Capability-cell SHA-256 | `c04d2dd111c85d323c3f96c7041bb598f047fff9f73b84f916d38b5321d32cfa` |
-| Capability profile | `codex-evaluator/0.150.1/v2` |
+| Capability-cell SHA-256 | `5a421631bb9ead1f79afaed8f6777b680cc6753076250cd8e7a4b7c102dbebaf` |
+| Capability profile | `codex-evaluator/0.157.1/v1` |
+| Capability evidence reviewed | `2026-09-27T00:00:00Z` |
 | Capability evidence expires | `2026-11-30T00:00:00Z` |
 | Transport | app-server v2, stdio JSONL |
 | Credential authority | `external_runtime_oauth` |
@@ -41,33 +44,111 @@ packaged live evidence.
 
 | Fact | Required value |
 |---|---|
-| Distribution | OpenAI Codex npm `0.150.1-linux-x64` (`@openai/codex-linux-x64`) |
+| Distribution | OpenAI Codex npm `0.157.1-linux-x64` (`@openai/codex-linux-x64`) |
 | Platform | Linux x86_64; WSL2 uses this cell only inside its Linux userspace (WSL smoke pending) |
 | Native executable | `vendor/x86_64-unknown-linux-musl/bin/codex` |
-| Native executable SHA-256 | `abf1bb1643a79f73aa78ee627e111e02d4f8c98f25813a0cf6ce277709664386` |
-| App-server schema SHA-256 | `8cdccfc35582696d7141e7f916e0d5a664ab5b5e90b732f104284d2507f369f8` |
+| Native executable SHA-256 | `3e2584f3f3829a43a0495011a1cecb2facbe64a2403e2b682351fd9c2983f970` |
+| App-server schema SHA-256 | `2719fccd25a97a7ce355497ca5e9123a63f6dce7f9f83724a5b73fd927811f59` |
 | Isolated config SHA-256 | `c11ecc6c60e5618ca1b988760ef643250527757a34ef2cbb9d393306236593da` |
-| Capability-cell SHA-256 | `3fac9e18eca7395b14166114ebf49eaaae5fe3061e86c0d5b76eb17b54488cab` |
-| Capability profile | `codex-evaluator/0.150.1/v2` |
-| Capability evidence reviewed | `2026-09-13T00:00:00Z` |
+| Capability-cell SHA-256 | `3a206f8d1c67b6b491af645c27689e05ff84c14a7fc5a69f8a6336e0f92de538` |
+| Capability profile | `codex-evaluator/0.157.1/v1` |
+| Capability evidence reviewed | `2026-09-27T00:00:00Z` |
 | Capability evidence expires | `2026-11-30T00:00:00Z` |
 | Transport | app-server v2, stdio JSONL |
 | Credential authority | `external_runtime_oauth` |
 | Upstream-body observability | `unavailable` |
 
-The Linux evidence covers the published npm metadata, the native executable bytes, the generated
-app-server v2 schema, and a plain Codex device-login/Luna-high execution in an isolated Modal Linux
-x86_64 runtime. A fresh installed Yoetz wheel was then exercised in an independent Modal Linux
-x86_64 test instance: the exact wrapper resolved to the pinned native digest, preview and
-`verify_local_binding` accepted the Linux cell, and unauthenticated `account/read` and logout
-probes completed with `cleanup: terminated` while reporting `runtime_ready: true`, no auth mode,
-and no model availability. The authenticated smoke evidence is bounded to the separate Linux
-acceptance note below; WSL-specific execution has not been tested.
 The separate identity digest prevents a Linux executable or source identity from being paired with
 the macOS cell.
 
-The September 7 v2 correction uses the schema generated by the exact npm `0.150.1` CLI; its
-SHA-256 still matches the pinned schema above. Synthetic fixtures cover sparse rate-limit
+### Codex 0.157.1 admission (2026-09-27, issue #871)
+
+Codex 0.150.1's ChatGPT model catalog does not list `gpt-6-luna`, the new-binding default since
+#870. On a ChatGPT account, `codex exec --model gpt-6-luna` returns HTTP 400 there. Codex 0.157.1
+lists `gpt-6-astra`, `gpt-6-sol` and `gpt-6-luna`, and it ran `gpt-6-luna`/high and
+`gpt-6-sol`/medium (plain Codex, operator Modal Linux x86_64 runs, 2026-09-27). This release
+therefore admits the exact 0.157.1 cells above in place of 0.150.1. ADR-006 still admits one
+reviewed executable per platform.
+
+Evidence recorded for this admission:
+
+- **npm metadata.** `npm pack` tarball integrity for `@openai/codex@0.157.1-darwin-arm64` and
+  `@openai/codex@0.157.1-linux-x64`, and the native executable digests in the tables.
+- **App-server schema.** The pinned digest is the SHA-256 of
+  `codex_app_server_protocol.v2.schemas.json` written by
+  `codex app-server generate-json-schema --out <dir>` (no `--experimental`). The darwin binary
+  (locally) and the Linux binary (disposable Modal sandbox) wrote identical bytes. The same recipe
+  reproduces the pinned 0.150.1 digests.
+- **Unauthenticated probe.** Run with Yoetz's exact argv, `--strict-config` and isolated config.
+  - The unchanged config is accepted.
+  - `initialize` reports 0.157.1 and is followed by `remoteControl/status/changed` with
+    `status: disabled`.
+  - `account/read` returns no account, plus a new `workspaceRouting` key that Yoetz does not read.
+  - The bundled `model/list` includes `gpt-6-luna` (`high`, `medium`) and the earlier `gpt-5.6-*`
+    models.
+  - On macOS, Yoetz's own adapter ran wrapper resolution, retention, `verify_local_binding`,
+    `account/read` and a logout probe, each with `cleanup: terminated`.
+
+No authenticated Yoetz AI-powered review has run through either 0.157.1 cell yet. The packaged
+Linux smoke is pending, no macOS authenticated run is claimed, and release evidence stays
+`pending`.
+
+Schema review, 0.150.1 to 0.157.1 v2, limited to what the evaluator reads:
+
+- **Unchanged.** `initialize`, `account/read`, `model/list`, login/logout, `turn/interrupt`, token
+  usage, warning/error, remote-control and `configWarning` shapes, and the server-request set.
+- **Accepted, not retained.** `RateLimitSnapshot.normalModelSlug` (nullable string) is accepted as
+  bounded bookkeeping of at most 128 characters and discarded. Without this, the pre-disclosure
+  validator would have rejected it.
+- **Classified.** `CodexErrorInfo.rateLimitExceeded` maps to `provider_rate_limited`, like HTTP
+  429.
+- **Not read.** Additive `ThreadStartResponse`, `Thread`, `TurnError`, `Model` and `agentMessage`
+  fields.
+- **Still fail closed.** The new `modelProvider/authRecoveryStarted|Completed`,
+  `account/gatewayOAuth/changed` and `thread/attachment/updated` notifications, and the new
+  `functionCallOutput` item, stay outside every allowlist. If a live run shows one of them during
+  an ordinary review, file it against this cell; do not widen the allowlist locally.
+
+**Moving an existing binding.** A binding written under 0.150.1 reports
+`codex_runtime_capability_unsupported`, with continuation `repair`.
+
+- With an everyday Codex 0.157.1 installed, `repair` discovers it. Otherwise run
+  `runtime install --download` first.
+- `repair` retains Yoetz's own copy at
+  `external-runtimes/codex-evaluator/openai-codex-npm-<platform>-0.157.1/codex`.
+- It keeps the sign-in, model, efforts, budgets and dedicated home when Codex's own probe reports
+  the home signed in with the exact model. 0.157.1 still lists `gpt-5.6-luna` and `gpt-5.6-sol`,
+  so those bindings keep their model. Pass `--model gpt-6-luna` to setup to move to the new
+  default.
+- The superseded copy under `openai-codex-npm-<platform>-0.150.1/` is no longer used, and nothing
+  removes it automatically: `runtime remove` addresses only the admitted cell. That follow-up is
+  tracked in #871.
+- The default dedicated home directory, `external-runtimes/codex-0.150.1`, is a stable sign-in
+  location, not the runtime version, and does not change.
+
+On Linux, Codex 0.157.1 emits a pre-disclosure `configWarning` when no system `bwrap` is on the
+evaluator's fixed `PATH` (`/usr/bin:/bin`). The guard still fails closed before disclosure, so
+install bubblewrap and run where unprivileged user namespaces work.
+
+### Historical 0.150.1 evidence
+
+This evidence was recorded on the superseded 0.150.1 cells and does not transfer to 0.157.1.
+
+The 0.150.1 Linux cell was admitted on npm metadata, native executable bytes, the generated
+app-server v2 schema, and a plain Codex device-login/Luna-high run in an isolated Modal Linux
+x86_64 runtime. A fresh installed Yoetz wheel then ran in an independent Modal Linux x86_64 test
+instance:
+
+- the exact wrapper resolved to the pinned native digest;
+- preview and `verify_local_binding` accepted the Linux cell;
+- unauthenticated `account/read` and logout probes completed with `cleanup: terminated`, reporting
+  `runtime_ready: true`, no auth mode, and no model availability.
+
+The authenticated smoke evidence is limited to the Linux acceptance note below. WSL-specific
+execution was not tested.
+
+The September 7 v2 correction used the schema generated by the exact npm `0.150.1` CLI, whose
+SHA-256 matched that cell's pinned schema. Synthetic fixtures cover sparse rate-limit
 notifications, quota/429 errors, final answers, and terminal isolation violations. This does not
 refresh the binary/platform evidence or claim new live acceptance. The expiry is unchanged and
 release evidence remains pending. Existing v1 bindings fail the capability check with
@@ -80,7 +161,8 @@ and any bounded string bucket ID are accepted with the pinned schema's types; no
 After turn acknowledgement an unrecognized bookkeeping shape records only the closed
 `rate_limits_invalid` diagnostic and reading continues under the same event/byte/deadline caps.
 A later native error supplies the terminal stage and failure class. Login and pre-disclosure
-validation still reject malformed shapes. No method or tool allowlist has changed.
+validation still reject malformed shapes. The 0.157.1 `normalModelSlug` field is handled the same
+way. No method or tool allowlist has changed.
 
 New Codex-subscription setups recommend and preselect `gpt-6-luna`. The final-review reasoning
 effort stays independently `high`, and routine checkpoint reviews default to `medium` (see *Routine
@@ -109,21 +191,22 @@ its full negative-control checklist.
 ### Linux authenticated smoke evidence (2026-09-13)
 
 One installed Linux VM run used Yoetz wheel
-`sha256:252ca337e2f002450fc5ae0649de2dbec29b70c12f1a0a6f768024e7acb4d68d`, the exact Linux x86_64
-Codex cell above, and a fresh dedicated ChatGPT home. The VM had working user namespaces and
-bubblewrap. At `2026-09-13 17:22 UTC`, one approved synthetic `Luna/high` `semantic_required` check
-completed through the Yoetz privacy gateway with `case_disclosed=true`, `turn_acknowledged=true`,
-and `process_cleanup=terminated`; a final task receipt was present. The receipt conclusion was
-`insufficient_coverage`, with `completion_scope_declared_none`, `evidence_content_digest_only`, and
-`semantic_challenges_rejected` recorded as coverage limits. The check recorded a privacy-receipt
-identifier, but the receipt get/list service handlers were unavailable (`method_forbidden`), so this
-evidence does not include a retrieved privacy receipt. This is one authenticated AI-powered review
-smoke check, not two-check evaluator acceptance; no live token accounting was captured in this run.
-The default gVisor sandbox failed closed on the pre-disclosure `configWarning` because user
-namespaces were unavailable; do not bypass that guard. WSL-specific smoke and the full negative and
-release-acceptance matrix remain pending. After the probe, the supported tightening operation
-disabled external AI-powered review; disconnect confirmed logout and removed the dedicated binding,
-and rollback was idempotent. Both test sandboxes were then terminated.
+`sha256:252ca337e2f002450fc5ae0649de2dbec29b70c12f1a0a6f768024e7acb4d68d`, the superseded exact
+Linux x86_64 Codex 0.150.1 cell, and a fresh dedicated ChatGPT home. The VM had working user
+namespaces and bubblewrap. At `2026-09-13 17:22 UTC`, one approved synthetic `Luna/high`
+`semantic_required` check completed through the Yoetz privacy gateway with `case_disclosed=true`,
+`turn_acknowledged=true`, and `process_cleanup=terminated`; a final task receipt was present. The
+receipt conclusion was `insufficient_coverage`, with `completion_scope_declared_none`,
+`evidence_content_digest_only`, and `semantic_challenges_rejected` recorded as coverage limits. The
+check recorded a privacy-receipt identifier, but the receipt get/list service handlers were
+unavailable (`method_forbidden`), so this evidence does not include a retrieved privacy receipt.
+This is one authenticated AI-powered review smoke check, not two-check evaluator acceptance; no live
+token accounting was captured in this run. The default gVisor sandbox failed closed on the
+pre-disclosure `configWarning` because user namespaces were unavailable; do not bypass that guard.
+WSL-specific smoke and the full negative and release-acceptance matrix remain pending. After the
+probe, the supported tightening operation disabled external AI-powered review; disconnect confirmed
+logout and removed the dedicated binding, and rollback was idempotent. Both test sandboxes were then
+terminated.
 
 ## Setup and reverse operations
 
@@ -202,9 +285,9 @@ device-code login are the only accepted methods. The browser window is 600 secon
 window is 900 seconds. Cancellation and timeout use bounded process-group termination, pipe close,
 and task cleanup before returning one terminal diagnostic.
 
-Codex 0.150.1 emits `remoteControl/status/changed` immediately after initialization, so either
-login method may receive that notification while `account/login/start` is outstanding. The login
-waiter follows the same reviewed pre-disclosure method allowlist as the evaluator: accepted
+Codex 0.150.1 and 0.157.1 emit `remoteControl/status/changed` immediately after initialization, so
+either login method may receive that notification while `account/login/start` is outstanding. The
+login waiter follows the same reviewed pre-disclosure method allowlist as the evaluator: accepted
 structural notifications are demultiplexed and discarded unread, with the remote-control and rate
 limit shapes validated; warnings remain fail-closed. `account/login/completed` remains the only
 terminal login event and must carry the exact `loginId` with `success: true`. Unknown, tool, or
@@ -266,7 +349,7 @@ yoetz provider codex-subscription runtime remove             # refused while the
   operator enter a local admitted path or return after installing.
 - **Download.** `runtime install --download` runs the operator's own `npm install --prefix
   <owner-private staging> --ignore-scripts --no-audit --no-fund --no-package-lock
-  @openai/codex@0.150.1` under their registry settings, keeps only the native executable matching
+  @openai/codex@0.157.1` under their registry settings, keeps only the native executable matching
   the admitted digest, and always deletes the staging prefix. npm output is not captured; failures
   are the closed `codex_evaluator_runtime_download_failed|download_timeout|package_manager_unavailable`
   tokens. `--npm` selects an absolute npm; `--from` retains a local copy without any download.

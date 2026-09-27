@@ -113,21 +113,21 @@ __all__ = [
     "prepare_codex_home",
 ]
 
-CODEX_EVALUATOR_RUNTIME_VERSION: Final = "0.150.1"
+CODEX_EVALUATOR_RUNTIME_VERSION: Final = "0.157.1"
 CODEX_APP_SERVER_SCHEMA_SHA256: Final = (
-    "sha256:8cdccfc35582696d7141e7f916e0d5a664ab5b5e90b732f104284d2507f369f8"
+    "sha256:2719fccd25a97a7ce355497ca5e9123a63f6dce7f9f83724a5b73fd927811f59"
 )
-CODEX_EVALUATOR_CAPABILITY_PROFILE: Final = "codex-evaluator/0.150.1/v2"
+CODEX_EVALUATOR_CAPABILITY_PROFILE: Final = "codex-evaluator/0.157.1/v1"
 CODEX_EVALUATOR_CAPABILITY_CELL_SHA256: Final = (
-    "sha256:c04d2dd111c85d323c3f96c7041bb598f047fff9f73b84f916d38b5321d32cfa"
+    "sha256:5a421631bb9ead1f79afaed8f6777b680cc6753076250cd8e7a4b7c102dbebaf"
 )
 CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT: Final = "2026-11-30T00:00:00Z"
 CODEX_EVALUATOR_LINUX_X64_EXECUTABLE_SHA256: Final = (
-    "sha256:abf1bb1643a79f73aa78ee627e111e02d4f8c98f25813a0cf6ce277709664386"
+    "sha256:3e2584f3f3829a43a0495011a1cecb2facbe64a2403e2b682351fd9c2983f970"
 )
-CODEX_EVALUATOR_LINUX_X64_SOURCE_IDENTITY: Final = "openai-codex-npm-linux-x64-0.150.1"
+CODEX_EVALUATOR_LINUX_X64_SOURCE_IDENTITY: Final = "openai-codex-npm-linux-x64-0.157.1"
 CODEX_EVALUATOR_LINUX_X64_CAPABILITY_CELL_SHA256: Final = (
-    "sha256:3fac9e18eca7395b14166114ebf49eaaae5fe3061e86c0d5b76eb17b54488cab"
+    "sha256:3a206f8d1c67b6b491af645c27689e05ff84c14a7fc5a69f8a6336e0f92de538"
 )
 _CAPABILITY_EVIDENCE_EXPIRES_AT: Final = datetime(2026, 11, 30, tzinfo=UTC)
 CODEX_EVALUATOR_CONFIG: Final = """approval_policy = "never"
@@ -202,15 +202,15 @@ class CodexEvaluatorCell:
     def native_package_spec(self) -> str:
         # The platform package is the optional-dependency key, while npm resolves the alias
         # through the canonical @openai/codex package name (the upstream package metadata uses
-        # ``npm:@openai/codex@0.150.1-linux-x64`` and its darwin equivalent).
+        # ``npm:@openai/codex@0.157.1-linux-x64`` and its darwin equivalent).
         return f"npm:@openai/codex@{self.native_package_version}"
 
 
 _MACOS_ARM64_CELL: Final = CodexEvaluatorCell(
     platform_os="darwin",
     platform_architecture="arm64",
-    source_identity="openai-codex-npm-darwin-arm64-0.150.1",
-    executable_sha256="sha256:a14f9a907c12c8812878b70e6b7d65f81c39ed795513e46a55817d7428c0ca6b",
+    source_identity="openai-codex-npm-darwin-arm64-0.157.1",
+    executable_sha256="sha256:27ceb5f9b957b43a519efe4eaa3816a0bffb0a531a2c89af18840c0a3c016a7d",
     app_server_schema_sha256=CODEX_APP_SERVER_SCHEMA_SHA256,
     capability_cell_sha256=CODEX_EVALUATOR_CAPABILITY_CELL_SHA256,
     capability_profile=CODEX_EVALUATOR_CAPABILITY_PROFILE,
@@ -285,9 +285,10 @@ def codex_evaluator_cell_for_binding(
 def _codex_output_schema(value: JsonValue) -> JsonValue:
     """Remove only constraints the exact Codex structured-output path rejects.
 
-    Codex 0.150.1 forwards this schema to the Responses structured-output boundary, which rejects
-    ``uniqueItems``. Domain normalization still enforces uniqueness after generation, so omitting
-    that provider-side keyword weakens no accepted Yoetz judgment.
+    The exact Codex runtime forwards this schema to the Responses structured-output boundary,
+    which rejected ``uniqueItems`` when observed on 0.150.1; the omission is kept for 0.157.1.
+    Domain normalization still enforces uniqueness after generation, so omitting that
+    provider-side keyword weakens no accepted Yoetz judgment.
     """
 
     if type(value) is dict:
@@ -1556,7 +1557,11 @@ class _CodexRuntimeWarning(Exception):
 
 
 def _discard_rate_limits_notification(message: Mapping[str, object]) -> None:
-    """Validate bounded 0.150.1 sparse bookkeeping and retain no account state."""
+    """Validate the pinned schema's bounded sparse bookkeeping and retain no account state.
+
+    Codex 0.157.1 adds the nullable ``normalModelSlug`` (the model a quota alias describes); like
+    every other field it is only type- and length-checked, then discarded.
+    """
 
     def invalid() -> None:
         raise ValueError("codex_app_server_rate_limits_invalid")
@@ -1589,6 +1594,7 @@ def _discard_rate_limits_notification(message: Mapping[str, object]) -> None:
         "individualLimit",
         "limitId",
         "limitName",
+        "normalModelSlug",
         "planType",
         "primary",
         "rateLimitReachedType",
@@ -1598,6 +1604,7 @@ def _discard_rate_limits_notification(message: Mapping[str, object]) -> None:
     rate_limits = bounded_object(params["rateLimits"], allowed, set())
     nullable_text(rate_limits.get("limitId"), 128)
     nullable_text(rate_limits.get("limitName"), 128)
+    nullable_text(rate_limits.get("normalModelSlug"), 128)
     plan_type = rate_limits.get("planType")
     if plan_type is not None and (type(plan_type) is not str or plan_type not in _SAFE_PLAN_TYPES):
         invalid()
@@ -1672,6 +1679,9 @@ def _turn_failure(error: object) -> _CodexTurnFailure:
             return _CodexTurnFailure("invalid", SemanticFailureClass.RESPONSE_CONTENT)
         if info in {"sessionBudgetExceeded", "usageLimitExceeded"}:
             return _CodexTurnFailure("unavailable", SemanticFailureClass.QUOTA_EXHAUSTED)
+        if info == "rateLimitExceeded":
+            # Codex 0.157.1 names a native rate limit directly, as HTTP 429 is named below.
+            return _CodexTurnFailure("unavailable", SemanticFailureClass.RATE_LIMITED)
         if info == "unauthorized":
             return _CodexTurnFailure("unavailable", SemanticFailureClass.AUTHENTICATION)
         if info in {"serverOverloaded", "internalServerError"}:

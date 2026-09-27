@@ -25,6 +25,7 @@ from yoetz.adapters.providers import codex_app_server
 from yoetz.adapters.providers import codex_evaluator_runtime as runtime_store
 from yoetz.adapters.providers.codex_app_server import (
     CODEX_EVALUATOR_CONFIG,
+    CODEX_EVALUATOR_RUNTIME_VERSION,
     CodexAppServerProfile,
     CodexEvaluatorCell,
     CodexRuntimeStatus,
@@ -43,8 +44,8 @@ from yoetz.ports.integrations import HarnessId
 
 pytestmark = pytest.mark.anyio
 
-_ADMITTED = b"admitted codex 0.150.1 native bytes"
-_NEWER = b"codex-cli 0.153.4 that replaced the ordinary npm path"
+_ADMITTED = b"admitted codex 0.157.1 native bytes"
+_NEWER = b"codex-cli 0.158.0 that replaced the ordinary npm path"
 _OWNER_CHOICES = ("model", "reasoning_effort", "timeout_seconds", "max_retries", "codex_home")
 _V1 = {
     "capability_profile": "codex-evaluator/0.150.1/v1",
@@ -116,7 +117,7 @@ class _Env:
         binding = codex_subscription_runtime(
             executable_path=str(executable),
             executable_sha256=self.cell.executable_sha256,
-            runtime_version="0.150.1",
+            runtime_version=CODEX_EVALUATOR_RUNTIME_VERSION,
             source_identity=self.cell.source_identity,
             app_server_schema_sha256=self.cell.app_server_schema_sha256,
             capability_cell_sha256=self.cell.capability_cell_sha256,
@@ -279,6 +280,86 @@ async def test_repair_rebinds_a_stranded_v1_binding_keeping_login_and_every_choi
     # The host installation is untouched; the evaluator runs Yoetz's own verified copy.
     assert ordinary_npm.read_bytes() == _NEWER
     assert env.managed.read_bytes() == _ADMITTED
+
+
+async def test_repair_moves_a_superseded_0_150_1_binding_onto_the_current_cell(
+    env: _Env,
+) -> None:
+    """The #871 upgrade: a binding admitted under 0.150.1, everyday Codex already on 0.157.1."""
+
+    # The earlier retained copy sits in the same owner-only store as the new one will.
+    old_store = (
+        runtime_store.managed_runtime_root(env.bundle) / "openai-codex-npm-linux-x64-0.150.1"
+    )
+    old_store.mkdir(parents=True)
+    for directory in (old_store, *old_store.relative_to(env.bundle).parents):
+        (env.bundle / directory).chmod(0o700)
+    old_copy = old_store / "codex"
+    old_copy.write_bytes(b"retained codex 0.150.1 native bytes")
+    old_copy.chmod(0o500)
+    superseded = env.binding(
+        old_copy,
+        executable_sha256=(
+            "sha256:abf1bb1643a79f73aa78ee627e111e02d4f8c98f25813a0cf6ce277709664386"
+        ),
+        runtime_version="0.150.1",
+        source_identity="openai-codex-npm-linux-x64-0.150.1",
+        app_server_schema_sha256=(
+            "sha256:8cdccfc35582696d7141e7f916e0d5a664ab5b5e90b732f104284d2507f369f8"
+        ),
+        capability_cell_sha256=(
+            "sha256:3fac9e18eca7395b14166114ebf49eaaae5fe3061e86c0d5b76eb17b54488cab"
+        ),
+        capability_profile="codex-evaluator/0.150.1/v2",
+        model="gpt-5.6-luna",
+        routine_reasoning_effort="medium",
+    )
+    env.write_config(superseded)
+    everyday = env.executable("npm-prefix/codex")  # the host's everyday Codex 0.157.1
+    env.discovered.append(everyday)
+
+    before = module.diagnose_bound_runtime(superseded)
+    assert (before.state, before.capability) == (
+        "codex_runtime_capability_unsupported",
+        "unsupported",
+    )
+    assert module.binding_continuation(before.state) == "yoetz provider codex-subscription repair"
+
+    result = await module.codex_subscription_repair(config_path=env.config_path)
+
+    repaired = env.written().external_runtime
+    assert repaired is not None
+    assert result["source"] == "discovered"
+    assert result["state_before"] == "codex_runtime_capability_unsupported"
+    assert result["changed_fields"] == [
+        "executable_path",
+        "executable_sha256",
+        "runtime_version",
+        "source_identity",
+        "app_server_schema_sha256",
+        "capability_cell_sha256",
+        "capability_profile",
+    ]
+    # Yoetz's own verified copy, in a directory named for the admitted source identity.
+    assert repaired.executable_path == str(env.managed)
+    assert env.managed.parent.name == "openai-codex-npm-linux-x64-0.157.1"
+    assert env.managed.read_bytes() == _ADMITTED
+    assert (repaired.runtime_version, repaired.source_identity) == (
+        CODEX_EVALUATOR_RUNTIME_VERSION,
+        env.cell.source_identity,
+    )
+    assert repaired.capability_profile == "codex-evaluator/0.157.1/v1"
+    # Sign-in and every owner choice are kept; nothing logged in or out.
+    assert (repaired.model, repaired.reasoning_effort) == ("gpt-5.6-luna", "xhigh")
+    assert repaired.routine_reasoning_effort == "medium"
+    assert (repaired.timeout_seconds, repaired.max_retries) == (37, 0)
+    assert repaired.codex_home == superseded.codex_home
+    assert result["login_reused"] is True
+    assert env.codex.logins == [] and env.codex.logouts == []
+    assert module.diagnose_bound_runtime(repaired).ready
+    # The host installation and the superseded copy are left untouched.
+    assert everyday.read_bytes() == _ADMITTED
+    assert old_copy.read_bytes() == b"retained codex 0.150.1 native bytes"
 
 
 async def test_a_later_host_update_cannot_strand_a_retained_binding(env: _Env) -> None:
