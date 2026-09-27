@@ -1346,7 +1346,7 @@ Codex may be both the host carrying Yoetz and the selected external AI-powered e
 are independent cells. Host skill/plugin/MCP activation grants no ChatGPT evaluator login or
 privacy authority. Configure the evaluator only through
 `yoetz provider codex-subscription setup`; it binds a separate owner-private `CODEX_HOME` and exact
-native `0.150.1` app-server cell. Never reuse the host's ambient home, environment, session, tools,
+native `0.157.1` app-server cell. Never reuse the host's ambient home, environment, session, tools,
 instructions, or repository cwd for the evaluator.
 
 The evaluator binds Yoetz's own verified copy of that admitted release (issue #855), never the host

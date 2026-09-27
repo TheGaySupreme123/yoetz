@@ -1543,19 +1543,19 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     ("support/runtime-support.json", "runtime_support", "application/json", True),
     (
-        "support/codex-evaluator/0.150.1/config.toml",
+        "support/codex-evaluator/0.157.1/config.toml",
         "runtime_config",
         "application/toml",
         True,
     ),
     (
-        "support/codex-evaluator/0.150.1/cell.json",
+        "support/codex-evaluator/0.157.1/cell.json",
         "compatibility_manifest",
         "application/json",
         True,
     ),
     (
-        "support/codex-evaluator/0.150.1/cell-linux-x64.json",
+        "support/codex-evaluator/0.157.1/cell-linux-x64.json",
         "compatibility_manifest",
         "application/json",
         True,

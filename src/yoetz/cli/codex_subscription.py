@@ -438,6 +438,14 @@ def resolve_supported_codex_executable(selected: Path) -> tuple[Path, str, str]:
 
 
 def default_codex_home() -> Path:
+    """The dedicated sign-in home a new binding is offered.
+
+    This is where Codex keeps the evaluator's ChatGPT login, not the runtime copy (that lives under
+    ``external-runtimes/codex-evaluator/<source identity>``). Its historical directory name is kept
+    stable across admitted runtime versions so a home signed in before a runtime change is offered
+    again, and reused, after a rollback followed by setup.
+    """
+
     config = _bounded_config_operation(lambda: load_config({}, os.environ, None))
     if config.external_runtime is not None:
         return Path(config.external_runtime.codex_home)

@@ -21,6 +21,7 @@ from yoetz.adapters.providers import codex_app_server
 from yoetz.adapters.providers import codex_evaluator_runtime as module
 from yoetz.adapters.providers.codex_app_server import (
     CODEX_EVALUATOR_CONFIG,
+    CODEX_EVALUATOR_RUNTIME_VERSION,
     CodexEvaluatorCell,
     codex_evaluator_cell_for_platform,
 )
@@ -88,7 +89,7 @@ def _binding(
     binding = codex_subscription_runtime(
         executable_path=str(executable),
         executable_sha256=cell.executable_sha256,
-        runtime_version="0.150.1",
+        runtime_version=CODEX_EVALUATOR_RUNTIME_VERSION,
         source_identity=cell.source_identity,
         app_server_schema_sha256=cell.app_server_schema_sha256,
         capability_cell_sha256=cell.capability_cell_sha256,
@@ -279,7 +280,7 @@ def test_provision_installs_without_scripts_retains_only_verified_bytes_and_clea
     retained = module.provision_codex_runtime(
         bundle=bundle,
         cell=cell,
-        runtime_version="0.150.1",
+        runtime_version=CODEX_EVALUATOR_RUNTIME_VERSION,
         npm=Path("/usr/bin/npm"),
         resolve_wrapper=_resolve_hoisted,
         runner=npm,
@@ -290,7 +291,7 @@ def test_provision_installs_without_scripts_retains_only_verified_bytes_and_clea
     ((argv, cwd),) = npm.calls
     assert argv[:2] == ("/usr/bin/npm", "install")
     assert "--ignore-scripts" in argv
-    assert argv[-1] == "@openai/codex@0.150.1"
+    assert argv[-1] == "@openai/codex@0.157.1"
     assert cwd.parent == module.managed_runtime_root(bundle)
     assert not cwd.exists()
     assert sorted(entry.name for entry in module.managed_runtime_root(bundle).iterdir()) == [
@@ -315,7 +316,7 @@ def test_a_failed_download_leaves_no_retained_runtime_or_staging(
         module.provision_codex_runtime(
             bundle=bundle,
             cell=cell,
-            runtime_version="0.150.1",
+            runtime_version=CODEX_EVALUATOR_RUNTIME_VERSION,
             npm=Path("/usr/bin/npm"),
             resolve_wrapper=_resolve_hoisted,
             runner=_FakeNpm(outcome=outcome),
@@ -336,7 +337,7 @@ def test_a_downloaded_runtime_with_other_bytes_is_never_retained(
         module.provision_codex_runtime(
             bundle=bundle,
             cell=cell,
-            runtime_version="0.150.1",
+            runtime_version=CODEX_EVALUATOR_RUNTIME_VERSION,
             npm=Path("/usr/bin/npm"),
             resolve_wrapper=resolve_other,
             runner=_FakeNpm(),
@@ -352,7 +353,7 @@ def test_a_relative_package_manager_is_refused_before_anything_runs(
         module.provision_codex_runtime(
             bundle=tmp_path / "bundle",
             cell=cell,
-            runtime_version="0.150.1",
+            runtime_version=CODEX_EVALUATOR_RUNTIME_VERSION,
             npm=Path("npm"),
             resolve_wrapper=_resolve_hoisted,
             runner=npm,
@@ -428,9 +429,27 @@ def test_a_binding_naming_another_runtime_is_capability_unsupported(
         cell,
         _executable(tmp_path / "mac" / "codex"),
         home,
-        source_identity="openai-codex-npm-darwin-arm64-0.150.1",
+        source_identity=codex_evaluator_cell_for_platform("darwin", "arm64").source_identity,
     )
     assert module.diagnose_codex_binding(macos).capability == "unsupported"
+    # A binding admitted under the superseded 0.150.1 Linux cell names another runtime too; its
+    # continuation is repair onto the current cell, never a launch.
+    superseded = _binding(
+        cell,
+        _executable(tmp_path / "old" / "codex", _OTHER_BYTES),
+        home,
+        runtime_version="0.150.1",
+        source_identity="openai-codex-npm-linux-x64-0.150.1",
+        executable_sha256=(
+            "sha256:abf1bb1643a79f73aa78ee627e111e02d4f8c98f25813a0cf6ce277709664386"
+        ),
+        app_server_schema_sha256=(
+            "sha256:8cdccfc35582696d7141e7f916e0d5a664ab5b5e90b732f104284d2507f369f8"
+        ),
+        capability_profile="codex-evaluator/0.150.1/v2",
+    )
+    old = module.diagnose_codex_binding(superseded)
+    assert (old.state, old.capability) == ("codex_runtime_capability_unsupported", "unsupported")
 
 
 @pytest.mark.parametrize(

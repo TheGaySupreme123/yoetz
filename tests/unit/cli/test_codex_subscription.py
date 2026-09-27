@@ -93,9 +93,9 @@ def _assume_structurally_ready(monkeypatch: pytest.MonkeyPatch) -> None:
 def _binding(executable: Path, home: Path):
     return codex_subscription_runtime(
         executable_path=str(executable),
-        executable_sha256="sha256:a14f9a907c12c8812878b70e6b7d65f81c39ed795513e46a55817d7428c0ca6b",
-        runtime_version="0.150.1",
-        source_identity="openai-codex-npm-darwin-arm64-0.150.1",
+        executable_sha256="sha256:27ceb5f9b957b43a519efe4eaa3816a0bffb0a531a2c89af18840c0a3c016a7d",
+        runtime_version="0.157.1",
+        source_identity="openai-codex-npm-darwin-arm64-0.157.1",
         app_server_schema_sha256=CODEX_APP_SERVER_SCHEMA_SHA256,
         capability_cell_sha256=CODEX_EVALUATOR_CAPABILITY_CELL_SHA256,
         isolated_config_sha256=CODEX_EVALUATOR_CONFIG_SHA256,
@@ -445,7 +445,7 @@ def test_direct_native_executable_support_keeps_platform_and_digest_checks(
     native.chmod(0o700)
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(module.platform, "machine", lambda: "arm64")
-    expected_digest = "sha256:a14f9a907c12c8812878b70e6b7d65f81c39ed795513e46a55817d7428c0ca6b"
+    expected_digest = "sha256:27ceb5f9b957b43a519efe4eaa3816a0bffb0a531a2c89af18840c0a3c016a7d"
 
     def fake_digest(_path: Path) -> str:
         return expected_digest
@@ -456,7 +456,7 @@ def test_direct_native_executable_support_keeps_platform_and_digest_checks(
 
     assert resolved == native
     assert actual_digest == expected_digest
-    assert source_identity == "openai-codex-npm-darwin-arm64-0.150.1"
+    assert source_identity == "openai-codex-npm-darwin-arm64-0.157.1"
 
 
 def test_linux_x64_package_layout_resolves_the_exact_musl_cell(
@@ -467,7 +467,7 @@ def test_linux_x64_package_layout_resolves_the_exact_musl_cell(
     )
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(module.platform, "machine", lambda: "x86_64")
-    expected_digest = "sha256:abf1bb1643a79f73aa78ee627e111e02d4f8c98f25813a0cf6ce277709664386"
+    expected_digest = "sha256:3e2584f3f3829a43a0495011a1cecb2facbe64a2403e2b682351fd9c2983f970"
 
     def linux_digest(_path: Path) -> str:
         return expected_digest
@@ -478,7 +478,7 @@ def test_linux_x64_package_layout_resolves_the_exact_musl_cell(
 
     assert resolved == native
     assert actual_digest == expected_digest
-    assert source_identity == "openai-codex-npm-linux-x64-0.150.1"
+    assert source_identity == "openai-codex-npm-linux-x64-0.157.1"
 
 
 def test_linux_cell_cannot_be_mixed_with_the_macos_capability_identity(
@@ -492,7 +492,7 @@ def test_linux_cell_cannot_be_mixed_with_the_macos_capability_identity(
     monkeypatch.setattr(module.platform, "machine", lambda: "x86_64")
 
     def mac_digest(_path: Path) -> str:
-        return "sha256:a14f9a907c12c8812878b70e6b7d65f81c39ed795513e46a55817d7428c0ca6b"
+        return "sha256:27ceb5f9b957b43a519efe4eaa3816a0bffb0a531a2c89af18840c0a3c016a7d"
 
     monkeypatch.setattr(module, "_sha256_file", mac_digest)
 
@@ -510,8 +510,8 @@ def test_preview_resolves_exact_cell_without_creating_home(
     def resolve(selected: Path) -> tuple[Path, str, str]:
         return (
             selected,
-            "sha256:a14f9a907c12c8812878b70e6b7d65f81c39ed795513e46a55817d7428c0ca6b",
-            "openai-codex-npm-darwin-arm64-0.150.1",
+            "sha256:27ceb5f9b957b43a519efe4eaa3816a0bffb0a531a2c89af18840c0a3c016a7d",
+            "openai-codex-npm-darwin-arm64-0.157.1",
         )
 
     monkeypatch.setattr(
@@ -849,8 +849,8 @@ def test_cli_setup_disconnect_and_rollback_recompose_the_service(
     def resolve(selected: Path) -> tuple[Path, str, str]:
         return (
             selected,
-            "sha256:a14f9a907c12c8812878b70e6b7d65f81c39ed795513e46a55817d7428c0ca6b",
-            "openai-codex-npm-darwin-arm64-0.150.1",
+            "sha256:27ceb5f9b957b43a519efe4eaa3816a0bffb0a531a2c89af18840c0a3c016a7d",
+            "openai-codex-npm-darwin-arm64-0.157.1",
         )
 
     async def setup(**_kwargs: object) -> dict[str, object]:
@@ -984,7 +984,7 @@ def test_guided_setup_offers_account_switch(
         return {
             "executable_path": "/opt/codex",
             "executable_sha256": "sha256:" + "a" * 64,
-            "runtime_version": "0.150.1",
+            "runtime_version": "0.157.1",
             "capability_cell_sha256": "sha256:" + "b" * 64,
             "capability_evidence_expires_at": "2026-11-30T00:00:00Z",
             "codex_home": "/home",
@@ -1042,7 +1042,7 @@ def test_guided_setup_preserves_existing_model_when_switching_accounts(
         return {
             "executable_path": "/opt/codex",
             "executable_sha256": "sha256:" + "a" * 64,
-            "runtime_version": "0.150.1",
+            "runtime_version": "0.157.1",
             "capability_cell_sha256": "sha256:" + "b" * 64,
             "capability_evidence_expires_at": "2026-11-30T00:00:00Z",
             "codex_home": "/home",
@@ -1100,7 +1100,7 @@ def test_guided_setup_discloses_login_reuse_before_the_confirmation(
         return {
             "executable_path": "/opt/codex",
             "executable_sha256": "sha256:" + "a" * 64,
-            "runtime_version": "0.150.1",
+            "runtime_version": "0.157.1",
             "capability_cell_sha256": "sha256:" + "b" * 64,
             "capability_evidence_expires_at": "2026-11-30T00:00:00Z",
             "codex_home": "/home",
@@ -1132,8 +1132,8 @@ def test_cli_setup_discloses_reuse_and_names_its_override_before_the_confirmatio
     def resolve(selected: Path) -> tuple[Path, str, str]:
         return (
             selected,
-            "sha256:a14f9a907c12c8812878b70e6b7d65f81c39ed795513e46a55817d7428c0ca6b",
-            "openai-codex-npm-darwin-arm64-0.150.1",
+            "sha256:27ceb5f9b957b43a519efe4eaa3816a0bffb0a531a2c89af18840c0a3c016a7d",
+            "openai-codex-npm-darwin-arm64-0.157.1",
         )
 
     selected_models: list[object] = []
@@ -1341,7 +1341,7 @@ class _SignedInAppServer:
         if method == "initialize":
             return {
                 "codexHome": str(getattr(self.profile, "codex_home")),
-                "userAgent": "yoetz_semantic_evaluator/0.150.1",
+                "userAgent": "yoetz_semantic_evaluator/0.157.1",
             }
         if method == "account/read":
             assert params == {"refreshToken": False}

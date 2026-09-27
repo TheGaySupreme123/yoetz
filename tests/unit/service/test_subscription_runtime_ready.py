@@ -23,9 +23,9 @@ from yoetz.service.ready_composition import subscription_runtime_structurally_re
 def _binding(executable: Path, home: Path):
     return codex_subscription_runtime(
         executable_path=str(executable),
-        executable_sha256="sha256:a14f9a907c12c8812878b70e6b7d65f81c39ed795513e46a55817d7428c0ca6b",
-        runtime_version="0.150.1",
-        source_identity="openai-codex-npm-darwin-arm64-0.150.1",
+        executable_sha256="sha256:27ceb5f9b957b43a519efe4eaa3816a0bffb0a531a2c89af18840c0a3c016a7d",
+        runtime_version="0.157.1",
+        source_identity="openai-codex-npm-darwin-arm64-0.157.1",
         app_server_schema_sha256=CODEX_APP_SERVER_SCHEMA_SHA256,
         capability_cell_sha256=CODEX_EVALUATOR_CAPABILITY_CELL_SHA256,
         isolated_config_sha256=CODEX_EVALUATOR_CONFIG_SHA256,

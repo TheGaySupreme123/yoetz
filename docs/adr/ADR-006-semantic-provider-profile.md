@@ -387,6 +387,37 @@ Evidence expiry is unchanged: after `2026-11-30T00:00:00Z` every cell reports
 resolves. The upgrade plan names the evaluator check; applying a repair stays an explicit owner
 step.
 
+### Codex 0.157.1 cell amendment (2026-09-27, issue #871)
+
+The admitted release moves from Codex npm `0.150.1` to `0.157.1` on both platform cells. Each
+cell still admits exactly one reviewed native executable, so decision 1 of the #855 amendment
+holds. `0.150.1` cannot list or run the `gpt-6-luna` new-binding default on a ChatGPT account;
+`0.157.1` can. This is a new exact-version admission with its own evidence, not capability-based
+admission of further releases.
+
+1. **New identities.** The macOS arm64 cell (`@openai/codex-darwin-arm64`) and the Linux x86_64
+   cell (`@openai/codex-linux-x64`) carry new native digests, a new app-server v2 schema digest,
+   and the capability profile `codex-evaluator/0.157.1/v1`. Each has its own capability-cell
+   digest.
+2. **Unchanged.** The isolated configuration, launch argv, OAuth authority, privacy and cleanup
+   fences, evidence expiry (`2026-11-30T00:00:00Z`) and the `implementation_candidate` / `pending`
+   release posture stay the same.
+3. **Schema review.** Two changes follow the reviewed schema difference:
+   - rate-limit bookkeeping accepts and discards the new nullable `normalModelSlug`;
+   - the native `rateLimitExceeded` error classifies as `provider_rate_limited`, like HTTP 429.
+
+   New notifications and item types stay outside the allowlists and fail closed.
+4. **Existing bindings.** A binding written under `0.150.1` names a runtime this release does not
+   admit. It reports `codex_runtime_capability_unsupported` and continues through `repair`, the
+   explicit identity transition from the #855 amendment. `repair` retains the new copy under its
+   own source-identity directory and reuses the sign-in only when Codex's probe proves the exact
+   model. No privacy authority migrates.
+5. **Superseded copy.** The retained `0.150.1` copy is not deleted automatically. Removing
+   superseded retained runtimes is recorded as follow-up work on #871.
+
+Authenticated Yoetz evidence through the `0.157.1` cells is pending; the runbook records the
+exact evidence boundary.
+
 ## Fallback endpoint amendment (2026-09-04, issue #582)
 
 AI-powered review may bind one primary endpoint plus exactly one fallback endpoint. The pairing is

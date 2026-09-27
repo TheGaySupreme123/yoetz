@@ -90,9 +90,12 @@ its own authentication in the dedicated home; that is separate from Yoetz config
 `disconnect` when you want Codex to log out, or `rollback` when you want to remove the Yoetz
 binding while preserving the home and installation.
 
-The exact evaluator cells are Codex npm `0.150.1` on macOS arm64 and `0.150.1-linux-x64` on
-Linux x86_64. An x86_64 WSL2 Linux userspace follows the Linux cell when run there, but
-WSL-specific smoke evidence remains pending. Both use capability `codex-evaluator/0.150.1/v2`.
+The exact evaluator cells are Codex npm `0.157.1-darwin-arm64` on macOS arm64 and
+`0.157.1-linux-x64` on Linux x86_64. An x86_64 WSL2 Linux userspace follows the Linux cell when run
+there, but WSL-specific smoke evidence remains pending. Both use capability
+`codex-evaluator/0.157.1/v1`. A binding set up with Codex `0.150.1` reports
+`codex_runtime_capability_unsupported`. Run `yoetz provider codex-subscription repair` to move it
+to Yoetz's own copy of `0.157.1`; your sign-in, model and settings are kept.
 The selected native binary digest, app-server v2 schema digest,
 capability-cell identity digest and evidence expiry, strict configuration digest, model, reasoning
 effort, and dedicated owner-private `CODEX_HOME` are bound in nonsecret config and rechecked before

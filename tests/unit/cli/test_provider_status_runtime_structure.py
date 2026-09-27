@@ -15,7 +15,10 @@ from unit.cli.test_provider_status import (
     _policy,  # pyright: ignore[reportPrivateUsage]
     _provider,  # pyright: ignore[reportPrivateUsage]
 )
-from yoetz.adapters.providers.codex_app_server import codex_evaluator_cell_for_platform
+from yoetz.adapters.providers.codex_app_server import (
+    CODEX_EVALUATOR_RUNTIME_VERSION,
+    codex_evaluator_cell_for_platform,
+)
 from yoetz.adapters.providers.codex_evaluator_runtime import (
     CodexBindingDiagnosis,
     managed_runtime_path,
@@ -40,7 +43,7 @@ def _runtime(executable: str = "/opt/npm/lib/node_modules/@openai/codex/bin/code
     return codex_subscription_runtime(
         executable_path=executable,
         executable_sha256=cell.executable_sha256,
-        runtime_version="0.150.1",
+        runtime_version=CODEX_EVALUATOR_RUNTIME_VERSION,
         source_identity=cell.source_identity,
         app_server_schema_sha256=cell.app_server_schema_sha256,
         capability_cell_sha256=cell.capability_cell_sha256,

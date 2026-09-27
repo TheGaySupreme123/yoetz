@@ -23,6 +23,13 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- Codex subscription AI-powered review now admits Codex `0.157.1` on macOS arm64 and Linux
+  x86_64 in place of `0.150.1`, which cannot run the `gpt-6-luna` default. Existing bindings
+  report `codex_runtime_capability_unsupported`. `yoetz provider codex-subscription repair`
+  moves them to Yoetz's own verified copy of `0.157.1` and keeps the sign-in, model and
+  settings. Rate-limit bookkeeping accepts the new `normalModelSlug` field, and the native
+  `rateLimitExceeded` error is reported as rate-limited. Other new app-server events still fail
+  closed. Authenticated live evidence for `0.157.1` is pending (#871).
 - Codex subscription AI-powered review no longer breaks when your everyday Codex updates. Setup
   binds Yoetz's own verified private copy of the one admitted Codex release. It offers only an
   eligible runtime as the default, and it can download that release with your npm after asking.

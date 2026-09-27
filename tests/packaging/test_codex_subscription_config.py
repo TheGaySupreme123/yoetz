@@ -118,13 +118,13 @@ def _codex_package_layout(
 ) -> tuple[Path, Path]:
     if platform_name == "linux":
         native_package_directory = "codex-linux-x64"
-        native_package_version = "0.150.1-linux-x64"
+        native_package_version = "0.157.1-linux-x64"
         native_relative = Path("vendor/x86_64-unknown-linux-musl/bin/codex")
         native_os = "linux"
         native_cpu = "x64"
     else:
         native_package_directory = "codex-darwin-arm64"
-        native_package_version = "0.150.1-darwin-arm64"
+        native_package_version = "0.157.1-darwin-arm64"
         native_relative = Path("vendor/aarch64-apple-darwin/bin/codex")
         native_os = "darwin"
         native_cpu = "arm64"
@@ -136,7 +136,7 @@ def _codex_package_layout(
         json.dumps(
             {
                 "name": "@openai/codex",
-                "version": "0.150.1",
+                "version": "0.157.1",
                 "bin": {"codex": "bin/codex.js"},
                 "optionalDependencies": {
                     f"@openai/{native_package_directory}": f"npm:@openai/codex@{native_package_version}"
@@ -174,14 +174,14 @@ def _codex_package_layout(
         (
             "darwin",
             "arm64",
-            "sha256:a14f9a907c12c8812878b70e6b7d65f81c39ed795513e46a55817d7428c0ca6b",
-            "openai-codex-npm-darwin-arm64-0.150.1",
+            "sha256:27ceb5f9b957b43a519efe4eaa3816a0bffb0a531a2c89af18840c0a3c016a7d",
+            "openai-codex-npm-darwin-arm64-0.157.1",
         ),
         (
             "linux",
             "x86_64",
-            "sha256:abf1bb1643a79f73aa78ee627e111e02d4f8c98f25813a0cf6ce277709664386",
-            "openai-codex-npm-linux-x64-0.150.1",
+            "sha256:3e2584f3f3829a43a0495011a1cecb2facbe64a2403e2b682351fd9c2983f970",
+            "openai-codex-npm-linux-x64-0.157.1",
         ),
     ],
 )

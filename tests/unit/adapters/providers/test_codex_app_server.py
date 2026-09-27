@@ -71,10 +71,10 @@ def _profile() -> CodexAppServerProfile:
         provider_id="openai-codex",
         endpoint_profile_id="codex-chatgpt-subscription",
         endpoint_profile_version="1.0.0",
-        executable_path=Path("/opt/codex/0.150.1/codex"),
-        executable_sha256="sha256:a14f9a907c12c8812878b70e6b7d65f81c39ed795513e46a55817d7428c0ca6b",
-        runtime_version="0.150.1",
-        source_identity="openai-codex-npm-darwin-arm64-0.150.1",
+        executable_path=Path("/opt/codex/0.157.1/codex"),
+        executable_sha256="sha256:27ceb5f9b957b43a519efe4eaa3816a0bffb0a531a2c89af18840c0a3c016a7d",
+        runtime_version="0.157.1",
+        source_identity="openai-codex-npm-darwin-arm64-0.157.1",
         app_server_schema_sha256=CODEX_APP_SERVER_SCHEMA_SHA256,
         capability_cell_sha256=CODEX_EVALUATOR_CAPABILITY_CELL_SHA256,
         capability_profile=CODEX_EVALUATOR_CAPABILITY_PROFILE,
@@ -90,8 +90,8 @@ def _profile() -> CodexAppServerProfile:
 
 def test_committed_compatibility_cell_matches_runtime_constants() -> None:
     root = Path(__file__).resolve().parents[4]
-    cell = json.loads((root / "support/codex-evaluator/0.150.1/cell.json").read_text("utf-8"))
-    config = (root / "support/codex-evaluator/0.150.1/config.toml").read_bytes()
+    cell = json.loads((root / "support/codex-evaluator/0.157.1/cell.json").read_text("utf-8"))
+    config = (root / "support/codex-evaluator/0.157.1/config.toml").read_bytes()
 
     assert cell["runtime_version"] == module.CODEX_EVALUATOR_RUNTIME_VERSION
     assert cell["app_server_schema_sha256"] == CODEX_APP_SERVER_SCHEMA_SHA256
@@ -127,7 +127,7 @@ def test_committed_compatibility_cell_matches_runtime_constants() -> None:
 def test_committed_linux_compatibility_cell_matches_runtime_constants() -> None:
     root = Path(__file__).resolve().parents[4]
     cell = json.loads(
-        (root / "support/codex-evaluator/0.150.1/cell-linux-x64.json").read_text("utf-8")
+        (root / "support/codex-evaluator/0.157.1/cell-linux-x64.json").read_text("utf-8")
     )
     identity_keys = (
         "schema",
@@ -172,7 +172,7 @@ def test_linux_cell_identity_binds_the_native_digest_and_package_alias() -> None
     assert cell.executable_sha256 == CODEX_EVALUATOR_LINUX_X64_EXECUTABLE_SHA256
     assert cell.capability_cell_sha256 == CODEX_EVALUATOR_LINUX_X64_CAPABILITY_CELL_SHA256
     assert cell.native_package_directory == "codex-linux-x64"
-    assert cell.native_package_spec == "npm:@openai/codex@0.150.1-linux-x64"
+    assert cell.native_package_spec == "npm:@openai/codex@0.157.1-linux-x64"
     assert cell.native_executable_relative.as_posix() == (
         "vendor/x86_64-unknown-linux-musl/bin/codex"
     )
@@ -182,8 +182,8 @@ def test_linux_cell_rejects_mac_digest_or_source_identity() -> None:
     with pytest.raises(ValueError, match="codex_runtime_capability_unsupported"):
         module.codex_evaluator_cell_for_binding(
             source_identity=CODEX_EVALUATOR_LINUX_X64_SOURCE_IDENTITY,
-            executable_sha256="sha256:a14f9a907c12c8812878b70e6b7d65f81c39ed795513e46a55817d7428c0ca6b",
-            runtime_version="0.150.1",
+            executable_sha256="sha256:27ceb5f9b957b43a519efe4eaa3816a0bffb0a531a2c89af18840c0a3c016a7d",
+            runtime_version="0.157.1",
             app_server_schema_sha256=CODEX_APP_SERVER_SCHEMA_SHA256,
             capability_cell_sha256=CODEX_EVALUATOR_LINUX_X64_CAPABILITY_CELL_SHA256,
             capability_profile=CODEX_EVALUATOR_CAPABILITY_PROFILE,
@@ -193,15 +193,63 @@ def test_linux_cell_rejects_mac_digest_or_source_identity() -> None:
 
     with pytest.raises(ValueError, match="codex_runtime_capability_unsupported"):
         module.codex_evaluator_cell_for_binding(
-            source_identity="openai-codex-npm-darwin-arm64-0.150.1",
+            source_identity="openai-codex-npm-darwin-arm64-0.157.1",
             executable_sha256=CODEX_EVALUATOR_LINUX_X64_EXECUTABLE_SHA256,
-            runtime_version="0.150.1",
+            runtime_version="0.157.1",
             app_server_schema_sha256=CODEX_APP_SERVER_SCHEMA_SHA256,
             capability_cell_sha256=CODEX_EVALUATOR_LINUX_X64_CAPABILITY_CELL_SHA256,
             capability_profile=CODEX_EVALUATOR_CAPABILITY_PROFILE,
             capability_evidence_expires_at=CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT,
             isolated_config_sha256=CODEX_EVALUATOR_CONFIG_SHA256,
         )
+
+
+@pytest.mark.parametrize(
+    ("source_identity", "executable_sha256", "capability_cell_sha256"),
+    [
+        (
+            "openai-codex-npm-darwin-arm64-0.150.1",
+            "sha256:a14f9a907c12c8812878b70e6b7d65f81c39ed795513e46a55817d7428c0ca6b",
+            "sha256:c04d2dd111c85d323c3f96c7041bb598f047fff9f73b84f916d38b5321d32cfa",
+        ),
+        (
+            "openai-codex-npm-linux-x64-0.150.1",
+            "sha256:abf1bb1643a79f73aa78ee627e111e02d4f8c98f25813a0cf6ce277709664386",
+            "sha256:3fac9e18eca7395b14166114ebf49eaaae5fe3061e86c0d5b76eb17b54488cab",
+        ),
+    ],
+)
+def test_the_superseded_0_150_1_cells_are_no_longer_admitted(
+    source_identity: str, executable_sha256: str, capability_cell_sha256: str
+) -> None:
+    """A binding written under the replaced cell must go through repair, never launch."""
+
+    with pytest.raises(ValueError, match="codex_runtime_capability_unsupported"):
+        module.codex_evaluator_cell_for_binding(
+            source_identity=source_identity,
+            executable_sha256=executable_sha256,
+            runtime_version="0.150.1",
+            app_server_schema_sha256=(
+                "sha256:8cdccfc35582696d7141e7f916e0d5a664ab5b5e90b732f104284d2507f369f8"
+            ),
+            capability_cell_sha256=capability_cell_sha256,
+            capability_profile="codex-evaluator/0.150.1/v2",
+            capability_evidence_expires_at=CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT,
+            isolated_config_sha256=CODEX_EVALUATOR_CONFIG_SHA256,
+        )
+
+
+def test_macos_cell_binds_the_exact_0_157_1_native_package() -> None:
+    cell = module.codex_evaluator_cell_for_platform("darwin", "arm64")
+
+    assert CODEX_EVALUATOR_RUNTIME_VERSION == "0.157.1"
+    assert cell.source_identity == "openai-codex-npm-darwin-arm64-0.157.1"
+    assert cell.executable_sha256 == (
+        "sha256:27ceb5f9b957b43a519efe4eaa3816a0bffb0a531a2c89af18840c0a3c016a7d"
+    )
+    assert cell.capability_cell_sha256 == CODEX_EVALUATOR_CAPABILITY_CELL_SHA256
+    assert cell.native_package_spec == "npm:@openai/codex@0.157.1-darwin-arm64"
+    assert cell.native_executable_relative.as_posix() == "vendor/aarch64-apple-darwin/bin/codex"
 
 
 def test_local_binding_rejects_a_mac_cell_on_linux_before_file_access(
@@ -410,7 +458,7 @@ class _Runtime:
         if method == "initialize":
             return {
                 "codexHome": str(self.profile.codex_home),
-                "userAgent": "yoetz_semantic_evaluator/0.150.1",
+                "userAgent": "yoetz_semantic_evaluator/0.157.1",
             }
         if method == "account/read":
             return {"account": self.account}
@@ -502,7 +550,7 @@ class _LoginRuntime:
         if method == "initialize":
             return {
                 "codexHome": str(self.profile.codex_home),
-                "userAgent": "yoetz_semantic_evaluator/0.150.1",
+                "userAgent": "yoetz_semantic_evaluator/0.157.1",
             }
         if method == "account/login/start":
             assert isinstance(params, dict)
@@ -645,8 +693,9 @@ async def test_login_demultiplexes_exact_remote_control_notice_before_completion
                 "params": {"loginId": "login-1", "success": True},
             }
         ],
-        # Codex 0.150.1 emits this notification while account/login/start is in flight. The
-        # request buffers it before returning the login challenge, as the native process does.
+        # Codex 0.150.1 and 0.157.1 emit this notification while account/login/start is in
+        # flight. The request buffers it before returning the login challenge, as the native
+        # process does.
         login_notifications=[
             {
                 "method": "remoteControl/status/changed",
@@ -710,6 +759,8 @@ _LOGIN_COMPLETED: dict[str, object] = {
         {"limitId": "other-bucket", "primary": {"usedPercent": 100}},
         {"secondary": {"usedPercent": 0, "resetsAt": None, "windowDurationMins": None}},
         {"credits": {"hasCredits": True, "unlimited": False}},
+        {"limitId": "codex", "normalModelSlug": "gpt-6-luna"},
+        {"normalModelSlug": None},
         {
             "individualLimit": {
                 "limit": "10.0",
@@ -729,7 +780,7 @@ async def test_sparse_rate_limit_snapshots_do_not_prevent_a_valid_answer(
         "params": {"rateLimits": snapshot},
     }
     # Exercise the strict pre-disclosure validator too; post-ack fallback must not mask
-    # accidental rejection of a supported 0.150.1 sparse shape.
+    # accidental rejection of a sparse shape the pinned app-server schema allows.
     module._discard_rate_limits_notification(notice)  # pyright: ignore[reportPrivateUsage]
     runtime.events.insert(0, notice)
     result = await _evaluate(monkeypatch, runtime)
@@ -749,6 +800,7 @@ async def test_sparse_rate_limit_snapshots_do_not_prevent_a_valid_answer(
     ("native_error", "failure_class"),
     [
         ("usageLimitExceeded", SemanticFailureClass.QUOTA_EXHAUSTED),
+        ("rateLimitExceeded", SemanticFailureClass.RATE_LIMITED),
         ({"httpConnectionFailed": {"httpStatusCode": 429}}, SemanticFailureClass.RATE_LIMITED),
     ],
 )
@@ -786,6 +838,8 @@ async def test_rate_limit_bookkeeping_cannot_mask_authoritative_quota_or_rate_er
         {"unexpected": "private-account-canary"},
         {"limitId": 42},
         {"limitName": "x" * 129},
+        {"normalModelSlug": 42},
+        {"normalModelSlug": "x" * 129},
         {"planType": []},
         {"spendControlReached": 1},
         {"rateLimitReachedType": "unknown-canary"},
@@ -825,6 +879,14 @@ async def test_malformed_rate_limit_snapshot_records_only_nonterminal_diagnostic
         {"method": "unreviewed/method", "params": {}},
         {"method": "account/rateLimits/updated", "id": 99, "params": {}},
         {"method": "item/started", "params": {"item": {"type": "commandExecution"}}},
+        # Codex 0.157.1 schema additions that were reviewed and deliberately not allowlisted.
+        {"method": "item/completed", "params": {"item": {"type": "functionCallOutput"}}},
+        {
+            "method": "modelProvider/authRecoveryStarted",
+            "params": {"message": "canary", "provider": "openai", "threadId": "t", "turnId": "u"},
+        },
+        {"method": "thread/attachment/updated", "params": {"threadId": "t"}},
+        {"method": "account/gatewayOAuth/changed", "params": {}},
     ],
 )
 async def test_post_ack_isolation_failures_remain_terminal_without_answer_blame(
@@ -1548,6 +1610,35 @@ async def test_unknown_predisclosure_event_prevents_case_bytes_crossing_stdin(
     assert all(method != "turn/start" for method in (item.get("method") for item in runtime.sent))
 
 
+async def test_linux_missing_bubblewrap_config_warning_fails_before_disclosure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The exact notice Codex 0.157.1 emitted after initialize on Linux x86_64 without a system
+    # bubblewrap on PATH. It stays outside the pre-disclosure allowlist: no case byte crosses.
+    runtime = _Runtime(
+        _profile(),
+        predisclosure_event={
+            "method": "configWarning",
+            "params": {
+                "summary": (
+                    "Codex could not find bubblewrap on PATH. canary-native-text Codex will use "
+                    "the bundled bubblewrap in the meantime."
+                ),
+                "details": None,
+            },
+        },
+    )
+
+    result = await _evaluate(monkeypatch, runtime)
+
+    assert type(result) is SemanticResultUnavailable
+    assert result.provenance.runtime_evidence is not None
+    assert result.provenance.runtime_evidence.case_disclosed is False
+    assert result.provenance.runtime_evidence.failure_stage == "predisclosure_event_forbidden"
+    assert all(method != "turn/start" for method in (item.get("method") for item in runtime.sent))
+    assert "canary" not in repr(result)
+
+
 async def test_exact_disabled_remote_control_notice_is_discarded_before_disclosure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1776,7 +1867,7 @@ def test_launcher_and_environment_do_not_inherit_aliases_credentials_or_proxies(
     )
 
     assert profile.launcher_argv[:3] == (
-        "/opt/codex/0.150.1/codex",
+        "/opt/codex/0.157.1/codex",
         "app-server",
         "--stdio",
     )
