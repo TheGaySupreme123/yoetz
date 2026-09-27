@@ -82,7 +82,7 @@ After turn acknowledgement an unrecognized bookkeeping shape records only the cl
 A later native error supplies the terminal stage and failure class. Login and pre-disclosure
 validation still reject malformed shapes. No method or tool allowlist has changed.
 
-New Codex-subscription setups recommend and preselect `gpt-5.6-luna`. The final-review reasoning
+New Codex-subscription setups recommend and preselect `gpt-6-luna`. The final-review reasoning
 effort stays independently `high`, and routine checkpoint reviews default to `medium` (see *Routine
 and final review budgets* below). When an existing binding is targeted, omitting `--model` preserves its
 exact model, including during `--switch-account`; an explicit `--model` (including `gpt-5.6-sol`
@@ -133,7 +133,7 @@ one.
 ```text
 yoetz provider codex-subscription setup \
   --executable /absolute/path/to/codex \
-  --model gpt-5.6-luna \
+  --model gpt-6-luna \
   --reasoning-effort high \
   --routine-reasoning-effort medium
 

@@ -93,7 +93,7 @@ __all__ = [
 _CODEX_PACKAGE_NAME: Final = "@openai/codex"
 _CODEX_PACKAGE_JSON_MAX_BYTES: Final = 64 * 1024
 _SUPPORTED_REASONING: Final = frozenset({"low", "medium", "high", "xhigh", "max", "ultra"})
-_DEFAULT_CODEX_SUBSCRIPTION_MODEL: Final = "gpt-5.6-luna"
+_DEFAULT_CODEX_SUBSCRIPTION_MODEL: Final = "gpt-6-luna"
 _DEFAULT_CODEX_SUBSCRIPTION_REASONING: Final = "high"
 _CLOSED_FAILURE_TOKEN: Final = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 

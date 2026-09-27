@@ -3591,7 +3591,7 @@ def provider_codex_subscription_setup(
         typer.Option(
             "--model",
             help=(
-                "Exact Codex model id. Defaults to gpt-5.6-luna for a new binding and "
+                "Exact Codex model id. Defaults to gpt-6-luna for a new binding and "
                 "preserves an existing binding's model when omitted."
             ),
         ),

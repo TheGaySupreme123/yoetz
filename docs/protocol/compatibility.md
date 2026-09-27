@@ -171,7 +171,7 @@ tested profile; unknown lines are quarantined as an explicit import gap, never s
 Provider compatibility (for example the OpenAI Responses adapter) names an exact
 adapter/SDK/endpoint/model profile and is optional and advisory; the strict-local base support
 Yoetz ships with is independent of any provider profile. New `codex-chatgpt-subscription@1`
-setups recommend `gpt-5.6-luna` with independent default reasoning `high`; that recommendation
+setups recommend `gpt-6-luna` with independent default reasoning `high`; that recommendation
 is not a live packaged Luna cell and does not rewrite historical Sol exact-cell evidence or
 existing bindings. Platform support is stated as an exact
 artifact/runtime/SQLite/filesystem/key-backend cell (for example "macOS 11.0+ arm64, APSW

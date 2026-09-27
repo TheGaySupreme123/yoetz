@@ -48,7 +48,7 @@ setup, the prompt-loop provider menu, `/provider`, or run:
 yoetz provider codex-subscription setup --executable /absolute/path/to/codex
 ```
 
-New setups preselect `gpt-5.6-luna` with reasoning effort `high` for final reviews and `medium`
+New setups preselect `gpt-6-luna` with reasoning effort `high` for final reviews and `medium`
 for routine checkpoints. A check counts as final when your task has recorded a completion claim;
 every earlier check is a routine checkpoint, which can use a lower effort than final reviews. Use
 `--reasoning-effort` and `--routine-reasoning-effort` to choose each one. When an existing
