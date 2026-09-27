@@ -36,7 +36,10 @@ For cooperative delegation, the parent calls `start mode=delegate` with its curr
 passes the complete single-use `attach_handle` with a bounded assignment to the intended child. The
 child calls `start mode=attach` and uses its own returned session and writer. A child without a handle
 may create a stable child-specific task with `parent_session_id`; it remains `self_registered` and
-`pending` until the parent records `child_accepted` or `child_rejected`. Read `status view=lineage`
+`pending` until the parent records `child_accepted` or `child_rejected`. A native subagent learns
+its role only from its assignment, so give each child its one selector, a distinct actor id, and
+its own closure duties (plan, evidence and completion claim, `check`, `respond`, `receipt`, then
+`work_closed`). Tell a helper given neither a handle nor a parent session to make no Yoetz call. Read `status view=lineage`
 after handoff. A receipt never closes work or refreshes the parent's dependency manifest. The `prj_`
 project membership object groups work; each source workspace grants workspace-level observation
 consent separately, and the exact membership generation binds coordination delivery. Membership does

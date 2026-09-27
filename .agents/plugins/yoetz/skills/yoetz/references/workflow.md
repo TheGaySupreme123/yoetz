@@ -311,6 +311,34 @@ does not refresh it. If a newer manifest was recorded after the check, recheck f
 conclusion; an honest incomplete receipt remains available while children are active. Read
 [coverage and receipts](coverage-and-receipts.md) for severity and freshness limits.
 
+#### Child assignment and child closure
+
+A native helper learns its Yoetz role only from its assignment: host skill listings and
+initialize instructions do not say it is a child. Each child's assignment carries:
+
+- its one selector: the complete `attach_handle`, to use before its `expires_at` and before other
+  work, or the parent `session_id` for `parent_session_id` plus a stable child-specific
+  `workspace_ref` + `external_ref` pair (the canonical root the child works in; never the
+  parent's pair);
+- a distinct child actor id, the bounded scope and write policy, and, after a
+  `terminal_unavailable` result, the `yoetz_availability` block;
+- its closure duties: in its own task, publish its plan and obligations, results and evidence,
+  and completion claim; `check`; `respond` to each finding it returns, repairing and rechecking
+  where the finding requires it; `receipt`; then `work_closed`, because a receipt never closes
+  work. It reports its task and receipt ids and limits back to the parent.
+
+For a self-registered child, the parent publishes `child_accepted` or `child_rejected` after the
+child reports its task id. A helper that gets neither selector does no Yoetz work of its own; its
+work is the parent's to account for: the parent's own obligations cover incorporating and verifying
+it, and the parent discloses what the helper did that the ledger does not show. This is not the
+startup fallback in startup failure precedence. Tell it so in the assignment in plain words (make
+no Yoetz call, publish nothing, return the result to the parent), because its initialize
+instructions otherwise tell it to call `start`. It does not create a root task for delegated work.
+The parent never publishes a child's plan, results, evidence, claim, or closure as if it were the
+child's; it records only its own decisions about the child (`child_accepted`, `child_rejected`,
+`delegation_cancelled`, `child_written_off`) and its own incorporation work. A child's text report
+is a claim, not its receipt.
+
 ### Project coordination
 
 Projects group work without granting attach authority. Automatic repository grouping begins with

@@ -794,6 +794,54 @@ the one-way changed-path digest, so #503 file-overlap attribution is `not observ
 delegate` unless the child explicitly registers and supplies its own task/session. Such activity
 is recorded as an attribution gap and never silently assigned to the parent.
 
+### Cooperative qualification procedure (#509)
+
+Regular Cursor Task subagents can inherit this session's Yoetz MCP tools. That inheritance is the
+supported cooperative path. It is not a native subagent hook and it does not prove host
+correlation. The qualification matrix and this run's native cells live in
+[multi-agent-conformance.md](multi-agent-conformance.md#host-qualification-rows).
+
+The #509 source guidance repair puts the no-selector helper rule in the workflow and host skill.
+The shared initialize safety floor remains unchanged because of its advertised-surface budget.
+The parent must give the helper that rule explicitly; spontaneous adoption of the repaired
+guidance is not qualified by this run.
+
+Supported, when the child actually calls Yoetz:
+
+1. **Delegated-attach.** The parent calls `start` with `mode=delegate` and its current
+   `session_id`. The returned child is `parent_minted` and `accepted`. Pass the complete
+   `attach_handle` only inside that child's assignment. The child calls `start` with `mode=attach`
+   and that handle alone, then uses the session and writer that call returns. The parent keeps its
+   own binding. Do not guess `subagent_id` before the spawn. After the child returns, read
+   `status view=lineage`. A successful attach is not host correlation: Cursor still has no
+   subagent lifecycle hook, so a missing host identity stays an explicit gap.
+2. **Self-registration.** A second child calls `start` with this workspace, its own
+   `external_ref`, and the parent's `parent_session_id`. This macOS run used
+   `mode=create_or_attach`. The composed fixture
+   `test_self_registration_pending_acceptance_closure_and_receipt_rollup` uses `mode=create`
+   with that same parent session. Either call begins `self_registered` and `pending`. The parent
+   publishes `child_accepted` for that child task.
+   Acceptance keeps the origin. An accepted child cannot later be rejected. The child still owns
+   its plan, publications, check, receipt, and `work_closed`. The parent rollup is a later parent
+   check of the recorded manifest; the child's receipt does not close either task and does not
+   prove the parent incorporated the work.
+
+Unsupported signals, which stay unsupported when a fixture is green:
+
+- A Task launch, a prompt handoff, or a helper summary is not a child receipt and not
+  `child_accepted`.
+- An unregistered helper that was told not to call Yoetz is not a child. Do not publish
+  `child_accepted` for it, and do not treat a pending `host_observed` annotation as its ledger.
+  If the host cannot start a helper that stays off Yoetz, the native negative row stays
+  `untested` and the composed fixtures cover it.
+- `explore` and other read-only helpers are not evidence that a general subagent completed a
+  Yoetz workflow.
+- Linux and WSL native-session capability remains unproven (#722). This procedure does not admit
+  those cells.
+- This macOS run recorded `work_abandoned` on the parent while its parent-minted child was still
+  open. That matches the missing subagent hold above. Abandonment is not child completion, and a
+  later successor task does not inherit that child.
+
 If a future exact cell proves a child signal, the service may stamp one `host_observed` pending
 annotation from `subagent_id` plus parent conversation/tool correlation. An accepted parent-minted
 delegate or cooperative self-registration then binds that annotation; host metadata alone never

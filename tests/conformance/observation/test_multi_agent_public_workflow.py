@@ -129,6 +129,8 @@ async def test_multi_agent_teardown_attempts_every_close_after_failure(
 async def test_explicit_siblings_have_independent_public_checks_receipts_and_work_state(
     tmp_path: Path,
 ) -> None:
+    """#509 independent-root control: workspace proximity never grants child ownership."""
+
     workspace = _workspace(tmp_path / "workspace")
     async with multi_agent_service(tmp_path / "state") as service:
         app = service.app
@@ -189,6 +191,10 @@ async def test_explicit_siblings_have_independent_public_checks_receipts_and_wor
             receipt_ids.add(receipt.receipt_id)
             assert receipt.task_id == task.task_id
             assert receipt.document is not None
+            assert isinstance(receipt.document, Mapping)
+            children_section = receipt.document["children"]
+            assert isinstance(children_section, Mapping)
+            assert children_section["children"] == []
             assert (
                 await app.receipt(receipt_request, repository_privacy_context=_REPOSITORY)
             ).receipt_digest == receipt.receipt_digest
@@ -208,7 +214,9 @@ async def test_explicit_siblings_have_independent_public_checks_receipts_and_wor
             )
             assert status.task_id == task.task_id
             assert isinstance(status.page, StatusLineagePageModel)
+            assert status.page.parent_task_id is None
             assert status.page.children == ()
+            assert status.page.annotations == ()
         assert len(receipt_ids) == 2
 
 
@@ -265,6 +273,8 @@ async def test_concurrent_create_or_attach_pairs_are_resolved_atomically(
 async def test_real_delegation_attach_publication_and_child_receipt_preserve_parent_lane(
     tmp_path: Path,
 ) -> None:
+    """#509 delegated attach: distinct identity, accepted lineage, receipt, explicit closure."""
+
     workspace = _workspace(tmp_path / "workspace")
     async with multi_agent_service(tmp_path / "state") as service:
         app = service.app
@@ -374,6 +384,10 @@ async def test_real_delegation_attach_publication_and_child_receipt_preserve_par
         )
         assert attached.task_id == delegated.task_id
         assert attached.task_id != parent.task_id
+        assert attached.session_id != parent.session_id
+        assert attached.writer_id != parent.writer_id
+        assert attached.origin == "parent_minted"
+        assert attached.acceptance == "accepted"
         child_host_session = "native-child-session"
         assert child_host_session != parent_host_session
         assert (
@@ -481,6 +495,67 @@ async def test_real_delegation_attach_publication_and_child_receipt_preserve_par
         assert child.acceptance == "accepted"
         assert child.work_state == "open"
         assert child.rollup_state != "clean"
+
+        # A receipt is not work closure. Only the child's explicit lifecycle publication
+        # closes this dependency, without closing the parent or upgrading its limited check.
+        child_status = await app.status(
+            StatusRequest.model_validate(
+                {
+                    **_identity(),
+                    "session_id": attached.session_id,
+                    "writer_id": attached.writer_id,
+                    "view": "compact",
+                    "limit": "1",
+                }
+            ),
+            repository_privacy_context=_REPOSITORY,
+        )
+        closed = await app.publish_work(
+            PublishWorkRequest.model_validate(
+                {
+                    **_identity(),
+                    "session_id": attached.session_id,
+                    "writer_id": attached.writer_id,
+                    "expected_frontier": dict(child_status.head_frontier.as_wire().items()),
+                    "event_drafts": [
+                        {
+                            "event_id": new_id(IdKind.EVENT),
+                            "schema": {"name": "work_closed", "version": "1.0.0"},
+                            "occurred_at": "2026-09-05T12:00:00.000Z",
+                            "causal_parents": [],
+                            "payload": {},
+                            "artifact_refs": [],
+                            "evidence_refs": [],
+                        }
+                    ],
+                }
+            ),
+            repository_privacy_context=_REPOSITORY,
+        )
+        assert isinstance(closed, PublishWorkInternalResult)
+        assert closed.task_id == attached.task_id
+        after_close = await app.status(
+            StatusRequest.model_validate(
+                {
+                    **_identity(),
+                    "session_id": parent.session_id,
+                    "writer_id": parent.writer_id,
+                    "view": "lineage",
+                    "limit": "10",
+                }
+            ),
+            repository_privacy_context=_REPOSITORY,
+        )
+        assert isinstance(after_close.page, StatusLineagePageModel)
+        (closed_child,) = after_close.page.children
+        assert closed_child.task_id == attached.task_id
+        assert closed_child.origin == "parent_minted"
+        assert closed_child.acceptance == "accepted"
+        assert closed_child.work_state == "closed"
+        assert closed_child.rollup_state != "clean"
+        parent_lineage = await app.start_catalog.task_lineage(parent.task_id)
+        assert parent_lineage is not None and parent_lineage.work_state is WorkState.OPEN
+        assert load_mapping(parent_host_session, _state=lifecycle_state) == delegated_parent_mapping
 
 
 async def test_generic_recovery_cannot_select_child_beside_root_siblings(
@@ -818,7 +893,7 @@ async def test_late_subagent_stop_after_parent_reattach_keeps_registry_annotatio
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Public advice cites the registry HMAC, never a recomputed host identity."""
+    """#509 unregistered-helper control retains advice without cooperative child ownership."""
 
     workspace = _workspace(tmp_path / "workspace")
     async with multi_agent_service(tmp_path / "state") as service:
@@ -996,6 +1071,13 @@ async def test_late_subagent_stop_after_parent_reattach_keeps_registry_annotatio
             repository_privacy_context=_REPOSITORY,
         )
         assert isinstance(lineage_status.page, StatusLineagePageModel)
+        # A native start/stop is observation, not a child registration, acceptance, check or
+        # receipt. The helper's missing cooperative lineage must remain explicit even though
+        # its finding can be delivered as advice using the registry's correlation identity.
+        assert lineage_status.page.children == ()
+        assert len(lineage_status.page.annotations) == 1
+        assert lineage_status.page.annotations[0].origin == "host_observed"
+        assert lineage_status.page.annotations[0].acceptance == "pending"
         assert any(
             item.correlation_id == annotation.correlation_id
             for item in lineage_status.page.annotations
@@ -1103,6 +1185,56 @@ async def test_late_subagent_stop_after_parent_reattach_keeps_registry_annotatio
         assert await reopened_registry.list_provisional_annotations(parent.task_id) == (
             reopened_annotation,
         )
+
+        # A parent receipt cannot turn that host-only handoff into checked child work.
+        current = await app.status(
+            StatusRequest.model_validate(
+                {
+                    **_identity(),
+                    "session_id": resumed.session_id,
+                    "writer_id": resumed.writer_id,
+                    "view": "compact",
+                    "limit": "1",
+                }
+            ),
+            repository_privacy_context=_REPOSITORY,
+        )
+        checked = await app.check(
+            CheckRequest.model_validate(
+                {
+                    **_identity(),
+                    "session_id": resumed.session_id,
+                    "writer_id": resumed.writer_id,
+                    "expected_frontier": dict(current.head_frontier.as_wire().items()),
+                    "mode": "deterministic_only",
+                    "max_findings": "10",
+                    "policy_packs": ["work-integrity/0.1.0"],
+                }
+            ),
+            repository_privacy_context=_REPOSITORY,
+        )
+        assert isinstance(checked, CheckCommitResult)
+        receipt = await app.receipt(
+            ReceiptRequest.model_validate(
+                {
+                    **_identity(),
+                    "task_id": resumed.task_id,
+                    "session_id": resumed.session_id,
+                    "writer_id": resumed.writer_id,
+                    "expected_frontier": dict(checked.result_frontier.as_wire().items()),
+                    "format": "json",
+                    "include": "standard",
+                    "redaction_profile": "default_local_export",
+                }
+            ),
+            repository_privacy_context=_REPOSITORY,
+        )
+        assert receipt.document is not None
+        assert isinstance(receipt.document, Mapping)
+        children_section = receipt.document["children"]
+        assert isinstance(children_section, Mapping)
+        assert children_section["children"] == []
+        assert receipt.conclusion != "no_unresolved_deterministic_findings"
 
 
 async def test_delegated_child_does_not_consume_parent_selector(

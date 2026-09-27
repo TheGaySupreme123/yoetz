@@ -509,6 +509,22 @@ resolve through the same child/parent-tool aliases; an event with no usable chil
 the permanent `missing_subagent_identity` gap and does not also produce an annotation. Parent
 advice and frontier delivery are never redirected to the child.
 
+#### Issue #509 qualification boundary
+
+The supported Codex paths are the two above: parent `mode=delegate` before the spawn, or a
+cooperative child that self-registers with the parent session. A `SubagentStart` annotation stays
+`host_observed` and `pending` until one of those paths binds it. A helper that never calls Yoetz,
+and a second root created with `mode=create` in the same workspace, are not children. The
+executable fixture names and the native acceptance table are in
+[multi-agent-conformance.md](multi-agent-conformance.md#host-qualification-rows). A green fixture
+does not pass the native macOS or Linux/WSL Codex cell. #841 rollout reconciliation stays a
+separate owner.
+
+The #509 source guidance repair puts the no-selector helper rule in the workflow and host skill.
+The shared initialize safety floor has no room for the same sentence under its advertised-surface
+budget, so the parent must state that rule explicitly in the helper assignment. This run does not
+qualify spontaneous adoption of the repaired guidance.
+
 When a retained child stop reports a finding, `subagent_finding_unaddressed` advice names the
 registry's annotation ID, or the bound child task ID when available. Advice refresh resolves that
 identity through a read-only, parent-scoped lookup; it does not update the annotation's timestamps

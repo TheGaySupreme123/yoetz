@@ -98,6 +98,12 @@ those ids exist, replay the exact original `start` body once with the same `requ
 invent ids or fabricate a status query. The same rule applies to a typed pending `start` result
 without returned route ids.
 
+For cooperative delegation, read the multi-agent section of `yoetz://guidance/workflow.md`. A
+native subagent learns its role only from its assignment, so give each child its one selector, a
+distinct actor id, and its own closure duties (plan, evidence and completion claim, `check`,
+`respond`, `receipt`, then `work_closed`). Tell a helper given neither a handle nor a parent
+session to make no Yoetz call.
+
 Delegation after an outage: if `start` (or any call) returned `safe_details.availability:
 terminal_unavailable`, that state belongs to the host binding, and later calls under a new
 `request_id` inherit the same `correlation_id` without a new diagnostic. Carry it into every

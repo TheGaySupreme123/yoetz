@@ -96,7 +96,10 @@ privacy disclosure is never the part that gets cut. `generic`, `codex` and `curs
 full document byte for byte. `tests/packaging/test_claude_code_instructions_cap.py` fails when
 the Claude text outgrows the recorded cap; `tests/unit/mcp/test_claude_code_instructions.py`
 locks the sentence order, the arithmetic and the other hosts' identity. Everything the compact
-body omits is one `read_guidance` call away.
+body omits is one `read_guidance` call away. Claude renders the same block into native
+subagents, which receive no hook cue saying they are children, so the trigger paragraph exempts a
+subagent whose assignment names neither an attach handle nor a parent session (#509). The parent
+still says so in the assignment in plain words, as the workflow's child-assignment rules require.
 
 Activation cues by connection mode:
 
@@ -615,7 +618,13 @@ This decision is based on installed native execution and the pinned profile boun
 online Claude reference or a renderer fixture does not upgrade the pinned cell. The #509 host
 matrix records the `2.1.261` child-hook fixture and the later installed `2.1.263` bounded
 parent/delegate publication, check, and receipt run as separate evidence cells. Cooperative MCP
-self-registration remains a separate, explicitly bounded path.
+self-registration remains a separate, explicitly bounded path. Those historical cells are not
+this qualification run. The current fixture names and native table are in
+[multi-agent-conformance.md](multi-agent-conformance.md#host-qualification-rows). Supported
+registration is still parent `mode=delegate` plus child `mode=attach`, or self-registration with
+`parent_session_id` followed by parent `child_accepted`. A hook with only the parent session, a
+text handoff, or an unregistered helper does not create child ownership. Linux/WSL native
+qualification of these rows was not run here.
 
 The historical 0.3 child-hook cell used control 2.5, which admits the `pairing_mode` and
 `correlation_kind` metadata emitted by Claude ingress. Current main's control 2.6 successor retains

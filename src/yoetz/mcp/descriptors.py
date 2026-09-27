@@ -249,20 +249,23 @@ _STRICT_ROUTE_TAIL: Final = (
 )
 # The Claude-host initialize text. Its first two sentences are the trigger and the late-start
 # rule, in imperative form, because those are the only lines guaranteed to survive a host that
-# cuts the block; everything else is one `read_guidance` call away.
+# cuts the block; everything else is one `read_guidance` call away. Claude also renders this block
+# into native subagents, which see no hook cue saying they are children (issue #509), so the
+# scope sentences exempt a subagent whose assignment names neither child selector.
 CLAUDE_CODE_INITIALIZE_INSTRUCTIONS: Final = (
     "# Yoetz: call start first\n"
     "\n"
     "If this session will edit files, run state-changing commands, or delegate, call "
     "`start` before that work. If material work already began without a task, call "
-    "`start` now, publish the work so far as a bounded plan, and disclose the uncovered "
-    "prefix in the receipt. If the tool list shows only names, load the schema first "
+    "`start` now, publish it as a plan, and disclose the uncovered "
+    "prefix in the receipt. If only tool names show, load the schema first "
     "(ToolSearch `select:mcp__yoetz__start` or the plugin-prefixed name). Read-only "
-    "questions skip it.\n"
+    "questions skip it. So does a subagent whose assignment names no handle or "
+    "parent session.\n"
     "\n"
-    "Then `read_guidance` on `yoetz://guidance/agent-instructions.md` (safety floor, "
-    "catalog) and `yoetz://guidance/workflow.md`; do not list resources to find them. "
-    "Cadence: `publish_work` per material transition, `check`, then `receipt` last. Never"
+    "Then `read_guidance` on `yoetz://guidance/agent-instructions.md` and "
+    "`yoetz://guidance/workflow.md`; do not list resources to find them. "
+    "Cadence: `publish_work` per transition, `check`, `receipt` last. Never"
     " claim Yoetz is active before `start` returns; never invent a ledger task. If "
     "`start` fails, follow its typed continuation, then ask the user; do not work without"
     " a task.\n"
