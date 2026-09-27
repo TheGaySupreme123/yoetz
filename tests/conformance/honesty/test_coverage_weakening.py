@@ -62,6 +62,7 @@ _WORK_INTEGRITY_KINDS = frozenset(
         FindingKind.WEAK_OR_STALE_RESPONSE,
     }
 )
+_COORDINATION_KINDS = frozenset({FindingKind.COORDINATION_OVERLAP})
 
 _DIMENSION_ATTRIBUTES = (
     "authorship_assurance",
@@ -97,6 +98,8 @@ def _policy_identity(kind: FindingKind) -> tuple[str, str]:
     return (
         ("work-integrity", "0.1.0")
         if kind in _WORK_INTEGRITY_KINDS
+        else ("coordination", "0.1.0")
+        if kind in _COORDINATION_KINDS
         else ("research-evidence", "0.1.0")
     )
 

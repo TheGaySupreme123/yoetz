@@ -20,10 +20,27 @@ from builders.ledger_adapters import (
     ownership_fence,
     sqlite_adapter,
 )
-from builders.policy_cases import FRONTIER, make_case
+from builders.policy_cases import (
+    FRONTIER,
+    clm,
+    evd,
+    evidence_record,
+    make_case,
+    obl,
+    obligation_record,
+    plan_record,
+    record,
+)
 from yoetz.adapters.memory.ledger import MemoryLedgerAdapter
 from yoetz.adapters.sqlite.repository import SqliteLedger
-from yoetz.application.check import FinalSemanticEvaluation, semantic_coverage_gap_code
+from yoetz.application.check import (
+    CheckScope,
+    FinalSemanticEvaluation,
+    allocate_findings,
+    prior_finding_ids,
+    run_deterministic_policies,
+    semantic_coverage_gap_code,
+)
 from yoetz.application.egress import (
     PrivacyCoordinator,
     RepositoryGrantAdmission,
@@ -32,11 +49,27 @@ from yoetz.application.egress import (
     SemanticEgressProviderOutcome,
 )
 from yoetz.application.semantic_content import CapturedContentResolution
-from yoetz.domain.findings import SamplingParams, SemanticDispatchKind, SemanticFailureClass
+from yoetz.domain.events import (
+    ClaimKind,
+    ClaimRecordedPayload,
+    EvidenceKind,
+    EvidenceRecordedPayload,
+    ObligationPublishedPayload,
+    ObligationStatus,
+    PlanPublishedPayload,
+)
+from yoetz.domain.findings import (
+    Finding,
+    FindingKind,
+    SamplingParams,
+    SemanticDispatchKind,
+    SemanticFailureClass,
+)
 from yoetz.domain.observation_profiles import CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
 from yoetz.domain.privacy import (
     AuthorizationScope,
     AuthorizationScopeKind,
+    CandidateContext,
     ChannelPolicy,
     DataClass,
     EgressChannel,
@@ -49,9 +82,13 @@ from yoetz.domain.privacy import (
     ReviewSelectionPolicy,
 )
 from yoetz.domain.receipts import (
+    SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
     SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
 )
+from yoetz.domain.values import EvidenceId, timestamp_from_string
+from yoetz.kernel.deterministic_checks import CaseGap
+from yoetz.kernel.projections import EvidenceProjectionRecord
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.importer import ImporterPort
 from yoetz.ports.ledger import CheckPhase, FrozenCase, OperationLease
@@ -73,6 +110,8 @@ from yoetz.ports.start_catalog import (
     TaskRouteState,
 )
 from yoetz.protocol.canonical import canonical_digest, canonical_encode
+from yoetz.protocol.coverage import EvidenceImmutability
+from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.models import DataCategory, SemanticReason, SemanticStatus
 
 _TASK = "tsk_53000000-0000-4000-8000-000000000001"
@@ -99,7 +138,9 @@ type _DurableSemanticEvaluator = Callable[
 ]
 
 
-def _test_effective_policy() -> EffectivePrivacyPolicy:
+def _test_effective_policy(
+    profile: ReviewContextProfile = ReviewContextProfile.STRUCTURAL,
+) -> EffectivePrivacyPolicy:
     scope = AuthorizationScope(
         AuthorizationScopeKind.TASK,
         _INSTALLATION,
@@ -127,8 +168,8 @@ def _test_effective_policy() -> EffectivePrivacyPolicy:
         version=1,
         policy_digest="sha256:" + "c" * 64,
         profile=PrivacyProfile.LOCAL_ONLY,
-        review_context_profile=ReviewContextProfile.STRUCTURAL,
-        review_selection=ReviewSelectionPolicy.for_profile(ReviewContextProfile.STRUCTURAL),
+        review_context_profile=profile,
+        review_selection=ReviewSelectionPolicy.for_profile(profile),
         require_current_provider_data_use_evidence=False,
         network_egress_permitted=False,
         effective_scope=scope,
@@ -199,18 +240,25 @@ class _PolicyApplication:
 
 
 class _Privacy:
-    def __init__(self, *, repository_granted: bool = True, task_id: str = _TASK) -> None:
+    def __init__(
+        self,
+        *,
+        repository_granted: bool = True,
+        task_id: str = _TASK,
+        profile: ReviewContextProfile = ReviewContextProfile.STRUCTURAL,
+    ) -> None:
         self.calls = 0
         self.resume_calls = 0
         self.repository_granted = repository_granted
         self.task_id = task_id
         # Real policy path is required for dispatch; never mint synthetic policy identity.
         self.policy_application = _PolicyApplication(
-            _test_effective_policy(), repository_granted=repository_granted
+            _test_effective_policy(profile), repository_granted=repository_granted
         )
         self.terminal_provider_result = False
         self.resume_terminal: tuple[PrivacyOutcome, PrivacyReason] | None = None
         self.cancel_on_resume = False
+        self.candidates: list[CandidateContext] = []
 
     async def activate_repository(self, scope: AuthorizationScope) -> bool:
         assert scope == AuthorizationScope(
@@ -252,6 +300,8 @@ class _Privacy:
     async def evaluate_semantic(self, candidate: object, deadline: object) -> object:
         del deadline
         self.calls += 1
+        if type(candidate) is CandidateContext:
+            self.candidates.append(candidate)
         request_id = cast(str, getattr(candidate, "request_id"))
         if self.terminal_provider_result:
             return SemanticEgressProviderOutcome(
@@ -1307,3 +1357,166 @@ async def test_dispatch_and_mapping_failures_keep_original_check_join(
     assert all(row["request_id"] == _REQUEST for row in rows)
     assert "PRIVATE_SENTINEL" not in repr(rows)
     assert semantic_check_request.get() is None
+
+
+@pytest.mark.anyio
+async def test_lineage_capacity_refuses_before_job_and_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yoetz.application.semantic_case import LineageSemanticCapacityExceeded
+
+    monkeypatch.setattr(diagnostics_module, "log_dir", lambda: tmp_path)
+
+    def refuse(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise LineageSemanticCapacityExceeded("lineage_semantic_input_too_large")
+
+    monkeypatch.setattr(ready_composition_module, "build_semantic_case", refuse)
+    adapter = memory_adapter(append_command())
+    frozen, runtime = await _durable_semantic_case(adapter)
+    privacy = _Privacy(task_id=runtime.task_id)
+    evaluator = cast(
+        _DurableSemanticEvaluator,
+        _evaluator(
+            privacy,
+            lambda: _PROVIDER,
+            _route_for(runtime.task_id, runtime.session_id),
+        ),
+    )
+    result = await evaluator(frozen, (), runtime)
+    assert (result.status, result.reason) == (
+        SemanticStatus.FAILED,
+        SemanticReason.CASE_CAPACITY_EXCEEDED,
+    )
+    assert result.provenance is None
+    assert result.attempt_accounting is None
+    assert privacy.calls == privacy.resume_calls == 0
+    assert await adapter.load_semantic_job(runtime.writer_id or "", _REQUEST) is None
+    _assert_record(
+        tmp_path,
+        "semantic_not_dispatched_lineage_capacity",
+        SemanticReason.CASE_CAPACITY_EXCEEDED,
+    )
+
+
+class _FindingIds:
+    def new(self, kind: IdKind) -> str:
+        return new_id(kind)
+
+
+def _wide_frozen(width: int) -> tuple[FrozenCase, tuple[Finding, ...]]:
+    """Ordinary task material plus one gap naming ``width`` subjects (issue #858 shape).
+
+    The work-integrity pack turns the gap into one ``ledger_stale_or_incomplete`` finding whose
+    subject tuple is ``width`` wide — the finding the native parent review failed on.
+    """
+
+    plan = plan_record(PlanPublishedPayload(1, "Ship the review packet", (obl(1),)), 1)
+    obligation = obligation_record(
+        ObligationPublishedPayload(
+            obl(1), "Build the real packet", "tests pass", ObligationStatus.OPEN
+        ),
+        2,
+    )
+    claim = record(
+        ClaimRecordedPayload(
+            clm(1),
+            ClaimKind.COMPLETION,
+            "Work is complete",
+            (evd(1),),
+            obligation_refs=(obl(1),),
+        ),
+        3,
+    )
+    evidence: dict[EvidenceId, EvidenceProjectionRecord] = {
+        evd(1): evidence_record(
+            EvidenceRecordedPayload(
+                evd(1),
+                EvidenceKind.TEST_RESULT,
+                EvidenceImmutability.METADATA_ONLY,
+                timestamp_from_string("2026-07-01T00:00:00.000Z"),
+                description="test output: 1 failed assertion",
+            ),
+            4,
+        )
+    }
+    subjects = tuple(sorted((clm(number) for number in range(100, 100 + width)), key=str.encode))
+    case = make_case(
+        plans={1: plan},
+        obligations={obl(1): obligation},
+        claims={clm(1): claim},
+        evidence=evidence,
+        extra_refs=(clm(1), obl(1), evd(1)),
+        gaps=(CaseGap("missing_ref:bulk", "missing_ref", subjects),),
+    )
+    assessments, _ = run_deterministic_policies(
+        case, CheckScope((), ()), ("research-evidence/0.1.0", "work-integrity/0.1.0")
+    )
+    findings = allocate_findings(
+        _FindingIds(),
+        tuple(item.candidate for item in assessments),
+        prior_finding_ids(case.projection),
+    )
+    wide = [item for item in findings if item.kind is FindingKind.LEDGER_STALE_OR_INCOMPLETE]
+    assert len(wide) == 1 and len(wide[0].subject_refs) == width
+    frozen = FrozenCase(
+        case,
+        OperationLease(
+            _WRITER,
+            _REQUEST,
+            _SESSION,
+            CheckPhase.LOCAL_READY,
+            "owner-generation-1",
+            "lease-owner-1",
+            1,
+            datetime(2030, 1, 1, tzinfo=UTC),
+            FRONTIER,
+            "sha256:" + "d" * 64,
+        ),
+    )
+    return frozen, findings
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("width", (17, 21))
+async def test_wide_finding_prose_dispatches_one_bounded_case(
+    width: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Expanded review with a >16-subject finding reaches the provider once (issue #858).
+
+    Before the fix the complete subject tuple reached ``SemanticCaseItem`` during case construction
+    and the generic exception path reported ``failed / coordinator_failure`` with no dispatch. The
+    bounded case now dispatches exactly once, names the omitted finding, and carries the capacity
+    gap into the final evaluation the check result folds.
+    """
+
+    monkeypatch.setattr(diagnostics_module, "log_dir", lambda: tmp_path)
+    privacy = _Privacy(profile=ReviewContextProfile.EXPANDED)
+    privacy.terminal_provider_result = True
+    frozen, findings = _wide_frozen(width)
+    wide = next(item for item in findings if item.kind is FindingKind.LEDGER_STALE_OR_INCOMPLETE)
+    wide_ref = str(wide.finding_id).encode("ascii")
+
+    result = await _evaluator(privacy, lambda: _PROVIDER, _route())(frozen, findings)
+
+    # The fake provider's terminal answer is what comes back: construction did not fail.
+    assert (result.status, result.reason) == (
+        SemanticStatus.UNAVAILABLE,
+        SemanticReason.TRANSPORT_UNAVAILABLE,
+    )
+    assert privacy.calls == 1
+    assert SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP in result.case_content_gaps
+    assert not any(
+        row.get("operation") == "semantic_evaluation_failed" for row in _records(tmp_path)
+    )
+
+    [candidate] = privacy.candidates
+    item_ids = {item.item_id for item in candidate.items}
+    assert f"finding-summary-{wide.finding_id}" not in item_ids
+    assert f"finding-detail-{wide.finding_id}" not in item_ids
+    # The other local findings of the run still travel with their prose.
+    narrow = [item for item in findings if item.finding_id != wide.finding_id]
+    assert narrow and all(f"finding-summary-{item.finding_id}" in item_ids for item in narrow)
+    envelope = next(item.plaintext for item in candidate.items if item.item_id == "review-packet")
+    assert wide_ref in envelope
+    assert SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP.encode("ascii") in envelope

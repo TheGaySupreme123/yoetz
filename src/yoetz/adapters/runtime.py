@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Protocol, cast
 
 from yoetz.domain.values import Frontier
@@ -20,6 +20,7 @@ from yoetz.ports.importer import ImporterPort, ImportStatusSnapshot
 from yoetz.ports.keys import BundleKeys, KeyStoreError, KeyStoreReason
 from yoetz.ports.ledger import (
     CaseAvailabilityFacts,
+    CheckAdmissionRecord,
     LedgerPort,
     LedgerRecord,
     OperationRecord,
@@ -28,6 +29,7 @@ from yoetz.ports.ledger import (
     ProjectionState,
     ProjectionView,
     SemanticDisclosureWait,
+    SemanticProgressRecord,
     StoredProjection,
 )
 from yoetz.ports.objects import ObjectRef, ObjectStorePort
@@ -51,6 +53,7 @@ __all__ = [
     "LocalBundleRuntime",
     "RuntimeAdapterFactories",
     "RuntimeCachePolicy",
+    "RuntimeScope",
     "open_local_bundle_runtime",
 ]
 
@@ -92,6 +95,7 @@ class _RouteInspection(Protocol):
 type CurrentGeneration = Callable[[], int]
 type InspectRoute = Callable[[TaskRoute, RouteAccess], Awaitable[object]]
 type InspectProvision = Callable[[BundleProvisionCommand], Awaitable[object]]
+type ScopeForRoute = Callable[[TaskRoute], object | None]
 type AcquireFence = Callable[[object, bool], Awaitable[OwnershipFence]]
 type ValidateFence = Callable[[object, OwnershipFence], Awaitable[None]]
 type OpenObjects = Callable[
@@ -136,6 +140,7 @@ class RuntimeAdapterFactories:
     open_importer: OpenImporter
     verify_start: VerifyStart
     close_entry: CloseEntry
+    scope_for_route: ScopeForRoute | None = None
 
     def __post_init__(self) -> None:
         values = (
@@ -152,12 +157,45 @@ class RuntimeAdapterFactories:
         )
         if any(not callable(value) for value in values):
             raise TypeError("runtime_factory_invalid")
+        if self.scope_for_route is not None and not callable(self.scope_for_route):
+            raise TypeError("runtime_scope_factory_invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeScope:
+    """Repository/project admission scope supplied by the ready catalog composition.
+
+    Scope identity is an opaque commitment or catalog identity. It is retained only in the
+    in-process runtime cache and never placed in a task runtime or user-facing error. A project
+    is optional because repository-local tasks can exist before project membership is created.
+    """
+
+    repository: str
+    project: str | None = None
+
+    def __post_init__(self) -> None:
+        for value in (self.repository, self.project):
+            if value is not None and (type(value) is not str or not value):
+                raise ValueError("runtime_scope_invalid")
 
 
 @dataclass(frozen=True, slots=True)
 class RuntimeCachePolicy:
     max_idle_tasks: int = 8
     max_opening_tasks: int = 4
+    # This explicit total keeps the historical 8 idle + 4 opening envelope while making the
+    # admission ceiling visible to callers that compose multiple live task runtimes.
+    max_open_bundle_tasks: int = 12
+    max_writer_connections: int = 12
+    max_pending_leases_per_task: int = 64
+    # Scope limits use the corresponding global limit when a RuntimeScope is supplied. ``None``
+    # leaves room for a composition to select a stricter measured project policy.
+    max_live_tasks_per_repository: int | None = None
+    max_opening_tasks_per_repository: int | None = None
+    max_writer_connections_per_repository: int | None = None
+    max_live_tasks_per_project: int | None = None
+    max_opening_tasks_per_project: int | None = None
+    max_writer_connections_per_project: int | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -165,6 +203,26 @@ class RuntimeCachePolicy:
             or not 1 <= self.max_idle_tasks <= 64
             or type(self.max_opening_tasks) is not int
             or not 1 <= self.max_opening_tasks <= 16
+            or type(self.max_open_bundle_tasks) is not int
+            or not self.max_opening_tasks <= self.max_open_bundle_tasks <= 256
+            or type(self.max_writer_connections) is not int
+            or not 1 <= self.max_writer_connections <= self.max_open_bundle_tasks
+            or type(self.max_pending_leases_per_task) is not int
+            or not 1 <= self.max_pending_leases_per_task <= 256
+        ):
+            raise ValueError("runtime_cache_policy_invalid")
+        scoped = (
+            self.max_live_tasks_per_repository,
+            self.max_opening_tasks_per_repository,
+            self.max_writer_connections_per_repository,
+            self.max_live_tasks_per_project,
+            self.max_opening_tasks_per_project,
+            self.max_writer_connections_per_project,
+        )
+        if any(
+            value is not None
+            and (type(value) is not int or not 1 <= value <= self.max_open_bundle_tasks)
+            for value in scoped
         ):
             raise ValueError("runtime_cache_policy_invalid")
 
@@ -178,6 +236,7 @@ class _Entry:
     ledger: LedgerPort
     importer: ImporterPort
     authority: frozenset[RuntimeCapability]
+    scope: RuntimeScope | None = None
     usages: int = 0
     # Leases claimed by _entry_for but not yet counted in usages (validate_fence window).
     pending: int = 0
@@ -208,8 +267,40 @@ def _observation_for(ledger: LedgerPort) -> TaskObservationPort | None:
     return cast(_ObservationCapableLedger, ledger).open_observation_store()
 
 
+class _StructuralLedger:
+    """A keyless read facade: record envelopes without their decoded payloads.
+
+    ``STRUCTURAL_READ`` never loads bundle keys when it opens a task, so it has no authority over
+    encrypted payload content.  A warm entry opened earlier for payload or write access does hold
+    decoded payloads, and before this facade a structural lease on such an entry saw them anyway.
+    Code built on that saw payloads only while some other caller kept the entry warm, and it
+    failed once the entry was evicted, restarted, or relocked (#839).  This facade removes the
+    payload, which is exactly the record a keyless decode produces, and it omits every
+    payload-derived projection read.  Warm or cold, a structural lease never sees payload content.
+    """
+
+    __slots__ = ("_value",)
+
+    def __init__(self, value: LedgerPort) -> None:
+        self._value = value
+
+    async def _structural_events(
+        self, session_id: str, after: int, through: int | None
+    ) -> AsyncIterator[LedgerRecord]:
+        async for record in self._value.load_events(session_id, after=after, through=through):
+            yield record if record.payload is None else replace(record, payload=None)
+
+    def load_events(
+        self, session_id: str, *, after: int = 0, through: int | None = None
+    ) -> AsyncIterator[LedgerRecord]:
+        return self._structural_events(session_id, after, through)
+
+    async def load_frontier(self) -> Frontier:
+        return await self._value.load_frontier()
+
+
 class _ReadLedger:
-    """A structural read facade with no mutator attributes."""
+    """A payload read facade with no mutator attributes."""
 
     __slots__ = ("_value",)
 
@@ -274,6 +365,24 @@ class _ReadLedger:
 
         return await self._value.load_disclosure_wait(writer_id, operation_id)
 
+    async def load_semantic_progress(
+        self, writer_id: str, operation_id: str
+    ) -> SemanticProgressRecord | None:
+        """Read the structural progress of one check's AI-powered review job (issue #571 A2)."""
+
+        return await self._value.load_semantic_progress(writer_id, operation_id)
+
+    async def lookup_check_admission(
+        self, writer_id: str, operation_id: str
+    ) -> CheckAdmissionRecord | None:
+        """Read why a check request id has no operation record yet (issue #838).
+
+        Operation recovery reads through this facade, and a pre-admission refusal leaves nothing
+        else to read: without it an agent told to replay sees only a bare ``absent`` page.
+        """
+
+        return await self._value.lookup_check_admission(writer_id, operation_id)
+
 
 class _PayloadObjects:
     __slots__ = ("_value",)
@@ -312,7 +421,6 @@ def _error(
 _STALE = "The ready service generation changed."
 _BUSY = "The task is temporarily busy."
 _START_REBIND_WAIT_SECONDS = 5.0
-_START_MAX_REBIND_WAITERS = 64
 
 
 class LocalBundleRuntime(BundleRuntimePort):
@@ -335,6 +443,9 @@ class LocalBundleRuntime(BundleRuntimePort):
         self._policy = cache_policy
         self._entries: OrderedDict[str, _Entry] = OrderedDict()
         self._opening: dict[str, asyncio.Task[_Entry]] = {}
+        self._opening_access: dict[str, RouteAccess] = {}
+        self._opening_scopes: dict[str, RuntimeScope | None] = {}
+        self._opening_writers: set[str] = set()
         self._usages: dict[int, _Entry] = {}
         self._lock = asyncio.Lock()
         self._idle = asyncio.Condition(self._lock)
@@ -441,6 +552,7 @@ class LocalBundleRuntime(BundleRuntimePort):
         if (
             route.task_id != command.task_id
             or route.session_id != command.session_id
+            or route.bundle_relpath != command.bundle_relpath
             or route.route_generation != command.route_generation
             or route.route_identity_digest != command.route_identity_digest
         ):
@@ -449,7 +561,15 @@ class LocalBundleRuntime(BundleRuntimePort):
                 "The start route identity is inconsistent.",
                 retryable=False,
             )
-        self._validate_inspection(route, inspection, command.writer_id)
+        # Provision inspection can prove only the immutable bundle identity.  The route metadata
+        # in ``command`` is the catalog authority and must survive even when bundle inspection
+        # cannot reproduce mutable lineage/work facts.
+        self._validate_inspection(
+            route,
+            inspection,
+            command.writer_id,
+            require_catalog_metadata=False,
+        )
         entry = await self._entry_for(
             inspection,
             RouteAccess.WRITE,
@@ -462,6 +582,8 @@ class LocalBundleRuntime(BundleRuntimePort):
         expected: TaskRoute,
         inspection: _RouteInspection,
         writer_id: str | None,
+        *,
+        require_catalog_metadata: bool = True,
     ) -> None:
         try:
             inspected_route = inspection.route
@@ -473,7 +595,17 @@ class LocalBundleRuntime(BundleRuntimePort):
                 "The task inspection is invalid.",
                 retryable=False,
             ) from exc
-        if type(inspected_route) is not TaskRoute or inspected_route != expected:
+        if type(inspected_route) is not TaskRoute or not self._same_bundle_identity(
+            inspected_route, expected
+        ):
+            raise _error(
+                PublicErrorCode.STORAGE_CORRUPT,
+                "The task route identity is inconsistent.",
+                retryable=False,
+            )
+        if inspected_route.session_id != expected.session_id or (
+            require_catalog_metadata and inspected_route != expected
+        ):
             raise _error(
                 PublicErrorCode.STORAGE_CORRUPT,
                 "The task route identity is inconsistent.",
@@ -496,6 +628,199 @@ class LocalBundleRuntime(BundleRuntimePort):
                 retryable=False,
             )
 
+    def _scope_for_route(self, route: TaskRoute) -> RuntimeScope | None:
+        provider = self._factories.scope_for_route
+        candidate: object | None
+        if provider is None:
+            # Existing routes carry the repository privacy commitment when one is available. It
+            # is a safe, stable fallback scope until the catalog composition supplies an explicit
+            # repository/project resolver.
+            candidate = getattr(route, "repository_privacy_commitment", None)
+        else:
+            try:
+                candidate = provider(route)
+            except Exception as exc:
+                raise _error(
+                    PublicErrorCode.STORAGE_UNSAFE,
+                    "The runtime admission scope is unavailable.",
+                    retryable=False,
+                ) from exc
+        if candidate is None:
+            return None
+        if isinstance(candidate, RuntimeScope):
+            return candidate
+        if type(candidate) is str:
+            try:
+                return RuntimeScope(candidate)
+            except ValueError as exc:
+                raise _error(
+                    PublicErrorCode.STORAGE_CORRUPT,
+                    "The runtime admission scope is invalid.",
+                    retryable=False,
+                ) from exc
+        raise _error(
+            PublicErrorCode.STORAGE_CORRUPT,
+            "The runtime admission scope is invalid.",
+            retryable=False,
+        )
+
+    @staticmethod
+    def _capacity_error(capacity: str, current: int, limit: int) -> PublicOperationError:
+        return _error(
+            PublicErrorCode.BUNDLE_BUSY,
+            f"The runtime {capacity.replace('_', ' ')} capacity is temporarily exhausted; "
+            "release a task and retry.",
+            retryable=True,
+            safe_details={
+                # The public error contract intentionally admits only its frozen safe-detail
+                # vocabulary.  ``operation`` carries the precise capacity name in the bounded
+                # message; ``count``/``limit`` make remediation machine-actionable without
+                # smuggling an unregistered key onto the wire.
+                "reason_code": "ownership_contended",
+                "operation": capacity,
+                "count": current,
+                "limit": limit,
+            },
+        )
+
+    def _scope_capacity(
+        self,
+        scope: RuntimeScope | None,
+        *,
+        needs_writer: bool,
+    ) -> None:
+        if scope is None:
+            return
+        live = sum(entry.scope == scope for entry in self._entries.values()) + sum(
+            opening_scope == scope for opening_scope in self._opening_scopes.values()
+        )
+        repository_limit = self._policy.max_live_tasks_per_repository
+        if repository_limit is None:
+            repository_limit = self._policy.max_open_bundle_tasks
+        if live >= repository_limit:
+            raise self._capacity_error("repository_live_tasks", live, repository_limit)
+        opening = sum(opening_scope == scope for opening_scope in self._opening_scopes.values())
+        opening_limit = self._policy.max_opening_tasks_per_repository
+        if opening_limit is None:
+            opening_limit = self._policy.max_opening_tasks
+        if opening >= opening_limit:
+            raise self._capacity_error("repository_opening_tasks", opening, opening_limit)
+        if needs_writer:
+            writers = sum(
+                RuntimeCapability.WRITE in entry.authority
+                for entry in self._entries.values()
+                if entry.scope == scope
+            ) + sum(
+                task_id in self._opening_writers
+                for task_id, opening_scope in self._opening_scopes.items()
+                if opening_scope == scope
+            )
+            writer_limit = self._policy.max_writer_connections_per_repository
+            if writer_limit is None:
+                writer_limit = self._policy.max_writer_connections
+            if writers >= writer_limit:
+                raise self._capacity_error("repository_writer_connections", writers, writer_limit)
+        if scope.project is None:
+            return
+        project_live = sum(
+            entry.scope is not None and entry.scope.project == scope.project
+            for entry in self._entries.values()
+        ) + sum(
+            opening_scope is not None and opening_scope.project == scope.project
+            for opening_scope in self._opening_scopes.values()
+        )
+        project_opening = sum(
+            opening_scope is not None and opening_scope.project == scope.project
+            for opening_scope in self._opening_scopes.values()
+        )
+        project_live_limit = self._policy.max_live_tasks_per_project
+        if project_live_limit is not None and project_live >= project_live_limit:
+            raise self._capacity_error("project_live_tasks", project_live, project_live_limit)
+        project_opening_limit = self._policy.max_opening_tasks_per_project
+        if project_opening_limit is not None and project_opening >= project_opening_limit:
+            raise self._capacity_error(
+                "project_opening_tasks", project_opening, project_opening_limit
+            )
+        if needs_writer:
+            project_writers = sum(
+                RuntimeCapability.WRITE in entry.authority
+                for entry in self._entries.values()
+                if entry.scope is not None and entry.scope.project == scope.project
+            ) + sum(
+                task_id in self._opening_writers
+                for task_id, opening_scope in self._opening_scopes.items()
+                if opening_scope is not None and opening_scope.project == scope.project
+            )
+            project_writer_limit = self._policy.max_writer_connections_per_project
+            if project_writer_limit is not None and project_writers >= project_writer_limit:
+                raise self._capacity_error(
+                    "project_writer_connections", project_writers, project_writer_limit
+                )
+
+    def _schedule_opening_adoption(self, task_id: str, opening: asyncio.Task[_Entry]) -> None:
+        """Retain or discard an opening when every waiting route caller cancels.
+
+        ``_entry_for`` shields the shared opener so one cancelled client cannot interrupt a
+        sibling.  If that client is the only waiter, no caller remains to publish the completed
+        entry or remove a failed task from ``_opening``.  The done callback closes that gap while
+        checking task identity so it cannot race a normal waiter that already published it.
+        """
+
+        def _done(completed: asyncio.Task[_Entry]) -> None:
+            asyncio.create_task(
+                self._adopt_finished_opening(task_id, completed),
+                name="runtime-opening-adoption",
+            )
+
+        opening.add_done_callback(_done)
+
+    async def _adopt_finished_opening(self, task_id: str, opening: asyncio.Task[_Entry]) -> None:
+        try:
+            opened = opening.result()
+        except BaseException:
+            async with self._lock:
+                if self._opening.get(task_id) is opening:
+                    self._opening.pop(task_id, None)
+                    self._opening_access.pop(task_id, None)
+                    self._opening_scopes.pop(task_id, None)
+                    self._opening_writers.discard(task_id)
+            return
+
+        ready = True
+        try:
+            self._require_ready()
+        except PublicOperationError:
+            ready = False
+        evictions: list[_Entry] = []
+        async with self._lock:
+            if self._opening.get(task_id) is not opening:
+                return
+            self._opening.pop(task_id, None)
+            self._opening_access.pop(task_id, None)
+            self._opening_scopes.pop(task_id, None)
+            self._opening_writers.discard(task_id)
+            if self._closed or not ready:
+                opened.poisoned = True
+            else:
+                self._entries[task_id] = opened
+                self._entries.move_to_end(task_id)
+                idle = [
+                    candidate
+                    for candidate in self._entries.values()
+                    if candidate.usages == 0
+                    and candidate.pending == 0
+                    and not candidate.rebind_waiters
+                ]
+                while len(idle) > self._policy.max_idle_tasks:
+                    candidate = idle.pop(0)
+                    candidate.poisoned = True
+                    self._entries.pop(candidate.inspection.route.task_id, None)
+                    evictions.append(candidate)
+        for entry in evictions:
+            await self._close_entry(entry)
+        if opened.poisoned:
+            await self._close_entry(opened)
+
     async def _entry_for(
         self,
         inspection: _RouteInspection,
@@ -505,6 +830,8 @@ class LocalBundleRuntime(BundleRuntimePort):
     ) -> _Entry:
         task_id = inspection.route.task_id
         required_authority = self._authority_for(access)
+        scope = self._scope_for_route(inspection.route)
+        needs_writer = RuntimeCapability.WRITE in required_authority
         rebind_deadline = asyncio.get_running_loop().time() + _START_REBIND_WAIT_SECONDS
         while True:
             self._require_ready()
@@ -513,10 +840,13 @@ class LocalBundleRuntime(BundleRuntimePort):
             async with self._lock:
                 entry = self._entries.get(task_id)
                 if entry is not None and not entry.poisoned:
-                    if self._same_route(
-                        entry.inspection.route, inspection.route
-                    ) and required_authority.issubset(entry.authority):
-                        # Give an admitted foreground start a bounded chance to drain.
+                    if (
+                        self._same_route(entry.inspection.route, inspection.route)
+                        and entry.scope == scope
+                        and required_authority.issubset(entry.authority)
+                    ):
+                        # An admitted start gets a chance to drain the old session. Otherwise
+                        # repeated background reads could keep rebinding busy indefinitely.
                         if entry.rebind_waiters and provision_mode is None:
                             raise _error(
                                 PublicErrorCode.BUNDLE_BUSY,
@@ -526,6 +856,12 @@ class LocalBundleRuntime(BundleRuntimePort):
                             )
                         # Claim a pending lease before release so rebind cannot race the
                         # validate_fence window in _lease where usages is still zero.
+                        if entry.pending >= self._policy.max_pending_leases_per_task:
+                            raise self._capacity_error(
+                                "task_pending_leases",
+                                entry.pending,
+                                self._policy.max_pending_leases_per_task,
+                            )
                         entry.pending += 1
                         self._entries.move_to_end(task_id)
                         return entry
@@ -535,6 +871,7 @@ class LocalBundleRuntime(BundleRuntimePort):
                     # Block rebind while any lease is live or still validating (pending > 0).
                     if (
                         self._same_bundle_route(entry.inspection.route, inspection.route)
+                        and entry.scope == scope
                         and entry.usages == 0
                         and entry.pending == 0
                         and required_authority.issubset(entry.authority)
@@ -547,14 +884,14 @@ class LocalBundleRuntime(BundleRuntimePort):
                         if (
                             provision_mode is not None
                             and self._same_bundle_route(entry.inspection.route, inspection.route)
+                            and entry.scope == scope
                             and required_authority.issubset(entry.authority)
                         ):
-                            if entry.rebind_waiters >= _START_MAX_REBIND_WAITERS:
-                                raise _error(
-                                    PublicErrorCode.BUNDLE_BUSY,
-                                    _BUSY,
-                                    retryable=True,
-                                    safe_details={"reason_code": "runtime_rebind_busy"},
+                            if entry.rebind_waiters >= self._policy.max_pending_leases_per_task:
+                                raise self._capacity_error(
+                                    "task_pending_leases",
+                                    entry.rebind_waiters,
+                                    self._policy.max_pending_leases_per_task,
                                 )
                             entry.rebind_waiters += 1
                             waiting_entry = entry
@@ -612,14 +949,51 @@ class LocalBundleRuntime(BundleRuntimePort):
                 if rebind_entry is None:
                     opening = self._opening.get(task_id)
                     if opening is None:
-                        if len(self._entries) + len(self._opening) >= (
-                            self._policy.max_idle_tasks + self._policy.max_opening_tasks
-                        ):
-                            raise _error(PublicErrorCode.BUNDLE_BUSY, _BUSY, retryable=True)
+                        total = len(self._entries) + len(self._opening)
+                        if total >= self._policy.max_open_bundle_tasks:
+                            raise self._capacity_error(
+                                "open_bundle_tasks", total, self._policy.max_open_bundle_tasks
+                            )
+                        if needs_writer:
+                            writers = sum(
+                                RuntimeCapability.WRITE in candidate.authority
+                                for candidate in self._entries.values()
+                            ) + len(self._opening_writers)
+                            if writers >= self._policy.max_writer_connections:
+                                raise self._capacity_error(
+                                    "writer_connections",
+                                    writers,
+                                    self._policy.max_writer_connections,
+                                )
+                        self._scope_capacity(scope, needs_writer=needs_writer)
                         opening = asyncio.create_task(
-                            self._open_entry(inspection, access, provision_mode=provision_mode)
+                            self._open_entry(
+                                inspection,
+                                access,
+                                scope=scope,
+                                provision_mode=provision_mode,
+                            )
                         )
                         self._opening[task_id] = opening
+                        self._opening_access[task_id] = access
+                        self._opening_scopes[task_id] = scope
+                        if needs_writer:
+                            self._opening_writers.add(task_id)
+                        self._schedule_opening_adoption(task_id, opening)
+                    elif not required_authority.issubset(
+                        self._authority_for(self._opening_access[task_id])
+                    ):
+                        # Do not let a read-only opening be handed out as a write-capable runtime.
+                        # The caller can retry after the existing opener is published and evicted.
+                        raise _error(
+                            PublicErrorCode.BUNDLE_BUSY,
+                            "The task runtime is opening with insufficient authority; retry.",
+                            retryable=True,
+                            safe_details={
+                                "reason_code": "runtime_opening_authority",
+                                "action": "retry_after_open",
+                            },
+                        )
                 else:
                     opening = None
             if rebind_entry is not None:
@@ -627,6 +1001,9 @@ class LocalBundleRuntime(BundleRuntimePort):
                     await self._factories.validate_fence(
                         rebind_entry.inspection, rebind_entry.fence
                     )
+                    rebind_session = getattr(rebind_entry.importer, "rebind_session", None)
+                    if callable(rebind_session):
+                        rebind_session(rebind_entry.inspection.route.session_id)
                 except BaseException:
                     async with self._lock:
                         rebind_entry.pending = max(0, rebind_entry.pending - 1)
@@ -649,6 +1026,9 @@ class LocalBundleRuntime(BundleRuntimePort):
                 async with self._lock:
                     if opening.done() and self._opening.get(task_id) is opening:
                         self._opening.pop(task_id, None)
+                        self._opening_access.pop(task_id, None)
+                        self._opening_scopes.pop(task_id, None)
+                        self._opening_writers.discard(task_id)
                 raise
             ready = True
             try:
@@ -659,6 +1039,9 @@ class LocalBundleRuntime(BundleRuntimePort):
                 if self._opening.get(task_id) is not opening:
                     continue
                 self._opening.pop(task_id, None)
+                self._opening_access.pop(task_id, None)
+                self._opening_scopes.pop(task_id, None)
+                self._opening_writers.discard(task_id)
                 if self._closed or not ready:
                     opened.poisoned = True
                 else:
@@ -674,6 +1057,7 @@ class LocalBundleRuntime(BundleRuntimePort):
         inspection: _RouteInspection,
         access: RouteAccess,
         *,
+        scope: RuntimeScope | None,
         provision_mode: BundleProvisionMode | None,
     ) -> _Entry:
         async with self._opening_limit:
@@ -725,6 +1109,7 @@ class LocalBundleRuntime(BundleRuntimePort):
                     ledger,
                     importer,
                     self._authority_for(access),
+                    scope,
                 )
             except KeyStoreError as exc:
                 if (
@@ -755,11 +1140,19 @@ class LocalBundleRuntime(BundleRuntimePort):
                 raise
 
     @staticmethod
-    def _same_bundle_route(left: TaskRoute, right: TaskRoute) -> bool:
+    def _same_bundle_identity(left: TaskRoute, right: TaskRoute) -> bool:
         return (
             left.task_id == right.task_id
+            and left.bundle_relpath == right.bundle_relpath
             and left.route_generation == right.route_generation
             and left.route_identity_digest == right.route_identity_digest
+        )
+
+    @staticmethod
+    def _same_bundle_route(left: TaskRoute, right: TaskRoute) -> bool:
+        return (
+            LocalBundleRuntime._same_bundle_identity(left, right)
+            and left.repository_privacy_commitment == right.repository_privacy_commitment
         )
 
     @staticmethod
@@ -808,7 +1201,12 @@ class LocalBundleRuntime(BundleRuntimePort):
                 if RuntimeCapability.WRITE in admitted:
                     observation = _observation_for(entry.ledger)
             else:
-                ledger = cast(LedgerPort, _ReadLedger(entry.ledger))
+                ledger = cast(
+                    LedgerPort,
+                    _ReadLedger(entry.ledger)
+                    if access is RouteAccess.PAYLOAD_READ
+                    else _StructuralLedger(entry.ledger),
+                )
                 objects = cast(
                     ObjectStorePort,
                     _PayloadObjects(entry.objects)
@@ -994,6 +1392,10 @@ class LocalBundleRuntime(BundleRuntimePort):
             openings = list(self._opening.values())
             self._entries.clear()
             self._usages.clear()
+            self._opening.clear()
+            self._opening_access.clear()
+            self._opening_scopes.clear()
+            self._opening_writers.clear()
             for entry in entries:
                 entry.poisoned = True
         if openings:

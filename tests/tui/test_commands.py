@@ -8,7 +8,13 @@ import pytest
 
 from builders.tui_runtime import RECOMMEND_PRIVATE, FakeRuntime
 from yoetz.tui.app import YoetzTui
-from yoetz.tui.models import CheckMode, PrivacyPosture, ProviderOption, ProviderPosture
+from yoetz.tui.models import (
+    CheckMode,
+    PrivacyPosture,
+    ProviderOption,
+    ProviderPosture,
+    TaskStatusPage,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -524,6 +530,10 @@ async def test_provider_exposes_codex_status_disconnect_and_rollback(
         assert runtime.subscription_actions == ["status"]
         assert "Codex subscription status" in text
         assert "Auth mode: chatgpt" in text
+        assert (
+            "Review budgets: routine effort=medium output_limit=4096 tokens; "
+            "final effort=high output_limit=8192 tokens"
+        ) in text
 
         await run_command(pilot, app, "/provider")
         view = app.open_view
@@ -563,7 +573,7 @@ async def test_provider_can_switch_the_codex_account(make_app: MakeApp) -> None:
         view.filter("switch")  # type: ignore[attr-defined]
         await pilot.press("enter")
         await pilot.pause()
-        for _ in range(4):
+        for _ in range(5):  # three entries, final and routine effort
             await pilot.press("enter")
             await pilot.pause()
         view = app.open_view
@@ -596,7 +606,7 @@ async def test_provider_switch_preserves_existing_subscription_model_when_omitte
         view.filter("switch")  # type: ignore[attr-defined]
         await pilot.press("enter")
         await pilot.pause()
-        for _ in range(4):
+        for _ in range(5):  # three entries, final and routine effort
             await pilot.press("enter")
             await pilot.pause()
         await pilot.press("up")
@@ -642,7 +652,7 @@ async def test_provider_discloses_and_reports_a_reused_codex_login(make_app: Mak
         view.filter("Codex with ChatGPT subscription")  # type: ignore[attr-defined]
         await pilot.press("enter")
         await pilot.pause()
-        for _ in range(4):
+        for _ in range(5):  # three entries, final and routine effort
             await pilot.press("enter")
             await pilot.pause()
         view = app.open_view
@@ -656,6 +666,7 @@ async def test_provider_discloses_and_reports_a_reused_codex_login(make_app: Mak
         await pilot.pause()
         assert runtime.subscription_actions == ["setup"]
         assert runtime.subscription_setups[0][2] == "gpt-5.6-luna"
+        assert runtime.subscription_routine_efforts == ["medium"]
         assert "reused the existing Codex login" in transcript(app)
 
 
@@ -664,7 +675,7 @@ async def test_provider_discloses_and_reports_a_reused_codex_login(make_app: Mak
 # ---------------------------------------------------------------------------
 
 
-async def test_work_is_honest_that_no_task_index_exists(make_app: MakeApp) -> None:
+async def test_work_requests_an_explicit_session_selector(make_app: MakeApp) -> None:
     app = make_app()
     async with app.run_test(size=WIDE) as pilot:
         await pilot.pause()
@@ -673,10 +684,11 @@ async def test_work_is_honest_that_no_task_index_exists(make_app: MakeApp) -> No
         assert view is not None
         assert view.view_name == "work"
         body = "\n".join(getattr(view, "_body", ()))
-        assert "does not keep" in body
+        assert "session ID" in body
+        assert "title or workspace alone cannot select" in body
 
 
-async def test_opening_a_task_by_name_uses_the_start_operation(
+async def test_opening_a_task_passes_the_explicit_session_to_the_runtime(
     make_app: MakeApp,
 ) -> None:
     runtime = FakeRuntime()
@@ -684,14 +696,15 @@ async def test_opening_a_task_by_name_uses_the_start_operation(
     async with app.run_test(size=WIDE) as pilot:
         await pilot.pause()
         await run_command(pilot, app, "/work")
-        await pilot.press("enter")  # "Open a task by name"
+        await pilot.press("enter")  # "Open a task by session ID"
         await pilot.pause()
-        for character in "upload":
+        selector = "ses_12345678-1234-4234-8234-123456789abc"
+        for character in selector:
             await pilot.press(character)
         await pilot.press("enter")
         await pilot.pause()
-        assert runtime.opened == ["upload"]
-        assert "upload" in transcript(app)
+        assert runtime.opened == [selector]
+        assert selector in transcript(app)
 
 
 async def test_check_offers_the_three_modes_and_passes_the_chosen_one_through(
@@ -714,6 +727,69 @@ async def test_check_offers_the_three_modes_and_passes_the_chosen_one_through(
         await pilot.press("down", "down", "enter")  # local only
         await pilot.pause()
         assert runtime.checks == [("upload", CheckMode.DETERMINISTIC_ONLY)]
+
+
+async def test_check_shows_live_review_progress_until_the_result_arrives(
+    make_app: MakeApp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #571 A2: a waiting check shows its structural phase, then its verdict."""
+
+    import asyncio
+
+    class _SlowCheckRuntime(FakeRuntime):
+        def __init__(self) -> None:
+            super().__init__()
+            self.release = asyncio.Event()
+
+        async def run_check(self, title: str, mode: CheckMode) -> tuple[str, tuple[str, ...]]:
+            self.checks.append((title, mode))
+            await self.release.wait()
+            return "pass", ("Verdict: pass",)
+
+        async def check_progress(self, title: str) -> TaskStatusPage:
+            page = await super().check_progress(title)
+            self.release.set()
+            return page
+
+    runtime = _SlowCheckRuntime()
+    app = make_app(runtime=runtime)
+    app.progress_poll_seconds = 0.0
+    app._active_task_title = "upload"  # pyright: ignore[reportPrivateUsage]
+    settled: list[tuple[str, tuple[str, ...]]] = []
+    original_settle = app.settle
+
+    def record_settle(level: object, title: str, body: object = (), **kwargs: object) -> object:
+        settled.append((title, tuple(body)))  # type: ignore[arg-type]
+        return original_settle(level, title, body, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(app, "settle", record_settle)
+    async with app.run_test(size=WIDE) as pilot:
+        await pilot.pause()
+        await run_command(pilot, app, "/check")
+        await pilot.press("down", "down", "enter")  # local only
+        await pilot.pause()
+        await pilot.pause()
+        assert runtime.progress_reads == ["upload"]
+        assert (
+            "Checking upload (local checks only)",
+            (
+                "Semantic review phase: provider_sampling (attempt 1, active)",
+                "Semantic review elapsed: 42s; remaining 858s; deadline 2026-09-22T12:15:00.000Z",
+            ),
+        ) in settled
+        assert "Check complete: pass" in transcript(app)
+
+
+async def test_progress_command_reads_the_latest_check_operation(make_app: MakeApp) -> None:
+    runtime = FakeRuntime()
+    app = make_app(runtime=runtime)
+    app._active_task_title = "upload"  # pyright: ignore[reportPrivateUsage]
+    async with app.run_test(size=WIDE) as pilot:
+        await pilot.pause()
+        await run_command(pilot, app, "/progress")
+        assert runtime.progress_reads == ["upload"]
+        text = transcript(app)
+        assert "Semantic review phase: provider_sampling (attempt 1, active)" in text
 
 
 async def test_receipt_offers_the_supported_formats(make_app: MakeApp) -> None:

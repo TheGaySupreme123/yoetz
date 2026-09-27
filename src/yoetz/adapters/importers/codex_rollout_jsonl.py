@@ -177,7 +177,7 @@ CODEX_ROLLOUT_COMPATIBLE_VERSION_TOKEN: Final = "compatible"
 CODEX_ROLLOUT_COMPATIBLE_PROFILE_ID: Final = "codex-rollout-jsonl/compatible/v1"
 # Wrapper families that only the compatibility profile admits (issue #754). ``token_usage_record``
 # is per-turn accounting telemetry a real Codex 0.153.4 multi-agent v2 transcript emits on every
-# turn. Yoetz reads no structural field from it, so admitting the family turns
+# turn (fixture IMP-015). Yoetz reads no structural field from it, so admitting the family turns
 # a per-line coverage gap into a bounded ignored line. It stays out of every exact profile: no
 # certified release has been proven to emit it.
 _COMPATIBLE_ONLY_WRAPPER_TYPES: Final = ("token_usage_record",)

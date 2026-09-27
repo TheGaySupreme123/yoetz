@@ -144,6 +144,8 @@ def test_claim_revision_text_without_an_invariant_keeps_the_reason_clause() -> N
         ("supporting_refs", "supporting_refs_must_exclude_limitations"),
         ("disputes_refs", "replacement_must_not_dispute"),
         ("obligation_refs", "scope_overlap_required"),
+        ("obligation_refs", "completion_scope_must_be_explicit"),
+        ("obligation_refs", "empty_scope_must_not_support_obligations"),
         ("supersedes_claim_refs", "replacement_must_change_effective_claim"),
         ("supersedes_claim_refs", "superseded_claim_must_be_effective"),
         ("supersedes_claim_refs", "superseded_claim_must_exist"),
@@ -161,6 +163,12 @@ def test_claim_revision_registered_pairs_survive_max_pointer_budget(
     assert f"Invariant: {invariant}." in summary
     assert "Correction:" in summary
     assert len(summary.encode("ascii")) <= 512
+    if invariant in {
+        "completion_scope_must_be_explicit",
+        "empty_scope_must_not_support_obligations",
+    }:
+        assert "fresh claim_id" in summary
+        assert "supersedes_claim_refs" in summary
 
 
 def _text(result: types.CallToolResult) -> str:

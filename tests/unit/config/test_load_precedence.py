@@ -63,6 +63,24 @@ payloads = false
     assert config.storage.data_dir == Path("/env/data")
 
 
+def test_lineage_bounds_use_the_same_leaf_precedence(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+[lineage]
+max_depth = 4
+max_fanout = 12
+"""
+    )
+    config = load_config(
+        {"lineage.max_depth": "6"},
+        {"YOETZ_LINEAGE_MAX_FANOUT": "16"},
+        config_path,
+    )
+    assert config.lineage.max_depth == 6
+    assert config.lineage.max_fanout == 16
+
+
 def test_shadowed_lower_precedence_scalar_is_not_parsed(tmp_path: Path) -> None:
     config = load_config(
         {"verification.max_findings": "7"},

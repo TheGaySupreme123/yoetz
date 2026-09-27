@@ -5,6 +5,13 @@ back to a fully verified, restored pre-migration backup in a new target where co
 proven** — it is never reverse SQL, a binary downgrade, or copying an old database over the active
 bundle.
 
+For a supported package update from 0.2 to 0.3, the fresh service owns the compatible bundle
+schema transition during controlled startup: it takes the verified backup first, applies the
+registered forward migration, verifies the preserved frontier and replay, and only then becomes
+READY. That normal path needs no per-task approval ceremony. Use this runbook for an explicit
+backup, restore, or ad-hoc migration, or when startup reports an unsupported, interrupted, or
+ambiguous upgrade that requires operator-controlled recovery.
+
 ## 1. Scope and compatibility decision
 
 Before migrating, confirm the exact current/candidate package, platform, SQLite, resource, and

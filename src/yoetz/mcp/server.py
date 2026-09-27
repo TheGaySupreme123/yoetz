@@ -111,6 +111,7 @@ from yoetz.service.client import (
     accepted_but_unresponsive,
     connect_service,
     connect_service_on_demand,
+    holder_version_order,
     service_holder_identity,
 )
 
@@ -369,6 +370,12 @@ def _runtime_launcher_from_argv() -> tuple[str, ...] | None:
     if serve_index is None or not argv[:serve_index]:
         return None
     prefix = argv[:serve_index]
+    from yoetz.adapters.release_runtime import original_module_launcher
+
+    original = original_module_launcher(Path(prefix[0]))
+    if original is not None:
+        prefix = (*original, *prefix[1:])
+        return prefix if _valid_runtime_launcher(prefix) else None
     try:
         package_main = (Path(__file__).resolve().parents[1] / "__main__.py").resolve(strict=True)
         first = Path(prefix[0]).resolve(strict=True)
@@ -1475,6 +1482,14 @@ def _control_error_result(
             operation,
             code=PublicErrorCode.SERVICE_UNAVAILABLE,
             message=(
+                "Yoetz was updated while this session was open, and a newer session already "
+                "switched the local service to the new version, which this session's older "
+                "bridge cannot use. Ask the user to reopen this session (or restart the agent "
+                "app); the new version then attaches automatically. Retry this operation with "
+                "the same request_id after that. Do not run service lifecycle commands for this."
+            )
+            if _holder_is_newer_than_bridge()
+            else (
                 "The running local Yoetz service belongs to a different Yoetz installation than "
                 "this bridge (control schema-manifest or protocol mismatch), and the bridge could "
                 "not replace it within its startup budget. On a local terminal run "
@@ -1652,6 +1667,16 @@ def _mutable_json(value: object) -> object:
         source_sequence = cast(tuple[object, ...] | list[object], value)
         return [_mutable_json(item) for item in source_sequence]
     return value
+
+
+def _holder_is_newer_than_bridge() -> bool:
+    """True when the stamped holder runs a newer package: this bridge predates an update."""
+
+    try:
+        holder = service_holder_identity()
+    except Exception:
+        return False
+    return holder is not None and holder_version_order(holder.service_version) == "newer"
 
 
 def _holder_snapshot() -> tuple[int, str | None, str | None, str | None] | None:

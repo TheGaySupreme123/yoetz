@@ -161,6 +161,7 @@ class _FileStageHandle:
     store_token: object
     temp_path: Path
     final_path: Path
+    preexisting: bool = False
 
 
 @dataclass(slots=True)
@@ -206,7 +207,13 @@ class EncryptedFilesObjectStore:
             raise ValueError("invalid_object_kind")
         return self._keys.commitment_key.mac(OBJECT_COMMITMENT_DOMAINS[kind], data)
 
-    async def stage(self, source: ObjectSource, metadata: ObjectMetadata) -> StagedObject:
+    async def stage(
+        self,
+        source: ObjectSource,
+        metadata: ObjectMetadata,
+        *,
+        object_id: str | None = None,
+    ) -> StagedObject:
         if type(source) is not ObjectSource or type(metadata) is not ObjectMetadata:
             raise ValueError("invalid_object_stage")
         if metadata.kind is ObjectKind.IMPORT_STDERR:
@@ -214,8 +221,72 @@ class EncryptedFilesObjectStore:
         plaintext = await read_object_source(source)
         with self._lock:
             self._prepare_directories()
-            object_id = self._allocate_object_id()
-            final_path = self._path_for(object_id)
+            if object_id is not None:
+                try:
+                    validate_id(IdKind.OBJECT, object_id)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("object_id_invalid") from exc
+                final_path = self._path_for(object_id)
+                if final_path.exists():
+                    try:
+                        frame = self._read_private_file(final_path)
+                        envelope = decode_object_envelope(frame)
+                        header = envelope.header
+                        if (
+                            header.object_id != object_id
+                            or header.object_kind is not metadata.kind
+                            or header.media_type != metadata.media_type
+                            or header.task_id != metadata.task_id
+                            or header.plaintext_size != len(plaintext)
+                        ):
+                            raise ValueError("object_destination_collision")
+                        commitment = self._keys.commitment_key.mac(
+                            OBJECT_COMMITMENT_DOMAINS[metadata.kind], plaintext
+                        )
+                        ref = ObjectRef(
+                            object_id=object_id,
+                            plaintext_size=header.plaintext_size,
+                            commitment=commitment,
+                            envelope_digest=f"sha256:{hashlib.sha256(frame).hexdigest()}",
+                            encryption_format=header.encryption_format,
+                            key_slot=header.key_slot,
+                            metadata=ObjectMetadata(
+                                header.object_kind,
+                                header.media_type,
+                                header.task_id,
+                                header.created_at_datetime,
+                            ),
+                        )
+                        observed = await self._open_verified_bytes(ref)
+                        if observed != plaintext:
+                            raise ValueError("object_destination_collision")
+                    except (TypeError, ValueError) as exc:
+                        if str(exc) == "object_destination_collision":
+                            raise
+                        raise ValueError("object_destination_collision") from exc
+                    handle = _FileStageHandle(
+                        self._token,
+                        final_path,
+                        final_path,
+                        preexisting=True,
+                    )
+                    staged = StagedObject(
+                        object_id=ref.object_id,
+                        plaintext_size=ref.plaintext_size,
+                        commitment=ref.commitment,
+                        envelope_digest=ref.envelope_digest,
+                        encryption_format=ref.encryption_format,
+                        key_slot=ref.key_slot,
+                        metadata=ref.metadata,
+                        staging_handle=handle,
+                    )
+                    self._stages[id(handle)] = _StageState(staged, finalized=ref)
+                    return staged
+                if any(self._staging_root.glob(f"{object_id}.*.tmp")):
+                    raise OSError("object_destination_collision")
+            else:
+                object_id = self._allocate_object_id()
+                final_path = self._path_for(object_id)
             payload_nonce = os.urandom(12)
             commitment = self._keys.commitment_key.mac(
                 OBJECT_COMMITMENT_DOMAINS[metadata.kind], plaintext
@@ -279,6 +350,10 @@ class EncryptedFilesObjectStore:
         with self._lock:
             state, handle = self._state_for(staged)
             if state.abandoned:
+                return
+            if handle.preexisting:
+                # A reserved retry may have resolved an already-finalized object.  That object is
+                # owned by the prior attempt and must remain available to the journal replay.
                 return
             self._prepare_directories()
             failures: list[OSError] = []

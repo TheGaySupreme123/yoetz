@@ -15,6 +15,8 @@ from typing import Final, Literal
 
 from yoetz.config.load import load_config, validate_config_mapping
 from yoetz.config.models import (
+    CODEX_FINAL_OUTPUT_LIMIT_DEFAULT,
+    CODEX_ROUTINE_OUTPUT_LIMIT_DEFAULT,
     CODEX_SUBSCRIPTION_ENDPOINT_PROFILE_ID,
     CODEX_SUBSCRIPTION_PROVIDER_ID,
     ConfigError,
@@ -195,7 +197,7 @@ PROVIDER_PRESETS: Final[Mapping[str, ProviderPreset]] = MappingProxyType(
                 "anthropic/claude-opus-5",
                 "anthropic/claude-fable-5",
                 "google/gemini-3.6-flash",
-                "x-ai/grok-4.5",
+                "x-ai/grok-4.6",
             ),
         ),
         "grok": ProviderPreset(
@@ -206,9 +208,10 @@ PROVIDER_PRESETS: Final[Mapping[str, ProviderPreset]] = MappingProxyType(
             _XAI_CAPABILITY,
             "api.x.ai",
             "/v1",
-            "grok-4.5",
+            "grok-4.6",
             "chat_completions",
             (
+                "grok-4.6",
                 "grok-4.5",
                 "grok-4.3",
                 "grok-4.20-0309-reasoning",
@@ -231,7 +234,7 @@ PROVIDER_PRESETS: Final[Mapping[str, ProviderPreset]] = MappingProxyType(
                 "openai/gpt-5.6-sol",
                 "openai/gpt-5.6-terra",
                 "openai/gpt-5.6-luna",
-                "xai/grok-4.5",
+                "spacexai/grok-4.6",
                 "google/gemini-3.6-flash",
             ),
         ),
@@ -422,10 +425,17 @@ def codex_subscription_runtime(
     codex_home: str,
     model: str,
     reasoning_effort: str,
-    timeout_seconds: int = 120,
+    timeout_seconds: int = 900,
     max_retries: int = 2,
+    routine_reasoning_effort: str | None = None,
+    routine_output_limit: int = CODEX_ROUTINE_OUTPUT_LIMIT_DEFAULT,
+    final_output_limit: int = CODEX_FINAL_OUTPUT_LIMIT_DEFAULT,
 ) -> ExternalRuntimeProfileConfig:
-    """Build the exact nonsecret Codex app-server subscription binding."""
+    """Build the exact nonsecret Codex app-server subscription binding.
+
+    ``reasoning_effort`` is the final-profile effort. ``routine_reasoning_effort=None`` keeps the
+    legacy single-effort behavior for routine checks; setup passes an explicit value.
+    """
 
     return ExternalRuntimeProfileConfig(
         provider_id=CODEX_SUBSCRIPTION_PROVIDER_ID,
@@ -446,7 +456,21 @@ def codex_subscription_runtime(
         reasoning_effort=reasoning_effort,
         timeout_seconds=timeout_seconds,
         max_retries=max_retries,
+        routine_reasoning_effort=routine_reasoning_effort,
+        routine_output_limit=routine_output_limit,
+        final_output_limit=final_output_limit,
     )
+
+
+def _codex_review_budget_fields(runtime: ExternalRuntimeProfileConfig) -> dict[str, object]:
+    fields: dict[str, object] = {}
+    if runtime.routine_reasoning_effort is not None:
+        fields["routine_reasoning_effort"] = runtime.routine_reasoning_effort
+    if runtime.routine_output_limit != CODEX_ROUTINE_OUTPUT_LIMIT_DEFAULT:
+        fields["routine_output_limit"] = runtime.routine_output_limit
+    if runtime.final_output_limit != CODEX_FINAL_OUTPUT_LIMIT_DEFAULT:
+        fields["final_output_limit"] = runtime.final_output_limit
+    return fields
 
 
 def _escape_basic(value: str) -> str:
@@ -511,6 +535,17 @@ def render_config_toml(config: YoetzConfig) -> str:
     _emit_table(lines, "observation", {"enabled": config.observation.enabled})
     _emit_table(
         lines,
+        "lineage",
+        {
+            "start_lease_seconds": config.lineage.start_lease_seconds,
+            "attach_handle_ttl_seconds": config.lineage.attach_handle_ttl_seconds,
+            "contact_lost_recovery_seconds": config.lineage.contact_lost_recovery_seconds,
+            "max_depth": config.lineage.max_depth,
+            "max_fanout": config.lineage.max_fanout,
+        },
+    )
+    _emit_table(
+        lines,
         "logging",
         {"level": config.logging.level, "payloads": config.logging.payloads},
     )
@@ -564,6 +599,9 @@ def render_config_toml(config: YoetzConfig) -> str:
                 "reasoning_effort": runtime.reasoning_effort,
                 "timeout_seconds": runtime.timeout_seconds,
                 "max_retries": runtime.max_retries,
+                # Phase-aware budget keys are emitted only when they carry an explicit choice,
+                # so a legacy binding rewritten by an unrelated command stays byte-compatible.
+                **_codex_review_budget_fields(runtime),
             },
         )
 

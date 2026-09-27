@@ -105,6 +105,37 @@ def test_exact_scanner_reuses_shared_sensitive_content_detectors() -> None:
     assert kinds == (ForbiddenDataKind.API_CREDENTIAL,)
 
 
+def test_source_denial_cannot_be_overridden_by_recipient_self_authorship() -> None:
+    candidate = CandidateContext(
+        request_id=_REQUEST,
+        channel=None,
+        local_sink=LocalDisclosureSink.AGENT_CONTEXT,
+        purpose="client-result-projection",
+        scope=_scope(),
+        subject_digest=_DIGEST,
+        provider_binding=None,
+        items=(
+            CandidateContextItem(
+                "source-denied",
+                DataCategory.FINDING_SUMMARY,
+                _scope(),
+                "/page/title",
+                b"null",
+                source_disclosure_permitted=False,
+            ),
+        ),
+        provenance_context=_provenance_context(),
+    )
+    enforcer = LocalPrivacyEnforcer(
+        provenance_resolver=_Provenance({"source-denied": DisclosureProvenance.SELF_AUTHORED})
+    )
+    classified = enforcer.classify(candidate, _effective())
+    assert not classified.items[0].scope_valid
+    decision = _decision(classified)
+    assert decision.approved_item_ids == ()
+    assert DataCategory.FINDING_SUMMARY in decision.blocked_categories
+
+
 def test_classification_is_scope_bound_and_source_never_send_is_absolute() -> None:
     candidate = CandidateContext(
         request_id=_REQUEST,

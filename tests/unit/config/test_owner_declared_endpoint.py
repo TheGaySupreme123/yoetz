@@ -307,9 +307,10 @@ def test_provider_model_catalog_matches_august_2026_review() -> None:
             "anthropic/claude-opus-5",
             "anthropic/claude-fable-5",
             "google/gemini-3.6-flash",
-            "x-ai/grok-4.5",
+            "x-ai/grok-4.6",
         ),
         "grok": (
+            "grok-4.6",
             "grok-4.5",
             "grok-4.3",
             "grok-4.20-0309-reasoning",
@@ -321,7 +322,7 @@ def test_provider_model_catalog_matches_august_2026_review() -> None:
             "openai/gpt-5.6-sol",
             "openai/gpt-5.6-terra",
             "openai/gpt-5.6-luna",
-            "xai/grok-4.5",
+            "spacexai/grok-4.6",
             "google/gemini-3.6-flash",
         ),
     }

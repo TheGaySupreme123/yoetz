@@ -2,9 +2,12 @@
 
 **Status:** Proposed for issue #687; the maintainer requested the complete implementation in one
 draft PR on 2026-09-10. Product direction is acknowledged; measured performance acceptance and
-the larger-profile rollout remain review decisions on that issue.
+the larger-profile rollout remain review decisions on that issue. Amended 2026-09-24 for #828
+(configurable capacity policy, custom counts, and the typed no-Yoetz-cap outcome) and 2026-09-25
+for #843 (a finite over-target drain bound that keeps accounting writable) and #836
+(stranded capture handoffs are reconciled as admission-independent maintenance).
 
-**Relates to:** ADR-009, ADR-010, ADR-014, ADR-016, ADR-022, and issue #687.
+**Relates to:** ADR-009, ADR-010, ADR-014, ADR-016, ADR-022, and issues #687, #753, #828, and #843.
 
 ## Context
 
@@ -48,6 +51,17 @@ Its durable identity binds every represented input identity and source position.
 the actual represented inputs and completed calls; they are not estimates of discarded traffic.
 Summaries cannot cross workspace, routed task/session/writer, host session, delegate, source,
 source generation, consent generation, restart, or material subject-state boundaries.
+
+One definition decides whether a routine read succeeded. The classifier resolves it from the host
+payload and records that decision on the envelope; a later caller re-derives the same state from
+the fields the envelope retains rather than applying a second, stricter rule to a lossy copy of
+them. Where the two disagreed, the buffer admitted an input the summary then refused (issue #753).
+
+Refusing to summarize a buffered lane is an accounting loss for that lane alone. Its members are
+still accepted observations: they are admitted individually with the durable
+`routine_summary_invalid` coverage gap, the remaining lanes commit, and the buffer drains. The
+workspace retains one bounded, deduplicated account of the refused lane so the cause is named
+once. An invariant failure while summarizing must never stop ingestion for the session.
 
 The pending representation and source cursor commit together. A replayable input cannot advance
 past an input for which neither an individual record nor its summary account is durable.
@@ -107,6 +121,29 @@ event, a task binding, or a zero-backlog proof. Missing mappings and unreadable 
 routes remain unknown and are retried without requiring another hook. A healthy proven workspace
 does not request another recovery scan.
 
+A known inventory can still hold one stranded handoff: a ticket and reservation whose structural
+row was already acknowledged or quarantined, so nothing will consume it. Its age alone held the
+oldest-age dimension at the hard limit with an empty queue, closing admission and content for the
+whole workspace until an unrelated authority change (#836). A handoff at least 30 seconds old is
+therefore also maintenance demand. After inventory is known, the same sweep turn opens at most
+eight owning task routes through the catalog, oldest first, and retires a handoff only when current
+authority no longer backs it or no outbox row or selected input can still deliver its row. The
+ordering (structural rows read before tickets, under the capture lock) cannot retire a handoff that
+is about to be consumed. Genuinely pending handoffs keep their pressure: this does not relax the
+pending-age limit, raise a capture ceiling, or clear pressure directly. Once the stranded age is
+gone, hard admission reopens at once and optional detail follows the unchanged recovery dwell. The
+coordinator rotates a bounded per-workspace cursor through that deterministic candidate order after
+each attempted batch, so an unavailable prefix cannot starve a later route. The cursor is only a
+scheduling hint and does not change route, task, or capture authority.
+
+Retirement accounting is a durable boundary before destructive cleanup. The local
+`content_capture_unavailable` marker and payload-free retirement record commit under the stable
+ticket identity before the ticket is tombstoned or its central reservation is released. A failure
+or cancellation leaves the handoff active and retryable. A retry reuses the ticket identity and
+does not duplicate the loss count or diagnostic when accounting already committed before the
+failure. Replay identities for tickets with active reservations are pinned within the bounded
+outstanding-ticket set, so repeated retirement failures cannot evict an accounted handoff's key.
+
 A sweep rotates through at most four workspace candidates with a shared five-second cooperative
 recovery budget inside its ordinary sweep budget. A workspace turn rotates through at most eight
 existing session candidates, then performs at most one complete inventory bootstrap. Session
@@ -158,7 +195,8 @@ Detailed and larger capacity default to a current-session override. Workspace pe
 explicit owner choice. A preview precedes non-default authority and describes scope, expiry,
 finite budgets, and increased storage and processing costs. Expiry, revoke, reset, and lowering a
 setting affect future admission. Accepted records drain under a finite over-target transition;
-they are not deleted to make occupancy match a lower selection.
+they are not deleted to make occupancy match a lower selection. The transition's byte bound is
+defined in the #843 amendment below.
 
 Selection is local operational state under ADR-014, not an artifact replacement or a privacy
 grant. The preview binds the requested detail, capacity, exact scope and expiry to an acceptance
@@ -217,3 +255,147 @@ baseline, proposed numerical targets, measured profile budgets, native-host acce
 remaining limits before this draft is marked ready. Larger profiles are not validated merely by
 passing a count-boundary unit test. No live installation or private corpus is changed by the
 implementation or its synthetic benchmarks.
+
+## Amendment — configurable capacity policy, custom counts and the no-Yoetz-cap outcome (2026-09-24, #828)
+
+Issue #828 asks for explicit larger, custom and no-Yoetz-cap choices for multi-agent capacity,
+each with a resource and cost disclosure on the terminal interface, the CLI and agent guidance.
+This amendment delivers the local structural observation queue dimension end to end and records
+the policy for the other dimensions. It does not change any default.
+
+### Capacity dimensions
+
+| Dimension | Owner-selectable finite values | No Yoetz cap | Status |
+| --- | --- | --- | --- |
+| Structural observation queue | `standard` 512, `larger` 2,048, `largest` 8,192, or `custom` 64..8,192 rows | Unsupported: typed `capacity_no_cap_unsupported`, reason `state_document_ceiling` | Implemented |
+| Pending pre/post pairs | Fixed at 256 | Unsupported | Unchanged |
+| Native capture lane | Fixed at 512 tickets / 128 MiB per workspace | Unsupported | Unchanged |
+| AI-powered review input, output and spend | Hard product constants and privacy-policy fields only | Unsupported: provider and egress ceilings still apply | Out of scope; a separate privacy/egress design change |
+
+A custom count uses the same byte ladder as the three profiles. For a queue count `N`:
+
+- queue bytes are `N × 1 KiB`;
+- the aggregate state document is `max(1 MiB, 2 × queue bytes)`, never above the 16 MiB
+  `STATE_DOCUMENT_CEILING_BYTES` safety ceiling that the local store also enforces;
+- the protected reserve is `max(64, N / 4)` rows and `max(128 KiB, queue bytes / 4)`, each capped
+  at half the queue so a small custom count still admits unprotected rows;
+- the per-session fair share is `max(1, N / 4)` rows and `max(1, queue bytes / 4)` bytes.
+
+The 512, 2,048 and 8,192 profiles produce exactly the limits in the profile table in Capacity,
+pressure, and setting lifetime. The pending-pair,
+capture, diagnostic, optional-detail and pressure-threshold values are the same for every count.
+
+### No Yoetz cap
+
+The local observation state is one document that is re-encoded on every save. Its 16 MiB safety
+ceiling is a product quota that would defeat any "unlimited" queue selection downstream, so this
+storage revision does not offer an uncapped structural queue. A no-cap request is still accepted
+as input on preview and apply and answered with the non-retryable typed outcome
+`capacity_no_cap_unsupported` (`invalid_request` class). The outcome names the state-document
+ceiling and the largest supported finite capacity (8,192 rows, `--capacity largest` or
+`--capacity custom --queue-count 8192`) and changes nothing. Status projects the same availability
+as the closed `no_cap` object. No surface may label a setting unlimited while this ceiling or a
+provider limit applies. Incremental persistence of the state document is the prerequisite for
+revisiting this and is not part of this amendment.
+
+### Explicit increases and one disclosure contract
+
+No capacity increase happens automatically, and ordinary task permission never authorizes one. Every
+change goes through the existing preview and digest-bound apply. The preview carries the closed
+`yoetz.capacity-change-disclosure/1` record: dimension, scope, change (`increase`, `decrease`,
+`unchanged` or `unsupported`), current and requested counts with their queue and state byte limits,
+closed consequence tokens, the limits that still apply, the unchanged
+content/privacy/provider/credential/network authority, the lower, revoke, pause and resume commands,
+and `validation_status: not_validated`. Every command in the disclosure and every `next_command`
+uses the literal `<workspace>` and `<session-id>` placeholders rather than the typed path or session
+id. The CLI human output and the terminal interface render that record through one shared renderer,
+and agent guidance tells agents to relay those lines, so the three surfaces cannot drift. An
+increase names possible disk, memory and CPU use and possible slowdown of Yoetz or other apps, and
+carries the consequence token `workspace_aggregate_raised` with the line that the shared workspace
+queue follows the largest active selection, so it can raise the queue and state-document bounds for
+every session in the workspace. A decrease affects future admission only; accepted records drain and
+are not deleted. The preview digest binds the requested queue count and the change token, but not
+live pressure. The selection-preview payload schema tag is `yoetz.observation-selection-preview/2`.
+The CLI no-cap failure is a standard ADR-030 failure: `error.recovery` carries the continuation and
+directive, and `error.capacity` carries the facts as `{no_cap, alternative_command}`.
+
+Status and the local control projection add a `yoetz.observation-effective-budget/1` record: the
+selected and effective counts and labels, why they differ (`selected` or `workspace_aggregate`),
+every finite limit, the limiting dimension and its utilization, and the no-cap availability. MCP
+status stays read-only and does not expose or change capacity; an agent relays a change only after
+the owner accepts the displayed preview through the local CLI or terminal interface.
+
+The shared workspace queue is the largest of the active workspace setting's count (or the 512
+default when none is active) and every active session selection's count. A session selection can
+raise that aggregate but never lower it, so a session-scoped custom count below 512 lowers only
+that session's own admission and never a sibling's.
+
+### Defaults, allocation and upgrade
+
+Focused with `standard` (512) remains the default. The benchmark phase in
+[the performance runbook](../runbooks/observation-selection-performance.md) still owns any default
+change, and the custom ladder has not been measured.
+
+The intended multi-agent allocation model is a per-task reservation plus a shared burst pool.
+That model is recorded as direction only; per-session fair share remains the implemented
+allocation.
+
+Saved selections are preserved across upgrade and the settings document keeps the queue count as
+an integer. Local control schema `2.9.0` accepts custom counts, capacity labels and the
+effective-budget record; both peers must run the `2.9.0` manifest to exchange them. An older
+revision reading a saved custom count treats it as malformed, drops that selection to the default,
+and does not report the drop. That is a disclosed limitation of downgrade, not a supported path.
+
+## Amendment — a finite over-target drain keeps accounting writable (2026-09-25, #843)
+
+### Problem
+
+Lowering, revoking or letting a larger selection expire, or ending the session that held it, can
+leave the state document above the 1 MiB fallback. The store used the current file size as the
+byte bound for that drain. Accepted rows were kept, but no write could grow the file. Accounting
+for refused input (`outbox_overflow`, `observation_input_loss`), delivery-attempt metadata, and
+a local session end all failed as `storage_unsafe`. A hook's capture batch rolled back with them,
+so the hook reported a refusal as accounted when it was not. The native `SessionEnd` hook
+discarded the failure, so the session and its temporary override stayed active.
+
+### Decision
+
+While accepted rows exceed the lowered selection, a write that does not fit the ordinary bound
+may use a finite over-target bound. Accepted rows exceed the selection when their count is above
+its queue count or their admission bytes are above its queue bytes. The bound is:
+
+- the selected state bytes;
+- plus the persisted bytes of accepted pending rows and buffered inputs above the selected queue
+  bytes;
+- plus a fixed 128 KiB accounting reserve;
+- never above the 16 MiB `STATE_DOCUMENT_CEILING_BYTES` and never below the current file size.
+
+Accepted rows carry their own persisted bytes, including delivery-attempt metadata. Everything
+else has the lowered selection's non-queue budget plus the reserve, including loss and lifecycle
+accounting. That accounting is count-bounded (at most 256 session gap maps and 64 loss ranges),
+so recording refusals cannot raise the bound. Only admission and drain change accepted rows, and
+admission is closed while the queue is over target. The bound shrinks as rows drain. It ends when
+they fit the selected target, and the ordinary bound applies again.
+
+The bound is never used outside an over-target transition. An ordinary full queue keeps the
+standard retention ladder, and the standard pressure seam is unchanged. Retention still trims
+disposable classes to the bound first. When protected state cannot fit even then, the write
+still fails without replacing the previous durable state. Landing within the over-target bound
+is not evidence of health: an active truncation gap clears only with headroom under the ordinary
+bound.
+
+Admission is unchanged. New host input, including protected and lifecycle observations, is
+refused and accounted while accepted rows exceed the selected target. The 600-rows-over-512
+backlog still reports `outbox_overflow` and keeps its rows.
+
+A `SessionEnd` hook whose local session end still cannot persist stays fail-open. It prints
+`hook_observe_degraded: session_end_unrecorded` and records the bounded `session_end_unrecorded`
+hook diagnostic instead of discarding the failure.
+
+### Unchanged
+
+No wire field or schema changes. Status keeps reporting the lowered selection's limits. The
+transition shows as over-100% utilization with `pressure_state: hard_limit`, beside the queue
+counts and bytes, gaps, and loss accounting. The per-write cost of a large state document is also
+unchanged: each acknowledgement during a 2 MiB drain rewrites the whole document. Incremental
+persistence remains the prerequisite for revisiting that.

@@ -232,7 +232,13 @@ async def test_repair_rebinds_a_stranded_v1_binding_keeping_login_and_every_choi
     env: _Env,
 ) -> None:
     ordinary_npm = env.executable("npm-prefix/codex", _NEWER)
-    stranded = env.binding(ordinary_npm, **_V1)
+    stranded = env.binding(
+        ordinary_npm,
+        routine_reasoning_effort="low",
+        routine_output_limit=2048,
+        final_output_limit=6000,
+        **_V1,
+    )
     env.write_config(stranded)
     evaluator = env.executable("separate-prefix/codex")
 
@@ -261,6 +267,8 @@ async def test_repair_rebinds_a_stranded_v1_binding_keeping_login_and_every_choi
     assert (repaired.model, repaired.reasoning_effort) == ("gpt-5.6-sol", "xhigh")
     assert (repaired.timeout_seconds, repaired.max_retries) == (37, 0)
     assert repaired.codex_home == stranded.codex_home
+    assert repaired.routine_reasoning_effort == "low"
+    assert (repaired.routine_output_limit, repaired.final_output_limit) == (2048, 6000)
     assert result["login_reused"] is True
     assert result["state_before"] == "codex_runtime_executable_changed"
     assert env.codex.logins == [] and env.codex.logouts == []
@@ -526,8 +534,18 @@ def test_rebinding_preserves_timeout_and_retry_budgets(env: _Env) -> None:
     )
 
 
-async def test_setup_rerun_preserves_budgets_and_effort_defaults(env: _Env) -> None:
-    env.write_config(env.binding(env.executable("npm-prefix/codex")))
+@pytest.mark.parametrize("routine_effort", [None, "low"])
+async def test_setup_rerun_preserves_budgets_and_effort_defaults(
+    env: _Env, routine_effort: str | None
+) -> None:
+    env.write_config(
+        env.binding(
+            env.executable("npm-prefix/codex"),
+            routine_reasoning_effort=routine_effort,
+            routine_output_limit=2048,
+            final_output_limit=6000,
+        )
+    )
     assert module.default_codex_subscription_reasoning_effort(env.config_path) == "xhigh"
     assert module.default_codex_subscription_model(env.config_path) == "gpt-5.6-sol"
 
@@ -545,6 +563,8 @@ async def test_setup_rerun_preserves_budgets_and_effort_defaults(env: _Env) -> N
     bound = env.written().external_runtime
     assert bound is not None
     assert (bound.timeout_seconds, bound.max_retries, bound.reasoning_effort) == (37, 0, "xhigh")
+    assert bound.routine_reasoning_effort == routine_effort
+    assert (bound.routine_output_limit, bound.final_output_limit) == (2048, 6000)
     assert bound.executable_path == str(env.managed)
 
 

@@ -196,7 +196,7 @@ def instance_status(*, now: datetime | None = None) -> dict[str, JsonValue]:
         "mode": report["mode"],
         "binding": report["binding"],
         "lifecycle": report["lifecycle"],
-        "identity": cast(JsonValue, dict(report["identity"])),
+        "path_identity": cast(JsonValue, dict(report["path_identity"])),
         "runtime_package_version": __version__,
         "runtime_prefix_digest": runtime_prefix_digest(Path(sys.prefix)),
         "runtime_pin": "bound" if runtime_pin_path().is_file() else "none",
@@ -340,12 +340,20 @@ def dispose_instance(
 
 
 def instance_failure_line(error: InstanceIdentityError | PathSafetyError) -> str:
-    """Operator-facing line: bounded token first, remediation second."""
+    """Operator-facing line: bounded token first, remediation second, directive beneath.
+
+    The directive lines come from the shared registry (ADR-030, issue #741), so an instance or
+    path refusal explains what to do next in a shell exactly as it does over MCP.
+    """
 
     from yoetz.cli.exits import remediation_message
+    from yoetz.cli.render import render_local_recovery_lines
 
     reason = error.reason if isinstance(error, InstanceIdentityError) else error.reason_code
     remediation = remediation_message(reason)
-    if remediation is None:
-        return f"{reason}: the instance root or runtime identity cannot be used as requested"
-    return f"{reason}: {remediation}"
+    head = (
+        f"{reason}: the instance root or runtime identity cannot be used as requested"
+        if remediation is None
+        else f"{reason}: {remediation}"
+    )
+    return "\n".join([head, *render_local_recovery_lines(reason)])

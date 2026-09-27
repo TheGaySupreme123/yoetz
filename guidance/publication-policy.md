@@ -119,17 +119,27 @@ binding is reported as legacy/unknown and cannot silently satisfy a new completi
 
 ### Claim correction and limitation linkage
 
-Use `claim_recorded/1.1.0` for new claims and send both new arrays, even when empty. Keep admissible
+Use `claim_recorded/1.1.0` for new claims and send both new arrays, even when empty. Completion
+claims must explicitly send `obligation_refs`: intended obligation IDs, or `[]` for intentional
+empty scope. `supporting_refs` does not declare scope. Obligation support with empty scope is
+rejected; consciously declare those IDs in scope or remove them from support. Empty scope remains
+coverage-incomplete and does not assert that the plan's work is complete. Keep admissible
 evidence, successful results, and resolved obligations in `supporting_refs`; put partial or failed
 result ids in `limitation_refs`.
 To correct an append-only claim, publish a fresh claim id and name every prior effective claim it
-replaces in `supersedes_claim_refs`. Restate corrected overlapping `obligation_refs`. The prior
+replaces in `supersedes_claim_refs`. Restate corrected `obligation_refs`, overlapping every target
+whose scope is nonempty. An already accepted empty-scope target can be replaced by either explicit
+empty or populated scope. For C0 with empty scope and a later scoped C1, name **both** actual IDs in
+the sorted `supersedes_claim_refs` of C2 and supply the intended scope; superseding only C1 leaves
+C0 effective. Retain every relevant limitation and make a real correction, not an identical claim
+under a new ID. The prior
 event stays immutable and visible as history, while checks and receipts evaluate the replacement
 as current.
 
 Before append, read `candidate_findings`, `history`, and `results`, then dry-run the exact
 replacement. Preflight rejects a missing or already-superseded target, a different claim kind,
-disjoint or absent declared scope, a success/unknown/unrelated limitation, a non-success result in
+disjoint scope against a populated target, omitted completion scope, misplaced obligation support,
+a success/unrelated limitation, a non-success result in
 `supporting_refs`, or an incomplete set of relevant partial/failed results. Do not use
 `disputes_refs` or `decision_recorded.supersedes_event_id` as claim supersession; those fields keep
 their existing contradiction and decision-history meanings.
@@ -184,8 +194,9 @@ returned `session_id` and `writer_id` on later calls. A `publish_work` preview u
 and the same `request_id` for the real append. A timeout or unknown write outcome uses the exact
 start replay branch below when it is a `start` response without route ids; otherwise use `status
 view=operation` with `filter.operation_request_id` set to the exact write request ID:
-`absent` permits one replay of the exact original body and request ID, `complete` uses the stored
-outcome without replay, and `pending` permits replay only after an exact typed continuation and
+`absent` permits one replay of the exact original body and request ID (an `absent` check page with
+an `admission` stage was refused before admission: replay after its `retry_after_ms`, at most three
+times), `complete` uses the stored outcome without replay, and `pending` permits replay only after an exact typed continuation and
 its required approval complete. A pending operation without a continuation, `quarantined`, or an
 unknown state is retained and reported rather than guessed.
 
@@ -361,7 +372,25 @@ The service independently stamps `accepted_at` on acceptance. Both values are du
 
 ## Multi-agent work
 
-Publish bounded assignments and preserve each delegate's logical writer identity. Treat delegate summaries as claims. Link their accepted evidence separately and record a decision when resolving a contradiction.
+Publish bounded assignments in the parent task, and let each child publish with its own returned
+session and writer in its own task. Pass the complete `attach_handle` privately to the intended
+child; never publish it as evidence or structural prose. Treat delegate summaries as claims. Link
+their accepted evidence separately and record a decision when resolving a contradiction.
+
+`child_accepted`, `child_rejected`, `child_written_off`, and `delegation_cancelled` target a direct
+child from the parent. `work_closed`, `work_cancelled`, and `work_written_off` describe the current
+task. These are ordinary `publish_work` events; keep mutually exclusive transitions in separate
+requests. Service facts such as `delegation_declared`, `work_abandoned`,
+`child_dependencies_recorded`, and `coordination_context_recorded` are not ordinary publication
+authority, even if an actor field or payload claims to be the service.
+
+An overlap notice or ordinary file obligation alone declares no coordination obligation. Publish
+the obligation and an explicit `coordination_obligation_declared` event binding its real ID to the
+admitted detection, project, recipient task, and current membership generation. Then record
+that same binding and evidence in
+`coordination_disposition_recorded`. Choose `shared_work`, `sequencing`, or `scope_revision` to
+record the agreed remedy. An acknowledgement through `respond` is only a finding response;
+it does not supply the coordination remedy or resolve a finding. Recheck the repaired record.
 
 ## Forbidden content
 

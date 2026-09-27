@@ -5,12 +5,24 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from yoetz.adapters.integrations.observation_local import LocalObservationStore
+import pytest
+
+from yoetz.adapters.integrations.observation_local import (
+    LocalConsentTransition,
+    LocalObservationStore,
+)
 from yoetz.domain.observation import ObservationControlCommand, ObservationRevokeCommand
-from yoetz.domain.observation_profiles import CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
+from yoetz.domain.observation_budget import LARGEST_CAPACITY
+from yoetz.domain.observation_profiles import (
+    CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
+    CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
+)
+from yoetz.domain.observation_settings import ObservationDetailProfile, ObservationSelection
 from yoetz.domain.values import Timestamp
+from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 
 _PROFILE = CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
+_CURSOR = CURSOR_ORDINARY_OBSERVATION_PROFILE_ID
 _STAMP = Timestamp("2026-01-01T00:00:00.000Z")
 
 
@@ -22,6 +34,12 @@ def _consented(tmp_path: Path) -> tuple[LocalObservationStore, str]:
     store.set_runtime_enabled(True)
     store.grant_consent(workspace, _STAMP, content_capture_profiles=(_PROFILE,))
     return store, workspace
+
+
+def _pending_revocation_token(store: LocalObservationStore, workspace: str) -> str:
+    pending = store.pending_consent_revocation(workspace)
+    assert pending is not None
+    return pending[0]
 
 
 def _generation(store: LocalObservationStore, workspace: str) -> str:
@@ -106,3 +124,120 @@ def test_content_fence_epoch_migrates_legacy_state_and_survives_reopen(tmp_path:
     reopened = LocalObservationStore(_state=tmp_path / "isolated-state")
     assert _generation(reopened, workspace) == after
     assert reopened.content_capture_authority_is_current(workspace, after, (_PROFILE,))
+
+
+def test_structural_grant_keeps_live_content_arms_and_fence(tmp_path: Path) -> None:
+    """Issue #835: a second host's routine setup must not reset the first host's arm."""
+
+    store, workspace = _consented(tmp_path)
+    store.enable_content_capture(workspace, _CURSOR)
+    store.set_workspace_selection(
+        workspace,
+        ObservationSelection(
+            detail=ObservationDetailProfile.DETAILED,
+            capacity=LARGEST_CAPACITY,
+        ),
+        set_at=_STAMP,
+    )
+    before = store.content_capture_authority(workspace)
+    assert before is not None and before.profiles == (_PROFILE, _CURSOR)
+    settings = store.selection_settings_for(workspace, now=_STAMP)
+
+    # The structural path names neither a stamp nor a profile set.
+    grant = store.grant_consent(workspace)
+    repeated = store.grant_consent(workspace)
+
+    assert grant.transition is LocalConsentTransition.UNCHANGED
+    assert repeated.transition is LocalConsentTransition.UNCHANGED
+    assert grant.consent.granted_at == _STAMP
+    assert grant.consent.content_capture_profiles == (_PROFILE, _CURSOR)
+    reopened = LocalObservationStore(_state=tmp_path / "isolated-state")
+    assert reopened.content_capture_profiles(workspace) == (_PROFILE, _CURSOR)
+    assert _generation(reopened, workspace) == before.generation
+    assert reopened.content_capture_authority_is_current(
+        workspace, before.generation, (_PROFILE, _CURSOR)
+    )
+    assert reopened.selection_settings_for(workspace, now=_STAMP) == settings
+
+
+def test_structural_grant_keeps_granted_at_even_when_a_stamp_is_named(tmp_path: Path) -> None:
+    store, workspace = _consented(tmp_path)
+    before = _generation(store, workspace)
+
+    grant = store.grant_consent(workspace, Timestamp("2026-06-01T00:00:00.000Z"))
+
+    assert grant.transition is LocalConsentTransition.UNCHANGED
+    assert grant.consent.granted_at == _STAMP
+    assert _generation(store, workspace) == before
+
+
+def test_structural_grant_resumes_a_paused_consent_with_its_arms(tmp_path: Path) -> None:
+    store, workspace = _consented(tmp_path)
+    initial = _generation(store, workspace)
+    store.pause(ObservationControlCommand(workspace))
+    paused = store.content_capture_authority(workspace)
+    assert paused is not None and not paused.active
+    assert paused.profiles == (_PROFILE,)
+
+    grant = store.grant_consent(workspace)
+
+    # Resuming is a real transition: it advances the fence exactly like ``resume``.
+    assert grant.transition is LocalConsentTransition.RESUMED
+    assert grant.consent.granted_at == _STAMP
+    assert grant.consent.content_capture_profiles == (_PROFILE,)
+    resumed = _generation(store, workspace)
+    assert resumed not in {initial, paused.generation}
+    assert not store.content_capture_authority_is_current(workspace, initial, (_PROFILE,))
+
+
+def test_revocation_still_fences_and_a_later_grant_infers_no_content_arm(
+    tmp_path: Path,
+) -> None:
+    store, workspace = _consented(tmp_path)
+    in_flight = _generation(store, workspace)
+
+    store.revoke(ObservationRevokeCommand(workspace))
+    assert not store.content_capture_authority_is_current(workspace, in_flight, (_PROFILE,))
+    # Until the project fence completes, no grant can revive the revoked authority.
+    with pytest.raises(PublicOperationError) as refused:
+        store.grant_consent(workspace)
+    assert refused.value.code is PublicErrorCode.SESSION_CONFLICT
+    store.mark_consent_revocation_fenced(workspace, _pending_revocation_token(store, workspace))
+
+    grant = store.grant_consent(workspace)
+
+    assert grant.transition is LocalConsentTransition.GRANTED
+    assert grant.consent.content_capture_profiles == ()
+    assert grant.consent.granted_at != _STAMP
+    fresh = _generation(store, workspace)
+    assert fresh != in_flight
+    assert store.content_capture_profiles(workspace) == ()
+    assert not store.content_capture_authority_is_current(workspace, in_flight, (_PROFILE,))
+    assert not store.content_capture_authority_is_current(workspace, in_flight, ())
+
+
+def test_explicit_disable_and_explicit_profile_sets_remain_authoritative(
+    tmp_path: Path,
+) -> None:
+    store, workspace = _consented(tmp_path)
+    enabled = _generation(store, workspace)
+
+    store.disable_content_capture(workspace, _PROFILE)
+    disabled = _generation(store, workspace)
+    assert disabled != enabled
+
+    # A later routine grant neither restores the disabled arm nor re-fences.
+    grant = store.grant_consent(workspace)
+    assert grant.transition is LocalConsentTransition.UNCHANGED
+    assert grant.consent.content_capture_profiles == ()
+    assert _generation(store, workspace) == disabled
+
+    # A caller that names a profile set still replaces the live arms exactly.
+    store.enable_content_capture(workspace, _PROFILE)
+    reenabled = _generation(store, workspace)
+    replaced = store.grant_consent(workspace, content_capture_profiles=())
+    assert replaced.transition is LocalConsentTransition.UPDATED
+    assert replaced.consent.content_capture_profiles == ()
+    assert replaced.consent.granted_at == _STAMP
+    assert _generation(store, workspace) != reenabled
+    assert not store.content_capture_authority_is_current(workspace, reenabled, (_PROFILE,))

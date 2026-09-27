@@ -1,0 +1,1 @@
+{"$id":"https://schemas.yoetz.dev/0.1/common/lineage-origin-1.0.0.schema.json","$schema":"https://json-schema.org/draft/2020-12/schema","enum":["host_observed","parent_minted","self_registered"],"title":"lineage-origin","type":"string"}

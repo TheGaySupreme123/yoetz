@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import io
 import json
+import sys
 from collections.abc import Mapping
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
 
+from yoetz.adapters.integrations.codex_lifecycle import (
+    load_mapping,
+    mapping_from_start_ids,
+    store_mapping,
+)
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.application.recommendations import (
     RecommendationState,
@@ -15,10 +22,16 @@ from yoetz.application.recommendations import (
     store_recommendation_state,
 )
 from yoetz.cli import observe_hooks
-from yoetz.domain.observation import ObservationSource
+from yoetz.cli.hook_io import MAX_HOOK_SKIM_BYTES, MAX_HOOK_STDIN_BYTES
+from yoetz.domain.observation import (
+    ObservationGapCode,
+    ObservationSource,
+    ObservationStatusQuery,
+)
 from yoetz.domain.observation_profiles import CURSOR_ORDINARY_OBSERVATION_PROFILE_ID
 from yoetz.kernel.policies.observation_advice import ObservationCompositionFact
 from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
+from yoetz.protocol.ids import IdKind, new_id
 
 
 @pytest.mark.parametrize("payload", [b"broken", b"{}", b'{"hook_event_name":"preToolUse"}'])
@@ -560,6 +573,43 @@ def test_cursor_real_ingress_uses_bounded_profile_and_privacy_canaries(
         assert canary.encode() not in state_bytes
 
 
+def test_cursor_received_clear_clears_existing_lifecycle_mapping(tmp_path: Path) -> None:
+    """The closed Cursor source=clear flag reaches the shared mapping fence."""
+
+    _store, _commitment = _consented_store(tmp_path)
+    session = "cursor:received-clear"
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id=session,
+            yoetz_task_id=new_id(IdKind.TASK),
+            yoetz_session_id=new_id(IdKind.SESSION),
+            yoetz_writer_id=new_id(IdKind.WRITER),
+            last_frontier=None,
+        ),
+        _state=tmp_path,
+    )
+    assert load_mapping(session, _state=tmp_path) is not None
+
+    assert (
+        observe_hooks.handle_cursor_observe(
+            event_name="sessionStart",
+            stdin_bytes=canonical_encode(
+                {
+                    "hook_event_name": "sessionStart",
+                    "conversation_id": "received-clear",
+                    "source": "clear",
+                }
+            ),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+    assert load_mapping(session, _state=tmp_path) is None
+
+
 def test_cursor_outputless_event_does_not_lease_or_commit_frontier_motion(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1029,3 +1079,336 @@ def test_cursor_version_mapping_distinguishes_ide_cli_unknown_and_omitted() -> N
     assert mapper(None) is None
     assert mapper("") is None
     assert observation_pairing_contract("cursor", None) == ("post_only", "generation_id")
+
+
+def _structural_text(envelope: object) -> str:
+    payload = getattr(envelope, "structural_payload")
+    return canonical_encode(payload).decode("utf-8")
+
+
+def test_cursor_oversized_edit_keeps_identity_and_omits_content(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    store, commitment = _consented_store(tmp_path)
+    oversize = (
+        b'{"conversation_id":"cursor-oversize","hook_event_name":"afterFileEdit",'
+        b'"file_path":"/EDIT_CANARY.md","edits":[{"new_string":"'
+        + b"x" * MAX_HOOK_STDIN_BYTES
+        + b'"}]}'
+    )
+    assert MAX_HOOK_STDIN_BYTES < len(oversize) <= MAX_HOOK_SKIM_BYTES
+    stdout = io.BytesIO()
+
+    assert (
+        observe_hooks.handle_cursor_observe(
+            event_name="afterFileEdit",
+            stdin_bytes=oversize,
+            stdout=stdout,
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+
+    assert stdout.getvalue() == b"{}\n"
+    diagnostic = (tmp_path / "observation/hook-diagnostics.jsonl").read_text(encoding="utf-8")
+    row = json.loads(diagnostic.splitlines()[0])
+    assert row == {
+        "event": "PostToolUse",
+        "reason": "cursor_payload_content_omitted",
+        "ts": row["ts"],
+    }
+    assert "cursor_payload_invalid" not in diagnostic
+    assert "cursor_payload_too_large" not in diagnostic
+    assert "EDIT_CANARY" not in diagnostic
+    envelopes = store.list_envelopes(commitment)
+    assert len(envelopes) == 1
+    omitted = envelopes[0]
+    assert ObservationGapCode.PAYLOAD_CONTENT_OMITTED.value in omitted.gap_codes
+    assert ObservationGapCode.PAYLOAD_TOO_LARGE.value not in omitted.gap_codes
+    assert omitted.content_object_refs == ()
+    assert omitted.structural_payload["changed_paths_digest"]
+    structural = _structural_text(omitted)
+    assert "EDIT_CANARY" not in structural
+    assert "xxxxx" not in structural
+    gaps = store.status(ObservationStatusQuery(commitment)).gaps
+    assert ObservationGapCode.PAYLOAD_CONTENT_OMITTED.value in gaps
+    assert ObservationGapCode.PAYLOAD_TOO_LARGE.value not in gaps
+    captured = capsys.readouterr().err
+    assert "payload_content_omitted" in captured
+    assert "EDIT_CANARY" not in captured
+
+    # The omission costs only that edit: the next ordinary edit still ingests
+    # without inheriting the content-omission gap on its own row.
+    assert (
+        observe_hooks.handle_cursor_observe(
+            event_name="afterFileEdit",
+            stdin_bytes=canonical_encode(
+                {
+                    "conversation_id": "cursor-oversize",
+                    "file_path": str(tmp_path / "small.md"),
+                    "hook_event_name": "afterFileEdit",
+                }
+            ),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+
+    follow = store.list_envelopes(commitment)
+    assert len(follow) == 2
+    assert ObservationGapCode.PAYLOAD_CONTENT_OMITTED.value not in follow[1].gap_codes
+
+
+def test_cursor_ordinary_oversize_write_pairs_pre_and_post_without_content(
+    tmp_path: Path,
+) -> None:
+    store, commitment = _consented_store(tmp_path)
+    store.grant_consent(
+        commitment,
+        content_capture_profiles=(CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,),
+    )
+    contents = b"Y" * MAX_HOOK_STDIN_BYTES
+
+    def body(event: str) -> bytes:
+        encoded = (
+            b'{"conversation_id":"cursor-write","hook_event_name":"'
+            + event.encode()
+            + b'","tool_name":"Write","tool_use_id":"toolu_write_interfaces",'
+            b'"tool_input":{"path":"docs/INTERFACES.md","contents":"' + contents + b'"}}'
+        )
+        assert MAX_HOOK_STDIN_BYTES < len(encoded) <= MAX_HOOK_SKIM_BYTES
+        return encoded
+
+    for event in ("preToolUse", "postToolUse"):
+        assert (
+            observe_hooks.handle_cursor_observe(
+                event_name=event,
+                stdin_bytes=body(event),
+                stdout=io.BytesIO(),
+                workspace=str(tmp_path),
+                _state=tmp_path,
+                skip_service=True,
+                observation_profile=CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
+            )
+            == 0
+        )
+
+    envelopes = store.list_envelopes(commitment)
+    assert [envelope.event_kind for envelope in envelopes] == ["PreToolUse", "PostToolUse"]
+    assert {envelope.structural_payload["tool_call_id"] for envelope in envelopes} == {
+        "toolu_write_interfaces"
+    }
+    assert {envelope.structural_payload["tool_name"] for envelope in envelopes} == {"Write"}
+    # Only the completed edit commits its path; the pending call changed nothing.
+    pre, post = envelopes
+    assert "changed_paths_digest" not in pre.structural_payload
+    assert post.structural_payload["changed_paths_digest"]
+    for envelope in envelopes:
+        assert ObservationGapCode.PAYLOAD_CONTENT_OMITTED.value in envelope.gap_codes
+        assert envelope.content_object_refs == ()
+        structural = _structural_text(envelope)
+        assert "INTERFACES.md" not in structural
+        assert "YYYYY" not in structural
+
+
+def _ordinary_oversize(tmp_path: Path, event: str, fields: bytes) -> None:
+    body = (
+        b'{"conversation_id":"cursor-skim","hook_event_name":"'
+        + event.encode()
+        + b'",'
+        + fields
+        + b',"pad":"'
+        + b"Z" * MAX_HOOK_STDIN_BYTES
+        + b'"}'
+    )
+    assert MAX_HOOK_STDIN_BYTES < len(body) <= MAX_HOOK_SKIM_BYTES
+    assert (
+        observe_hooks.handle_cursor_observe(
+            event_name=event,
+            stdin_bytes=body,
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+            observation_profile=CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
+        )
+        == 0
+    )
+
+
+def test_cursor_oversized_read_does_not_commit_a_changed_path(tmp_path: Path) -> None:
+    store, commitment = _consented_store(tmp_path)
+
+    _ordinary_oversize(
+        tmp_path,
+        "postToolUse",
+        b'"tool_name":"Read","tool_use_id":"toolu_read","tool_input":{"path":"README.md"}',
+    )
+
+    (envelope,) = store.list_envelopes(commitment)
+    assert ObservationGapCode.PAYLOAD_CONTENT_OMITTED.value in envelope.gap_codes
+    assert "changed_paths_digest" not in envelope.structural_payload
+
+
+def test_cursor_oversized_failed_edit_keeps_failure_without_error_text(tmp_path: Path) -> None:
+    store, commitment = _consented_store(tmp_path)
+
+    _ordinary_oversize(
+        tmp_path,
+        "postToolUse",
+        b'"tool_name":"Write","tool_use_id":"toolu_fail","tool_input":{"path":"a.md"},'
+        b'"tool_output":{"error":"ERROR_CANARY","success":true}',
+    )
+
+    (envelope,) = store.list_envelopes(commitment)
+    assert envelope.structural_payload["action"] == "cursor_tool_failure"
+    assert "changed_paths_digest" not in envelope.structural_payload
+    assert "ERROR_CANARY" not in _structural_text(envelope)
+
+
+def test_cursor_oversized_invalid_workspace_roots_is_refused_like_full_size(
+    tmp_path: Path,
+) -> None:
+    store, commitment = _consented_store(tmp_path)
+
+    _ordinary_oversize(
+        tmp_path,
+        "postToolUse",
+        b'"tool_name":"Write","tool_use_id":"toolu_roots","workspace_roots":[""]',
+    )
+
+    assert store.list_envelopes(commitment) == ()
+
+
+def test_cursor_oversized_skipped_mcp_execution_is_not_a_coverage_loss(
+    tmp_path: Path,
+) -> None:
+    store, commitment = _consented_store(tmp_path)
+
+    _ordinary_oversize(
+        tmp_path,
+        "afterMCPExecution",
+        b'"tool_name":"MCP:fixture_echo","tool_use_id":"toolu_mcp"',
+    )
+
+    assert store.list_envelopes(commitment) == ()
+    assert (
+        ObservationGapCode.PAYLOAD_TOO_LARGE.value
+        not in store.status(ObservationStatusQuery(commitment)).gaps
+    )
+
+
+def test_cursor_oversized_body_without_event_flag_keeps_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, commitment = _consented_store(tmp_path)
+    body = (
+        b'{"conversation_id":"cursor-stdin","hook_event_name":"postToolUse",'
+        b'"tool_name":"Write","tool_use_id":"toolu_stdin","tool_input":{"path":"a.md",'
+        b'"contents":"' + b"W" * MAX_HOOK_STDIN_BYTES + b'"}}'
+    )
+    assert MAX_HOOK_STDIN_BYTES < len(body) <= MAX_HOOK_SKIM_BYTES
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=io.BytesIO(body)))
+
+    assert (
+        observe_hooks.handle_cursor_observe(
+            event_name=None,
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+            observation_profile=CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
+        )
+        == 0
+    )
+
+    (envelope,) = store.list_envelopes(commitment)
+    assert envelope.structural_payload["tool_call_id"] == "toolu_stdin"
+    assert ObservationGapCode.PAYLOAD_CONTENT_OMITTED.value in envelope.gap_codes
+
+
+def test_cursor_body_over_skim_cap_stays_an_unparsed_gap(
+    tmp_path: Path,
+) -> None:
+    store, commitment = _consented_store(tmp_path)
+    oversize = b'{"hook_event_name":"afterFileEdit","pad":"' + (b"x" * MAX_HOOK_SKIM_BYTES) + b'"}'
+    assert len(oversize) > MAX_HOOK_SKIM_BYTES
+
+    assert (
+        observe_hooks.handle_cursor_observe(
+            event_name="afterFileEdit",
+            stdin_bytes=oversize,
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+
+    diagnostic = (tmp_path / "observation/hook-diagnostics.jsonl").read_text(encoding="utf-8")
+    row = json.loads(diagnostic.splitlines()[0])
+    assert row["reason"] == "cursor_payload_too_large"
+    assert "cursor_payload_content_omitted" not in diagnostic
+    assert store.list_envelopes(commitment) == ()
+    assert (
+        ObservationGapCode.PAYLOAD_TOO_LARGE.value
+        in store.status(ObservationStatusQuery(commitment)).gaps
+    )
+
+
+def test_cursor_oversize_without_identity_stays_an_unparsed_gap(tmp_path: Path) -> None:
+    store, commitment = _consented_store(tmp_path)
+    anonymous = b'{"edits":[{"new_string":"' + b"x" * MAX_HOOK_STDIN_BYTES + b'"}]}'
+    assert MAX_HOOK_STDIN_BYTES < len(anonymous) <= MAX_HOOK_SKIM_BYTES
+
+    assert (
+        observe_hooks.handle_cursor_observe(
+            event_name="afterFileEdit",
+            stdin_bytes=anonymous,
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+
+    assert store.list_envelopes(commitment) == ()
+    assert (
+        ObservationGapCode.PAYLOAD_TOO_LARGE.value
+        in store.status(ObservationStatusQuery(commitment)).gaps
+    )
+
+
+def test_cursor_oversized_malformed_body_is_not_a_structural_row(tmp_path: Path) -> None:
+    store, commitment = _consented_store(tmp_path)
+    duplicate = (
+        b'{"hook_event_name":"afterFileEdit","hook_event_name":"afterFileEdit","pad":"'
+        + b"x" * MAX_HOOK_STDIN_BYTES
+        + b'"}'
+    )
+    assert MAX_HOOK_STDIN_BYTES < len(duplicate) <= MAX_HOOK_SKIM_BYTES
+
+    assert (
+        observe_hooks.handle_cursor_observe(
+            event_name="afterFileEdit",
+            stdin_bytes=duplicate,
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+
+    diagnostic = (tmp_path / "observation/hook-diagnostics.jsonl").read_text(encoding="utf-8")
+    reasons = {json.loads(line)["reason"] for line in diagnostic.splitlines()}
+    assert reasons == {"cursor_payload_invalid", "cursor_payload_too_large"}
+    assert store.list_envelopes(commitment) == ()

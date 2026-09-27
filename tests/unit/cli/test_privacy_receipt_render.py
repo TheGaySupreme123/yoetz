@@ -31,8 +31,8 @@ from yoetz.application.privacy_control import (
     encode_privacy_receipt_page,
     encode_privacy_receipt_view,
 )
+from yoetz.cli import bootstrap
 from yoetz.cli.app import (
-    _plain_json,  # pyright: ignore[reportPrivateUsage]
     _privacy_receipts_get,  # pyright: ignore[reportPrivateUsage]
     _privacy_receipts_list,  # pyright: ignore[reportPrivateUsage]
 )
@@ -268,17 +268,17 @@ async def test_a_list_refusal_stays_a_bounded_error(
 def test_the_converter_renders_canonical_timestamps_without_a_catch_all() -> None:
     """Bullet 2 of #731: the datetime case is typed; unsupported values still refuse."""
 
-    assert _plain_json(NOW) == _EXPECTED_TIMESTAMP
+    assert bootstrap.plain_json(NOW) == _EXPECTED_TIMESTAMP
 
     with pytest.raises(TypeError, match="cli_result_not_json"):
-        _plain_json(object())
+        bootstrap.plain_json(object())
 
 
 def test_a_non_canonical_timestamp_is_a_typed_refusal_not_an_invented_rendering() -> None:
     from yoetz.protocol.errors import ProtocolValueError
 
     with pytest.raises(ProtocolValueError):
-        _plain_json(datetime(2026, 9, 13, 12, 0))
+        bootstrap.plain_json(datetime(2026, 9, 13, 12, 0))
 
 
 def test_the_menu_shares_the_one_converter() -> None:

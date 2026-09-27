@@ -11,6 +11,7 @@ from yoetz.domain.observation import ObservationEnvelope, ObservationGapCode, Ob
 from yoetz.protocol.canonical import JsonValue, canonical_digest
 
 __all__ = [
+    "SEMANTIC_ATTENTION_TOKENS",
     "STANDING_MACHINE_ACTIONS",
     "OBSERVATION_ADVICE_FACT_CODES",
     "OBSERVATION_ADVICE_POLICY_ID",
@@ -26,7 +27,7 @@ __all__ = [
 ]
 
 OBSERVATION_ADVICE_POLICY_ID: Final = "observation-advice"
-OBSERVATION_ADVICE_POLICY_VERSION: Final = "0.1.3"
+OBSERVATION_ADVICE_POLICY_VERSION: Final = "0.1.5"
 
 OBSERVATION_ADVICE_FACT_CODES: Final = frozenset(
     {
@@ -38,7 +39,23 @@ OBSERVATION_ADVICE_FACT_CODES: Final = frozenset(
         "change_outside_plan",
         "observation_gap_or_stale",
         "provider_not_ready",
+        "semantic_sign_in_required",
+        "semantic_provider_attention",
         "semantic_claim_without_attempt",
+    }
+)
+
+# Closed, nonsecret reasons the last terminal AI-powered review attempt of a configured
+# provider stopped for a cause only the user can repair (#819). The service derives them from
+# the attempt's closed failure class and runtime failure stage, never from provider text.
+SEMANTIC_ATTENTION_TOKENS: Final = frozenset(
+    {
+        "sign_in_required",
+        "credential_rejected",
+        "access_denied",
+        "quota_exhausted",
+        "model_unavailable",
+        "runtime_update_required",
     }
 )
 
@@ -51,6 +68,9 @@ type AdviceNextAction = Literal[
     "revise_plan_scope",
     "refresh_observation",
     "connect_provider",
+    "renew_provider_sign_in",
+    "repair_semantic_provider",
+    "update_yoetz",
     "attempt_semantic_dispatch",
     "reground_status",
 ]
@@ -60,7 +80,9 @@ type AdviceNextAction = Literal[
 # redelivery trigger and they get a bounded cadence instead (#241).
 # refresh_observation is deliberately excluded: it reflects live coverage
 # degradation the agent should hear about once per distinct occurrence.
-STANDING_MACHINE_ACTIONS: Final = frozenset({"connect_provider"})
+STANDING_MACHINE_ACTIONS: Final = frozenset(
+    {"connect_provider", "renew_provider_sign_in", "repair_semantic_provider", "update_yoetz"}
+)
 
 _EDIT_TOOLS: Final = frozenset(
     {
@@ -74,15 +96,31 @@ _EDIT_TOOLS: Final = frozenset(
         "shell_write",
     }
 )
-_CHECK_TOOLS: Final = frozenset(
+# Dedicated verification tools: the tool identity itself names a check, so a
+# successful result is typed check evidence rather than an inference from a
+# command line.  Generic host shells are deliberately absent (#681).
+_VERIFICATION_TOOLS: Final = frozenset(
     {
-        "shell",
-        "Bash",
         "test",
         "pytest",
         "cargo_test",
         "npm_test",
         "uv_run_pytest",
+    }
+)
+# Generic host shells.  A successful envelope here proves only that the host
+# tool returned; it never proves that a verification check ran.
+_SHELL_TOOLS: Final = frozenset({"shell", "Bash", "bash"})
+# Tools whose envelopes carry command outcomes at all, used by the failed and
+# unresolved-command rules, which reason about outcomes rather than checks.
+_COMMAND_TOOLS: Final = _VERIFICATION_TOOLS | _SHELL_TOOLS
+# Service-owned routine-read markers.  ADR-022 decision 10 keeps routine reads
+# a separate class that is never promoted to a check.
+_ROUTINE_READ_ACTIONS: Final = frozenset(
+    {
+        "routine_read",
+        "routine_read_detailed",
+        "routine_read_summary",
     }
 )
 _STATIC_CHECK_HINTS: Final = frozenset(
@@ -145,11 +183,25 @@ class ObservationCompositionFact:
     # semantic_ready is the structural usability of the configured AI-powered review
     # path — endpoint bound, factory available, configured credential present.
     # It claims nothing about repository-scoped dispatch authority, which is
-    # resolved per check (#265).
+    # resolved per check (#265). semantic_configured is the operator's effective intent to
+    # use external AI-powered review — review not disabled, an endpoint bound, and the
+    # machine privacy policy admitting LLM-inference egress — so a private or intentionally
+    # unbound install is never told to connect or repair a provider (#844).
     semantic_configured: bool
     semantic_ready: bool
     provider_factory_ids: tuple[str, ...]
     connected_provider_ids: tuple[str, ...]
+    # The last terminal attempt's user-repairable cause (SEMANTIC_ATTENTION_TOKENS) and the
+    # provider id it concerns. Structural readiness cannot see an expired Codex login or an
+    # exhausted plan; only a real attempt can, and a later successful attempt clears it (#819).
+    semantic_attention: str | None = None
+    semantic_attention_provider: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.semantic_attention is not None and (
+            self.semantic_attention not in SEMANTIC_ATTENTION_TOKENS
+        ):
+            raise ValueError("observation_advice_invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,6 +209,7 @@ class ObservationAdviceContext:
     envelopes: tuple[ObservationEnvelope, ...]
     lifecycle: ObservationLifecycle
     gaps: tuple[str, ...]
+    lineage_refs: tuple[tuple[str, str], ...] = ()
     check_facts: tuple[ObservationCheckFact, ...] = ()
     inspect_fact: ObservationInspectFact | None = None
     composition: ObservationCompositionFact | None = None
@@ -304,6 +357,40 @@ def _resolved_tool(
     return _tool(envelope) or fallback.get(key), key
 
 
+def _is_routine_read(envelope: ObservationEnvelope) -> bool:
+    """Return whether the service classified this envelope as a routine read."""
+
+    action = envelope.structural_payload.get(_FIELD_ACTION)
+    return type(action) is str and action in _ROUTINE_READ_ACTIONS
+
+
+def _observed_check_success(envelope: ObservationEnvelope, tool: str | None) -> bool:
+    """Return whether one envelope is typed evidence that a check passed.
+
+    A successful generic shell envelope proves that the host tool returned,
+    not that the command verified anything, and a routine read is a separate
+    class that is never promoted to a check (ADR-022 decision 10, #681).  Only
+    a dedicated verification tool reporting an explicit success qualifies; a
+    pre-event remains an attempt until its successful post-event arrives.
+    """
+
+    if tool is None or tool not in _VERIFICATION_TOOLS:
+        return False
+    if _is_routine_read(envelope) or envelope.event_kind in {"PreToolUse", "preToolUse"}:
+        return False
+    return _exit_status(envelope) == 0 or _success(envelope) is True
+
+
+def _is_edit_envelope(envelope: ObservationEnvelope, tool: str | None) -> bool:
+    """Return whether one envelope is structural evidence of a state edit."""
+
+    if tool is not None and tool in _EDIT_TOOLS:
+        return True
+    # Also treat apply_patch action writes.
+    action = envelope.structural_payload.get(_FIELD_ACTION)
+    return action in {"write", "edit", "delete"} or _changed_paths_digest(envelope) is not None
+
+
 def _candidate(
     kind: FindingKind,
     rule_code: str,
@@ -326,13 +413,12 @@ def _candidate(
 def _failed_commands(envelopes: Sequence[ObservationEnvelope]) -> list[ObservationAdviceCandidate]:
     results: list[ObservationAdviceCandidate] = []
     unresolved: dict[_ToolCorrelationKey, ObservationEnvelope] = {}
-    shell_tools = _CHECK_TOOLS | {"shell", "Bash", "bash"}
     originating_tools, fallback_tools = _tool_resolution(envelopes)
     for envelope in envelopes:
         tool, key = _resolved_tool(envelope, originating_tools, fallback_tools)
         if key is None:
             continue
-        if tool is None or tool not in shell_tools:
+        if tool is None or tool not in _COMMAND_TOOLS:
             continue
         if envelope.event_kind in {"PreToolUse"}:
             continue
@@ -366,42 +452,51 @@ def _edits_after_check(
     envelopes: Sequence[ObservationEnvelope],
     checks: Sequence[ObservationCheckFact],
 ) -> list[ObservationAdviceCandidate]:
+    # The verification baseline moves only on typed check evidence: a current
+    # passed approved-check fact, or a dedicated verification tool reporting an
+    # explicit success.  An arbitrary successful shell command and any routine
+    # read leave the baseline where it is, so a routine read neither invents a
+    # baseline nor carries one past a later edit (#681).
+    originating_tools, fallback_tools = _tool_resolution(envelopes)
     last_success_pos: int | None = None
     for envelope in envelopes:
-        tool = _tool(envelope)
-        exit_status = _exit_status(envelope)
-        if (
-            tool is not None
-            and tool in _CHECK_TOOLS | {"shell", "Bash", "bash"}
-            and (exit_status == 0 or _success(envelope) is True)
-        ):
+        tool, _key = _resolved_tool(envelope, originating_tools, fallback_tools)
+        if _observed_check_success(envelope, tool):
             last_success_pos = envelope.cursor.event_position
     for check in checks:
         if check.status == "passed" and check.is_current:
             last_success_pos = max(last_success_pos or 0, check.cursor_event_position)
     if last_success_pos is None:
         return []
-    results: list[ObservationAdviceCandidate] = []
+    # One logical host edit is observed twice on paired profiles: a PreToolUse
+    # attempt and a PostToolUse result.  Group the observed phases by the
+    # source/session/generation-fenced call key so the stale-verification
+    # condition keeps one identity per logical edit (#680).  A post-only
+    # profile (current Cursor) still yields one group per envelope through the
+    # ``source_identity`` fallback in ``_tool_correlation_key``, and two
+    # distinct calls — or the same call id across a source, session, or
+    # generation boundary — remain separate keys.
+    grouped: dict[_ToolCorrelationKey, list[ObservationEnvelope]] = {}
     for envelope in envelopes:
-        tool = _tool(envelope)
-        if tool is None or tool not in _EDIT_TOOLS:
-            # Also treat apply_patch action writes.
-            action = envelope.structural_payload.get(_FIELD_ACTION)
-            if (
-                action not in {"write", "edit", "delete"}
-                and _changed_paths_digest(envelope) is None
-            ):
-                continue
-        if envelope.cursor.event_position > last_success_pos:
-            results.append(
-                _candidate(
-                    FindingKind.STALE_EVIDENCE_FOR_CHANGED_STATE,
-                    "edit_after_successful_check",
-                    "rerun_approved_check",
-                    (_envelope_ref(envelope),),
-                    f"edit-after-check:{envelope.cursor.event_position}",
-                )
+        tool, key = _resolved_tool(envelope, originating_tools, fallback_tools)
+        if key is None or not _is_edit_envelope(envelope, tool):
+            continue
+        grouped.setdefault(key, []).append(envelope)
+    results: list[ObservationAdviceCandidate] = []
+    for key, phases in grouped.items():
+        if not any(phase.cursor.event_position > last_success_pos for phase in phases):
+            continue
+        # The call key identifies the condition; the phase refs prove it.
+        cause_digest = canonical_digest({"correlation_key": key})
+        results.append(
+            _candidate(
+                FindingKind.STALE_EVIDENCE_FOR_CHANGED_STATE,
+                "edit_after_successful_check",
+                "rerun_approved_check",
+                tuple(_envelope_ref(phase) for phase in phases),
+                f"edit-after-check:{cause_digest.removeprefix('sha256:')}",
             )
+        )
     return results
 
 
@@ -423,11 +518,12 @@ def _completion_without_verification(
         return []
     has_pass = any(check.status == "passed" and check.is_current for check in checks)
     originating_tools, fallback_tools = _tool_resolution(envelopes)
+    # Only typed check evidence supports a completion claim.  A successful
+    # arbitrary shell command, and a routine read in particular, leaves the
+    # claim unverified (#681).
     has_obs_pass = any(
-        (_exit_status(envelope) == 0 or _success(envelope) is True)
-        and (
-            _resolved_tool(envelope, originating_tools, fallback_tools)[0]
-            in _CHECK_TOOLS | {"shell", "Bash", "bash"}
+        _observed_check_success(
+            envelope, _resolved_tool(envelope, originating_tools, fallback_tools)[0]
         )
         for envelope in envelopes
     )
@@ -454,18 +550,22 @@ def _static_for_live(envelopes: Sequence[ObservationEnvelope]) -> list[Observati
         blob = f"{claim}:{hint}:{tool}"
         if any(token in blob for token in _LIVE_CLAIM_HINTS):
             live_claims.append(_envelope_ref(envelope))
-        if any(token in blob for token in _STATIC_CHECK_HINTS) and (
-            _exit_status(envelope) == 0 or _success(envelope) is True
+        if (
+            any(token in blob for token in _STATIC_CHECK_HINTS)
+            and not _is_routine_read(envelope)
+            and (_exit_status(envelope) == 0 or _success(envelope) is True)
         ):
             static_support.append(_envelope_ref(envelope))
     if (
         live_claims
         and static_support
+        # A live-labelled success suppresses the limitation only when it is
+        # typed check evidence; an arbitrary successful shell command is not
+        # live verification (#681).
         and not any(
             "live" in ((_mapping_hint(envelope) or "").lower())
-            and (_exit_status(envelope) == 0 or _success(envelope) is True)
+            and _observed_check_success(envelope, _tool(envelope))
             for envelope in envelopes
-            if _tool(envelope) in _CHECK_TOOLS | {"shell", "Bash", "bash"}
         )
     ):
         # Heuristic: live/wire claim present, only static verification observed.
@@ -483,9 +583,11 @@ def _static_for_live(envelopes: Sequence[ObservationEnvelope]) -> list[Observati
 
 def _subagent_unaddressed(
     envelopes: Sequence[ObservationEnvelope],
+    lineage_refs: Sequence[tuple[str, str]] = (),
 ) -> list[ObservationAdviceCandidate]:
-    findings: dict[str, str] = {}
+    findings: dict[str, ObservationEnvelope] = {}
     addressed: set[str] = set()
+    authorized_refs = dict(lineage_refs)
     for envelope in envelopes:
         sub = _subagent_id(envelope)
         if envelope.event_kind == "SubagentStop" and sub is not None:
@@ -493,7 +595,7 @@ def _subagent_unaddressed(
                 _result_status(envelope) in {"finding", "failed", "issue"}
                 or _success(envelope) is False
             ):
-                findings[sub] = _envelope_ref(envelope)
+                findings[sub] = envelope
         if sub is not None and envelope.event_kind in {"PostToolUse", "UserPromptSubmit"}:
             if _result_status(envelope) in {"resolved", "addressed", "fixed"}:
                 addressed.add(sub)
@@ -502,14 +604,17 @@ def _subagent_unaddressed(
         if claim is not None and sub is not None and claim in {"resolved", "addressed"}:
             addressed.add(sub)
     results: list[ObservationAdviceCandidate] = []
-    for sub, ref in findings.items():
+    for sub, envelope in findings.items():
         if sub not in addressed:
+            ref = _envelope_ref(envelope)
+            authorized_ref = authorized_refs.get(ref)
+            evidence_refs = (ref,) if authorized_ref is None else (authorized_ref, ref)
             results.append(
                 _candidate(
                     FindingKind.FAILED_WORK_OMITTED,
                     "subagent_finding_unaddressed",
                     "address_subagent_finding",
-                    (ref,),
+                    evidence_refs,
                     f"subagent:{sub[:48]}",
                 )
             )
@@ -592,7 +697,8 @@ def _provider_not_ready(
     # but the configured path is structurally unusable. Absence from the
     # connected registry is not such a fact — activation is lazy and
     # repository-scoped, re-established automatically on dispatch (#265) —
-    # so registry lag only names evidence, it never triggers the advice.
+    # so registry lag only names evidence, it never triggers the advice. Without effective
+    # review intent there is nothing to connect; check reports that coverage gap itself (#844).
     if composition is None:
         return []
     if not composition.semantic_configured or composition.semantic_ready:
@@ -607,6 +713,44 @@ def _provider_not_ready(
             "connect_provider",
             tuple(sorted(missing or {"semantic:not_ready"}, key=_ascii)),
             "provider-not-ready",
+        )
+    ]
+
+
+_ATTENTION_NEXT_ACTIONS: Final[Mapping[str, AdviceNextAction]] = {
+    "sign_in_required": "renew_provider_sign_in",
+    "credential_rejected": "repair_semantic_provider",
+    "access_denied": "repair_semantic_provider",
+    "quota_exhausted": "repair_semantic_provider",
+    "model_unavailable": "repair_semantic_provider",
+    "runtime_update_required": "update_yoetz",
+}
+
+
+def _semantic_attention(
+    composition: ObservationCompositionFact | None,
+) -> list[ObservationAdviceCandidate]:
+    # A standing machine condition like provider_not_ready, but resting on the last real
+    # attempt instead of structure: the path is usable on paper, yet its last terminal attempt
+    # stopped for a cause only the user can repair (#819). A structurally unusable path is
+    # provider_not_ready's to report, so the two never compete for the same standing slot.
+    if composition is None or composition.semantic_attention is None:
+        return []
+    if not composition.semantic_configured or not composition.semantic_ready:
+        return []
+    token = composition.semantic_attention
+    refs = [f"semantic:{token}"]
+    if composition.semantic_attention_provider:
+        refs.append(composition.semantic_attention_provider)
+    return [
+        _candidate(
+            FindingKind.MATERIAL_LIMITATION_OMITTED,
+            "semantic_sign_in_required"
+            if token == "sign_in_required"
+            else "semantic_provider_attention",
+            _ATTENTION_NEXT_ACTIONS[token],
+            tuple(refs),
+            f"semantic-attention:{token}",
         )
     ]
 
@@ -653,10 +797,11 @@ def observation_advice_findings(
     collected.extend(_edits_after_check(envelopes, context.check_facts))
     collected.extend(_completion_without_verification(envelopes, context.check_facts))
     collected.extend(_static_for_live(envelopes))
-    collected.extend(_subagent_unaddressed(envelopes))
+    collected.extend(_subagent_unaddressed(envelopes, context.lineage_refs))
     collected.extend(_outside_plan(envelopes, context.inspect_fact, context.plan_path_digests))
     collected.extend(_observation_gaps(context.lifecycle, context.gaps, envelopes))
     collected.extend(_provider_not_ready(context.composition))
+    collected.extend(_semantic_attention(context.composition))
     collected.extend(_semantic_without_attempt(envelopes))
 
     # Deduplicate by rule_code + detail_token; keep first occurrence.

@@ -17,8 +17,10 @@ from yoetz.adapters.memory.ledger import (
     _AttemptState,  # pyright: ignore[reportPrivateUsage]
     _case_dependency_digest,  # pyright: ignore[reportPrivateUsage]
     build_append_operation_record,
+    check_admission_record,
     compact_status_coverage,
     load_frozen_case_from_resume,
+    note_check_admission_refusal,
     quarantine_resume_object_invalid,
 )
 from yoetz.adapters.sqlite.observation import SqliteObservationStore
@@ -26,6 +28,7 @@ from yoetz.domain.events import (
     AcceptedEvent,
     CheckRecordedPayload,
     EventSchema,
+    EvidenceDigestProvenance,
     FindingRecordedPayload,
     LedgerChain,
     LedgerRecord,
@@ -66,11 +69,14 @@ from yoetz.kernel.reducers import replay
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.ids import IdPort
 from yoetz.ports.ledger import (
+    CHECK_ACQUISITION_RESERVATION_SECONDS,
     AcceptedEventSummary,
     AppendCommand,
     AppendResult,
     AppendWarning,
     AttemptOutcome,
+    CheckAdmissionRecord,
+    CheckAdmissionStage,
     CheckCommitResult,
     CheckPhase,
     CheckPolicyExecution,
@@ -92,7 +98,10 @@ from yoetz.ports.ledger import (
     SemanticAttemptRecord,
     SemanticDisclosureWait,
     SemanticJobRecord,
+    SemanticProgressRecord,
     StoredProjection,
+    check_admission_refused,
+    check_admission_stage,
 )
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef, ObjectStorePort
 from yoetz.ports.runtime import OwnershipFence
@@ -104,7 +113,13 @@ from yoetz.protocol.coverage import (
     coverage_to_json,
 )
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
-from yoetz.protocol.models import CheckScopeModel, SemanticReason, SemanticStatus
+from yoetz.protocol.models import (
+    SEMANTIC_PROGRESS_PHASE_RANK,
+    CheckScopeModel,
+    SemanticProgressPhase,
+    SemanticReason,
+    SemanticStatus,
+)
 
 __all__ = ["CheckpointReport", "SqliteLedger"]
 
@@ -327,7 +342,7 @@ class SqliteLedger:
         self._ids = ids
         self._objects = objects
         self._lock = asyncio.Lock()
-        self._state = MemoryLedgerState()
+        self._state: MemoryLedgerState = MemoryLedgerState()
         self._requires_recovery = _head(db).sequence != 0
         self._recovery_task: asyncio.Task[None] | None = None
         self._recovery_failed = False
@@ -1653,12 +1668,14 @@ class SqliteLedger:
         locator = operation.result_locator
         assert operation.result_canonical is not None and operation.result_digest is not None
         assert operation.terminal_at is not None and locator is not None
+        if locator.result_object_ref is not None:
+            self._inventory_object(locator.result_object_ref)
         self._db.execute(
             "INSERT INTO operations(writer_id,operation_id,operation_kind,request_digest,"
             "resume_object_id,state,phase,owner_generation,lease_owner_id,lease_generation,"
             "lease_expires_at,first_ingestion_seq,last_ingestion_seq,result_canonical,"
             "result_digest,result_object_id,quarantine_code,terminal_at,created_at,updated_at) "
-            "VALUES(?,?,?,?,NULL,'complete','terminal',NULL,NULL,NULL,NULL,?,?,?,?,NULL,NULL,?,?,?)",
+            "VALUES(?,?,?,?,NULL,'complete','terminal',NULL,NULL,NULL,NULL,?,?,?,?,?,NULL,?,?,?)",
             (
                 command.writer_id,
                 command.operation_id,
@@ -1668,6 +1685,7 @@ class SqliteLedger:
                 locator.last_ingestion_sequence,
                 operation.result_canonical,
                 operation.result_digest,
+                None if locator.result_object_ref is None else locator.result_object_ref.object_id,
                 format_rfc3339_millis(operation.terminal_at),
                 now,
                 now,
@@ -2035,7 +2053,9 @@ class SqliteLedger:
             if pending_capture_task_id is not None:
                 pending_capture = self._pending_capture_ticket(pending_capture_task_id)
                 if pending_capture is not None:
-                    raise _public_error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+                    # Only a new check's admission passes this task id: the handoff that landed
+                    # while it staged must be in any frozen case, so admission waits for it.
+                    raise check_admission_refused(CheckAdmissionStage.CAPTURE_HANDOFF_PENDING)
             self._persist_derived_records(new_records)
             self._sync_runtime_state()
             self._db.execute("COMMIT")
@@ -2070,7 +2090,45 @@ class SqliteLedger:
         self, session_id: str, frontier: Frontier, projection: ProjectionState
     ) -> CaseAvailabilityFacts:
         await self._ensure_recovered()
+        self._refresh_native_capture_refs(projection)
         return await self._oracle().load_case_availability(session_id, frontier, projection)
+
+    def _refresh_native_capture_refs(self, projection: ProjectionState) -> None:
+        """Rehydrate only live referenced native captures inventoried by observation.
+
+        Observation persists its encrypted objects independently of ledger payload objects.
+        Their descriptors must enter the oracle's availability snapshot after recovery too.
+        This restores descriptors only: the oracle still authenticates physical bytes before
+        declaring availability, and redacted/missing objects never earn readable coverage.
+        """
+        for record in projection.evidence.values():
+            payload = record.payload
+            if (
+                payload is None
+                or payload.captured_object_id is None
+                or payload.digest_binding is None
+                or payload.digest_binding.provenance
+                is not EvidenceDigestProvenance.OBSERVATION_CAPTURED
+                or not record.object_available
+            ):
+                continue
+            captured_id = payload.captured_object_id
+            self._state.object_refs.pop(captured_id, None)
+            row = self._db.execute(
+                "SELECT 1 FROM observation_content_manifests AS manifests "
+                "JOIN objects ON objects.object_id=manifests.object_id "
+                "WHERE manifests.object_id=? AND manifests.content_digest=? "
+                "AND manifests.content_bytes=? AND objects.state='present' "
+                "AND objects.kind='captured_content'",
+                (captured_id, payload.content_digest, payload.digest_binding.byte_count),
+            ).fetchone()
+            if row is None:
+                continue
+            self._state.object_refs[captured_id] = self._object_ref_from_inventory(
+                captured_id,
+                self._task_id,
+                "application/vnd.yoetz.observation-content+json",
+            )
 
     async def query_projection(self, query: ProjectionQuery) -> ProjectionPage:
         await self._ensure_recovered()
@@ -2120,19 +2178,104 @@ class SqliteLedger:
         request_id: str,
         request_digest: str,
     ) -> FrozenCase | CheckCommitResult:
+        key = (writer_id, request_id)
+        try:
+            result = await self._freeze_case_unrecorded(
+                session_id, writer_id, expected_frontier, request_id, request_digest
+            )
+        except PublicOperationError as exc:
+            stage = check_admission_stage(exc)
+            if stage is not None:
+                # No await separates this from the refusal, so the stable live state is current;
+                # the oracle's own note landed in its discarded clone.
+                note_check_admission_refusal(self._state, key, stage, self._terminal_at())
+            raise
+        self._state.check_admissions.pop(key, None)
+        return result
+
+    async def lookup_check_admission(
+        self, writer_id: str, operation_id: str
+    ) -> CheckAdmissionRecord | None:
+        await self._ensure_recovered()
+        async with self._lock:
+            return check_admission_record(
+                self._state, (writer_id, operation_id), self._terminal_at()
+            )
+
+    def _merge_freeze_over_lifecycle_motion(
+        self,
+        current: MemoryLedgerState,
+        baseline: tuple[object, ...],
+        staged: MemoryLedgerState,
+        operation_key: tuple[str, str],
+    ) -> MemoryLedgerState | None:
+        """Carry one acquisition's own delta over lifecycle writes that moved no ledger record.
+
+        Staging releases the repository lock, so another check's lease renewal, phase advance,
+        or AI-powered review bookkeeping may commit meanwhile. None of that can change this case:
+        it was built from the unchanged record prefix, projection, writers, and object inventory.
+        Adopting the staged clone wholesale would overwrite those writes, and discarding the
+        admission turned them into a no-record ``OPERATION_PENDING`` (issue #838). Only this
+        key's operation row and frozen case move; any change to the case's own inputs or to this
+        key refuses as contended instead.
+        """
+
+        (
+            _records,
+            operations,
+            writers,
+            projection,
+            frozen_cases,
+            check_results,
+            check_errors,
+            *_rest,
+        ) = baseline
+        operations_before = cast(dict[tuple[str, str], object], operations)
+        frozen_before = cast(dict[tuple[str, str], object], frozen_cases)
+        results_before = cast(dict[tuple[str, str], object], check_results)
+        errors_before = cast(dict[tuple[str, str], object], check_errors)
+        object_refs_before = baseline[11]
+        if (
+            current.projection is not projection
+            or current.writers != writers
+            or current.object_refs != object_refs_before
+            or current.operations.get(operation_key) is not operations_before.get(operation_key)
+            or current.frozen_cases.get(operation_key) is not frozen_before.get(operation_key)
+            or current.check_results.get(operation_key) is not results_before.get(operation_key)
+            or current.check_errors.get(operation_key) is not errors_before.get(operation_key)
+        ):
+            return None
+        admitted = staged.operations.get(operation_key)
+        case = staged.frozen_cases.get(operation_key)
+        if admitted is None or case is None:
+            return None
+        merged = self._clone_state()
+        merged.operations[operation_key] = admitted
+        merged.frozen_cases[operation_key] = case
+        return merged
+
+    async def _freeze_case_unrecorded(
+        self,
+        session_id: str,
+        writer_id: str,
+        expected_frontier: int | None,
+        request_id: str,
+        request_digest: str,
+    ) -> FrozenCase | CheckCommitResult:
         await self._ensure_recovered()
         async with self._lock:
             operation_key = (writer_id, request_id)
             existing_operation = self._state.operations.get(operation_key)
             new_freeze = existing_operation is None
             prior = self._state
+            self._refresh_native_capture_refs(prior.projection)
             baseline = self._freeze_state_snapshot(prior)
             clone = self._clone_state()
             reservation: _FreezeReservation | None = None
             if new_freeze:
                 pending_capture = self._pending_capture_ticket(self._task_id)
                 if pending_capture is not None:
-                    raise _public_error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+                    raise check_admission_refused(CheckAdmissionStage.CAPTURE_HANDOFF_PENDING)
                 now = self._terminal_at()
                 reservations = cast(dict[tuple[str, str], object], prior.check_reservations)
                 existing_reservation = reservations.get(operation_key)
@@ -2141,13 +2284,15 @@ class SqliteLedger:
                 ):
                     raise _public_error(PublicErrorCode.STORAGE_CORRUPT)
                 if existing_reservation is not None and existing_reservation.expires_at > now:
-                    raise _public_error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+                    raise check_admission_refused(CheckAdmissionStage.ACQUIRING)
 
                 # Install the transient barrier in the live state before releasing the repository
                 # lock.  The clone deliberately precedes this write: the oracle must create its
                 # own reservation and later remove it, while concurrent append calls inspect the
                 # live reservation and either defer observation or advance the real frontier.
-                reservation = _FreezeReservation(session_id, now + timedelta(seconds=60))
+                reservation = _FreezeReservation(
+                    session_id, now + timedelta(seconds=CHECK_ACQUISITION_RESERVATION_SECONDS)
+                )
                 reservations[operation_key] = reservation
 
         try:
@@ -2171,24 +2316,45 @@ class SqliteLedger:
                 current = self._state
                 reservations = cast(dict[tuple[str, str], object], current.check_reservations)
                 if reservation is not None and reservations.get(operation_key) is not reservation:
-                    raise _public_error(PublicErrorCode.OPERATION_PENDING, retryable=True)
-
-                if self._freeze_state_snapshot(current) != baseline:
-                    if reservation is not None and reservations.get(operation_key) is reservation:
-                        reservations.pop(operation_key, None)
-                    # An append moved the ledger head, so retain the adapter-parity conflict
-                    # details. Other concurrent lifecycle mutations are retryable but do not
-                    # change the event frontier and must not be misreported as one.
-                    if current.records is not baseline[0]:
-                        raise _frontier_conflict(
-                            Frontier(current.projection.frontier, current.projection.head_digest)
-                        )
-                    raise _public_error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+                    # This acquisition stalled past its reservation. A successor holding the key
+                    # is still acquiring; otherwise nothing durable was staged under it.
+                    raise check_admission_refused(
+                        CheckAdmissionStage.ACQUIRING
+                        if reservations.get(operation_key) is not None
+                        else CheckAdmissionStage.ACQUISITION_CONTENDED
+                    )
 
                 if type(result) is not FrozenCase:
+                    # A completed same-request replay is immutable and changed no state, so
+                    # concurrent motion cannot invalidate it.
                     if reservation is not None and reservations.get(operation_key) is reservation:
                         reservations.pop(operation_key, None)
                     return result
+
+                if self._freeze_state_snapshot(current) != baseline:
+                    # An append moved the ledger head, so retain the adapter-parity conflict
+                    # details. Other concurrent lifecycle mutations do not change the event
+                    # frontier and must not be misreported as one.
+                    if current.records is not baseline[0]:
+                        if (
+                            reservation is not None
+                            and reservations.get(operation_key) is reservation
+                        ):
+                            reservations.pop(operation_key, None)
+                        raise _frontier_conflict(
+                            Frontier(current.projection.frontier, current.projection.head_digest)
+                        )
+                    merged = self._merge_freeze_over_lifecycle_motion(
+                        current, baseline, clone, operation_key
+                    )
+                    if merged is None:
+                        if (
+                            reservation is not None
+                            and reservations.get(operation_key) is reservation
+                        ):
+                            reservations.pop(operation_key, None)
+                        raise check_admission_refused(CheckAdmissionStage.ACQUISITION_CONTENDED)
+                    clone = merged
 
                 # Keep reservations installed by another acquisition while adopting the durable
                 # clone. The local token is removed only by its owner, and this merge also avoids
@@ -2320,6 +2486,133 @@ class SqliteLedger:
         result = await self._oracle().resolve_disclosure_wait(job_id)
         await self._sync_after_mutation()
         return result
+
+    def _progress_write_locked(self, statement: str, parameters: tuple[str | int, ...]) -> int:
+        """Run one progress statement in its own owner-fenced write transaction."""
+
+        self._db.execute("BEGIN IMMEDIATE")
+        try:
+            self._verify_owner()
+            self._db.execute(statement, parameters)
+            changed = self._db.changes()
+            self._db.execute("COMMIT")
+        except BaseException:
+            if self._db.get_autocommit() is False:
+                self._db.execute("ROLLBACK")
+            raise
+        return changed
+
+    async def begin_semantic_progress(
+        self, job_id: str, queued_at: datetime, deadline_at: datetime
+    ) -> None:
+        # Validates identifiers and exact-millisecond UTC before any SQL runs.
+        SemanticProgressRecord(
+            job_id, 0, SemanticProgressPhase.QUEUED, queued_at, queued_at, deadline_at
+        )
+        await self._ensure_recovered()
+        queued = format_rfc3339_millis(queued_at)
+        async with self._lock:
+            # Progress rows are written directly rather than through the in-memory oracle: they
+            # are telemetry beside the job, and a completed operation's job is not reloaded into
+            # the oracle after restart, yet its terminal progress must stay readable.
+            self._progress_write_locked(
+                "INSERT INTO semantic_progress(job_id,attempt_ordinal,phase,phase_rank,"
+                "phase_entered_at,queued_at,deadline_at) "
+                "SELECT ?,0,'queued',1,?,?,? WHERE EXISTS ("
+                "SELECT 1 FROM semantic_jobs WHERE job_id=? AND state IN ('queued','leased')) "
+                "ON CONFLICT(job_id) DO NOTHING",
+                (job_id, queued, queued, format_rfc3339_millis(deadline_at), job_id),
+            )
+
+    async def advance_semantic_progress(
+        self,
+        handle: SemanticAttemptHandle,
+        phase: SemanticProgressPhase,
+        observed_at: datetime,
+    ) -> bool:
+        if (
+            type(handle) is not SemanticAttemptHandle
+            or type(phase) is not SemanticProgressPhase
+            or phase is SemanticProgressPhase.TERMINAL
+        ):
+            raise _public_error(PublicErrorCode.INVALID_REQUEST)
+        observed = format_rfc3339_millis(observed_at)
+        rank = SEMANTIC_PROGRESS_PHASE_RANK[phase]
+        await self._ensure_recovered()
+        async with self._lock:
+            changed = self._progress_write_locked(
+                "UPDATE semantic_progress SET attempt_ordinal=?,phase=?,phase_rank=?,"
+                "phase_entered_at=max(phase_entered_at,?) "
+                "WHERE job_id=? AND (attempt_ordinal<? OR (attempt_ordinal=? AND phase_rank<?)) "
+                "AND EXISTS (SELECT 1 FROM semantic_jobs WHERE job_id=? AND state='leased' "
+                "AND active_attempt_id=?)",
+                (
+                    handle.attempt_ordinal,
+                    phase.value,
+                    rank,
+                    observed,
+                    handle.job_id,
+                    handle.attempt_ordinal,
+                    handle.attempt_ordinal,
+                    rank,
+                    handle.job_id,
+                    handle.attempt_id,
+                ),
+            )
+        return changed == 1
+
+    async def load_semantic_progress(
+        self, writer_id: str, operation_id: str
+    ) -> SemanticProgressRecord | None:
+        await self._ensure_recovered()
+        async with self._lock:
+            row = self._db.execute(
+                "SELECT progress.job_id,progress.attempt_ordinal,progress.phase,"
+                "progress.phase_entered_at,progress.queued_at,progress.deadline_at,"
+                "jobs.state,jobs.terminal_code,jobs.terminal_at "
+                "FROM semantic_jobs AS jobs JOIN semantic_progress AS progress "
+                "ON progress.job_id=jobs.job_id "
+                "WHERE jobs.writer_id=? AND jobs.operation_id=? "
+                "ORDER BY jobs.attempt_count DESC, jobs.job_id DESC LIMIT 1",
+                (writer_id, operation_id),
+            ).fetchone()
+        if row is None:
+            return None
+        (
+            job_value,
+            ordinal,
+            phase_value,
+            entered,
+            queued,
+            deadline,
+            job_state,
+            terminal_code,
+            terminal_at,
+        ) = row
+        try:
+            entered_at = parse_rfc3339_millis(cast(str, entered))
+            if job_state in {"queued", "leased"}:
+                return SemanticProgressRecord(
+                    cast(str, job_value),
+                    cast(int, ordinal),
+                    SemanticProgressPhase(cast(str, phase_value)),
+                    entered_at,
+                    parse_rfc3339_millis(cast(str, queued)),
+                    parse_rfc3339_millis(cast(str, deadline)),
+                )
+            ended_at = parse_rfc3339_millis(cast(str, terminal_at))
+            return SemanticProgressRecord(
+                cast(str, job_value),
+                cast(int, ordinal),
+                SemanticProgressPhase.TERMINAL,
+                max(ended_at, entered_at),
+                parse_rfc3339_millis(cast(str, queued)),
+                parse_rfc3339_millis(cast(str, deadline)),
+                cast(Literal["succeeded", "failed", "quarantined"], job_state),
+                SemanticReason(cast(str, terminal_code)),
+            )
+        except (TypeError, ValueError) as exc:
+            raise _public_error(PublicErrorCode.STORAGE_CORRUPT) from exc
 
     async def renew_leases(self, lease: OperationLease) -> OperationLease:
         await self._ensure_recovered()

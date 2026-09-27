@@ -17,10 +17,14 @@ from yoetz.adapters.integrations.codex_marketplace import (
 from yoetz.adapters.integrations.codex_mcp import CodexMcpAdapter
 from yoetz.adapters.integrations.codex_skill import CodexSkillIntegration
 from yoetz.adapters.integrations.host_discovery import HostInstallation
-from yoetz.application.harness_mcp import HarnessMcpService, McpRegistrationConfirmation
+from yoetz.application.harness_mcp import (
+    HarnessMcpService,
+    McpRegistrationConfirmation,
+    mcp_removal_report,
+)
 from yoetz.application.host_connection import ConnectionAction, ConnectionError, ConnectionPlan
 from yoetz.domain.values import request_id
-from yoetz.ports.harness_mcp import HarnessBinary
+from yoetz.ports.harness_mcp import HarnessBinary, McpRegistrationError, McpRegistrationReason
 from yoetz.ports.integrations import (
     HarnessId,
     IntegrationAction,
@@ -127,6 +131,7 @@ def prepare_codex_connection(
                 "reload_required": True,
             }
     else:
+        removal_report: dict[str, JsonValue] | None = None
         target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(project))
         removal = preview_removal(
             target,
@@ -155,6 +160,7 @@ def prepare_codex_connection(
         body["skill_preview_digest"] = skill_preview.preview_digest
         body["plugin_preview_digest"] = removal.preview_digest
         body["mcp_preview_digest"] = registration.preview_digest
+        body["warnings"] = list(registration.warnings)
         body["retained"] = ["Yoetz data", "inactive project plugin sources"]
         body["changes"] = (
             [] if removal.outcome is RemovalOutcome.ALREADY_ABSENT else ["deactivate_plugin"]
@@ -165,6 +171,7 @@ def prepare_codex_connection(
             cast(list[JsonValue], body["changes"]).append("remove_project_skill")
 
         def apply() -> None:
+            nonlocal removal_report
             apply_removal(
                 target,
                 approved_digest=removal.preview_digest,
@@ -180,7 +187,32 @@ def prepare_codex_connection(
                     ),
                 )
 
-            anyio.run(unregister)
+            try:
+                removal_report = mcp_removal_report(anyio.run(unregister))
+            except McpRegistrationError as error:
+                if error.reason is McpRegistrationReason.REGISTRATION_FAILED:
+                    from yoetz.cli.setup_readiness import continuation
+
+                    raise ConnectionError(
+                        "connection_outcome_unknown",
+                        status={
+                            "mcp_removal": mcp_removal_report(error),
+                            "next_command": continuation(
+                                [
+                                    "integrate",
+                                    "codex",
+                                    "mcp",
+                                    "status",
+                                    "--codex-path",
+                                    binary.executable_path,
+                                    "--codex-home",
+                                    str(installation.config_root),
+                                    "--json",
+                                ]
+                            ),
+                        },
+                    ) from error
+                raise
             if skill_preview.state_before is IntegrationState.INSTALLED_EXACT:
 
                 async def remove_skill():
@@ -212,6 +244,7 @@ def prepare_codex_connection(
                 "connection_observed": False,
                 "reload_required": True,
                 "retained": body["retained"],
+                "mcp_removal": removal_report,
             }
 
     body["preview_digest"] = canonical_digest(body)

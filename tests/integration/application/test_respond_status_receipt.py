@@ -169,12 +169,14 @@ class _FailSecondPersistObjects(MemoryObjects):
     async def commitment_for(self, data: bytes, kind: ObjectKind) -> str:
         return await self._delegate.commitment_for(data, kind)
 
-    async def stage(self, source: ObjectSource, metadata: ObjectMetadata) -> StagedObject:
+    async def stage(
+        self, source: ObjectSource, metadata: ObjectMetadata, *, object_id: str | None = None
+    ) -> StagedObject:
         self.stage_calls += 1
         if self._fault_at == "stage" and self.stage_calls == 2 and not self._failed:
             self._failed = True
             raise OSError("simulated_second_stage_failure")
-        return await self._delegate.stage(source, metadata)
+        return await self._delegate.stage(source, metadata, object_id=object_id)
 
     async def finalize(self, staged: StagedObject) -> ObjectRef:
         self.finalize_calls += 1
@@ -389,19 +391,29 @@ def _scope(_binding: object, source: Mapping[str, JsonValue]) -> AuthorizationSc
     )
 
 
-async def _semantic_disabled(frozen: object, findings: object) -> object:
-    del frozen, findings
+async def _semantic_disabled(
+    frozen: object,
+    findings: object,
+    runtime: object | None = None,
+    lineage_evaluation: object | None = None,
+) -> object:
+    del frozen, findings, runtime, lineage_evaluation
     raise AssertionError("semantic_evaluator_called_in_deterministic_mode")
 
 
-async def _semantic_succeeds(frozen: object, findings: object) -> object:
+async def _semantic_succeeds(
+    frozen: object,
+    findings: object,
+    runtime: object | None = None,
+    lineage_evaluation: object | None = None,
+) -> object:
     """Reach ``succeeded`` without raising an AI-powered review challenge of its own.
 
     AI-powered review delivery is exercised elsewhere; here the only thing that matters is that the check
     earns ``semantic_model_derived`` coverage, so the receipt has something to lose.
     """
 
-    del frozen, findings
+    del frozen, findings, runtime, lineage_evaluation
     return FinalSemanticEvaluation(
         SemanticStatus.SUCCEEDED,
         SemanticReason.SEMANTIC_COMPLETED,
@@ -1717,15 +1729,18 @@ async def test_check_respond_recheck_reaches_a_fixed_point() -> None:
     assert status.closure_readiness.blocking_conditions == (
         "receipt_findings_unresolved",
         "no_plan_published",
+        "coverage_gaps_declared",
     )
     assert item.freshness != "stale_after_material_change"
 
     # The MCP text fallback stands in for this exact result when a host drops structured content,
-    # so it must report the singleton's own counters and freshness, not the newest record
-    # envelope's coverage, which reads `current` at this same frontier.
+    # so it must report the singleton's own counters and freshness. Aggregate and item coverage
+    # both retain the deterministic-only limitation instead of claiming complete coverage.
     summary = summary_for_status(status.as_json())
     assert f"freshness: {item.freshness}" in summary
-    assert status.coverage.ledger_freshness.value != item.freshness
+    assert status.coverage.ledger_freshness.value == item.freshness
+    assert "semantic_review_not_requested" in status.coverage.known_gaps
+    assert "check_not_applicable" not in status.coverage.known_gaps
     assert "unanswered findings: 0" in summary
     assert f"receipt-blocking findings: {item.receipt_blocking_finding_count}" in summary
 
@@ -2713,6 +2728,13 @@ async def test_finding_free_observation_work_keeps_check_applicable(
     compact = cast(StatusCompactPageModel, status.page)
     assert CheckType.DETERMINISTIC in compact.items[0].coverage.check_types
     assert compact.items[0].freshness != LedgerFreshness.STALE_AFTER_MATERIAL_CHANGE.value
+    # Status and the receipt must expose the same earlier-frontier qualification. The suffix is
+    # attributable observation work, so the check remains useful, but compact status must not
+    # silently report the current ledger as fully covered.
+    assert "check_current_as_of_earlier_frontier" in compact.items[0].coverage.known_gaps
+    assert "check_current_as_of_earlier_frontier" in compact.items[0].gaps
+    assert "check_current_as_of_earlier_frontier" in status.coverage.known_gaps
+    assert "coverage_gaps_declared" in status.closure_readiness.blocking_conditions
 
     receipt = await app.receipt(
         ReceiptRequest.model_validate(
@@ -4266,3 +4288,187 @@ async def test_command_gap_partition_preserves_receipt_coverage(
     assert isinstance(status.page, StatusFindingsPageModel)
     final = next(row for row in status.page.items if row.finding_id == target.finding_id)
     assert final.resolved is should_resolve
+
+
+@pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))
+async def test_empty_claim_repair_converges_across_views_and_receipts(
+    ledger_backend: Literal["memory", "sqlite"], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#859: historical C0 + scoped C1 become C2 without rewriting accepted bytes."""
+    import yoetz.application.publish_work as publication
+    from yoetz.kernel.claims import effective_claim_ids
+    from yoetz.kernel.completion_scope import completion_scope_codes
+
+    app, runtime, _ = _build_app(ledger_backend=ledger_backend)
+    started = await app.start(start_request(85900, title="Empty claim repair"))
+    obligation = protocol_id("obl_", 85901)
+    evidence = protocol_id("evd_", 85902)
+    c0, c1, c2 = (protocol_id("clm_", n) for n in (85903, 85904, 85905))
+    serial = 86000
+    frontier = started.frontier
+
+    def draft(name: str, payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        nonlocal serial
+        serial += 1
+        return {
+            "event_id": protocol_id("evt_", serial),
+            "schema": {"name": name, "version": "1.1.0" if name == "claim_recorded" else "1.0.0"},
+            "occurred_at": "2026-07-19T12:00:00.000Z",
+            "causal_parents": [],
+            "artifact_refs": [],
+            "evidence_refs": [],
+            "payload": payload,
+        }
+
+    def request_base() -> dict[str, object]:
+        nonlocal serial
+        serial += 1
+        return {
+            **_request_base(protocol_id("req_", serial)),
+            "session_id": started.session_id,
+            "writer_id": started.writer_id,
+        }
+
+    async def publish(drafts: list[dict[str, JsonValue]]) -> PublishWorkRequest:
+        nonlocal frontier
+        req = PublishWorkRequest.model_validate(
+            {**request_base(), "expected_frontier": _frontier(frontier), "event_drafts": drafts}
+        )
+        preview = await app.publish_work(req.model_copy(update={"dry_run": True}))
+        assert isinstance(preview, PublishWorkResult)
+        result = await app.publish_work(req)
+        assert isinstance(result, PublishWorkInternalResult)
+        frontier = result.result_frontier
+        return req
+
+    meaning: dict[str, JsonValue] = {
+        "obligation_id": obligation,
+        "description": "Synthetic bounded repair",
+        "evidence_expectation": "Evidence",
+        "status": "open",
+    }
+    await publish(
+        [
+            draft(
+                "plan_published",
+                {"plan_version": 1, "summary": "Repair", "obligation_refs": [obligation]},
+            ),
+            draft("obligation_published", meaning),
+            draft(
+                "evidence_recorded",
+                {
+                    "evidence_id": evidence,
+                    "evidence_kind": "other",
+                    "strength": "metadata_only",
+                    "description": "Synthetic evidence",
+                    "observed_at": "2026-07-19T12:00:00.000Z",
+                },
+            ),
+            draft(
+                "obligation_published",
+                {**meaning, "status": "resolved", "resolution_evidence_refs": [evidence]},
+            ),
+        ]
+    )
+    initial: dict[str, JsonValue] = {
+        "claim_id": c0,
+        "claim_kind": "completion",
+        "statement": "Original missing scope",
+        "supporting_refs": [obligation],
+        "limitation_refs": [],
+        "supersedes_claim_refs": [],
+    }
+
+    # Seed the exact historically accepted v1.1 authoring shape through the ordinary durable
+    # append path with only the new admission guard disabled, as on the pre-fix runtime.
+    def prior_admission(*_args: object) -> None:
+        pass
+
+    with monkeypatch.context() as old_runtime:
+        old_runtime.setattr(publication, "_validate_new_completion_scope", prior_admission)
+        historical_request = await publish([draft("claim_recorded", initial)])
+    await publish(
+        [
+            draft(
+                "claim_recorded",
+                {
+                    **initial,
+                    "claim_id": c1,
+                    "statement": "Scoped completion",
+                    "obligation_refs": [obligation],
+                    "supporting_refs": [evidence],
+                },
+            )
+        ]
+    )
+    ledger, _ = runtime.resources[started.task_id]
+    before = tuple([row async for row in ledger.load_events(started.session_id)])
+    assert completion_scope_codes(replay(before)) == ("completion_plan_not_claimed",)
+    for view in ("compact", "candidate_findings"):
+        status = await app.status(
+            StatusRequest.model_validate({**request_base(), "view": view, "limit": "100"})
+        )
+        assert "completion_plan_not_claimed" in str(status)
+    await publish(
+        [
+            draft(
+                "claim_recorded",
+                {
+                    **initial,
+                    "claim_id": c2,
+                    "statement": "Corrected bounded completion",
+                    "obligation_refs": [obligation],
+                    "supporting_refs": [evidence],
+                    "supersedes_claim_refs": [c0, c1],
+                },
+            )
+        ]
+    )
+    records = tuple([row async for row in ledger.load_events(started.session_id)])
+    assert records[: len(before)] == before
+    state = replay(records)
+    assert effective_claim_ids(state) == frozenset({c2})
+    assert completion_scope_codes(state) == ()
+    for view in ("compact", "candidate_findings", "history"):
+        status = await app.status(
+            StatusRequest.model_validate({**request_base(), "view": view, "limit": "100"})
+        )
+        assert "completion_plan_not_claimed" not in str(status)
+    # A pre-upgrade operation remains replayable even though its authoring shape is now refused.
+    recovered = await app.publish_work(historical_request)
+    assert isinstance(recovered, PublishWorkInternalResult)
+    assert recovered.outcome == "replayed"
+    check = await app.check(
+        CheckRequest.model_validate(
+            {
+                **request_base(),
+                "expected_frontier": _frontier(frontier),
+                "mode": "deterministic_only",
+                "max_findings": "10",
+            }
+        )
+    )
+    assert isinstance(check, CheckCommitResult)
+    frontier = check.result_frontier
+    assert "completion_plan_not_claimed" not in check.coverage.known_gaps
+    for fmt in ("json", "markdown", "text"):
+        receipt = await app.receipt(
+            ReceiptRequest.model_validate(
+                {
+                    **request_base(),
+                    "task_id": started.task_id,
+                    "expected_frontier": _frontier(frontier),
+                    "format": fmt,
+                    "include": "standard",
+                    "redaction_profile": "full_local",
+                }
+            )
+        )
+        frontier = receipt.result_frontier
+        assert "completion_plan_not_claimed" not in receipt.coverage.known_gaps
+        assert "semantic_review_not_requested" in receipt.coverage.known_gaps
+        rendered = str(receipt.document if fmt == "json" else receipt.human_text)
+        if fmt == "json":
+            assert c2 in rendered
+        assert "Original missing scope" not in rendered
+        assert receipt.conclusion != "no_issue_detected"

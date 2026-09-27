@@ -5,19 +5,31 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from typing import Final, Literal, Protocol, cast
 
 from pydantic import BaseModel
 
 from yoetz.application.check import CheckScope, run_deterministic_policies
+from yoetz.application.coordination import CoordinationAdvice
+from yoetz.application.projects import ProjectApplication, ProjectCommandError
+from yoetz.application.status_faults import (
+    StatusFault,
+    StatusFaultStage,
+    classify_status_fault,
+    fault_source,
+    status_stage,
+)
+from yoetz.application.task_views import LineageStatusSnapshot, ProjectStatusSnapshot
 from yoetz.domain.findings import FINDING_KIND_TRAITS, FindingOrigin
 from yoetz.domain.observation import AdviceSnapshot
 from yoetz.domain.values import (
     Frontier,
     SemanticContinuation,
     disclosure_continuation,
+    format_rfc3339_millis,
     repository_grant_continuation,
 )
 from yoetz.kernel.deterministic_checks import (
@@ -27,8 +39,10 @@ from yoetz.kernel.deterministic_checks import (
 )
 from yoetz.observability.logging import record_unexpected_exception_without_raising
 from yoetz.ports.diagnostics import RuntimeCapability
+from yoetz.ports.host_lineage import HostLineageRegistryPort
 from yoetz.ports.ledger import (
     AssignmentProjectionFilter,
+    CheckAdmissionRecord,
     CheckSuspensionKind,
     EvidenceProjectionFilter,
     FindingProjectionPosition,
@@ -45,8 +59,10 @@ from yoetz.ports.ledger import (
     ProjectionPosition,
     ProjectionQuery,
     ProjectionView,
+    SemanticProgressRecord,
 )
 from yoetz.ports.runtime import BundleRuntimePort, RouteAccess, RouteCommand, TaskRuntime
+from yoetz.ports.start_catalog import StartCatalogPort
 from yoetz.protocol.canonical import (
     JsonValue,
     canonical_digest,
@@ -69,12 +85,14 @@ from yoetz.protocol.coverage import (
 )
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.models import (
+    SemanticProgressPhase,
     StatusAdvicePageModel,
     StatusAssignmentFilterModel,
     StatusAssignmentPageModel,
     StatusCandidateFindingItemModel,
     StatusCandidateFindingsFilterModel,
     StatusCandidateFindingsPageModel,
+    StatusCheckAdmissionModel,
     StatusClosureReadinessModel,
     StatusCompactItemModel,
     StatusCompactPageModel,
@@ -86,18 +104,26 @@ from yoetz.protocol.models import (
     StatusHistoryFilterModel,
     StatusHistoryPageModel,
     StatusImportStatusModel,
+    StatusLineagePageModel,
     StatusObligationsFilterModel,
     StatusObligationsPageModel,
     StatusOperationFilterModel,
     StatusOperationPageModel,
     StatusPage,
+    StatusProjectPageModel,
     StatusRequest,
     StatusResultsPageModel,
+    StatusSemanticProgressModel,
     StatusVersionSliceModel,
     StatusVersionsPageModel,
 )
 
-__all__ = ["Application", "StatusInternalResult", "execute_status"]
+__all__ = [
+    "Application",
+    "StatusInternalResult",
+    "execute_status",
+    "semantic_progress_wire",
+]
 
 _PACKS = ("research-evidence/0.1.0", "work-integrity/0.1.0")
 _CURSOR_VERSION = "1"
@@ -163,6 +189,9 @@ def _strip_optional_non_null_nulls(
 class Application(Protocol):
     runtime: BundleRuntimePort
     status_cursor_key: bytes
+    start_catalog: StartCatalogPort
+    project_application: ProjectApplication | None
+    host_lineage_registry: HostLineageRegistryPort | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,6 +256,148 @@ def _error(code: PublicErrorCode, message: str) -> PublicOperationError:
     return PublicOperationError(code, message, False)
 
 
+async def _coordination_advice_status_items(
+    app: Application,
+    runtime: TaskRuntime,
+    coverage: Coverage,
+    *,
+    limit: int,
+) -> tuple[dict[str, JsonValue], ...]:
+    """Project currently delivered coordination advice into the ordinary advice page.
+
+    The project application performs the source-consent, recipient-consent, delivery-pair, and
+    membership-generation checks.  Status only retains rows addressed to this task and exposes
+    structural commitments; counterpart paths and text stay behind the existing project detail
+    and disclosure gates.
+    """
+
+    project_application = getattr(app, "project_application", None)
+    if not isinstance(project_application, ProjectApplication):
+        return ()
+    list_projects = getattr(project_application.catalog, "list_task_project_ids", None)
+    advice_for = getattr(project_application, "coordination_advice_for", None)
+    if not callable(list_projects) or not callable(advice_for):
+        return ()
+    try:
+        project_ids = await cast(Callable[[str], Awaitable[tuple[str, ...]]], list_projects)(
+            runtime.task_id
+        )
+    except ProjectCommandError, PublicOperationError:
+        return ()
+    items: list[dict[str, JsonValue]] = []
+    for project_id in sorted(set(project_ids), key=str.encode):
+        try:
+            rows = await cast(Callable[..., Awaitable[tuple[CoordinationAdvice, ...]]], advice_for)(
+                runtime.task_id, project=project_id
+            )
+        except ProjectCommandError, PublicOperationError:
+            continue
+        for advice in rows:
+            target = getattr(advice, "target_task_id", None)
+            if target != runtime.task_id:
+                continue
+            detection_id = getattr(advice, "detection_id", None)
+            project_value = getattr(advice, "project_id", None)
+            generation = getattr(advice, "membership_generation", None)
+            counterpart = getattr(advice, "counterpart_task_id", None)
+            if (
+                type(detection_id) is not str
+                or type(project_value) is not str
+                or type(generation) is not int
+                or type(counterpart) is not str
+            ):
+                continue
+            evidence = canonical_digest(cast(JsonValue, advice.as_wire()))
+            items.append(
+                {
+                    # The advice page predates the coordination-specific item shape and uses a
+                    # finding-shaped stable identity.  Preserve the detection UUID while changing
+                    # only its typed prefix; this is an advice identity, not a recorded finding.
+                    "finding_id": "fnd_" + detection_id.removeprefix("evt_"),
+                    "rule_code": "coordination_overlap",
+                    "priority": 50,
+                    "evidence_commitments": (evidence,),
+                    "coverage": coverage_to_json(coverage),
+                    "freshness_frontier": f"membership_generation:{generation}",
+                    "verification_state": "not_required",
+                    "semantic_state": "disabled",
+                    "recommended_next_action": "review_coordination_advice",
+                    "coordination_project_id": project_value,
+                    "coordination_detection_id": detection_id,
+                    "coordination_membership_generation": str(generation),
+                    "coordination_counterpart_task_id": counterpart,
+                    "coordination_resource_paths": {
+                        "omitted": True,
+                        "category": "repository_excerpt",
+                        "reason": "local_disclosure_not_authorized",
+                    },
+                }
+            )
+    return tuple(items[:limit])
+
+
+def _task_snapshot_size(snapshot: LineageStatusSnapshot | ProjectStatusSnapshot) -> int:
+    if isinstance(snapshot, LineageStatusSnapshot):
+        return len(snapshot.children) + len(snapshot.annotations)
+    return (
+        len(snapshot.members)
+        + _task_snapshot_size(snapshot.lineage)
+        + len(snapshot.detections)
+        + len(snapshot.coverage)
+        + len(snapshot.receipts)
+    )
+
+
+def _task_snapshot_page(
+    snapshot: LineageStatusSnapshot | ProjectStatusSnapshot,
+    offset: int,
+    limit: int,
+    next_cursor: str | None,
+) -> StatusLineagePageModel | StatusProjectPageModel:
+    """One shared item budget covers every collection in a task/project response."""
+
+    end = offset + limit
+    if isinstance(snapshot, LineageStatusSnapshot):
+        count = len(snapshot.children)
+        return StatusLineagePageModel(
+            parent_task_id=snapshot.parent_task_id,
+            children=snapshot.children[offset:end],
+            annotations=snapshot.annotations[max(0, offset - count) : max(0, end - count)],
+            next_cursor=next_cursor,
+        )
+    members_end = len(snapshot.members)
+    children_end = members_end + len(snapshot.lineage.children)
+    annotations_end = children_end + len(snapshot.lineage.annotations)
+    detections_end = annotations_end + len(snapshot.detections)
+    coverage_end = detections_end + len(snapshot.coverage)
+    return StatusProjectPageModel.model_validate(
+        {
+            **snapshot.metadata,
+            "members": snapshot.members[offset:end],
+            "lineage": {
+                "parent_task_id": snapshot.lineage.parent_task_id,
+                "children": snapshot.lineage.children[
+                    max(0, offset - members_end) : max(0, end - members_end)
+                ],
+                "annotations": snapshot.lineage.annotations[
+                    max(0, offset - children_end) : max(0, end - children_end)
+                ],
+                "next_cursor": None,
+            },
+            "detections": snapshot.detections[
+                max(0, offset - annotations_end) : max(0, end - annotations_end)
+            ],
+            "coverage": snapshot.coverage[
+                max(0, offset - detections_end) : max(0, end - detections_end)
+            ],
+            "receipts": snapshot.receipts[
+                max(0, offset - coverage_end) : max(0, end - coverage_end)
+            ],
+            "next_cursor": next_cursor,
+        }
+    )
+
+
 def _filter_json(value: StatusFilter | None) -> JsonValue:
     if value is None:
         return None
@@ -234,7 +405,14 @@ def _filter_json(value: StatusFilter | None) -> JsonValue:
 
 
 def _filter_digest(request: StatusRequest) -> str:
-    return canonical_digest(_filter_json(request.filter))
+    selectors = {
+        name: getattr(request, name, None)
+        for name in ("task_id", "project_id", "correlation_id")
+        if getattr(request, name, None) is not None
+    }
+    if not selectors:
+        return canonical_digest(_filter_json(request.filter))
+    return canonical_digest({"filter": _filter_json(request.filter), **selectors})
 
 
 # A SHA-256 HMAC digest is always exactly 32 bytes, so its unpadded base64url encoding is
@@ -461,26 +639,159 @@ async def _operation_continuation(
     return result
 
 
+def semantic_progress_wire(
+    record: SemanticProgressRecord, observed_at: datetime
+) -> dict[str, JsonValue]:
+    """Project one durable progress record onto the bounded structural wire (issue #571 A2).
+
+    Durations are derived here, at one service observation time, so every rendering of the same
+    page agrees. Only closed phase/outcome/reason values, an ordinal, and service timestamps leave.
+    """
+
+    if type(record) is not SemanticProgressRecord or type(observed_at) is not datetime:
+        raise ValueError("status_semantic_progress_invalid")
+    observed = observed_at.replace(microsecond=observed_at.microsecond // 1000 * 1000)
+
+    def _ms(start: datetime, end: datetime) -> int:
+        return max(0, int((end - start).total_seconds() * 1000))
+
+    terminal = record.phase is SemanticProgressPhase.TERMINAL
+    wire: dict[str, JsonValue] = {
+        "phase": record.phase.value,
+        "attempt_ordinal": str(record.attempt_ordinal),
+        "queued_at": format_rfc3339_millis(record.queued_at),
+        "phase_entered_at": format_rfc3339_millis(record.phase_entered_at),
+        "deadline_at": format_rfc3339_millis(record.deadline_at),
+        "observed_at": format_rfc3339_millis(observed),
+        "elapsed_ms": str(_ms(record.queued_at, record.phase_entered_at if terminal else observed)),
+    }
+    if terminal:
+        assert record.terminal_outcome is not None and record.terminal_reason is not None
+        wire["condition"] = "terminal"
+        wire["terminal_outcome"] = record.terminal_outcome
+        wire["terminal_reason"] = record.terminal_reason.value
+    else:
+        remaining = _ms(observed, record.deadline_at)
+        wire["remaining_ms"] = str(remaining)
+        wire["condition"] = "active" if remaining > 0 else "overdue"
+    return wire
+
+
+async def _operation_semantic_progress(
+    app: Application, runtime: TaskRuntime, operation: object | None
+) -> dict[str, JsonValue] | None:
+    """Read best-effort structural progress for one check operation; never fail recovery."""
+
+    if (
+        type(operation) is not OperationRecord
+        or operation.operation_kind is not OperationKind.CHECK
+        or operation.state not in {OperationState.PENDING, OperationState.COMPLETE}
+    ):
+        return None
+    load = getattr(runtime.ledger, "load_semantic_progress", None)
+    if not callable(load):
+        return None
+    try:
+        record = await cast(Callable[[str, str], Awaitable[SemanticProgressRecord | None]], load)(
+            operation.writer_id, operation.operation_id
+        )
+        if record is None:
+            return None
+        clock = getattr(app, "clock", None)
+        now = clock.now_utc() if clock is not None else datetime.now(UTC)
+        wire = semantic_progress_wire(record, now)
+        StatusSemanticProgressModel.model_validate(wire)
+        return wire
+    except Exception as exc:  # noqa: BLE001 - progress enriches recovery, never blocks it
+        record_unexpected_exception_without_raising(
+            exc,
+            component="application.status",
+            operation="status_semantic_progress_unavailable",
+            request_id=operation.operation_id,
+        )
+        return None
+
+
+def check_admission_wire(
+    record: CheckAdmissionRecord, observed_at: datetime
+) -> dict[str, JsonValue]:
+    """Project one transient admission record onto the bounded structural wire (issue #838).
+
+    Only the closed stage, a count, service timestamps, and durations derived at one service
+    observation time leave; the page never names another request or any payload.
+    """
+
+    if type(record) is not CheckAdmissionRecord or type(observed_at) is not datetime:
+        raise ValueError("status_check_admission_invalid")
+    observed = observed_at.replace(microsecond=observed_at.microsecond // 1000 * 1000)
+    first = record.first_observed_at
+    last = record.last_observed_at
+    observed = max(observed, last)
+    return {
+        "stage": record.stage.value,
+        "refusal_count": str(record.refusal_count),
+        "first_observed_at": format_rfc3339_millis(first),
+        "last_observed_at": format_rfc3339_millis(last),
+        "observed_at": format_rfc3339_millis(observed),
+        "elapsed_ms": str(max(0, int((observed - first).total_seconds() * 1000))),
+        "retry_after_ms": str(record.retry_after_ms),
+    }
+
+
+async def _operation_admission(
+    app: Application, runtime: TaskRuntime, writer_id: str, operation_request_id: str
+) -> dict[str, JsonValue] | None:
+    """Read best-effort pre-admission state for an absent check request; never fail recovery."""
+
+    lookup = getattr(runtime.ledger, "lookup_check_admission", None)
+    if not callable(lookup):
+        return None
+    try:
+        record = await cast(Callable[[str, str], Awaitable[CheckAdmissionRecord | None]], lookup)(
+            writer_id, operation_request_id
+        )
+        if record is None:
+            return None
+        clock = getattr(app, "clock", None)
+        now = clock.now_utc() if clock is not None else datetime.now(UTC)
+        wire = check_admission_wire(record, now)
+        StatusCheckAdmissionModel.model_validate(wire)
+        return wire
+    except Exception as exc:  # noqa: BLE001 - admission enriches recovery, never blocks it
+        record_unexpected_exception_without_raising(
+            exc,
+            component="application.status",
+            operation="status_check_admission_unavailable",
+            request_id=operation_request_id,
+        )
+        return None
+
+
 def _operation_page_from_record(
     operation_request_id: str,
     operation: object | None,
     continuation: Mapping[str, JsonValue] | None = None,
+    semantic_progress: Mapping[str, JsonValue] | None = None,
+    admission: Mapping[str, JsonValue] | None = None,
 ) -> StatusOperationPageModel:
     """Project one operation record into the recovery page, or a bounded not-found page.
 
     Every exit is either a validated page or ``ValueError``. Attribute and type faults on a
     stored record (corrupt shape, missing enum members) collapse to the same bounded error so
-    the operation status branch never raises an unbounded exception into the daemon.
+    the operation status branch never raises an unbounded exception into the daemon. An absent
+    page carries ``admission`` only when a check under this exact key was refused before
+    admission or is being admitted right now (issue #838).
     """
 
     if operation is None:
-        return StatusOperationPageModel.model_validate(
-            {
-                "operation_request_id": operation_request_id,
-                "found": False,
-                "state": "absent",
-            }
-        )
+        absent: dict[str, JsonValue] = {
+            "operation_request_id": operation_request_id,
+            "found": False,
+            "state": "absent",
+        }
+        if admission is not None:
+            absent["admission"] = cast(JsonValue, dict(admission))
+        return StatusOperationPageModel.model_validate(absent)
     from yoetz.ports.ledger import OperationRecord as _OperationRecord
 
     try:
@@ -499,6 +810,8 @@ def _operation_page_from_record(
             # original result scrolled away or the context was compacted.
             if continuation is not None and kind == "check":
                 pending["continuation"] = cast(JsonValue, dict(continuation))
+            if semantic_progress is not None and kind == "check":
+                pending["semantic_progress"] = cast(JsonValue, dict(semantic_progress))
             return StatusOperationPageModel.model_validate(pending)
         if record.state is OperationState.QUARANTINED:
             return StatusOperationPageModel.model_validate(
@@ -514,14 +827,15 @@ def _operation_page_from_record(
         # Only publish_work stores the AppendResult shape used here. Other complete kinds surface
         # without accepted-event detail so recovery stays bounded and honest.
         if record.operation_kind is not OperationKind.PUBLISH_WORK:
-            return StatusOperationPageModel.model_validate(
-                {
-                    "operation_request_id": operation_request_id,
-                    "found": True,
-                    "state": "complete",
-                    "operation_kind": kind,
-                }
-            )
+            complete: dict[str, JsonValue] = {
+                "operation_request_id": operation_request_id,
+                "found": True,
+                "state": "complete",
+                "operation_kind": kind,
+            }
+            if semantic_progress is not None and kind == "check":
+                complete["semantic_progress"] = cast(JsonValue, dict(semantic_progress))
+            return StatusOperationPageModel.model_validate(complete)
         source = _mapping(strict_json_parse(record.result_canonical))
         accepted_raw = source["accepted"]
         if type(accepted_raw) is not tuple and type(accepted_raw) is not list:
@@ -658,10 +972,12 @@ async def _candidate_page(
         projection = replay(records)
     except ValueError as exc:
         # Replay is genesis-anchored; a chain it rejects is a storage fact, not an engine bug, so
-        # it leaves here as a bounded public error rather than an unbounded internal one.
-        raise _error(PublicErrorCode.STORAGE_CORRUPT, "The task ledger is unreadable.") from exc
+        # it leaves here as a bounded public error rather than an unbounded internal one. The
+        # status boundary records its class and origin under the public correlation id.
+        raise StatusFault(StatusFaultStage.REPLAY, "The task ledger is unreadable.") from exc
     if Frontier(projection.frontier, projection.head_digest) != frontier:
-        raise _error(PublicErrorCode.STORAGE_CORRUPT, "The status frontier is inconsistent.")
+        with status_stage(StatusFaultStage.REPLAY, "The status frontier is inconsistent."):
+            raise ValueError("status_frontier_inconsistent")
     availability = await runtime.ledger.load_case_availability(
         runtime.session_id, frontier, projection
     )
@@ -669,10 +985,7 @@ async def _candidate_page(
         case = build_deterministic_case(projection, records, availability)
     except ValueError as exc:
         if str(exc) == "deterministic_case_invalid":
-            raise _error(
-                PublicErrorCode.STORAGE_CORRUPT,
-                "The status case is unreadable.",
-            ) from exc
+            raise StatusFault(StatusFaultStage.REPLAY, "The status case is unreadable.") from exc
         raise
     assessments, _ = run_deterministic_policies(case, CheckScope((), ()), _PACKS)
     indexed = tuple(enumerate(assessments))
@@ -685,24 +998,25 @@ async def _candidate_page(
     )
     limit = int(request.limit)
     selected = ordered[offset : offset + limit]
-    items = tuple(
-        StatusCandidateFindingItemModel.model_validate(
-            {
-                "kind": item.candidate.kind.value,
-                "origin": "deterministic",
-                "priority": item.candidate.priority,
-                "summary": item.candidate.summary,
-                "detail": item.candidate.detail,
-                "subject_refs": item.candidate.subject_refs,
-                "policy_id": item.candidate.policy_id,
-                "policy_version": item.candidate.policy_version,
-                "subject_frontier": dict(item.candidate.subject_frontier.as_wire().items()),
-                "coverage": coverage_to_json(item.candidate.coverage),
-                "basis": finding_basis_to_status_json(item),
-            }
+    with status_stage(StatusFaultStage.MODEL):
+        items = tuple(
+            StatusCandidateFindingItemModel.model_validate(
+                {
+                    "kind": item.candidate.kind.value,
+                    "origin": "deterministic",
+                    "priority": item.candidate.priority,
+                    "summary": item.candidate.summary,
+                    "detail": item.candidate.detail,
+                    "subject_refs": item.candidate.subject_refs,
+                    "policy_id": item.candidate.policy_id,
+                    "policy_version": item.candidate.policy_version,
+                    "subject_frontier": dict(item.candidate.subject_frontier.as_wire().items()),
+                    "coverage": coverage_to_json(item.candidate.coverage),
+                    "basis": finding_basis_to_status_json(item),
+                }
+            )
+            for item in selected
         )
-        for item in selected
-    )
     next_offset = offset + len(selected)
     next_cursor = (
         _encode_cursor(app, request, frontier, runtime.projection_version, next_offset)
@@ -792,6 +1106,8 @@ async def _closure_readiness(
     frontier: Frontier,
     compact_page: ProjectionPage | None = None,
     request_id: str | None = None,
+    *,
+    lineage_gaps: tuple[str, ...] = (),
 ) -> StatusClosureReadinessModel:
     """Derive what currently bounds a completion conclusion, from the compact projection.
 
@@ -844,7 +1160,7 @@ async def _closure_readiness(
         has_plan = item.current_plan_event_id is not None
         no_obligations_reason = item.no_obligations_reason
         stale = page.rebuild_state != "current" or bool(page.lag)
-        declared_gaps = bool(page.gaps)
+        declared_gaps = bool(page.gaps or lineage_gaps)
     except (AttributeError, IndexError, TypeError, ValueError) as exc:
         record_unexpected_exception_without_raising(
             exc,
@@ -893,6 +1209,44 @@ async def _closure_readiness(
     )
 
 
+async def _lineage_readiness_gaps(
+    app: Application, runtime: TaskRuntime, frontier: Frontier, request_id: str
+) -> tuple[str, ...]:
+    """Compare accepted catalog children with recorded facts without opening child bundles.
+
+    These are current advisory gaps only. Checks and receipts still replay service-stamped
+    manifests, and this read never refreshes one or awards verification to a live catalog row.
+    """
+
+    from yoetz.application.task_views import lineage_status_page
+
+    try:
+        if not await app.start_catalog.list_child_task_ids(runtime.task_id):
+            return ()
+        snapshot = await lineage_status_page(app.start_catalog, runtime, frontier)
+        return tuple(
+            sorted(
+                {
+                    gap
+                    for child in snapshot.children
+                    if child.acceptance == "accepted"
+                    for gap in child.blocking_conditions
+                }
+            )
+        )
+    except Exception as exc:
+        # A secondary read must neither strand operation recovery nor turn an unreadable
+        # dependency inventory into an apparently clean parent. Record the original under any
+        # stage marker so the class and origin still name the defect.
+        record_unexpected_exception_without_raising(
+            fault_source(exc),
+            component="application.status",
+            operation="status_lineage_readiness_unavailable",
+            request_id=request_id,
+        )
+        return ("lineage_readiness_unavailable",)
+
+
 async def execute_status(
     app: Application,
     request: StatusRequest,
@@ -929,6 +1283,7 @@ async def execute_status(
             if request.at_frontier is not None and int(request.at_frontier) != frontier.sequence:
                 raise _error(PublicErrorCode.INVALID_REQUEST, "The status cursor is invalid.")
 
+        result_view = request.view
         import_status = await _import_status(runtime)
         compact_page: ProjectionPage | None = None
         if request.view == "operation":
@@ -951,13 +1306,25 @@ async def execute_status(
                     runtime,
                     operation,
                 )
+            semantic_progress = await _operation_semantic_progress(app, runtime, operation)
+            admission = (
+                await _operation_admission(
+                    app, runtime, request.writer_id, request.filter.operation_request_id
+                )
+                if operation is None
+                else None
+            )
             try:
                 page = _operation_page_from_record(
-                    request.filter.operation_request_id, operation, continuation
+                    request.filter.operation_request_id,
+                    operation,
+                    continuation,
+                    semantic_progress,
+                    admission,
                 )
             except (AttributeError, TypeError, ValueError) as exc:
-                raise _error(
-                    PublicErrorCode.STORAGE_CORRUPT, "The stored operation result is invalid."
+                raise StatusFault(
+                    StatusFaultStage.REPLAY, "The stored operation result is invalid."
                 ) from exc
             # Operation recovery is structural: the operation page is authoritative. Compact
             # projection only enriches coverage/closure/frontiers and must not fail recovery
@@ -1090,13 +1457,18 @@ async def execute_status(
                         "coverage": coverage_to_json(item.coverage),
                         "freshness_frontier": item.freshness_frontier,
                         "verification_state": verification_state,
-                        "semantic_state": (
-                            "ready" if item.origin == "semantic_model_derived" else "disabled"
-                        ),
+                        "semantic_state": advice.semantic_attempt_state,
                         "recommended_next_action": item.recommended_next_action,
                     }
                     for item in advice.ranked_items[: int(request.limit)]
                 )
+            coordination_items = await _coordination_advice_status_items(
+                app,
+                runtime,
+                raw_page.coverage,
+                limit=max(0, min(int(request.limit), 64 - len(items))),
+            )
+            items = (*items, *coordination_items)
             page = StatusAdvicePageModel.model_validate(
                 {
                     "projection_format": "yoetz.advice-snapshot/1",
@@ -1113,6 +1485,75 @@ async def execute_status(
             lag = raw_page.lag
             projection_version = raw_page.projection_version
             rebuild_state = raw_page.rebuild_state
+        elif request.view == "lineage" or request.view == "project":
+            from yoetz.application.task_views import lineage_status_page, project_status_snapshot
+
+            if frontier != head:
+                raise _error(
+                    PublicErrorCode.INVALID_REQUEST,
+                    "Current task views require the current task frontier.",
+                )
+            if position is not None and type(position) is not int:
+                raise _error(PublicErrorCode.INVALID_REQUEST, "The status cursor is invalid.")
+            if request.view == "lineage":
+                if request.task_id is not None and request.task_id != runtime.task_id:
+                    raise _error(
+                        PublicErrorCode.SESSION_CONFLICT, "The task selector is inconsistent."
+                    )
+                full_page = await lineage_status_page(
+                    app.start_catalog,
+                    runtime,
+                    frontier,
+                    host_lineage_registry=app.host_lineage_registry,
+                    correlation_id=request.correlation_id,
+                )
+            else:
+                if app.project_application is None:
+                    raise _error(
+                        PublicErrorCode.SERVICE_UNAVAILABLE, "Project status is unavailable."
+                    )
+                full_page = await project_status_snapshot(
+                    app.project_application,
+                    app.start_catalog,
+                    app.runtime,
+                    runtime,
+                    frontier,
+                    selected_task_id=request.task_id,
+                    project_id=request.project_id,
+                    host_lineage_registry=app.host_lineage_registry,
+                    correlation_id=request.correlation_id,
+                    request_id=request.request_id,
+                )
+            if isinstance(full_page, LineageStatusSnapshot):
+                result_view = "lineage"
+            with status_stage(StatusFaultStage.DIGEST):
+                snapshot_identity = canonical_digest(cast(JsonValue, full_page.as_wire()))
+            if expected_version is not None and expected_version != snapshot_identity:
+                raise _error(PublicErrorCode.INVALID_REQUEST, "The task view cursor is stale.")
+            offset = position or 0
+            limit = int(request.limit)
+            next_offset = offset + limit
+            next_cursor = (
+                _encode_cursor(app, request, frontier, snapshot_identity, next_offset)
+                if next_offset < _task_snapshot_size(full_page)
+                else None
+            )
+            with status_stage(StatusFaultStage.MODEL):
+                page = _task_snapshot_page(full_page, offset, limit, next_cursor)
+            effective = frontier
+            lag = 0
+            projection_version = runtime.projection_version
+            rebuild_state = "current"
+            compact_page = await runtime.ledger.query_projection(
+                ProjectionQuery(runtime.session_id, "compact", None, frontier, 1, None, None)
+            )
+            coverage = compact_page.coverage
+            view_gaps = (
+                full_page.known_gaps
+                if isinstance(full_page, LineageStatusSnapshot)
+                else full_page.gaps
+            )
+            gaps = tuple(sorted(set(compact_page.gaps) | set(view_gaps)))
         elif request.view == "candidate_findings":
             if position is not None and type(position) is not int:
                 raise _error(PublicErrorCode.INVALID_REQUEST, "The status cursor is invalid.")
@@ -1126,15 +1567,22 @@ async def execute_status(
         else:
             if type(position) is int:
                 raise _error(PublicErrorCode.INVALID_REQUEST, "The status cursor is invalid.")
-            query = ProjectionQuery(
-                runtime.session_id,
-                request.view,
-                _port_filter(request.filter),
-                frontier,
-                int(request.limit),
-                cast(ProjectionPosition | None, position),
-                expected_version,
-            )
+            try:
+                query = ProjectionQuery(
+                    runtime.session_id,
+                    request.view,
+                    _port_filter(request.filter),
+                    frontier,
+                    int(request.limit),
+                    cast(ProjectionPosition | None, position),
+                    expected_version,
+                )
+            except (TypeError, ValueError) as exc:
+                # The one remaining caller-shape stage: this view, filter, and cursor position do
+                # not form a projection query. Every later failure is service-owned.
+                raise _error(
+                    PublicErrorCode.INVALID_REQUEST, "The status request is invalid."
+                ) from exc
             raw_page = await runtime.ledger.query_projection(query)
             if request.view == "compact":
                 compact_page = raw_page
@@ -1149,7 +1597,8 @@ async def execute_status(
                     raw_page.next_position,
                 )
             )
-            page = _page_model(raw_page, next_cursor)
+            with status_stage(StatusFaultStage.MODEL):
+                page = _page_model(raw_page, next_cursor)
             if route_profile is not None and type(page) is StatusVersionsPageModel:
                 page = StatusVersionsPageModel(
                     items=tuple(
@@ -1170,8 +1619,20 @@ async def execute_status(
             lag = raw_page.lag
             projection_version = raw_page.projection_version
             rebuild_state = raw_page.rebuild_state
+        lineage_gaps = await _lineage_readiness_gaps(app, runtime, frontier, request.request_id)
+        if lineage_gaps:
+            gaps = tuple(sorted(set(gaps) | set(lineage_gaps)))
+            coverage = replace(
+                coverage,
+                known_gaps=tuple(sorted(set(coverage.known_gaps) | set(lineage_gaps))),
+                ledger_freshness=(
+                    LedgerFreshness.PARTIAL
+                    if coverage.ledger_freshness is LedgerFreshness.CURRENT
+                    else coverage.ledger_freshness
+                ),
+            )
         closure_readiness = await _closure_readiness(
-            runtime, frontier, compact_page, request.request_id
+            runtime, frontier, compact_page, request.request_id, lineage_gaps=lineage_gaps
         )
         return StatusInternalResult(
             "0.1",
@@ -1181,7 +1642,7 @@ async def execute_status(
             runtime.task_id,
             runtime.session_id,
             cast(str, runtime.writer_id),
-            request.view,
+            result_view,
             frontier,
             head,
             effective,
@@ -1195,9 +1656,11 @@ async def execute_status(
             import_status,
             closure_readiness,
         )
-    except (TypeError, ValueError) as exc:
-        if isinstance(exc, PublicOperationError):
-            raise
-        raise _error(PublicErrorCode.INVALID_REQUEST, "The status request is invalid.") from exc
+    except (StatusFault, TypeError, ValueError) as exc:
+        # The request passed schema validation and every caller-shape rejection above is explicit,
+        # so a fault reaching here is stored state or the service's own projection. Reporting it
+        # as INVALID_REQUEST sent agents to repair a valid request and discarded the evidence
+        # (issue #840); classify it and join the public correlation id to the bounded origin.
+        raise classify_status_fault(exc, view=request.view, request_id=request.request_id) from exc
     finally:
         await app.runtime.release(runtime)

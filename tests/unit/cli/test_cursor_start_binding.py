@@ -311,7 +311,10 @@ def test_mapping_write_failure_has_bounded_diagnostic(
     def fail(*_args: object, **_kwargs: object) -> None:
         raise OSError("PRIVATE_WRITE_CANARY")
 
-    monkeypatch.setattr(hooks, "queue_mapping_store" if deferred else "store_mapping", fail)
+    # Immediate and lock-deferred start results share the durable queue/replay writer. Patching
+    # that boundary keeps this regression meaningful after child-lane binding made the write
+    # protocol transactional for every lane.
+    monkeypatch.setattr(hooks, "queue_mapping_store", fail)
     if deferred:
         with acquire_session_lock(_SESSION, _state=tmp_path) as owned:
             assert owned

@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, cast
 
 from yoetz.adapters.approved_checks import (
     ApprovedCheckApproval,
@@ -16,6 +16,7 @@ from yoetz.adapters.approved_checks import (
     ApprovedCheckStatus,
 )
 from yoetz.kernel.policies.observation_advice import ObservationCheckFact, ObservationInspectFact
+from yoetz.observability.logging import record_unexpected_exception_without_raising
 from yoetz.ports.subject_state import LocalWorkspaceHandle
 from yoetz.ports.workspace_inspect import (
     WorkspaceInspectCommand,
@@ -119,12 +120,22 @@ NowProvider = Callable[[], str]
 
 @dataclass(frozen=True, slots=True)
 class VerificationDrainHandle:
-    """One workspace's durable verification worker plus optional post-drain hook."""
+    """One task/workspace lane's durable worker plus optional post-drain hooks.
+
+    A workspace can own more than one task once explicit sibling/child work is admitted.  The
+    durable job repository is task-bundle local, so the supervisor must retain one handle per
+    task lane rather than using the source workspace as a process-global singleton key.  The
+    optional ``task_id`` keeps callers that predate multi-task routing source-compatible; those
+    callers retain the historical one-handle-per-workspace behavior until they provide the task
+    identity.
+    """
 
     workspace_commitment: str
     worker: ObservationVerificationWorker
     after_complete: Callable[[], Awaitable[None]] | None = None
     on_idle: Callable[[], Awaitable[None]] | None = None
+    task_id: str | None = None
+    on_failure: Callable[[], Awaitable[None]] | None = None
 
 
 @dataclass
@@ -146,25 +157,54 @@ class ObservationVerificationSupervisor:
         self._loop_task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
 
+    @staticmethod
+    def _handle_key(workspace_commitment: str, task_id: str | None = None) -> str:
+        """Return an opaque in-process lane key.
+
+        The workspace-only form deliberately remains the historical dictionary key for callers
+        that do not yet provide a task identity.  The multi-task form is namespaced with a NUL
+        separator; this value never crosses a public boundary, and all durable identity remains
+        in the task repository and route fence.
+        """
+
+        return workspace_commitment if task_id is None else f"{workspace_commitment}\x00{task_id}"
+
+    @classmethod
+    def _key_for_handle(cls, handle: VerificationDrainHandle) -> str:
+        return cls._handle_key(handle.workspace_commitment, handle.task_id)
+
     def register(self, handle: VerificationDrainHandle) -> bool:
         if self._closed:
             return False
-        if handle.workspace_commitment in self._handles:
+        key = self._key_for_handle(handle)
+        if key in self._handles:
             self._wake.set()
             return False
-        self._handles[handle.workspace_commitment] = handle
+        self._handles[key] = handle
         self._wake.set()
         return True
 
-    def has_handle(self, workspace_commitment: str) -> bool:
-        return workspace_commitment in self._handles
+    def has_handle(self, workspace_commitment: str, task_id: str | None = None) -> bool:
+        """Return whether the requested lane is currently registered.
+
+        ``task_id=None`` intentionally checks every lane for the workspace for compatibility with
+        old callers.  Multi-task callers pass their task ID and therefore do not suppress an
+        unrelated sibling sharing the same source workspace.
+        """
+
+        if task_id is not None:
+            return self._handle_key(workspace_commitment, task_id) in self._handles
+        legacy_key = self._handle_key(workspace_commitment)
+        return legacy_key in self._handles or any(
+            handle.workspace_commitment == workspace_commitment for handle in self._handles.values()
+        )
 
     @property
     def closed(self) -> bool:
         return self._closed
 
-    def unregister(self, workspace_commitment: str) -> None:
-        self._handles.pop(workspace_commitment, None)
+    def unregister(self, workspace_commitment: str, task_id: str | None = None) -> None:
+        self._handles.pop(self._handle_key(workspace_commitment, task_id), None)
 
     def notify(self, workspace_commitment: str | None = None) -> None:
         del workspace_commitment
@@ -189,11 +229,9 @@ class ObservationVerificationSupervisor:
         ready-lifecycle start so restart reclaim can complete.
         """
 
-        for workspace, builder in sorted(builders.items(), key=lambda item: item[0].encode()):
+        for _workspace, builder in sorted(builders.items(), key=lambda item: item[0].encode()):
             if self._closed:
                 return
-            if workspace in self._handles:
-                continue
             handle = builder()
             if handle is None:
                 continue
@@ -220,9 +258,15 @@ class ObservationVerificationSupervisor:
             # registered by an on-idle handoff during the drain then leaves the
             # event set and starts the successor pass immediately.
             self._wake.clear()
-            await self._drain_once()
+            made_progress = await self._drain_once()
             if self._closed:
                 break
+            if made_progress:
+                # One check per lane per round gives every task a fair turn while still draining a
+                # busy lane without waiting for a timer.  Yield so a newly registered sibling can
+                # join the next round before the current lane gets another turn.
+                await asyncio.sleep(0)
+                continue
             # Always park on the wake event so an empty handle set cannot busy-loop
             # and starve Application.close / supervisor.stop.
             try:
@@ -230,24 +274,63 @@ class ObservationVerificationSupervisor:
             except TimeoutError:
                 pass
 
-    async def _drain_once(self) -> None:
+    async def _drain_handle_once(self, handle: VerificationDrainHandle) -> bool:
+        """Run at most one job for one lane and release idle resources."""
+
+        if self._closed or handle.worker.service_generation != self.service_generation:
+            return False
+        job = await handle.worker.run_once()
+        if job is None:
+            key = self._key_for_handle(handle)
+            if self._handles.get(key) is handle:
+                self.unregister(handle.workspace_commitment, handle.task_id)
+                if handle.on_idle is not None:
+                    await handle.on_idle()
+            return False
+        if handle.after_complete is not None:
+            await handle.after_complete()
+        return True
+
+    async def _drain_once(self) -> bool:
+        """Run one fair round across all registered task lanes.
+
+        Previous code drained one workspace until empty before visiting the next.  Since the
+        supervisor key was also only the workspace, a sibling task could be both hidden by
+        registration and starved by a long queue.  Running one job per lane concurrently keeps
+        independent task repositories independent while retaining one serialized worker per lane.
+        """
+
         async with self._lock:
             handles = tuple(self._handles.values())
-        for handle in handles:
-            if self._closed:
-                return
-            if handle.worker.service_generation != self.service_generation:
-                continue
-            while not self._closed:
-                job = await handle.worker.run_once()
-                if job is None:
-                    if self._handles.get(handle.workspace_commitment) is handle:
-                        self.unregister(handle.workspace_commitment)
-                        if handle.on_idle is not None:
-                            await handle.on_idle()
-                    break
-                if handle.after_complete is not None:
-                    await handle.after_complete()
+        if not handles:
+            return False
+        results = await asyncio.gather(
+            *(self._drain_isolated_handle(handle) for handle in handles), return_exceptions=True
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+        return any(cast(bool, result) for result in results)
+
+    async def _drain_isolated_handle(self, handle: VerificationDrainHandle) -> bool:
+        """An ordinary lane failure must not terminate the shared service worker loop."""
+
+        try:
+            return await self._drain_handle_once(handle)
+        except Exception as exc:
+            record_unexpected_exception_without_raising(
+                exc, component="application.observation_verification", operation="lane_failed"
+            )
+            if handle.on_failure is not None:
+                try:
+                    await handle.on_failure()
+                except Exception as callback_error:
+                    record_unexpected_exception_without_raising(
+                        callback_error,
+                        component="application.observation_verification",
+                        operation="lane_failure_record_failed",
+                    )
+            return False
 
 
 @dataclass

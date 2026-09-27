@@ -41,7 +41,12 @@ from yoetz.adapters.providers.codex_evaluator_runtime import (
     runtime_mutation_lock,
 )
 from yoetz.config.load import load_config
-from yoetz.config.models import ConfigError, ExternalRuntimeProfileConfig, YoetzConfig
+from yoetz.config.models import (
+    CODEX_ROUTINE_REASONING_EFFORT_DEFAULT,
+    ConfigError,
+    ExternalRuntimeProfileConfig,
+    YoetzConfig,
+)
 from yoetz.config.paths import PathSafetyError, bundle_root, config_file_path
 from yoetz.config.write import (
     cleared_external_runtime_config,
@@ -72,6 +77,7 @@ __all__ = [
     "default_codex_evaluator_executable",
     "default_codex_home",
     "default_codex_subscription_model",
+    "default_codex_subscription_routine_effort",
     "default_codex_subscription_reasoning_effort",
     "describe_runtime_download",
     "diagnose_bound_runtime",
@@ -519,9 +525,18 @@ def diagnose_bound_runtime(binding: ExternalRuntimeProfileConfig) -> CodexBindin
 
 
 def codex_subscription_preview(
-    *, executable: Path, codex_home: Path, model: str, reasoning_effort: str
+    *,
+    executable: Path,
+    codex_home: Path,
+    model: str,
+    reasoning_effort: str,
+    routine_reasoning_effort: str | None = None,
 ) -> dict[str, JsonValue]:
-    """Resolve and validate the exact nonsecret cell without creating a home or logging in."""
+    """Resolve and validate the exact nonsecret cell without creating a home or logging in.
+
+    ``reasoning_effort`` is the final-profile effort. ``routine_reasoning_effort=None`` means the
+    routine profile keeps that single effort (the legacy binding shape).
+    """
 
     native, digest, source_identity = resolve_supported_codex_executable(executable)
     cell = codex_evaluator_cell_for_platform(sys.platform, platform.machine())
@@ -530,6 +545,10 @@ def codex_subscription_preview(
     if not codex_home.is_absolute():
         raise ValueError("codex_home_invalid")
     if not model or reasoning_effort not in _SUPPORTED_REASONING:
+        raise ValueError("codex_runtime_model_invalid")
+    if routine_reasoning_effort is not None and routine_reasoning_effort not in (
+        _SUPPORTED_REASONING
+    ):
         raise ValueError("codex_runtime_model_invalid")
     return {
         "schema": "yoetz.codex-subscription-preview/1",
@@ -546,6 +565,9 @@ def codex_subscription_preview(
         "codex_home": str(codex_home),
         "model": model,
         "reasoning_effort": reasoning_effort,
+        "routine_reasoning_effort": (
+            reasoning_effort if routine_reasoning_effort is None else routine_reasoning_effort
+        ),
         "destination": "OpenAI through Codex-managed ChatGPT authentication",
         "data_use_posture": "unknown",
         "upstream_body_observability": "unavailable",
@@ -577,11 +599,22 @@ def default_codex_subscription_model(path: Path | None = None) -> str:
     return _DEFAULT_CODEX_SUBSCRIPTION_MODEL
 
 
-def default_codex_subscription_reasoning_effort(path: Path | None = None) -> str:
-    """Return the recommended effort, or preserve an existing binding's exact effort.
+def default_codex_subscription_routine_effort(path: Path | None = None) -> str | None:
+    """Return the routine effort setup applies when no explicit choice is given.
 
-    Re-running setup to repair a runtime must not silently change the review policy (#855).
+    A new binding receives the bounded recommendation. An existing binding keeps its own routine
+    choice, and a legacy binding without one keeps its single effort (``None``): re-running setup
+    never silently lowers a persisted choice.
     """
+
+    config = _base_config(path)
+    if config.external_runtime is not None:
+        return config.external_runtime.routine_reasoning_effort
+    return CODEX_ROUTINE_REASONING_EFFORT_DEFAULT
+
+
+def default_codex_subscription_reasoning_effort(path: Path | None = None) -> str:
+    """Preserve the existing final effort, or recommend the new-binding default (#855)."""
 
     config = _base_config(path)
     if config.external_runtime is not None:
@@ -608,13 +641,13 @@ def _binding(
     codex_home: Path,
     model: str,
     reasoning_effort: str,
+    routine_reasoning_effort: str | None = None,
     existing: ExternalRuntimeProfileConfig | None = None,
 ) -> ExternalRuntimeProfileConfig:
     """Validate and construct the exact nonsecret binding without creating any state.
 
-    Timeout and retry budgets are configuration-only choices with no setup prompt; an existing
-    binding's values are carried over so a rebind never silently lengthens or multiplies review
-    attempts (#855).
+    Output limits, timeout and retry budgets are configuration-only choices with no setup
+    prompt; an existing binding preserves all of them during a rebind (#855).
     """
 
     preview = codex_subscription_preview(
@@ -622,6 +655,7 @@ def _binding(
         codex_home=codex_home,
         model=model,
         reasoning_effort=reasoning_effort,
+        routine_reasoning_effort=routine_reasoning_effort,
     )
     return codex_subscription_runtime(
         executable_path=cast(str, preview["executable_path"]),
@@ -638,10 +672,13 @@ def _binding(
         codex_home=str(codex_home),
         model=model,
         reasoning_effort=reasoning_effort,
+        routine_reasoning_effort=routine_reasoning_effort,
         **(
             {}
             if existing is None
             else {
+                "routine_output_limit": existing.routine_output_limit,
+                "final_output_limit": existing.final_output_limit,
                 "timeout_seconds": existing.timeout_seconds,
                 "max_retries": existing.max_retries,
             }
@@ -784,6 +821,7 @@ def _safe_status(
         "codex_home": binding.codex_home,
         "model": binding.model,
         "reasoning_effort": binding.reasoning_effort,
+        "review_budgets": cast(JsonValue, binding.review_budget_facts()),
         "runtime_ready": status.runtime_ready,
         "auth_mode": status.auth_mode,
         "plan_type": status.plan_type,
@@ -804,6 +842,7 @@ async def codex_subscription_setup(
     switch_account: bool,
     config_path: Path | None = None,
     as_fallback: bool = False,
+    routine_reasoning_effort: str | None = None,
 ) -> dict[str, JsonValue]:
     """Validate the binding and its persistence, prove or obtain Codex login, then persist it.
 
@@ -833,6 +872,17 @@ async def codex_subscription_setup(
     with runtime_mutation_lock(runtime_bundle()):
         target = _target_config_path(config_path)
         base, expected_bytes = _config_snapshot(target)
+        # ``None`` defers to the same rule the setup screens display: keep an existing binding's
+        # routine choice (including a legacy single effort) or recommend the bounded default.
+        selected_routine = (
+            routine_reasoning_effort
+            if routine_reasoning_effort is not None
+            else (
+                CODEX_ROUTINE_REASONING_EFFORT_DEFAULT
+                if base.external_runtime is None
+                else base.external_runtime.routine_reasoning_effort
+            )
+        )
         if executable is None:
             selected = select_codex_evaluator_executable(base)
             if selected is None:
@@ -843,6 +893,7 @@ async def codex_subscription_setup(
             codex_home=codex_home,
             model=model,
             reasoning_effort=reasoning_effort,
+            routine_reasoning_effort=selected_routine,
             existing=base.external_runtime,
         )
         bundle = runtime_bundle()
@@ -946,7 +997,12 @@ async def prompt_codex_subscription_setup() -> dict[str, JsonValue]:
     ).expanduser()
     model = typer.prompt("Exact model", default=default_codex_subscription_model()).strip()
     reasoning_effort = typer.prompt(
-        "Reasoning effort", default=default_codex_subscription_reasoning_effort()
+        "Final review reasoning effort", default=default_codex_subscription_reasoning_effort()
+    ).strip()
+    routine_default = default_codex_subscription_routine_effort()
+    routine_reasoning_effort = typer.prompt(
+        "Routine checkpoint reasoning effort",
+        default=reasoning_effort if routine_default is None else routine_default,
     ).strip()
     login_choice = typer.prompt("Login method (browser/device_code)", default="browser").strip()
     if login_choice not in {"browser", "device_code"}:
@@ -956,6 +1012,7 @@ async def prompt_codex_subscription_setup() -> dict[str, JsonValue]:
         codex_home=codex_home,
         model=model,
         reasoning_effort=reasoning_effort,
+        routine_reasoning_effort=routine_reasoning_effort,
     )
     typer.echo("")
     typer.echo("Codex with ChatGPT subscription")
@@ -969,7 +1026,8 @@ async def prompt_codex_subscription_setup() -> dict[str, JsonValue]:
     typer.echo(f"  capability cell: {preview['capability_cell_sha256']}")
     typer.echo(f"  cell evidence expires: {preview['capability_evidence_expires_at']}")
     typer.echo(f"  dedicated CODEX_HOME: {preview['codex_home']}")
-    typer.echo(f"  model/reasoning: {model} / {reasoning_effort}")
+    typer.echo(f"  model: {model}")
+    typer.echo(f"  reasoning: final {reasoning_effort} / routine {routine_reasoning_effort}")
     typer.echo("  destination: OpenAI through Codex-managed ChatGPT authentication")
     typer.echo("  data-use posture: unknown; your ChatGPT plan and terms apply")
     typer.echo("  Yoetz receives no OAuth credential and cannot observe the upstream body")
@@ -987,6 +1045,7 @@ async def prompt_codex_subscription_setup() -> dict[str, JsonValue]:
         codex_home=codex_home,
         model=model,
         reasoning_effort=reasoning_effort,
+        routine_reasoning_effort=routine_reasoning_effort,
         login_mode=cast(Literal["browser", "device_code"], login_choice),
         open_browser=login_choice == "browser",
         switch_account=switch_account,

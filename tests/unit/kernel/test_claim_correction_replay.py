@@ -6,6 +6,8 @@ share, so an append these vectors reject is an append no surface can record.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from yoetz.domain.events import (
@@ -460,3 +462,76 @@ def test_republishing_a_superseded_v1_claim_id_does_not_make_it_current_again() 
     state = replay(chain)
     assert state.claims[_clm(0)].superseded_by_claim_id == _clm(1)
     assert effective_claim_ids(state) == frozenset({_clm(1)})
+
+
+@pytest.mark.parametrize("legacy", (False, True))
+@pytest.mark.parametrize("scoped_replacement", (False, True))
+def test_empty_prior_scope_has_an_explicit_append_only_repair(
+    legacy: bool, scoped_replacement: bool
+) -> None:
+    empty = replace(_completion(0), obligation_refs=())
+    if legacy:
+        old: ClaimRecordedPayload = ClaimRecordedPayload(
+            claim_id=empty.claim_id,
+            claim_kind=empty.claim_kind,
+            statement=empty.statement,
+            supporting_refs=(_OBLIGATION,),
+        )
+        schema = _CLAIM_V1_SCHEMA
+    else:
+        old = replace(empty, supporting_refs=(_OBLIGATION,))
+        schema = _CLAIM_V1_1_SCHEMA
+    prefix = _chain((schema, old))
+    correction = replace(
+        _completion(1, supersedes=(_clm(0),), statement="Corrected explicit scope."),
+        obligation_refs=(_OBLIGATION,) if scoped_replacement else (),
+    )
+    state = replay(_extend(prefix, (_CLAIM_V1_1_SCHEMA, correction)))
+    assert effective_claim_ids(state) == frozenset({_clm(1)})
+    assert state.claims[_clm(0)].payload == old
+    assert state.claims[_clm(0)].source_event_id == prefix[0].event_id
+    assert state.claims[_clm(0)].superseded_by_claim_id == _clm(1)
+
+
+def test_mixed_empty_and_scoped_targets_converge_without_weakening_overlap() -> None:
+    prefix = _chain(
+        (_CLAIM_V1_1_SCHEMA, replace(_completion(0), obligation_refs=())),
+        (_CLAIM_V1_1_SCHEMA, _completion(1)),
+    )
+    correction = _completion(2, supersedes=(_clm(0), _clm(1)))
+    state = replay(_extend(prefix, (_CLAIM_V1_1_SCHEMA, correction)))
+    assert effective_claim_ids(state) == frozenset({_clm(2)})
+    assert state.claims[_clm(0)].superseded_by_claim_id == _clm(2)
+    assert state.claims[_clm(1)].superseded_by_claim_id == _clm(2)
+    for refs in ((), (obligation_id("obl_00000000-0000-4000-8000-000000000002"),)):
+        with pytest.raises(ClaimRevisionMismatch) as rejected:
+            replay(_extend(prefix, (_CLAIM_V1_1_SCHEMA, replace(correction, obligation_refs=refs))))
+        assert rejected.value.invariant == "scope_overlap_required"
+    with pytest.raises(ClaimRevisionMismatch) as stale:
+        replay(
+            _extend(
+                prefix,
+                (_CLAIM_V1_1_SCHEMA, correction),
+                (_CLAIM_V1_1_SCHEMA, _completion(3, supersedes=(_clm(0),))),
+            )
+        )
+
+    assert stale.value.invariant == "superseded_claim_must_be_effective"
+
+
+def test_empty_scope_repair_preserves_limitation_and_noop_checks() -> None:
+    prefix = _chain(
+        (_ACTION_SCHEMA, _action(1)),
+        (_RESULT_SCHEMA, _result(1, ResultOutcome.PARTIAL)),
+        (_CLAIM_V1_1_SCHEMA, replace(_completion(0, limitations=(_res(1),)), obligation_refs=())),
+    )
+    with pytest.raises(ClaimRevisionMismatch) as incomplete:
+        replay(_extend(prefix, (_CLAIM_V1_1_SCHEMA, _completion(1, supersedes=(_clm(0),)))))
+    assert incomplete.value.invariant == "limitation_refs_complete"
+    corrected = _completion(1, supersedes=(_clm(0),), limitations=(_res(1),))
+    state = replay(_extend(prefix, (_CLAIM_V1_1_SCHEMA, corrected)))
+    assert state.claims[_clm(1)].payload == corrected
+    with pytest.raises(ClaimRevisionMismatch) as noop:
+        replay(_extend(prefix, (_CLAIM_V1_1_SCHEMA, replace(corrected, obligation_refs=()))))
+
+    assert noop.value.invariant == "replacement_must_change_effective_claim"

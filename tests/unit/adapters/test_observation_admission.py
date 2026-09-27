@@ -196,7 +196,14 @@ def test_legacy_buffer_without_success_does_not_block_later_work() -> None:
     buffer = AdmissionBuffer((BufferedInput("host1", FENCE, event, "success", 100),))
     restored = admission_buffer_from_json(admission_buffer_to_json(buffer))
     flushed = flush_admission(restored, now_ms=2100, summary_builder=build_routine_read_summary)
-    assert flushed.deliveries == (("host1", event),)
+    # The original record is delivered in source order. On the 0.3 line the unprovable
+    # summary is also accounted for: the input carries the ``routine_summary_invalid``
+    # coverage gap and the lane records one bounded refusal (#764, #786).
+    demoted = replace(event, gap_codes=("routine_summary_invalid",))
+    assert flushed.deliveries == (("host1", demoted),)
+    assert [(refusal.reason, refusal.input_count) for refusal in flushed.refusals] == [
+        ("invalid_event_value_type", 1)
+    ]
     assert not flushed.buffer.inputs
     later = plan_admission(
         restored,
@@ -209,5 +216,5 @@ def test_legacy_buffer_without_success_does_not_block_later_work() -> None:
         now_ms=2100,
         summary_builder=build_routine_read_summary,
     )
-    assert later.deliveries == (("host1", event), ("host1", envelope(2, "Mutation")))
+    assert later.deliveries == (("host1", demoted), ("host1", envelope(2, "Mutation")))
     assert not later.buffer.inputs

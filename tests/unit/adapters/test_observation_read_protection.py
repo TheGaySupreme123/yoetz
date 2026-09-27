@@ -11,6 +11,7 @@ from yoetz.domain.observation import (
     ObservationControlCommand,
     ObservationCursor,
     ObservationEnvelope,
+    ObservationRevokeCommand,
     ObservationSource,
 )
 from yoetz.domain.observation_read_protection import (
@@ -159,6 +160,32 @@ def test_pause_resume_does_not_reactivate_old_scope(tmp_path: Path) -> None:
     store.protect_next_reads(workspace, session, _REFERENCE)
     store.pause(ObservationControlCommand(workspace))
     store.resume(ObservationControlCommand(workspace))
+
+    assert not store.read_is_protected(
+        workspace, session, _envelope(session, event_kind="PreToolUse")
+    )
+
+
+def test_repeated_structural_grant_keeps_an_active_scope(tmp_path: Path) -> None:
+    """Issue #835: routine setup (another host's connection) is not a consent transition."""
+
+    store, workspace, session = _store(tmp_path)
+    store.protect_next_reads(workspace, session, _REFERENCE)
+
+    store.grant_consent(workspace)
+
+    assert store.read_is_protected(workspace, session, _envelope(session, event_kind="PreToolUse"))
+
+
+def test_revoke_and_fresh_grant_do_not_reactivate_old_scope(tmp_path: Path) -> None:
+    store, workspace, session = _store(tmp_path)
+    store.protect_next_reads(workspace, session, _REFERENCE)
+    store.revoke(ObservationRevokeCommand(workspace))
+    pending = store.pending_consent_revocation(workspace)
+    assert pending is not None
+    store.mark_consent_revocation_fenced(workspace, pending[0])
+
+    store.grant_consent(workspace)
 
     assert not store.read_is_protected(
         workspace, session, _envelope(session, event_kind="PreToolUse")

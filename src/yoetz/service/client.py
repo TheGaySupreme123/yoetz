@@ -108,6 +108,7 @@ if TYPE_CHECKING:
 __all__ = [
     "GetPrivacyReceiptRequest",
     "ListPrivacyReceiptsRequest",
+    "PreparedProjectRequest",
     "PrivacyReceiptFilters",
     "PrivacyReceiptFound",
     "PrivacyReceiptGetResult",
@@ -116,6 +117,8 @@ __all__ = [
     "accepted_but_unresponsive",
     "connect_service",
     "connect_service_on_demand",
+    "holder_version_order",
+    "prepare_project_request",
     "service_holder_identity",
     "supersede_incompatible_service",
     "wait_for_singleton_release",
@@ -375,6 +378,60 @@ class PrivacyReceiptNotFound:
 type PrivacyReceiptGetResult = PrivacyReceiptFound | PrivacyReceiptNotFound
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedProjectRequest:
+    """A project body together with the exact request identity sent on the wire.
+
+    Project mutations are journaled by ``request_id``.  Keeping the normalized body and its
+    identity together gives callers a safe value to retain when a response is lost or a consent
+    continuation requires a later replay.  The project result deliberately remains unchanged;
+    this wrapper is client-side request preparation metadata only.
+    """
+
+    body: JsonObject
+    request_id: str
+
+    def __post_init__(self) -> None:
+        if type(self.body) is not JsonObject:
+            raise TypeError("project_request_body_invalid")
+        validate_id(IdKind.REQUEST, self.request_id)
+        if self.body.get("request_id") != self.request_id:
+            raise ValueError("project_request_id_mismatch")
+
+    @property
+    def request(self) -> JsonObject:
+        """Alias for callers that refer to the prepared wire body as a request."""
+
+        return self.body
+
+
+def prepare_project_request(
+    request: JsonObject, *, request_id: str | None = None
+) -> PreparedProjectRequest:
+    """Add one stable project request identity without changing supplied IDs.
+
+    A body that already carries ``request_id`` is returned with that exact identity.  When the
+    body omits it, an explicit ``request_id`` is validated and used; otherwise one is generated
+    and returned in the wrapper so the caller can retain the exact body for recovery.  This is
+    intentionally separate from the result body: project responses have their own closed schema
+    and must not grow request metadata merely to make client retries possible.
+    """
+
+    if type(request) is not JsonObject:
+        raise TypeError("project_request_body_invalid")
+    explicit = None if request_id is None else validate_id(IdKind.REQUEST, request_id)
+    supplied = request.get("request_id")
+    if supplied is not None:
+        selected = validate_id(IdKind.REQUEST, supplied)
+        if explicit is not None and selected != explicit:
+            raise ValueError("project_request_id_conflict")
+        return PreparedProjectRequest(request, selected)
+    selected = explicit if explicit is not None else new_id(IdKind.REQUEST)
+    values = dict(request)
+    values["request_id"] = selected
+    return PreparedProjectRequest(JsonObject(values), selected)
+
+
 class _ReceiptCommon(TypedDict):
     schema_version: Literal["1.0.0"]
     receipt_id: str
@@ -620,6 +677,7 @@ class ServiceClient(ControlClientPort):
     __slots__ = (
         "_client_kind",
         "_closed",
+        "_last_project_request",
         "_pending",
         "_pid",
         "_receiver",
@@ -646,6 +704,7 @@ class ServiceClient(ControlClientPort):
         self._client_kind = client_kind
         self._pid = os.getpid()
         self._closed = False
+        self._last_project_request: PreparedProjectRequest | None = None
         self._pending: dict[str, asyncio.Future[ControlResult]] = {}
         self._retired_rpc_ids: set[str] = set()
         self._write_lock = asyncio.Lock()
@@ -674,6 +733,18 @@ class ServiceClient(ControlClientPort):
         """The service-status snapshot this session's hello-result carried at connect time."""
 
         return self._session.service_status
+
+    @property
+    def last_project_request(self) -> PreparedProjectRequest | None:
+        """Return the most recently prepared project request for retry/recovery.
+
+        The value is retained even when the transport raises a retryable error or the caller's
+        task is cancelled.  A caller that did not prepare the request explicitly can therefore
+        recover the generated ID and exact normalized body before reconnecting.  A later project
+        call replaces this snapshot, so long-lived callers should retain the returned wrapper.
+        """
+
+        return self._last_project_request
 
     async def _send(self, request: ControlCallRequest | ControlCancelRequest) -> None:
         validate_request(request)
@@ -766,9 +837,13 @@ class ServiceClient(ControlClientPort):
     def _retire_call(self, rpc_id: str, future: asyncio.Future[ControlResult]) -> None:
         """Keep bounded correlation state for a terminal result that may still arrive."""
 
-        if not future.done():
+        if not future.done() or future.cancelled():
             self._retired_rpc_ids.add(rpc_id)
-            future.cancel()
+            if not future.done():
+                future.cancel()
+        else:
+            # The response can win the deadline race after the caller stops awaiting it.
+            future.exception()
 
     async def call(self, request: ControlCallRequest) -> ControlResult:
         self._ensure_live()
@@ -805,7 +880,8 @@ class ServiceClient(ControlClientPort):
                 except TimeoutError as exc:
                     if sent:
                         self._retire_call(request.rpc_id, future)
-                        await self._request_cancel(request.rpc_id)
+                        if request.method is not ControlMethod.CHECK:
+                            await self._request_cancel(request.rpc_id)
                     else:
                         future.cancel()
                         await self._fail_connection(
@@ -815,7 +891,8 @@ class ServiceClient(ControlClientPort):
         except asyncio.CancelledError:
             if sent:
                 self._retire_call(request.rpc_id, future)
-                await self._request_cancel(request.rpc_id)
+                if request.method is not ControlMethod.CHECK:
+                    await self._request_cancel(request.rpc_id)
             else:
                 future.cancel()
                 await self._fail_connection(ControlError("service_unavailable", retryable=True))
@@ -970,6 +1047,34 @@ class ServiceClient(ControlClientPort):
         return await self._support(
             ControlMethod.IMPORT_CODEX_JSONL, request, deadline_ms=deadline_ms
         )
+
+    def prepare_project_request(
+        self, request: JsonObject, *, request_id: str | None = None
+    ) -> PreparedProjectRequest:
+        """Prepare and expose one stable project request before sending it."""
+
+        prepared = prepare_project_request(request, request_id=request_id)
+        self._last_project_request = prepared
+        return prepared
+
+    async def project(
+        self,
+        request: JsonObject,
+        *,
+        deadline_ms: int | None = None,
+        request_id: str | None = None,
+    ) -> JsonObject:
+        """Send one CLI-only project lifecycle request to the ready service.
+
+        The active 2.7 project schema requires ``request_id``.  Existing direct callers may still
+        pass a body without it: the client prepares one generated identity and exposes the exact
+        resulting body through :attr:`last_project_request`.  Callers recovering an ambiguous
+        write must reuse that prepared body (or pass its ID explicitly), never invoke this method
+        again with a fresh body and silently mint a replacement identity.
+        """
+
+        prepared = self.prepare_project_request(request, request_id=request_id)
+        return await self._support(ControlMethod.PROJECT, prepared.body, deadline_ms=deadline_ms)
 
     async def review(self, request: JsonObject, *, deadline_ms: int | None = None) -> JsonObject:
         return await self._support(ControlMethod.REVIEW, request, deadline_ms=deadline_ms)
@@ -1342,16 +1447,41 @@ async def wait_for_singleton_release(pid: int, *, deadline: float) -> bool:
         await asyncio.sleep(min(_SERVICE_START_POLL_SECONDS, remaining))
 
 
-async def supersede_incompatible_service(*, deadline: float) -> bool:
+def holder_version_order(holder_version: str | None) -> Literal["older", "same", "newer"] | None:
+    """Order a running service's stamped package version against this installation's.
+
+    ``None`` means the holder predates the stamp or either version does not parse; callers then
+    keep their version-agnostic behavior instead of guessing an upgrade direction.
+    """
+
+    if holder_version is None:
+        return None
+    from packaging.version import InvalidVersion, Version
+
+    try:
+        holder = Version(holder_version)
+        own = Version(__version__)
+    except InvalidVersion:
+        return None
+    if holder < own:
+        return "older"
+    return "newer" if holder > own else "same"
+
+
+async def supersede_incompatible_service(*, deadline: float, replace_newer: bool = False) -> bool:
     """Ask the live same-user singleton holder to stop and wait for it to release the endpoint.
 
-    Called only after a listening service rejected this client's hello. The holder is identified
-    through the owner-only singleton stamp (never guessed from process listings), receives the
-    daemon's ordinary bounded-shutdown signal, and is polled until it releases the lock. Returns
-    ``True`` once the endpoint is free, ``False`` when no supersede candidate can be identified
-    (no live stamped holder, an identical-identity holder that rejected us anyway, or a platform
-    without POSIX signals), and raises ``service_incompatible`` when the holder outlives the
-    deadline. A durable diagnostic names every attempt.
+    Called after a listening service rejected this client's hello, or when a new host session
+    retires an older installation's service. The holder is identified through the owner-only
+    singleton stamp (never guessed from process listings), receives the daemon's ordinary
+    bounded-shutdown signal, and is polled until it releases the lock. Returns ``True`` once the
+    endpoint is free, ``False`` when no supersede candidate can be identified (no live stamped
+    holder, an identical-identity holder that rejected us anyway, a holder stamped by a newer
+    package than this one, or a platform without POSIX signals), and raises
+    ``service_incompatible`` when the holder outlives the deadline. Only an explicit human
+    ``yoetz service restart`` passes ``replace_newer``: an upgrade moves forward, so a process
+    left over from before an in-place package upgrade never replaces its successor. A durable
+    diagnostic names every attempt.
     """
 
     if os.name == "nt":
@@ -1369,6 +1499,10 @@ async def supersede_incompatible_service(*, deadline: float) -> bool:
         # Same installation identity yet it rejected the hello: this is not an upgrade, and
         # stopping it would not change the outcome. Report instead of restarting.
         return False
+    if not replace_newer and holder_version_order(holder.service_version) == "newer":
+        # This process predates an in-place upgrade (an open session's bridge, typically). The
+        # newer service is the one to keep; the session switches when its host reopens it.
+        return False
     correlation_id = record_public_error_without_raising(
         component="service.client",
         operation="service_supersede",
@@ -1385,6 +1519,11 @@ async def supersede_incompatible_service(*, deadline: float) -> bool:
     if await wait_for_singleton_release(holder.pid, deadline=deadline):
         return True
     raise ControlError("service_incompatible", retryable=True, correlation_id=correlation_id)
+
+
+def _serves_older_package(client: ServiceClient) -> bool:
+    status = client.hello_service_status
+    return status is not None and holder_version_order(status.service_version) == "older"
 
 
 def _manifest_digest_for_client() -> str:
@@ -1410,8 +1549,14 @@ async def connect_service_on_demand(
     (a stale process from another installation holding the one per-user endpoint after an
     upgrade), the holder is asked to stop through its ordinary bounded shutdown and a successor
     of this installation is spawned inside the same budget. The one endpoint then belongs to
-    the installation that is actually being used; bridges of the stale installation reconnect
-    and are refused in turn, which is the correct outcome of an upgrade.
+    the installation that is actually being used. A holder stamped by a newer package is never
+    replaced here: a process that predates an in-place upgrade reports ``service_incompatible``
+    instead of undoing it.
+
+    The MCP bridge a host starts for a session also retires a *compatible* service whose package
+    is older than its own: sessions opened before an in-place upgrade keep that service, and the
+    first session opened afterwards replaces it so the new package actually runs. When no holder
+    can be identified the compatible service keeps serving.
     """
 
     if type(client_kind) is not ControlClientKind:
@@ -1435,7 +1580,7 @@ async def connect_service_on_demand(
         )
 
     try:
-        return await connect_with_remaining_budget()
+        connected = await connect_with_remaining_budget()
     except _AcceptedServiceUnresponsive:
         # A process already owns and accepted the fixed endpoint. Starting a successor cannot
         # repair that process and only creates a singleton race, so fail this bounded attempt.
@@ -1446,6 +1591,32 @@ async def connect_service_on_demand(
                 raise
         elif exc.reason != "service_unavailable":
             raise
+    else:
+        if not (
+            client_kind is ControlClientKind.MCP_BRIDGE
+            and supersede_incompatible
+            and _serves_older_package(connected)
+        ):
+            return connected
+        await connected.close()
+        try:
+            retired = await supersede_incompatible_service(deadline=deadline)
+        except ControlError as exc:
+            # The older service was asked to stop and is still draining calls of sessions opened
+            # before the upgrade. A retry reaches whichever service holds the endpoint next.
+            raise ControlError(
+                "service_unavailable", retryable=True, correlation_id=exc.correlation_id
+            ) from exc
+        if not retired:
+            # Nothing identifiable to retire (or a concurrent bridge already did): use whatever
+            # holds the endpoint now, starting this installation's service only if none does.
+            try:
+                return await connect_with_remaining_budget()
+            except _AcceptedServiceUnresponsive:
+                raise
+            except ControlError as exc:
+                if exc.reason != "service_unavailable":
+                    raise
     if time.monotonic() >= deadline:
         raise ControlError("service_unavailable", retryable=True)
     # A consented hook may prime an absent service, but cannot replace a holder.

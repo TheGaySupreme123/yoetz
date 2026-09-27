@@ -126,6 +126,13 @@ Yoetz rechecks the exact bytes immediately before each atomic replacement or del
 the result, but an ordinary host configuration file has no portable compare-and-swap operation
 that can exclude a non-cooperating process in the final filesystem syscall window.
 
+At session start, Yoetz may show a short notice when a fresh read confirms your repository grant
+allows external AI review but the host has no project admission entry for `check`. The notice names
+the admission command for your host. It describes the grant at startup; it does not confirm the
+active connection can dispatch review or approve a held tool call. If the read cannot finish in the
+available time, or other task context fills the message, the notice is omitted. Its absence does
+not mean you revoked consent. The existing host approval flow and Yoetz's current gates still apply.
+
 ### The way out
 
 Every way in has a way out, and each is reported rather than silent:
@@ -153,6 +160,20 @@ it should. Yoetz never ships a hook that approves its own tool calls, and never 
 `openWorldHint` a reviewer reads. When Claude Code auto mode denies a scoped `check` anyway,
 `yoetz observe status` records one payload-free `host_auto_review_denied` diagnostic so the hold
 is visible as what it is, not as an AI-powered review result.
+
+### When Claude Code holds a check you already authorized
+
+In Claude Code, Yoetz can show you whether this repository's privacy grant permits external
+AI-powered review. When it confirms the grant and Claude's classifier returned a verdict, the
+hook may offer one retry in the session. Claude shows the notice to you and gives the agent a
+retry cue. The agent must preserve the exact request and ask you after another hold. A missing
+or unreadable grant, unknown verdict, or unavailable retry record produces no retry.
+
+The notice does not approve a tool call or change settings. Higher-priority host instructions,
+your explicit denial, the MCP route and Yoetz's disclosure gates still apply. The durable owner
+choice is `yoetz integrate claude admission grant`, with `admission revoke` as its reverse.
+Codex and Cursor retain the pause-and-ask workflow. Live acceptance of the new Claude notice and
+retry cue is still pending; it is not proof that a provider received or reviewed anything.
 
 ## Codex registration
 

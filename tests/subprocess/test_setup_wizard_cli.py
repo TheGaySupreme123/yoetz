@@ -15,13 +15,26 @@ import pytest
 from typer.testing import CliRunner
 
 import yoetz.cli.app as cli
+import yoetz.cli.setup as _setup_module_at_import
 from yoetz.adapters.integrations.codex_marketplace import (
     ActivationInspection,
     ActivationPreview,
     ActivationState,
 )
 from yoetz.adapters.integrations.codex_mcp import CodexMcpAdapter, CommandOutput
+from yoetz.adapters.integrations.observation_local import (
+    LocalContentCaptureAuthority,
+    LocalObservationStore,
+)
 from yoetz.application.harness_mcp import HarnessMcpService
+from yoetz.domain.observation import ObservationRevokeCommand
+from yoetz.domain.observation_budget import LARGEST_CAPACITY
+from yoetz.domain.observation_profiles import CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
+from yoetz.domain.observation_settings import (
+    ObservationDetailProfile,
+    ObservationSelection,
+    ObservationSelectionSettings,
+)
 from yoetz.ports.control import ControlClientKind, ControlError
 from yoetz.ports.harness_mcp import (
     MCP_SERVE_COMMAND,
@@ -36,10 +49,14 @@ from yoetz.ports.integrations import (
     IntegrationTarget,
     SkillSource,
 )
+from yoetz.ports.plugin_artifacts import ArtifactAuthority
 from yoetz.protocol.canonical import JsonValue
 from yoetz.service.client import ServiceClient
 
 _RUNNER = CliRunner()
+# ``wizard_env`` replaces the consent step with a canned report; the issue #835 composition
+# tests below restore this real one against a disposable observation store.
+_REAL_GRANT_OBSERVATION_CONSENT = _setup_module_at_import._grant_observation_consent  # pyright: ignore[reportPrivateUsage]
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
@@ -1356,7 +1373,8 @@ def test_integrate_mcp_refuses_foreign_entry(wizard_env: dict[str, object]) -> N
     assert "foreign_entry_present" in result.stderr
 
 
-def test_integrate_mcp_remove_owned_entry(wizard_env: dict[str, object]) -> None:
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_integrate_mcp_remove_owned_entry(wizard_env: dict[str, object], exit_code: int) -> None:
     wizard_env["outputs"] = [_yoetz_entry()]
     previewed = _RUNNER.invoke(cli.app, ["integrate", "codex", "mcp", "preview-remove", "--json"])
     assert previewed.exit_code == 0, (previewed.output, previewed.exception)
@@ -1381,7 +1399,7 @@ def test_integrate_mcp_remove_owned_entry(wizard_env: dict[str, object]) -> None
         _yoetz_entry(),
         _yoetz_entry(),
         _yoetz_entry(),
-        CommandOutput(0, b""),
+        CommandOutput(exit_code, b""),
         CommandOutput(1, b""),
         CommandOutput(0, b"[]"),
     ]
@@ -1402,6 +1420,7 @@ def test_integrate_mcp_remove_owned_entry(wizard_env: dict[str, object]) -> None
     body = json.loads(result.stdout)
     assert body["action"] == "unregister"
     assert body["state_after"] == "absent"
+    assert body["removal"]["warnings"] == (["host_remove_returned_nonzero"] if exit_code else [])
 
 
 def test_integrate_mcp_interactive_remove_surfaces_complete_warning_bound_preview(
@@ -2827,3 +2846,332 @@ def test_complete_codex_plan_accepts_only_its_generated_activation_transition(
     ]
     assert any(call[1:3] == ("mcp", "add") for call in calls) is expected_transition
     assert result["outcome"] == ("reregistered" if expected_transition else "failed")
+
+
+class _CodexMcpHost:
+    """A Codex MCP CLI answering from one registration flag, whatever the call order."""
+
+    def __init__(self) -> None:
+        self.registered = False
+        self.calls: list[tuple[str, ...]] = []
+
+    def __call__(self, argv: tuple[str, ...]) -> CommandOutput:
+        self.calls.append(argv)
+        verb = argv[1:3]
+        if verb == ("mcp", "get"):
+            return _yoetz_entry("strict") if self.registered else CommandOutput(1, b"")
+        if verb == ("mcp", "list") and not self.registered:
+            return CommandOutput(0, b"[]")
+        if verb == ("mcp", "add"):
+            self.registered = True
+            return CommandOutput(0, b"")
+        raise AssertionError(f"unexpected Codex MCP call: {argv[1:]}")
+
+
+@pytest.fixture
+def consent_arm_env(
+    wizard_env: dict[str, object], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> dict[str, object]:
+    """The composed Codex connection with its real consent step on a disposable store."""
+
+    import yoetz.adapters.integrations.observation_local as observation_local
+    import yoetz.cli.setup as setup_module
+
+    host = _CodexMcpHost()
+
+    def adapter(
+        *,
+        route_profile: Literal["policy", "strict"] = "policy",
+        codex_home: Path | None = None,
+    ) -> CodexMcpAdapter:
+        return CodexMcpAdapter(host, route_profile=route_profile, codex_home=codex_home)
+
+    import yoetz.adapters.integrations.codex_mcp as codex_mcp_module
+    import yoetz.cli.codex_connection as codex_connection_module
+
+    monkeypatch.setattr(setup_module, "CodexMcpAdapter", adapter)
+    # The host-connection preview and its terminal-interface plan reach the same host.
+    monkeypatch.setattr(codex_mcp_module, "CodexMcpAdapter", adapter)
+    monkeypatch.setattr(codex_connection_module, "CodexMcpAdapter", adapter)
+
+    def installed_activation(_target: object, **_kwargs: object) -> ActivationInspection:
+        return ActivationInspection(
+            True,
+            True,
+            ActivationState.ACTIVE,
+            plugin_cached=cast(bool, wizard_env["plugin_cached"]),
+        )
+
+    monkeypatch.setattr(codex_connection_module, "inspect_activation", installed_activation)
+    monkeypatch.setattr(setup_module, "_grant_observation_consent", _REAL_GRANT_OBSERVATION_CONSENT)
+    observation_state = tmp_path / "observation-state"
+    monkeypatch.setattr(observation_local, "state_dir", lambda: observation_state)
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    store = LocalObservationStore()
+    store.set_runtime_enabled(True)
+    wizard_env["host"] = host
+    wizard_env["plugin_cached"] = False
+    wizard_env["workspace"] = workspace
+    wizard_env["commitment"] = store.workspace_commitment(str(workspace.resolve()))
+    return wizard_env
+
+
+async def _connect_codex(env: dict[str, object]) -> dict[str, JsonValue]:
+    """Preview and apply exactly as the host connection and terminal interface do."""
+
+    import yoetz.cli.setup as setup_module
+
+    workspace = cast(Path, env["workspace"])
+    home = cast(Path, env["codex_home"])
+    skill_preview = await setup_module.project_skill_preview(workspace)
+    mcp_preview = await HarnessMcpService(
+        CodexMcpAdapter(cast(_CodexMcpHost, env["host"]), route_profile="strict", codex_home=home)
+    ).preview(_binary())
+    return await setup_module.apply_codex_integration(
+        _binary(),
+        route_profile="strict",
+        workspace=workspace,
+        approved_preview_digest=mcp_preview.preview_digest,
+        approved_skill_preview_digest=skill_preview.preview_digest,
+        approved_activation_digest=cast(str, env["activation_digest"]),
+        codex_home=home,
+        _state=cast(Path, env["isolated_state"]),
+    )
+
+
+class _NoOsPresenceReview:
+    """Codex connection plans declare no OS-presence review; consuming one is a defect."""
+
+    def consume_setup_authority(self, authority: ArtifactAuthority, preview_digest: str) -> None:
+        raise AssertionError("Codex connection must not consume setup authority")
+
+    def consume_artifact_review(self, authority: ArtifactAuthority, preview_digest: str) -> None:
+        raise AssertionError("Codex connection must not consume an artifact review")
+
+
+def _host_connect_codex(env: dict[str, object]) -> tuple[bool, dict[str, JsonValue]]:
+    """Run ``yoetz connect codex``'s prepare/accept/apply composition; report if it applied."""
+
+    from yoetz.adapters.integrations.host_discovery import HostInstallation
+    from yoetz.application.host_connection import ConnectionPlan, apply_connection
+    from yoetz.cli.codex_connection import prepare_codex_connection
+    from yoetz.protocol.ids import IdKind, new_id
+
+    binary = _binary()
+    installation = HostInstallation(
+        "codex",
+        Path(binary.executable_path),
+        binary.reported_version,
+        cast(Path, env["codex_home"]),
+        "Codex",
+    )
+    request = new_id(IdKind.REQUEST)
+
+    def prepare() -> ConnectionPlan:
+        return prepare_codex_connection(
+            installation,
+            cast(Path, env["workspace"]),
+            action="connect",
+            route="strict",
+            request_value=request,
+        )
+
+    plan = prepare()
+    status = apply_connection(
+        plan,
+        accepted_digest=plan.digest,
+        refresh=prepare,
+        authority=None,
+        review=_NoOsPresenceReview(),
+    )
+    return not plan.unchanged, status
+
+
+def _approve_claude_capture(env: dict[str, object]) -> None:
+    """The documented Claude steps: structural grant, then the explicit content arm."""
+
+    import yoetz.cli.observe as observe_cli
+
+    workspace = str(cast(Path, env["workspace"]))
+    assert observe_cli.grant_observation(workspace=workspace) == 0
+    assert (
+        observe_cli.enable_observation_content(
+            profile=CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID, workspace=workspace
+        )
+        == 0
+    )
+
+
+def _select_detailed_largest(env: dict[str, object]) -> ObservationSelectionSettings:
+    store = LocalObservationStore()
+    commitment = cast(str, env["commitment"])
+    store.set_workspace_selection(
+        commitment,
+        ObservationSelection(
+            detail=ObservationDetailProfile.DETAILED,
+            capacity=LARGEST_CAPACITY,
+        ),
+    )
+    return store.selection_settings_for(commitment)
+
+
+def _authority(env: dict[str, object]) -> LocalContentCaptureAuthority:
+    authority = LocalObservationStore().content_capture_authority(cast(str, env["commitment"]))
+    assert authority is not None
+    assert authority.active and authority.runtime_enabled
+    return authority
+
+
+def _consent_report(report: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    consent = report["observation_consent"]
+    assert isinstance(consent, dict)
+    return consent
+
+
+def _still_current(env: dict[str, object], authority: LocalContentCaptureAuthority) -> bool:
+    """The same local fence the service rechecks before it opens or dispatches content."""
+
+    return LocalObservationStore().content_capture_authority_is_current(
+        cast(str, env["commitment"]), authority.generation, authority.profiles
+    )
+
+
+def test_codex_connection_after_claude_keeps_claude_capture_and_selection(
+    consent_arm_env: dict[str, object],
+) -> None:
+    """Issue #835, Claude first: connecting Codex must not clear or re-fence Claude's arm."""
+
+    env = consent_arm_env
+    _approve_claude_capture(env)
+    selection = _select_detailed_largest(env)
+    claude = _authority(env)
+    assert claude.profiles == (CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,)
+
+    report = asyncio.run(_connect_codex(env))
+
+    assert report["outcome"] == "registered"
+    assert _authority(env) == claude
+    assert _still_current(env, claude)
+    assert LocalObservationStore().selection_settings_for(cast(str, env["commitment"])) == (
+        selection
+    )
+    assert _consent_report(report) == {
+        "outcome": "granted",
+        "transition": "unchanged",
+        "workspace_commitment": env["commitment"],
+        "content_capture_profiles": [CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID],
+    }
+
+    # Reconnecting is the same idempotent structural setup.
+    again = asyncio.run(_connect_codex(env))
+
+    assert again["outcome"] == "already_registered"
+    assert _authority(env) == claude
+    assert _still_current(env, claude)
+    assert _consent_report(again)["transition"] == "unchanged"
+    assert [call[1:3] for call in cast(_CodexMcpHost, env["host"]).calls].count(("mcp", "add")) == 1
+
+
+def test_claude_arm_added_after_codex_survives_codex_reconnection(
+    consent_arm_env: dict[str, object],
+) -> None:
+    """Issue #835, Codex first: Claude's later arm survives a repeated Codex connection."""
+
+    env = consent_arm_env
+    first = asyncio.run(_connect_codex(env))
+    assert first["outcome"] == "registered"
+    codex_only = _authority(env)
+    assert codex_only.profiles == ()
+
+    import yoetz.cli.observe as observe_cli
+
+    # Claude's structural grant repeats an effective consent: Codex's own profileless hook
+    # authority is not re-fenced by it.
+    assert observe_cli.grant_observation(workspace=str(cast(Path, env["workspace"]))) == 0
+    assert _authority(env) == codex_only
+    _approve_claude_capture(env)
+    claude = _authority(env)
+    assert claude.profiles == (CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,)
+    assert claude.generation != codex_only.generation  # enabling an arm is a real transition
+    selection = _select_detailed_largest(env)
+
+    again = asyncio.run(_connect_codex(env))
+
+    assert again["outcome"] == "already_registered"
+    assert _authority(env) == claude
+    assert _still_current(env, claude)
+    assert LocalObservationStore().selection_settings_for(cast(str, env["commitment"])) == (
+        selection
+    )
+    assert _consent_report(first)["transition"] == "granted"
+    assert _consent_report(again)["transition"] == "unchanged"
+    assert _consent_report(again)["content_capture_profiles"] == [
+        CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID
+    ]
+
+
+def test_revocation_after_connection_fences_and_reconnection_infers_no_arm(
+    consent_arm_env: dict[str, object],
+) -> None:
+    env = consent_arm_env
+    _approve_claude_capture(env)
+    assert asyncio.run(_connect_codex(env))["outcome"] == "registered"
+    in_flight = _authority(env)
+    commitment = cast(str, env["commitment"])
+
+    store = LocalObservationStore()
+    store.revoke(ObservationRevokeCommand(commitment, retain_evidence=True))
+    assert not _still_current(env, in_flight)
+
+    # While the project fence is pending, reconnecting cannot revive consent.
+    blocked = asyncio.run(_connect_codex(env))
+    assert blocked["outcome"] == "already_registered"
+    assert _consent_report(blocked)["outcome"] == "failed"
+    consent = store.consent_for(commitment)
+    assert consent is not None and consent.revoked_at is not None
+    assert store.content_capture_profiles(commitment) == ()
+
+    pending = store.pending_consent_revocation(commitment)
+    assert pending is not None
+    store.mark_consent_revocation_fenced(commitment, pending[0])
+    fresh = asyncio.run(_connect_codex(env))
+
+    assert _authority(env).profiles == ()
+    assert not _still_current(env, in_flight)
+    assert _consent_report(fresh)["transition"] == "granted"
+    assert _consent_report(fresh)["content_capture_profiles"] == []
+
+
+def test_host_connection_codex_after_claude_keeps_claude_capture(
+    consent_arm_env: dict[str, object],
+) -> None:
+    """Issue #835 through ``yoetz connect codex``: preview, accept, apply, and reconnect."""
+
+    env = consent_arm_env
+    _approve_claude_capture(env)
+    selection = _select_detailed_largest(env)
+    claude = _authority(env)
+
+    applied, status = _host_connect_codex(env)
+
+    assert applied
+    assert status["configured"] is True
+    assert _authority(env) == claude
+    assert _still_current(env, claude)
+    assert LocalObservationStore().selection_settings_for(cast(str, env["commitment"])) == (
+        selection
+    )
+
+    # A missing plugin cache makes reconnection apply the whole composition again.
+    applied_again, _status = _host_connect_codex(env)
+    assert applied_again
+    assert _authority(env) == claude
+    assert _still_current(env, claude)
+
+    # A fully installed reconnection has no changes and applies nothing.
+    env["plugin_cached"] = True
+    applied_last, _status = _host_connect_codex(env)
+    assert not applied_last
+    assert _authority(env) == claude
+    assert [call[1:3] for call in cast(_CodexMcpHost, env["host"]).calls].count(("mcp", "add")) == 1

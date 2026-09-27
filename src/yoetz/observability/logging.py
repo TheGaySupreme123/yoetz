@@ -127,11 +127,15 @@ _EXCEPTION_REASONS: Final[Mapping[str, str]] = MappingProxyType(
         "ConstraintError": "exception_constraint_error",
         "ControlError": "exception_control_error",
         "ControlProtocolError": "exception_control_protocol_error",
+        # Coordination domain and project command failures are ValueError subclasses that can
+        # reach the status boundary from a project read (issue #840).
+        "CoordinationError": "exception_coordination_error",
         "CorruptError": "exception_corrupt_error",
         "EOFError": "exception_eof_error",
         "FileExistsError": "exception_file_exists_error",
         "FileNotFoundError": "exception_file_not_found_error",
         "FullError": "exception_full_error",
+        "HostLineageRegistryError": "exception_host_lineage_registry_error",
         "IndexError": "exception_index_error",
         "InterruptedError": "exception_interrupted_error",
         "IsADirectoryError": "exception_is_a_directory_error",
@@ -147,6 +151,7 @@ _EXCEPTION_REASONS: Final[Mapping[str, str]] = MappingProxyType(
         "OverflowError": "exception_overflow_error",
         "PathSafetyError": "exception_path_safety_error",
         "PermissionError": "exception_permission_error",
+        "ProjectCommandError": "exception_project_command_error",
         "ProtocolValueError": "exception_protocol_value_error",
         "PublicOperationError": "exception_public_operation_error",
         "ReadOnlyError": "exception_read_only_error",

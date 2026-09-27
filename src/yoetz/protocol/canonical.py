@@ -11,10 +11,13 @@ from typing import Final, NoReturn, cast
 from yoetz.protocol.errors import ProtocolValueError
 
 __all__ = [
+    "CanonicalFragment",
     "JsonValue",
     "MAX_JSON_DEPTH",
     "canonical_digest",
     "canonical_encode",
+    "canonical_fragment",
+    "container_levels",
     "canonical_integer_string",
     "ensure_canonical_set",
     "ensure_canonical_value",
@@ -66,6 +69,67 @@ _ACCEPTED_ENTRY_PREIMAGE_KEYS: Final = frozenset(
 )
 
 
+class CanonicalFragment:
+    """The canonical text of one already-validated value, for splicing into a larger value.
+
+    Canonical encoding is compositional: a value's text inside any enclosing document is exactly
+    its own canonical text. A caller that re-encodes a large document whose members rarely change
+    (the local observation state, issue #689) can therefore encode each immutable member once and
+    splice it. Only :func:`canonical_fragment` builds one, from a value this module validated, so
+    a fragment can never carry text the profile would reject; parsing never produces one.
+
+    ``levels`` is the deepest relative nesting level that holds a container (``-1`` for a
+    scalar), so splicing enforces exactly the nesting bound inline encoding would.
+    """
+
+    __slots__ = ("byte_length", "levels", "text")
+
+    def __init__(self, text: str, levels: int, *, _token: object = None) -> None:
+        if _token is not _FRAGMENT_TOKEN:
+            raise TypeError("canonical_fragment_private")
+        self.text = text
+        self.levels = levels
+        self.byte_length = len(text.encode("utf-8"))
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if hasattr(self, name):
+            raise AttributeError("canonical_fragment_immutable")
+        object.__setattr__(self, name, value)
+
+
+_FRAGMENT_TOKEN: Final = object()
+
+
+def canonical_fragment(value: JsonValue | CanonicalFragment) -> CanonicalFragment:
+    """Validate and encode *value* once, returning a splice-ready fragment."""
+
+    if type(value) is CanonicalFragment:
+        return value
+    return CanonicalFragment(
+        _canonical_text(value),
+        container_levels(value),
+        _token=_FRAGMENT_TOKEN,
+    )
+
+
+def container_levels(value: object) -> int:
+    """Return the deepest relative level holding a container, or ``-1`` for a scalar.
+
+    A value whose root sits at depth ``d`` satisfies the nesting bound exactly when
+    ``d + container_levels(value) < MAX_JSON_DEPTH``.
+    """
+
+    if type(value) is CanonicalFragment:
+        return value.levels
+    if type(value) in {list, tuple}:
+        items = cast(Sequence[object], value)
+        return 1 + max((container_levels(item) for item in items), default=-1)
+    if _is_actual_mapping(value):
+        source = cast(Mapping[str, object], value)
+        return 1 + max((container_levels(item) for item in source.values()), default=-1)
+    return -1
+
+
 def canonical_encode(value: JsonValue) -> bytes:
     """Encode a restricted canonical JSON value to UTF-8 bytes."""
 
@@ -78,8 +142,13 @@ def canonical_digest(value: JsonValue) -> str:
     return f"sha256:{hashlib.sha256(canonical_encode(value)).hexdigest()}"
 
 
-def strict_json_parse(data: bytes | bytearray) -> JsonValue:
-    """Parse strict wire JSON into the Yoetz JSON profile."""
+def strict_json_parse(data: bytes | bytearray, *, validate: bool = True) -> JsonValue:
+    """Parse strict wire JSON into the Yoetz JSON profile.
+
+    ``validate=False`` keeps every lexical check (UTF-8, no NUL byte or BOM, no duplicate key,
+    no float or non-finite constant, safe integers) and skips only the final profile walk; the
+    caller then owns :func:`ensure_canonical_value` for every subtree it accepts.
+    """
 
     if type(data) is bytearray:
         raw = bytes(data)
@@ -137,14 +206,19 @@ def strict_json_parse(data: bytes | bytearray) -> JsonValue:
     except RecursionError as exc:
         raise ProtocolValueError("nesting_too_deep") from exc
 
-    ensure_canonical_value(cast(JsonValue, parsed))
+    if validate:
+        ensure_canonical_value(cast(JsonValue, parsed))
     return cast(JsonValue, parsed)
 
 
-def ensure_canonical_value(value: JsonValue) -> None:
-    """Validate a parsed value against the canonical JSON profile."""
+def ensure_canonical_value(value: JsonValue, *, depth: int = 0) -> None:
+    """Validate a parsed value against the canonical JSON profile.
 
-    _canonical_text(value)
+    ``depth`` is the value's nesting depth inside an enclosing document, so validating a
+    document's members one by one enforces exactly the bound validating it whole would.
+    """
+
+    _canonical_text(value, depth=depth)
 
 
 def ensure_canonical_set(values: list[str] | tuple[str, ...]) -> None:
@@ -272,7 +346,11 @@ def _reject_ledger_assigned_fields(value: JsonValue) -> None:
     _walk(value, 0)
 
 
-def _canonical_text(value: JsonValue, *, depth: int = 0) -> str:
+def _canonical_text(value: JsonValue | CanonicalFragment, *, depth: int = 0) -> str:
+    if type(value) is CanonicalFragment:
+        if value.levels >= 0 and depth + value.levels >= MAX_JSON_DEPTH:
+            raise ProtocolValueError("nesting_too_deep")
+        return value.text
     if value is None:
         return "null"
     if type(value) is bool:

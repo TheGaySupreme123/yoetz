@@ -18,10 +18,12 @@ from yoetz.adapters.integrations.codex_lifecycle import (
     acquire_workspace_recovery_lock,
     clear_mapping,
     encode_frontier_token,
+    is_scoped_child_session_id,
     load_latest_mapping,
     load_mapping,
     load_route_history,
     mapping_from_start_ids,
+    scoped_child_session_id,
     store_mapping,
     validate_codex_session_id,
 )
@@ -38,6 +40,62 @@ def _ids() -> tuple[str, str, str, str]:
         new_id(IdKind.SESSION),
         new_id(IdKind.WRITER),
     )
+
+
+def test_scoped_child_session_id_is_bounded_and_domain_separated() -> None:
+    parent = "codex-parent-abc"
+    first = scoped_child_session_id(
+        parent,
+        host="codex",
+        identity="agent-1",
+        identity_kind="host",
+    )
+    assert first == scoped_child_session_id(
+        parent,
+        host="codex",
+        identity="agent-1",
+        identity_kind="host",
+    )
+    assert is_scoped_child_session_id(first)
+    assert len(first) <= 128
+    assert first != scoped_child_session_id(
+        parent,
+        host="codex",
+        identity="agent-1",
+        identity_kind="task",
+    )
+    assert first != scoped_child_session_id(
+        "codex-other-parent",
+        host="codex",
+        identity="agent-1",
+        identity_kind="host",
+    )
+    assert not is_scoped_child_session_id(parent)
+    assert not is_scoped_child_session_id(first[:-1])
+
+
+@pytest.mark.parametrize(
+    ("parent", "host", "identity", "identity_kind"),
+    [
+        ("parent", "unknown", "agent", "host"),
+        ("parent", "codex", "agent", "unknown"),
+        ("parent", "codex", "", "host"),
+        ("parent", "codex", "agent/unsafe", "host"),
+    ],
+)
+def test_scoped_child_session_id_rejects_unadmitted_inputs(
+    parent: str,
+    host: str,
+    identity: str,
+    identity_kind: str,
+) -> None:
+    with pytest.raises(ProtocolValueError):
+        scoped_child_session_id(
+            parent,
+            host=host,
+            identity=identity,
+            identity_kind=identity_kind,
+        )
 
 
 def test_mapping_round_trip(tmp_path: Path) -> None:

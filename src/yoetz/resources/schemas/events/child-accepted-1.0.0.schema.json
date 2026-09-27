@@ -1,0 +1,1 @@
+{"$id":"https://schemas.yoetz.dev/0.1/events/child-accepted-1.0.0.schema.json","$schema":"https://json-schema.org/draft/2020-12/schema","additionalProperties":false,"properties":{"child_task_id":{"pattern":"^tsk_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$","type":"string"}},"required":["child_task_id"],"title":"child-accepted","type":"object"}

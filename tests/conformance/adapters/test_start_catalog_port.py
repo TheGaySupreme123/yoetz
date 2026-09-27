@@ -18,11 +18,13 @@ from yoetz.adapters.memory.start_catalog import (
     MemoryStartCatalogState,
 )
 from yoetz.adapters.sqlite.start_catalog import SqliteStartCatalog
+from yoetz.domain.coordination import SessionHealth, WorkState
 from yoetz.domain.values import Frontier
 from yoetz.ports.runtime import StartCompletionEvidence, StartMilestone
 from yoetz.ports.start_catalog import (
     EncryptedResultRef,
     SafeReason,
+    SessionState,
     StartAllocation,
     StartCommand,
     StartIdentityInput,
@@ -82,10 +84,12 @@ def _id(kind: IdKind, value: int) -> str:
     return PREFIX_BY_KIND[kind] + str(uuid.UUID(bytes=bytes(raw)))
 
 
-def _sqlite_catalog(installation_id: str, clock: _Clock) -> SqliteStartCatalog:
+def _sqlite_catalog(
+    installation_id: str, clock: _Clock, *, schema_version: int = 3
+) -> SqliteStartCatalog:
     db = apsw.Connection(":memory:")
     root = Path(__file__).resolve().parents[3]
-    for version in ("0001", "0002", "0003"):
+    for version in (f"{number:04d}" for number in range(1, schema_version + 1)):
         db.execute((root / f"migrations/catalog/{version}.sql").read_text(encoding="utf-8"))
     db.executemany(
         "INSERT INTO catalog_meta(key, value) VALUES(?, ?)",
@@ -239,6 +243,66 @@ async def test_reserve_resume_complete_parity() -> None:
     assert memory_replay == sqlite_replay
     assert memory_replay.outcome == "replayed"
     assert memory_replay.replayed_result is not None
+
+
+@pytest.mark.anyio
+async def test_session_lease_extension_is_monotonic_and_preserves_ended_fences() -> None:
+    """Memory and SQLite apply lease offers atomically and never revive an ended route."""
+
+    installation_id = _id(IdKind.INSTALLATION, 750)
+    start = datetime(2026, 7, 19, 9, 5, tzinfo=UTC)
+    memory_clock = _Clock(start)
+    sqlite_clock = _Clock(start)
+    memory, _ = _memory_catalog(installation_id, memory_clock)
+    sqlite = _sqlite_catalog(installation_id, sqlite_clock, schema_version=4)
+
+    states: list[tuple[SessionState, SessionState, SessionState, SessionState]] = []
+    for catalog in (memory, sqlite):
+        command = await _command(catalog, operation_id=_id(IdKind.REQUEST, 751))
+        allocation = await catalog.reserve_or_resume(command)
+        first = await catalog.extend_session_lease(
+            allocation.task_id,
+            allocation.session_id,
+            changed_at=start,
+            lease_expires_at=start + timedelta(seconds=60),
+        )
+        second = await catalog.extend_session_lease(
+            allocation.task_id,
+            allocation.session_id,
+            changed_at=start + timedelta(seconds=1),
+            lease_expires_at=start + timedelta(seconds=120),
+        )
+        stale = await catalog.extend_session_lease(
+            allocation.task_id,
+            allocation.session_id,
+            changed_at=start,
+            lease_expires_at=start + timedelta(seconds=90),
+        )
+        assert first.lease_expires_at == start + timedelta(seconds=60)
+        assert second.lease_expires_at == start + timedelta(seconds=120)
+        assert stale == second
+        ended = await catalog.record_session_state(
+            allocation.task_id,
+            allocation.session_id,
+            health=SessionHealth.ENDED,
+            changed_at=start + timedelta(seconds=2),
+        )
+        offered_after_end = await catalog.extend_session_lease(
+            allocation.task_id,
+            allocation.session_id,
+            changed_at=start + timedelta(seconds=3),
+            lease_expires_at=start + timedelta(seconds=180),
+        )
+        assert ended.health is SessionHealth.ENDED
+        assert offered_after_end == ended
+        states.append((second, stale, ended, offered_after_end))
+
+    memory_second, memory_stale, memory_ended, memory_after_end = states[0]
+    sqlite_second, sqlite_stale, sqlite_ended, sqlite_after_end = states[1]
+    assert memory_second == sqlite_second
+    assert memory_stale == sqlite_stale
+    assert memory_ended == sqlite_ended
+    assert memory_after_end == sqlite_after_end
 
 
 @pytest.mark.anyio
@@ -718,11 +782,14 @@ async def test_initializing_route_preserves_its_pair_without_blocking_a_new_pair
 
 
 @pytest.mark.anyio
-async def test_repository_binding_is_atomic_and_mismatch_precedes_operation_reservation() -> None:
+@pytest.mark.parametrize("schema_version", [3, 4])
+async def test_repository_binding_is_atomic_and_mismatch_precedes_operation_reservation(
+    schema_version: int,
+) -> None:
     installation_id = _id(IdKind.INSTALLATION, 705)
     clock = _Clock(datetime(2026, 7, 19, 9, 30, tzinfo=UTC))
     memory, memory_state = _memory_catalog(installation_id, clock)
-    sqlite = _sqlite_catalog(installation_id, _Clock(clock.current))
+    sqlite = _sqlite_catalog(installation_id, _Clock(clock.current), schema_version=schema_version)
     commitment_a = "hmac-sha256:" + "a" * 64
     commitment_b = "hmac-sha256:" + "b" * 64
 
@@ -795,6 +862,90 @@ async def test_quarantine_and_reclaim_parity() -> None:
     sqlite_replay = await sqlite.reserve_or_resume(sqlite_request)
     assert memory_replay == sqlite_replay
     assert memory_replay.replayed_result is not None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", [StartMode.ATTACH, StartMode.CREATE_OR_ATTACH, StartMode.CREATE])
+async def test_quarantined_pair_refuses_before_new_reservation(mode: StartMode) -> None:
+    installation = _id(IdKind.INSTALLATION, 740)
+    clock = _Clock(datetime(2026, 7, 19, 11, 0, tzinfo=UTC))
+    memory, state = _memory_catalog(installation, clock)
+    sqlite = _sqlite_catalog(installation, clock, schema_version=5)
+    for catalog in (memory, sqlite):
+        original = await _command(catalog, operation_id=_id(IdKind.REQUEST, 741))
+        allocation = await catalog.reserve_or_resume(original)
+        await catalog.quarantine(allocation, SafeReason("start_bundle_invalid"))
+        route = await catalog.task_route(allocation.task_id)
+        sessions = await catalog.task_session_states(allocation.task_id)
+        replacement = await _command(catalog, operation_id=_id(IdKind.REQUEST, 742), mode=mode)
+        with pytest.raises(PublicOperationError) as error:
+            await catalog.reserve_or_resume(replacement)
+        assert error.value.code is PublicErrorCode.STORAGE_CORRUPT
+        assert await catalog.task_route(allocation.task_id) == route
+        assert await catalog.task_session_states(allocation.task_id) == sessions
+        if isinstance(catalog, MemoryStartCatalogAdapter):
+            assert len(state.operations) == 1
+        else:
+            assert catalog._db.execute(  # pyright: ignore[reportPrivateUsage]
+                "SELECT COUNT(*) FROM start_operations"
+            ).fetchone() == (1,)
+        # An exact retry still recovers the original terminal failure.
+        replayed = await catalog.reserve_or_resume(original)
+        assert replayed.outcome == "replayed"
+        assert replayed.replayed_result is not None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("state", [WorkState.ABANDONED, WorkState.CLOSED])
+@pytest.mark.parametrize("mode", [StartMode.ATTACH, StartMode.CREATE_OR_ATTACH])
+async def test_terminal_work_refuses_resume_before_new_reservation(
+    mode: StartMode, state: WorkState
+) -> None:
+    """Terminal work cannot be resumed, so no session is reserved or rotated (#837)."""
+
+    installation = _id(IdKind.INSTALLATION, 760)
+    clock = _Clock(datetime(2026, 7, 19, 11, 0, tzinfo=UTC))
+    memory, memory_state = _memory_catalog(installation, clock)
+    sqlite = _sqlite_catalog(installation, clock, schema_version=5)
+    for catalog in (memory, sqlite):
+        original = await _command(catalog, operation_id=_id(IdKind.REQUEST, 761))
+        allocation, _result_ref = await _finish(catalog, await catalog.reserve_or_resume(original))
+        assert type(allocation) is StartAllocation
+        await catalog.set_task_work_state(allocation.task_id, state)
+        route = await catalog.task_route(allocation.task_id)
+        sessions = await catalog.task_session_states(allocation.task_id)
+        resume = await _command(
+            catalog,
+            operation_id=_id(IdKind.REQUEST, 762),
+            mode=mode,
+            session_id=allocation.session_id if mode is StartMode.ATTACH else None,
+        )
+        with pytest.raises(PublicOperationError) as error:
+            await catalog.reserve_or_resume(resume)
+        assert error.value.code is PublicErrorCode.SESSION_CONFLICT
+        assert error.value.safe_details["reason_code"] == "lineage_resume_work_terminal"
+        assert error.value.safe_details["continuation"] == "lineage_successor_task"
+        assert await catalog.task_route(allocation.task_id) == route
+        assert await catalog.task_session_states(allocation.task_id) == sessions
+        if isinstance(catalog, MemoryStartCatalogAdapter):
+            assert len(memory_state.operations) == 1
+        else:
+            assert catalog._db.execute(  # pyright: ignore[reportPrivateUsage]
+                "SELECT COUNT(*) FROM start_operations"
+            ).fetchone() == (1,)
+        # The completed original start still replays its recorded result.
+        replayed = await catalog.reserve_or_resume(original)
+        assert replayed.outcome == "replayed"
+        # A deliberate new identity pair remains an ordinary successor task.
+        successor = await catalog.reserve_or_resume(
+            await _command(
+                catalog,
+                operation_id=_id(IdKind.REQUEST, 763),
+                mode=StartMode.CREATE,
+                external_ref="external-successor",
+            )
+        )
+        assert successor.task_id != allocation.task_id
 
 
 @pytest.mark.anyio

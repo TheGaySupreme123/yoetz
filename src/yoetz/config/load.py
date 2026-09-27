@@ -48,6 +48,14 @@ _ENV_TO_LEAF: Final[dict[str, _LeafPath | None]] = {
     "YOETZ_STORAGE_DURABILITY": ("storage", "durability"),
     "YOETZ_VERIFICATION_SEMANTIC": ("verification", "semantic"),
     "YOETZ_VERIFICATION_MAX_FINDINGS": ("verification", "max_findings"),
+    "YOETZ_LINEAGE_START_LEASE_SECONDS": ("lineage", "start_lease_seconds"),
+    "YOETZ_LINEAGE_ATTACH_HANDLE_TTL_SECONDS": ("lineage", "attach_handle_ttl_seconds"),
+    "YOETZ_LINEAGE_CONTACT_LOST_RECOVERY_SECONDS": (
+        "lineage",
+        "contact_lost_recovery_seconds",
+    ),
+    "YOETZ_LINEAGE_MAX_DEPTH": ("lineage", "max_depth"),
+    "YOETZ_LINEAGE_MAX_FANOUT": ("lineage", "max_fanout"),
     "YOETZ_LOG_LEVEL": ("logging", "level"),
     "YOETZ_PROVIDER_ID": ("provider", "provider_id"),
     "YOETZ_PROVIDER_ENDPOINT_PROFILE_ID": ("provider", "endpoint_profile_id"),
@@ -65,6 +73,11 @@ _OVERRIDE_TO_LEAF: Final[dict[str, _LeafPath | None]] = {
     "storage.durability": ("storage", "durability"),
     "verification.semantic": ("verification", "semantic"),
     "verification.max_findings": ("verification", "max_findings"),
+    "lineage.start_lease_seconds": ("lineage", "start_lease_seconds"),
+    "lineage.attach_handle_ttl_seconds": ("lineage", "attach_handle_ttl_seconds"),
+    "lineage.contact_lost_recovery_seconds": ("lineage", "contact_lost_recovery_seconds"),
+    "lineage.max_depth": ("lineage", "max_depth"),
+    "lineage.max_fanout": ("lineage", "max_fanout"),
     "logging.level": ("logging", "level"),
     "provider.provider_id": ("provider", "provider_id"),
     "provider.endpoint_profile_id": ("provider", "endpoint_profile_id"),
@@ -75,6 +88,11 @@ _OVERRIDE_TO_LEAF: Final[dict[str, _LeafPath | None]] = {
 _INTEGER_LEAVES: Final = frozenset(
     {
         ("verification", "max_findings"),
+        ("lineage", "start_lease_seconds"),
+        ("lineage", "attach_handle_ttl_seconds"),
+        ("lineage", "contact_lost_recovery_seconds"),
+        ("lineage", "max_depth"),
+        ("lineage", "max_fanout"),
         ("provider", "timeout_seconds"),
     }
 )

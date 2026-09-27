@@ -8,12 +8,31 @@ from collections.abc import Mapping, Sequence
 import typer
 
 from yoetz.adapters.package_upgrade import execute_package_upgrade
+from yoetz.adapters.release_runtime import installation_prefix, prune_release_runtimes
 from yoetz.application.upgrade import HOSTS, build_upgrade_plan
 
 
 def run_upgrade(
-    *, hosts: Sequence[str] | None, options: Mapping[str, str], accept: bool, writers_stopped: bool
+    *,
+    hosts: Sequence[str] | None,
+    options: Mapping[str, str],
+    accept: bool,
+    prune_runtimes: bool = False,
 ) -> int:
+    if prune_runtimes:
+        if accept:
+            typer.echo("Choose either --accept or --prune-runtimes.", err=True)
+            return 2
+        try:
+            removed, retained = prune_release_runtimes(installation_prefix())
+        except OSError, ValueError:
+            typer.echo(
+                "Runtime cleanup could not safely complete; running sessions were not stopped.",
+                err=True,
+            )
+            return 2
+        typer.echo(f"Removed {removed} unused runtime copies; kept {retained} in use.")
+        return 0
     try:
         steps = build_upgrade_plan(hosts or HOSTS, options)
     except ValueError as exc:
@@ -34,23 +53,32 @@ def run_upgrade(
     if not accept:
         typer.echo("\nPlan only. No package, host, service, data, or setting was changed.")
         return 0
-    if not writers_stopped:
-        typer.echo(
-            "upgrade_writers_must_be_stopped: quiesce old hosts/hooks and service, then pass --writers-stopped",
-            err=True,
-        )
-        return 2
     try:
         outcome = execute_package_upgrade()
     except OSError, ValueError:
         outcome = "runtime_identity_unavailable"
     typer.echo(f"\nPackage step: {outcome}")
+    if outcome == "package_already_current":
+        typer.echo("The fresh launcher reports the same version. No newer version was installed.")
+        return 0
+    if outcome == "refused_custom_uv_installation":
+        typer.echo(
+            "This installation has custom package sources, dependencies, or options. "
+            "Update it through its original installation procedure to preserve those choices."
+        )
+        return 2
     if outcome != "package_command_succeeded":
         typer.echo("No full upgrade is claimed. Resolve the package step before continuing.")
         return 2
     typer.echo(
-        "Host refresh, migration and activation remain unverified. Re-run yoetz upgrade from "
-        "the fresh launcher with the same target options and follow the remaining stages. "
-        "Do not repeat --accept merely to continue."
+        "Open sessions keep working on the previous version; nothing needs to be stopped. When "
+        "you next reopen your agent app (or start a new session), its first Yoetz call switches "
+        "to the new version and retires the previous service automatically. A session left open "
+        "from before may then ask to be reopened."
+    )
+    typer.echo(
+        "Host refresh, migration and activation remain unverified. Re-run yoetz upgrade with the "
+        "same target options and follow the remaining stages. Do not repeat --accept merely to "
+        "continue."
     )
     return 0

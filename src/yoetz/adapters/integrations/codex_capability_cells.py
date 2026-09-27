@@ -76,7 +76,7 @@ CODEX_ROLLOUT_PARSER_PROOFS: Final = (
 # fixture proving an unproven release is admitted under the structural compatibility profile
 # without inheriting a parser proof (issue #656).
 CODEX_ROLLOUT_UNSUPPORTED_EVIDENCE_CASE_IDS: Final = ("IMP-013",)
-CODEX_ROLLOUT_COMPATIBLE_EVIDENCE_CASE_IDS: Final = ("IMP-014",)
+CODEX_ROLLOUT_COMPATIBLE_EVIDENCE_CASE_IDS: Final = ("IMP-014", "IMP-015")
 
 
 def rollout_parser_proven_versions() -> tuple[str, ...]:

@@ -54,6 +54,7 @@ class IdKind(str, Enum):  # noqa: UP042 - v0.1 requires a str-valued Enum
     EGRESS_DISPATCH = "egress_dispatch"
     EGRESS_RECEIPT = "egress_receipt"
     ACTOR = "actor"
+    PROJECT = "project"
 
 
 ID_TOTAL_LENGTH: Final = 40
@@ -89,6 +90,7 @@ PREFIX_BY_KIND: Final[Mapping[IdKind, str]] = MappingProxyType(
         IdKind.EGRESS_DISPATCH: "dsp_",
         IdKind.EGRESS_RECEIPT: "egr_",
         IdKind.ACTOR: "agt_",
+        IdKind.PROJECT: "prj_",
     }
 )
 

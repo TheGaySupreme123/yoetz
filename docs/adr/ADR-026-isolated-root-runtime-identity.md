@@ -6,12 +6,16 @@ maintainer-authorized in [issue #534](https://github.com/TheGaySupreme123/yoetz/
 exempt one explicitly passed dedicated Codex evaluator home from the "every artifact lives beneath
 the root" reverse state; amended 2026-09-04, maintainer-authorized in
 [issue #561](https://github.com/TheGaySupreme123/yoetz/issues/561), to bind the root into
-Yoetz-owned external Codex MCP registrations.
+Yoetz-owned external Codex MCP registrations; amended 2026-09-22, maintainer-authorized in
+[issue #571](https://github.com/TheGaySupreme123/yoetz/issues/571) (item B1, from
+[#567](https://github.com/TheGaySupreme123/yoetz/issues/567)), to name path-identity digests
+apart from byte-content digests (decision 8).
 **Implemented by:** `src/yoetz/config/paths.py` (`isolated_root()`, `runtime_dir()`,
 `ISOLATED_ROOT_ENV`), `src/yoetz/adapters/control/unix_socket.py`, `src/yoetz/config/load.py`,
 `src/yoetz/service/client.py`, `src/yoetz/cli/isolation_status.py`, the
-`yoetz service isolation` CLI command, `scripts/check_codex_dogfood_parity.py`
-(`yoetz.codex-dogfood-parity/3`), `tests/packaging/test_isolated_root_boundary.py`, and
+`yoetz service isolation` CLI command and its `yoetz.isolation-report/1` contract
+(`src/yoetz/protocol/isolation_report.py`), `scripts/check_codex_dogfood_parity.py`
+(`yoetz.codex-dogfood-parity/4`), `tests/packaging/test_isolated_root_boundary.py`, and
 `tests/packaging/test_codex_mcp_isolated_registration.py`.
 **Relates to:** ADR-001 (single service/writer authority), ADR-003 (durable storage), and the
 [Codex dogfood parity runbook](../runbooks/codex-dogfood.md).
@@ -66,7 +70,8 @@ identity along with it, and nothing validates or proves it.
    exact normal executable/config environment and one from the exact isolated candidate. The gate
    compares those reports; it never substitutes platform defaults for the normal target, because
    its config or storage may be relocated. Each report contains canonical path-identity digests,
-   never raw paths. The command is CLI-only; MCP and hooks inherit isolation through environment.
+   never raw paths (decision 8 names them `*_path_digest`). The command is CLI-only; MCP and hooks
+   inherit isolation through environment.
 6. **The host-launched external Codex MCP child keeps the same identity.** In ambient mode the
    Yoetz-owned registration has no environment block. In isolated mode preview and apply bind
    exactly one allowed entry, `YOETZ_ISOLATED_ROOT=<validated-root>`, into `codex mcp add`; the
@@ -78,11 +83,12 @@ identity along with it, and nothing validates or proves it.
    local review. This exception is limited to external Codex registration; plugin-managed routes
    retain their own host-specific environment contracts.
 7. **The dogfood parity gate fails closed on shared or unlaunched identity.** Report schema
-   `yoetz.codex-dogfood-parity/3` retains the `service_isolation` preflight facet, the
-   `identity.yoetz_isolation` digest block, and the `observed.yoetz_isolation_state` closed state
-   (`isolated|shared|ambient|unknown`). The facet can pass only when the observed state is
+   `yoetz.codex-dogfood-parity/4` retains the `service_isolation` preflight facet, the
+   `identity.yoetz_isolation` path-digest block, and the `observed.yoetz_isolation_state` closed
+   state (`isolated|shared|ambient|unknown`). The facet can pass only when the observed state is
    `isolated`, the candidate mode is `isolated`, the normal mode is `ambient`, and every resolved
-   state/endpoint/storage/config/executable digest differs from its exact normal-target counterpart;
+   state/endpoint/storage/config/executable path digest differs from its exact normal-target
+   counterpart;
    any equality, wrong mode, or unknown
    state is rejected or fails preflight, and a non-pass row must carry the
    `provision_isolated_yoetz_root` continuation. It adds `mcp_child_isolation`, which can pass only
@@ -90,7 +96,32 @@ identity along with it, and nothing validates or proves it.
    Codex app-server inventory starts the registered child successfully. A non-pass row carries
    `reregister_isolated_mcp` when the registration or its binding is not exact, and
    `recapture_isolated_mcp_child` when the binding is already exact and only the child start is
-   unproven. Version 1 and 2 reports are no longer accepted.
+   unproven. Version 1, 2, and 3 reports are no longer accepted.
+8. **Path identity is not byte content (issue #567).** A path-identity digest binds only the
+   canonical resolved path; an in-place or atomic edit of the file leaves it unchanged, so it can
+   prove *which* target a runtime uses but never that the target's bytes stayed the same. The
+   0.2 isolation output blurred this: its `identity.config_digest` was a path digest that a
+   dogfood operator could read as an "unchanged config" proof. `yoetz.isolation-report/1` (wire
+   schema `service/isolation-report-1.0.0.schema.json`) therefore renames the block to
+   `path_identity` with `state|endpoint|storage|config|executable_path_digest` fields, and adds an
+   opt-in, bounded byte-content lane: `yoetz service isolation --json --content-digests` fills
+   `config_content` with one observation of the selected config — `path_digest`, `presence`
+   (`present|absent|not_regular|oversized|unreadable|unstable`), SHA-256 `content_digest` and
+   `size_bytes` (both only when `present`, ≤ 16 MiB), and `observed_at`. It never records content.
+   Symlinks are followed, so a retargeted link with identical bytes changes `path_digest` but not
+   `content_digest`; a read the file changes under is retried and otherwise `unstable`, never a
+   digest of mixed bytes. `yoetz.codex-dogfood-parity/4` renames its isolation fields to the same
+   `*_path_digest` names and adds a required top-level `normal_target` key: `null`, or a bounded
+   list (≤ 32) of slot-labelled before/after observations of normal-target files, captured with
+   `scripts/check_codex_dogfood_parity.py --observe <path>`. When present it binds the
+   `normal_target_unchanged` facet: a path-stable byte change must fail with
+   `normal_target_content_changed`, a move with identical bytes with `normal_target_path_moved`,
+   both with `normal_target_path_and_content_changed`, and an unobservable file with
+   `normal_target_content_unobservable`; a missing after snapshot cannot pass, and a passing
+   `normal_target_snapshot` needs every before observation `present` or `absent`. **Compatibility:**
+   the isolation JSON gains a `schema` tag and drops the untagged 0.2 `identity` block (consumers
+   detect the old shape by the absent tag); `yoetz instance status` carries the same
+   `path_identity` block; parity reports must be rebuilt at version 4. Nothing persisted changes.
 
 ## Reverse states and rollback
 

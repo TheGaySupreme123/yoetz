@@ -275,6 +275,7 @@ async def test_same_request_replay_after_repository_grant_reaches_terminal_resul
     memory = LocalSecretMemory()
     lifecycle = ServiceLifecycle(
         clock,
+        singleton_lock_path=tmp_path / "lifecycle.lock",
         generation_store=_GenerationStore(),
         process_start_identity_commitment="sha256:" + "d" * 64,
         instance_id=_INSTANCE_ID,

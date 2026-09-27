@@ -1708,3 +1708,97 @@ async def test_obligation_resolution_omitting_only_acceptance_criteria_names_tha
         await execute_publish_work(cast(Application, app), request)
     assert caught.value.safe_details["reason_code"] == "obligation_resolution_mismatch"
     assert "mismatched fields: acceptance_criteria" in caught.value.message
+
+
+@pytest.mark.parametrize("preview", (True, False))
+@pytest.mark.parametrize("missing", (True, False))
+async def test_new_completion_scope_is_explicit_before_any_append(
+    preview: bool, missing: bool
+) -> None:
+    app, objects = _composition()
+    draft = _claim_revision_draft(
+        859,
+        claim_tail=859,
+        version="1.1.0",
+        supporting_refs=[_OBLIGATION_ID],
+        limitation_refs=[],
+        supersedes_claim_refs=[],
+    )
+    payload = cast(dict[str, object], draft["payload"])
+    if missing:
+        del payload["obligation_refs"]
+    else:
+        payload["obligation_refs"] = []
+    request = _request(
+        request_tail=859,
+        event_drafts=(draft,),
+        expected_frontier={"sequence": "0", "head_digest": "genesis"},
+    ).model_copy(update={"dry_run": preview})
+    frontier = await app.runtime.task.ledger.load_frontier()
+    objects_before = len(objects._data)  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(PublicOperationError) as caught:
+        await execute_publish_work(cast(Application, app), request)
+    assert caught.value.safe_details == {
+        "reason_code": "claim_revision_mismatch",
+        "invariant": "completion_scope_must_be_explicit"
+        if missing
+        else "empty_scope_must_not_support_obligations",
+        "field": "/event_drafts/0/payload/obligation_refs",
+    }
+    assert await app.runtime.task.ledger.load_frontier() == frontier
+    assert len(objects._data) == objects_before  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_explicit_empty_completion_scope_remains_authorable() -> None:
+    app, _ = _composition()
+    draft = _claim_revision_draft(
+        860,
+        claim_tail=860,
+        version="1.1.0",
+        supporting_refs=[],
+        limitation_refs=[],
+        supersedes_claim_refs=[],
+    )
+    cast(dict[str, object], draft["payload"])["obligation_refs"] = []
+    request = _request(
+        request_tail=860,
+        event_drafts=(draft,),
+        expected_frontier={"sequence": "0", "head_digest": "genesis"},
+    )
+    preview = await execute_publish_work(
+        cast(Application, app), request.model_copy(update={"dry_run": True})
+    )
+    assert preview.outcome == "dry_run"
+    accepted = await execute_publish_work(cast(Application, app), request)
+    assert accepted.outcome == "accepted"
+
+
+@pytest.mark.parametrize("route_field", ("session_id", "writer_id"))
+@pytest.mark.parametrize("preview", (True, False))
+async def test_empty_scope_correction_keeps_session_and_writer_fences(
+    route_field: str, preview: bool
+) -> None:
+    app, _ = _composition()
+    draft = _claim_revision_draft(
+        861,
+        claim_tail=861,
+        version="1.1.0",
+        supporting_refs=[],
+        limitation_refs=[],
+        supersedes_claim_refs=["clm_00000000-0000-4000-8000-000000000860"],
+    )
+    cast(dict[str, object], draft["payload"])["obligation_refs"] = []
+    req = _request(
+        request_tail=861,
+        event_drafts=(draft,),
+        expected_frontier={"sequence": "0", "head_digest": "genesis"},
+    )
+    prefix = "ses" if route_field == "session_id" else "wri"
+    req = req.model_copy(
+        update={route_field: f"{prefix}_00000000-0000-4000-8000-000000000999", "dry_run": preview}
+    )
+    before = await app.runtime.task.ledger.load_frontier()
+    with pytest.raises(PublicOperationError) as caught:
+        await execute_publish_work(cast(Application, app), req)
+    assert caught.value.code is PublicErrorCode.SESSION_CONFLICT
+    assert await app.runtime.task.ledger.load_frontier() == before

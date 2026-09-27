@@ -273,6 +273,37 @@ def test_incompatible_service_is_a_bounded_service_unavailable_with_the_repair_c
     assert "yoetz service restart" in str(error["message"])
 
 
+def test_bridge_from_before_an_update_asks_to_reopen_instead_of_restarting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A newer service already serves new sessions; this older bridge must not replace it (#820)."""
+
+    from yoetz.service.lifecycle import SingletonHolder
+
+    monkeypatch.setattr(
+        bridge,
+        "service_holder_identity",
+        lambda: SingletonHolder(
+            pid=4242,
+            instance_id="svc_test",
+            schema_manifest_digest="sha256:" + "b" * 64,
+            service_version="99.0.0",
+        ),
+    )
+    result = bridge._control_error_result(  # pyright: ignore[reportPrivateUsage]
+        ControlError("service_incompatible", retryable=True, correlation_id=_CORRELATION),
+        request_id=_REQUEST,
+        operation="start",
+    )
+    error = _error_of(result)
+    assert error["code"] == PublicErrorCode.SERVICE_UNAVAILABLE.value
+    assert error["retryable"] is True
+    message = cast(str, error["message"])
+    assert "reopen this session" in message
+    assert "yoetz service restart" not in message
+    assert cast(dict[str, object], error["safe_details"])["reason_code"] == "service_incompatible"
+
+
 def test_absent_service_maps_to_supervisor_copy_and_control_class_reason(
     diagnostic_root: Path,
 ) -> None:

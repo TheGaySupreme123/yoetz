@@ -68,6 +68,7 @@ class _Objects:
         self.payloads: list[bytes] = []
         self.refs: dict[str, ObjectRef] = {}
         self.material: dict[str, bytes] = {}
+        self.abandoned: list[object] = []
 
     async def stage(self, source: ObjectSource, metadata: ObjectMetadata) -> ObjectMetadata:
         assert source.data is not None
@@ -89,6 +90,14 @@ class _Objects:
         self.refs[object_id] = ref
         self.material[object_id] = payload
         return ref
+
+    async def abandon(self, staged: object) -> None:
+        self.abandoned.append(staged)
+        if not self.refs:
+            return
+        object_id = next(reversed(self.refs))
+        del self.refs[object_id]
+        del self.material[object_id]
 
     async def resolve_verified(self, object_id: str, envelope_digest: str) -> ObjectRef:
         ref = self.refs[object_id]
@@ -229,4 +238,7 @@ async def test_capture_fence_revoked_after_finalize_does_not_bind_manifest(
     assert revoked is True
     assert manifests == ()
     assert unavailable is True
+    assert objects.abandoned
+    assert objects.refs == {}
     assert db.execute("SELECT count(*) FROM observation_content_manifests").fetchone() == (0,)
+    assert db.execute("SELECT count(*) FROM events").fetchone() == (0,)

@@ -2,13 +2,21 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from dataclasses import FrozenInstanceError, fields, is_dataclass
+from dataclasses import FrozenInstanceError, fields, is_dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
-from yoetz.domain.findings import CheckVerdict
+from yoetz.domain.findings import (
+    CheckVerdict,
+    CostFields,
+    SamplingParams,
+    SemanticDispatchKind,
+    SemanticFailureClass,
+    SemanticProvenance,
+    TokenUsage,
+)
 from yoetz.domain.receipts import (
     ReceiptConclusion,
     ReceiptDocument,
@@ -23,6 +31,7 @@ from yoetz.domain.receipts import (
 )
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 from yoetz.protocol.errors import ProtocolValueError
+from yoetz.protocol.models import SemanticReason, SemanticStatus
 
 _RECEIPT_FIXTURES = Path(__file__).parents[3] / "fixtures" / "receipts"
 
@@ -138,6 +147,7 @@ def test_receipt_document_is_frozen_and_exactly_shaped() -> None:
         "gaps",
         "redactions",
         "sections",
+        "children",
         "semantic_provenance",
     )
     assert is_dataclass(document)
@@ -145,6 +155,30 @@ def test_receipt_document_is_frozen_and_exactly_shaped() -> None:
     assert tuple(item.name for item in fields(document)) == expected_fields
     with pytest.raises(FrozenInstanceError):
         setattr(document, "suppressed_finding_count", 1)
+
+
+def test_children_use_receipt_document_1_3_artifact_and_keep_inner_version() -> None:
+    """The additive artifact carries children while the inner document version stays 1.0.0."""
+
+    wire = _variant("deterministic-current.case.json", "current_complete")
+    versions = cast(dict[str, Any], wire["versions"])
+    schema_versions = cast(list[dict[str, str]], versions["schema_versions"])
+    for entry in schema_versions:
+        if entry["schema_id"] == "receipts/receipt-document":
+            entry["schema_version"] = "1.3.0"
+    wire["children"] = {"children": []}
+
+    document = receipt_document_from_json(wire)
+    assert document.schema_version == "1.0.0"
+    assert receipt_document_to_json(document) == wire
+
+
+def test_children_are_rejected_under_the_legacy_receipt_artifact() -> None:
+    wire = _variant("deterministic-current.case.json", "current_complete")
+    wire["children"] = {"children": []}
+    with pytest.raises(ProtocolValueError) as exc_info:
+        receipt_document_from_json(wire)
+    _assert_reason(exc_info, "invalid_receipt_document")
 
 
 def test_receipt_conclusion_vocab_is_conservative() -> None:
@@ -455,6 +489,55 @@ def test_registration_drift_compact_names_policy_recovery() -> None:
     assert "yoetz integrate codex mcp install --route-profile policy" in rendered
     assert "start a fresh Codex process" in rendered
     assert "No provider attempt or AI-powered finding was recorded." in rendered
+
+
+def test_render_receipt_human_projects_registry_recovery_from_provenance() -> None:
+    document = receipt_document_from_json(
+        _variant("deterministic-current.case.json", "current_complete")
+    )
+    digest = "sha256:" + "c" * 64
+    uuid = "00000000-0000-4000-8000-000000000001"
+    provenance = SemanticProvenance(
+        provider="openai",
+        endpoint_profile_id="review.default",
+        endpoint_profile_version="1.0.0",
+        model="gpt-5.4",
+        sdk_version="2.46.0",
+        prompt_digest=digest,
+        schema_digest=digest,
+        policy_digest=digest,
+        privacy_policy_digest=digest,
+        sampling_params=SamplingParams(
+            max_output_tokens=2_048,
+            temperature="0.20",
+            top_p="1.0",
+            seed=7,
+        ),
+        latency_ms=321,
+        semantic_attempt_id="att_" + uuid,
+        dispatch_kind=SemanticDispatchKind.EXTERNAL,
+        privacy_receipt_id="egr_" + "00000000-0000-4000-8000-000000000002",
+        status=SemanticStatus.UNAVAILABLE,
+        reason=SemanticReason.TRANSPORT_UNAVAILABLE,
+        provider_request_id="request:abc-123",
+        token_usage=TokenUsage(input_tokens=12, output_tokens=7, total_tokens=19),
+        cost_fields=CostFields(
+            currency="USD",
+            input_microunits=12,
+            output_microunits=14,
+            total_microunits=26,
+        ),
+        failure_class=SemanticFailureClass.AUTHENTICATION,
+        egress_authorization_id="aut_" + "00000000-0000-4000-8000-000000000003",
+        request_commitment="hmac-sha256:" + "d" * 64,
+    )
+    rendered = render_receipt_human(
+        replace(document, semantic_provenance=provenance), markdown=True
+    )
+    assert "## Recovery" in rendered
+    assert "Continuation: semantic_credential_rejected" in rendered
+    compact = render_receipt_compact(replace(document, semantic_provenance=provenance))
+    assert "Continuation:" not in compact
 
 
 def test_genuine_strict_ceiling_compact_keeps_terminal_wording() -> None:

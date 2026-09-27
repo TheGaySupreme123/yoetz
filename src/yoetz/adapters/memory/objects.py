@@ -127,6 +127,7 @@ def _root_snapshot_identity(snapshot: ObjectRootSnapshot) -> tuple[object, ...]:
 @dataclass(frozen=True, slots=True)
 class _MemoryStageHandle:
     store_token: object
+    preexisting: bool = False
 
 
 @dataclass(slots=True)
@@ -172,7 +173,13 @@ class MemoryObjectStore:
             raise ValueError("invalid_object_kind")
         return self._keys.commitment_key.mac(OBJECT_COMMITMENT_DOMAINS[kind], data)
 
-    async def stage(self, source: ObjectSource, metadata: ObjectMetadata) -> StagedObject:
+    async def stage(
+        self,
+        source: ObjectSource,
+        metadata: ObjectMetadata,
+        *,
+        object_id: str | None = None,
+    ) -> StagedObject:
         if type(source) is not ObjectSource or type(metadata) is not ObjectMetadata:
             raise ValueError("invalid_object_stage")
         if metadata.kind is ObjectKind.IMPORT_STDERR:
@@ -180,17 +187,85 @@ class MemoryObjectStore:
         plaintext = await _read_object_source(source)
         recorded_at = self._clock.now_utc()
         format_rfc3339_millis(recorded_at)
+        if object_id is not None:
+            try:
+                validate_id(IdKind.OBJECT, object_id)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("object_id_invalid") from exc
+            with self._lock:
+                existing = self._durable.get(object_id)
+                if existing is not None:
+                    frame = existing.frame
+                else:
+                    frame = None
+            if frame is not None:
+                try:
+                    envelope = decode_object_envelope(frame)
+                    header = envelope.header
+                    if (
+                        header.object_id != object_id
+                        or header.object_kind is not metadata.kind
+                        or header.media_type != metadata.media_type
+                        or header.task_id != metadata.task_id
+                        or header.plaintext_size != len(plaintext)
+                    ):
+                        raise ValueError("object_destination_collision")
+                    commitment = self._keys.commitment_key.mac(
+                        OBJECT_COMMITMENT_DOMAINS[metadata.kind], plaintext
+                    )
+                    ref = ObjectRef(
+                        object_id=object_id,
+                        plaintext_size=header.plaintext_size,
+                        commitment=commitment,
+                        envelope_digest=f"sha256:{hashlib.sha256(frame).hexdigest()}",
+                        encryption_format=header.encryption_format,
+                        key_slot=header.key_slot,
+                        metadata=ObjectMetadata(
+                            header.object_kind,
+                            header.media_type,
+                            header.task_id,
+                            header.created_at_datetime,
+                        ),
+                    )
+                    observed = await self._open_verified_bytes(ref)
+                    if observed != plaintext:
+                        raise ValueError("object_destination_collision")
+                except (TypeError, ValueError) as exc:
+                    if str(exc) == "object_destination_collision":
+                        raise
+                    raise ValueError("object_destination_collision") from exc
+                with self._lock:
+                    assert existing is not None
+                    handle = _MemoryStageHandle(self._token, preexisting=True)
+                    staged = StagedObject(
+                        object_id=ref.object_id,
+                        plaintext_size=ref.plaintext_size,
+                        commitment=ref.commitment,
+                        envelope_digest=ref.envelope_digest,
+                        encryption_format=ref.encryption_format,
+                        key_slot=ref.key_slot,
+                        metadata=ref.metadata,
+                        staging_handle=handle,
+                    )
+                    existing.staged = staged
+                    existing.finalized = ref
+                    self._staging[id(handle)] = existing
+                    return staged
         with self._lock:
-            object_id = self._allocate_object_id()
+            allocated_object_id = object_id or self._allocate_object_id()
+            if object_id is not None:
+                if object_id in self._allocated_ids or object_id in self._durable:
+                    raise ValueError("object_destination_collision")
+                self._allocated_ids.add(object_id)
             try:
                 payload_nonce = os.urandom(12)
                 commitment = self._keys.commitment_key.mac(
                     OBJECT_COMMITMENT_DOMAINS[metadata.kind], plaintext
                 )
-                frame = self._encrypt_frame(object_id, plaintext, payload_nonce, metadata)
+                frame = self._encrypt_frame(allocated_object_id, plaintext, payload_nonce, metadata)
                 handle = _MemoryStageHandle(self._token)
                 staged = StagedObject(
-                    object_id=object_id,
+                    object_id=allocated_object_id,
                     plaintext_size=len(plaintext),
                     commitment=commitment,
                     envelope_digest=f"sha256:{hashlib.sha256(frame).hexdigest()}",
@@ -202,7 +277,7 @@ class MemoryObjectStore:
                 self._staging[id(handle)] = _MemoryRecord(staged, frame, recorded_at)
                 return staged
             except Exception:
-                self._allocated_ids.discard(object_id)
+                self._allocated_ids.discard(allocated_object_id)
                 raise
 
     async def finalize(self, staged: StagedObject) -> ObjectRef:
@@ -225,6 +300,8 @@ class MemoryObjectStore:
         with self._lock:
             record = self._record_for(staged)
             if record.abandoned:
+                return
+            if cast(_MemoryStageHandle, staged.staging_handle).preexisting:
                 return
             durable = self._durable.get(staged.object_id)
             if durable is not None and durable is not record:

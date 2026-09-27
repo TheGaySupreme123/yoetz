@@ -137,6 +137,7 @@ async def test_self_contained_clean_profile_restores_same_vault_authority(
     await vault.create_bundle_keys(TASK_ID)
     original_lifecycle = ServiceLifecycle(
         clock,
+        singleton_lock_path=original_state / "service.lock",
         generation_store=_GenerationStore(),
         process_start_identity_commitment="sha256:" + "3" * 64,
         instance_id=SERVICE_ID,
@@ -271,6 +272,7 @@ async def test_self_contained_clean_profile_restores_same_vault_authority(
 
     clean_lifecycle = ServiceLifecycle(
         clock,
+        singleton_lock_path=clean_state / "service.lock",
         generation_store=_GenerationStore(),
         process_start_identity_commitment="sha256:" + "4" * 64,
         instance_id=SERVICE_ID,
@@ -377,6 +379,7 @@ async def test_self_contained_clean_profile_restores_same_vault_authority(
     assert await reopened_vault.has_provider_credential(provider_binding)
     reopen_lifecycle = ServiceLifecycle(
         clock,
+        singleton_lock_path=clean_state / "service.lock",
         generation_store=_GenerationStore(),
         process_start_identity_commitment="sha256:" + "5" * 64,
         instance_id=SERVICE_ID,
@@ -548,6 +551,7 @@ async def test_rotation_reencrypts_live_vault_and_revokes_older_artifact(
 
     lifecycle = ServiceLifecycle(
         clock,
+        singleton_lock_path=tmp_path / "lifecycle.lock",
         generation_store=_GenerationStore(),
         process_start_identity_commitment="sha256:" + "6" * 64,
         instance_id=SERVICE_ID,

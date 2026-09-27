@@ -5,13 +5,22 @@ sample to :func:`evaluate_pressure`; this module has no clock, storage, or
 background state.  Limits are provisional candidates for issue #687:
 performance validation has not been done.  Queue capacity and detail mode are
 independent, and larger queue profiles never increase content-capture limits.
+
+Issue #828 adds an owner-chosen finite custom queue count between
+``MIN_CUSTOM_QUEUE_COUNT`` and ``LARGEST_SUPPORTED_QUEUE_COUNT``.  An uncapped
+structural queue is not supported in this storage revision: the local state is
+one JSON document with a fixed ``STATE_DOCUMENT_CEILING_BYTES`` safety ceiling,
+so a request for no Yoetz cap resolves to the typed ``no_cap`` outcome
+described by :func:`no_cap_support` instead of an unlimited label.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum, IntEnum
-from typing import Final, Literal
+from typing import Final, Literal, cast
+
+from yoetz.domain.values import JsonObject
 
 __all__ = [
     "AdmissionDecision",
@@ -21,9 +30,22 @@ __all__ = [
     "BUDGET_VALIDATION_STATUS",
     "BudgetLimits",
     "BudgetUsage",
+    "CapacityLabel",
     "CapacityProfile",
+    "CapacityRequest",
+    "CapacityRequestKind",
     "CURRENT_SERIALIZATION_CAP_BYTES",
+    "LARGER_CAPACITY",
+    "LARGEST_CAPACITY",
+    "LARGEST_SUPPORTED_QUEUE_COUNT",
+    "MIN_CUSTOM_QUEUE_COUNT",
+    "NO_CAP_UNSUPPORTED_REASON",
+    "QUEUE_BYTES_PER_ROW",
+    "STANDARD_CAPACITY",
+    "STATE_DOCUMENT_CEILING_BYTES",
+    "STRUCTURAL_QUEUE_DIMENSION",
     "ModeLimits",
+    "ObservationCapacity",
     "ObservationMode",
     "PressureDimension",
     "PressureEvaluation",
@@ -33,11 +55,22 @@ __all__ = [
     "evaluate_admission",
     "evaluate_pressure",
     "mode_limits",
+    "no_cap_support",
+    "parse_capacity_request",
 ]
 
 BUDGET_POLICY_VERSION: Final = "observation-budget-v2-provisional"
 BUDGET_VALIDATION_STATUS: Final = "not_validated"
 CURRENT_SERIALIZATION_CAP_BYTES: Final = 1 * 1024 * 1024
+# The whole local observation state is one JSON document re-encoded on every
+# save.  This is its hard safety ceiling and the reason the structural queue
+# cannot offer an uncapped selection in this storage revision (#828).
+STATE_DOCUMENT_CEILING_BYTES: Final = 16 * 1024 * 1024
+MIN_CUSTOM_QUEUE_COUNT: Final = 64
+LARGEST_SUPPORTED_QUEUE_COUNT: Final = 8_192
+QUEUE_BYTES_PER_ROW: Final = 1024
+STRUCTURAL_QUEUE_DIMENSION: Final = "structural_queue"
+NO_CAP_UNSUPPORTED_REASON: Final = "state_document_ceiling"
 RISING_WATERMARK_BPS: Final = 6_500
 HIGH_WATERMARK_BPS: Final = 8_500
 LOW_WATERMARK_BPS: Final = 4_500
@@ -83,6 +116,166 @@ class CapacityProfile(IntEnum):
             return cls(value)
         except ValueError as exc:
             raise ValueError("capacity_profile_invalid") from exc
+
+
+type CapacityLabel = Literal["standard", "larger", "largest", "custom"]
+type CapacityRequestKind = Literal["profile", "custom", "no_cap"]
+
+_PROFILE_LABELS: Final[dict[CapacityProfile, CapacityLabel]] = {
+    CapacityProfile.STANDARD: "standard",
+    CapacityProfile.LARGER: "larger",
+    CapacityProfile.LARGEST: "largest",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class ObservationCapacity:
+    """One finite structural queue count an owner may select.
+
+    The three :class:`CapacityProfile` values keep their names; any other
+    count in ``MIN_CUSTOM_QUEUE_COUNT..LARGEST_SUPPORTED_QUEUE_COUNT`` is a
+    ``custom`` capacity.  There is no uncapped value: see
+    :func:`no_cap_support`.
+    """
+
+    queue_count: int
+
+    def __post_init__(self) -> None:
+        if type(self.queue_count) is not int:
+            raise ValueError("capacity_profile_invalid")
+        if not MIN_CUSTOM_QUEUE_COUNT <= self.queue_count <= LARGEST_SUPPORTED_QUEUE_COUNT:
+            raise ValueError("capacity_queue_count_unsupported")
+
+    def __int__(self) -> int:
+        return self.queue_count
+
+    @property
+    def profile(self) -> CapacityProfile | None:
+        """Return the named profile with this exact count, if any."""
+
+        try:
+            return CapacityProfile(self.queue_count)
+        except ValueError:
+            return None
+
+    @property
+    def label(self) -> CapacityLabel:
+        """Return the closed display label for this count."""
+
+        profile = self.profile
+        return "custom" if profile is None else _PROFILE_LABELS[profile]
+
+    @classmethod
+    def from_value(cls, value: object) -> ObservationCapacity:
+        """Decode a capacity from a capacity, profile, exact int, or decimal string."""
+
+        if type(value) is cls:
+            return cast(ObservationCapacity, value)
+        if isinstance(value, CapacityProfile):
+            return cls(int(value))
+        if type(value) is str:
+            if not (value.isascii() and value.isdigit()):
+                raise ValueError("capacity_profile_invalid")
+            try:
+                value = int(value)
+            except ValueError as exc:
+                raise ValueError("capacity_profile_invalid") from exc
+        if type(value) is not int:
+            raise ValueError("capacity_profile_invalid")
+        return cls(value)
+
+
+STANDARD_CAPACITY: Final = ObservationCapacity(int(CapacityProfile.STANDARD))
+LARGER_CAPACITY: Final = ObservationCapacity(int(CapacityProfile.LARGER))
+LARGEST_CAPACITY: Final = ObservationCapacity(int(CapacityProfile.LARGEST))
+
+_PROFILE_WORDS: Final[dict[str, ObservationCapacity]] = {
+    "standard": STANDARD_CAPACITY,
+    "recommended": STANDARD_CAPACITY,
+    "larger": LARGER_CAPACITY,
+    "largest": LARGEST_CAPACITY,
+}
+_NO_CAP_WORDS: Final = frozenset({"none", "no-cap", "no_cap", "uncapped", "unlimited"})
+
+
+@dataclass(frozen=True, slots=True)
+class CapacityRequest:
+    """One parsed owner capacity request before any preview or apply.
+
+    ``kind`` describes the resolved capacity: ``profile`` when the count is a
+    named profile, ``custom`` otherwise, and ``no_cap`` for an uncapped
+    request, which carries no capacity because none is supported.
+    """
+
+    kind: CapacityRequestKind
+    capacity: ObservationCapacity | None
+
+    def __post_init__(self) -> None:
+        if self.kind == "no_cap":
+            if self.capacity is not None:
+                raise ValueError("capacity_request_invalid")
+            return
+        if type(self.capacity) is not ObservationCapacity:
+            raise ValueError("capacity_request_invalid")
+        expected = "custom" if self.capacity.profile is None else "profile"
+        if self.kind != expected:
+            raise ValueError("capacity_request_invalid")
+
+    @classmethod
+    def for_capacity(cls, capacity: ObservationCapacity) -> CapacityRequest:
+        """Return the finite request that resolves to ``capacity``."""
+
+        if type(capacity) is not ObservationCapacity:
+            raise ValueError("capacity_request_invalid")
+        return cls("custom" if capacity.profile is None else "profile", capacity)
+
+
+def parse_capacity_request(text: str, *, queue_count: int | None = None) -> CapacityRequest:
+    """Parse one closed owner capacity word, optionally with a custom count.
+
+    Words are case-insensitive: ``standard``/``recommended``, ``larger``,
+    ``largest``, ``custom`` (requires ``queue_count``), a bare decimal count,
+    or one of the no-cap words.  A custom or decimal count equal to a named
+    profile resolves to that profile.
+    """
+
+    if type(text) is not str:
+        raise ValueError("capacity_request_invalid")
+    if queue_count is not None and type(queue_count) is not int:
+        raise ValueError("capacity_request_invalid")
+    word = text.strip().casefold()
+    if word == "custom":
+        if queue_count is None:
+            raise ValueError("capacity_queue_count_required")
+        return CapacityRequest.for_capacity(ObservationCapacity(queue_count))
+    if queue_count is not None:
+        raise ValueError("capacity_request_invalid")
+    if word in _NO_CAP_WORDS:
+        return CapacityRequest("no_cap", None)
+    named = _PROFILE_WORDS.get(word)
+    if named is not None:
+        return CapacityRequest("profile", named)
+    if word and word.isascii() and word.isdigit():
+        try:
+            count = int(word)
+        except ValueError as exc:
+            raise ValueError("capacity_request_invalid") from exc
+        return CapacityRequest.for_capacity(ObservationCapacity(count))
+    raise ValueError("capacity_request_invalid")
+
+
+def no_cap_support() -> JsonObject:
+    """Return the deterministic reason the structural queue has no uncapped choice."""
+
+    return JsonObject(
+        {
+            "available": False,
+            "dimension": STRUCTURAL_QUEUE_DIMENSION,
+            "reason": NO_CAP_UNSUPPORTED_REASON,
+            "state_document_ceiling_bytes": STATE_DOCUMENT_CEILING_BYTES,
+            "largest_supported_queue_count": LARGEST_SUPPORTED_QUEUE_COUNT,
+        }
+    )
 
 
 class PressureState(str, Enum):  # noqa: UP042 - stable domain value
@@ -182,7 +375,7 @@ def mode_limits(mode: ObservationMode | str) -> ModeLimits:
 class BudgetLimits:
     """All finite structural, pairing, capture, reserve, and fair-share limits."""
 
-    profile: CapacityProfile
+    capacity: ObservationCapacity
     queue_count: int
     queue_bytes: int
     state_bytes: int
@@ -200,7 +393,7 @@ class BudgetLimits:
     recovery_dwell_ms: int = RECOVERY_DWELL_MS
 
     def __post_init__(self) -> None:
-        if type(self.profile) is not CapacityProfile:
+        if type(self.capacity) is not ObservationCapacity:
             raise ValueError("capacity_profile_invalid")
         for value, field in (
             (self.queue_count, "queue_count"),
@@ -226,8 +419,8 @@ class BudgetLimits:
                 raise ValueError(f"{field}_invalid")
         if not self.low_watermark_bps < self.rising_watermark_bps < self.high_watermark_bps:
             raise ValueError("pressure_watermarks_invalid")
-        if self.queue_count != int(self.profile):
-            raise ValueError("queue_count_profile_mismatch")
+        if self.queue_count != self.capacity.queue_count:
+            raise ValueError("queue_count_capacity_mismatch")
         if self.state_bytes < self.queue_bytes:
             raise ValueError("state_bytes_below_queue_bytes")
         if self.protected_count > self.queue_count or self.protected_bytes > self.queue_bytes:
@@ -238,35 +431,59 @@ class BudgetLimits:
         ):
             raise ValueError("session_fair_share_exceeds_queue")
 
+    @property
+    def profile(self) -> CapacityProfile | None:
+        """Return the named profile for these limits, or ``None`` when custom."""
+
+        return self.capacity.profile
+
     @classmethod
     def for_profile(cls, profile: CapacityProfile | int | str) -> BudgetLimits:
-        """Return provisional limits for exactly 512, 2,048, or 8,192 rows."""
+        """Return provisional limits for exactly 512, 2,048, or 8,192 rows.
 
-        selected = CapacityProfile.from_value(profile)
-        queue_bytes = {
-            CapacityProfile.STANDARD: 512 * 1024,
-            CapacityProfile.LARGER: 2 * 1024 * 1024,
-            CapacityProfile.LARGEST: 8 * 1024 * 1024,
-        }[selected]
-        state_bytes = {
-            CapacityProfile.STANDARD: CURRENT_SERIALIZATION_CAP_BYTES,
-            CapacityProfile.LARGER: 4 * 1024 * 1024,
-            CapacityProfile.LARGEST: 16 * 1024 * 1024,
-        }[selected]
-        count = int(selected)
-        return cls(
-            selected,
-            count,
-            queue_bytes,
-            state_bytes,
-            256,
-            512,
-            128 * 1024 * 1024,
-            max(64, count // 4),
-            max(128 * 1024, queue_bytes // 4),
-            max(1, count // 4),
-            max(1, queue_bytes // 4),
-        )
+        This remains the seam every named-profile lookup passes through,
+        including :meth:`for_capacity` for a profile-valued capacity, so a test
+        or deployment override of the named ladder still applies.
+        """
+
+        return _capacity_limits(cls, ObservationCapacity(int(CapacityProfile.from_value(profile))))
+
+    @classmethod
+    def for_capacity(cls, capacity: ObservationCapacity | CapacityProfile) -> BudgetLimits:
+        """Return provisional limits for one finite queue count.
+
+        Queue bytes are 1 KiB per row and the state document may hold twice
+        the queue bytes, never below the historic 1 MiB serialization cap.
+        The three named profiles reproduce their original limits exactly.
+        """
+
+        selected = ObservationCapacity.from_value(capacity)
+        profile = selected.profile
+        if profile is not None:
+            return cls.for_profile(profile)
+        return _capacity_limits(cls, selected)
+
+
+def _capacity_limits(cls: type[BudgetLimits], capacity: ObservationCapacity) -> BudgetLimits:
+    count = capacity.queue_count
+    queue_bytes = count * QUEUE_BYTES_PER_ROW
+    state_bytes = max(CURRENT_SERIALIZATION_CAP_BYTES, 2 * queue_bytes)
+    return cls(
+        capacity,
+        count,
+        queue_bytes,
+        state_bytes,
+        256,
+        512,
+        128 * 1024 * 1024,
+        # The protected-reserve floors (64 rows / 128 KiB) are never allowed
+        # to cover more than half of a small custom queue, so unprotected
+        # structural rows stay admissible.  Named profiles are unaffected.
+        min(max(64, count // 4), count // 2),
+        min(max(128 * 1024, queue_bytes // 4), queue_bytes // 2),
+        max(1, count // 4),
+        max(1, queue_bytes // 4),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -583,9 +800,7 @@ def evaluate_pressure(
     if type(now_ms) is not int or now_ms < 0:
         raise ValueError("pressure_now_invalid")
     selected = ObservationMode.from_value(selected_mode)
-    selected_limits = (
-        BudgetLimits.for_profile(CapacityProfile.STANDARD) if limits is None else limits
-    )
+    selected_limits = BudgetLimits.for_capacity(STANDARD_CAPACITY) if limits is None else limits
     if type(selected_limits) is not BudgetLimits:
         raise ValueError("pressure_limits_invalid")
     if previous is None:

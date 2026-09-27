@@ -330,7 +330,12 @@ def _read(path: Path) -> _Read:
     try:
         if path.parent.is_symlink() or path.is_symlink():
             return _Read(None, "file_symlink")
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
         descriptor = os.open(path, flags)
     except FileNotFoundError:
         return _Read(None, None)

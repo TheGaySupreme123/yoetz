@@ -13,14 +13,18 @@ from yoetz.ports.secret_memory import SecretConsumer, SecretHandle, SecretPurpos
 from yoetz.protocol.canonical import canonical_encode, strict_json_parse
 
 REPOSITORY_PRIVACY_MAC_DOMAIN = b"yoetz/repository-privacy/v1\x00"
+LINEAGE_ATTACH_MAC_DOMAIN = b"yoetz/lineage-attach/v1\x00"
+PROJECT_OPERATION_MAC_DOMAIN = b"yoetz/project-operation/v1\x00"
 
 __all__ = [
     "BundleKeys",
     "KeyStoreError",
     "KeyStorePort",
     "KeyStoreReason",
+    "LINEAGE_ATTACH_MAC_DOMAIN",
     "MacKeyHandle",
     "MacKeyPurpose",
+    "PROJECT_OPERATION_MAC_DOMAIN",
     "RecoveryArtifact",
     "RecoveryKeyMaterialHandle",
     "RecoverySecret",
@@ -33,6 +37,7 @@ __all__ = [
 class MacKeyPurpose(str, Enum):  # noqa: UP042 - exact internal enum base
     BUNDLE_COMMITMENT = "bundle_commitment"
     CATALOG_LOOKUP = "catalog_lookup"
+    LINEAGE_ATTACH = "lineage_attach"
     LOG_CORRELATION = "log_correlation"
     PRIVACY_AUDIT = "privacy_audit"
 

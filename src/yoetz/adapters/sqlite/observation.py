@@ -393,6 +393,34 @@ class SqliteObservationStore:
             tickets.append(ticket)
         return tuple(tickets)
 
+    def structural_envelope_accepted(self, workspace: str, envelope: ObservationEnvelope) -> bool:
+        """Report whether this exact structural envelope already passed store dedup.
+
+        The dedup identity omits content references and gap codes, so a
+        contentless copy and a content-bearing copy of one native row share it.
+        A capture-only handoff staged after that point could never be consumed:
+        the structural FIFO has already moved past the row (#836).
+        """
+
+        if type(envelope) is not ObservationEnvelope:
+            raise _error(
+                PublicErrorCode.INVALID_REQUEST,
+                "Observation envelope is invalid.",
+                retryable=False,
+            )
+        try:
+            row = self._db.execute(
+                "SELECT 1 FROM observation_dedup WHERE dedup_key = ?",
+                (_dedup_key(workspace, envelope),),
+            ).fetchone()
+        except apsw.Error as exc:
+            raise _error(
+                PublicErrorCode.STORAGE_CORRUPT,
+                "Observation dedup table is unavailable.",
+                retryable=False,
+            ) from exc
+        return row is not None
+
     def bind_session(self, workspace_commitment: str, session_commitment: str) -> None:
         consent = self._consent_row(workspace_commitment)
         if consent is None:
@@ -786,15 +814,16 @@ class SqliteObservationStore:
         yoetz_writer_id: str,
         codex_session_commitment: str,
         bound_at: Timestamp,
-    ) -> None:
+    ) -> bool:
         try:
             with self._db:
-                self._db.execute(
-                    "UPDATE observation_workspace_session_routes "
-                    "SET active=0, unbound_at=? "
-                    "WHERE workspace_commitment=? AND yoetz_session_id<>? AND active=1",
-                    (bound_at.wire, workspace, yoetz_session_id),
-                )
+                # Routes are keyed by Yoetz session, not by workspace.  Deactivating every other
+                # row here encoded the old one-session-per-workspace assumption and made a second
+                # explicit sibling appear to retire the first one's route.  A repeated route may
+                # refresh its writer/bound time, but its host-session commitment is a fence: a
+                # late predecessor envelope must never overwrite the current host binding.  Keep
+                # that fence in the single SQLite upsert predicate so two connections racing from
+                # an absent row cannot turn a stale INSERT into a commitment replacement.
                 self._db.execute(
                     "INSERT INTO observation_workspace_session_routes("
                     "workspace_commitment, yoetz_session_id, yoetz_task_id, yoetz_writer_id, "
@@ -803,8 +832,9 @@ class SqliteObservationStore:
                     "ON CONFLICT(workspace_commitment, yoetz_session_id) DO UPDATE SET "
                     "yoetz_task_id=excluded.yoetz_task_id, "
                     "yoetz_writer_id=excluded.yoetz_writer_id, "
-                    "codex_session_commitment=excluded.codex_session_commitment, "
-                    "active=1, bound_at=excluded.bound_at, unbound_at=NULL",
+                    "active=1, bound_at=excluded.bound_at, unbound_at=NULL "
+                    "WHERE observation_workspace_session_routes.codex_session_commitment = "
+                    "excluded.codex_session_commitment",
                     (
                         workspace,
                         yoetz_session_id,
@@ -814,8 +844,10 @@ class SqliteObservationStore:
                         bound_at.wire,
                     ),
                 )
+                return self._db.changes() == 1
         except Exception:
-            return
+            return False
+        return False
 
     def record_inspection_snapshot(
         self,
@@ -2200,7 +2232,18 @@ class SqliteObservationStore:
             advice_frontier=advice_frontier,
         )
 
-    def list_envelopes(self, workspace: str) -> tuple[ObservationEnvelope, ...]:
+    def list_envelopes(
+        self, workspace: str, *, limit: int | None = None
+    ) -> tuple[ObservationEnvelope, ...]:
+        if limit is not None:
+            if type(limit) is not int or not 1 <= limit <= 256:
+                raise ValueError("observation_envelope_limit_invalid")
+            rows = self._db.execute(
+                "SELECT structural_json FROM observation_events "
+                "WHERE workspace_commitment = ? ORDER BY id DESC LIMIT ?",
+                (workspace, limit),
+            ).fetchall()
+            return self._envelopes_from_rows(reversed(rows))
         rows = self._db.execute(
             "SELECT structural_json FROM observation_events "
             "WHERE workspace_commitment = ? ORDER BY id ASC",
@@ -2209,7 +2252,7 @@ class SqliteObservationStore:
         return self._envelopes_from_rows(rows)
 
     def list_envelopes_for_session(
-        self, workspace: str, session_commitment: str
+        self, workspace: str, session_commitment: str, *, limit: int | None = None
     ) -> tuple[ObservationEnvelope, ...]:
         """Return only the mapped session's retained envelopes (#352).
 
@@ -2220,6 +2263,15 @@ class SqliteObservationStore:
         layer down.
         """
 
+        if limit is not None:
+            if type(limit) is not int or not 1 <= limit <= 256:
+                raise ValueError("observation_envelope_limit_invalid")
+            rows = self._db.execute(
+                "SELECT structural_json FROM observation_events "
+                "WHERE workspace_commitment = ? AND session_commitment = ? ORDER BY id DESC LIMIT ?",
+                (workspace, session_commitment, limit),
+            ).fetchall()
+            return self._envelopes_from_rows(reversed(rows))
         rows = self._db.execute(
             "SELECT structural_json FROM observation_events "
             "WHERE workspace_commitment = ? AND session_commitment = ? ORDER BY id ASC",

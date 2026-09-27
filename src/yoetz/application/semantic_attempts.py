@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Final, Literal, Protocol
 
-from yoetz.domain.findings import RuntimeTokenUsage
+from yoetz.domain.findings import RuntimeTokenUsage, SemanticFailureClass
 from yoetz.observability.logging import record_unexpected_exception_without_raising
 from yoetz.ports.ledger import (
     AttemptOutcome,
@@ -376,9 +376,24 @@ def max_physical_attempts(max_retries: int) -> int:
     return physical_attempt_budget(max_retries)
 
 
-def is_retriable_semantic_outcome(status: SemanticStatus, reason: SemanticReason) -> bool:
+_NON_RETRIABLE_FAILURE_CLASSES: Final[frozenset[SemanticFailureClass]] = frozenset(
+    {
+        SemanticFailureClass.AUTHENTICATION,
+        SemanticFailureClass.AUTHORIZATION,
+    }
+)
+
+
+def is_retriable_semantic_outcome(
+    status: SemanticStatus,
+    reason: SemanticReason,
+    *,
+    failure_class: SemanticFailureClass | None = None,
+) -> bool:
     """Whether a terminal attempt outcome may consume another physical attempt slot."""
 
+    if failure_class in _NON_RETRIABLE_FAILURE_CLASSES:
+        return False
     if status not in _RETRIABLE_STATUSES or reason not in _RETRIABLE_REASONS:
         return False
     # Quota exhaustion is not a transient 429-class retry; refuse silent multi-dispatch.
@@ -413,19 +428,22 @@ def should_retry_after(
     max_retries: int,
     deadline_expired: bool,
     repair_retries_used: int = 0,
+    failure_class: SemanticFailureClass | None = None,
 ) -> bool:
     """Decide whether another physical attempt is admitted inside the total deadline.
 
     ``repair_retries_used`` is the number of repair retries the job has already spent (from
     durable rows). A repair-class outcome is admitted only while that count is below the
     one-retry cap; transient classes ignore it. Both classes share the physical-attempt budget.
+    A rejected credential is not a transport retry even when the public reason is the
+    transport catch-all (issue #742).
     """
 
     if deadline_expired:
         return False
     if type(repair_retries_used) is not int or repair_retries_used < 0:
         raise ValueError("repair_retries_used_invalid")
-    if is_retriable_semantic_outcome(status, reason):
+    if is_retriable_semantic_outcome(status, reason, failure_class=failure_class):
         pass
     elif is_repairable_semantic_outcome(status, reason):
         if repair_retries_used >= _REPAIR_RETRY_LIMIT:
@@ -1411,6 +1429,14 @@ async def run_durable_semantic_attempts(
             deadline_expired = deadline.expired(now_monotonic())
             codes_after = (*codes_before, evaluation.reason)
             switching = False
+            raw_failure_class = (
+                getattr(evaluation.provenance, "failure_class", None)
+                if evaluation.provenance is not None
+                else None
+            )
+            failure_class = (
+                raw_failure_class if type(raw_failure_class) is SemanticFailureClass else None
+            )
             if fallback is None:
                 can_retry = should_retry_after(
                     status=evaluation.status,
@@ -1419,10 +1445,19 @@ async def run_durable_semantic_attempts(
                     max_retries=max_retries,
                     deadline_expired=deadline_expired,
                     repair_retries_used=repair_retries_used,
+                    failure_class=failure_class,
                 )
             else:
                 walk_after = _walk_endpoints(codes_after, fallback)
-                switching = role == "primary" and walk_after.engaged
+                # A rejected credential is not a licensed transition either: the durable code may
+                # be the transport catch-all, but the adapter's class says the provider refused
+                # this binding, and the ``semantic_credential_rejected`` directive promises that
+                # the job stops. The veto only ever ends a job, so replay never needs the class.
+                switching = (
+                    role == "primary"
+                    and walk_after.engaged
+                    and failure_class not in _NON_RETRIABLE_FAILURE_CLASSES
+                )
                 if switching:
                     # The primary just crossed the closed engagement rule. The fallback's own
                     # budget is untouched, so the only thing that can refuse it is the deadline.
@@ -1441,6 +1476,7 @@ async def run_durable_semantic_attempts(
                         deadline_expired=deadline_expired
                         or attempt_deadline.expired(now_monotonic()),
                         repair_retries_used=repair_retries_used,
+                        failure_class=failure_class,
                     )
                 budget = _total_budget(walk_after, fallback)
             if can_retry:

@@ -118,7 +118,10 @@ Three things on Linux differ from macOS, and each is reported once, up front, by
   `sandbox_unavailable`. Ubuntu 24.04 and later restrict unprivileged user namespaces through
   AppArmor: use the distribution package, which ships the profile that permits `bwrap`; if a
   hand-built copy still fails, `/doctor` says `bwrap_unusable` and names the sysctl to relax.
-  `yoetz observe checks status --json` reports the same `sandbox` answer per workspace.
+  Sandbox readiness is a fact about the computer that runs your checks, so exactly three
+  places answer it: `/doctor`, `yoetz setup status --json`, and
+  `yoetz observe checks status --json` (per workspace). `yoetz service status` reports the
+  local service itself and stays silent about the sandbox.
 - **System secure storage needs a running Secret Service.** The "system keyring" choice at setup
   means macOS Keychain on macOS and, on Linux, a Freedesktop Secret Service on your session bus
   (GNOME Keyring, or KWallet through its Secret Service bridge). Headless sessions, servers, and
@@ -307,7 +310,9 @@ supervisor (launchd, systemd, a terminal). Interactive setup may use the bounded
 Related: `yoetz service status`, `lock`, `unlock`, `initialize-passphrase`,
 `rotate-passphrase`, `idle-relock`, `stop`; `restart` stops the running service — even one from
 another installation — and starts this one; `isolation` reports the resolved identity roots and
-isolation mode as digests, without connecting to a service; `diagnostics --correlation-id
+isolation mode as path digests, without connecting to a service (a path digest names which file
+is used, not its contents; add `--content-digests` to also fingerprint the selected config file's
+bytes without revealing them); `diagnostics --correlation-id
 <err_...>` resolves one durable owner-only diagnostic record by the correlation id printed with a
 public error. Two sub-trees sit beneath it: `yoetz service auto-unlock status|enable|repair`
 inspects or repairs restart-safe passphrase unlock after proving the current vault passphrase, and

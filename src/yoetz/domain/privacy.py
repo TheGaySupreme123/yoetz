@@ -1416,6 +1416,9 @@ class CandidateContextItem:
     origin_ref: str
     plaintext: bytes
     contributor_refs: tuple[str, ...] = ()
+    # Trusted producer restriction, never caller authority. False keeps a source-side denial
+    # inside the normal disclosure audit without loading the denied source plaintext.
+    source_disclosure_permitted: bool = True
 
     def __post_init__(self) -> None:
         _text(self.item_id, _OPAQUE)
@@ -1428,6 +1431,8 @@ class CandidateContextItem:
         ):
             raise _invalid()
         object.__setattr__(self, "contributor_refs", _sorted_text(self.contributor_refs))
+        if type(self.source_disclosure_permitted) is not bool:
+            raise _invalid()
 
 
 @dataclass(frozen=True, slots=True)

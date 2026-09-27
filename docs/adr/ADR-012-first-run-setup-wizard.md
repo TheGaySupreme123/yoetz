@@ -265,6 +265,13 @@ exactly those contracts and connects the steps without weakening any existing tr
    `noop`. The same positive-absence fallback applies to every pre/post removal read, so a generic
    failed `get` cannot become a false no-op or successful unregistration. Interactive removal
    shows the command, route, all warning tokens, and exact preview digest before confirmation.
+   **Amended 2026-09-26 (issue #860):** a returned nonzero removal exit still receives the bounded
+   post-state probe. Only positive absence completes unregistration, with the payload-free
+   `host_remove_returned_nonzero` warning in the versioned `yoetz.mcp-removal/1` outcome. Present or
+   unreadable post-state and mutating-command exceptions retain non-success; the CLI supplies a
+   selected-runtime/home/binary status continuation before any fresh preview. The host mutation is
+   never silently retried. CLI and setup disconnect preserve this outcome and clear applied-route
+   state only after verified absence. The existing non-CAS warning and ownership fences remain.
    After activation removal,
    observe/inspect reports
    `installed_not_activated` when the managed plugin source remains (issues #387 and #347),

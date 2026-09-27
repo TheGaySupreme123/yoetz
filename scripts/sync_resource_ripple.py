@@ -21,7 +21,7 @@ _SCRIPT_ROOT = Path(__file__).resolve().parent
 _DEFAULT_REPO_ROOT = _SCRIPT_ROOT.parent
 
 _MAX_PASSES: Final = 5
-_VERSION_MANIFEST_SCHEMA: Final = "version/version-manifest-2.2.4.schema.json"
+_VERSION_MANIFEST_SCHEMA: Final = "version/version-manifest-2.3.0.schema.json"
 _OWNED_ROOTS: Final = (
     "schemas",
     "src/yoetz/resources",
@@ -38,10 +38,14 @@ import pathlib
 
 from jsonschema import Draft202012Validator
 
+from yoetz.protocol.schemas import load_schema_catalog
 from yoetz.version import build_version_manifest, version_manifest_json
 
+# Matching source and mirror bytes can share a stale schema inventory. Exercise the same closed
+# catalog loader used by every public request before claiming the package is usable.
+load_schema_catalog()
 schema = json.loads(
-    pathlib.Path("schemas/version/version-manifest-2.2.4.schema.json").read_bytes()
+    pathlib.Path("schemas/version/version-manifest-2.3.0.schema.json").read_bytes()
 )
 document = json.loads(version_manifest_json(build_version_manifest(), include_resources=True))
 Draft202012Validator(schema).validate(document)
@@ -160,7 +164,8 @@ def _installed_manifest_agrees_with_schema(repo_root: Path) -> bool:
 
 def _check(repo_root: Path) -> bool:
     return (
-        _run(repo_root, "generate_schemas.py", "--check")
+        _run(repo_root, "generate_project_policy_fixture.py", "--check")
+        and _run(repo_root, "generate_schemas.py", "--check")
         and _run(repo_root, "verify_resource_manifest.py", "--check")
         and _installed_manifest_agrees_with_schema(repo_root)
         and _run(repo_root, "sync_committed_agent_trees.py", "--check")
@@ -175,9 +180,11 @@ def _write_pass(repo_root: Path) -> bool:
         ):
             return False
     steps = (
+        ("generate_project_policy_fixture.py", "--write"),
         (
             "generate_schemas.py",
             "--write",
+            "--include-builder-owned",
             "--only",
             "service/control-request-2.6.1.schema.json",
             "--only",
@@ -193,9 +200,13 @@ def _write_pass(repo_root: Path) -> bool:
             "--only",
             "integrations/host-connection-1.0.0.schema.json",
             "--only",
+            "integrations/mcp-removal-1.0.0.schema.json",
+            "--only",
             "integrations/setup-readiness-1.0.0.schema.json",
             "--only",
             "integrations/setup-status-2.0.0.schema.json",
+            "--only",
+            "service/isolation-report-1.0.0.schema.json",
         ),
         ("sync_repository_authority_schemas.py", "--write"),
         ("sync_semantic_capacity_schemas.py",),

@@ -306,9 +306,14 @@ def test_permanent_install_and_two_pinned_snapshots_coexist_and_dispose_independ
             assert reports[name]["binding"] == "runtime_pin"
             assert reports[name]["lifecycle"] == "disposable"
         digests = {
-            name: cast(dict[str, str], report["identity"]) for name, report in reports.items()
+            name: cast(dict[str, str], report["path_identity"]) for name, report in reports.items()
         }
-        for key in ("state_digest", "endpoint_digest", "storage_digest", "executable_digest"):
+        for key in (
+            "state_path_digest",
+            "endpoint_path_digest",
+            "storage_path_digest",
+            "executable_path_digest",
+        ):
             assert len({digest[key] for digest in digests.values()}) == 3, key
         for state in (a_state, b_state):
             assert (state / "state" / "service.lock").is_file()

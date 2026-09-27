@@ -42,7 +42,7 @@ __all__ = [
     "upgrade_command_for",
 ]
 
-PACKAGE_UPDATE_UPGRADE_COMMAND: Final = "uv tool upgrade yoetz"
+PACKAGE_UPDATE_UPGRADE_COMMAND: Final = "yoetz upgrade"
 PACKAGE_INSTALL_COMMAND: Final = "uv tool install --managed-python --python 3.14.6 yoetz"
 _CACHE_SCHEMA: Final = "yoetz.package-update-cache/1"
 _CACHE_NAME: Final = "package-update-cache.json"
@@ -137,7 +137,7 @@ def compare_versions(installed: str, candidate: str) -> bool | None:
 def upgrade_command_for(*, latest_version: str | None = None) -> str:
     """Primary remediation string (ADR-007). Never invents a pin from a failed check."""
 
-    del latest_version  # Reserved for optional display; command stays unpinned upgrade.
+    del latest_version  # Reserved for optional display; the guided command owns version selection.
     return PACKAGE_UPDATE_UPGRADE_COMMAND
 
 
@@ -193,7 +193,8 @@ def advisory_tip_lines(advisory: PackageUpdateAdvisory) -> tuple[str, ...]:
         f"A newer Yoetz package is available "
         f"({advisory.installed_version} → {advisory.latest_version}).",
         f"Upgrade with: {advisory.upgrade_command}",
-        "Use yoetz upgrade to plan host refresh and any migration; then use a fresh launcher.",
+        "Use yoetz upgrade to plan host refresh and any migration. Nothing needs to be stopped: "
+        "open sessions keep working and switch to the new version when reopened.",
     )
 
 

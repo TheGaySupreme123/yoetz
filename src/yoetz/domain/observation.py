@@ -44,7 +44,11 @@ from yoetz.protocol.ids import IdKind, validate_id
 
 __all__ = [
     "AdviceItem",
+    "AdviceSemanticState",
     "AdviceSnapshot",
+    "CAPTURE_HANDOFF_RECONCILE_AGE_MS",
+    "CaptureHandoffRetirementReason",
+    "CaptureHandoffRetirementStage",
     "OBSERVATION_BACKPRESSURE_REASON",
     "OBSERVATION_CONTENT_CAPTURE_PENDING_REASON",
     "OBSERVATION_HOOK_COMMITMENT_DOMAIN",
@@ -265,6 +269,10 @@ _STRUCTURAL_KEYS: Final = frozenset(
         "bytes_touched",
         "tool_call_id",
         "parent_tool_call_id",
+        "lineage_child_task_id",
+        "lineage_child_session_id",
+        "lineage_child_writer_id",
+        "lineage_parent_task_id",
         "permission_kind",
         "decision_reason_code",
         "mapping_hint",
@@ -370,6 +378,44 @@ OBSERVATION_BACKPRESSURE_REASON: Final = "operation_pending"
 # ``operation_pending`` because the latter says nothing about content
 # retention.
 OBSERVATION_CONTENT_CAPTURE_PENDING_REASON: Final = "content_capture_pending"
+# A native handoff normally completes inside the hook drain that staged it, and
+# a committed or terminally refused structural row retires its own ticket.  Only
+# a handoff at least this old is compared with the structural rows that could
+# still consume it, so a handoff whose own drain is still in progress is never
+# retired as stranded.  This is half of the default pending-age ceiling: a
+# stranded handoff becomes eligible before it alone can hold oldest-age pressure
+# at the hard limit, and the READY sweep retires it on its next maintenance turn
+# (#836).
+CAPTURE_HANDOFF_RECONCILE_AGE_MS: Final = 30_000
+
+
+class CaptureHandoffRetirementStage(str, Enum):  # noqa: UP042 - stable diagnostic value
+    """The bounded transition that retired an unfinished native capture handoff."""
+
+    # The structural row committed through this delivery without consuming the
+    # handoff: its content was blocked, unauthorized, or fenced, or the handoff
+    # was staged after the row had passed its capture fence.
+    STRUCTURAL_COMMITTED = "structural_committed"
+    # The structural row was refused terminally after its handoff was matched.
+    STRUCTURAL_REFUSED = "structural_refused"
+    # The READY maintenance sweep, independent of native admission.
+    SWEEP = "sweep"
+    # The exact-task reconciliation a new CHECK runs at the capture barrier.
+    CHECK_PREFLIGHT = "check_preflight"
+
+
+class CaptureHandoffRetirementReason(str, Enum):  # noqa: UP042 - stable diagnostic value
+    """Why a handoff can no longer be consumed by its structural row."""
+
+    CONTENT_NOT_ADMITTED = "content_not_admitted"
+    TERMINAL_REFUSAL = "terminal_refusal"
+    STRUCTURAL_ROW_ABSENT = "structural_row_absent"
+    STRUCTURAL_ROW_QUARANTINED = "structural_row_quarantined"
+    AUTHORITY_ABSENT = "authority_absent"
+    AUTHORITY_INACTIVE = "authority_inactive"
+    RUNTIME_DISABLED = "runtime_disabled"
+    AUTHORITY_GENERATION_CHANGED = "authority_generation_changed"
+    PROFILE_UNSELECTED = "profile_unselected"
 
 
 class ObservationGapCode(str, Enum):  # noqa: UP042 - exact durable wire enum
@@ -386,6 +432,7 @@ class ObservationGapCode(str, Enum):  # noqa: UP042 - exact durable wire enum
     CONSENT_REVOKED = "consent_revoked"
     SOURCE_LAG = "source_lag"
     MAPPING_MISSING = "mapping_missing"
+    MISSING_SUBAGENT_IDENTITY = "missing_subagent_identity"
     SESSION_SUPERSEDED = "session_superseded"
     OUTBOX_OVERFLOW = "outbox_overflow"
     OBSERVATION_INPUT_LOSS = "observation_input_loss"
@@ -399,6 +446,23 @@ class ObservationGapCode(str, Enum):  # noqa: UP042 - exact durable wire enum
     CONTENT_REDACTED = "content_redacted"
     ROUTINE_READ_SUMMARY_DETAIL_OMITTED = "routine_read_detail_omitted"
     ROUTINE_READ_SUMMARY_INVALID = "routine_read_summary_invalid"
+    # Distinct from ``routine_read_summary_invalid`` above, which describes a
+    # delivered summary envelope that materialization refused.  This one
+    # describes a summary that was never built: the admission flush refused one
+    # buffered lane, so its members were admitted individually instead of being
+    # represented by a bounded summary account (issue #753).
+    ROUTINE_SUMMARY_INVALID = "routine_summary_invalid"
+    # One host hook event whose body exceeded the trusted stdin cap and was not
+    # admitted as a structural row. Distinct from ``truncated_payload``, which is
+    # a payload that was admitted and then clipped after parsing. Codex and
+    # Claude Code always stop here. Cursor stops here when the body does not fit
+    # the skim cap or the skim cannot validate a complete document (#667).
+    PAYLOAD_TOO_LARGE = "payload_too_large"
+    # One Cursor hook event whose complete body fit the skim cap. The structural
+    # row keeps closed identity and carries no native content. Distinct from
+    # ``payload_too_large``, which minted no row, and from ``truncated_payload``,
+    # which clipped an already-admitted body (#667).
+    PAYLOAD_CONTENT_OMITTED = "payload_content_omitted"
     SELECTION_ROUTE_CHANGED = "selection_route_changed"
     POLICY_UNTRUSTED = "policy_untrusted"
     VERIFICATION_STALE = "verification_stale"
@@ -1752,6 +1816,12 @@ def _ranked_advice_items(value: object) -> tuple[AdviceItem, ...]:
     return tuple(result)
 
 
+type AdviceSemanticState = Literal["ready", "disabled", "unavailable", "failed"]
+_ADVICE_SEMANTIC_STATES: Final[frozenset[str]] = frozenset(
+    {"ready", "disabled", "unavailable", "failed"}
+)
+
+
 @dataclass(frozen=True, slots=True)
 class AdviceSnapshot:
     ranked_finding_ids: tuple[FindingId, ...]
@@ -1761,6 +1831,9 @@ class AdviceSnapshot:
     freshness_frontier: str
     suppression_identity: str
     ranked_items: tuple[AdviceItem, ...] = ()
+    # Recorded AI-powered review attempt status for this snapshot (issue #742).
+    # Derived from the durable attempt row, never from finding count.
+    semantic_attempt_state: AdviceSemanticState = "disabled"
 
     def __post_init__(self) -> None:
         items = _ranked_advice_items(self.ranked_items)
@@ -1781,6 +1854,9 @@ class AdviceSnapshot:
         object.__setattr__(self, "recommended_next_action", _token(self.recommended_next_action))
         object.__setattr__(self, "freshness_frontier", _token(self.freshness_frontier))
         object.__setattr__(self, "suppression_identity", _token(self.suppression_identity))
+        if self.semantic_attempt_state not in _ADVICE_SEMANTIC_STATES:
+            raise _invalid()
+        object.__setattr__(self, "semantic_attempt_state", self.semantic_attempt_state)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2103,6 +2179,7 @@ def advice_snapshot_to_json(value: AdviceSnapshot) -> JsonObject:
             "recommended_next_action": value.recommended_next_action,
             "freshness_frontier": value.freshness_frontier,
             "suppression_identity": value.suppression_identity,
+            "semantic_attempt_state": value.semantic_attempt_state,
         }
     )
 
@@ -2119,7 +2196,7 @@ def advice_snapshot_from_json(value: JsonValue) -> AdviceSnapshot:
         "freshness_frontier",
         "suppression_identity",
     }
-    optional = {"ranked_items"}
+    optional = {"ranked_items", "semantic_attempt_state"}
     if not required.issubset(set(source)) or set(source) - required - optional:
         raise _invalid()
     items_raw = source.get("ranked_items", ())
@@ -2127,6 +2204,14 @@ def advice_snapshot_from_json(value: JsonValue) -> AdviceSnapshot:
         raise _invalid()
     ids_raw = source["ranked_finding_ids"]
     items = tuple(advice_item_from_json(item) for item in cast(tuple[JsonValue, ...], items_raw))
+    # A snapshot stored before issue #742 has no recorded attempt state. AI-powered items exist
+    # only after a succeeded review, so they are the one fact such a snapshot still carries.
+    legacy_state = (
+        "ready" if any(item.origin == "semantic_model_derived" for item in items) else "disabled"
+    )
+    attempt_state = source.get("semantic_attempt_state", legacy_state)
+    if type(attempt_state) is not str or attempt_state not in _ADVICE_SEMANTIC_STATES:
+        raise _invalid()
     return AdviceSnapshot(
         ranked_finding_ids=_ranked_finding_ids(ids_raw),
         evidence_basis_digest=cast(str, source["evidence_basis_digest"]),
@@ -2135,6 +2220,7 @@ def advice_snapshot_from_json(value: JsonValue) -> AdviceSnapshot:
         freshness_frontier=cast(str, source["freshness_frontier"]),
         suppression_identity=cast(str, source["suppression_identity"]),
         ranked_items=items,
+        semantic_attempt_state=cast(AdviceSemanticState, attempt_state),
     )
 
 

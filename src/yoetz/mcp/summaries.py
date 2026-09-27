@@ -13,7 +13,12 @@ from yoetz.mcp.errors import VALIDATION_REASON_TOKENS
 from yoetz.protocol.canonical import JsonValue, ensure_canonical_value
 from yoetz.protocol.errors import PublicErrorCode, normalize_safe_details
 from yoetz.protocol.ids import IdKind, is_valid_id
-from yoetz.protocol.recovery import RecoveryDirective, correction_for_invariant, directive_for
+from yoetz.protocol.recovery import (
+    RecoveryDirective,
+    continuation_for_semantic_outcome,
+    correction_for_invariant,
+    directive_for,
+)
 
 __all__ = [
     "render_safe_compact_summary",
@@ -42,6 +47,12 @@ _CORRELATION_ID: Final = re.compile(
 )
 # Closed shape for the frontier head: either the genesis sentinel or a canonical digest.
 _HEAD_DIGEST: Final = re.compile(r"^(?:genesis|sha256:[0-9a-f]{64})$", re.ASCII)
+
+
+def _failure_class_from_mapping(value: object) -> object | None:
+    if isinstance(value, Mapping):
+        return cast(Mapping[str, object], value).get("failure_class")
+    return None
 
 
 def _mapping(value: object) -> Mapping[str, JsonValue]:
@@ -200,6 +211,15 @@ def _safe_gap_codes(source: Mapping[str, JsonValue]) -> tuple[str, ...]:
     if not isinstance(coverage, Mapping):
         return ()
     raw_gaps = cast(Mapping[str, JsonValue], coverage).get("known_gaps")
+    if not isinstance(raw_gaps, list | tuple):
+        return ()
+    return tuple(
+        gap for gap in raw_gaps if type(gap) is str and _GAP_CODE.fullmatch(gap) is not None
+    )
+
+
+def _safe_status_gap_codes(source: Mapping[str, JsonValue]) -> tuple[str, ...]:
+    raw_gaps = source.get("gaps")
     if not isinstance(raw_gaps, list | tuple):
         return ()
     return tuple(
@@ -468,11 +488,32 @@ def summary_for_check(envelope: object) -> str:
         prefix = (
             f"Check verdict: {verdict}; findings returned: {findings}; suppressed: {suppressed}; "
         )
+    children = source.get("children")
+    if (
+        isinstance(children, Mapping)
+        and type(children.get("label")) is str
+        and children.get("label") in {"recorded", "preview"}
+    ):
+        prefix += f"children ({children['label']}): {_item_count(children.get('items'))}; "
+    notes = source.get("advisory_notes")
+    if isinstance(notes, (list, tuple)) and notes:
+        prefix += f"project advice (non-verdict): {len(notes)}; "
     suffix = f"AI-powered review status/reason: {status}/{reason}; {_frontier_clause(source)}."
-    if reason == "case_capacity_exceeded":
-        suffix += " No provider attempt; narrow claim/obligation scope for a new check."
-    elif reason == "coordinator_failure":
-        suffix += " Inspect service diagnostics by this check request ID; provider outcome may be unknown."
+    recovery = continuation_for_semantic_outcome(
+        status=status,
+        reason=reason,
+        failure_class=_failure_class_from_mapping(source.get("semantic_provenance")),
+    )
+    recovered = directive_for(recovery)
+    if recovered is not None:
+        extra = f" Continuation: {recovered.token}."
+        reserved = 80
+        used = len((prefix + suffix + extra).encode("ascii")) + reserved
+        leftover = _MAX_SUMMARY_BYTES - used
+        directive_text = recovered.directive
+        if leftover > 8 and len(directive_text.encode("ascii")) + 1 <= leftover:
+            extra += f" {directive_text}"
+        suffix += extra
     clause = _finding_identity_clause(
         source,
         byte_budget=_MAX_SUMMARY_BYTES - len((prefix + suffix).encode("ascii")),
@@ -540,12 +581,27 @@ def _compact_status_fields(source: Mapping[str, JsonValue], view: str) -> tuple[
 def summary_for_status(envelope: object) -> str:
     source = _mapping(envelope)
     view = _safe_token(source.get("view"))
+    if view in {"lineage", "project"}:
+        return _summary_for_multi_agent_status(source, view)
+    if view == "advice":
+        page = source.get("page")
+        count = _item_count(page.get("items")) if isinstance(page, Mapping) else "unavailable"
+        return _bounded(
+            f"Status view: advice; {_frontier_clause(source)}; advice items: {count}; "
+            "Read the structured page for coordination selectors and bounded resource details."
+        )
     freshness, obligations, unanswered, receipt_blocking = _compact_status_fields(source, view)
     gaps = _item_count(source.get("gaps"))
     prefix = (
         f"Status view: {view}; {_frontier_clause(source)}; freshness: {freshness}; "
         f"open obligations: {obligations}; "
     )
+    if view == "operation":
+        operation_clause = _operation_progress_clause(source)
+        if len((prefix + operation_clause).encode("ascii")) > _MAX_SUMMARY_BYTES - 128:
+            # Pathological counts cannot push the fixed suffix out of the bounded summary.
+            operation_clause = "semantic progress: see structured page; "
+        prefix += operation_clause
     suffix = (
         f"unanswered findings: {unanswered}; "
         f"receipt-blocking findings: {receipt_blocking}; reported gaps: {gaps}."
@@ -557,6 +613,97 @@ def summary_for_status(envelope: object) -> str:
         byte_budget=_MAX_SUMMARY_BYTES - len((prefix + suffix).encode("ascii")),
     )
     return _bounded(prefix + clause + suffix)
+
+
+def _operation_progress_clause(source: Mapping[str, JsonValue]) -> str:
+    """Name the operation state and structural review progress with allowlisted values only."""
+
+    page = source.get("page")
+    if not isinstance(page, Mapping):
+        return "operation: unavailable; "
+    typed = cast(Mapping[str, JsonValue], page)
+    clause = (
+        f"operation state: {_safe_token(typed.get('state'))}; "
+        f"kind: {_safe_token(typed.get('operation_kind'), fallback='none')}; "
+    )
+    admission = typed.get("admission")
+    if isinstance(admission, Mapping):
+        # Issue #838: an absent page with an admission stage is a refused or in-flight admission,
+        # not an unknown request; the exact replay after the named wait is the recovery.
+        admitted = cast(Mapping[str, JsonValue], admission)
+        return clause + (
+            f"admission stage: {_safe_token(admitted.get('stage'))}; "
+            f"refusals: {_safe_count(admitted.get('refusal_count'))}; "
+            f"elapsed ms: {_safe_count(admitted.get('elapsed_ms'))}; "
+            f"retry after ms: {_safe_count(admitted.get('retry_after_ms'))}; "
+        )
+    progress = typed.get("semantic_progress")
+    if not isinstance(progress, Mapping):
+        return clause + "semantic progress: none; "
+    fields = cast(Mapping[str, JsonValue], progress)
+    clause += (
+        f"semantic phase: {_safe_token(fields.get('phase'))}; "
+        f"attempt: {_safe_count(fields.get('attempt_ordinal'))}; "
+        f"condition: {_safe_token(fields.get('condition'))}; "
+        f"elapsed ms: {_safe_count(fields.get('elapsed_ms'))}; "
+    )
+    if fields.get("condition") == "terminal":
+        return clause + (
+            f"outcome: {_safe_token(fields.get('terminal_outcome'))} "
+            f"({_safe_token(fields.get('terminal_reason'))}); "
+        )
+    return clause + f"remaining ms: {_safe_count(fields.get('remaining_ms'))}; "
+
+
+def _summary_for_multi_agent_status(source: Mapping[str, JsonValue], view: str) -> str:
+    page = source.get("page")
+    prefix = f"Status view: {view}; {_frontier_clause(source)}; "
+    if not isinstance(page, Mapping):
+        return _bounded(prefix + "page unavailable.")
+    lineage = page if view == "lineage" else page.get("lineage")
+    if view == "project":
+        project = page.get("project_id")
+        project_id = project if is_valid_id(IdKind.PROJECT, project) else "unavailable"
+        grant = page.get("grant_state")
+        grant_state = (
+            grant
+            if type(grant) is str and grant in {"active", "revoked"}
+            else "none"
+            if grant is None
+            else "unavailable"
+        )
+        prefix += (
+            f"project: {project_id}; generation: {_safe_count(page.get('membership_generation'))}; "
+            f"grant: {grant_state or 'none'}; members: {_item_count(page.get('members'))}; "
+            f"detections: {_item_count(page.get('detections'))}; "
+            f"receipts: {_item_count(page.get('receipts'))}; "
+        )
+    if isinstance(lineage, Mapping):
+        parent = lineage.get("parent_task_id")
+        if view == "lineage":
+            parent_id = (
+                parent
+                if is_valid_id(IdKind.TASK, parent)
+                else "none"
+                if parent is None
+                else "unavailable"
+            )
+            prefix += f"parent: {parent_id}; "
+        prefix += (
+            f"children: {_item_count(lineage.get('children'))}; "
+            f"host annotations: {_item_count(lineage.get('annotations'))}; "
+        )
+    if view == "project":
+        prefix += f"coverage: {_item_count(page.get('coverage'))}; "
+    suffix = "Read the structured page for child states and row identities."
+    if page.get("next_cursor") is not None:
+        suffix = "More pages available. " + suffix
+    gap_clause = _bounded_list_clause(
+        "gap codes: ",
+        _safe_status_gap_codes(source),
+        byte_budget=_MAX_SUMMARY_BYTES - len((prefix + suffix).encode("ascii")),
+    )
+    return _bounded(prefix + gap_clause + suffix)
 
 
 def summary_for_receipt(envelope: object) -> str:

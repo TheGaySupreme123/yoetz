@@ -5,16 +5,33 @@
 from __future__ import annotations
 
 import io
+import json
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from builders.codex_rollout import (
+    encode_lines,
+    function_call,
+    function_call_output,
+    session_meta,
+)
 from yoetz.adapters.integrations.codex_lifecycle import LifecycleMapping, store_mapping
-from yoetz.adapters.integrations.observation_admission import build_routine_read_summary
+from yoetz.adapters.integrations.codex_session_stream import (
+    CodexSessionStreamLocator,
+    reconcile_session_stream,
+)
+from yoetz.adapters.integrations.observation_admission import (
+    ROUTINE_SUMMARY_INVALID_GAP,
+    AdmissionBuffer,
+    build_routine_read_summary,
+)
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.application.observation_drain import ObservationOutboxSweeper
 from yoetz.application.observation_materialize import materialize_observation_envelope
+from yoetz.cli import observe as observe_cli
 from yoetz.cli import observe_hooks
 from yoetz.cli.observe import _selection_preview_plan
 from yoetz.domain.observation import (
@@ -48,6 +65,19 @@ def setup_store(tmp_path: Path) -> tuple[LocalObservationStore, Path, Path, str,
     return store, root, workspace, commitment, session
 
 
+# Every shape a real host post can carry its proven success in. Codex states
+# its result under ``tool_response`` and Claude's native post hook may state no
+# outcome fact at all, so only the first row is the shape the top-level
+# structural copy ever retained (issue #753).
+NATIVE_POST_SUCCESS_SHAPES: dict[str, dict[str, JsonValue]] = {
+    "native_post_fallback": {},
+    "nested_exit_code": {"tool_response": {"exit_code": 0}},
+    "nested_is_error": {"tool_response": {"is_error": False}},
+    "nested_status": {"tool_response": {"status": "ok"}},
+    "top_level_success": {"success": True, "exit_status": 0},
+}
+
+
 def hook(
     root: Path,
     workspace: Path,
@@ -56,6 +86,7 @@ def hook(
     *,
     success: bool = True,
     event_ordinal: int | None = None,
+    outcome: Mapping[str, JsonValue] | None = None,
 ) -> None:
     payload: dict[str, JsonValue] = {
         "session_id": HOST,
@@ -64,7 +95,9 @@ def hook(
         "tool_use_id": call,
         "tool_input": {"file_path": "public-example.txt"},
     }
-    if phase == "PostToolUse":
+    if phase == "PostToolUse" and outcome is not None:
+        payload.update(outcome)
+    elif phase == "PostToolUse":
         payload.update(
             success=success,
             exit_status=0 if success else 1,
@@ -356,3 +389,162 @@ async def test_fresh_background_sweeper_delivers_buffer_without_another_hook(
     assert second.attempted == 0
     assert reopened.selection_accounting(commitment) == after_sweep
     sweeper.close()
+
+
+@pytest.mark.parametrize("shape", sorted(NATIVE_POST_SUCCESS_SHAPES))
+def test_every_proven_post_shape_buffers_and_flushes_repeatedly(tmp_path: Path, shape: str) -> None:
+    """The classifier and the summary builder must agree on one proof (#753).
+
+    The hook classifier proves a routine success from nested result carriers or
+    from the native post-hook fallback, while the structural envelope retained
+    only top-level outcome fields. Re-deriving proof from that copy refused four
+    of these five shapes, and the refused input stayed buffered, so every later
+    flush raised again and ingestion stopped for the rest of the session.
+    """
+
+    store, root, workspace, commitment, _ = setup_store(tmp_path)
+    outcome = NATIVE_POST_SUCCESS_SHAPES[shape]
+    hook(root, workspace, "PreToolUse", "shaped-read", outcome=outcome)
+    hook(root, workspace, "PostToolUse", "shaped-read", outcome=outcome)
+    assert store.selection_accounting(commitment)["buffered_input_count"] == 2
+
+    assert store.flush_selected_admission(
+        commitment, summary_builder=build_routine_read_summary, force=True
+    )
+    rows = store.list_pending_outbox_rows(commitment)
+    assert [row.envelope.event_kind for row in rows] == ["RoutineReadSummary"]
+    assert rows[0].envelope.structural_payload["input_count"] == 2
+
+    # The second flush is what every later hook and every daemon sweep runs.
+    assert store.flush_selected_admission(
+        commitment, summary_builder=build_routine_read_summary, force=True
+    )
+    assert store.selection_accounting(commitment)["buffered_input_count"] == 0
+    assert store.summary_refusals(commitment) == ()
+    assert ROUTINE_SUMMARY_INVALID_GAP not in store.status(ObservationStatusQuery(commitment)).gaps
+
+
+def _poison_buffered_post(store: LocalObservationStore, commitment: str) -> ObservationEnvelope:
+    """Contradict one buffered success so the summary builder must refuse it."""
+
+    state = store._load(commitment)
+    inputs = state.admission_buffer.inputs
+    assert [item.kind for item in inputs] == ["success", "success"]
+    original = inputs[-1].envelope
+    poisoned = replace(
+        original,
+        structural_payload=JsonObject({**original.structural_payload, "success": False}),
+    )
+    state.admission_buffer = AdmissionBuffer(
+        inputs[:-1] + (replace(inputs[-1], envelope=poisoned),)
+    )
+    store._save(commitment, state)
+    return poisoned
+
+
+@pytest.mark.anyio
+async def test_refused_summary_drains_its_lane_and_ingestion_continues(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A builder refusal is an accounting loss for one lane, never a stall (#753).
+
+    Before this, the refused input was never evicted: the daemon sweep aborted
+    its batch once a minute and every later hook raised out of its own
+    pre-flush, so nothing from either source reached the ledger again.
+    """
+
+    def fixed_wall_now(_store: LocalObservationStore) -> float:
+        return 1_000_000.0
+
+    monkeypatch.setattr(LocalObservationStore, "_wall_now", fixed_wall_now)
+    store, root, workspace, commitment, _ = setup_store(tmp_path)
+    hook(root, workspace, "PreToolUse", "poisoned-read", event_ordinal=1)
+    hook(root, workspace, "PostToolUse", "poisoned-read", event_ordinal=2)
+    poisoned = _poison_buffered_post(store, commitment)
+
+    # A later hook still ingests, and its own pre-flush drains the refused lane.
+    hook(root, workspace, "SessionEnd", "session-end", event_ordinal=3)
+    reopened = LocalObservationStore(_state=root)
+    rows = reopened.list_pending_outbox_rows(commitment)
+    assert [row.envelope.event_kind for row in rows] == [
+        "PreToolUse",
+        "PostToolUse",
+        "SessionEnd",
+    ]
+    refused = next(row for row in rows if row.envelope.source_identity == poisoned.source_identity)
+    assert ROUTINE_SUMMARY_INVALID_GAP in refused.envelope.gap_codes
+    assert reopened.selection_accounting(commitment)["buffered_input_count"] == 0
+
+    # The cause is named durably, once, with the refused lane's bounded identity.
+    refusals = reopened.summary_refusals(commitment)
+    assert len(refusals) == 1
+    refusal = refusals[0]
+    assert refusal["source_identity"] == rows[0].envelope.source_identity
+    assert refusal["event_position"] == rows[0].envelope.cursor.event_position
+    assert refusal["input_count"] == 2
+    assert refusal["reason"] == "invalid_event_value_type"
+    assert ROUTINE_SUMMARY_INVALID_GAP in reopened.status(ObservationStatusQuery(commitment)).gaps
+
+    diagnostics = (root / "observation" / "hook-diagnostics.jsonl").read_text()
+    assert ROUTINE_SUMMARY_INVALID_GAP in diagnostics
+    assert '"reason":"observe"' not in diagnostics
+
+    # `observe status` names the cause instead of a bare coverage note.
+    assert observe_cli.observe_status(workspace=str(workspace), json_output=True, _state=root) == 0
+    status_payload = json.loads(capsys.readouterr().out)
+    assert status_payload["summary_refusals"] == list(refusals)
+    assert ROUTINE_SUMMARY_INVALID_GAP in status_payload["status"]["gaps"]
+
+    # The real background sweep drains the workspace it used to abort, and a
+    # later stream-sourced ingest still reaches the same outbox.
+    received: list[ObservationEnvelope] = []
+
+    class Coordinator:
+        async def ingest_request(
+            self, request: ObservationIngestRequest
+        ) -> ObservationIngestResult:
+            received.append(request.envelope)
+            return ObservationIngestResult(
+                ObservationIngestDisposition.ACCEPTED, None, request.envelope.cursor
+            )
+
+    swept = LocalObservationStore(_state=root)
+    sweeper = ObservationOutboxSweeper(swept, Coordinator())
+    try:
+        result = await sweeper.sweep()
+        assert result.acknowledged == 3
+        assert [envelope.event_kind for envelope in received] == [
+            "PreToolUse",
+            "PostToolUse",
+            "SessionEnd",
+        ]
+        assert swept.list_pending_outbox_rows(commitment) == ()
+
+        home = tmp_path / "codex-home"
+        (home / "sessions").mkdir(parents=True)
+        (home / "sessions" / f"rollout-{HOST}.jsonl").write_bytes(
+            encode_lines(
+                session_meta(session_id=HOST),
+                function_call(name="shell", call_id="stream-read", arguments='{"command":"ls"}'),
+                function_call_output(call_id="stream-read", exit_code=0),
+            )
+        )
+        stream = reconcile_session_stream(
+            swept,
+            workspace_commitment=commitment,
+            session_commitment=swept.session_commitment(HOST),
+            codex_session_id=HOST,
+            locator=CodexSessionStreamLocator(home),
+        )
+        assert stream["accepted"] == 3
+        stream_result = await sweeper.sweep()
+        assert stream_result.acknowledged >= 1
+        assert [
+            envelope.event_kind
+            for envelope in received
+            if envelope.source is ObservationSource.CODEX_SESSION_STREAM
+        ] != []
+    finally:
+        sweeper.close()

@@ -55,7 +55,10 @@ from yoetz.domain.privacy import (
     ReviewContextProfile,
     ReviewSelectionPolicy,
 )
-from yoetz.domain.receipts import SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP
+from yoetz.domain.receipts import (
+    SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
+    SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
+)
 from yoetz.domain.values import (
     SubjectStateRelation,
     session_id,
@@ -72,9 +75,11 @@ from yoetz.kernel.deterministic_checks import (
     DeterministicCase,
     FrozenHistoryEvent,
 )
+from yoetz.kernel.lineage import LineageEvaluation
 from yoetz.kernel.projections import EvidenceProjectionRecord
 from yoetz.ports.objects import ObjectKind, ObjectRef
 from yoetz.ports.semantic import (
+    MAX_SEMANTIC_ITEM_SUBJECT_REFS,
     ChangeObservation,
     ExcerptDigestProvenance,
     ReviewAssessment,
@@ -95,6 +100,8 @@ from yoetz.protocol.canonical import (
 from yoetz.protocol.coverage import LedgerFreshness, coverage_to_json
 from yoetz.protocol.models import (
     MAX_REVIEW_TEXT_BYTES,
+    MAX_REVIEW_TIMELINE_ITEMS,
+    MAX_SEMANTIC_CASE_BYTES,
     MAX_SEMANTIC_ITEM_BYTES,
     DataCategory,
 )
@@ -105,6 +112,7 @@ __all__ = [
     "MAX_CAPTURED_SEMANTIC_CONTENT_BYTES",
     "MAX_CAPTURED_SEMANTIC_CONTENT_PARTS",
     "MAX_CAPTURED_SEMANTIC_INPUT_BYTES",
+    "LineageSemanticCapacityExceeded",
     "OVER_CASE_ITEM_LIMIT_REASON",
     "REVIEW_PACKET_ITEM_ID",
     "SEMANTIC_REVIEW_PURPOSE",
@@ -463,6 +471,291 @@ def _bounded_json(value: Mapping[str, JsonValue]) -> tuple[str, bool]:
     return _structural_json(marker), True
 
 
+class LineageSemanticCapacityExceeded(ValueError):
+    """Recorded lineage cannot be carried as complete semantic items.
+
+    One child or gap fact is larger than a single item, or the partitioned set would exceed the
+    timeline item budget or the complete case byte budget, including retained parent content.
+    Callers map this to a pre-dispatch capacity outcome. Partial JSON is never a substitute.
+    """
+
+
+_LINEAGE_INPUT_SCHEMA: Final = "yoetz.lineage-semantic-input/1"
+_LINEAGE_INPUT_PART_SCHEMA: Final = "yoetz.lineage-semantic-input/2"
+# One part per timeline slot. Fan-out admission is also capped at 64 children.
+_MAX_LINEAGE_PARTS: Final = MAX_REVIEW_TIMELINE_ITEMS
+
+
+def _lineage_rows(
+    evaluation: LineageEvaluation,
+) -> tuple[list[dict[str, JsonValue]], list[dict[str, JsonValue]]]:
+    snapshots = {item.child_task_id: item for item in evaluation.snapshots}
+    children: list[dict[str, JsonValue]] = []
+    for rollup in evaluation.children:
+        snapshot = snapshots.get(rollup.child_task_id)
+        if snapshot is None:
+            # Omitting a child would make the semantic case claim less source than the check
+            # evaluated. Fail closed at case construction instead.
+            raise ValueError("lineage_semantic_input_invalid")
+        children.append(
+            {
+                "acceptance": snapshot.acceptance.value,
+                "blocking_conditions": list(rollup.blockers),
+                "child_check_id": snapshot.child_check_id,
+                "child_check_subject_frontier": (
+                    None
+                    if snapshot.child_check_subject_frontier is None
+                    else dict(snapshot.child_check_subject_frontier.as_wire())
+                ),
+                "child_frontier": (
+                    None
+                    if snapshot.child_frontier is None
+                    else dict(snapshot.child_frontier.as_wire())
+                ),
+                "child_receipt_id": snapshot.child_receipt_id,
+                "child_task_id": str(rollup.child_task_id),
+                "coverage_gaps": list(snapshot.coverage.known_gaps),
+                "finding_ids": [str(value) for value in rollup.finding_ids],
+                "freshness": rollup.freshness,
+                "lineage_authority_revision": snapshot.lineage_authority_revision,
+                "origin": snapshot.origin.value,
+                "provenance_restrictions": list(snapshot.provenance_restrictions),
+                "read_gap_reasons": list(snapshot.read_gap_reasons),
+                "rollup_state": rollup.state.value,
+                "session_health": snapshot.session_health.value,
+                "work_state": snapshot.work_state.value,
+            }
+        )
+    gaps: list[dict[str, JsonValue]] = []
+    for gap in evaluation.gaps:
+        gaps.append(
+            cast(
+                dict[str, JsonValue],
+                {
+                    "code": gap.code,
+                    "child_task_id": None if gap.child_task_id is None else str(gap.child_task_id),
+                    "finding_ids": [str(value) for value in gap.finding_ids],
+                    "manifest_event_id": (
+                        None if gap.manifest_event_id is None else str(gap.manifest_event_id)
+                    ),
+                },
+            )
+        )
+    return children, gaps
+
+
+def _lineage_encode(body: Mapping[str, JsonValue]) -> bytes:
+    return canonical_encode(cast(JsonValue, dict(body)))
+
+
+def _lineage_v1_body(
+    children: Sequence[Mapping[str, JsonValue]],
+    gaps: Sequence[Mapping[str, JsonValue]],
+    manifest_digest: str | None,
+) -> dict[str, JsonValue]:
+    return {
+        "children": list(children),
+        "gaps": list(gaps),
+        "manifest_digest": manifest_digest,
+        "schema": _LINEAGE_INPUT_SCHEMA,
+    }
+
+
+def _lineage_v2_body(
+    children: Sequence[Mapping[str, JsonValue]],
+    gaps: Sequence[Mapping[str, JsonValue]],
+    *,
+    manifest_digest: str | None,
+    part_index: int,
+    part_count: int,
+    child_count: int,
+    gap_count: int,
+) -> dict[str, JsonValue]:
+    return {
+        "child_count": child_count,
+        "children": list(children),
+        "gap_count": gap_count,
+        "gaps": list(gaps),
+        "manifest_digest": manifest_digest,
+        "part_count": part_count,
+        "part_index": part_index,
+        "schema": _LINEAGE_INPUT_PART_SCHEMA,
+    }
+
+
+def _lineage_part_bytes(
+    children: Sequence[Mapping[str, JsonValue]],
+    gaps: Sequence[Mapping[str, JsonValue]],
+    *,
+    manifest_digest: str | None,
+    part_index: int,
+    part_count: int,
+    child_count: int,
+    gap_count: int,
+) -> bytes:
+    return _lineage_encode(
+        _lineage_v2_body(
+            children,
+            gaps,
+            manifest_digest=manifest_digest,
+            part_index=part_index,
+            part_count=part_count,
+            child_count=child_count,
+            gap_count=gap_count,
+        )
+    )
+
+
+def _lineage_partition(
+    children: Sequence[Mapping[str, JsonValue]],
+    gaps: Sequence[Mapping[str, JsonValue]],
+    manifest_digest: str | None,
+) -> tuple[bytes, ...]:
+    """Split children and gaps into complete documents that each fit one item.
+
+    Fit is measured against the widest part header (``part_count`` at the timeline cap) so the
+    final encoding with the real count cannot grow past the item bound.
+    """
+
+    child_count = len(children)
+    gap_count = len(gaps)
+    child_at = 0
+    gap_at = 0
+    slices: list[tuple[int, int, int, int]] = []
+    while child_at < child_count or gap_at < gap_count:
+        if len(slices) >= _MAX_LINEAGE_PARTS:
+            raise LineageSemanticCapacityExceeded("lineage_semantic_input_too_large")
+        part_index = len(slices)
+        child_take = 0
+        if child_at < child_count:
+            low, high = 1, child_count - child_at
+            if (
+                len(
+                    _lineage_part_bytes(
+                        children[child_at : child_at + 1],
+                        (),
+                        manifest_digest=manifest_digest,
+                        part_index=part_index,
+                        part_count=_MAX_LINEAGE_PARTS,
+                        child_count=child_count,
+                        gap_count=gap_count,
+                    )
+                )
+                > MAX_SEMANTIC_ITEM_BYTES
+            ):
+                raise LineageSemanticCapacityExceeded("lineage_semantic_input_too_large")
+            while low < high:
+                mid = (low + high + 1) // 2
+                encoded = _lineage_part_bytes(
+                    children[child_at : child_at + mid],
+                    (),
+                    manifest_digest=manifest_digest,
+                    part_index=part_index,
+                    part_count=_MAX_LINEAGE_PARTS,
+                    child_count=child_count,
+                    gap_count=gap_count,
+                )
+                if len(encoded) <= MAX_SEMANTIC_ITEM_BYTES:
+                    low = mid
+                else:
+                    high = mid - 1
+            child_take = low
+        gap_take = 0
+        if gap_at < gap_count:
+            alone = _lineage_part_bytes(
+                children[child_at : child_at + child_take],
+                gaps[gap_at : gap_at + 1],
+                manifest_digest=manifest_digest,
+                part_index=part_index,
+                part_count=_MAX_LINEAGE_PARTS,
+                child_count=child_count,
+                gap_count=gap_count,
+            )
+            if len(alone) <= MAX_SEMANTIC_ITEM_BYTES:
+                low, high = 1, gap_count - gap_at
+                while low < high:
+                    mid = (low + high + 1) // 2
+                    encoded = _lineage_part_bytes(
+                        children[child_at : child_at + child_take],
+                        gaps[gap_at : gap_at + mid],
+                        manifest_digest=manifest_digest,
+                        part_index=part_index,
+                        part_count=_MAX_LINEAGE_PARTS,
+                        child_count=child_count,
+                        gap_count=gap_count,
+                    )
+                    if len(encoded) <= MAX_SEMANTIC_ITEM_BYTES:
+                        low = mid
+                    else:
+                        high = mid - 1
+                gap_take = low
+            elif child_take == 0:
+                raise LineageSemanticCapacityExceeded("lineage_semantic_input_too_large")
+        if child_take == 0 and gap_take == 0:
+            raise LineageSemanticCapacityExceeded("lineage_semantic_input_too_large")
+        slices.append((child_at, child_at + child_take, gap_at, gap_at + gap_take))
+        child_at += child_take
+        gap_at += gap_take
+    part_count = len(slices)
+    encoded_parts: list[bytes] = []
+    for part_index, (child_start, child_end, gap_start, gap_end) in enumerate(slices):
+        encoded = _lineage_part_bytes(
+            children[child_start:child_end],
+            gaps[gap_start:gap_end],
+            manifest_digest=manifest_digest,
+            part_index=part_index,
+            part_count=part_count,
+            child_count=child_count,
+            gap_count=gap_count,
+        )
+        if len(encoded) > MAX_SEMANTIC_ITEM_BYTES:
+            raise LineageSemanticCapacityExceeded("lineage_semantic_input_too_large")
+        encoded_parts.append(encoded)
+    return tuple(encoded_parts)
+
+
+def _lineage_structural_item(item_id: str, occurred_order: int, encoded: bytes) -> SemanticCaseItem:
+    # Structural lineage is not review prose. ``_content_item`` cuts text at the 4 KiB review
+    # bound, which would publish a partial JSON document the 16 KiB item check had accepted.
+    if not 1 <= len(encoded) <= MAX_SEMANTIC_ITEM_BYTES:
+        raise LineageSemanticCapacityExceeded("lineage_semantic_input_too_large")
+    digest = "sha256:" + hashlib.sha256(encoded).hexdigest()
+    return SemanticCaseItem(
+        item_id=item_id,
+        section="timeline",
+        category=DataCategory.BOUNDED_STRUCTURAL_METADATA,
+        source_kind="task",
+        source_ref="lineage",
+        linked_subject_refs=(),
+        occurred_order=occurred_order,
+        content=encoded,
+        content_bytes=len(encoded),
+        content_digest=digest,
+    )
+
+
+def _lineage_semantic_items(evaluation: LineageEvaluation) -> tuple[SemanticCaseItem, ...]:
+    """Encode recorded lineage as one or more complete structural items.
+
+    A single ``yoetz.lineage-semantic-input/1`` document is used when it fits. Larger legal
+    fan-out is split into ``yoetz.lineage-semantic-input/2`` parts that together retain every
+    child and gap identity plus the shared manifest digest. Child prose never enters the case.
+    """
+
+    children, gaps = _lineage_rows(evaluation)
+    single = _lineage_encode(_lineage_v1_body(children, gaps, evaluation.manifest_digest))
+    if len(single) <= MAX_SEMANTIC_ITEM_BYTES:
+        return (_lineage_structural_item("lineage", 0, single),)
+    parts = _lineage_partition(children, gaps, evaluation.manifest_digest)
+    if len(parts) == 1:
+        # The part header made a one-part split larger than v1, which already did not fit.
+        raise LineageSemanticCapacityExceeded("lineage_semantic_input_too_large")
+    return tuple(
+        _lineage_structural_item(f"lineage-{index:02d}", index, encoded)
+        for index, encoded in enumerate(parts)
+    )
+
+
 def _history_json(
     item: FrozenHistoryEvent,
     *,
@@ -714,6 +1007,7 @@ def build_semantic_case(
     review_selection: ReviewSelectionPolicy,
     policy_id: str,
     policy_version: str,
+    lineage_evaluation: LineageEvaluation | None = None,
     captured_content: Sequence[CapturedSemanticContent] = (),
     captured_content_scope: CapturedContentScope | None = None,
     captured_content_gaps: Sequence[str] = (),
@@ -1242,6 +1536,7 @@ def build_semantic_case(
 
     # --- Local assessments + optional finding prose ---
     review_assessments: list[ReviewAssessment] = []
+    finding_refs_over_limit = False
     if "deterministic_assessments" in sections:
         matched = _match_assessments(frozen_case, findings)
         for finding, assessment in matched[: selection.max_assessments]:
@@ -1252,7 +1547,20 @@ def build_semantic_case(
                 linked = tuple(str(ref) for ref in finding.subject_refs)
                 # Prose requires exact-match allowlist on every subject_ref; otherwise keep the
                 # local assessment without summary/detail content items.
-                if linked and set(linked) <= allowed:
+                if linked and len(linked) > MAX_SEMANTIC_ITEM_SUBJECT_REFS:
+                    # A finding may cite up to 64 subjects; one case item links at most 16. The
+                    # complete tuple used to reach SemanticCaseItem and fail its bound, which
+                    # surfaced as coordinator_failure with no review at all (issue #858). Slicing
+                    # the tuple would present a partial subject list as the finding's own, so the
+                    # prose is omitted whole and named: the finding keeps its identity in
+                    # local_check_refs and the check result, the omission says which category was
+                    # withheld, and coverage carries the capacity reason. The projected
+                    # assessment below skips itself for the same width with its own omission.
+                    omissions.append(
+                        _omit(finding_ref, DataCategory.FINDING_SUMMARY, "finding", "not_selected")
+                    )
+                    finding_refs_over_limit = True
+                elif linked and set(linked) <= allowed:
                     summary_id = f"finding-summary-{finding_ref}"
                     detail_id = f"finding-detail-{finding_ref}"
                     items.append(
@@ -1380,6 +1688,20 @@ def build_semantic_case(
                         _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_selected")
                     )
                     continue
+            if (
+                captured_group is None
+                and payload.captured_object_id is not None
+                and payload.digest_binding is not None
+                and payload.digest_binding.provenance
+                is EvidenceDigestProvenance.OBSERVATION_CAPTURED
+            ):
+                # A structural capture description is never a substitute for authenticated bytes.
+                # Preserve the coverage gap even when the omission list itself is capped away.
+                omissions.append(
+                    _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_recorded")
+                )
+                capture_gap_set.add("captured_object_unavailable")
+                continue
             digest_provenance: ExcerptDigestProvenance | None = None
             if captured_group is not None:
                 # The service-authenticated inner bytes are the only source that may populate a
@@ -1685,6 +2007,17 @@ def build_semantic_case(
                 )
                 excerpt_bytes_used += item.content_bytes
 
+    lineage_items: tuple[SemanticCaseItem, ...] = ()
+    if lineage_evaluation is not None:
+        # Lineage is an independent C9 channel.  Keep every part in the provider packet even
+        # when the review selection caps ordinary timeline rows; it is structural authority for
+        # this parent check, not child prose selected by the review profile.
+        lineage_items = _lineage_semantic_items(lineage_evaluation)
+        items.extend(lineage_items)
+
+    # Cap lists per selection.  Reserve one timeline slot per lineage part.  Dropped ordinary
+    # timeline items are removed below with the rest of the post-cap catalog so SemanticCase's
+    # referenced-item invariant remains exact.
     # A valid capture can exist even when a custom policy disables the excerpt section entirely or
     # sets its excerpt count to zero. Keep that policy exclusion visible just as we do for a group
     # rejected by kind/relevance, while retaining only bounded identity metadata in the omission.
@@ -1708,6 +2041,9 @@ def build_semantic_case(
     claim_ids = claim_ids[:32]
     decision_ids = decision_ids[:16]
     timeline_ids = timeline_ids[: selection.max_timeline_items]
+    if lineage_items:
+        timeline_ids = timeline_ids[: max(0, selection.max_timeline_items - len(lineage_items))]
+        timeline_ids.extend(item.item_id for item in lineage_items)
     review_assessments = review_assessments[: selection.max_assessments]
     changes = changes[: selection.max_change_observations]
     targeted = targeted[: selection.max_excerpts]
@@ -1735,7 +2071,10 @@ def build_semantic_case(
     }
     review_assessments.sort(
         key=lambda item: (
-            kind_order[item.finding_kind],
+            # The finding registry is extensible by coordination lanes.  Keep the historical
+            # review order for the core kinds, while placing a newly registered kind after that
+            # stable prefix instead of raising a KeyError during semantic case construction.
+            kind_order.get(item.finding_kind, len(kind_order)),
             tuple(ref.encode("ascii") for ref in item.subject_refs),
         )
     )
@@ -1803,6 +2142,13 @@ def build_semantic_case(
         items = [item]
         timeline_ids = [item.item_id]
 
+    if lineage_items and sum(item.content_bytes for item in items) > MAX_SEMANTIC_CASE_BYTES:
+        # Every lineage part may fit individually while their sum, or their sum with
+        # selected parent content, exceeds SemanticCase's independent aggregate bound.
+        # Refuse with the same typed pre-dispatch outcome instead of leaking the
+        # constructor's generic semantic_case_invalid ValueError to the coordinator.
+        raise LineageSemanticCapacityExceeded("lineage_semantic_case_too_large")
+
     capture_gaps = tuple(sorted(capture_gap_set, key=str.encode))
     coverage = case_coverage(frozen_case, semantic=True)
     if capture_gaps:
@@ -1828,6 +2174,23 @@ def build_semantic_case(
             known_gaps=tuple(
                 sorted(
                     {*coverage.known_gaps, SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP},
+                    key=str.encode,
+                )
+            ),
+        )
+    if finding_refs_over_limit:
+        # The finding is still a local check result the reviewer can cite; only its prose and
+        # projected basis are absent from this case. Coverage says so, as with shortened prose.
+        coverage = replace(
+            coverage,
+            ledger_freshness=(
+                LedgerFreshness.PARTIAL
+                if coverage.ledger_freshness is LedgerFreshness.CURRENT
+                else coverage.ledger_freshness
+            ),
+            known_gaps=tuple(
+                sorted(
+                    {*coverage.known_gaps, SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP},
                     key=str.encode,
                 )
             ),

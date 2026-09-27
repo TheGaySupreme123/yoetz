@@ -268,7 +268,7 @@ async def main():
         dropped = subprocess.run([entry["command"], "service", "isolation", "--json"], env=os.environ, capture_output=True, check=True)
         pinned = json.loads(dropped.stdout)
         assert pinned["binding"] == "runtime_pin"
-        assert pinned["identity"] == identity["identity"]
+        assert pinned["path_identity"] == identity["path_identity"]
         params = StdioServerParameters(command=entry["command"], args=entry["args"], env={**os.environ, **entry["env"]})
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as client:

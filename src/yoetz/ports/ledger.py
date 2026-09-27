@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
+from types import MappingProxyType
 from typing import Final, Literal, Protocol, cast
 
+from yoetz.domain.coordination import (
+    LineageAcceptance,
+    LineageOrigin,
+    SessionHealth,
+    WorkState,
+)
 from yoetz.domain.events import EventDraft, LedgerRecord
 from yoetz.domain.findings import (
     CheckVerdict,
@@ -27,14 +34,16 @@ from yoetz.domain.values import (
     validate_sha256_digest,
 )
 from yoetz.kernel.deterministic_checks import CaseAvailabilityFacts, DeterministicCase
+from yoetz.kernel.lineage import LineageRollupState
 from yoetz.kernel.projections import ProjectionState
 from yoetz.ports.objects import ObjectKind, ObjectRef
 from yoetz.protocol.coverage import Coverage, PublicationChannel
-from yoetz.protocol.errors import PublicOperationError
+from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind, validate_actor_id, validate_id
 from yoetz.protocol.models import (
     MAX_EVENTS_PER_BATCH,
     CheckScopeModel,
+    SemanticProgressPhase,
     SemanticReason,
     SemanticStatus,
     StatusAssignmentItemModel,
@@ -57,7 +66,15 @@ __all__ = [
     "AppendWarning",
     "AssignmentProjectionFilter",
     "AttemptOutcome",
+    "CHECK_ACQUISITION_RESERVATION_SECONDS",
+    "CHECK_ADMISSION_REASON_CODES",
+    "CHECK_ADMISSION_RETRY_AFTER_MS",
+    "CheckAdmissionRecord",
+    "CheckAdmissionStage",
     "CheckAwaitingHuman",
+    "CheckAdvisoryNote",
+    "CheckChildPreviewItem",
+    "CheckChildrenPreview",
     "CheckCommitResult",
     "CheckPhase",
     "CheckPolicyExecution",
@@ -92,7 +109,10 @@ __all__ = [
     "SemanticContinuation",
     "SemanticDisclosureWait",
     "SemanticJobRecord",
+    "SemanticProgressRecord",
     "StoredProjection",
+    "check_admission_refused",
+    "check_admission_stage",
 ]
 
 
@@ -161,6 +181,89 @@ class PendingVerdictKind(str, Enum):  # noqa: UP042 - exact durable enum base
     QUARANTINED = "quarantined"
 
 
+# A new check arms a transient acquisition reservation for its exact (writer, request) key before
+# it releases the ledger lock to stage its resume object. It is never persisted and lapses after
+# this many seconds if acquisition stalls (ADR-022 decision 4).
+CHECK_ACQUISITION_RESERVATION_SECONDS: Final = 60
+
+
+class CheckAdmissionStage(str, Enum):  # noqa: UP042 - exact structural enum base
+    """Why a check request has no operation record yet (issue #838).
+
+    Each member names a transient condition met before admission. None of them records anything
+    under the request identity, so replaying the exact same body and ``request_id`` is always
+    safe and converges on the one operation that admission eventually creates.
+    """
+
+    # A live acquisition reservation already holds this exact request key.
+    ACQUIRING = "acquiring"
+    # A native capture handoff for this task is still outstanding; the frozen case must include it.
+    CAPTURE_HANDOFF_PENDING = "capture_handoff_pending"
+    # The acquisition lost a race with concurrent ledger motion and staged nothing durable.
+    ACQUISITION_CONTENDED = "acquisition_contended"
+    # A Codex import for this session is still being published.
+    IMPORT_PENDING = "import_pending"
+
+
+CHECK_ADMISSION_REASON_CODES: Final[Mapping[CheckAdmissionStage, str]] = MappingProxyType(
+    {
+        CheckAdmissionStage.ACQUIRING: "check_admission_in_progress",
+        CheckAdmissionStage.CAPTURE_HANDOFF_PENDING: "check_admission_capture_pending",
+        CheckAdmissionStage.ACQUISITION_CONTENDED: "check_admission_contended",
+        CheckAdmissionStage.IMPORT_PENDING: "check_admission_import_pending",
+    }
+)
+_CHECK_ADMISSION_STAGE_BY_REASON: Final[Mapping[str, CheckAdmissionStage]] = MappingProxyType(
+    {reason: stage for stage, reason in CHECK_ADMISSION_REASON_CODES.items()}
+)
+
+# How long a caller should wait before replaying the exact request. A capture handoff drains on
+# the service sweep that a refused admission wakes, so it gets the longest bounded wait.
+CHECK_ADMISSION_RETRY_AFTER_MS: Final[Mapping[CheckAdmissionStage, int]] = MappingProxyType(
+    {
+        CheckAdmissionStage.ACQUIRING: 2_000,
+        CheckAdmissionStage.CAPTURE_HANDOFF_PENDING: 5_000,
+        CheckAdmissionStage.ACQUISITION_CONTENDED: 1_000,
+        CheckAdmissionStage.IMPORT_PENDING: 5_000,
+    }
+)
+
+
+def check_admission_refused(stage: CheckAdmissionStage) -> PublicOperationError:
+    """Build the one retryable refusal every pre-admission branch raises.
+
+    The typed reason code attaches the same-identity continuation at construction, so a caller
+    can never receive a pre-admission ``OPERATION_PENDING`` that reads like a stranded operation.
+    """
+
+    if type(stage) is not CheckAdmissionStage:
+        raise TypeError("check_admission_stage_invalid")
+    return PublicOperationError(
+        PublicErrorCode.OPERATION_PENDING,
+        "The check has not been admitted yet.",
+        True,
+        safe_details={
+            "reason_code": CHECK_ADMISSION_REASON_CODES[stage],
+            "retry_after_ms": CHECK_ADMISSION_RETRY_AFTER_MS[stage],
+        },
+    )
+
+
+def check_admission_stage(error: BaseException) -> CheckAdmissionStage | None:
+    """Return the pre-admission stage a refusal names, or ``None`` for any other failure."""
+
+    if (
+        type(error) is not PublicOperationError
+        or error.code is not PublicErrorCode.OPERATION_PENDING
+        or not error.retryable
+    ):
+        return None
+    reason = error.safe_details.get("reason_code")
+    if type(reason) is not str:
+        return None
+    return _CHECK_ADMISSION_STAGE_BY_REASON.get(reason)
+
+
 type QueryableProjectionView = Literal[
     "compact",
     "assignment",
@@ -175,7 +278,11 @@ type QueryableProjectionView = Literal[
 _MAX_SAFE_INTEGER: Final = 2**53 - 1
 _MAX_SQLITE_SIGNED_INTEGER: Final = 2**63 - 1
 _IDENTITY_PATTERN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$", re.ASCII)
-_POLICY_IDS: Final = ("research-evidence/0.1.0", "work-integrity/0.1.0")
+_POLICY_IDS: Final = (
+    "coordination/0.1.0",
+    "research-evidence/0.1.0",
+    "work-integrity/0.1.0",
+)
 
 
 def _invalid() -> ValueError:
@@ -511,9 +618,91 @@ class CheckVersionSlice:
             raise _invalid()
         _identity(self.engine_version)
         _identity(self.projection_version)
-        packs = _sorted_unique_strings(self.policy_packs, maximum=2)
+        packs = _sorted_unique_strings(self.policy_packs, maximum=3)
         if not packs or any(pack not in _POLICY_IDS for pack in packs):
             raise _invalid()
+
+
+@dataclass(frozen=True, slots=True)
+class CheckChildPreviewItem:
+    """One bounded child projection attached to a completed check result.
+
+    The preview is derived from the parent ledger's recorded manifest by the application layer;
+    it never holds live child state.  ``blocking_conditions`` contains evaluator tokens only and
+    is deliberately separate from the check's finding list.
+    """
+
+    child_task_id: str
+    origin: LineageOrigin
+    acceptance: LineageAcceptance
+    work_state: WorkState
+    session_health: SessionHealth
+    rollup_state: LineageRollupState
+    blocking_conditions: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        _id(IdKind.TASK, self.child_task_id)
+        if (
+            type(self.origin) is not LineageOrigin
+            or type(self.acceptance) is not LineageAcceptance
+            or type(self.work_state) is not WorkState
+            or type(self.session_health) is not SessionHealth
+            or type(self.rollup_state) is not LineageRollupState
+        ):
+            raise _invalid()
+        _sorted_unique_strings(self.blocking_conditions)
+
+
+@dataclass(frozen=True, slots=True)
+class CheckChildrenPreview:
+    """The check-result child section, with a recorded/preview freshness label."""
+
+    label: Literal["recorded", "preview"]
+    items: tuple[CheckChildPreviewItem, ...]
+    tested_manifest_frontier: Frontier | None = None
+
+    def __post_init__(self) -> None:
+        if self.label not in {"recorded", "preview"} or type(self.items) is not tuple:
+            raise _invalid()
+        if len(self.items) > 64 or any(
+            type(item) is not CheckChildPreviewItem for item in self.items
+        ):
+            raise _invalid()
+        ids = tuple(item.child_task_id for item in self.items)
+        if ids != tuple(sorted(set(ids), key=str.encode)):
+            raise _invalid()
+        if (
+            self.tested_manifest_frontier is not None
+            and type(self.tested_manifest_frontier) is not Frontier
+        ):
+            raise _invalid()
+
+
+@dataclass(frozen=True, slots=True)
+class CheckAdvisoryNote:
+    """A bounded project coordination hint carried beside, never inside, findings."""
+
+    kind: Literal["live_member_present", "duplicate_finding"]
+    project_id: str
+    task_ids: tuple[str, ...]
+    count: int
+
+    def __post_init__(self) -> None:
+        if self.kind not in {"live_member_present", "duplicate_finding"}:
+            raise _invalid()
+        _id(IdKind.PROJECT, self.project_id)
+        if type(self.task_ids) is not tuple or not 1 <= len(self.task_ids) <= 64:
+            raise _invalid()
+        tasks = tuple(_id(IdKind.TASK, value) for value in self.task_ids)
+        if tasks != tuple(sorted(set(tasks), key=str.encode)):
+            raise _invalid()
+        if self.kind == "duplicate_finding" and len(tasks) < 2:
+            raise _invalid()
+        if type(self.count) is not int or not 1 <= self.count <= _MAX_SAFE_INTEGER:
+            raise _invalid()
+        if self.count < len(tasks):
+            raise _invalid()
+        object.__setattr__(self, "task_ids", tasks)
 
 
 @dataclass(frozen=True, slots=True)
@@ -534,6 +723,8 @@ class CheckCommitResult:
     semantic_provenance: SemanticProvenance | None
     coverage: Coverage
     versions: CheckVersionSlice
+    children: CheckChildrenPreview | None = None
+    advisory_notes: tuple[CheckAdvisoryNote, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.outcome) is not str or self.outcome not in {"committed", "replayed"}:
@@ -573,6 +764,17 @@ class CheckCommitResult:
         ):
             raise _invalid()
         if type(self.coverage) is not Coverage or type(self.versions) is not CheckVersionSlice:
+            raise _invalid()
+        if self.children is not None and type(self.children) is not CheckChildrenPreview:
+            raise _invalid()
+        if type(self.advisory_notes) is not tuple or len(self.advisory_notes) > 64:
+            raise _invalid()
+        if any(type(item) is not CheckAdvisoryNote for item in self.advisory_notes):
+            raise _invalid()
+        note_keys = tuple(
+            (item.kind, item.project_id, item.task_ids) for item in self.advisory_notes
+        )
+        if len(note_keys) != len(set(note_keys)):
             raise _invalid()
 
 
@@ -982,6 +1184,81 @@ class SemanticAttemptRecord:
             if self.terminal_code is None or self.result_object_ref is None:
                 raise _invalid()
         elif self.terminal_code is None:
+            raise _invalid()
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticProgressRecord:
+    """Durable structural progress of one AI-powered review job (issue #571 item A2).
+
+    ``attempt_ordinal`` is 0 until the first attempt is claimed. ``queued_at`` and
+    ``deadline_at`` are written once when progress begins; ``deadline_at`` is the job's frozen
+    total execution expiry, never a caller wait. A terminal record is derived from the terminal
+    job row, so ``phase`` is ``terminal`` exactly when ``terminal_outcome`` is present.
+    """
+
+    job_id: str
+    attempt_ordinal: int
+    phase: SemanticProgressPhase
+    phase_entered_at: datetime
+    queued_at: datetime
+    deadline_at: datetime
+    terminal_outcome: Literal["succeeded", "failed", "quarantined"] | None = None
+    terminal_reason: SemanticReason | None = None
+
+    def __post_init__(self) -> None:
+        _id(IdKind.SEMANTIC_JOB, self.job_id)
+        _uint(self.attempt_ordinal)
+        if type(self.phase) is not SemanticProgressPhase:
+            raise _invalid()
+        _utc(self.phase_entered_at)
+        _utc(self.queued_at)
+        _utc(self.deadline_at)
+        terminal = self.phase is SemanticProgressPhase.TERMINAL
+        if terminal:
+            if (
+                type(self.terminal_outcome) is not str
+                or self.terminal_outcome not in {"succeeded", "failed", "quarantined"}
+                or type(self.terminal_reason) is not SemanticReason
+            ):
+                raise _invalid()
+        elif self.terminal_outcome is not None or self.terminal_reason is not None:
+            raise _invalid()
+        elif self.attempt_ordinal == 0 and self.phase is not SemanticProgressPhase.QUEUED:
+            raise _invalid()
+
+
+@dataclass(frozen=True, slots=True)
+class CheckAdmissionRecord:
+    """Transient structural admission state of one check request id (issue #838).
+
+    Read only while no operation record exists for the key. ``refusal_count`` counts the refused
+    admissions this service observed for the exact (writer, request) key; it is 0 when the only
+    fact is a live acquisition reservation. Nothing here is persisted, carries payload, or names
+    another request: a service restart or runtime eviction forgets it, and the page then reads as
+    plainly absent again.
+    """
+
+    writer_id: str
+    operation_id: str
+    stage: CheckAdmissionStage
+    refusal_count: int
+    first_observed_at: datetime
+    last_observed_at: datetime
+    retry_after_ms: int
+
+    def __post_init__(self) -> None:
+        _id(IdKind.WRITER, self.writer_id)
+        _id(IdKind.REQUEST, self.operation_id)
+        if type(self.stage) is not CheckAdmissionStage:
+            raise _invalid()
+        _uint(self.refusal_count)
+        _uint(self.retry_after_ms)
+        _utc(self.first_observed_at)
+        _utc(self.last_observed_at)
+        if self.last_observed_at < self.first_observed_at:
+            raise _invalid()
+        if self.refusal_count == 0 and self.stage is not CheckAdmissionStage.ACQUIRING:
             raise _invalid()
 
 
@@ -1561,6 +1838,31 @@ class LedgerPort(Protocol):
 
     async def resolve_disclosure_wait(self, job_id: str) -> SemanticDisclosureWait: ...
 
+    async def begin_semantic_progress(
+        self, job_id: str, queued_at: datetime, deadline_at: datetime
+    ) -> None:
+        """Create the ``queued`` progress row for a non-terminal job once; later calls no-op."""
+
+        ...
+
+    async def advance_semantic_progress(
+        self,
+        handle: SemanticAttemptHandle,
+        phase: SemanticProgressPhase,
+        observed_at: datetime,
+    ) -> bool:
+        """Move progress forward for the job's active attempt; return whether it advanced.
+
+        A write that would not move ``(attempt_ordinal, phase)`` strictly forward, names an
+        attempt that is no longer active, or targets a terminal job is ignored.
+        """
+
+        ...
+
+    async def load_semantic_progress(
+        self, writer_id: str, operation_id: str
+    ) -> SemanticProgressRecord | None: ...
+
     async def renew_leases(self, lease: OperationLease) -> OperationLease:
         """Return a replacement lease under the operation's authenticated lifetime policy.
 
@@ -1601,3 +1903,14 @@ class LedgerPort(Protocol):
     async def lookup_task_operation(
         self, writer_id: str, operation_id: str
     ) -> OperationRecord | None: ...
+
+    async def lookup_check_admission(
+        self, writer_id: str, operation_id: str
+    ) -> CheckAdmissionRecord | None:
+        """Report why an exact check request has no operation record yet (issue #838).
+
+        ``None`` once an operation record exists, and whenever this service has neither a live
+        acquisition reservation nor a recent pre-admission refusal for the exact key.
+        """
+
+        ...

@@ -70,7 +70,16 @@ Host recovery follows that integration's reported continuation; installed plugin
 live MCP runtime. Read the Recovery section of
 [coverage-and-receipts.md](references/coverage-and-receipts.md) when a route or binding fails.
 A host auto-review hold is not a Yoetz result; preserve the exact proposed
-request and do not switch to local-only while required approval is pending.
+request and do not switch to local-only while required approval is pending. A hold does not establish
+the Yoetz grant state. State existing repository authorization only after a current first-hand
+read confirms it; configured routing alone is not consent, and host approval remains separate.
+
+Capacity and cost changes need a disclosed choice: never choose a larger or uncapped local
+observation capacity for an ordinary task. When the user asks, run `yoetz observe
+selection-preview`, relay its scope, current and requested values, local-hardware consequences,
+remaining limits, and lower/pause/resume path, and apply only after the user accepts that preview.
+A no-cap request returns `capacity_no_cap_unsupported`; relay it with the largest supported
+alternative. See "Change local retention capacity" in [workflow.md](references/workflow.md).
 
 Same-task recovery comes before a new task. On an ambiguous write, use `status view=operation` with
 `filter.operation_request_id` set to the exact write request ID. Replay the exact original body with
@@ -88,6 +97,12 @@ The operation view needs both `session_id` and `writer_id`. If a `start` respons
 those ids exist, replay the exact original `start` body once with the same `request_id`; do not
 invent ids or fabricate a status query. The same rule applies to a typed pending `start` result
 without returned route ids.
+
+For cooperative delegation, read the multi-agent section of `yoetz://guidance/workflow.md`. A
+native subagent learns its role only from its assignment, so give each child its one selector, a
+distinct actor id, and its own closure duties (plan, evidence and completion claim, `check`,
+`respond`, `receipt`, then `work_closed`). Tell a helper given neither a handle nor a parent
+session to make no Yoetz call.
 
 Delegation after an outage: if `start` (or any call) returned `safe_details.availability:
 terminal_unavailable`, that state belongs to the host binding, and later calls under a new

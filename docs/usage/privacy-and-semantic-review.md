@@ -40,6 +40,9 @@ the local runtime gate is enabled. Retaining plaintext additionally requires tha
 the mapped task's consent grant. Local status does not establish that task-level permission; without
 it, ingress drops content chunks. Pausing observation or disabling the runtime gate preserves the
 configured choice but empties locally effective capture. Disabling a profile removes that choice.
+Connecting another host to the same repository, or confirming observation consent again, keeps the
+content capture you enabled. Only disabling the profile or revoking observation consent turns it
+off; after a revoke, enable it again if you still want it.
 
 Native content capture and AI-powered review have separate authority. Enabling a host profile does
 not authorize external review, choose a provider, or permit any content to leave the computer.
@@ -251,9 +254,18 @@ For an `external_runtime_oauth` profile, the equivalent attempt identity is the 
 runtime authority plus exact runtime evidence, not a vault credential handle. Post-acknowledgement
 ambiguity is terminal `outcome_unknown`; it does not mint a replacement attempt.
 
-When you are auditing a run rather than the installation, the [AI-powered review dogfood
-runbook](../runbooks/semantic-dogfood.md) gives the preflight and the provenance gate: which route
-the agent actually got, and how to read `semantic_provenance`.
+Starting a session takes priority over the optional background review, so a review already in
+flight can be cut short. Once a request has been authorized and sent, that cannot un-send it: the
+receipt for that attempt is recorded as `transport_failed` with reason `outcome_unknown`, which
+says the request left your machine and its answer never came back. Nothing is sent again. If the
+service stops before the receipt lands, it is written once when the service next starts, before any
+new request can go out. The background note for that session is marked cancelled and names the
+attempt and provider it reconciled, so `yoetz privacy receipts` accounts for every authorization
+that was spent. A cancelled note that names neither means nothing was sent.
+
+When you are auditing a run rather than the installation, the
+[AI-powered review dogfood runbook](../runbooks/semantic-dogfood.md) gives the preflight and the provenance
+gate: which route the agent actually got, and how to read `semantic_provenance`.
 
 Read `semantic_provenance` together with `semantic_status` and `semantic_reason`, never on its own.
 The outcome is three-way, not two-way: on the statuses where the protocol forbids provenance, null
@@ -263,6 +275,47 @@ not the same as it being useful); and `failed`/`coordinator_failure` is unconstr
 
 If you believe Yoetz disclosed, retained, or logged something these commitments forbid, treat it as
 a security report: [`SECURITY.md`](../../SECURITY.md), not a public issue.
+
+### Reviews that take longer
+
+Codex subscription reviews default to a 15-minute total budget. An explicitly configured shorter
+budget stays in effect; `external_runtime.timeout_seconds` accepts up to one hour. A host tool can
+stop waiting before the review finishes. Recover with the same check request and request ID:
+`OPERATION_PENDING` means the existing check is still running. Repeated waits do not start another
+review or reset its budget. A completed result still needs to qualify before it can resolve a
+finding or support a completion claim.
+
+While a review runs, `status` with `view: "operation"` and the check's request ID shows where it
+is: queued, case admitted, runtime starting, account and model validation, provider sampling,
+response validation, cleanup, or terminal. It also shows the attempt number, the elapsed time,
+the fixed deadline, and the time remaining. After the review ends it shows the outcome and its
+reason. This read answers even while the check is still running; other status views wait for
+the check to finish. In the terminal interface, a running check shows the same phase and elapsed
+time, and `/progress` reads the latest check again. An `overdue` condition means the deadline
+passed without a recorded result; retry the same check request ID to recover it.
+
+Progress names phases only. It never shows prompt or response text, streamed tokens, reasoning,
+token counts, your account, or credentials. A phase is not evidence that the review is correct.
+Checks started before this version show no progress.
+
+### Routine checkpoints and final reviews
+
+A Codex subscription review uses one of two budget profiles. A check made after your task
+records a completion claim is a **final** review. It uses the configured final reasoning effort
+(`high` by default) and an output limit of 8192 tokens. Every earlier check is a **routine**
+checkpoint, which uses the routine effort (`medium` for new setups) and an output limit of 4096
+tokens.
+
+- **Choosing values.** Choose the efforts during setup. The limits are the optional
+  `routine_output_limit` and `final_output_limit` keys in `[external_runtime]` (1–8192).
+- **Older subscriptions.** A subscription connected before routine checkpoints existed keeps its
+  single effort for every check until you choose a routine effort.
+- **What does not change.** The profile is fixed when the check starts, so retries and
+  recovery never switch it. It does not change what may be disclosed, how long the review may
+  run, or whether it retries.
+- **What is recorded.** Every check result and receipt names the exact model, reasoning effort,
+  and output limit used. A review whose visible answer exceeds its limit is stopped and reported
+  as an invalid answer.
 
 ### Cancelled background review
 
