@@ -1489,9 +1489,22 @@ With the ordinary content profile enabled, Cursor `Write` calls (Cursor's report
 enter the shared encrypted capture lane as changed-file content from `postToolUse`; only the
 public path and replacement fields (`path`/`file_path`/`target_file`, `contents`/`content`,
 `old_string`/`new_string`, `edits[]`) are kept, and the JSON `tool_output` is not. A
-`postToolUseFailure` marks the edit `failed`. The documented `afterFileEdit` body (`file_path` plus
-`edits[]`) is parsed by the same rule, but that event remains outside the ordinary profile's
-subscription and the structural profile keeps only its path commitment.
+`postToolUseFailure` marks the edit `failed`. Shell heredoc edits (`cat > path <<EOF`, `tee path <<EOF`, `git apply <<EOF`) are also captured
+from the `postToolUse` `Shell` event as changed-file or workspace-diff content, marked
+`edit_source: shell`; edits made by `sed -i`, scripts or `git apply <file>` are not captured.
+
+`afterFileEdit` is deliberately not subscribed by the ordinary profile. Cursor's hook reference
+names `Write` as the file-editing tool on the generic `preToolUse`/`postToolUse` pair (and uses the
+same `Write` matcher value for `afterFileEdit`), and `tool_input`
+there is the tool's complete argument object (the object `preToolUse` may replace through
+`updated_input`), so it carries the path and new text. The generic pair is the single paired owner
+of each call; `afterFileEdit` has no tool-call identity, so under the paired ordinary profile it
+would be an orphan (`unpaired_event`) and a second copy of the same edit. The documented
+`afterFileEdit` body (`file_path` plus `edits[]`) is parsed by the same content rule, and the
+structural profile keeps only its path commitment. Cursor does not document the `Write`
+`tool_input` field names; the adapter accepts `path`/`file_path`/`target_file`,
+`contents`/`content`/`code_edit`, `old_string`/`new_string` and `edits[]`. A `Write` call whose
+input has none of these keeps its structural row but no edit content.
 
 The capture runs from the post-tool event only, once per edit: the pre-tool proposal is neither
 duplicated nor kept as raw tool input. Each captured edit names the host-reported outcome

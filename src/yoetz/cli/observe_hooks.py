@@ -1516,6 +1516,8 @@ def _edit_outcome(payload: Mapping[str, JsonValue], source: ObservationSource) -
     hook_event = payload.get("hook_event_name")
     if hook_event in {"PostToolUseFailure", "postToolUseFailure"}:
         return "failed"
+    if hook_event == "afterFileEdit":
+        return "applied"  # Cursor emits it only after the agent's edit was written.
     response = payload.get("tool_response")
     if response is None:
         response = payload.get("tool_output")
@@ -1617,6 +1619,108 @@ def _native_edit_content(
     return ObservationContentKind.CHANGED_FILE, "changed-file", cast(JsonValue, selected)
 
 
+_SHELL_TOOL_NAMES: Final = frozenset({"Bash", "Shell", "shell", "exec_command", "local_shell"})
+_HEREDOC_START: Final = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+_SHELL_APPLY_PATCH: Final = re.compile(r"(?:^|[\s;&|(])apply_patch\s*$")
+_SHELL_GIT_APPLY: Final = re.compile(
+    r"(?:^|[\s;&|(])git\s+apply(?:\s+-{1,2}[A-Za-z0-9=-]+)*\s*-?\s*$"
+)
+_SHELL_WRITER: Final = re.compile(r"(?:^|[\s;&|(])(cat|tee)(?:\s+-a)?\b")
+_SHELL_REDIRECT: Final = re.compile(r">>?\s*(['\"]?)([^\s'\";&|<>]+)\1")
+_SHELL_TEE_TARGET: Final = re.compile(
+    r"(?:^|[\s;&|(])tee(?:\s+-a)?\s+(['\"]?)([^\s'\";&|<>-][^\s'\";&|<>]*)\1"
+)
+_MAX_SHELL_HEREDOCS: Final = 8
+
+
+def _shell_heredocs(command: str) -> list[tuple[str, str, str]]:
+    """Return bounded ``(prefix, suffix, body)`` triples for each heredoc in a command."""
+
+    lines = command.split("\n")
+    found: list[tuple[str, str, str]] = []
+    index = 0
+    while index < len(lines) and len(found) < _MAX_SHELL_HEREDOCS:
+        line = lines[index]
+        match = _HEREDOC_START.search(line)
+        index += 1
+        if match is None:
+            continue
+        delimiter = match.group(2)
+        body: list[str] = []
+        while index < len(lines) and lines[index].strip() != delimiter:
+            body.append(lines[index])
+            index += 1
+        if index >= len(lines):
+            break  # unterminated heredoc: not a complete edit
+        index += 1
+        found.append((line[: match.start()], line[match.end() :], "\n".join(body) + "\n"))
+    return found
+
+
+def _shell_edit_contents(
+    command: str,
+    *,
+    cwd: str | None,
+    workspace_locator: str | None,
+    event_name: str,
+    source: ObservationSource,
+    outcome: str,
+) -> list[tuple[ObservationContentKind, str, JsonValue]]:
+    """Recognize shell-mediated edits whose new bytes are visible in the command itself.
+
+    Covered: ``apply_patch <<EOF`` (Codex intercepts it, so only its pre-tool event exists),
+    ``git apply <<EOF`` and whole-file writes through ``cat > path <<EOF`` or
+    ``tee path <<EOF``. A write outside the workspace (for example a ``/tmp`` scratch file) is
+    not code under review and is skipped. Edits made by scripts (``sed -i``, ``python``,
+    ``git apply file.patch``) carry no reviewable bytes in the command and stay uncaptured.
+    """
+
+    patches: list[str] = []
+    writes: list[JsonValue] = []
+    for prefix, suffix, body in _shell_heredocs(command):
+        if _SHELL_APPLY_PATCH.search(prefix):
+            # Codex intercepts a shell apply_patch and emits no post-tool event for it.
+            if event_name == "PreToolUse" and source is ObservationSource.CODEX_HOOK:
+                patches.append(body)
+            continue
+        if event_name != "PostToolUse":
+            continue
+        if _SHELL_GIT_APPLY.search(prefix):
+            patches.append(body)
+            continue
+        if _SHELL_WRITER.search(prefix) is None:
+            continue
+        target = _SHELL_REDIRECT.search(f"{prefix} {suffix}") or _SHELL_TEE_TARGET.search(prefix)
+        if target is None:
+            continue
+        path = target.group(2)
+        if _absolute_path_key(path) is None and cwd is not None and _absolute_path_key(cwd):
+            path = cwd.rstrip("/\\") + "/" + path
+        relative = workspace_relative_edit_path(path, workspace_locator)
+        if relative is None:
+            continue
+        writes.append({"path": relative, "content": body})
+    selected: list[tuple[ObservationContentKind, str, JsonValue]] = []
+    if patches:
+        selected.append(
+            (
+                ObservationContentKind.WORKSPACE_DIFF,
+                "patch",
+                f"# yoetz edit outcome: {outcome}\n# yoetz edit source: shell\n"
+                + "".join(_sanitize_patch_paths(patch, workspace_locator) for patch in patches),
+            )
+        )
+    if writes:
+        selected.append(
+            (
+                ObservationContentKind.CHANGED_FILE,
+                "changed-file",
+                {"edit_outcome": outcome, "edit_source": "shell", "writes": writes},
+            )
+        )
+    return selected
+
+
 def _visible_content_chunks(
     event_name: str,
     payload: Mapping[str, JsonValue],
@@ -1677,6 +1781,25 @@ def _visible_content_chunks(
         if edit is not None:
             add(*edit)
             edit_content = True
+    if event_name in {"PreToolUse", "PostToolUse"} and tool in _SHELL_TOOL_NAMES:
+        arguments = payload.get("tool_input")
+        command = arguments.get("command") if isinstance(arguments, Mapping) else None
+        if type(command) is str and "<<" in command:
+            cwd = payload.get("cwd")
+            for shell_edit in _shell_edit_contents(
+                command,
+                cwd=cwd if type(cwd) is str else None,
+                workspace_locator=workspace_locator,
+                event_name=event_name,
+                source=envelope.source,
+                outcome=(
+                    _edit_outcome(payload, envelope.source)
+                    if event_name == "PostToolUse"
+                    else "unknown"
+                ),
+            ):
+                # Additive: the shell call's own output remains ordinary tool output.
+                add(*shell_edit)
 
     if event_name == "UserPromptSubmit":
         add(

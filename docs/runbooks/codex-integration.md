@@ -1645,9 +1645,16 @@ source tests do not establish native host/platform acceptance.
 Codex `apply_patch` calls (including code-mode nested calls) enter the shared encrypted capture
 lane as workspace-diff content. Codex 0.157.x sends the patch as `tool_input.command` on both
 PreToolUse and PostToolUse; the older `patch`/`input` carriers are still read. The post-tool
-`Exit code: N` result prefix supplies the edit outcome and the structural `exit_status`. Generic
-command input does not become code evidence, and a patch applied through a shell command is not
-recognized as an edit. This capture uses the existing profileless Codex observation consent; users
+`Exit code: N` result prefix supplies the edit outcome and the structural `exit_status`. In code
+mode the outer `exec` cell has no hook payload, but each nested `tools.apply_patch("...")` call is
+dispatched through the tool registry and fires its own `apply_patch` hooks with the same shape, and
+each nested `tools.exec_command` fires `Bash` hooks with `tool_input.command`. A shell
+`apply_patch <<EOF` is intercepted by `exec_command` and fires only PreToolUse, so its patch is
+captured from that event with outcome `unknown`. Whole-file heredoc writes (`cat > path <<EOF`,
+`tee path <<EOF`) and `git apply <<EOF` are captured from the post-tool `Bash` event; writes outside
+the workspace, such as `/tmp` scratch files, are skipped. Edits made by `sed -i`, scripts or
+`git apply <file>` carry no edit bytes in the command and are not captured; other generic command
+input does not become code evidence. This capture uses the existing profileless Codex observation consent; users
 who granted it earlier now also have `apply_patch` text encrypted locally, while egress still follows
 the selected review recipe.
 

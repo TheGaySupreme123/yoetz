@@ -169,7 +169,9 @@ and AI-powered review/privacy capability and conformance tests.
     admission, generation fences and disclosure approval remain required. Claim-linked evidence
     wins selection first, then captured edits (newest first), then other captures, including before
     bounded object resolution; a selected capture outside the latest-256 envelope window is read by
-    exact content reference or disclosed as `content_unselected`. Authenticated
+    exact content reference or disclosed as `content_unselected`. Shell heredoc edits whose new
+    bytes are in the command (`apply_patch`/`git apply`/`cat >`/`tee` heredocs) are captured the same
+    way; script-mediated edits are not. Authenticated
     code is split into UTF-8-safe items within the existing per-item, item-count and total-byte caps;
     a delivered prefix reports `truncated_payload`, and excluded retained content reports
     `content_unselected`. This is not a fresh Git snapshot at check time: shell-mediated edits,

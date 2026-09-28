@@ -472,3 +472,189 @@ def test_unified_diff_headers_are_relativized_but_removed_lines_are_not() -> Non
     assert "diff --git a/src/a.py b/src/a.py\n" in result
     assert "--- literal removed line\n" in result
     assert "alice" not in result
+
+
+# --- Codex code mode and shell-mediated edits ---------------------------------------------
+#
+# Codex 0.157.1 code mode runs a ``custom_tool_call`` named ``exec`` whose JavaScript calls
+# ``tools.apply_patch("<patch>")`` or ``tools.exec_command({cmd})``. The outer ``exec`` has no
+# hook payload (its payload is ``ToolPayload::Custom`` and the default hook contract only
+# covers function payloads), while each nested call is dispatched through the same tool
+# registry and fires its own hooks: ``apply_patch`` with ``tool_input.command`` (the freeform
+# string becomes ``ToolPayload::Custom``) and ``Bash`` with ``tool_input.command`` for
+# ``exec_command`` (``core/src/tools/code_mode/mod.rs`` build_freeform_tool_payload,
+# ``core/src/tools/registry.rs``, ``core/tests/suite/hooks.rs`` code-mode cases). A shell
+# ``apply_patch <<EOF`` is intercepted by ``exec_command`` and returns output with no hook
+# command, so it has a PreToolUse ``Bash`` event and no PostToolUse.
+#
+# The patch and heredoc bodies below are taken from DeepSWE benchmark rollouts (Codex 0.157.1,
+# code mode, unified_exec), trimmed, with the container workspace replaced per OS.
+
+_KEA_CODE_MODE_PATCH = (
+    "*** Begin Patch\n"
+    "*** Update File: {ws}/src/types.ts\n"
+    "@@\n"
+    "   selectors: Record<string, Selector>\n"
+    "+  selectorHealth?: () => SelectorHealth\n"
+    "*** Update File: {ws}/src/kea/context.ts\n"
+    "@@\n"
+    "       debug: false,\n"
+    "+      atomicSelectors: false,\n"
+    "*** Update File: {ws}/src/kea/build.ts\n"
+    "@@\n"
+    "-    throw new Error(`[KEA] Circular build detected.`)\n"
+    "+    throw new Error(`[KEA] Circular dependency detected. Circular build detected.`)\n"
+    "*** End Patch"
+)
+_BANDIT_HEREDOC_WRITE = (
+    "cat > tests/unit/test_tainted_injection.py <<'PY'\n"
+    "# SPDX-License-Identifier: Apache-2.0\n"
+    "import ast\n"
+    "from bandit.plugins import tainted_injection\n"
+    "PY\n"
+    "cat > /tmp/bandit_taint_sample.py <<'PY'\n"
+    "import os\n"
+    "PY\n"
+    "python -m pytest -q tests/unit/test_tainted_injection.py"
+)
+
+
+@pytest.mark.parametrize("os_name", sorted(_WORKSPACES))
+def test_codex_code_mode_nested_apply_patch_is_captured(os_name: str, tmp_path: Path) -> None:
+    workspace = _WORKSPACES[os_name]
+    patch = _KEA_CODE_MODE_PATCH.replace("{ws}", workspace)
+    response = (
+        "Exit code: 0\nWall time: 0 seconds\nOutput:\nSuccess. Updated the following files:\n"
+        f"M {workspace}/src/types.ts\nM {workspace}/src/kea/context.ts\n"
+        f"M {workspace}/src/kea/build.ts\n"
+    )
+    payload = _codex("PostToolUse", workspace, patch, response)
+    payload["tool_use_id"] = "exec-cell-1:nested-3"
+    diff = dict(_chunks("PostToolUse", payload, tmp_path, source=_CODEX, workspace=workspace))[
+        ObservationContentKind.WORKSPACE_DIFF
+    ]
+    assert diff.startswith(b"# yoetz edit outcome: applied\n")
+    for header in (b"src/types.ts", b"src/kea/context.ts", b"src/kea/build.ts"):
+        assert b"*** Update File: " + header + b"\n" in diff
+    assert b"Circular dependency detected" in diff and b"alice" not in diff
+
+
+def _codex_bash(event: str, workspace: str, command: str) -> dict[str, JsonValue]:
+    payload = _codex(event, workspace, "", None)
+    payload["tool_name"] = "Bash"
+    payload["tool_input"] = {"command": command}
+    if event == "PostToolUse":
+        payload["tool_response"] = "1 passed in 0.12s\n"
+    return payload
+
+
+@pytest.mark.parametrize("os_name", sorted(_WORKSPACES))
+def test_codex_shell_apply_patch_heredoc_is_captured_from_its_only_hook(
+    os_name: str, tmp_path: Path
+) -> None:
+    workspace = _WORKSPACES[os_name]
+    command = "apply_patch <<'EOF'\n" + _patch(f"{workspace}/app/module.py") + "EOF"
+    pre = dict(
+        _chunks(
+            "PreToolUse",
+            _codex_bash("PreToolUse", workspace, command),
+            tmp_path / "pre",
+            source=_CODEX,
+            workspace=workspace,
+        )
+    )
+    diff = pre[ObservationContentKind.WORKSPACE_DIFF]
+    assert diff.startswith(b"# yoetz edit outcome: unknown\n# yoetz edit source: shell\n")
+    assert b"*** Update File: app/module.py\n" in diff and b"planted_bug" in diff
+    assert b"alice" not in diff
+    # Codex intercepts the shell patch, so a post event (if any host ever sent one) is not a
+    # second copy.
+    post = dict(
+        _chunks(
+            "PostToolUse",
+            _codex_bash("PostToolUse", workspace, command),
+            tmp_path / "post",
+            source=_CODEX,
+            workspace=workspace,
+        )
+    )
+    assert ObservationContentKind.WORKSPACE_DIFF not in post
+
+
+@pytest.mark.parametrize("os_name", sorted(_WORKSPACES))
+def test_codex_exec_command_heredoc_write_is_captured_and_scratch_files_skipped(
+    os_name: str, tmp_path: Path
+) -> None:
+    workspace = _WORKSPACES[os_name]
+    post = dict(
+        _chunks(
+            "PostToolUse",
+            _codex_bash("PostToolUse", workspace, _BANDIT_HEREDOC_WRITE),
+            tmp_path,
+            source=_CODEX,
+            workspace=workspace,
+        )
+    )
+    write = post[ObservationContentKind.CHANGED_FILE]
+    assert b'"path":"tests/unit/test_tainted_injection.py"' in write
+    assert b"from bandit.plugins import tainted_injection" in write
+    assert b"bandit_taint_sample" not in write and b"alice" not in write
+    # The shell call's own output stays ordinary tool output.
+    assert post[ObservationContentKind.TOOL_OUTPUT] == b"1 passed in 0.12s\n"
+
+
+@pytest.mark.parametrize(
+    ("source", "tool", "event"),
+    [(_CLAUDE, "Bash", "PostToolUse"), (_CURSOR, "Shell", "postToolUse")],
+)
+def test_claude_and_cursor_shell_heredoc_edits_are_captured(
+    source: ObservationSource, tool: str, event: str, tmp_path: Path
+) -> None:
+    workspace = _WORKSPACES["linux"]
+    command = (
+        f"cd {workspace} && git apply --3way <<'EOF'\n"
+        "diff --git a/app/module.py b/app/module.py\n"
+        f"--- {workspace}/app/module.py\n"
+        f"+++ {workspace}/app/module.py\n"
+        "@@ -1 +1 @@\n"
+        "-    return validate(request)\n"
+        "+    return planted_bug(request)\n"
+        "EOF\n"
+        f"tee {workspace}/app/notes.md <<'EOF'\nplanted note\nEOF"
+    )
+    payload: dict[str, JsonValue] = {
+        "hook_event_name": event,
+        "tool_name": tool,
+        "tool_use_id": "shell-1",
+        "cwd": workspace,
+        "tool_input": {"command": command},
+        "tool_response": {"stdout": "", "stderr": "", "interrupted": False},
+    }
+    post = dict(_chunks("PostToolUse", payload, tmp_path, source=source, workspace=workspace))
+    diff = post[ObservationContentKind.WORKSPACE_DIFF]
+    assert b"# yoetz edit outcome: applied\n" in diff
+    assert b"--- app/module.py\n+++ app/module.py\n" in diff and b"planted_bug" in diff
+    write = post[ObservationContentKind.CHANGED_FILE]
+    assert b'"path":"app/notes.md"' in write and b"planted note" in write
+    assert b"alice" not in diff + write
+
+
+def test_script_mediated_edits_carry_no_reviewable_bytes(tmp_path: Path) -> None:
+    """Recorded gap: sed/python/``git apply file`` edits have no edit bytes in the command."""
+
+    workspace = _WORKSPACES["linux"]
+    for command in (
+        "sed -i 's/validate/planted_bug/' app/module.py",
+        "python - <<'PY'\nfrom pathlib import Path\nPath('app/module.py').write_text('x')\nPY",
+        "git apply /tmp/fix.patch",
+    ):
+        post = dict(
+            _chunks(
+                "PostToolUse",
+                _codex_bash("PostToolUse", workspace, command),
+                tmp_path / str(abs(hash(command))),
+                source=_CODEX,
+                workspace=workspace,
+            )
+        )
+        assert set(post) == {ObservationContentKind.TOOL_OUTPUT}

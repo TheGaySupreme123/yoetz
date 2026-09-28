@@ -1357,7 +1357,9 @@ edit fields are kept (`file_path`/`notebook_path` as a relative `path`, `old_str
 `edits[]`, `content`, `new_source`, cell identifiers) plus the result's line-numbered
 `structuredPatch`; the result's `filePath`, `originalFile` and unknown fields are never kept. No
 Bash call is needed: the dedicated edit tools are captured directly. `PostToolUseFailure` marks the
-edit `failed`.
+edit `failed`. Shell heredoc edits (`cat > path <<EOF`, `tee path <<EOF`, `git apply <<EOF`) are also captured
+from the post-tool shell event as changed-file or workspace-diff content, marked
+`edit_source: shell`; edits made by `sed -i`, scripts or `git apply <file>` are not captured.
 
 The capture runs from the post-tool event only, once per edit: the pre-tool proposal is neither
 duplicated nor kept as raw tool input. Each captured edit names the host-reported outcome

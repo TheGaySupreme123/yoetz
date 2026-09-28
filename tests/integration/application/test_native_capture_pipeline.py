@@ -2722,3 +2722,157 @@ async def test_early_planted_edit_outranks_many_captured_outputs_in_the_packet(
     assert str(project.resolve()) not in prepared
     # Competing output still exceeds the caps, and that loss stays disclosed.
     assert "content_unselected" in semantic.packet.coverage.known_gaps
+
+
+@pytest.mark.anyio
+async def test_codex_code_mode_and_shell_edits_reach_the_packet(tmp_path: Path) -> None:
+    """Codex 0.157.1 code mode: nested apply_patch, shell apply_patch and heredoc writes."""
+
+    raw_session = "codex-code-mode"
+    (
+        project,
+        workspace,
+        _session_commitment,
+        local,
+        _task_observation,
+        ledger,
+        runtime,
+        _coordinator,
+        _client,
+        connect,
+    ) = await _pipeline(tmp_path, codex_session_id=raw_session, profile=None)
+    root = str(project.resolve())
+
+    def run_async(factory: Callable[[], Awaitable[object]]) -> object:
+        return asyncio.run(factory())
+
+    def run_hook(event_name: str, payload: Mapping[str, object]) -> int:
+        return handle_observe(
+            event_name=event_name,
+            stdin_bytes=canonical_encode(cast(CanonicalJsonValue, payload)),
+            workspace=str(project),
+            _state=tmp_path / "state",
+            stdout=io.BytesIO(),
+            connect=cast(object, connect),  # type: ignore[arg-type]
+            run_async=run_async,
+            source=ObservationSource.CODEX_HOOK,
+        )
+
+    base: dict[str, object] = {
+        "session_id": raw_session,
+        "turn_id": "turn-1",
+        "cwd": root,
+        "model": "gpt-5.5-codex",
+        "permission_mode": "default",
+    }
+    nested_patch = (
+        f"*** Begin Patch\n*** Update File: {root}/src/kea/build.ts\n@@\n"
+        "-    throw new Error(`[KEA] Circular build detected.`)\n"
+        "+    throw new Error(`planted_nested_bug`)\n*** End Patch"
+    )
+    shell_patch = (
+        "apply_patch <<'EOF'\n*** Begin Patch\n"
+        f"*** Update File: {root}/src/kea/context.ts\n@@\n"
+        "-      debug: false,\n+      debug: planted_shell_patch_bug,\n*** End Patch\nEOF"
+    )
+    heredoc_write = (
+        "cat > tests/test_planted.py <<'PY'\nassert planted_heredoc_bug()\nPY\n"
+        "python -m pytest -q tests/test_planted.py"
+    )
+    events: list[tuple[str, dict[str, object]]] = [
+        # Nested ``tools.apply_patch`` inside a code-mode ``exec`` cell: Pre and Post fire.
+        (
+            "PreToolUse",
+            {
+                **base,
+                "hook_event_name": "PreToolUse",
+                "tool_name": "apply_patch",
+                "tool_use_id": "nested-1",
+                "tool_input": {"command": nested_patch},
+            },
+        ),
+        (
+            "PostToolUse",
+            {
+                **base,
+                "hook_event_name": "PostToolUse",
+                "tool_name": "apply_patch",
+                "tool_use_id": "nested-1",
+                "tool_input": {"command": nested_patch},
+                "tool_response": "Exit code: 0\nWall time: 0 seconds\nOutput:\n"
+                f"Success. Updated the following files:\nM {root}/src/kea/build.ts\n",
+            },
+        ),
+        # Shell ``apply_patch`` through ``tools.exec_command``: intercepted, Pre only.
+        (
+            "PreToolUse",
+            {
+                **base,
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_use_id": "nested-2",
+                "tool_input": {"command": shell_patch},
+            },
+        ),
+        # Heredoc whole-file write through ``tools.exec_command``.
+        (
+            "PreToolUse",
+            {
+                **base,
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_use_id": "nested-3",
+                "tool_input": {"command": heredoc_write},
+            },
+        ),
+        (
+            "PostToolUse",
+            {
+                **base,
+                "hook_event_name": "PostToolUse",
+                "tool_name": "Bash",
+                "tool_use_id": "nested-3",
+                "tool_input": {"command": heredoc_write},
+                "tool_response": "1 passed in 0.01s\n",
+            },
+        ),
+    ]
+    for event_name, payload in events:
+        assert await asyncio.to_thread(run_hook, event_name, payload) == 0
+
+    frontier = await ledger.load_frontier()
+    frozen = await ledger.freeze_case(
+        runtime.session_id,
+        cast(str, runtime.writer_id),
+        frontier.sequence,
+        _ids(IdKind.REQUEST, 7),
+        _ZERO_DIGEST,
+    )
+    assert isinstance(frozen, FrozenCase)
+    resolved = await resolve_captured_semantic_content(
+        runtime=runtime,
+        frozen=frozen,
+        workspace_commitment=workspace,
+        local_observation=local,
+    )
+    semantic = build_semantic_case(
+        case_id="cas_10000000-0000-4000-8000-000000000007",
+        frozen_case=frozen.case,
+        dependency_digest=frozen.lease.dependency_digest,
+        findings=(),
+        review_context_profile=ReviewContextProfile.EXPANDED,
+        review_selection=ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED),
+        policy_id="research-evidence",
+        policy_version="0.1.0",
+        captured_content=resolved.content,
+        captured_content_scope=resolved.scope,
+        captured_content_gaps=resolved.gaps,
+    )
+    prepared = semantic_case_to_prepared_payload(
+        semantic, {item.item_id for item in semantic.items}
+    ).decode("utf-8")
+    for marker in ("planted_nested_bug", "planted_shell_patch_bug", "planted_heredoc_bug"):
+        assert marker in prepared, marker
+    assert prepared.count("planted_nested_bug") == 1, "nested patch captured once"
+    assert "*** Update File: src/kea/build.ts" in prepared
+    assert root not in prepared
