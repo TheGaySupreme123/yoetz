@@ -209,3 +209,45 @@ def test_disposal_waits_for_the_observed_process_lease_to_close(
         assert runtimes.prune_release_runtimes(prefix, wait_seconds=1.0) == (1, 0)
     assert len(observed) == 1
     assert not target.exists()
+
+
+def test_snapshot_publication_supports_filesystems_requiring_writable_rename_source(
+    prefix: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rename = Path.rename
+
+    def require_writable(path: Path, target: str | Path) -> Path:
+        if path.name.startswith(".creating-"):
+            assert path.stat().st_mode & 0o200, "macOS rename requires a writable staging root"
+            # Only the private root remains writable; payloads are already sealed.
+            assert not (path / "pyvenv.cfg").stat().st_mode & 0o222
+        return rename(path, target)
+
+    monkeypatch.setattr(Path, "rename", require_writable)
+    target = runtimes.prepare_release_runtime(prefix)
+    assert not target.stat().st_mode & 0o222
+    assert runtimes.prepare_release_runtime(prefix) == target
+
+
+def test_failed_root_seal_removes_only_new_generation_and_can_retry(
+    prefix: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    chmod = Path.chmod
+    failed = False
+
+    def fail_once(path: Path, mode: int, *, follow_symlinks: bool = True) -> None:
+        nonlocal failed
+        if not failed and len(path.name) == 64 and mode == 0o500:
+            failed = True
+            raise PermissionError(13, "synthetic seal refusal")
+        chmod(path, mode, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "chmod", fail_once)
+    with pytest.raises(runtimes.ReleaseRuntimeIOError) as caught:
+        runtimes.prepare_release_runtime(prefix)
+    assert caught.value.phase == "snapshot_publish"
+    manager = prefix.parent / f".{prefix.name}-releases"
+    assert sorted(p.name for p in manager.iterdir()) == [".lock"]
+    assert (prefix / "pyvenv.cfg").is_file()
+    target = runtimes.prepare_release_runtime(prefix)
+    assert not target.stat().st_mode & 0o222

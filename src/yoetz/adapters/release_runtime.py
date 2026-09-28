@@ -248,11 +248,20 @@ def _prepare_locked(prefix: Path, root: Path) -> Path:
             for path in sorted(temporary.rglob("*"), reverse=True):
                 if path.is_dir():
                     path.chmod(0o500)
-            temporary.chmod(0o500)
         except OSError as error:
             raise ReleaseRuntimeIOError(error, "snapshot_seal") from None
         try:
+            # macOS may require a writable source directory for rename. Keep only the
+            # private staging root writable until publication, under the manager lock.
+            # Consumers cannot acquire that lock or a lease until sealing completes.
             temporary.rename(target)
+            try:
+                target.chmod(0o500)
+            except OSError:
+                # This call created the unpublished/unleased generation. Remove it rather
+                # than leave a writable root that a later prepare could mistake for ready.
+                _remove_copy(target)
+                raise
         except OSError as error:
             raise ReleaseRuntimeIOError(error, "snapshot_publish") from None
         return target
