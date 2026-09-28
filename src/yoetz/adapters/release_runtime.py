@@ -21,7 +21,7 @@ import tempfile
 import time
 from collections.abc import Generator
 from pathlib import Path
-from typing import Final, cast
+from typing import Final, Literal, cast
 
 _MARKER: Final = "yoetz-release-runtime.json"
 _SCHEMA: Final = "yoetz.release-runtime/1"
@@ -36,6 +36,14 @@ _original_interpreter: str | None = None
 
 class ReleaseRuntimeError(ValueError):
     """A bounded refusal, never an installation path or package-manager output."""
+
+
+class ReleaseRuntimeIOError(OSError):
+    """A closed operation label plus errno; never retains an exception message or path."""
+
+    def __init__(self, error: OSError, phase: Literal["snapshot", "lease", "exec"]) -> None:
+        super().__init__(error.errno, "release_runtime_io")
+        self.phase = phase
 
 
 def _private_directory(path: Path, *, create: bool = False) -> None:
@@ -385,10 +393,17 @@ def enter_release_runtime(arguments: list[str]) -> None:
     if sys.prefix == sys.base_prefix or not package.is_relative_to(prefix.resolve()):
         return
     with release_update_lock(prefix) as root:
-        target = _prepare_locked(prefix, root)
+        try:
+            target = _prepare_locked(prefix, root)
+        except OSError as error:
+            raise ReleaseRuntimeIOError(error, "snapshot") from None
         fd = _open_lock(target / _LEASE)
-        fcntl.flock(fd, fcntl.LOCK_SH)
-        os.set_inheritable(fd, True)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH)
+            os.set_inheritable(fd, True)
+        except OSError as error:
+            os.close(fd)
+            raise ReleaseRuntimeIOError(error, "lease") from None
         try:
             with contextlib.suppress(OSError, ReleaseRuntimeError):
                 _prune_locked(root, keep=target)
