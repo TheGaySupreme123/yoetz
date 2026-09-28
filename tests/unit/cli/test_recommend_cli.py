@@ -97,7 +97,9 @@ def test_accept_observation_writes_config_and_records_decision(
     assert "[observation] enabled = true" in result.stdout
     assert "restart the Yoetz service" in result.stdout
     assert tomllib.loads(config_path.read_text(encoding="utf-8"))["observation"] == {
-        "enabled": True
+        "enabled": True,
+        "semantic_advice_enabled": True,
+        "semantic_advice_min_interval_seconds": 180,
     }
     state = load_recommendation_state(root=tmp_path)
     assert state.decisions["observation-enabled"].decision == "accepted"
@@ -130,7 +132,9 @@ def test_accept_reports_applied_change_when_decision_record_fails(
     assert "recommendation_error: recommendation_store_write_failed" in result.output
     assert "the decision could not be recorded" in result.output
     assert tomllib.loads(config_path.read_text(encoding="utf-8"))["observation"] == {
-        "enabled": True
+        "enabled": True,
+        "semantic_advice_enabled": True,
+        "semantic_advice_min_interval_seconds": 180,
     }
 
 
