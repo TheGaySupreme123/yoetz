@@ -826,7 +826,8 @@ exact task, workspace, host/Yoetz session, source generation, tool-call correlat
 object kind, and digest. Codex session-stream records remain outside the native ticket lane and are
 excluded from AI-powered review selection. Generic tool input and path/locator content are excluded from
 AI-powered review selection. Recognized `apply_patch` arguments are captured as workspace-diff
-content; recognized edit/write fields use changed-file content under the same input-byte limits.
+content from the post-tool event, with workspace-relative locators and the host-reported outcome
+(see "Reviewable native edits").
 Encrypted capture and AI-powered review disclosure have separate authority: selecting these
 bytes into a frozen AI-powered review case still requires the effective repository privacy grant and
 the independently authorized provider attempt.
@@ -1641,16 +1642,34 @@ source tests do not establish native host/platform acceptance.
 
 ### Reviewable native edits
 
-Recognized visible patch, edit and write arguments enter the shared encrypted capture lane as
-workspace-diff or changed-file content. The adapter keeps only public edit fields, removes absolute
-path locators from edit metadata, and retains the existing capture consent, secret scanning and
-input-byte limits. A pre-tool patch describes a proposed edit; it does not prove application or
-current repository state. Generic command input does not become code evidence.
+Codex `apply_patch` calls (including code-mode nested calls) enter the shared encrypted capture
+lane as workspace-diff content. Codex 0.157.x sends the patch as `tool_input.command` on both
+PreToolUse and PostToolUse; the older `patch`/`input` carriers are still read. The post-tool
+`Exit code: N` result prefix supplies the edit outcome and the structural `exit_status`. Generic
+command input does not become code evidence, and a patch applied through a shell command is not
+recognized as an edit. This capture uses the existing profileless Codex observation consent; users
+who granted it earlier now also have `apply_patch` text encrypted locally, while egress still follows
+the selected review recipe.
 
-Claim-linked evidence is selected before unrelated captures. Retained code is split into bounded
-UTF-8 excerpts, with omitted content and truncated prefixes disclosed under the existing count and
-byte limits. These rules apply on macOS, Linux and Windows through WSL 2; they add no OS-specific
-filesystem lookup. Hooks do not create a fresh check-time Git diff. Shell-mediated edits, missing
-capture and stale code still require explicit content/state evidence; bounded packet inclusion does
-not prove that the reviewer detects a defect. Pause, revoke and content-capture disable continue to
-stop admission through the existing shared controls.
+The capture runs from the post-tool event only, once per edit: the pre-tool proposal is neither
+duplicated nor kept as raw tool input. Each captured edit names the host-reported outcome
+(`applied`, `failed` or `unknown`), so a rejected or unconfirmed edit is never presented as applied
+code. Every file locator is made workspace-relative; a locator outside the workspace, a
+home-relative or drive-relative locator, or any `..` path is replaced by `<outside-workspace>` or
+dropped. The rule is lexical and identical on macOS, Linux and Windows through WSL 2: POSIX
+(`/home/...`, `/Users/...`), Windows drive (`C:\...`), UNC (`\\server\share\...`) and WSL
+mount (`/mnt/c/...`) spellings are compared, with drive, mount and UNC forms matched
+case-insensitively, and no filesystem lookup is made. Edits use the ordinary capture caps (at most
+16 chunks and about 680 KB per event), not the routine-output budgets, and remain subject to the
+existing capture consent, secret scanning and outbox admission.
+
+Selection ranks claim-linked evidence first, then captured edits (newest first), then other
+captured output, so later test logs or file reads cannot starve a patch. A selected capture whose
+envelope has aged out of the latest-256 session window is still read by exact content reference;
+one that cannot be reached is disclosed as `content_unselected`. Identical retained bytes are
+selected once. Retained code is split into bounded UTF-8 excerpts, with omitted content and
+truncated prefixes disclosed under the existing count and byte limits. Hooks do not create a fresh
+check-time Git diff. Shell-mediated edits, missing capture and stale code still require explicit
+content/state evidence; bounded packet inclusion does not prove that the reviewer detects a
+defect. Pause, revoke and content-capture disable continue to stop admission through the existing
+shared controls.

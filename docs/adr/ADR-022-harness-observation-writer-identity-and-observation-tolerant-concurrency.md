@@ -553,7 +553,7 @@ limits remain in the host integration runbooks.
     and AI-powered review selection. Its session-stream records remain outside this native ticket
     lane and are excluded from AI-powered review selection. Generic tool input and path/locator content are
     excluded from AI-powered review selection. Recognized visible edit arguments are projected
-    separately as diff/changed-file content under the same capture and input-byte limits (ADR-006). Captured-content staging does not authorize egress: AI-powered review
+    separately as diff/changed-file content from the post-tool event, with workspace-relative locators (ADR-006). Captured-content staging does not authorize egress: AI-powered review
     case selection still requires effective repository privacy authority and an independently
     authorized provider/attempt route. Codex's historical session-stream path otherwise remains
     unchanged, while the shared generation, operation-replay, and teardown repairs apply to all

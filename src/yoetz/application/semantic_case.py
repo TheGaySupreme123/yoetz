@@ -1638,9 +1638,21 @@ def build_semantic_case(
                 )
                 else 1,
                 0 if str(pair[0]) in captured_groups else 1,
+                # Captured code edits are the change under review (#883): rank them ahead of
+                # other captured tool output, newest first, so a patch cannot be starved by
+                # test logs or file reads competing for the shared excerpt cap.
+                0
+                if str(pair[0]) in captured_groups
+                and captured_groups[str(pair[0])].source_kind == "diff"
+                else 1,
+                -pair[1].source_frontier
+                if str(pair[0]) in captured_groups
+                and captured_groups[str(pair[0])].source_kind == "diff"
+                else 0,
                 str(pair[0]).encode("ascii"),
             ),
         )
+        admitted_capture_digests: set[bytes] = set()
         processed_evidence_refs: set[str] = set()
         captured_rows_omitted_by_limit: set[str] = set()
         for evidence_id, record in evidence_rows:
@@ -1713,6 +1725,15 @@ def build_semantic_case(
                 continue
             digest_provenance: ExcerptDigestProvenance | None = None
             if captured_group is not None:
+                capture_digest = hashlib.sha256(captured_group.content).digest()
+                if capture_digest in admitted_capture_digests:
+                    # Identical retained bytes (for example a patch captured by an older build
+                    # on both its pre- and post-tool events) are one excerpt, not two.
+                    omissions.append(
+                        _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_selected")
+                    )
+                    continue
+                admitted_capture_digests.add(capture_digest)
                 # The service-authenticated inner bytes are the only source that may populate a
                 # captured AI-powered review excerpt. Their digest provenance is retained separately from
                 # the digest of the selection-clipped item below.

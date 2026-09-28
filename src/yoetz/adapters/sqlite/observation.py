@@ -2279,6 +2279,61 @@ class SqliteObservationStore:
         ).fetchall()
         return self._envelopes_from_rows(rows)
 
+    def list_envelopes_for_content_refs(
+        self,
+        workspace: str,
+        session_commitment: str,
+        object_ids: tuple[str, ...],
+        *,
+        limit: int = 64,
+    ) -> tuple[ObservationEnvelope, ...]:
+        """Return this session's envelopes that reference any of ``object_ids`` (#883).
+
+        AI-powered review preselects captured objects from the task ledger, but the ordinary
+        envelope read is a latest-256 window. This bounded lookup reaches an older selected
+        capture by exact content reference without widening the recency window.
+        """
+
+        if type(limit) is not int or not 1 <= limit <= 256:
+            raise ValueError("observation_envelope_limit_invalid")
+        wanted = frozenset(item for item in object_ids if type(item) is str)
+        if not wanted or len(wanted) > 256:
+            return ()
+        rows = self._db.execute(
+            "SELECT id, content_refs_json FROM observation_events "
+            "WHERE workspace_commitment = ? AND session_commitment = ? "
+            "AND content_refs_json != ? ORDER BY id DESC",
+            (workspace, session_commitment, b"[]"),
+        ).fetchall()
+        matched: list[int] = []
+        for row in cast("Iterable[tuple[object, object]]", rows):
+            row_id, refs_blob = row
+            if type(row_id) is not int:
+                continue
+            if type(refs_blob) is bytes:
+                raw = refs_blob
+            elif type(refs_blob) is str:
+                raw = refs_blob.encode("utf-8")
+            else:
+                continue
+            try:
+                refs = strict_json_parse(raw)
+            except Exception:
+                continue
+            if type(refs) is list and wanted.intersection(ref for ref in refs if type(ref) is str):
+                matched.append(row_id)
+                if len(matched) >= limit:
+                    break
+        if not matched:
+            return ()
+        placeholders = ",".join("?" for _ in matched)
+        selected = self._db.execute(
+            f"SELECT structural_json FROM observation_events WHERE id IN ({placeholders}) "
+            "ORDER BY id ASC",
+            tuple(matched),
+        ).fetchall()
+        return self._envelopes_from_rows(selected)
+
     async def status_for_session(
         self, workspace: str, session_commitment: str
     ) -> ObservationStatus:

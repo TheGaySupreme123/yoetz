@@ -897,11 +897,13 @@ async def test_resolver_admits_multipart_groups_atomically_under_part_bound() ->
     )
 
     # Four in-scope object IDs are metadata candidates, but the two-part group
-    # is the atomic semantic unit. The second group is withheld as a whole;
-    # no fragment is opened merely because its ID sorts early.
+    # is the atomic semantic unit. The captured workspace diff outranks the tool
+    # output (#883); the tool-output group is withheld as a whole and no
+    # fragment of it is opened merely because its ID sorts early.
     assert len(resolved.content) == 2
-    assert b"group-a-0:" in resolved.content[0].content
-    assert b"planted-defect-marker" in b"".join(item.content for item in resolved.content)
+    assert b"group-b-0:" in resolved.content[0].content
+    assert b"group-b-1:" in resolved.content[1].content
+    assert b"group-a" not in b"".join(item.content for item in resolved.content)
     assert len(objects.resolve_calls) == 2
     assert objects.open_calls == 2
     assert "content_unselected" in resolved.gaps
@@ -1292,4 +1294,62 @@ async def test_linked_multipart_code_group_wins_bounded_resolver_admission() -> 
     assert len(resolved.content) == 2
     assert b"".join(item.content for item in resolved.content) == b"group-b-0:group-b-1:"
     assert objects.open_calls == 2
+    assert "content_unselected" in resolved.gaps
+
+
+class _WindowedObservation(_Observation):
+    """The selected capture's envelope has aged out of the latest-256 session window."""
+
+    def __init__(self, base: _Observation, *, by_ref: bool) -> None:
+        super().__init__(base.envelope, base.manifest, profiles=base.profiles)
+        self.by_ref = by_ref
+        self.ref_calls: list[tuple[str, ...]] = []
+
+    def list_envelopes_for_session(
+        self, _workspace: str, _session_commitment: str, *, limit: int | None = None
+    ) -> tuple[ObservationEnvelope, ...]:
+        assert limit == 256
+        return ()
+
+    def list_envelopes_for_content_refs(
+        self, _workspace: str, session_commitment: str, object_ids: tuple[str, ...]
+    ) -> tuple[ObservationEnvelope, ...]:
+        self.ref_calls.append(object_ids)
+        if not self.by_ref or session_commitment != _SESSION_COMMITMENT:
+            return ()
+        return tuple(
+            self.envelope for ref in self.envelope.content_object_refs if ref in object_ids
+        )[:1]
+
+
+@pytest.mark.anyio
+async def test_resolver_reaches_selected_capture_outside_latest_envelope_window() -> None:
+    frozen, runtime, _objects, observation, envelope = _fixture()
+    windowed = _WindowedObservation(observation, by_ref=True)
+    runtime = replace(runtime, observation=cast(TaskObservationPort, windowed))
+
+    resolved = await resolve_captured_semantic_content(
+        runtime=runtime, frozen=frozen, workspace_commitment=_WORKSPACE
+    )
+
+    assert windowed.ref_calls == [tuple(envelope.content_object_refs)]
+    assert resolved.gaps == ()
+    assert [part.content for part in resolved.content] == [
+        b"planted-defect-marker: missing validation"
+    ]
+
+
+@pytest.mark.anyio
+async def test_resolver_discloses_selected_capture_it_cannot_reach() -> None:
+    frozen, runtime, _objects, observation, _envelope = _fixture()
+    runtime = replace(
+        runtime,
+        observation=cast(TaskObservationPort, _WindowedObservation(observation, by_ref=False)),
+    )
+
+    resolved = await resolve_captured_semantic_content(
+        runtime=runtime, frozen=frozen, workspace_commitment=_WORKSPACE
+    )
+
+    assert resolved.content == ()
     assert "content_unselected" in resolved.gaps

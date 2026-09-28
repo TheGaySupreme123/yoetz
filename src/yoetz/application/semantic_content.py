@@ -509,6 +509,20 @@ def _sort_gaps(gaps: set[str]) -> tuple[str, ...]:
     return tuple(sorted(gaps, key=str.encode))[:16]
 
 
+_EDIT_CONTENT_KINDS: Final = frozenset(
+    {ObservationContentKind.WORKSPACE_DIFF, ObservationContentKind.CHANGED_FILE}
+)
+_EDIT_CAPTURE_DESCRIPTIONS: Final = tuple(
+    f"Observation-captured {kind.value} bytes " for kind in sorted(_EDIT_CONTENT_KINDS)
+)
+
+
+def _is_edit_capture(payload: EvidenceRecordedPayload) -> bool:
+    """Return the service-authored edit-kind hint of one materialized captured row."""
+
+    return (payload.description or "").startswith(_EDIT_CAPTURE_DESCRIPTIONS)
+
+
 def _projected_candidates(
     frozen: FrozenCase,
     *,
@@ -608,8 +622,14 @@ async def _session_envelopes(
     session_id: str,
     task_id: str,
     gaps: set[str],
+    content_refs: frozenset[str] = frozenset(),
 ) -> tuple[ObservationEnvelope, ...]:
-    """Read envelopes for the exact routed task session and reattach route."""
+    """Read envelopes for the exact routed task session and reattach route.
+
+    The latest-256 window bounds the ordinary read. Selected captured objects referenced only by
+    older envelopes (for example, edits made early in a long session) are then read by exact
+    content reference, so recency never silently drops an already-selected capture.
+    """
 
     try:
         session_commitment = _session_commitment_for_runtime(
@@ -657,6 +677,35 @@ async def _session_envelopes(
     )
     if len(envelopes) != len(loaded_items):
         gaps.add(ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
+    referenced = {ref for item in envelopes for ref in item.content_object_refs}
+    missing = content_refs - referenced
+    if missing:
+        list_for_refs = cast(
+            Callable[..., object] | None,
+            getattr(observation, "list_envelopes_for_content_refs", None),
+        )
+        older: object = ()
+        if callable(list_for_refs):
+            try:
+                older = list_for_refs(
+                    workspace,
+                    session_commitment,
+                    tuple(sorted(missing, key=str.encode)),
+                )
+            except Exception:
+                older = ()
+        known = {item.source_identity for item in envelopes}
+        extra = tuple(
+            item
+            for item in (cast(tuple[object, ...], older) if type(older) is tuple else ())
+            if type(item) is ObservationEnvelope
+            and item.session_commitment == session_commitment
+            and item.source_identity not in known
+        )
+        envelopes = (*envelopes, *extra)
+        if missing - {ref for item in extra for ref in item.content_object_refs}:
+            # Disclose selected captures that no bounded read could reach.
+            gaps.add(ObservationGapCode.CONTENT_UNSELECTED.value)
     return tuple(
         sorted(
             envelopes,
@@ -785,11 +834,26 @@ async def resolve_captured_semantic_content(
         if claim.payload is not None
         for ref in claim.payload.supporting_refs
     }
+    # Captured code edits (workspace diffs and changed files) outrank other captures: they are
+    # the change under review (#883). The kind hint is the service-authored materialization
+    # description; the manifest check below still authenticates the actual kind. Newer
+    # edits win among edits, so the latest edit of a file is preferred under the cap.
+    object_frontier = {
+        object_id: max(row[2].source_frontier for row in rows)
+        for object_id, rows in candidates.items()
+    }
+    edit_objects = frozenset(
+        object_id
+        for object_id, rows in candidates.items()
+        if any(_is_edit_capture(row[1]) for row in rows)
+    )
     selected_objects = tuple(
         sorted(
             candidates,
             key=lambda object_id: (
                 0 if any(row[0] in linked_evidence for row in candidates[object_id]) else 1,
+                0 if object_id in edit_objects else 1,
+                -object_frontier[object_id] if object_id in edit_objects else 0,
                 object_id.encode("ascii"),
             ),
         )
@@ -813,6 +877,7 @@ async def resolve_captured_semantic_content(
         session_id=runtime.session_id,
         task_id=runtime.task_id,
         gaps=gaps,
+        content_refs=frozenset(selected_objects),
     )
     if codex_historical_candidate:
         # Only this exact source/session route can activate the profileless
@@ -1009,6 +1074,10 @@ async def resolve_captured_semantic_content(
     complete_groups.sort(
         key=lambda rows: (
             0 if any(row[3] in linked_evidence for row in rows) else 1,
+            0 if rows[0][-1].content_kind in _EDIT_CONTENT_KINDS else 1,
+            -max(object_frontier.get(row[4], 0) for row in rows)
+            if rows[0][-1].content_kind in _EDIT_CONTENT_KINDS
+            else 0,
             rows[0][2].encode("ascii"),
             rows[0][1].encode("ascii"),
             rows[0][-1].content_kind.value.encode("ascii"),

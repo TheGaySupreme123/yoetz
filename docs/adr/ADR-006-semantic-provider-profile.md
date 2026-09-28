@@ -161,11 +161,15 @@ and AI-powered review/privacy capability and conformance tests.
     `custom` may select more *already recorded* in-scope material, but no profile grants ambient
     repository access or defeats the existing item/case caps.
     Native edit arguments from Codex, Claude Code and Cursor may enter this lane as dedicated
-    diff/changed-file content, using only recognized visible patch or replacement fields. Unknown
-    nested fields and absolute path locators are excluded from edit-object metadata. Pre-tool edits
-    describe intent, not proof of successful application. Capture consent, secret scanning, pressure
-    limits, generation fences and disclosure approval remain required. Claim-linked evidence wins
-    selection before unrelated captures, including before bounded object resolution. Authenticated
+    diff/changed-file content, using only recognized visible patch or replacement fields, captured
+    once from the post-tool event and labelled with the host-reported outcome (`applied`, `failed`
+    or `unknown`). Unknown nested fields are excluded, and every file locator in the edit, including
+    patch headers, is made workspace-relative or masked as `<outside-workspace>` (POSIX, Windows
+    drive, UNC and WSL `/mnt/<drive>` spellings alike). Capture consent, secret scanning, outbox
+    admission, generation fences and disclosure approval remain required. Claim-linked evidence
+    wins selection first, then captured edits (newest first), then other captures, including before
+    bounded object resolution; a selected capture outside the latest-256 envelope window is read by
+    exact content reference or disclosed as `content_unselected`. Authenticated
     code is split into UTF-8-safe items within the existing per-item, item-count and total-byte caps;
     a delivered prefix reports `truncated_payload`, and excluded retained content reports
     `content_unselected`. This is not a fresh Git snapshot at check time: shell-mediated edits,

@@ -6785,9 +6785,12 @@ check did not return. Resolved history does not remove receipt coverage limitati
 ### Native edit evidence selection
 
 Dedicated visible edit arguments may be retained as `workspace_diff` / changed-file capture content
-through the existing observation contract. This does not admit generic command input or ambient
-repository reads. The shared resolver prioritizes claim-linked captured groups before unrelated
-objects; the builder also prioritizes claim/assessment-linked evidence. Authenticated code uses
-bounded UTF-8 chunks and preserves `content_unselected` and `truncated_payload` coverage when caps
-omit bytes. Pre-tool intent, successful application and current repository state remain distinct.
+through the existing observation contract, once per edit from the post-tool event, with
+workspace-relative locators and an `applied`/`failed`/`unknown` outcome label. This does not admit
+generic command input or ambient repository reads. The shared resolver and the builder rank
+claim/assessment-linked evidence first, then captured edits (newest first), then other captures;
+a selected capture outside the latest-256 envelope window is read by exact content reference.
+Authenticated code uses bounded UTF-8 chunks and preserves `content_unselected` and
+`truncated_payload` coverage when caps omit bytes. Successful application and current repository
+state remain distinct.
 See ADR-006 and the three host integration runbooks for capture and disclosure boundaries.

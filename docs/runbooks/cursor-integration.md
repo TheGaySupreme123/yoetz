@@ -1485,16 +1485,33 @@ source tests do not establish native host/platform acceptance.
 
 ### Reviewable native edits
 
-Recognized visible patch, edit and write arguments enter the shared encrypted capture lane as
-workspace-diff or changed-file content. The adapter keeps only public edit fields, removes absolute
-path locators from edit metadata, and retains the existing capture consent, secret scanning and
-input-byte limits. A pre-tool patch describes a proposed edit; it does not prove application or
-current repository state. Generic command input does not become code evidence.
+With the ordinary content profile enabled, Cursor `Write` calls (Cursor's reported file-edit tool)
+enter the shared encrypted capture lane as changed-file content from `postToolUse`; only the
+public path and replacement fields (`path`/`file_path`/`target_file`, `contents`/`content`,
+`old_string`/`new_string`, `edits[]`) are kept, and the JSON `tool_output` is not. A
+`postToolUseFailure` marks the edit `failed`. The documented `afterFileEdit` body (`file_path` plus
+`edits[]`) is parsed by the same rule, but that event remains outside the ordinary profile's
+subscription and the structural profile keeps only its path commitment.
 
-Claim-linked evidence is selected before unrelated captures. Retained code is split into bounded
-UTF-8 excerpts, with omitted content and truncated prefixes disclosed under the existing count and
-byte limits. These rules apply on macOS, Linux and Windows through WSL 2; they add no OS-specific
-filesystem lookup. Hooks do not create a fresh check-time Git diff. Shell-mediated edits, missing
-capture and stale code still require explicit content/state evidence; bounded packet inclusion does
-not prove that the reviewer detects a defect. Pause, revoke and content-capture disable continue to
-stop admission through the existing shared controls.
+The capture runs from the post-tool event only, once per edit: the pre-tool proposal is neither
+duplicated nor kept as raw tool input. Each captured edit names the host-reported outcome
+(`applied`, `failed` or `unknown`), so a rejected or unconfirmed edit is never presented as applied
+code. Every file locator is made workspace-relative; a locator outside the workspace, a
+home-relative or drive-relative locator, or any `..` path is replaced by `<outside-workspace>` or
+dropped. The rule is lexical and identical on macOS, Linux and Windows through WSL 2: POSIX
+(`/home/...`, `/Users/...`), Windows drive (`C:\...`), UNC (`\\server\share\...`) and WSL
+mount (`/mnt/c/...`) spellings are compared, with drive, mount and UNC forms matched
+case-insensitively, and no filesystem lookup is made. Edits use the ordinary capture caps (at most
+16 chunks and about 680 KB per event), not the routine-output budgets, and remain subject to the
+existing capture consent, secret scanning and outbox admission.
+
+Selection ranks claim-linked evidence first, then captured edits (newest first), then other
+captured output, so later test logs or file reads cannot starve a patch. A selected capture whose
+envelope has aged out of the latest-256 session window is still read by exact content reference;
+one that cannot be reached is disclosed as `content_unselected`. Identical retained bytes are
+selected once. Retained code is split into bounded UTF-8 excerpts, with omitted content and
+truncated prefixes disclosed under the existing count and byte limits. Hooks do not create a fresh
+check-time Git diff. Shell-mediated edits, missing capture and stale code still require explicit
+content/state evidence; bounded packet inclusion does not prove that the reviewer detects a
+defect. Pause, revoke and content-capture disable continue to stop admission through the existing
+shared controls.

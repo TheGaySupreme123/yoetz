@@ -842,6 +842,21 @@ def _extract_structural(
         flag = _bool_or_none(payload.get(key))
         if flag is not None:
             fields[key] = flag
+    response = payload.get("tool_response")
+    if (
+        "exit_status" not in fields
+        and event_name == "PostToolUse"
+        and tool_name in _PATCH_TOOL_NAMES
+        and type(response) is str
+    ):
+        # Codex 0.157.x reports apply_patch's outcome only as the ``Exit code: N`` prefix of
+        # its text result. Keep that closed number so an applied or failed patch is not an
+        # outcome-less call (#883); the text itself is never copied here.
+        exit_match = _CODEX_EXIT_CODE.match(response)
+        if exit_match is not None:
+            exit_number = int(exit_match.group(1))
+            if -1 <= exit_number <= 255:
+                fields["exit_status"] = exit_number
     # Classification can prove success from nested host result aliases (for example
     # tool_response.exit_code). Preserve that bounded fact beside the routine marker:
     # summary construction revalidates the persisted envelope after process restart.
@@ -1327,6 +1342,281 @@ def map_hook_payload_to_envelope(
     )
 
 
+# Native edit tools whose arguments are reviewable code content (#883). Names are the exact
+# spellings each host reports on its generic tool hooks: Codex 0.157.x ``apply_patch`` (also on
+# code-mode nested calls); Claude Code ``Write``/``Edit``/``MultiEdit``/``NotebookEdit``; Cursor
+# ``Write`` (its documented file-edit tool name) plus the agent tool aliases it has reported.
+_PATCH_TOOL_NAMES: Final = frozenset({"apply_patch", "ApplyPatch", "functions.apply_patch"})
+_EDIT_TOOL_NAMES: Final = frozenset(
+    {
+        "Write",
+        "Edit",
+        "MultiEdit",
+        "NotebookEdit",
+        "StrReplace",
+        "str_replace",
+        "search_replace",
+        "edit_file",
+        "write_file",
+        "create_file",
+    }
+)
+_EDIT_PATH_KEYS: Final = ("file_path", "path", "target_file", "filePath", "notebook_path")
+_EDIT_TEXT_KEYS: Final = frozenset(
+    {
+        "content",
+        "contents",
+        "code_edit",
+        "old_string",
+        "new_string",
+        "old_str",
+        "new_str",
+        "new_source",
+        "cell_id",
+        "cell_type",
+        "edit_mode",
+    }
+)
+_EDIT_BODY_KEYS: Final = frozenset(
+    {"content", "contents", "code_edit", "new_string", "new_str", "new_source", "edits"}
+)
+_EDIT_ITEM_KEYS: Final = frozenset({"old_string", "new_string", "old_str", "new_str"})
+_OUTSIDE_WORKSPACE_PATH: Final = "<outside-workspace>"
+_WINDOWS_DRIVE_PATH: Final = re.compile(r"^([A-Za-z]):/(.*)$", re.DOTALL)
+_WINDOWS_DRIVE_RELATIVE: Final = re.compile(r"^[A-Za-z]:")
+_WSL_MOUNT_PATH: Final = re.compile(r"^/mnt/([A-Za-z])(/.*)?$", re.DOTALL)
+_PATCH_PATH_HEADER: Final = re.compile(
+    r"^(\*\*\* (?:Add|Update|Delete) File: |\*\*\* Move to: )(.*?)(\r?)$"
+)
+_UNIFIED_FILE_HEADER: Final = re.compile(r"^(--- |\+\+\+ )(.*?)(\t[^\r\n]*)?(\r?)$")
+_GIT_DIFF_HEADER: Final = re.compile(r"^diff --git (\S+) (\S+)(\r?)$")
+_PATCH_RESULT_LINE: Final = re.compile(r"^([AMDR] )(.+?)(\r?)$")
+_CODEX_EXIT_CODE: Final = re.compile(r"\AExit code: (-?\d+)")
+
+
+def _absolute_path_key(value: str) -> tuple[str, bool] | None:
+    """Return one comparable absolute-path key, or ``None`` for a relative path.
+
+    POSIX/macOS paths stay case-sensitive. Windows drive paths (``C:\\x``/``C:/x``) are keyed
+    in their WSL 2 ``/mnt/c/x`` spelling so that a Windows-side and a WSL-side locator for the
+    same file compare equal; drive, WSL-mount and UNC keys compare case-insensitively.
+    """
+
+    text = value.replace("\\", "/")
+    drive = _WINDOWS_DRIVE_PATH.match(text)
+    if drive is not None:
+        return f"/mnt/{drive.group(1).lower()}/{drive.group(2)}", True
+    if text.startswith("//"):
+        return "//" + "/".join(part for part in text[2:].split("/") if part), True
+    mount = _WSL_MOUNT_PATH.match(text)
+    if mount is not None:
+        return f"/mnt/{mount.group(1).lower()}{mount.group(2) or ''}", True
+    if text.startswith(("/", "~")) or _WINDOWS_DRIVE_RELATIVE.match(text):
+        return text, False
+    return None
+
+
+def workspace_relative_edit_path(value: str, workspace_locator: str | None) -> str | None:
+    """Return a workspace-relative POSIX path for review content, or ``None``.
+
+    Absolute locators never enter captured content (ADR-006): a path inside the workspace is
+    relativized, and a path outside it, a home-relative or drive-relative path, or any path
+    with a ``..`` segment returns ``None`` so the caller can drop or mask it. The rule is
+    lexical and identical on macOS, Linux and Windows through WSL 2; it never touches the
+    filesystem.
+    """
+
+    if type(value) is not str or not value or "\n" in value or "\x00" in value:
+        return None
+    key = _absolute_path_key(value)
+    if key is None:
+        relative = value.replace("\\", "/")
+    else:
+        if workspace_locator is None:
+            return None
+        path_key, path_folds = key
+        if path_key.startswith("~") or _WINDOWS_DRIVE_RELATIVE.match(path_key):
+            return None
+        root = _absolute_path_key(workspace_locator)
+        if root is None:
+            return None
+        root_key, root_folds = root
+        root_key = root_key.rstrip("/")
+        folds = path_folds or root_folds
+        compare_path = path_key.casefold() if folds else path_key
+        compare_root = root_key.casefold() if folds else root_key
+        if not root_key or not compare_path.startswith(compare_root + "/"):
+            return None
+        relative = path_key[len(root_key) + 1 :]
+    parts = [part for part in relative.split("/") if part not in {"", "."}]
+    if not parts or ".." in parts:
+        return None
+    return "/".join(parts)
+
+
+def _sanitize_patch_paths(text: str, workspace_locator: str | None) -> str:
+    """Relativize file locators in patch headers; mask any locator outside the workspace."""
+
+    def rewrite(token: str) -> str:
+        if token == "/dev/null":
+            return token
+        if token.startswith(("a/", "b/")) and _absolute_path_key(token) is None:
+            relative = workspace_relative_edit_path(token[2:], workspace_locator)
+            return token[:2] + relative if relative is not None else _OUTSIDE_WORKSPACE_PATH
+        relative = workspace_relative_edit_path(token, workspace_locator)
+        return relative if relative is not None else _OUTSIDE_WORKSPACE_PATH
+
+    lines = text.split("\n")
+    for index, line in enumerate(lines):
+        header = _PATCH_PATH_HEADER.match(line)
+        if header is not None:
+            lines[index] = header.group(1) + rewrite(header.group(2)) + header.group(3)
+            continue
+        git = _GIT_DIFF_HEADER.match(line)
+        if git is not None:
+            lines[index] = (
+                f"diff --git {rewrite(git.group(1))} {rewrite(git.group(2))}{git.group(3)}"
+            )
+            continue
+        unified = _UNIFIED_FILE_HEADER.match(line)
+        if unified is None:
+            continue
+        # ``--- x`` is a file header only when paired with ``+++ y``; otherwise it is a removed
+        # hunk line whose code content must stay byte-exact.
+        paired = (
+            index + 1 < len(lines) and lines[index + 1].startswith("+++ ")
+            if unified.group(1) == "--- "
+            else index > 0 and lines[index - 1].startswith("--- ")
+        )
+        if paired:
+            lines[index] = unified.group(1) + rewrite(unified.group(2)) + (unified.group(4) or "")
+    return "\n".join(lines)
+
+
+def _sanitize_patch_result(text: str, workspace_locator: str | None) -> str:
+    """Relativize the ``A/M/D path`` lines of an apply_patch result summary."""
+
+    lines = text.split("\n")
+    for index, line in enumerate(lines):
+        match = _PATCH_RESULT_LINE.match(line)
+        if match is None or _absolute_path_key(match.group(2)) is None:
+            continue
+        relative = workspace_relative_edit_path(match.group(2), workspace_locator)
+        lines[index] = (
+            match.group(1)
+            + (relative if relative is not None else _OUTSIDE_WORKSPACE_PATH)
+            + match.group(3)
+        )
+    return "\n".join(lines)
+
+
+def _edit_outcome(payload: Mapping[str, JsonValue], source: ObservationSource) -> str:
+    """Return ``applied``, ``failed`` or ``unknown`` for one post-tool native edit."""
+
+    hook_event = payload.get("hook_event_name")
+    if hook_event in {"PostToolUseFailure", "postToolUseFailure"}:
+        return "failed"
+    response = payload.get("tool_response")
+    if response is None:
+        response = payload.get("tool_output")
+    if type(response) is str:
+        exit_code = _CODEX_EXIT_CODE.match(response)
+        if exit_code is not None:
+            return "applied" if exit_code.group(1) == "0" else "failed"
+        if "Success. Updated the following files" in response:
+            return "applied"
+        if "verification failed" in response or "Failed to apply" in response:
+            return "failed"
+    facts = _native_outcome_facts(payload)
+    if facts.denied or facts.success is False:
+        return "failed"
+    if facts.success is True:
+        return "applied"
+    if source in {ObservationSource.CLAUDE_HOOK, ObservationSource.CURSOR_HOOK} and hook_event in {
+        "PostToolUse",
+        "postToolUse",
+    }:
+        # Claude Code and Cursor report a failed tool call on their separate failure event, so
+        # their ordinary post-tool event is the host's own success signal for the edit.
+        return "applied"
+    return "unknown"
+
+
+def _native_edit_content(
+    tool: str | None,
+    payload: Mapping[str, JsonValue],
+    *,
+    workspace_locator: str | None,
+    outcome: str,
+) -> tuple[ObservationContentKind, str, JsonValue] | None:
+    """Select one native edit as review content with workspace-relative locators only."""
+
+    arguments = payload.get("tool_input")
+    if tool in _PATCH_TOOL_NAMES:
+        patch: JsonValue | None = arguments
+        if isinstance(arguments, Mapping):
+            # Codex 0.157.x sends ``{"command": <patch>}`` on Pre and Post; older and
+            # freeform carriers used ``patch``/``input``.
+            patch = next(
+                (
+                    arguments[key]
+                    for key in ("command", "patch", "input")
+                    if type(arguments.get(key)) is str and arguments[key]
+                ),
+                None,
+            )
+        if type(patch) is not str or not patch:
+            return None
+        return (
+            ObservationContentKind.WORKSPACE_DIFF,
+            "patch",
+            f"# yoetz edit outcome: {outcome}\n" + _sanitize_patch_paths(patch, workspace_locator),
+        )
+    if isinstance(arguments, Mapping) and tool in _EDIT_TOOL_NAMES:
+        source: Mapping[str, JsonValue] = arguments
+    elif (
+        arguments is None
+        and type(payload.get("file_path")) is str
+        and type(payload.get("edits")) is list
+    ):
+        # Cursor ``afterFileEdit``: ``{"file_path": <absolute>, "edits": [{old_string,
+        # new_string}]}`` at the top level.
+        source = payload
+    else:
+        return None
+    # Preserve only the host's public edit fields; never serialize unknown nested prompt,
+    # reasoning or credential fields just because they share an input object.
+    selected: dict[str, JsonValue] = {
+        key: value for key, value in source.items() if key in _EDIT_TEXT_KEYS and type(value) is str
+    }
+    for key in _EDIT_PATH_KEYS:
+        value = source.get(key)
+        if type(value) is str and value:
+            relative = workspace_relative_edit_path(value, workspace_locator)
+            selected["path"] = relative if relative is not None else _OUTSIDE_WORKSPACE_PATH
+            break
+    edits = source.get("edits")
+    if type(edits) is list:
+        selected["edits"] = [
+            {
+                key: value
+                for key, value in item.items()
+                if key in _EDIT_ITEM_KEYS and type(value) is str
+            }
+            for item in edits
+            if isinstance(item, Mapping)
+        ]
+    response = payload.get("tool_response")
+    if isinstance(response, Mapping) and type(response.get("structuredPatch")) is list:
+        # Claude Code's post-edit result carries line-numbered hunks with context; keep them and
+        # never its ``originalFile`` copy or absolute ``filePath``.
+        selected["structured_patch"] = response["structuredPatch"]
+    if not any(key in selected for key in _EDIT_BODY_KEYS):
+        return None
+    selected["edit_outcome"] = outcome
+    return ObservationContentKind.CHANGED_FILE, "changed-file", cast(JsonValue, selected)
+
+
 def _visible_content_chunks(
     event_name: str,
     payload: Mapping[str, JsonValue],
@@ -1364,85 +1654,29 @@ def _visible_content_chunks(
             except ProtocolValueError, TypeError, ValueError:
                 return
 
-    # Dedicated native edit arguments are visible task content, not arbitrary command input.
-    # Retain them through the existing consent/redaction/capture path. A pre-tool patch is a
-    # proposed edit; its separate outcome and state evidence decide whether it was applied.
+    # Native edit arguments are visible task content (#883). They are captured once, from the
+    # post-tool event: a pre-tool edit is only a proposal and would duplicate the post-tool copy.
+    # The capture names the host-reported outcome, so a failed or unconfirmed edit is never
+    # presented as applied code, and it carries workspace-relative locators only (ADR-006).
+    tool = (
+        _token_or_none(payload.get("tool_name"))
+        if event_name in {"PreToolUse", "PostToolUse"}
+        else None
+    )
+    native_edit_tool = tool in _PATCH_TOOL_NAMES or tool in _EDIT_TOOL_NAMES
     edit_content = False
-    if event_name in {"PreToolUse", "PostToolUse"}:
-        tool = _token_or_none(payload.get("tool_name"))
-        arguments = payload.get("tool_input")
-        if tool in {"apply_patch", "ApplyPatch", "functions.apply_patch"}:
-            patch = arguments
-            if isinstance(arguments, Mapping):
-                patch = arguments.get("patch") or arguments.get("input")
-            if type(patch) is str and patch:
-                add(ObservationContentKind.WORKSPACE_DIFF, "patch", patch)
-                edit_content = True
-        elif tool in {
-            "Write",
-            "write_file",
-            "create_file",
-            "Edit",
-            "MultiEdit",
-            "StrReplace",
-            "str_replace",
-            "edit_file",
-        } and isinstance(arguments, Mapping):
-            # Preserve only the host's public edit fields; never serialize unknown nested
-            # prompt, reasoning or credential fields just because they share an input object.
-            selected_edit: dict[str, JsonValue] = {
-                key: value
-                for key, value in arguments.items()
-                if key
-                in {
-                    "file_path",
-                    "path",
-                    "content",
-                    "contents",
-                    "old_string",
-                    "new_string",
-                    "old_str",
-                    "new_str",
-                }
-                and type(value) is str
-            }
-            for path_key in ("file_path", "path"):
-                path_value = selected_edit.get(path_key)
-                if type(path_value) is not str:
-                    continue
-                path = Path(path_value)
-                if ".." in path.parts or "\\" in path_value:
-                    selected_edit.pop(path_key)
-                elif path.is_absolute():
-                    if workspace_locator is None:
-                        selected_edit.pop(path_key)
-                    else:
-                        try:
-                            selected_edit[path_key] = path.relative_to(workspace_locator).as_posix()
-                        except ValueError:
-                            selected_edit.pop(path_key)
-            edits = arguments.get("edits")
-            if type(edits) is list:
-                selected_edit["edits"] = [
-                    {
-                        key: value
-                        for key, value in item.items()
-                        if key in {"old_string", "new_string", "old_str", "new_str"}
-                        and type(value) is str
-                    }
-                    for item in edits
-                    if isinstance(item, Mapping)
-                ]
-            if any(
-                key in selected_edit
-                for key in {"content", "contents", "new_string", "new_str", "edits"}
-            ):
-                add(
-                    ObservationContentKind.CHANGED_FILE,
-                    "changed-file",
-                    cast(JsonValue, selected_edit),
-                )
-                edit_content = True
+    edit_outcome = "unknown"
+    if event_name == "PostToolUse":
+        edit_outcome = _edit_outcome(payload, envelope.source)
+        edit = _native_edit_content(
+            tool,
+            payload,
+            workspace_locator=workspace_locator,
+            outcome=edit_outcome,
+        )
+        if edit is not None:
+            add(*edit)
+            edit_content = True
 
     if event_name == "UserPromptSubmit":
         add(
@@ -1467,18 +1701,33 @@ def _visible_content_chunks(
         # AI-powered selection. Keep the structural envelope/correlation, but
         # avoid encrypting a second copy of command arguments. Ordinary native
         # profiles retain their explicitly selected capture contract.
-        if not edit_content and envelope.source is not ObservationSource.CODEX_HOOK:
+        # Native edit input is captured from its post-tool event instead (see above).
+        if not native_edit_tool and envelope.source is not ObservationSource.CODEX_HOOK:
             add(ObservationContentKind.TOOL_INPUT, "tool-input", payload.get("tool_input"))
     elif event_name == "PostToolUse":
-        add(
-            ObservationContentKind.TOOL_OUTPUT,
-            "tool-output",
+        tool_result = (
             payload.get("tool_response")
             or payload.get("tool_output")
             or payload.get("output")
             or payload.get("result")
-            or payload.get("result_json"),
+            or payload.get("result_json")
         )
+        if not native_edit_tool and not edit_content:
+            add(ObservationContentKind.TOOL_OUTPUT, "tool-output", tool_result)
+        elif (
+            edit_outcome != "applied"
+            and type(tool_result) is str
+            and not tool_result.lstrip().startswith(("{", "["))
+        ):
+            # A successful edit's result only repeats the outcome already named on the edit.
+            # A failed or unconfirmed edit keeps its plain-text result (Codex: exit code and
+            # error) with locators relativized. Structured edit results carry absolute paths
+            # and whole original files; their hunks are already kept above.
+            add(
+                ObservationContentKind.TOOL_OUTPUT,
+                "tool-output",
+                _sanitize_patch_result(tool_result, workspace_locator),
+            )
     elif event_name not in SUPPORTED_HOOK_EVENTS:
         # Unknown host events are retained only when the host marks their
         # payload visible. Hidden/system/developer/reasoning fields are never read.
@@ -1494,7 +1743,10 @@ def _visible_content_chunks(
         ("patch", ObservationContentKind.WORKSPACE_DIFF, "patch"),
         ("file_content", ObservationContentKind.CHANGED_FILE, "changed-file"),
     ):
-        add(kind, label, payload.get(key))
+        value = payload.get(key)
+        if kind is ObservationContentKind.WORKSPACE_DIFF and type(value) is str:
+            value = _sanitize_patch_paths(value, workspace_locator)
+        add(kind, label, value)
     if event_name == "SessionStart" and workspace_locator is not None:
         add(ObservationContentKind.WORKSPACE_LOCATOR, "workspace", workspace_locator)
 
