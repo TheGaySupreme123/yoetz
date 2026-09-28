@@ -41,7 +41,13 @@ class ReleaseRuntimeError(ValueError):
 class ReleaseRuntimeIOError(OSError):
     """A closed operation label plus errno; never retains an exception message or path."""
 
-    def __init__(self, error: OSError, phase: Literal["snapshot", "lease", "exec"]) -> None:
+    def __init__(
+        self,
+        error: OSError,
+        phase: Literal[
+            "snapshot", "snapshot_copy", "snapshot_seal", "snapshot_publish", "lease", "exec"
+        ],
+    ) -> None:
         super().__init__(error.errno, "release_runtime_io")
         self.phase = phase
 
@@ -221,8 +227,11 @@ def _prepare_locked(prefix: Path, root: Path) -> Path:
             if source.is_symlink():
                 destination.symlink_to(source.resolve(strict=True))
             else:
-                shutil.copyfile(source, destination, follow_symlinks=False)
-                destination.chmod(0o700 if os.access(source, os.X_OK) else 0o600)
+                try:
+                    shutil.copyfile(source, destination, follow_symlinks=False)
+                    destination.chmod(0o700 if os.access(source, os.X_OK) else 0o600)
+                except OSError as error:
+                    raise ReleaseRuntimeIOError(error, "snapshot_copy") from None
         if before != _members(prefix) or key != _release_key(prefix):
             raise ReleaseRuntimeError("release_runtime_changed_retry")
         (temporary / _MARKER).write_text(
@@ -232,14 +241,20 @@ def _prepare_locked(prefix: Path, root: Path) -> Path:
         (temporary / _MARKER).chmod(0o600)
         lease = _open_lock(temporary / _LEASE)
         os.close(lease)
-        for path in temporary.rglob("*"):
-            if path.is_file() and not path.is_symlink() and path.name != _LEASE:
-                path.chmod(0o500 if os.access(path, os.X_OK) else 0o400)
-        for path in sorted(temporary.rglob("*"), reverse=True):
-            if path.is_dir():
-                path.chmod(0o500)
-        temporary.chmod(0o500)
-        temporary.rename(target)
+        try:
+            for path in temporary.rglob("*"):
+                if path.is_file() and not path.is_symlink() and path.name != _LEASE:
+                    path.chmod(0o500 if os.access(path, os.X_OK) else 0o400)
+            for path in sorted(temporary.rglob("*"), reverse=True):
+                if path.is_dir():
+                    path.chmod(0o500)
+            temporary.chmod(0o500)
+        except OSError as error:
+            raise ReleaseRuntimeIOError(error, "snapshot_seal") from None
+        try:
+            temporary.rename(target)
+        except OSError as error:
+            raise ReleaseRuntimeIOError(error, "snapshot_publish") from None
         return target
     finally:
         if temporary.exists():
@@ -395,6 +410,8 @@ def enter_release_runtime(arguments: list[str]) -> None:
     with release_update_lock(prefix) as root:
         try:
             target = _prepare_locked(prefix, root)
+        except ReleaseRuntimeIOError:
+            raise
         except OSError as error:
             raise ReleaseRuntimeIOError(error, "snapshot") from None
         fd = _open_lock(target / _LEASE)
