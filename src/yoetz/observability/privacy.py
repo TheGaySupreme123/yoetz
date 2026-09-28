@@ -118,6 +118,11 @@ _LOG_FIELDS: Final = frozenset(
         "semantic_challenges_rejected",
         "semantic_findings_selected",
         "semantic_findings_suppressed",
+        "semantic_capture_parts_resolved",
+        "semantic_diff_parts_resolved",
+        "semantic_excerpts_selected",
+        "semantic_diff_excerpts_selected",
+        "semantic_excerpt_bytes_selected",
     }
 )
 _MANIFEST_FIELDS: Final = frozenset(
@@ -211,6 +216,11 @@ _INTEGER_FIELDS: Final = frozenset(
         "semantic_challenges_rejected",
         "semantic_findings_selected",
         "semantic_findings_suppressed",
+        "semantic_capture_parts_resolved",
+        "semantic_diff_parts_resolved",
+        "semantic_excerpts_selected",
+        "semantic_diff_excerpts_selected",
+        "semantic_excerpt_bytes_selected",
     }
 )
 _BOOLEAN_FIELDS: Final = frozenset({"sqlite_compile_options_ok"})

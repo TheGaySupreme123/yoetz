@@ -34,9 +34,9 @@ _CURSOR = ObservationSource.CURSOR_HOOK
 
 # One workspace per supported OS spelling: Linux, macOS, and Windows through WSL 2.
 _WORKSPACES = {
-    "linux": "/home/alice/proj",
-    "macos": "/Users/alice/proj",
-    "wsl": "/mnt/c/Users/alice/proj",
+    "linux": "/home/{user}/proj",
+    "macos": "/Users/{user}/proj",
+    "wsl": "/mnt/c/Users/{user}/proj",
 }
 
 
@@ -136,7 +136,7 @@ def test_codex_0157_apply_patch_is_captured_once_after_the_tool_ran(
     assert b"+    return planted_bug(request)" in diff
     # A successful result only repeats the outcome; nothing else carries the absolute locator.
     assert ObservationContentKind.TOOL_OUTPUT not in post
-    assert b"alice" not in b"".join(post.values())
+    assert b"{user}" not in b"".join(post.values())
 
 
 def test_codex_failed_apply_patch_is_labelled_failed(tmp_path: Path) -> None:
@@ -163,7 +163,7 @@ def test_codex_patch_outside_workspace_is_masked(tmp_path: Path) -> None:
     workspace = _WORKSPACES["linux"]
     patch = (
         "*** Begin Patch\n*** Add File: /etc/private.conf\n+x\n"
-        f"*** Update File: {workspace}/a.py\n*** Move to: /home/bob/b.py\n@@\n-a\n+b\n"
+        f"*** Update File: {workspace}/a.py\n*** Move to: /home/{{other}}/b.py\n@@\n-a\n+b\n"
         "*** End Patch\n"
     )
     diff = dict(
@@ -178,7 +178,7 @@ def test_codex_patch_outside_workspace_is_masked(tmp_path: Path) -> None:
     assert b"*** Add File: <outside-workspace>\n" in diff
     assert b"*** Update File: a.py\n" in diff
     assert b"*** Move to: <outside-workspace>\n" in diff
-    assert b"/etc/" not in diff and b"bob" not in diff and b"alice" not in diff
+    assert b"/etc/" not in diff and b"{other}" not in diff and b"{user}" not in diff
 
 
 # --- Claude Code --------------------------------------------------------------------------
@@ -189,8 +189,8 @@ def _claude(
 ) -> dict[str, JsonValue]:
     payload: dict[str, JsonValue] = {
         "session_id": "5b3c1d2e-0000-4000-8000-000000000001",
-        "transcript_path": "/Users/alice/.claude/projects/proj/session.jsonl",
-        "cwd": "/Users/alice/proj",
+        "transcript_path": "/Users/{user}/.claude/projects/proj/session.jsonl",
+        "cwd": "/Users/{user}/proj",
         "permission_mode": "acceptEdits",
         "hook_event_name": event,
         "tool_name": tool,
@@ -313,7 +313,7 @@ def test_claude_native_edit_tools_are_captured_with_relative_paths(
     assert b'"edit_outcome":"applied"' in content
     expected_path = b"nb/analysis.ipynb" if tool == "NotebookEdit" else b"app/module.py"
     assert b'"path":"' + expected_path + b'"' in content
-    for leaked in (b"alice", b"HIDDEN_CANARY", b"ORIGINAL_FILE_CANARY", b"/mnt/", b"/Users/"):
+    for leaked in (b"{user}", b"HIDDEN_CANARY", b"ORIGINAL_FILE_CANARY", b"/mnt/", b"/Users/"):
         assert leaked not in content
 
 
@@ -383,7 +383,7 @@ def test_cursor_write_tool_is_captured_with_relative_path(os_name: str, tmp_path
     assert set(post) == {ObservationContentKind.CHANGED_FILE}
     content = post[ObservationContentKind.CHANGED_FILE]
     assert b'"path":"app/module.py"' in content and b"planted_bug" in content
-    assert b'"edit_outcome":"applied"' in content and b"alice" not in content
+    assert b'"edit_outcome":"applied"' in content and b"{user}" not in content
 
 
 def test_cursor_post_tool_use_failure_is_labelled_failed(tmp_path: Path) -> None:
@@ -408,14 +408,14 @@ def test_cursor_after_file_edit_body_is_captured_with_relative_path(tmp_path: Pa
     payload = _cursor(
         "afterFileEdit",
         workspace,
-        file_path="C:\\Users\\alice\\proj\\app\\module.py",
+        file_path="C:\\Users\\{user}\\proj\\app\\module.py",
         edits=[{"old_string": "validate(request)", "new_string": "planted_bug(request)"}],
     )
     content = dict(_chunks("PostToolUse", payload, tmp_path, source=_CURSOR, workspace=workspace))[
         ObservationContentKind.CHANGED_FILE
     ]
     assert b'"path":"app/module.py"' in content and b"planted_bug" in content
-    assert b"alice" not in content
+    assert b"{user}" not in content
 
 
 # --- Path privacy matrix ------------------------------------------------------------------
@@ -425,30 +425,30 @@ def test_cursor_after_file_edit_body_is_captured_with_relative_path(tmp_path: Pa
     ("workspace", "value", "expected"),
     [
         # Linux and macOS POSIX.
-        ("/home/alice/proj", "/home/alice/proj/src/a.py", "src/a.py"),
-        ("/Users/alice/proj", "/Users/alice/proj/src/a.py", "src/a.py"),
-        ("/Users/alice/proj/", "/Users/alice/proj/src/a.py", "src/a.py"),
-        ("/Users/alice/proj", "/Users/alice/proj-other/a.py", None),
-        ("/Users/alice/proj", "/Users/bob/a.py", None),
-        ("/Users/alice/proj", "/Users/alice/proj/../secret.py", None),
-        ("/Users/alice/proj", "~/proj/a.py", None),
+        ("/home/{user}/proj", "/home/{user}/proj/src/a.py", "src/a.py"),
+        ("/Users/{user}/proj", "/Users/{user}/proj/src/a.py", "src/a.py"),
+        ("/Users/{user}/proj/", "/Users/{user}/proj/src/a.py", "src/a.py"),
+        ("/Users/{user}/proj", "/Users/{user}/proj-other/a.py", None),
+        ("/Users/{user}/proj", "/Users/{other}/a.py", None),
+        ("/Users/{user}/proj", "/Users/{user}/proj/../secret.py", None),
+        ("/Users/{user}/proj", "~/proj/a.py", None),
         # Relative input stays relative and never climbs out.
-        ("/Users/alice/proj", "src/a.py", "src/a.py"),
-        ("/Users/alice/proj", "./src\\a.py", "src/a.py"),
-        ("/Users/alice/proj", "../a.py", None),
+        ("/Users/{user}/proj", "src/a.py", "src/a.py"),
+        ("/Users/{user}/proj", "./src\\a.py", "src/a.py"),
+        ("/Users/{user}/proj", "../a.py", None),
         # Windows through WSL 2: drive letters, WSL mounts and case-insensitive drives.
-        ("/mnt/c/Users/alice/proj", "/mnt/c/Users/alice/proj/src/a.py", "src/a.py"),
-        ("/mnt/c/Users/alice/proj", "C:\\Users\\alice\\proj\\src\\a.py", "src/a.py"),
-        ("/mnt/c/Users/alice/proj", "c:/users/ALICE/proj/src/a.py", "src/a.py"),
-        ("/mnt/c/Users/alice/proj", "D:\\Users\\alice\\proj\\a.py", None),
-        ("/mnt/c/Users/alice/proj", "C:relative.py", None),
-        ("C:\\Users\\alice\\proj", "/mnt/c/Users/alice/proj/src/a.py", "src/a.py"),
+        ("/mnt/c/Users/{user}/proj", "/mnt/c/Users/{user}/proj/src/a.py", "src/a.py"),
+        ("/mnt/c/Users/{user}/proj", "C:\\Users\\{user}\\proj\\src\\a.py", "src/a.py"),
+        ("/mnt/c/Users/{user}/proj", "c:/users/{USER}/proj/src/a.py", "src/a.py"),
+        ("/mnt/c/Users/{user}/proj", "D:\\Users\\{user}\\proj\\a.py", None),
+        ("/mnt/c/Users/{user}/proj", "C:relative.py", None),
+        ("C:\\Users\\{user}\\proj", "/mnt/c/Users/{user}/proj/src/a.py", "src/a.py"),
         # UNC shares (for example \\wsl$ or a network workspace).
         ("//server/share/proj", "\\\\server\\share\\proj\\src\\a.py", "src/a.py"),
         ("//server/share/proj", "\\\\other\\share\\proj\\a.py", None),
-        ("/home/alice/proj", "\\\\wsl$\\Ubuntu\\home\\alice\\proj\\a.py", None),
+        ("/home/{user}/proj", "\\\\wsl$\\Ubuntu\\home\\{user}\\proj\\a.py", None),
         # No workspace: absolute locators are never retained.
-        (None, "/Users/alice/proj/a.py", None),
+        (None, "/Users/{user}/proj/a.py", None),
     ],
 )
 def test_workspace_relative_edit_path_matrix(
@@ -461,17 +461,17 @@ def test_unified_diff_headers_are_relativized_but_removed_lines_are_not() -> Non
     sanitize = observe_hooks_module._sanitize_patch_paths  # pyright: ignore[reportPrivateUsage]
     diff = (
         "diff --git a/src/a.py b/src/a.py\n"
-        "--- /Users/alice/proj/src/a.py\t2026-09-01\n"
-        "+++ /Users/alice/proj/src/a.py\n"
+        "--- /Users/{user}/proj/src/a.py\t2026-09-01\n"
+        "+++ /Users/{user}/proj/src/a.py\n"
         "@@ -1,2 +1,2 @@\n"
         "--- literal removed line\n"
         " keep\n"
     )
-    result = sanitize(diff, "/Users/alice/proj")
+    result = sanitize(diff, "/Users/{user}/proj")
     assert "--- src/a.py\n+++ src/a.py\n" in result
     assert "diff --git a/src/a.py b/src/a.py\n" in result
     assert "--- literal removed line\n" in result
-    assert "alice" not in result
+    assert "{user}" not in result
 
 
 # --- Codex code mode and shell-mediated edits ---------------------------------------------
@@ -536,7 +536,7 @@ def test_codex_code_mode_nested_apply_patch_is_captured(os_name: str, tmp_path: 
     assert diff.startswith(b"# yoetz edit outcome: applied\n")
     for header in (b"src/types.ts", b"src/kea/context.ts", b"src/kea/build.ts"):
         assert b"*** Update File: " + header + b"\n" in diff
-    assert b"Circular dependency detected" in diff and b"alice" not in diff
+    assert b"Circular dependency detected" in diff and b"{user}" not in diff
 
 
 def _codex_bash(event: str, workspace: str, command: str) -> dict[str, JsonValue]:
@@ -566,7 +566,7 @@ def test_codex_shell_apply_patch_heredoc_is_captured_from_its_only_hook(
     diff = pre[ObservationContentKind.WORKSPACE_DIFF]
     assert diff.startswith(b"# yoetz edit outcome: unknown\n# yoetz edit source: shell\n")
     assert b"*** Update File: app/module.py\n" in diff and b"planted_bug" in diff
-    assert b"alice" not in diff
+    assert b"{user}" not in diff
     # Codex intercepts the shell patch, so a post event (if any host ever sent one) is not a
     # second copy.
     post = dict(
@@ -598,7 +598,7 @@ def test_codex_exec_command_heredoc_write_is_captured_and_scratch_files_skipped(
     write = post[ObservationContentKind.CHANGED_FILE]
     assert b'"path":"tests/unit/test_tainted_injection.py"' in write
     assert b"from bandit.plugins import tainted_injection" in write
-    assert b"bandit_taint_sample" not in write and b"alice" not in write
+    assert b"bandit_taint_sample" not in write and b"{user}" not in write
     # The shell call's own output stays ordinary tool output.
     assert post[ObservationContentKind.TOOL_OUTPUT] == b"1 passed in 0.12s\n"
 
@@ -636,7 +636,7 @@ def test_claude_and_cursor_shell_heredoc_edits_are_captured(
     assert b"--- app/module.py\n+++ app/module.py\n" in diff and b"planted_bug" in diff
     write = post[ObservationContentKind.CHANGED_FILE]
     assert b'"path":"app/notes.md"' in write and b"planted note" in write
-    assert b"alice" not in diff + write
+    assert b"{user}" not in diff + write
 
 
 def test_script_mediated_edits_carry_no_reviewable_bytes(tmp_path: Path) -> None:

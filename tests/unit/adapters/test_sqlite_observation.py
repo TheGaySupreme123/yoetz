@@ -569,33 +569,56 @@ def test_bounded_envelope_window_filters_session_before_selecting_latest_rows() 
     asyncio.run(run())
 
 
-def test_content_ref_lookup_reaches_capture_older_than_the_envelope_window() -> None:
-    """#883: an early edit's envelope stays reachable after 256 later session events."""
+def test_content_ref_lookup_survives_real_retention_and_keeps_session_fence() -> None:
+    """Real ingest must keep provenance after routine events roll over the ring."""
 
-    store = _store()
-    early_object = "obj_00000000-0000-4000-8000-000000000883"
-    early = replace(
-        _session_envelope(_SESSION, "hook:early-edit", 1),
-        content_object_refs=(early_object,),
-    )
-    with store._db:  # pyright: ignore[reportPrivateUsage]
-        store._insert_event(_WORKSPACE, early)  # pyright: ignore[reportPrivateUsage]
+    async def run() -> None:
+        store = _store()
+        store.grant_consent(_WORKSPACE, _TIME)
+        store.bind_session(_WORKSPACE, _SESSION)
+        store.bind_session(_WORKSPACE, _SESSION_B)
+        early_object = "obj_00000000-0000-4000-8000-000000000883"
+        early = replace(
+            _session_envelope(_SESSION, "hook:early-edit", 1),
+            content_object_refs=(early_object,),
+        )
+        assert (await store.ingest(early)).disposition is ObservationIngestDisposition.ACCEPTED
         for ordinal in range(2, 302):
-            store._insert_event(  # pyright: ignore[reportPrivateUsage]
-                _WORKSPACE, _session_envelope(_SESSION, f"hook:later-{ordinal}", ordinal)
-            )
-        store._insert_event(  # pyright: ignore[reportPrivateUsage]
-            _WORKSPACE,
+            await store.ingest(_session_envelope(_SESSION, f"hook:later-{ordinal}", ordinal))
+        await store.ingest(
             replace(
                 _session_envelope(_SESSION_B, "hook:other-session", 1),
                 content_object_refs=(early_object,),
-            ),
+            )
         )
+        assert len(store.list_envelopes(_WORKSPACE)) == 256
+        found = store.list_envelopes_for_content_refs(_WORKSPACE, _SESSION, (early_object,))
+        assert [item.source_identity for item in found] == ["hook:early-edit"]
+        assert store.list_envelopes_for_content_refs(_WORKSPACE, _SESSION, ()) == ()
+        with pytest.raises(ValueError, match="observation_envelope_limit_invalid"):
+            store.list_envelopes_for_content_refs(_WORKSPACE, _SESSION, (early_object,), limit=0)
 
-    window = store.list_envelopes_for_session(_WORKSPACE, _SESSION, limit=256)
-    assert all(early_object not in item.content_object_refs for item in window)
-    found = store.list_envelopes_for_content_refs(_WORKSPACE, _SESSION, (early_object,))
-    assert [item.source_identity for item in found] == ["hook:early-edit"]
-    assert store.list_envelopes_for_content_refs(_WORKSPACE, _SESSION, ()) == ()
-    with pytest.raises(ValueError, match="observation_envelope_limit_invalid"):
-        store.list_envelopes_for_content_refs(_WORKSPACE, _SESSION, (early_object,), limit=0)
+    asyncio.run(run())
+
+
+def test_capture_retention_reservation_is_bounded_and_keeps_recent_structure() -> None:
+    async def run() -> None:
+        store = _store()
+        store.grant_consent(_WORKSPACE, _TIME)
+        store.bind_session(_WORKSPACE, _SESSION)
+        for ordinal in range(1, 301):
+            await store.ingest(
+                replace(
+                    _session_envelope(_SESSION, f"hook:capture-{ordinal}", ordinal),
+                    content_object_refs=(f"obj_00000000-0000-4000-8000-{ordinal:012d}",),
+                )
+            )
+        for ordinal in range(301, 601):
+            await store.ingest(_session_envelope(_SESSION, f"hook:recent-{ordinal}", ordinal))
+        retained = store.list_envelopes(_WORKSPACE)
+        assert len(retained) == 256
+        assert sum(bool(item.content_object_refs) for item in retained) == 64
+        assert retained[-1].source_identity == "hook:recent-600"
+        assert retained[0].source_identity == "hook:capture-237"
+
+    asyncio.run(run())

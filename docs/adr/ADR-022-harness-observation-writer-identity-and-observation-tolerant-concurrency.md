@@ -649,3 +649,20 @@ at the #241 SessionStart/Stop cadence with #249 scoping, are never materialized 
 (ADR-022 #231 amendment), and model-derived advice may not name their next actions. Hook text keeps
 the token and adds a plain instruction to tell the user and offer a subagent fix, leaving sign-in,
 credentials, and approvals to the user.
+
+
+### Captured-envelope retention within the bounded ring (2026-09-28, #883)
+
+Captured object manifests and ledger evidence can outlive the observation ring. A semantic
+resolver still needs the original, source-qualified envelope to authenticate those bytes; an
+exact-object lookup cannot recover an envelope that FIFO retention already deleted. SQLite now
+protects the newest 64 content-bearing envelopes per workspace inside the existing 256-event
+ring. The remaining slots retain the newest other events. No queue, disk, capture, or disclosure
+ceiling is increased, and no plaintext is added to structural storage. The protected subset is
+bounded and rotates when new captures arrive; this is not permanent retention or reconstruction
+of historical state. At least 192 slots remain available for recent structural events.
+
+The exact-reference lookup remains workspace/session fenced and the resolver still authenticates
+consent, manifests, objects, and ledger provenance. Evicted, redacted, revoked, or unavailable
+captures remain coverage gaps. Already-pruned envelopes cannot be repaired by upgrading. This
+shared SQLite behavior applies to Codex, Claude Code and Cursor on macOS, Linux and WSL 2.
