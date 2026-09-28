@@ -1620,18 +1620,39 @@ def build_semantic_case(
                 continue
             linked_subjects.update(str(ref) for ref in claim_record.payload.supporting_refs)
 
-        # Authenticated native captures are more useful than a metadata-only description, and
-        # their retained bytes are otherwise easy to starve: the evidence cap is shared by every
-        # evidence row while the projection can contain many opaque stream events.  Keep the
-        # ordering deterministic within each class and use the captured-group leaders only; a
-        # payload merely lacking a captured object is still metadata, never native capture.
+        # Claim/assessment-linked material wins the shared cap before unrelated captures.
+        # Within each relevance class, authenticated captures win over metadata. Multipart
+        # groups inherit linkage from any member so UUID ordering cannot hide a linked group.
         evidence_rows = sorted(
             projection.evidence.items(),
             key=lambda pair: (
+                0
+                if str(pair[0]) in linked_subjects
+                or any(
+                    ref in linked_subjects
+                    for ref in (
+                        captured_groups[str(pair[0])].evidence_refs
+                        if str(pair[0]) in captured_groups
+                        else ()
+                    )
+                )
+                else 1,
                 0 if str(pair[0]) in captured_groups else 1,
+                # Captured code edits are the change under review (#883): rank them ahead of
+                # other captured tool output, newest first, so a patch cannot be starved by
+                # test logs or file reads competing for the shared excerpt cap.
+                0
+                if str(pair[0]) in captured_groups
+                and captured_groups[str(pair[0])].source_kind == "diff"
+                else 1,
+                -pair[1].source_frontier
+                if str(pair[0]) in captured_groups
+                and captured_groups[str(pair[0])].source_kind == "diff"
+                else 0,
                 str(pair[0]).encode("ascii"),
             ),
         )
+        admitted_capture_digests: set[bytes] = set()
         processed_evidence_refs: set[str] = set()
         captured_rows_omitted_by_limit: set[str] = set()
         for evidence_id, record in evidence_rows:
@@ -1704,6 +1725,15 @@ def build_semantic_case(
                 continue
             digest_provenance: ExcerptDigestProvenance | None = None
             if captured_group is not None:
+                capture_digest = hashlib.sha256(captured_group.content).digest()
+                if capture_digest in admitted_capture_digests:
+                    # Identical retained bytes (for example a patch captured by an older build
+                    # on both its pre- and post-tool events) are one excerpt, not two.
+                    omissions.append(
+                        _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_selected")
+                    )
+                    continue
+                admitted_capture_digests.add(capture_digest)
                 # The service-authenticated inner bytes are the only source that may populate a
                 # captured AI-powered review excerpt. Their digest provenance is retained separately from
                 # the digest of the selection-clipped item below.
@@ -1769,19 +1799,29 @@ def build_semantic_case(
                 )
                 continue
             encoded = text.encode("utf-8")
-            excerpt_truncated = len(encoded) > selection.max_excerpt_bytes
+            split_diff = captured_group is not None and excerpt_kind == "diff"
+            excerpt_truncated = len(encoded) > selection.max_excerpt_bytes and not split_diff
             if excerpt_truncated:
                 text = encoded[: selection.max_excerpt_bytes].decode("utf-8", errors="ignore")
-                encoded = text.encode("utf-8")
-            if excerpt_bytes_used + len(encoded) > selection.max_total_excerpt_bytes:
-                if captured_group is not None:
-                    # The retained group was authenticated but the selection budget excluded
-                    # this row entirely; report omission rather than claiming a delivered prefix.
-                    capture_gap_set.add("content_unselected")
-                omissions.append(
-                    _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_selected")
+            if split_diff:
+                # Split authenticated code, not freeform claim prose, into independently
+                # bounded items. Later hunks must compete for the explicit count/total caps,
+                # rather than vanish at the first item's 4 KiB boundary.
+                part_limit = min(
+                    selection.max_excerpt_bytes, MAX_REVIEW_TEXT_BYTES, MAX_SEMANTIC_ITEM_BYTES
                 )
-                continue
+                parts: list[str] = []
+                remaining = encoded
+                while remaining and len(parts) <= selection.max_excerpts:
+                    part = remaining[:part_limit].decode("utf-8", errors="ignore")
+                    if not part:
+                        break
+                    parts.append(part)
+                    remaining = remaining[len(part.encode("utf-8")) :]
+                if remaining:
+                    excerpt_truncated = True
+            else:
+                parts = [text]
             linked = tuple(
                 sorted(
                     {
@@ -1825,45 +1865,54 @@ def build_semantic_case(
                     _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_selected")
                 )
                 continue
-            # Clipping at the selection policy's excerpt bound remains within the
-            # declared packet limit, but its retained-source limitation is carried
-            # as ``truncated_payload`` and downgrades coverage to PARTIAL below.
-            item_id = f"excerpt-{ref}"
-            item = _content_item(
-                item_id=item_id,
-                section="excerpt",
-                category=DataCategory.EVIDENCE_EXCERPT,
-                source_kind=excerpt_kind,
-                source_ref=ref,
-                linked_subject_refs=linked,
-                occurred_order=record.source_frontier,
-                text=text,
-                over_limit=over_limit,
-            )
-            items.append(item)
-            targeted.append(
-                TargetedExcerptRef(
-                    excerpt_item_id=item_id,
-                    source_kind=excerpt_kind,
-                    linked_subject_refs=linked,
-                    subject_state_relation=SubjectStateRelation.UNKNOWN,
-                    content_visibility=(
-                        "available"
-                        if captured_group is not None or payload.captured_object_id is None
-                        else "not_recorded"
-                    ),
-                    content_digest=item.content_digest,
-                    content_bytes=item.content_bytes,
-                    digest_provenance=digest_provenance,
+            admitted_before = len(targeted)
+            for part_index, part in enumerate(parts):
+                if (
+                    len(targeted) >= selection.max_excerpts
+                    or excerpt_bytes_used + len(part.encode("utf-8"))
+                    > selection.max_total_excerpt_bytes
+                ):
+                    excerpt_truncated = True
+                    if captured_group is not None:
+                        capture_gap_set.add("content_unselected")
+                    omissions.append(
+                        _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_selected")
+                    )
+                    break
+                item_id = (
+                    f"excerpt-{ref}" if len(parts) == 1 else f"excerpt-{ref}-part-{part_index + 1}"
                 )
-            )
-            if excerpt_truncated:
-                # The reviewer receives a valid UTF-8 prefix, but its digest is
-                # necessarily the delivered prefix rather than the retained
-                # source. Keep that limitation visible only when the prefix was
-                # actually admitted to the packet.
+                item = _content_item(
+                    item_id=item_id,
+                    section="excerpt",
+                    category=DataCategory.EVIDENCE_EXCERPT,
+                    source_kind=excerpt_kind,
+                    source_ref=ref,
+                    linked_subject_refs=linked,
+                    occurred_order=record.source_frontier,
+                    text=part,
+                    over_limit=over_limit,
+                )
+                items.append(item)
+                targeted.append(
+                    TargetedExcerptRef(
+                        excerpt_item_id=item_id,
+                        source_kind=excerpt_kind,
+                        linked_subject_refs=linked,
+                        subject_state_relation=SubjectStateRelation.UNKNOWN,
+                        content_visibility=(
+                            "available"
+                            if captured_group is not None or payload.captured_object_id is None
+                            else "not_recorded"
+                        ),
+                        content_digest=item.content_digest,
+                        content_bytes=item.content_bytes,
+                        digest_provenance=digest_provenance,
+                    )
+                )
+                excerpt_bytes_used += item.content_bytes
+            if excerpt_truncated and len(targeted) > admitted_before:
                 capture_gap_set.add("truncated_payload")
-            excerpt_bytes_used += item.content_bytes
 
         if captured_rows_omitted_by_limit:
             capture_gap_set.add("content_unselected")

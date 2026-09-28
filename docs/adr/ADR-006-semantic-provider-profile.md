@@ -160,6 +160,23 @@ and AI-powered review/privacy capability and conformance tests.
     filesystem browser and never upgrades missing content into observed content. `expanded` and
     `custom` may select more *already recorded* in-scope material, but no profile grants ambient
     repository access or defeats the existing item/case caps.
+    Native edit arguments from Codex, Claude Code and Cursor may enter this lane as dedicated
+    diff/changed-file content, using only recognized visible patch or replacement fields, captured
+    once from the post-tool event and labelled with the host-reported outcome (`applied`, `failed`
+    or `unknown`). Unknown nested fields are excluded, and every file locator in the edit, including
+    patch headers, is made workspace-relative or masked as `<outside-workspace>` (POSIX, Windows
+    drive, UNC and WSL `/mnt/<drive>` spellings alike). Capture consent, secret scanning, outbox
+    admission, generation fences and disclosure approval remain required. Claim-linked evidence
+    wins selection first, then captured edits (newest first), then other captures, including before
+    bounded object resolution; a selected capture outside the latest-256 envelope window is read by
+    exact content reference or disclosed as `content_unselected`. Shell heredoc edits whose new
+    bytes are in the command (`apply_patch`/`git apply`/`cat >`/`tee` heredocs) are captured the same
+    way; script-mediated edits are not. Authenticated
+    code is split into UTF-8-safe items within the existing per-item, item-count and total-byte caps;
+    a delivered prefix reports `truncated_payload`, and excluded retained content reports
+    `content_unselected`. This is not a fresh Git snapshot at check time: shell-mediated edits,
+    changes outside supported visible fields, and uncaptured current state still need separately
+    recorded content/state evidence. A digest alone cannot supply missing code.
 13. **Reviewer output talks to the main agent through the existing workflow:** a successful model
     judgment may propose bounded `ReviewerChallenge` values. Each challenge names only case-bound
     refs, explains the discrepancy, states an alternative interpretation, addresses the main agent

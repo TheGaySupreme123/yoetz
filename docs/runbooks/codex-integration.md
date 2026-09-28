@@ -824,10 +824,11 @@ separate evidence; none proves that the provider selected native Codex bytes.
 The Codex hook capture arm is eligible only for content explicitly linked to the hook event and its
 exact task, workspace, host/Yoetz session, source generation, tool-call correlation, multipart set,
 object kind, and digest. Codex session-stream records remain outside the native ticket lane and are
-excluded from AI-powered review selection. Tool input and path/locator content are excluded from
-AI-powered review selection too, although the current Codex hook path may still stage consented
-input/locator chunks locally in the bounded encrypted capture lane pending a follow-up staging
-filter. Encrypted capture and AI-powered review disclosure have separate authority: selecting these
+excluded from AI-powered review selection. Generic tool input and path/locator content are excluded from
+AI-powered review selection. Recognized `apply_patch` arguments are captured as workspace-diff
+content from the post-tool event, with workspace-relative locators and the host-reported outcome
+(see "Reviewable native edits").
+Encrypted capture and AI-powered review disclosure have separate authority: selecting these
 bytes into a frozen AI-powered review case still requires the effective repository privacy grant and
 the independently authorized provider attempt.
 
@@ -844,9 +845,8 @@ selection remains after drain, and advice is committed only after the host outpu
 advice, because the closing host cannot receive it. A later hook or the service sweeper drains the
 end event and refreshes advice. The encrypted capture-ticket handoff does not change Codex's
 historical session-stream path. Session-stream reconciliation remains a separate source and cannot
-supply content to a `codex_hook` ticket; session-stream, input, and locator content remain excluded
-from AI-powered review selection. The current hook path may still stage consented input/locator
-chunks locally pending the follow-up staging filter. Codex keeps its existing replay semantics; the
+supply content to a `codex_hook` ticket; session-stream, generic input, and locator content remain excluded
+from AI-powered review selection. Codex keeps its existing replay semantics; the
 shared operation-replay, source-generation fencing, and teardown repairs apply to all host adapters.
 
 Provider-repair advice is standing advice, so Codex delivers it only at session boundaries (#844).
@@ -1639,6 +1639,47 @@ New completion claims must declare scope explicitly; obligation support is not s
 performs this repair. The shared service behavior applies on macOS, Linux and Windows through WSL 2;
 source tests do not establish native host/platform acceptance.
 
+
+### Reviewable native edits
+
+Codex `apply_patch` calls (including code-mode nested calls) enter the shared encrypted capture
+lane as workspace-diff content. Codex 0.157.x sends the patch as `tool_input.command` on both
+PreToolUse and PostToolUse; the older `patch`/`input` carriers are still read. The post-tool
+`Exit code: N` result prefix supplies the edit outcome and the structural `exit_status`. In code
+mode the outer `exec` cell has no hook payload, but each nested `tools.apply_patch("...")` call is
+dispatched through the tool registry and fires its own `apply_patch` hooks with the same shape, and
+each nested `tools.exec_command` fires `Bash` hooks with `tool_input.command`. A shell
+`apply_patch <<EOF` is intercepted by `exec_command` and fires only PreToolUse, so its patch is
+captured from that event with outcome `unknown`. Whole-file heredoc writes (`cat > path <<EOF`,
+`tee path <<EOF`) and `git apply <<EOF` are captured from the post-tool `Bash` event; writes outside
+the workspace, such as `/tmp` scratch files, are skipped. Edits made by `sed -i`, scripts or
+`git apply <file>` carry no edit bytes in the command and are not captured; other generic command
+input does not become code evidence. This capture uses the existing profileless Codex observation consent; users
+who granted it earlier now also have `apply_patch` text encrypted locally, while egress still follows
+the selected review recipe.
+
+The capture runs from the post-tool event only, once per edit: the pre-tool proposal is neither
+duplicated nor kept as raw tool input. Each captured edit names the host-reported outcome
+(`applied`, `failed` or `unknown`), so a rejected or unconfirmed edit is never presented as applied
+code. Every file locator is made workspace-relative; a locator outside the workspace, a
+home-relative or drive-relative locator, or any `..` path is replaced by `<outside-workspace>` or
+dropped. The rule is lexical and identical on macOS, Linux and Windows through WSL 2: POSIX
+(`/home/...`, `/Users/...`), Windows drive (`C:\...`), UNC (`\\server\share\...`) and WSL
+mount (`/mnt/c/...`) spellings are compared, with drive, mount and UNC forms matched
+case-insensitively, and no filesystem lookup is made. Edits use the ordinary capture caps (at most
+16 chunks and about 680 KB per event), not the routine-output budgets, and remain subject to the
+existing capture consent, secret scanning and outbox admission.
+
+Selection ranks claim-linked evidence first, then captured edits (newest first), then other
+captured output, so later test logs or file reads cannot starve a patch. A selected capture whose
+envelope has aged out of the latest-256 session window is still read by exact content reference;
+one that cannot be reached is disclosed as `content_unselected`. Identical retained bytes are
+selected once. Retained code is split into bounded UTF-8 excerpts, with omitted content and
+truncated prefixes disclosed under the existing count and byte limits. Hooks do not create a fresh
+check-time Git diff. Shell-mediated edits, missing capture and stale code still require explicit
+content/state evidence; bounded packet inclusion does not prove that the reviewer detects a
+defect. Pause, revoke and content-capture disable continue to stop admission through the existing
+shared controls.
 
 ## Background semantic advice controls
 

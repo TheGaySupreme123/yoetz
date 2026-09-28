@@ -6856,3 +6856,16 @@ truncation or redaction invalidates them. Snapshot reuse never substitutes front
 alone for an adapter's recovery/authentication authority. All host/OS clients share this path.
 `tests/integration/application/test_ledger_replay_bench.py` is an opt-in latency benchmark
 (`YOETZ_BENCH_886=1`) at 1,500 and 3,000 observation events.
+
+### Native edit evidence selection
+
+Dedicated visible edit arguments may be retained as `workspace_diff` / changed-file capture content
+through the existing observation contract, once per edit from the post-tool event, with
+workspace-relative locators and an `applied`/`failed`/`unknown` outcome label. This does not admit
+generic command input or ambient repository reads. The shared resolver and the builder rank
+claim/assessment-linked evidence first, then captured edits (newest first), then other captures;
+a selected capture outside the latest-256 envelope window is read by exact content reference.
+Authenticated code uses bounded UTF-8 chunks and preserves `content_unselected` and
+`truncated_payload` coverage when caps omit bytes. Successful application and current repository
+state remain distinct.
+See ADR-006 and the three host integration runbooks for capture and disclosure boundaries.
