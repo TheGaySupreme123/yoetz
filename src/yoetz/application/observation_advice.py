@@ -48,6 +48,8 @@ from yoetz.protocol.errors import ProtocolValueError
 from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
 
 __all__ = [
+    "ADVICE_SEMANTIC_DEFERRED_GAP",
+    "ADVICE_SEMANTIC_DEFERRED_REASON",
     "ADVICE_SEMANTIC_PENDING_GAP",
     "ADVICE_SEMANTIC_UNAVAILABLE_GAP",
     "semantic_state_from_addon",
@@ -84,7 +86,12 @@ _ADVICE_COVERAGE_GAPS_TRUNCATED_GAP: Final = "advice_coverage_gaps_truncated"
 # state, or it terminated without validated output. Neither ever adds AI-powered review coverage.
 ADVICE_SEMANTIC_PENDING_GAP: Final = "advice_semantic_pending"
 ADVICE_SEMANTIC_UNAVAILABLE_GAP: Final = "advice_semantic_unavailable"
+# Background review frequency bound (#888): the condition is eligible for review but the session's
+# rate limit has not elapsed yet. No row exists and no provider was contacted; a later build
+# (or the supervisor's scheduled revisit) admits it when allowed.
+ADVICE_SEMANTIC_DEFERRED_GAP: Final = "advice_semantic_deferred"
 _ADVICE_SEMANTIC_PENDING_REASON: Final = "pending"
+ADVICE_SEMANTIC_DEFERRED_REASON: Final = "deferred"
 _SEMANTIC_SUMMARY_FALLBACK: Final = "Model-derived observation note"
 _SEMANTIC_DETAIL_FALLBACK: Final = "Additive AI-powered advice over minimized evidence"
 _VALID_ADVICE_NEXT_ACTIONS: Final[frozenset[str]] = frozenset(
@@ -205,7 +212,7 @@ def semantic_state_from_addon(
         return "disabled"
     if addon.failure_reason is None:
         return "ready" if output_usable else "failed"
-    if addon.failure_reason == _ADVICE_SEMANTIC_PENDING_REASON:
+    if addon.failure_reason in {_ADVICE_SEMANTIC_PENDING_REASON, ADVICE_SEMANTIC_DEFERRED_REASON}:
         return "unavailable"
     return "failed"
 
@@ -810,10 +817,14 @@ def build_observation_advice_snapshot(
     semantic_pending = (
         semantic is not None and semantic.failure_reason == _ADVICE_SEMANTIC_PENDING_REASON
     )
+    semantic_deferred = (
+        semantic is not None and semantic.failure_reason == ADVICE_SEMANTIC_DEFERRED_REASON
+    )
     semantic_unavailable = (
         semantic is not None
         and semantic.failure_reason is not None
-        and semantic.failure_reason != _ADVICE_SEMANTIC_PENDING_REASON
+        and semantic.failure_reason
+        not in {_ADVICE_SEMANTIC_PENDING_REASON, ADVICE_SEMANTIC_DEFERRED_REASON}
     )
     if semantic is not None:
         if semantic.next_action is not None and (
@@ -920,6 +931,10 @@ def build_observation_advice_snapshot(
             (
                 ADVICE_SEMANTIC_UNAVAILABLE_GAP,
                 semantic_unavailable,
+            ),
+            (
+                ADVICE_SEMANTIC_DEFERRED_GAP,
+                semantic_deferred,
             ),
             (
                 "observation_qualified_partial",

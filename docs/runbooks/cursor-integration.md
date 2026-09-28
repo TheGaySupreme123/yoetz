@@ -624,7 +624,9 @@ structural rows, including Yoetz-owned MCP mutations whose result is already dur
 defer service delivery. When chunks exist, the pass prioritizes the current event after its
 same-session FIFO prefix, within that one-second drain and sixteen-row bound. Teardown
 keeps its host-clamped three-second hook, records local lifecycle/outbox intent, and defers service
-delivery to a later hook or the sweeper (a ready service's idle sweep interval is 60 seconds);
+delivery to a later hook or the sweeper (a ready service polls for undelivered rows every
+5 seconds while idle, and retries a row that already failed an attempt at the 60-second idle
+interval);
 it skips local advice construction because the closing host
 cannot receive it. A stale or blocked
 backlog produces the explicit gap when the hook completes.
@@ -1482,6 +1484,14 @@ New completion claims must declare scope explicitly; obligation support is not s
 performs this repair. The shared service behavior applies on macOS, Linux and Windows through WSL 2;
 source tests do not establish native host/platform acceptance.
 
+
+## Background semantic advice controls
+
+Background review uses the shared service's routine budget, condition deduplication and durable
+per-session interval on macOS, Linux and Windows through WSL 2. See
+[background review frequency](../usage/providers.md#background-review-frequency) for disable,
+resume and interval settings. The setting gates recovered pending work as well as new scheduling;
+explicit checks and deterministic advice retain their independent behavior.
 
 ## Response and receipt timeout recovery
 

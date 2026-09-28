@@ -4051,7 +4051,8 @@ Shared closed types:
   advice is asynchronous (issue #619): the advice build never calls a provider.
   `application/observation_advice_semantic.ObservationAdviceSemanticScheduler` looks up or enqueues
   one durable attempt row in `observation_advice_semantic_attempts` (migration 0012), keyed by
-  (workspace commitment, Yoetz session, pre-review evidence basis), storing the exact scoped
+  (workspace commitment, Yoetz session, advice-candidate identity; retries of a terminal
+  non-success use `<identity>#<generation>` after a backoff, see ADR-006 issue #888), storing the exact scoped
   observation gap tuple and the minimized packet that carries it. Repeated identical builds coalesce
   onto that row; a newer basis for the same session supersedes that session's unattempted pending
   rows (`cancelled` / `superseded`) and keeps every completed row's receipt. At most 16 rows may be
@@ -4060,7 +4061,8 @@ Shared closed types:
   `advice_semantic_pending`; a `failed`, `unavailable`, or `cancelled` row adds
   `advice_semantic_unavailable` with its closed reason (`authorization_missing`,
   `provider_unavailable`, `provider_failed`, `output_invalid`, `queue_full`, `superseded`,
-  `cancelled`, `interrupted`). Only a `succeeded` row with validated finding ids adds
+  `cancelled`, `interrupted`). An admission refused by the per-session interval writes no row and
+  adds `advice_semantic_deferred` (semantic state `unavailable`). Only a `succeeded` row with validated finding ids adds
   `semantic_model_derived`; a succeeded attempt that returned no challenges is an honest receipt and
   no finding.
 
@@ -6794,6 +6796,12 @@ Historical event bytes remain intact; rebuilding a projection applies this bound
 its accepted history. A held old check is still invalidated by a later response to a finding that
 check did not return. Resolved history does not remove receipt coverage limitations.
 
+### Observation latency and capacity (#887)
+
+`observation-budget-v3-capacity` uses resource occupancy for admission and effective detail.
+`oldest_pending_age_ms` and the historical `max_pending_age_ms` field remain readable diagnostic
+values; age alone neither rejects structural input nor disables content. Real count, byte,
+session-share, pending-pair and capture limits and recovery dwell remain authoritative. See ADR-029.
 
 ### Exact-frontier workflow snapshot reuse (issue #886)
 

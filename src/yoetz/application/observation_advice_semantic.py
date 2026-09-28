@@ -1,11 +1,19 @@
 """Bounded asynchronous AI-powered review for observation advice (issue #619).
 
 Hook ingest never calls a provider. The advice builder asks the scheduler for the durable
-attempt that matches the current evidence basis; when none exists it enqueues one minimized
-packet and reports ``advice_semantic_pending``. A generation-fenced background worker later
+attempt that matches the current advice-candidate identity; when eligible it enqueues one
+minimized packet and reports ``advice_semantic_pending``. A generation-fenced background worker later
 claims the row, resolves repository-scoped provider authority at dispatch time, performs the
 privacy-gated attempt, and records the outcome. Only a ``succeeded`` row with validated output
 may add AI-powered advice; every other state stays a truthful bounded coverage gap.
+
+Frequency bound (#888): reuse is keyed by the stable candidate identity (rule, kind, next action,
+summary, and scoped gaps; never the rolling evidence basis or per-rule evidence counts). A
+terminal non-success for that identity is re-admitted after an exponential backoff, or at once
+for ``authorization_missing`` when the task route has since become active. A new admission is
+refused while the session's last provider-reaching attempt is younger than the configured
+minimum interval; the refusal is reported as ``deferred`` and a revisit is scheduled for when
+the interval elapses, so suppressed work is retried without waiting for another hook.
 """
 
 from __future__ import annotations
@@ -13,33 +21,43 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Final, Literal, Protocol, cast
 
 from yoetz.application.observation_advice import (
+    ADVICE_SEMANTIC_DEFERRED_REASON,
     ObservationAdviceCandidate,
     ObservationAdviceSemanticAddon,
     minimized_semantic_evidence_packet,
 )
 from yoetz.domain.findings import FindingId
 from yoetz.observability.logging import record_unexpected_exception_without_raising
+from yoetz.ports.semantic_budget import (
+    semantic_background_scope,
+    semantic_budget_profile_scope,
+)
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 
 __all__ = [
     "ADVICE_SEMANTIC_FAILURE_REASONS",
     "ADVICE_SEMANTIC_PENDING_REASON",
     "DEFAULT_ADVICE_SEMANTIC_MAX_PENDING",
+    "DEFAULT_ADVICE_SEMANTIC_MIN_INTERVAL_SECONDS",
+    "MAX_ADVICE_SEMANTIC_BACKOFF_FACTOR",
     "MAX_ADVICE_SEMANTIC_ATTEMPTS",
     "AdviceSemanticCancellationReconciler",
     "AdviceSemanticDispatch",
     "AdviceSemanticDrainHandle",
     "ObservationAdviceSemanticAttempt",
+    "ObservationAdviceSemanticDeferral",
     "ObservationAdviceSemanticOutcome",
     "ObservationAdviceSemanticRepository",
     "ObservationAdviceSemanticScheduler",
     "ObservationAdviceSemanticSupervisor",
     "ObservationAdviceSemanticWorker",
     "addon_from_attempt",
+    "advice_candidate_identity",
+    "advice_semantic_retry_delay_seconds",
 ]
 
 type AttemptStatus = Literal[
@@ -67,11 +85,87 @@ ADVICE_SEMANTIC_FAILURE_REASONS: Final[frozenset[str]] = frozenset(
 DEFAULT_ADVICE_SEMANTIC_MAX_PENDING: Final = 16
 # A row reclaimed this many times without a terminal outcome is recorded ``interrupted``.
 MAX_ADVICE_SEMANTIC_ATTEMPTS: Final = 3
+# Minimum spacing between provider-reaching background reviews of one Yoetz session (#888).
+DEFAULT_ADVICE_SEMANTIC_MIN_INTERVAL_SECONDS: Final = 180
+# Retries of one failed candidate identity back off exponentially from the minimum interval and
+# stop growing at this multiple of it (180 s -> 360 s -> ... -> 48 min at the default).
+MAX_ADVICE_SEMANTIC_BACKOFF_FACTOR: Final = 16
+_MAX_REVISIT_TIMERS: Final = 256
+# Failure reasons recorded before any provider request: they neither consume the session's rate
+# limit nor wait on a provider-failure backoff longer than the base interval.
+_PRE_PROVIDER_FAILURE_REASONS: Final[frozenset[str]] = frozenset(
+    {"authorization_missing", "provider_unavailable", "queue_full", "superseded"}
+)
+
+
+def advice_semantic_retry_delay_seconds(
+    attempt: ObservationAdviceSemanticAttempt,
+    *,
+    generation: int,
+    base_seconds: int,
+) -> int:
+    """Backoff before a terminal non-success row for one identity may be admitted again.
+
+    ``generation`` is how many rows this identity already has in the session (1 for the first).
+    A superseded row was never attempted, so it is immediately eligible (subject to the session
+    rate limit). Pre-provider unavailability retries at the base interval; provider-reaching
+    failures double per generation up to the cap.
+    """
+
+    if base_seconds <= 0:
+        return 0
+    if attempt.failure_reason == "superseded":
+        return 0
+    if attempt.failure_reason in _PRE_PROVIDER_FAILURE_REASONS:
+        return base_seconds
+    factor = min(2 ** max(generation - 1, 0), MAX_ADVICE_SEMANTIC_BACKOFF_FACTOR)
+    return base_seconds * factor
+
+
+def advice_candidate_identity(packet: Mapping[str, object]) -> str:
+    """Stable identity of the reviewable advice candidates in one minimized packet.
+
+    The identity is the set of distinct candidates (kind, rule, next action, summary) plus the
+    scoped gaps and packet format. It excludes the rolling evidence basis, each rule's evidence
+    count, and how many times the same candidate repeats, all of which change on almost every
+    observation. A new or removed candidate kind, a changed next action, or a changed scoped gap
+    is a different identity and therefore genuinely new advice.
+    """
+
+    rules = packet.get("deterministic_rules", ())
+    distinct: dict[bytes, JsonValue] = {}
+    for rule in cast(Sequence[object], rules):
+        if not isinstance(rule, Mapping):
+            continue
+        stable = cast(
+            JsonValue,
+            {
+                str(key): value
+                for key, value in cast(Mapping[str, object], rule).items()
+                if key != "evidence_ref_count"
+            },
+        )
+        distinct[canonical_encode(stable)] = stable
+    summaries = packet.get("finding_summaries", ())
+    condition: dict[str, object] = {
+        "format": packet.get("format"),
+        "policy": packet.get("policy"),
+        "coverage_gaps": packet.get("coverage_gaps", ()),
+        "finding_summaries": tuple(
+            sorted({str(item) for item in cast(Sequence[object], summaries)}, key=str.encode)
+        ),
+        "deterministic_rules": tuple(distinct[key] for key in sorted(distinct)),
+    }
+    return canonical_digest(cast(JsonValue, condition))
 
 
 @dataclass(frozen=True, slots=True)
 class ObservationAdviceSemanticAttempt:
-    """One durable attempt row keyed by (workspace, session, evidence basis)."""
+    """One durable attempt keyed by session and candidate identity (legacy rows use basis).
+
+    Retries of the same identity are stored as ``<identity>#<generation>`` so every earlier
+    receipt and failure reason is retained.
+    """
 
     attempt_id: str
     workspace_commitment: str
@@ -115,6 +209,19 @@ class ObservationAdviceSemanticOutcome:
             raise ValueError("advice_semantic_outcome_invalid")
 
 
+@dataclass(frozen=True, slots=True)
+class ObservationAdviceSemanticDeferral:
+    """An admission the frequency bound refused without writing a row or contacting a provider.
+
+    ``rate_limited``: the session's last provider-reaching attempt is too recent.
+    ``retry_backoff``: this identity's last attempt failed and its backoff has not elapsed.
+    """
+
+    reason: Literal["rate_limited", "retry_backoff"]
+    retry_after_seconds: float
+    previous: ObservationAdviceSemanticAttempt | None = None
+
+
 class ObservationAdviceSemanticRepository(Protocol):
     """Generation-fenced durable attempt repository (one per task bundle)."""
 
@@ -129,10 +236,17 @@ class ObservationAdviceSemanticRepository(Protocol):
         packet_json: bytes,
         enqueued_at: str,
         max_pending: int,
-    ) -> ObservationAdviceSemanticAttempt: ...
+        min_interval_seconds: int = 0,
+        retry_base_seconds: int = 0,
+        retry_now: bool = False,
+    ) -> ObservationAdviceSemanticAttempt | ObservationAdviceSemanticDeferral: ...
 
     def lookup(
         self, *, yoetz_session_id: str, basis_digest: str
+    ) -> ObservationAdviceSemanticAttempt | None: ...
+
+    def latest_for_identity(
+        self, *, yoetz_session_id: str, identity: str
     ) -> ObservationAdviceSemanticAttempt | None: ...
 
     def claim_next(
@@ -166,6 +280,12 @@ type AdviceSemanticCancellationReconciler = Callable[
     [ObservationAdviceSemanticAttempt], Awaitable[ObservationAdviceSemanticOutcome | None]
 ]
 type NowProvider = Callable[[], str]
+# ``(yoetz_session_id) -> route is ACTIVE with repository authority``; consulted only to let an
+# ``authorization_missing`` identity retry before its backoff once the route became active.
+type AdviceSemanticRouteReady = Callable[[str], Awaitable[bool]]
+# ``(workspace, yoetz_session_id, delay_seconds)``: ask for an advice rebuild once a deferred or
+# backed-off admission becomes eligible. Must not block; the supervisor owns the timer.
+type AdviceSemanticRevisit = Callable[[str, str, float], None]
 
 
 def addon_from_attempt(
@@ -226,6 +346,9 @@ class ObservationAdviceSemanticScheduler:
     now: NowProvider
     max_pending: int = DEFAULT_ADVICE_SEMANTIC_MAX_PENDING
     enabled: bool = True
+    min_interval_seconds: int = DEFAULT_ADVICE_SEMANTIC_MIN_INTERVAL_SECONDS
+    route_ready: AdviceSemanticRouteReady | None = field(default=None, compare=False)
+    revisit: AdviceSemanticRevisit | None = field(default=None, compare=False)
 
     async def review(
         self,
@@ -242,9 +365,6 @@ class ObservationAdviceSemanticScheduler:
         repository = _repository_for(store)
         if repository is None:
             return None
-        existing = repository.lookup(yoetz_session_id=yoetz_session_id, basis_digest=basis)
-        if existing is not None:
-            return addon_from_attempt(existing)
         sorted_gaps = tuple(sorted({gap for gap in gaps if gap}, key=str.encode))
         packet = minimized_semantic_evidence_packet(
             candidates,
@@ -252,23 +372,67 @@ class ObservationAdviceSemanticScheduler:
             coverage_gaps=sorted_gaps,
             finding_summaries=tuple(str(item.rule_code) for item in candidates),
         )
-        payload = canonical_encode(cast(JsonValue, dict(packet)))
-        subject = (
-            basis
-            if basis.startswith("sha256:")
-            else canonical_digest(cast(JsonValue, {"basis": basis}))
+        # The packet contains rule summaries, not source content. Key reuse by the stable
+        # candidate identity, excluding the rolling stream digest and evidence counts. Keep the
+        # original basis in the frozen packet and hash those exact bytes for disclosure provenance.
+        identity = advice_candidate_identity(packet)
+        latest = repository.latest_for_identity(
+            yoetz_session_id=yoetz_session_id, identity=identity
         )
+        retry_now = False
+        if (
+            latest is not None
+            and latest.status == "unavailable"
+            and latest.failure_reason == "authorization_missing"
+            and self.route_ready is not None
+        ):
+            try:
+                retry_now = bool(await self.route_ready(yoetz_session_id))
+            except Exception as exc:  # noqa: BLE001 - a probe failure keeps the normal backoff
+                record_unexpected_exception_without_raising(
+                    exc,
+                    component="application.observation_advice_semantic",
+                    operation="route_ready_probe_failed",
+                )
+        payload = canonical_encode(cast(JsonValue, dict(packet)))
+        subject = canonical_digest(cast(JsonValue, dict(packet)))
         scheduled = repository.schedule(
             workspace=workspace,
             yoetz_session_id=yoetz_session_id,
-            basis_digest=basis,
+            basis_digest=identity,
             subject_digest=subject,
             coverage_gaps=sorted_gaps,
             packet_json=payload,
             enqueued_at=self.now(),
             max_pending=self.max_pending,
+            min_interval_seconds=self.min_interval_seconds,
+            retry_base_seconds=self.min_interval_seconds,
+            retry_now=retry_now,
         )
+        if isinstance(scheduled, ObservationAdviceSemanticDeferral):
+            self._request_revisit(workspace, yoetz_session_id, scheduled.retry_after_seconds)
+            if scheduled.reason == "retry_backoff" and scheduled.previous is not None:
+                # The last attempt's own closed reason stays visible until the retry runs.
+                return addon_from_attempt(scheduled.previous)
+            return ObservationAdviceSemanticAddon(
+                finding_ids=(),
+                evidence_digest=None,
+                failure_reason=ADVICE_SEMANTIC_DEFERRED_REASON,
+            )
         return addon_from_attempt(scheduled)
+
+    def _request_revisit(self, workspace: str, yoetz_session_id: str, delay: float) -> None:
+        revisit = self.revisit
+        if revisit is None:
+            return
+        try:
+            revisit(workspace, yoetz_session_id, max(float(delay), 1.0))
+        except Exception as exc:  # noqa: BLE001 - a missed revisit only waits for the next hook
+            record_unexpected_exception_without_raising(
+                exc,
+                component="application.observation_advice_semantic",
+                operation="revisit_schedule_failed",
+            )
 
 
 def _repository_for(store: object) -> ObservationAdviceSemanticRepository | None:
@@ -340,7 +504,10 @@ class ObservationAdviceSemanticWorker:
             )
             return attempt
         try:
-            outcome = await self.dispatch(attempt)
+            # Background advice is never a completion gate: routine output limit plus the
+            # adapter's lower background effort, independent of any explicit ``check`` profile.
+            with semantic_budget_profile_scope("routine"), semantic_background_scope():
+                outcome = await self.dispatch(attempt)
         except asyncio.CancelledError:
             self._complete(attempt, await self._cancelled_outcome(attempt))
             raise
@@ -428,6 +595,61 @@ class ObservationAdviceSemanticSupervisor:
         self._lock = asyncio.Lock()
         self._active_handle: AdviceSemanticDrainHandle | None = None
         self._retirements: dict[int, asyncio.Task[None]] = {}
+        self._revisit_handler: Callable[[str, str], Awaitable[None]] | None = None
+        self._revisit_timers: dict[tuple[str, str], asyncio.TimerHandle] = {}
+        self._revisit_tasks: set[asyncio.Task[None]] = set()
+
+    def set_revisit_handler(self, handler: Callable[[str, str], Awaitable[None]] | None) -> None:
+        """Install the advice rebuild used when a deferred background review becomes eligible."""
+
+        self._revisit_handler = handler
+
+    def schedule_revisit(self, workspace: str, yoetz_session_id: str, delay: float) -> None:
+        """Rebuild one session's advice after ``delay`` seconds (trailing edge, #888).
+
+        At most one timer per session; an existing earlier timer is kept because the rebuild
+        simply defers again, rescheduling itself, if it fires before eligibility. The table is
+        bounded, in memory, and cleared on stop; after a restart the next hook rebuild re-derives
+        the same deferral from durable rows.
+        """
+
+        if self._closed or self._revisit_handler is None:
+            return
+        key = (workspace, yoetz_session_id)
+        if key in self._revisit_timers or len(self._revisit_timers) >= _MAX_REVISIT_TIMERS:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._revisit_timers[key] = loop.call_later(
+            max(delay, 1.0), self._fire_revisit, workspace, yoetz_session_id
+        )
+
+    def _fire_revisit(self, workspace: str, yoetz_session_id: str) -> None:
+        self._revisit_timers.pop((workspace, yoetz_session_id), None)
+        handler = self._revisit_handler
+        if self._closed or handler is None:
+            return
+
+        async def run() -> None:
+            try:
+                await handler(workspace, yoetz_session_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - a failed revisit waits for the next hook
+                record_unexpected_exception_without_raising(
+                    exc,
+                    component="application.observation_advice_semantic",
+                    operation="revisit_failed",
+                )
+
+        task = asyncio.get_running_loop().create_task(run(), name="observation-advice-revisit")
+        self._revisit_tasks.add(task)
+        task.add_done_callback(self._revisit_tasks.discard)
+
+    def pending_revisits(self) -> tuple[tuple[str, str], ...]:
+        return tuple(sorted(self._revisit_timers))
 
     def register(self, handle: AdviceSemanticDrainHandle) -> bool:
         if self._closed:
@@ -497,6 +719,13 @@ class ObservationAdviceSemanticSupervisor:
     async def stop(self) -> None:
         self._closed = True
         self._wake.set()
+        for timer in self._revisit_timers.values():
+            timer.cancel()
+        self._revisit_timers.clear()
+        for revisit in tuple(self._revisit_tasks):
+            revisit.cancel()
+        if self._revisit_tasks:
+            await asyncio.gather(*self._revisit_tasks, return_exceptions=True)
         task = self._loop_task
         self._loop_task = None
         if task is not None:

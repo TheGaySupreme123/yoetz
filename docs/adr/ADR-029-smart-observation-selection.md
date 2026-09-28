@@ -206,14 +206,14 @@ relay it only after the owner explicitly accepts the displayed scope and costs. 
 configuration cannot silently grant Detailed or a larger session override. Content and disclosure
 changes continue through their independent ADR-012/ADR-016 authority paths.
 
-Pressure is driven by the worst relevant count, byte, pending-age, pending-pair or capture-backlog
+Pressure is driven by the worst relevant count, byte, pending-pair or capture-backlog
 constraint. Rising pressure reduces optional content first. High pressure temporarily makes a
 selected Detailed session effectively Focused. A hard limit pauses replayable ingestion at the
 last durably accounted input and records bounded loss for non-replayable input. Sustained low
 pressure restores only a still-valid owner selection, with hysteresis and a recovery dwell.
 
 The initial thresholds are 65% rising pressure, 85% high pressure, and a hard stop at 100% of
-the worst relevant budget. Under `observation-budget-v2-provisional`, leaving every current
+the worst relevant budget. Under `observation-budget-v3-capacity`, leaving every current
 hard threshold transitions `hard_limit` to `high` immediately. Structural admission reopens only
 when the whole proposed buffer/outbox transition also fits the selected count and byte limits.
 Optional detail remains reduced until all dimensions stay at or below 45% for ten seconds.
@@ -399,3 +399,39 @@ transition shows as over-100% utilization with `pressure_state: hard_limit`, bes
 counts and bytes, gaps, and loss accounting. The per-write cost of a large state document is also
 unchanged: each acknowledgement during a 2 MiB drain rewrites the whole document. Incremental
 persistence remains the prerequisite for revisiting that.
+
+### Amendment: delayed delivery is not exhausted capacity (#887)
+
+Oldest pending age remains diagnostic and maintenance demand; it is not an admission or content
+budget. A delayed row or capture handoff must not refuse later input, force Detailed to Focused,
+or disable content while real capacity remains. This supersedes the pending-age pressure policy
+above, including the historical #836 description. Existing handoff retirement and authority
+checks remain unchanged. Count, byte, session-share, pending-pair and capture ceilings still
+refuse unsafe admissions; existing losses remain reported. The shared policy applies to Codex,
+Claude Code, Cursor and session-stream observation on every supported OS.
+
+A persisted old hard-pressure snapshot reopens structural admission as soon as current resource
+usage is below its limits; optional detail recovers through the existing low-water dwell. Age
+continues to be reported unchanged, including across retry and restart, so sluggish draining is
+visible without turning a delivery delay into unrecoverable evidence loss. It does not claim
+unbounded retention. Because content is no longer disabled at 60 s, a stall can keep capturing
+content up to the existing 128 MiB per-workspace capture ceiling.
+
+Retaining input moves the steady-state backlog from about one minute of input to the session fair
+share (2,048 rows at `largest`). Two measures keep that affordable and drained:
+
+- **Hook-side cost.** Pressure sampling on each hook admission now reads one memoized size and
+  protection fact per retained row and derives each delivery unit's length arithmetically, instead
+  of re-encoding every row. On an Apple-silicon reference run at 2,048 retained rows (1.37 MB
+  state), `commit_selected_admission` fell from about 28 ms to about 10 ms median. The remainder is
+  the single-document rewrite, which stays bounded by the 16 MiB state ceiling and is still
+  proportional to state size; incremental persistence (an append-only outbox segment) remains the
+  prerequisite for a write cost that is independent of backlog size.
+- **Drain cadence.** Every hook observation ingest arms a coalesced sweep wake (at most one early
+  pass about every second), and while idle the service polls a lock-free, read-only probe every
+  5 s and sweeps as soon as any outbox row is waiting that no drain has attempted. Rows that
+  already failed an attempt keep the 60 s idle interval, so the poll cannot become a retry storm.
+  Consecutive progressing passes continue as before. The 0.2 s hook drain budget and the 60 s
+  idle interval are unchanged and remain non-configurable.
+
+Loss at real ceilings is still counted in `unrecoverable_input_count` and reported by status.

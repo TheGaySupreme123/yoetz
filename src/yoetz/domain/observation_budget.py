@@ -59,7 +59,7 @@ __all__ = [
     "parse_capacity_request",
 ]
 
-BUDGET_POLICY_VERSION: Final = "observation-budget-v2-provisional"
+BUDGET_POLICY_VERSION: Final = "observation-budget-v3-capacity"
 BUDGET_VALIDATION_STATUS: Final = "not_validated"
 CURRENT_SERIALIZATION_CAP_BYTES: Final = 1 * 1024 * 1024
 # The whole local observation state is one JSON document re-encoded on every
@@ -699,6 +699,9 @@ def _pressure_ratios(
     usage: BudgetUsage,
     limits: BudgetLimits,
 ) -> tuple[tuple[PressureDimension, int], ...]:
+    # Age measures delivery latency, not occupied capacity. A slow consumer must
+    # not turn a small durable backlog into input loss or disable content capture.
+    # Keep oldest_pending_age_ms in status/maintenance, outside admission pressure.
     return (
         (
             PressureDimension.COUNT,
@@ -715,10 +718,6 @@ def _pressure_ratios(
                 _ratio(usage.state_bytes, limits.state_bytes),
                 _ratio(usage.session_queue_bytes, limits.session_fair_share_bytes),
             ),
-        ),
-        (
-            PressureDimension.OLDEST_AGE,
-            _ratio(usage.oldest_pending_age_ms, limits.max_pending_age_ms),
         ),
         (
             PressureDimension.CAPTURE_BACKLOG,

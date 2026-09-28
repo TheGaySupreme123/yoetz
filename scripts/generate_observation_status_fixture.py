@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any, cast
 
 from yoetz.domain.observation_budget import (
-    BUDGET_POLICY_VERSION,
     BUDGET_VALIDATION_STATUS,
     STATE_DOCUMENT_CEILING_BYTES,
     BudgetLimits,
@@ -34,6 +33,9 @@ from yoetz.domain.values import JsonObject, Timestamp
 from yoetz.protocol.canonical import canonical_digest, canonical_encode, strict_json_parse
 
 _MANIFEST_RELATIVE = Path("fixtures/manifest.json")
+# Frozen fixtures pin the policy string they shipped with; the live
+# ``BUDGET_POLICY_VERSION`` may advance without rewriting historical wire cases.
+_CTL_290_BUDGET_POLICY_VERSION = "observation-budget-v2-provisional"
 _FIXTURE_MEDIA_TYPE = "application/vnd.yoetz.fixture-case+json"
 _INSTANCE_ID = "svc_00000000-0000-4000-8000-000000000001"
 _RPC_ID = "rpc_00000000-0000-4000-8000-000000000002"
@@ -212,7 +214,8 @@ def _runtime_status_29() -> dict[str, Any]:
     effective_budget = JsonObject(
         {
             "schema": EFFECTIVE_BUDGET_SCHEMA,
-            "budget_policy_version": BUDGET_POLICY_VERSION,
+            # CTL-290 is frozen at the policy version current when 2.9 shipped.
+            "budget_policy_version": _CTL_290_BUDGET_POLICY_VERSION,
             "validation_status": BUDGET_VALIDATION_STATUS,
             "scope": "session",
             "selected_queue_count": capacity.queue_count,
@@ -264,6 +267,7 @@ def _runtime_status_29() -> dict[str, Any]:
         accounting=JsonObject(cast(dict[str, Any], template["accounting"])),
         session_commitment=_COMMITMENT,
         effective_budget=effective_budget,
+        policy_version=_CTL_290_BUDGET_POLICY_VERSION,
     )
     return _plain(observation_selection_runtime_status_to_json(status))
 

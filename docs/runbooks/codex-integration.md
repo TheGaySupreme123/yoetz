@@ -1640,6 +1640,14 @@ performs this repair. The shared service behavior applies on macOS, Linux and Wi
 source tests do not establish native host/platform acceptance.
 
 
+## Background semantic advice controls
+
+Background review uses the shared service's routine budget, condition deduplication and durable
+per-session interval on macOS, Linux and Windows through WSL 2. See
+[background review frequency](../usage/providers.md#background-review-frequency) for disable,
+resume and interval settings. The setting gates recovered pending work as well as new scheduling;
+explicit checks and deterministic advice retain their independent behavior.
+
 ## Response and receipt timeout recovery
 
 The shared MCP bridge allows 50 seconds for `respond` and `receipt` by default, below the
