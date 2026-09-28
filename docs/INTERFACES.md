@@ -6792,6 +6792,9 @@ Semantic finding resolution compares the later completed review's native capture
 the readable original finding's capture baseline (ADR-006, issue #884). Only the closed existing
 baseline is tolerated; it does not remove any receipt coverage gap. `insufficient_packet` cannot
 resolve a prior semantic finding. Response disposition and limitation acceptance are not proofs.
+Semantic findings carry their review's closed capture limits in their own coverage, and resolve
+only after a readable material change recorded after the finding
+(`no_material_change_since_finding` otherwise).
 
 
 `check_recorded` version `1.3.0` adds required `semantic_conclusion` on succeeded attempts. The

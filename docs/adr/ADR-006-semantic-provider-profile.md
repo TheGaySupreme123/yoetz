@@ -701,13 +701,27 @@ The same prompt, result commitment and guidance serve all hosts and supported op
 ### Capture baseline for semantic finding resolution (issue #884)
 
 A completed semantic re-review with a recorded assessable conclusion may resolve an absent issue
-while retaining the original readable
-finding's closed native capture limits: `content_unselected`, `content_capture_unavailable`,
-`captured_object_unavailable`, `host_outcome_unavailable`, and `unpaired_event`. Only codes already
-present on that original finding are tolerated, and original/current freshness must remain
-readable (`current` or `partial`). New gaps, redacted or missing ledger payloads, stale/unknown
-state, withheld reviewer context, clipped semantic packets, an `insufficient_packet` answer,
-failed review, suppression, scope mismatch and a returned issue still prevent resolution.
+while retaining the original readable finding's closed native capture limits:
+`content_unselected`, `content_capture_unavailable`, `captured_object_unavailable`,
+`host_outcome_unavailable`, `unpaired_event`, and `semantic_case_content_over_item_limit`
+(recorded clipping of an oversized item). Only codes already present on that original finding are
+tolerated. The check stamps the capture limits its review ran under onto every semantic finding it
+raises, so the baseline is durable finding coverage rather than the deterministic case alone.
+Original and current freshness must be readable (`current` or `partial`); `redacted_gap` is
+accepted only when a tolerated `captured_object_unavailable` explains it, mirroring the local
+host-limited exception. New gaps, redacted or missing ledger payloads, stale/unknown state,
+withheld reviewer context, dropped challenges, reference-limit clipping, an `insufficient_packet`
+answer, failed review, suppression, scope mismatch and a returned issue still prevent resolution.
+
+A semantic finding also resolves only over state that changed materially after it was recorded
+and at or before the tested frontier: a new or revised readable action, result or evidence record,
+or a revision of a claim or obligation the finding names (including a superseding claim). A
+reviewer that merely does not repeat an issue over unchanged state proves nothing, so a re-roll
+never resolves a finding (`no_material_change_since_finding`). Yoetz cannot bind arbitrary new
+evidence to reviewer prose; this requires new work, not proof of its relevance, and the later
+review must still complete without returning the issue. Local findings are unaffected. Local
+re-derivations reuse only local finding IDs, so a same-subject semantic row can no longer be
+rewritten as a local one.
 
 This is absence of a previously raised issue under the same bounded coverage, not proof of
 unseen code correctness. Coverage gaps remain verbatim and keep the receipt insufficient.
