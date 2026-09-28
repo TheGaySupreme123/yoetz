@@ -56,6 +56,8 @@ __all__ = [
 ]
 
 _MAX_EVENTS: Final = 256
+# Reserve part of the existing ring for capture provenance; do not increase retention.
+_MAX_CAPTURE_ENVELOPES: Final = 64
 _MAX_DEDUP: Final = 4_096
 _MAX_CAPTURE_TICKETS: Final = 512
 # Native content is admitted independently of the structural observation queue.
@@ -2093,8 +2095,10 @@ class SqliteObservationStore:
             self._db.execute(
                 "DELETE FROM observation_events WHERE id IN ("
                 "SELECT id FROM observation_events WHERE workspace_commitment = ? "
-                "ORDER BY id ASC LIMIT ?)",
-                (workspace, excess),
+                "AND id NOT IN (SELECT id FROM observation_events "
+                "WHERE workspace_commitment = ? AND content_refs_json != ? "
+                "ORDER BY id DESC LIMIT ?) ORDER BY id ASC LIMIT ?)",
+                (workspace, workspace, b"[]", _MAX_CAPTURE_ENVELOPES, excess),
             )
         dedup_row = self._db.execute(
             "SELECT COUNT(*) FROM observation_dedup WHERE workspace_commitment = ?",

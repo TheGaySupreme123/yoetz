@@ -6869,3 +6869,14 @@ Authenticated code uses bounded UTF-8 chunks and preserves `content_unselected` 
 `truncated_payload` coverage when caps omit bytes. Successful application and current repository
 state remain distinct.
 See ADR-006 and the three host integration runbooks for capture and disclosure boundaries.
+
+
+### Native capture provenance retention (#883 follow-up)
+
+`SqliteObservationStore` keeps at most 256 observation envelopes per workspace, reserving up to
+64 slots for the newest envelopes with content references. Other slots keep the most recent
+remaining events. `list_envelopes_for_content_refs` can therefore authenticate retained captures
+after routine traffic rolls over the ring, but cannot reconstruct captures evicted from this
+bounded reservation. Workspace/session fences and capture/disclosure authorization still apply.
+The selection policy is shared by all three hosts and supported OSes; it needs no extra Codex
+content profile and does not increase the owner's configured capacity.
