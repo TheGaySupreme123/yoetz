@@ -325,6 +325,7 @@ def _native_output(host: str, text: str) -> str:
     "text,expected",
     [
         ("DONE", True),
+        ("Coverage limitation disclosed. DONE", True),
         ("Probe completed.\n\nDONE\n", True),
         ("The required Yoetz MCP tools are not available in this session.", False),
         ("NOT_DONE", False),
