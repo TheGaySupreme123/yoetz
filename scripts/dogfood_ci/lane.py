@@ -1129,13 +1129,34 @@ class Lane:
         return status
 
     def _observe_drain(self, name: str, phase: str, *, fatal: bool) -> dict[str, Any] | None:
-        _, drain = self._yoetz(
-            name,
-            phase,
-            ["observe", "drain", "--workspace", str(self.project), "--json"],
-            expect_zero=False,
-        )
+        deadline = time.monotonic() + 60.0
+        polls = 0
+        drain: dict[str, Any] | None = None
+        drain_step: Step | None = None
+        while (remaining := deadline - time.monotonic()) > 0:
+            polls += 1
+            drain_step, drain = self._yoetz(
+                name if polls == 1 else f"{name}_poll_{polls}",
+                phase,
+                ["observe", "drain", "--workspace", str(self.project), "--json"],
+                expect_zero=False,
+                timeout=min(remaining, 30.0),
+            )
+            if (
+                drain_step.exit_code != 0
+                or drain is None
+                or drain.get("terminal")
+                not in (
+                    "retry_pending",
+                    "pass_limit",
+                )
+            ):
+                break
+            # Observe real drain state after allowing the background worker to advance.
+            # A delay alone never establishes success; the final result must be drained.
+            time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
         summary = {
+            "polls": polls,
             "terminal": (drain or {}).get("terminal"),
             "pending_after": (drain or {}).get("pending_after"),
             "acknowledged": (drain or {}).get("acknowledged"),
@@ -1144,7 +1165,9 @@ class Lane:
         }
         self.observation[name] = summary
         ok = (
-            drain is not None
+            drain_step is not None
+            and drain_step.exit_code == 0
+            and drain is not None
             and drain.get("terminal") == "drained"
             and drain.get("pending_after") == 0
         )

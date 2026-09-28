@@ -426,3 +426,71 @@ def test_native_launch_resolves_pinned_runtime_before_ambient_install(
     assert child["PATH"] == env["PATH"]
     assert "DOGFOOD_VAULT_PASSPHRASE" not in child
     assert "DOGFOOD_OS_PASSWORD" not in child
+
+
+@pytest.mark.parametrize("terminal", ["retry_pending", "pass_limit"])
+def test_drain_observes_background_completion_before_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    terminal: str,
+) -> None:
+    lane = _LANE.Lane(_namespace(tmp_path))
+    lane.evidence.mkdir()
+    pending = {"terminal": terminal, "pending_after": 7}
+    drained = {"terminal": "drained", "pending_after": 0}
+    invoke = Mock(side_effect=[(Mock(exit_code=0), pending), (Mock(exit_code=0), drained)])
+    monkeypatch.setattr(lane, "_yoetz", invoke)
+    monkeypatch.setattr(_LANE.time, "sleep", Mock())
+    assert lane._observe_drain("drain", "native", fatal=False) == drained
+    assert invoke.call_count == 2
+    assert lane.steps[-1].status == "pass"
+    assert lane.steps[-1].summary["polls"] == 2
+
+
+@pytest.mark.parametrize(
+    "result",
+    [None, {"terminal": "service_unavailable"}, {"terminal": "drained", "pending_after": 1}],
+)
+def test_drain_does_not_retry_invalid_or_nonretryable_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    result: dict[str, object] | None,
+) -> None:
+    lane = _LANE.Lane(_namespace(tmp_path))
+    lane.evidence.mkdir()
+    invoke = Mock(return_value=(Mock(exit_code=0), result))
+    monkeypatch.setattr(lane, "_yoetz", invoke)
+    lane._observe_drain("drain", "native", fatal=False)
+    assert invoke.call_count == 1
+    assert lane.steps[-1].status == "fail"
+
+
+def test_drain_deadline_never_turns_pending_into_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lane = _LANE.Lane(_namespace(tmp_path))
+    lane.evidence.mkdir()
+    invoke = Mock(
+        return_value=(Mock(exit_code=0), {"terminal": "retry_pending", "pending_after": 7})
+    )
+    monkeypatch.setattr(lane, "_yoetz", invoke)
+    monkeypatch.setattr(_LANE.time, "monotonic", Mock(side_effect=[0.0, 0.0, 60.0, 60.0]))
+    monkeypatch.setattr(_LANE.time, "sleep", Mock())
+    lane._observe_drain("drain", "native", fatal=False)
+    assert invoke.call_count == 1
+    assert lane.steps[-1].status == "fail"
+    assert lane.steps[-1].reason == "not_drained"
+
+
+def test_drain_nonzero_exit_cannot_claim_drained(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lane = _LANE.Lane(_namespace(tmp_path))
+    lane.evidence.mkdir()
+    invoke = Mock(return_value=(Mock(exit_code=1), {"terminal": "drained", "pending_after": 0}))
+    monkeypatch.setattr(lane, "_yoetz", invoke)
+    lane._observe_drain("drain", "native", fatal=False)
+    assert invoke.call_count == 1
+    assert lane.steps[-1].status == "fail"
