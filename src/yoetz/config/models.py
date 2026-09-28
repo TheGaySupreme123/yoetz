@@ -332,11 +332,18 @@ class VerificationConfig(StrictConfigModel):
 
 class ObservationConfig(StrictConfigModel):
     enabled: bool = True
+    semantic_advice_enabled: bool = True
+    semantic_advice_min_interval_seconds: int = Field(default=180, ge=1, le=86_400)
 
     @model_validator(mode="before")
     @classmethod
     def _validate_raw(cls, value: object) -> object:
-        _reject_unknown(value, frozenset({"enabled"}))
+        _reject_unknown(
+            value,
+            frozenset(
+                {"enabled", "semantic_advice_enabled", "semantic_advice_min_interval_seconds"}
+            ),
+        )
         return value
 
 

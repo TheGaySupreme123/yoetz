@@ -196,3 +196,17 @@ symlinked path) or at a base inside a repository.
 - [AI-powered review dogfood](semantic-dogfood.md) — profiles and the provenance gate this lane
   reports against.
 - [Influence dogfood](influence-dogfood.md) — what this lane deliberately does not measure.
+
+
+A service that exits before readiness with `release_runtime_unavailable` has not exercised a native
+agent or semantic review. Retained-runtime OS failures report only a closed category (for example,
+`file_missing` or `permission_denied`), never the exception's path or free-form message. Keep that
+startup failure separate from host compliance and provider outcomes. Do not bypass runtime
+retention to make an installation smoke pass; use the lane's bounded service log to diagnose it.
+
+
+Retained-runtime publication keeps its staging root owner-writable through the same-parent rename
+because hosted macOS can refuse renaming an already read-only directory. The manager lock remains
+held, payloads are sealed before rename, and the root is sealed before any runtime is returned or
+leased. A failed root seal removes only the newly created generation, allowing a later retry;
+existing generations, live application state and vault contents are never that cleanup target.

@@ -111,6 +111,7 @@ from yoetz.kernel.reducers import (
     invalidates_recorded_check,
     is_material_event_family,
     replay,
+    replay_extension,
     replay_extension_with_index,
     replay_with_index,
 )
@@ -362,6 +363,69 @@ class _CheckAdmissionRefusal:
     refusal_count: int
 
 
+_TRUSTED_PROJECTION_HISTORY_LIMIT: Final = 16
+_CASE_DEPENDENCY_DIGEST_LIMIT: Final = 8
+
+
+class TrustedProjectionHistory:
+    """Bounded, process-local projections this adapter itself produced by replay or extension.
+
+    Issue #886: a caller pinned one or a few appends behind the live head (hook observation
+    drains between agent calls) used to force a full genesis replay. Each entry is keyed by the
+    exact ``(sequence, head_digest)`` frontier and retains the record tuple it was folded from, so
+    a lookup is honoured only while the current chain still carries those exact record objects as
+    its prefix. Recovery, a rolled-back SQLite sync, or any replacement of a record (for example a
+    payload purge after redaction) therefore invalidates the entry by identity instead of by
+    trusting the hash chain alone. Nothing is persisted, so a restart falls back to replay.
+    """
+
+    __slots__ = ("_entries",)
+
+    def __init__(self) -> None:
+        self._entries: dict[tuple[int, str], tuple[ProjectionState, tuple[LedgerRecord, ...]]] = {}
+
+    def remember(
+        self,
+        projection: ProjectionState,
+        records: tuple[LedgerRecord, ...],
+        appended: tuple[LedgerRecord, ...] = (),
+    ) -> None:
+        # A redaction must also hide content from every pinned historical read, so it drops
+        # every older snapshot rather than letting one outlive the redaction.
+        if any(row.schema.name == "redaction_recorded" for row in appended):
+            self._entries.clear()
+        if type(projection) is not ProjectionState or len(records) != projection.frontier:
+            return
+        key = (projection.frontier, projection.head_digest)
+        self._entries.pop(key, None)
+        while len(self._entries) >= _TRUSTED_PROJECTION_HISTORY_LIMIT:
+            del self._entries[next(iter(self._entries))]
+        self._entries[key] = (projection, records)
+
+    def lookup(
+        self, frontier: Frontier, current: tuple[LedgerRecord, ...]
+    ) -> ProjectionState | None:
+        entry = self._entries.get((frontier.sequence, frontier.head_digest))
+        if entry is None:
+            return None
+        projection, records = entry
+        if len(records) > len(current) or not (
+            records is current
+            or (
+                (len(records) == 0 or records[-1] is current[len(records) - 1])
+                and all(old is new for old, new in zip(records, current, strict=False))
+            )
+        ):
+            return None
+        return projection
+
+    def vouches_for(self, projection: ProjectionState, current: tuple[LedgerRecord, ...]) -> bool:
+        return (
+            self.lookup(Frontier(projection.frontier, projection.head_digest), current)
+            is projection
+        )
+
+
 @dataclass(slots=True)
 class MemoryLedgerState:
     """Copy-on-write task state shared by the reference adapters."""
@@ -393,6 +457,14 @@ class MemoryLedgerState:
         default_factory=lambda: {}
     )
 
+    # Transient, bounded projections at recent exact frontiers. Clones share the same history:
+    # every lookup is fenced by record identity, so an entry from a discarded clone never matches.
+    trusted_projections: TrustedProjectionHistory = field(default_factory=TrustedProjectionHistory)
+    # Transient memo of each frozen case's dependency digest (a canonical digest of its whole
+    # projection), recomputed on every lease renewal otherwise. Identity-fenced on the case object.
+    case_dependency_digests: dict[tuple[str, str], tuple[DeterministicCase, str]] = field(
+        default_factory=lambda: {}
+    )
     # Transient, bounded exact-snapshot row indexes; never persisted or shared across clones.
     query_records: tuple[LedgerRecord, ...] = ()
     query_cache: dict[
@@ -1539,8 +1611,25 @@ class MemoryLedgerAdapter:
             record.lease_generation,
             record.lease_expires_at,
             case.frontier,
-            _case_dependency_digest(case),
+            self._dependency_digest_for(key, case),
         )
+
+    def _dependency_digest_for(self, key: tuple[str, str], case: DeterministicCase) -> str:
+        memo = self._state.case_dependency_digests.get(key)
+        if memo is not None and memo[0] is case:
+            return memo[1]
+        digest = _case_dependency_digest(case)
+        self._remember_dependency_digest(key, case, digest)
+        return digest
+
+    def _remember_dependency_digest(
+        self, key: tuple[str, str], case: DeterministicCase, digest: str
+    ) -> None:
+        memo = self._state.case_dependency_digests
+        memo.pop(key, None)
+        while len(memo) >= _CASE_DEPENDENCY_DIGEST_LIMIT:
+            del memo[next(iter(memo))]
+        memo[key] = (case, digest)
 
     def _require_lease(self, lease: OperationLease) -> OperationRecord:
         row = self._state.operations.get((lease.writer_id, lease.operation_id))
@@ -1637,6 +1726,12 @@ class MemoryLedgerAdapter:
     def _projection_anchored_unlocked(self, projection: ProjectionState) -> bool:
         """True when ``projection`` is the exact replay of this chain through its frontier."""
 
+        # The live projection and projections this adapter produced for a still-identical prefix
+        # are replay results by construction; only a foreign object needs re-deriving.
+        if projection is self._state.projection or self._state.trusted_projections.vouches_for(
+            projection, self._state.records
+        ):
+            return True
         records = tuple(
             row
             for row in self._state.records
@@ -1794,7 +1889,13 @@ class MemoryLedgerAdapter:
             proposed = snapshot_records + appended_records
             prior_projection = self._state.projection
             try:
-                if observation_authored and appended_records:
+                # ``prior_projection`` is the adapter-owned replay of ``snapshot_records`` (set
+                # only by recovery replay or a prior validated append under this lock), so folding
+                # just the new records is equivalent to a genesis replay of ``proposed`` while the
+                # extension still re-authenticates the whole prefix into a fresh reverse index.
+                # A genesis replay here held the ledger lock for tens of seconds late in a
+                # session (issue #886).
+                if appended_records:
                     projection, replay_index = await _run_blocking_joined(
                         lambda: replay_extension_with_index(
                             prior_projection,
@@ -1869,6 +1970,7 @@ class MemoryLedgerAdapter:
                 raise _error(PublicErrorCode.STORAGE_CORRUPT)
             self._state.records = proposed
             self._state.projection = projection
+            self._state.trusted_projections.remember(projection, proposed, appended_records)
             self._state.object_refs = {
                 **self._state.object_refs,
                 **{
@@ -1930,6 +2032,24 @@ class MemoryLedgerAdapter:
         self, session_id: str, *, after: int = 0, through: int | None = None
     ) -> AsyncIterator[LedgerRecord]:
         return self._iter_events(session_id, after=after, through=through)
+
+    async def load_trusted_projection(
+        self, session_id: str, frontier: Frontier
+    ) -> ProjectionState | None:
+        """Return the adapter-owned projection at exactly ``frontier``, or ``None``.
+
+        Only the live head or a retained entry whose record prefix is still identical qualifies;
+        callers fall back to genesis replay otherwise. No replay runs here.
+        """
+
+        async with self._lock:
+            records = self._state.records
+            if not any(record.session_id == session_id for record in records):
+                return None
+            live = self._state.projection
+            if Frontier(live.frontier, live.head_digest) == frontier:
+                return live
+            return self._state.trusted_projections.lookup(frontier, records)
 
     async def load_projection(
         self, session_id: str, view: ProjectionView
@@ -2048,7 +2168,17 @@ class MemoryLedgerAdapter:
             head = Frontier(projection.frontier, projection.head_digest)
             records = state.records
             if state.query_records is not records:
-                state.query_cache.clear()
+                previous = state.query_records
+                # A pinned page remains valid after an append-only extension. Redaction,
+                # replacement, truncation or rebuilding the prefix invalidates every cache.
+                unchanged_prefix = len(records) >= len(previous) and all(
+                    old is new for old, new in zip(previous, records, strict=False)
+                )
+                redaction = any(
+                    row.schema.name == "redaction_recorded" for row in records[len(previous) :]
+                )
+                if not unchanged_prefix or redaction:
+                    state.query_cache.clear()
                 state.query_records = records
             key = (query.requested_frontier, query.view, query.session_id)
             cached = state.query_cache.get(key)
@@ -2059,7 +2189,8 @@ class MemoryLedgerAdapter:
                         for cached_key, value in state.query_cache.items()
                         if cached_key[0] == query.requested_frontier
                     ),
-                    projection,
+                    state.trusted_projections.lookup(query.requested_frontier, records)
+                    or projection,
                 )
         # Only immutable snapshots cross the thread boundary; no SQLite handle or mutable
         # ledger state enters the worker. Cancellation joins it before this read returns.
@@ -2445,28 +2576,45 @@ class MemoryLedgerAdapter:
         assert object_refs is not None
         try:
             availability = await self.load_case_availability(session_id, frontier, projection)
-            try:
-                case = build_deterministic_case(projection, records, availability)
-            except ValueError as exc:
-                if str(exc) == "deterministic_case_invalid":
-                    raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
-                raise
-            dependency = _case_dependency_digest(case)
-            case_json = deterministic_case_to_json(case)
-            case_bytes = canonical_encode(
-                {
-                    "schema_version": "1.0.0",
-                    "task_id": self._task_id,
-                    "case": case_json,
-                    "case_digest": canonical_digest(case_json),
-                    "dependency_digest": dependency,
-                    "frontier": frontier.as_wire(),
-                    "request_digest": request_digest,
-                    "request_id": request_id,
-                    "session_id": session_id,
-                    "writer_id": writer_id,
-                }
-            )
+            frozen_projection = projection
+            frozen_records = records
+            frozen_frontier = frontier
+
+            def freeze() -> tuple[DeterministicCase, str, bytes]:
+                # ``projection`` and ``records`` were read together under the ledger lock, so the
+                # projection is this adapter's replay of exactly these records; the case builder
+                # still re-authenticates the chain and its frontier/digest (issue #886).
+                try:
+                    built = build_deterministic_case(
+                        frozen_projection,
+                        frozen_records,
+                        availability,
+                        _projection_validated=True,
+                    )
+                except ValueError as exc:
+                    if str(exc) == "deterministic_case_invalid":
+                        raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
+                    raise
+                digest = _case_dependency_digest(built)
+                case_json = deterministic_case_to_json(built)
+                encoded = canonical_encode(
+                    {
+                        "schema_version": "1.0.0",
+                        "task_id": self._task_id,
+                        "case": case_json,
+                        "case_digest": canonical_digest(case_json),
+                        "dependency_digest": digest,
+                        "frontier": frozen_frontier.as_wire(),
+                        "request_digest": request_digest,
+                        "request_id": request_id,
+                        "session_id": session_id,
+                        "writer_id": writer_id,
+                    }
+                )
+                return built, digest, encoded
+
+            case, dependency, case_bytes = await _run_blocking_joined(freeze)
+            self._remember_dependency_digest(key, case, dependency)
             assert self._objects is not None
             created_at = _now(self._clock)
             staged = await self._objects.stage(
@@ -3331,8 +3479,15 @@ class MemoryLedgerAdapter:
             previous_ledger = accepted.entry_digest
             previous_writer = accepted.entry_digest
         proposed_records = snapshot_records + tuple(new_records)
+        appended_check_records = tuple(new_records)
         try:
-            proposed_projection = replay(proposed_records)
+            # The snapshot projection is the adapter-owned replay of ``snapshot_records``; the
+            # commit below re-checks both under the lock before adopting this extension.
+            proposed_projection = await _run_blocking_joined(
+                lambda: replay_extension(
+                    snapshot_projection, snapshot_records, appended_check_records
+                )
+            )
         except ValueError as exc:
             raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
         result_frontier = Frontier(proposed_projection.frontier, proposed_projection.head_digest)
@@ -3403,6 +3558,9 @@ class MemoryLedgerAdapter:
             )
             self._state.records = proposed_records
             self._state.projection = proposed_projection
+            self._state.trusted_projections.remember(
+                proposed_projection, proposed_records, appended_check_records
+            )
             self._state.object_refs = {
                 **self._state.object_refs,
                 **{entry.payload_object.object_id: entry.payload_object for entry in entries},

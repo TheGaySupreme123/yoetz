@@ -785,9 +785,20 @@ async def test_status_is_task_read_only_paginated_and_projection_receipted() -> 
     _ = runtime
 
 
-async def test_receipt_matches_check_and_response_state() -> None:
-    app, _runtime, _ = _build_app(seed_offset=2)
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+async def test_receipt_matches_check_and_response_state(
+    backend: Literal["memory", "sqlite"], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, _runtime, _ = _build_app(seed_offset=2, ledger_backend=backend)
     started, checked, _obligation = await _bootstrap_finding(app, seed=500)
+
+    def forbidden_replay(*_args: object) -> object:
+        pytest.fail("respond/receipt must reuse the authenticated current projection")
+
+    monkeypatch.setattr(
+        "yoetz.application.ledger_snapshot._replay_until_cancelled", forbidden_replay
+    )
+    monkeypatch.setattr("yoetz.kernel.deterministic_checks.replay", forbidden_replay)
     finding = checked.findings[0]
 
     respond_wire: dict[str, JsonValue] = {
@@ -2677,6 +2688,122 @@ async def test_receipt_tolerates_observation_only_drain() -> None:
     assert receipt.result_frontier.sequence == second.result_frontier.sequence + 1
     # The pinned case is the same truth an undrained receipt would have documented.
     assert receipt.conclusion == "unresolved_findings_remain"
+
+
+def _forbid_genesis_replay(monkeypatch: pytest.MonkeyPatch, why: str) -> None:
+    def forbidden(*_args: object) -> object:
+        pytest.fail(why)
+
+    monkeypatch.setattr("yoetz.application.ledger_snapshot._replay_until_cancelled", forbidden)
+    monkeypatch.setattr("yoetz.kernel.deterministic_checks.replay", forbidden)
+    monkeypatch.setattr("yoetz.adapters.memory.ledger.replay", forbidden)
+    monkeypatch.setattr("yoetz.adapters.memory.ledger.replay_with_index", forbidden)
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+async def test_stale_frontier_respond_and_receipt_never_replay_from_genesis(
+    backend: Literal["memory", "sqlite"], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #886: the normal live case is one or more observation drains behind the head.
+
+    Respond reads its finding at the older check frontier and receipt pins to a frontier the
+    hook drain already moved past. Both must reuse adapter-owned projections (live head or a
+    retained exact frontier) instead of re-reducing the whole ledger, and still produce the same
+    facts as the undrained path.
+    """
+
+    app, runtime, _ = _build_app(seed_offset=86, ledger_backend=backend)
+    started, checked, _obligation = await _bootstrap_finding(app, seed=8600)
+    finding = checked.findings[0]
+    head = checked.result_frontier
+    for offset in range(3):
+        drained = await _drain_observation_record(
+            app, runtime, started, seed=8610 + offset * 10, expected_frontier=head.sequence
+        )
+        head = drained.result_frontier
+    ledger, _objects = next(iter(runtime.resources.values()))
+    records = tuple([row async for row in ledger.load_events(started.session_id)])
+    # The retained projection at the stale check frontier is exactly the genesis replay.
+    retained = await ledger.load_trusted_projection(started.session_id, checked.result_frontier)
+    assert retained is not None
+    assert retained == replay(records[: checked.result_frontier.sequence])
+
+    _forbid_genesis_replay(monkeypatch, "stale-frontier respond/receipt must not replay")
+    responded = await app.respond(
+        RespondRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 8650)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(head),
+                "finding_id": finding.finding_id,
+                "finding_frontier": _frontier(checked.result_frontier),
+                "disposition": "acknowledged",
+            }
+        )
+    )
+    assert responded.result_frontier.sequence == head.sequence + 1
+
+    after_respond = await _drain_observation_record(
+        app,
+        runtime,
+        started,
+        seed=8660,
+        expected_frontier=responded.result_frontier.sequence,
+    )
+    receipt = await app.receipt(
+        ReceiptRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 8670)),
+                "task_id": started.task_id,
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                # One observation drain behind the live head.
+                "expected_frontier": _frontier(responded.result_frontier),
+                "format": "json",
+                "include": "standard",
+                "redaction_profile": "full_local",
+            }
+        )
+    )
+    assert receipt.subject_frontier == responded.result_frontier
+    assert receipt.result_frontier.sequence == after_respond.result_frontier.sequence + 1
+    assert receipt.conclusion == "unresolved_findings_remain"
+    monkeypatch.undo()
+    # The incrementally extended live projection is the genesis replay of the final chain.
+    final = tuple([row async for row in ledger.load_events(started.session_id)])
+    stored = await ledger.load_projection(started.session_id, ProjectionView.CANDIDATE_FINDINGS)
+    assert stored is not None and stored.state == replay(final)
+
+
+async def test_stale_finding_frontier_outside_the_current_chain_is_still_rejected() -> None:
+    app, runtime, _ = _build_app(seed_offset=87)
+    started, checked, _obligation = await _bootstrap_finding(app, seed=8700)
+    drained = await _drain_observation_record(
+        app, runtime, started, seed=8710, expected_frontier=checked.result_frontier.sequence
+    )
+    forged = {
+        "sequence": str(checked.result_frontier.sequence),
+        "head_digest": "sha256:" + "0" * 64,
+    }
+    with pytest.raises(PublicOperationError) as raised:
+        await app.respond(
+            RespondRequest.model_validate(
+                {
+                    **_request_base(protocol_id("req_", 8750)),
+                    "session_id": started.session_id,
+                    "writer_id": started.writer_id,
+                    "expected_frontier": _frontier(drained.result_frontier),
+                    "finding_id": checked.findings[0].finding_id,
+                    "finding_frontier": forged,
+                    "disposition": "acknowledged",
+                }
+            )
+        )
+    assert raised.value.code in {
+        PublicErrorCode.FRONTIER_CONFLICT,
+        PublicErrorCode.INVALID_REQUEST,
+    }
 
 
 @pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))

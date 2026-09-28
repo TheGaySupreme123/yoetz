@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final, Literal, Protocol, cast
 
+from yoetz.application.ledger_snapshot import projection_for_records
 from yoetz.domain.coordination import CoordinationError, CoordinationErrorCode
 from yoetz.domain.events import LedgerRecord
 from yoetz.domain.findings import (
@@ -69,7 +70,6 @@ from yoetz.kernel.policies.response_support import (
 from yoetz.kernel.policies.work_integrity import work_integrity_findings
 from yoetz.kernel.projections import PROJECTION_VERSION, ProjectionState
 from yoetz.kernel.ranking import CheckCompleteness, RankingContext, rank_findings
-from yoetz.kernel.reducers import replay
 from yoetz.observability.logging import (
     record_bounded_counts_without_raising,
     record_unexpected_exception_without_raising,
@@ -517,7 +517,16 @@ async def _current_task_findings(
                     async for record in child_runtime.ledger.load_events(child_runtime.session_id)
                 ]
             )
-            projection = replay(records)
+            projection = await projection_for_records(
+                child_runtime.ledger,
+                child_runtime.session_id,
+                (
+                    Frontier(records[-1].ledger.ingestion_sequence, records[-1].entry_digest)
+                    if records
+                    else Frontier(0, "genesis")
+                ),
+                records,
+            )
         finally:
             await runtime_port.release(child_runtime)
     except Exception as exc:

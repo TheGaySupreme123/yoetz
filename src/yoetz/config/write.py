@@ -532,7 +532,15 @@ def render_config_toml(config: YoetzConfig) -> str:
             "max_findings": config.verification.max_findings,
         },
     )
-    _emit_table(lines, "observation", {"enabled": config.observation.enabled})
+    _emit_table(
+        lines,
+        "observation",
+        {
+            "enabled": config.observation.enabled,
+            "semantic_advice_enabled": config.observation.semantic_advice_enabled,
+            "semantic_advice_min_interval_seconds": config.observation.semantic_advice_min_interval_seconds,
+        },
+    )
     _emit_table(
         lines,
         "lineage",
