@@ -786,9 +786,9 @@ def build_version_manifest(*, include_optional_probes: bool = False) -> VersionM
             (
                 name,
                 "1.3.0"
-                if name == "finding_recorded"
+                if name in {"finding_recorded", "check_recorded"}
                 else "1.2.0"
-                if name in {"evidence_recorded", "session_opened", "check_recorded"}
+                if name in {"evidence_recorded", "session_opened"}
                 else "1.1.0"
                 if name
                 in {
