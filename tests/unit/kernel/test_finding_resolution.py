@@ -955,3 +955,78 @@ def test_supersession_wording_needs_a_closure_for_that_coordination_finding(
         state, fnd(1), cast(tuple[LedgerRecord, ...], records)
     )
     assert explanation == f"Resolved by qualifying check {evt(12)}; retained as history."
+
+
+@pytest.mark.parametrize(
+    "gap",
+    [
+        "captured_object_unavailable",
+        "content_unselected",
+        "host_outcome_unavailable",
+        "unpaired_event",
+        "content_capture_unavailable",
+    ],
+)
+def test_completed_semantic_recheck_can_retain_original_readable_capture_limits(gap: str) -> None:
+    coverage = _coverage(gaps=(gap,), semantic=True, freshness=LedgerFreshness.PARTIAL)
+    original = replace(_finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED), coverage=coverage)
+    later = replace(
+        _check(semantic=_SEMANTIC_OK, coverage=coverage),
+        semantic_conclusion="no_material_discrepancy",
+    )
+    assert _resolves(original, later) is True
+    # A legacy check did not record whether it was unassessable: no inferred success.
+    assert _resolves(original, _check(semantic=_SEMANTIC_OK, coverage=coverage)) is False
+    assert _resolves(original, replace(later, semantic_conclusion="insufficient_packet")) is False
+    # A new capture weakness is not licensed by an originally unbounded finding.
+    assert (
+        _resolves(
+            _finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED),
+            _check(semantic=_SEMANTIC_OK, coverage=coverage),
+        )
+        is False
+    )
+    # An acknowledgement/local check cannot supply the independent semantic proof.
+    assert _resolves(original, _check(coverage=coverage)) is False
+    assert original.coverage.known_gaps == (gap,)
+
+
+@pytest.mark.parametrize(
+    "gap",
+    [
+        "semantic_packet_insufficient",
+        "semantic_case_content_over_item_limit",
+        "semantic_review_context_withheld",
+        "event_payload_unavailable",
+        "redacted_event",
+        "missing_ref",
+        "observation_input_loss",
+    ],
+)
+def test_matching_material_gaps_never_become_semantic_absence_proof(gap: str) -> None:
+    coverage = _coverage(gaps=(gap,), semantic=True, freshness=LedgerFreshness.PARTIAL)
+    original = replace(_finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED), coverage=coverage)
+    assert _resolves(original, _check(semantic=_SEMANTIC_OK, coverage=coverage)) is False
+
+
+@pytest.mark.parametrize(
+    "freshness",
+    [
+        LedgerFreshness.REDACTED_GAP,
+        LedgerFreshness.UNKNOWN,
+        LedgerFreshness.STALE_AFTER_MATERIAL_CHANGE,
+    ],
+)
+def test_capture_baseline_cannot_rehabilitate_unreadable_original_proof(
+    freshness: LedgerFreshness,
+) -> None:
+    coverage = _coverage(gaps=("content_unselected",), semantic=True, freshness=freshness)
+    original = replace(_finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED), coverage=coverage)
+    later = replace(coverage, ledger_freshness=LedgerFreshness.PARTIAL)
+    assert _resolves(original, _check(semantic=_SEMANTIC_OK, coverage=later)) is False
+
+
+def test_unassessable_conclusion_blocks_proof_even_without_a_coverage_gap() -> None:
+    original = _finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED)
+    later = replace(_check(semantic=_SEMANTIC_OK), semantic_conclusion="insufficient_packet")
+    assert _resolves(original, later) is False

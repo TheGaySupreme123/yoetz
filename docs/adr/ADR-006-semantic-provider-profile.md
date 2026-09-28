@@ -691,3 +691,32 @@ requested-items and action-attempt records make the attempted work inspectable. 
 workflow instruction, not a new execution-enforcement claim: `respond` still records only a
 disposition and never clears a finding. No provider schema or new finding kind is required.
 The same prompt, result commitment and guidance serve all hosts and supported operating systems.
+
+
+### Capture baseline for semantic finding resolution (issue #884)
+
+A completed semantic re-review with a recorded assessable conclusion may resolve an absent issue
+while retaining the original readable
+finding's closed native capture limits: `content_unselected`, `content_capture_unavailable`,
+`captured_object_unavailable`, `host_outcome_unavailable`, and `unpaired_event`. Only codes already
+present on that original finding are tolerated, and original/current freshness must remain
+readable (`current` or `partial`). New gaps, redacted or missing ledger payloads, stale/unknown
+state, withheld reviewer context, clipped semantic packets, an `insufficient_packet` answer,
+failed review, suppression, scope mismatch and a returned issue still prevent resolution.
+
+This is absence of a previously raised issue under the same bounded coverage, not proof of
+unseen code correctness. Coverage gaps remain verbatim and keep the receipt insufficient.
+Acknowledging or accepting a limitation alone never resolves a defect. Coverage-only review
+outcomes use `insufficient_packet`; `ledger_stale_or_incomplete` remains the existing nonblocking
+finding kind. Do not retroactively relabel a historical unsupported-claim finding by matching
+its prose. Actual defects and omitted material limitations remain actionable until qualified.
+The same pure replay rule drives all hosts' CLI, MCP, status and receipt projections on every
+supported OS. Legacy findings with unreadable original proof stay explicitly unresolved.
+
+
+Check event version `1.3.0` records `semantic_conclusion` for succeeded provider attempts. Its
+closed values are `no_material_discrepancy`, `challenges_returned`, and `insufficient_packet`.
+Older event bytes stay unchanged and read with no conclusion. Only a recorded assessable
+conclusion enables the capture-baseline exception; legacy succeeded status alone is insufficient,
+because older engines could collapse an unassessable answer to zero findings without a gap.
+Failed/local-only checks retain their prior event shape. Public check-result schemas are unchanged.

@@ -64,6 +64,7 @@ def main() -> None:
     # exact bytes remain frozen even when the runtime admits a new reason.
     for relative_path in (
         "events/check-recorded-1.2.0.schema.json",
+        "events/check-recorded-1.3.0.schema.json",
         "findings/semantic-provenance-1.2.0.schema.json",
         "operations/check-result-1.2.0.schema.json",
     ):

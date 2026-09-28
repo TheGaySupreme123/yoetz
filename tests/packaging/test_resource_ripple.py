@@ -26,6 +26,7 @@ _CHECKOUT_TREES: Final = (
     "fixtures/agent-plugins",
     "fixtures/canonical",
     "fixtures/replay",
+    "fixtures/receipts",
     "guidance",
     "migrations",
     "schemas",
@@ -96,6 +97,7 @@ def _synthetic_checkout(root: Path, *, inventory_count: int, reviewed_count: int
     _write(root, "scripts/sync_committed_agent_trees.py", "")
     _write(root, "scripts/sync_mcp_descriptor_digests.py", "")
     _write(root, "scripts/generate_project_policy_fixture.py", "")
+    _write(root, "scripts/generate_check_conclusion_fixture.py", "")
     _write(root, "schemas/state.txt", "stale\n")
     _write(root, "src/yoetz/resources/manifest.json", "{}\n")
     _write(root, "skills/codex/yoetz/manifest.json", "{}\n")

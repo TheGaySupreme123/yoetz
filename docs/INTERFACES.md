@@ -6786,3 +6786,18 @@ check did not return. Resolved history does not remove receipt coverage limitati
 judgment is `insufficient_packet`. It reports unassessable content without adding a defect
 finding, and must remain visible in CLI, MCP and receipt coverage. A succeeded attempt with this
 gap is not a complete review and cannot prove absence of a prior semantic issue.
+
+
+Semantic finding resolution compares the later completed review's native capture gaps against
+the readable original finding's capture baseline (ADR-006, issue #884). Only the closed existing
+baseline is tolerated; it does not remove any receipt coverage gap. `insufficient_packet` cannot
+resolve a prior semantic finding. Response disposition and limitation acceptance are not proofs.
+
+
+`check_recorded` version `1.3.0` adds required `semantic_conclusion` on succeeded attempts. The
+closed values are `no_material_discrepancy`, `challenges_returned`, and `insufficient_packet`.
+Versions 1.0–1.2 keep their frozen payload shapes and read without a recorded conclusion. Only
+an explicitly assessable conclusion enables capture-baseline resolution. An unassessable
+conclusion blocks semantic absence proof even if a producer omitted its coverage-gap marker.
+Failed and local-only attempts retain their existing version. The owning schema generator and
+`fixtures/canonical/check-conclusion-1.3.0.case.json` lock the new and legacy bytes.

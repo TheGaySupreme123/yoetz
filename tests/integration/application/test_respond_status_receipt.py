@@ -34,6 +34,7 @@ from yoetz.domain.events import (
     EVIDENCE_SCHEMA_VERSION,
     ActionKind,
     ActionRecordedPayload,
+    CheckRecordedPayload,
     DecisionRecordedPayload,
     EventDraft,
     EventSchema,
@@ -4472,3 +4473,19 @@ async def test_empty_claim_repair_converges_across_views_and_receipts(
             assert c2 in rendered
         assert "Original missing scope" not in rendered
         assert receipt.conclusion != "no_issue_detected"
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+async def test_succeeded_review_records_assessable_conclusion_durably(
+    backend: Literal["memory", "sqlite"],
+) -> None:
+    app, runtime, _ = _build_app(seed_offset=40, semantic="optional", ledger_backend=backend)
+    started, checked, _ = await _bootstrap_finding(app, seed=8000, mode="semantic_if_configured")
+    ledger, _ = runtime.resources[started.task_id]
+    records = tuple([row async for row in ledger.load_events(started.session_id)])
+    row = next(row for row in reversed(records) if type(row.payload) is CheckRecordedPayload)
+    assert row.schema.version == "1.3.0"
+    assert type(row.payload) is CheckRecordedPayload
+    assert row.payload.semantic_conclusion == "no_material_discrepancy"
+    rebuilt = replay(records)
+    assert Frontier(rebuilt.frontier, rebuilt.head_digest) == checked.result_frontier

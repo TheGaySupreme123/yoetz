@@ -110,6 +110,12 @@ _DETERMINISTIC_PROOF_TOLERATED_GAPS: Final = (
     _BASE_DETERMINISTIC_PROOF_TOLERATED_GAPS | _HOST_OBSERVATION_GAPS
 )
 _SEMANTIC_PROOF_TOLERATED_GAPS: Final = _EVIDENCE_STRENGTH_GAPS
+# These native capture limits may be compared with the readable original finding's baseline.
+# They never tolerate a new limitation, hidden ledger payloads, withheld review categories,
+# semantic packet clipping, or an insufficient-packet answer.
+_SEMANTIC_BASELINE_CAPTURE_GAPS: Final = _HOST_OBSERVATION_GAPS | frozenset(
+    {"content_capture_unavailable"}
+)
 _UNPROVEN_FRESHNESS: Final = frozenset(
     {
         LedgerFreshness.UNKNOWN,
@@ -330,6 +336,18 @@ def resolution_blockers(
     gaps = frozenset(check.coverage.known_gaps)
     if finding.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED:
         tolerated = _SEMANTIC_PROOF_TOLERATED_GAPS
+        if check.semantic_conclusion == "insufficient_packet":
+            reasons.append("semantic_packet_insufficient")
+        original_gaps = frozenset(finding.coverage.known_gaps)
+        if (
+            check.semantic_conclusion in {"no_material_discrepancy", "challenges_returned"}
+            and finding.coverage.ledger_freshness not in _UNPROVEN_FRESHNESS
+            and original_gaps <= (_SEMANTIC_PROOF_TOLERATED_GAPS | _SEMANTIC_BASELINE_CAPTURE_GAPS)
+        ):
+            # Absence proof is no weaker than the readable review that raised this issue.
+            # The later review still must complete and not return the issue. Its unchanged
+            # capture limitations remain on the receipt; a response alone changes nothing.
+            tolerated |= original_gaps & _SEMANTIC_BASELINE_CAPTURE_GAPS
         if check.coverage.ledger_freshness in _UNPROVEN_FRESHNESS:
             reasons.append("freshness_unproven")
         if (

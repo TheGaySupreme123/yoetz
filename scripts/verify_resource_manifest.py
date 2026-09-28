@@ -147,6 +147,12 @@ _CODEX_SKILL_MEMBERS: Final = (
 # is deliberately listed here; nothing is discovered by scanning the repository.
 _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     (
+        "fixtures/canonical/check-conclusion-1.3.0.case.json",
+        "canonical_vector",
+        "application/json",
+        True,
+    ),
+    (
         "schemas/integrations/mcp-removal-1.0.0.schema.json",
         "json_schema",
         "application/schema+json",
@@ -585,6 +591,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     (
         "schemas/events/check-recorded-1.2.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/events/check-recorded-1.3.0.schema.json",
         "json_schema",
         "application/schema+json",
         True,

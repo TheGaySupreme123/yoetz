@@ -2430,6 +2430,12 @@ async def execute_check_commit(
             semantic_result.provenance,
             request.request_id,
             scope=CheckScopeModel(claim_ids=scope.claim_ids, obligation_ids=scope.obligation_ids),
+            semantic_conclusion=(
+                semantic_result.judgment.conclusion
+                if semantic_result.status is SemanticStatus.SUCCEEDED
+                and semantic_result.judgment is not None
+                else None
+            ),
         )
         preview = _lineage_preview(lineage_evaluation, frozen.case.frontier)
         projected = committed if preview is None else replace(committed, children=preview)

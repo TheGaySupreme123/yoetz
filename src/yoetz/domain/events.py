@@ -231,6 +231,7 @@ EVIDENCE_SCHEMA_VERSIONS: Final = (
     EVIDENCE_SCHEMA_VERSION,
 )
 CLAIM_SCHEMA_VERSION: Final = "1.1.0"
+CHECK_EVENT_SCHEMA_VERSION: Final = "1.3.0"
 SEMANTIC_EVENT_SCHEMA_VERSION: Final = "1.2.0"
 SEMANTIC_EVENT_SCHEMA_VERSIONS: Final = ("1.1.0", SEMANTIC_EVENT_SCHEMA_VERSION)
 FINDING_EVENT_SCHEMA_VERSION: Final = "1.3.0"
@@ -776,6 +777,9 @@ def _locator_key_kind(schema: EventSchema) -> str:
             schema.name in {"check_recorded", "finding_recorded"}
             and (
                 schema.version in SEMANTIC_EVENT_SCHEMA_VERSIONS
+                or (
+                    schema.name == "check_recorded" and schema.version == CHECK_EVENT_SCHEMA_VERSION
+                )
                 or (
                     schema.name == "finding_recorded"
                     and schema.version == FINDING_EVENT_SCHEMA_VERSION
@@ -2204,6 +2208,7 @@ class CheckRecordedPayload:
     engine_version: str
     projection_version: str
     semantic_provenance: SemanticProvenance | None = None
+    semantic_conclusion: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "mode", _exact_enum(self.mode, CheckMode))
@@ -2267,6 +2272,13 @@ class CheckRecordedPayload:
             provenance_status,
             provenance_reason,
         )
+        if self.semantic_conclusion is not None and (
+            type(self.semantic_conclusion) is not str
+            or self.semantic_conclusion
+            not in {"no_material_discrepancy", "challenges_returned", "insufficient_packet"}
+            or status is not SemanticStatus.SUCCEEDED
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
         if type(self.engine_version) is not str or self.engine_version != "0.1.0":
             raise ProtocolValueError("invalid_event_value_type")
         if type(self.projection_version) is not str or self.projection_version != "yoetz/0.1.0":
@@ -2362,6 +2374,7 @@ PAYLOAD_TYPES: Final[Mapping[EventSchema, type[EventPayload]]] = MappingProxyTyp
         EventSchema("response_recorded", SCHEMA_VERSION): ResponseRecordedPayload,
         EventSchema("redaction_recorded", SCHEMA_VERSION): RedactionRecordedPayload,
         EventSchema("check_recorded", SCHEMA_VERSION): CheckRecordedPayload,
+        EventSchema("check_recorded", CHECK_EVENT_SCHEMA_VERSION): CheckRecordedPayload,
         **{
             EventSchema("check_recorded", version): CheckRecordedPayload
             for version in SEMANTIC_EVENT_SCHEMA_VERSIONS
@@ -2986,7 +2999,7 @@ _PAYLOAD_SHAPES: Final[Mapping[str, tuple[frozenset[str], frozenset[str]]]] = Ma
                     "projection_version",
                 }
             ),
-            frozenset({"semantic_provenance"}),
+            frozenset({"semantic_provenance", "semantic_conclusion"}),
         ),
         "receipt_recorded": (
             frozenset(
@@ -3441,6 +3454,7 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
             semantic_reason=_enum_from_json(_field(source, "semantic_reason"), SemanticReason),
             engine_version=cast(str, _field(source, "engine_version")),
             projection_version=cast(str, _field(source, "projection_version")),
+            semantic_conclusion=cast(str | None, _optional(source, "semantic_conclusion")),
             semantic_provenance=(
                 None
                 if provenance_value is None
@@ -3926,6 +3940,7 @@ def encode_payload(payload: EventPayload) -> JsonValue:
             if value.semantic_provenance is None
             else semantic_provenance_to_json(value.semantic_provenance),
         )
+        _optional_value(result, "semantic_conclusion", value.semantic_conclusion)
         return _json_object(result)
     if payload_type is ReceiptRecordedPayload:
         value = cast(ReceiptRecordedPayload, payload)
@@ -3974,6 +3989,11 @@ def _validate_event_schema_payload(
             raise ProtocolValueError("invalid_event_schema")
         if has_project_lineage and schema != EventSchema(
             "session_opened", LINEAGE_SESSION_EVENT_SCHEMA_VERSION
+        ):
+            raise ProtocolValueError("invalid_event_schema")
+    if type(payload) is CheckRecordedPayload:
+        if (payload.semantic_conclusion is not None) != (
+            schema.version == CHECK_EVENT_SCHEMA_VERSION
         ):
             raise ProtocolValueError("invalid_event_schema")
     if schema.version == SCHEMA_VERSION:
