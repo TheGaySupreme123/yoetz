@@ -1481,3 +1481,20 @@ New completion claims must declare scope explicitly; obligation support is not s
 `[]` remains coverage-incomplete and cannot carry obligation support. No host hook invents scope or
 performs this repair. The shared service behavior applies on macOS, Linux and Windows through WSL 2;
 source tests do not establish native host/platform acceptance.
+
+
+### Reviewable native edits
+
+Recognized visible patch, edit and write arguments enter the shared encrypted capture lane as
+workspace-diff or changed-file content. The adapter keeps only public edit fields, removes absolute
+path locators from edit metadata, and retains the existing capture consent, secret scanning and
+input-byte limits. A pre-tool patch describes a proposed edit; it does not prove application or
+current repository state. Generic command input does not become code evidence.
+
+Claim-linked evidence is selected before unrelated captures. Retained code is split into bounded
+UTF-8 excerpts, with omitted content and truncated prefixes disclosed under the existing count and
+byte limits. These rules apply on macOS, Linux and Windows through WSL 2; they add no OS-specific
+filesystem lookup. Hooks do not create a fresh check-time Git diff. Shell-mediated edits, missing
+capture and stale code still require explicit content/state evidence; bounded packet inclusion does
+not prove that the reviewer detects a defect. Pause, revoke and content-capture disable continue to
+stop admission through the existing shared controls.

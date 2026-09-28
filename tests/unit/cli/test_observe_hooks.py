@@ -7512,3 +7512,122 @@ def test_deferred_session_end_pending_cap_is_named(
     assert "hook_observe_degraded: session_end_unrecorded" in err
     assert isinstance(reasons, Mapping)
     assert cast(Mapping[str, object], reasons["session_end_unrecorded"])["count"] == 1
+
+
+@pytest.mark.parametrize(
+    "source",
+    [ObservationSource.CODEX_HOOK, ObservationSource.CLAUDE_HOOK, ObservationSource.CURSOR_HOOK],
+)
+@pytest.mark.parametrize("event", ["PreToolUse", "PostToolUse"])
+def test_native_patch_input_is_captured_as_reviewable_code(
+    source: ObservationSource, event: str, tmp_path: Path
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    patch = "*** Begin Patch\n*** Update File: module.py\n@@\n-old()\n+planted_bug()\n*** End Patch"
+    payload: dict[str, JsonValue] = {
+        "tool_name": "apply_patch",
+        "tool_input": {"input": patch},
+        "tool_use_id": "patch-1",
+        "reasoning": "HIDDEN_CANARY",
+    }
+    envelope = map_hook_payload_to_envelope(
+        event,
+        payload,
+        session_commitment=store.session_commitment("edit-session"),
+        event_ordinal=1,
+        key_material=_KEY,
+        source=source,
+    )
+    chunks, truncated = observe_hooks_module._visible_content_chunks(  # pyright: ignore[reportPrivateUsage]
+        event, payload, envelope=envelope, workspace_locator=None
+    )
+    assert not truncated
+    code = [
+        chunk for chunk in chunks if chunk.content_kind is ObservationContentKind.WORKSPACE_DIFF
+    ]
+    assert b"".join(chunk.content for chunk in code) == patch.encode()
+    assert b"HIDDEN_CANARY" not in b"".join(chunk.content for chunk in chunks)
+
+
+@pytest.mark.parametrize("tool", ["Edit", "MultiEdit", "Write"])
+def test_native_edit_capture_excludes_unknown_input_fields(tool: str, tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    payload: dict[str, JsonValue] = {
+        "tool_name": tool,
+        "tool_input": {
+            "file_path": "module.py",
+            "old_string": "old()",
+            "new_string": "planted_bug()",
+            "reasoning": "HIDDEN_CANARY",
+            "system_prompt": "SYSTEM_CANARY",
+        },
+    }
+    envelope = map_hook_payload_to_envelope(
+        "PreToolUse",
+        payload,
+        session_commitment=store.session_commitment("edit-session"),
+        event_ordinal=1,
+        key_material=_KEY,
+    )
+    chunks, _ = observe_hooks_module._visible_content_chunks(  # pyright: ignore[reportPrivateUsage]
+        "PreToolUse", payload, envelope=envelope, workspace_locator=None
+    )
+    content = b"".join(chunk.content for chunk in chunks)
+    assert b"planted_bug()" in content and b"module.py" in content
+    assert b"HIDDEN_CANARY" not in content and b"SYSTEM_CANARY" not in content
+
+
+def test_edit_capture_respects_selected_input_budget(tmp_path: Path) -> None:
+    from yoetz.domain.observation_budget import mode_limits
+
+    store = LocalObservationStore(_state=tmp_path)
+    payload: dict[str, JsonValue] = {"tool_name": "apply_patch", "tool_input": "x" * 20000}
+    envelope = map_hook_payload_to_envelope(
+        "PreToolUse",
+        payload,
+        session_commitment=store.session_commitment("edit-cap"),
+        event_ordinal=1,
+        key_material=_KEY,
+    )
+    limits = mode_limits("focused")
+    chunks, truncated = observe_hooks_module._visible_content_chunks(  # pyright: ignore[reportPrivateUsage]
+        "PreToolUse", payload, envelope=envelope, workspace_locator=None, optional_limits=limits
+    )
+    assert truncated
+    assert sum(len(chunk.content) for chunk in chunks) <= limits.max_input_bytes
+
+
+@pytest.mark.parametrize(
+    "path_value, expected",
+    [
+        ("/workspace/project/module.py", b'"path":"module.py"'),
+        ("module.py", b'"path":"module.py"'),
+        ("/workspace/other/private.py", None),
+        ("../private.py", None),
+        ("C:\\outside\\private.py", None),
+    ],
+)
+def test_native_edit_capture_omits_ambient_paths(
+    path_value: str, expected: bytes | None, tmp_path: Path
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    payload: dict[str, JsonValue] = {
+        "tool_name": "write_file",
+        "tool_input": {"path": path_value, "contents": "visible code"},
+    }
+    envelope = map_hook_payload_to_envelope(
+        "PreToolUse",
+        payload,
+        session_commitment=store.session_commitment("edit-path"),
+        event_ordinal=1,
+        key_material=_KEY,
+    )
+    chunks, _ = observe_hooks_module._visible_content_chunks(  # pyright: ignore[reportPrivateUsage]
+        "PreToolUse", payload, envelope=envelope, workspace_locator="/workspace/project"
+    )
+    content = b"".join(chunk.content for chunk in chunks)
+    assert b"visible code" in content
+    if expected is None:
+        assert b'"path"' not in content
+    else:
+        assert expected in content

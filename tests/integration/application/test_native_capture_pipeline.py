@@ -499,7 +499,7 @@ def _assert_native_handoff_requests(
     requests: tuple[ObservationIngestRequest, ...],
     *,
     codex_session_id: str,
-    profile: str,
+    profile: str | None,
     captured_bytes: bytes,
     content_kind: ObservationContentKind,
 ) -> tuple[
@@ -527,7 +527,12 @@ def _assert_native_handoff_requests(
     structural_request = next(
         request for request in structural_requests if request.envelope.event_kind == "PostToolUse"
     )
-    assert requests.index(capture_request) < requests.index(pre_request)
+    if pre_request.envelope.source is ObservationSource.CODEX_HOOK:
+        # Codex drains its contentless pre-event immediately; profiled hosts defer it.
+        assert requests.index(pre_request) < requests.index(capture_request)
+    else:
+        assert requests.index(capture_request) < requests.index(pre_request)
+    assert requests.index(capture_request) < requests.index(structural_request)
     assert requests.index(pre_request) < requests.index(structural_request)
     assert pre_request.codex_session_id == codex_session_id
     assert not pre_request.capture_only
@@ -940,13 +945,100 @@ async def test_profileless_codex_hook_content_reaches_guarded_task_bundle(
             b"planted-cursor-tool-output-marker: missing validation",
             ObservationContentKind.TOOL_OUTPUT,
         ),
+        (
+            "codex",
+            None,
+            "PreToolUse",
+            {
+                "hook_event_name": "PreToolUse",
+                "session_id": "codex-edit-session",
+                "tool_use_id": "codex-edit-1",
+                "tool_name": "apply_patch",
+            },
+            "PostToolUse",
+            {
+                "hook_event_name": "PostToolUse",
+                "session_id": "codex-edit-session",
+                "tool_use_id": "codex-edit-1",
+                "tool_name": "apply_patch",
+                "tool_input": {
+                    "input": "*** Begin Patch\n*** Update File: module.py\n@@\n-old()\n+planted_edit_bug()\n*** End Patch"
+                },
+                "exit_status": 0,
+            },
+            b"*** Begin Patch\n*** Update File: module.py\n@@\n-old()\n+planted_edit_bug()\n*** End Patch",
+            b"planted_edit_bug",
+            ObservationContentKind.WORKSPACE_DIFF,
+        ),
+        (
+            "claude",
+            CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
+            "PreToolUse",
+            {
+                "hook_event_name": "PreToolUse",
+                "session_id": "claude-edit-session",
+                "tool_use_id": "claude-edit-1",
+                "tool_name": "Edit",
+            },
+            "PostToolUse",
+            {
+                "hook_event_name": "PostToolUse",
+                "session_id": "claude-edit-session",
+                "tool_use_id": "claude-edit-1",
+                "tool_name": "Edit",
+                "tool_input": {
+                    "file_path": "module.py",
+                    "old_string": "old()",
+                    "new_string": "planted_edit_bug()",
+                },
+                "exit_status": 0,
+            },
+            canonical_encode(
+                {
+                    "file_path": "module.py",
+                    "old_string": "old()",
+                    "new_string": "planted_edit_bug()",
+                }
+            ),
+            b"planted_edit_bug",
+            ObservationContentKind.CHANGED_FILE,
+        ),
+        (
+            "cursor",
+            CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
+            "preToolUse",
+            {
+                "hook_event_name": "preToolUse",
+                "conversation_id": "cursor-edit-session",
+                "tool_use_id": "cursor-edit-1",
+                "tool_name": "StrReplace",
+            },
+            "postToolUse",
+            {
+                "hook_event_name": "postToolUse",
+                "conversation_id": "cursor-edit-session",
+                "tool_use_id": "cursor-edit-1",
+                "tool_name": "StrReplace",
+                "tool_input": {
+                    "path": "module.py",
+                    "old_string": "old()",
+                    "new_string": "planted_edit_bug()",
+                },
+                "exit_status": 0,
+            },
+            canonical_encode(
+                {"path": "module.py", "old_string": "old()", "new_string": "planted_edit_bug()"}
+            ),
+            b"planted_edit_bug",
+            ObservationContentKind.CHANGED_FILE,
+        ),
     ),
-    ids=("claude-tool-output", "cursor-tool-output"),
+    ids=("claude-tool-output", "cursor-tool-output", "codex-patch", "claude-edit", "cursor-edit"),
 )
 async def test_ordinary_native_hook_content_reaches_prepared_semantic_packet(
     tmp_path: Path,
     host: str,
-    profile: str,
+    profile: str | None,
     pre_event_name: str,
     pre_payload: Mapping[str, object],
     post_event_name: str,
@@ -955,7 +1047,8 @@ async def test_ordinary_native_hook_content_reaches_prepared_semantic_packet(
     marker: bytes,
     content_kind: ObservationContentKind,
 ) -> None:
-    codex_session_id = f"{host}:{pre_payload.get('session_id') or pre_payload['conversation_id']}"
+    raw_session = str(pre_payload.get("session_id") or pre_payload["conversation_id"])
+    codex_session_id = raw_session if host == "codex" else f"{host}:{raw_session}"
     (
         project,
         workspace,
@@ -980,6 +1073,17 @@ async def test_ordinary_native_hook_content_reaches_prepared_semantic_packet(
         return asyncio.run(factory())
 
     def run_hook(event_name: str, payload: Mapping[str, object]) -> int:
+        if host == "codex":
+            return handle_observe(
+                event_name=event_name,
+                stdin_bytes=canonical_encode(cast(CanonicalJsonValue, payload)),
+                workspace=str(project),
+                _state=tmp_path / "state",
+                stdout=io.BytesIO(),
+                connect=cast(object, connect),  # type: ignore[arg-type]
+                run_async=run_async,
+                source=ObservationSource.CODEX_HOOK,
+            )
         if host == "claude":
             return handle_claude_observe(
                 event_name=event_name,
@@ -1136,7 +1240,11 @@ async def test_ordinary_native_hook_content_reaches_prepared_semantic_packet(
     assert len(captured_evidence_refs) == 1
     captured_coverage = frozen.case.coverage_by_ref[evidence_id(captured_evidence_refs[0][0])]
     assert captured_coverage.artifact_observation is ArtifactObservation.CONTENT_CAPTURED
-    assert captured_coverage.authorship_assurance is AuthorshipAssurance.SERVICE_AUTHENTICATED
+    assert captured_coverage.authorship_assurance is (
+        AuthorshipAssurance.HARNESS_OBSERVED
+        if host == "codex"
+        else AuthorshipAssurance.SERVICE_AUTHENTICATED
+    )
     assert captured_coverage.evidence_immutability is EvidenceImmutability.IMMUTABLE_SNAPSHOT
     assert PublicationChannel.HOOK_OBSERVED in captured_coverage.publication_channels
     assert semantic.packet.coverage.known_gaps == ()

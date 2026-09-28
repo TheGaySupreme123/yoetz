@@ -6780,3 +6780,14 @@ and receipts. No new event schema, persisted proof metadata, or command executio
 Historical event bytes remain intact; rebuilding a projection applies this bounded derivation to
 its accepted history. A held old check is still invalidated by a later response to a finding that
 check did not return. Resolved history does not remove receipt coverage limitations.
+
+
+### Native edit evidence selection
+
+Dedicated visible edit arguments may be retained as `workspace_diff` / changed-file capture content
+through the existing observation contract. This does not admit generic command input or ambient
+repository reads. The shared resolver prioritizes claim-linked captured groups before unrelated
+objects; the builder also prioritizes claim/assessment-linked evidence. Authenticated code uses
+bounded UTF-8 chunks and preserves `content_unselected` and `truncated_payload` coverage when caps
+omit bytes. Pre-tool intent, successful application and current repository state remain distinct.
+See ADR-006 and the three host integration runbooks for capture and disclosure boundaries.

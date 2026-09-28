@@ -49,6 +49,7 @@ from yoetz.domain.observation_profiles import (
     CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
 )
 from yoetz.domain.values import validate_sha256_digest
+from yoetz.kernel.claims import effective_claim_items
 from yoetz.kernel.projections import EvidenceProjectionRecord
 from yoetz.ports.ledger import FrozenCase
 from yoetz.ports.objects import ObjectKind, ObjectRef
@@ -778,7 +779,21 @@ async def resolve_captured_semantic_content(
     # Metadata selection is bounded independently from AI-powered review part admission:
     # selecting only the first object ID could split a valid multipart group and
     # turn an otherwise admissible capture into a false unavailable gap.
-    selected_objects = tuple(sorted(candidates, key=str.encode))[:_MAX_CAPTURED_SEMANTIC_PARTS]
+    linked_evidence = {
+        str(ref)
+        for _, claim in effective_claim_items(frozen.case.projection)
+        if claim.payload is not None
+        for ref in claim.payload.supporting_refs
+    }
+    selected_objects = tuple(
+        sorted(
+            candidates,
+            key=lambda object_id: (
+                0 if any(row[0] in linked_evidence for row in candidates[object_id]) else 1,
+                object_id.encode("ascii"),
+            ),
+        )
+    )[:_MAX_CAPTURED_SEMANTIC_PARTS]
     metadata_selection_truncated = len(candidates) > len(selected_objects)
     if metadata_selection_truncated:
         gaps.add(ObservationGapCode.CONTENT_UNSELECTED.value)
@@ -993,6 +1008,7 @@ async def resolve_captured_semantic_content(
         complete_groups.append(rows)
     complete_groups.sort(
         key=lambda rows: (
+            0 if any(row[3] in linked_evidence for row in rows) else 1,
             rows[0][2].encode("ascii"),
             rows[0][1].encode("ascii"),
             rows[0][-1].content_kind.value.encode("ascii"),

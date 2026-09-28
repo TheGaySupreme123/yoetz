@@ -156,6 +156,7 @@ def _build(
     captured_content: Sequence[CapturedSemanticContent] = (),
     captured_content_scope: CapturedContentScope | None = None,
     captured_content_gaps: Sequence[str] = (),
+    selection: ReviewSelectionPolicy | None = None,
 ) -> SemanticCase:
     return build_semantic_case(
         case_id="cas_10000000-0000-4000-8000-000000000001",
@@ -163,7 +164,7 @@ def _build(
         dependency_digest=dependency,
         findings=findings,
         review_context_profile=profile,
-        review_selection=ReviewSelectionPolicy.for_profile(profile),
+        review_selection=selection or ReviewSelectionPolicy.for_profile(profile),
         policy_id="pvy_10000000-0000-4000-8000-000000000001",
         policy_version="1",
         captured_content=captured_content,
@@ -1646,3 +1647,87 @@ def test_reused_native_evidence_survives_mixed_digest_and_item_limits(profile: s
         semantic, {item.item_id for item in semantic.items}
     )
     assert b"synthetic matching native evidence" in prepared
+
+
+def test_linked_evidence_precedes_unrelated_authenticated_capture() -> None:
+    case, captured, scope, _ = _opaque_before_capture_case()
+    row = case.projection.claims[clm(1)]
+    assert row.payload is not None
+    case = replace(
+        case,
+        projection=replace(
+            case.projection,
+            claims={
+                clm(1): claim_record(
+                    replace(row.payload, supporting_refs=(evd(1),)), row.source_frontier
+                )
+            },
+        ),
+    )
+    selection = replace(
+        ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED), max_excerpts=1
+    )
+    semantic = _build(
+        case,
+        ReviewContextProfile.EXPANDED,
+        captured_content=(captured,),
+        captured_content_scope=scope,
+        selection=selection,
+    )
+    assert semantic.packet.targeted_excerpts[0].excerpt_item_id == f"excerpt-{evd(1)}"
+    assert "content_unselected" in semantic.packet.coverage.known_gaps
+
+
+def test_retained_code_hunks_beyond_first_item_reach_prepared_review() -> None:
+    content = ("+ordinary_line()\n" * 600 + "+planted_late_bug()\n").encode()
+    case, captured, scope = _captured_case_values(content)
+    captured = replace(
+        captured,
+        manifest=replace(captured.manifest, content_kind=ObservationContentKind.WORKSPACE_DIFF),
+    )
+    semantic = _build(
+        case,
+        ReviewContextProfile.EXPANDED,
+        captured_content=(captured,),
+        captured_content_scope=scope,
+    )
+    excerpts = [item for item in semantic.items if item.section == "excerpt"]
+    assert len(excerpts) > 1
+    assert all(item.content_bytes <= 4096 for item in excerpts)
+    assert b"".join(item.content for item in excerpts) == content
+    prepared = semantic_case_to_prepared_payload(
+        semantic, {item.item_id for item in semantic.items}
+    )
+    assert b"planted_late_bug" in prepared
+    assert "truncated_payload" not in semantic.packet.coverage.known_gaps
+
+
+@pytest.mark.parametrize("max_excerpts, max_total", [(1, 65536), (16, 4096)])
+def test_code_chunk_selection_keeps_utf8_and_reports_unselected_suffix(
+    max_excerpts: int, max_total: int
+) -> None:
+    content = ("+π🙂\n" * 2000).encode()
+    case, captured, scope = _captured_case_values(content)
+    captured = replace(
+        captured,
+        manifest=replace(captured.manifest, content_kind=ObservationContentKind.WORKSPACE_DIFF),
+    )
+    selection = replace(
+        ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED),
+        max_excerpts=max_excerpts,
+        max_total_excerpt_bytes=max_total,
+    )
+    semantic = _build(
+        case,
+        ReviewContextProfile.EXPANDED,
+        captured_content=(captured,),
+        captured_content_scope=scope,
+        selection=selection,
+    )
+    excerpts = [item for item in semantic.items if item.section == "excerpt"]
+    delivered = b"".join(item.content for item in excerpts)
+    assert delivered and content.startswith(delivered) and delivered != content
+    assert len(delivered) <= max_total
+    assert len(excerpts) <= max_excerpts
+    delivered.decode("utf-8")
+    assert {"truncated_payload", "content_unselected"}.issubset(semantic.packet.coverage.known_gaps)
