@@ -196,3 +196,10 @@ symlinked path) or at a base inside a repository.
 - [AI-powered review dogfood](semantic-dogfood.md) — profiles and the provenance gate this lane
   reports against.
 - [Influence dogfood](influence-dogfood.md) — what this lane deliberately does not measure.
+
+
+A service that exits before readiness with `release_runtime_unavailable` has not exercised a native
+agent or semantic review. Retained-runtime OS failures report only a closed category (for example,
+`file_missing` or `permission_denied`), never the exception's path or free-form message. Keep that
+startup failure separate from host compliance and provider outcomes. Do not bypass runtime
+retention to make an installation smoke pass; use the lane's bounded service log to diagnose it.
