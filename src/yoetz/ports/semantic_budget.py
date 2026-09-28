@@ -22,11 +22,13 @@ __all__ = [
     "LEGACY_SEMANTIC_BUDGET_PROFILE",
     "SEMANTIC_BUDGET_PROFILES",
     "SemanticBudgetProfile",
+    "current_semantic_background",
     "current_semantic_budget_profile",
     "enter_semantic_budget_profile",
     "exit_semantic_budget_profile",
     "parse_semantic_budget_profile",
     "select_semantic_budget_profile",
+    "semantic_background_scope",
     "semantic_budget_profile_scope",
 ]
 
@@ -41,6 +43,10 @@ LEGACY_SEMANTIC_BUDGET_PROFILE: Final[SemanticBudgetProfile] = "final"
 _current_profile: ContextVar[SemanticBudgetProfile | None] = ContextVar(
     "semantic_budget_profile", default=None
 )
+# Background observation advice (#888) is advisory and never gates completion. Adapters that
+# expose a reasoning effort select an explicit lower default for it when the owner configured no
+# routine effort. Explicit ``check`` dispatches never enter this scope.
+_background: ContextVar[bool] = ContextVar("semantic_budget_background", default=False)
 
 
 def select_semantic_budget_profile(projection: ProjectionState) -> SemanticBudgetProfile:
@@ -85,3 +91,18 @@ def semantic_budget_profile_scope(profile: SemanticBudgetProfile) -> Generator[N
 def current_semantic_budget_profile() -> SemanticBudgetProfile:
     selected = _current_profile.get()
     return LEGACY_SEMANTIC_BUDGET_PROFILE if selected is None else selected
+
+
+@contextmanager
+def semantic_background_scope() -> Generator[None]:
+    """Mark one dispatch as background advisory work for the provider adapter."""
+
+    token = _background.set(True)
+    try:
+        yield
+    finally:
+        _background.reset(token)
+
+
+def current_semantic_background() -> bool:
+    return _background.get()

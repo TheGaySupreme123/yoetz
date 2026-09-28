@@ -568,9 +568,14 @@ yoetz version --json      # installed package and runtime identity
 
 ## Background review frequency
 
-Background AI-powered advice uses the routine review budget and reuses a review when its rule
-summaries and coverage gaps are unchanged. New conditions are reviewed at most once every three
-minutes per session by default. Explicit checks continue to use their normal review policy.
+Background AI-powered advice uses the routine review budget. With Codex, it uses your configured
+routine effort, or `low` when none is set; API-key providers keep their normal (effort-free)
+request, which is already capped at 2,048 output tokens. A review is reused while the set of
+advice candidates and coverage gaps is unchanged, even as more evidence for them arrives. New
+advice is reviewed at most once every three minutes per session by default; advice waiting for
+that interval shows `advice_semantic_deferred` and is reviewed automatically when it elapses. A
+failed or unavailable review is retried with backoff, and immediately once the task route
+becomes active. Explicit checks continue to use their normal review policy.
 
 To change background advice, edit the existing `[observation]` table in your Yoetz configuration:
 

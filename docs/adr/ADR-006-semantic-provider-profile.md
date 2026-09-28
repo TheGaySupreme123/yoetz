@@ -677,13 +677,34 @@ from a different session or writer of the same task can still receive retryable 
 
 ### Background observation review admission (issue #888)
 
-The shared service deduplicates advisory review by the minimized candidate packet (policy, rules,
-actions, counts and coverage gaps), excluding the rolling observation stream digest. The frozen
-packet retains its original basis; its exact digest remains the disclosure subject. Reusing a
-review is only review of those structural summaries, never evidence that later source was read.
-A durable per-session admission interval defaults to 180 seconds; deferred work adds no attempt
-and does not claim review. The next advice build can admit a changed condition after the interval.
-Explicit checks retain their separate authority, completion-profile selection and scheduling.
+The shared service deduplicates advisory review by the stable advice-candidate identity: the set
+of distinct candidates (kind, rule, next action, summary), the scoped coverage gaps and the packet
+policy. It excludes the rolling observation stream digest, per-rule evidence counts and repeats of
+the same candidate, so more evidence for an already-reviewed candidate reuses that review, while a
+new candidate, changed next action or changed gap is new advice. The frozen packet retains its
+original basis; its exact digest remains the disclosure subject. Reusing a review is only review of
+those structural summaries, never evidence that later source was read.
+
+A durable per-session admission interval defaults to 180 seconds and counts only attempts that
+could have reached a provider (`authorization_missing` and `provider_unavailable` rows do not). A
+refused admission writes no attempt, never claims review, and is reported with the coverage gap
+`advice_semantic_deferred`; the service schedules an in-memory revisit that rebuilds advice when
+the interval elapses, so the trailing condition is reviewed without waiting for another hook (the
+next hook re-derives the same deferral after a restart). A terminal non-success is never sticky:
+the same identity is re-admitted as `<identity>#<generation>`, keeping every earlier receipt, after
+a backoff from its terminal time. `superseded` retries immediately; other pre-provider reasons
+(`authorization_missing`, `provider_unavailable`, `queue_full`) wait the base interval, and
+`authorization_missing` retries at once when the task route has become ACTIVE with repository
+authority; provider-reaching failures double from the base interval up to 16 times it. The
+admission interval still applies to every retry. Explicit checks retain their separate authority,
+completion-profile selection and scheduling.
+
+Background dispatch runs under the `routine` profile inside a background scope. The Codex adapter
+then uses the owner's `routine_reasoning_effort` when set, and otherwise `low` when the configured
+effort is a known effort above it (it never raises or rewrites an effort). API-key adapters
+(`openai-responses`, `openai-chat-completions`) send no reasoning-effort parameter and already cap
+output at 2,048 tokens, below the routine limit; the admission interval, deduplication, backoff and
+disable switch are enforced before dispatch and therefore apply to every provider identically.
 
 `observation.semantic_advice_enabled` can disable background scheduling and dispatch, including
 rediscovered pending work. Re-enabling it on service restart permits pending work to drain.

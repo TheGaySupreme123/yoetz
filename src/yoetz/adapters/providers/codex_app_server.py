@@ -75,6 +75,7 @@ from yoetz.ports.semantic_budget import (
     LEGACY_SEMANTIC_BUDGET_PROFILE,
     SEMANTIC_BUDGET_PROFILES,
     SemanticBudgetProfile,
+    current_semantic_background,
     current_semantic_budget_profile,
 )
 from yoetz.protocol.canonical import (
@@ -88,6 +89,7 @@ from yoetz.protocol.models import SemanticProgressPhase, SemanticStatus
 
 __all__ = [
     "CODEX_APP_SERVER_SCHEMA_SHA256",
+    "CODEX_BACKGROUND_ADVICE_EFFORT",
     "CODEX_CODE_MODE_HOST_NAME",
     "CODEX_EVALUATOR_CODE_MODE_HOST_SHA256",
     "CODEX_EVALUATOR_CAPABILITY_PROFILE",
@@ -334,6 +336,20 @@ _MAX_MESSAGE_BYTES: Final = 1_048_576
 # ``_MAX_MESSAGE_BYTES`` and the attempt deadline; this cap only stops an unbounded stream.
 _MAX_EVENT_COUNT: Final = 4096
 _EFFORT_PATTERN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,63}$", re.ASCII)
+# Default effort for background observation advice when no routine effort is configured (#888).
+CODEX_BACKGROUND_ADVICE_EFFORT: Final = "low"
+_EFFORT_ORDER: Final[tuple[str, ...]] = ("none", "minimal", "low", "medium", "high", "xhigh")
+
+
+def _lower_effort(configured: str, ceiling: str) -> str:
+    """Return ``ceiling`` only when both are known efforts and it is strictly lower."""
+
+    if configured in _EFFORT_ORDER and ceiling in _EFFORT_ORDER:
+        if _EFFORT_ORDER.index(ceiling) < _EFFORT_ORDER.index(configured):
+            return ceiling
+    return configured
+
+
 _MAX_STDERR_BYTES: Final = 65_536
 _CLEANUP_GRACE_SECONDS: Final = 2.0
 # The AI-powered evaluator's request deadline is carried by ``Deadline`` and is intentionally
@@ -595,12 +611,16 @@ class CodexAppServerProfile:
             if type(limit) is not int or not 1 <= limit <= CODEX_OUTPUT_LIMIT_MAX:
                 raise ValueError("codex_runtime_output_limit_invalid")
 
-    def review_budget(self, budget_profile: SemanticBudgetProfile) -> CodexReviewBudget:
+    def review_budget(
+        self, budget_profile: SemanticBudgetProfile, *, background: bool = False
+    ) -> CodexReviewBudget:
         """Select the exact effort and output limit for one check's budget profile.
 
         Final reviews use the configured ``reasoning_effort``. Routine reviews use the explicit
         routine effort when the owner set one; a legacy binding without it keeps its single
-        configured effort, so no persisted choice is silently lowered.
+        configured effort for explicit checks, so no persisted check choice is silently lowered.
+        Background observation advice (#888) is advisory only: without an owner routine effort
+        it uses ``CODEX_BACKGROUND_ADVICE_EFFORT`` when that is lower than the configured one.
         """
 
         if budget_profile == "final":
@@ -611,6 +631,8 @@ class CodexAppServerProfile:
                 if self.routine_reasoning_effort is None
                 else self.routine_reasoning_effort
             )
+            if background and self.routine_reasoning_effort is None:
+                effort = _lower_effort(effort, CODEX_BACKGROUND_ADVICE_EFFORT)
             return CodexReviewBudget("routine", effort, self.routine_output_limit)
         raise ValueError("codex_budget_profile_invalid")
 
@@ -2265,7 +2287,9 @@ class CodexAppServerExternalFactory:
             raise ValueError("codex_runtime_factory_render_required")
         # The service composition exposes the check's frozen budget profile for exactly this
         # dispatch; anything dispatched outside a check keeps the legacy final selection.
-        budget = self.profile.review_budget(current_semantic_budget_profile())
+        budget = self.profile.review_budget(
+            current_semantic_budget_profile(), background=current_semantic_background()
+        )
         return CodexAppServerEvaluator(self.profile, binding, credential, self.clock, budget)
 
 

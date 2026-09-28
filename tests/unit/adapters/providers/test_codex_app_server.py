@@ -2317,6 +2317,29 @@ def test_legacy_binding_keeps_its_single_effort_for_routine_checks() -> None:
     assert profile.required_reasoning_efforts == ("high",)
 
 
+def test_background_advice_uses_lower_default_effort_without_routine_config() -> None:
+    """Issue #888: background advice is cheaper even when no routine effort is configured.
+
+    Explicit checks (no background scope) keep the legacy single effort.
+    """
+
+    legacy = _phased_profile(routine=None)
+    assert legacy.review_budget("routine", background=True) == CodexReviewBudget(
+        "routine", "low", 4096
+    )
+    assert legacy.review_budget("routine") == CodexReviewBudget("routine", "high", 4096)
+    assert legacy.review_budget("final", background=True) == CodexReviewBudget(
+        "final", "high", 8192
+    )
+    # An owner routine effort always wins, and a configured effort already at or below the
+    # background default (or an unknown vendor effort) is never raised or rewritten.
+    configured = _phased_profile(routine="medium")
+    assert configured.review_budget("routine", background=True).reasoning_effort == "medium"
+    for effort in ("minimal", "low", "vendor-custom"):
+        profile = replace(_phased_profile(routine=None), reasoning_effort=effort)
+        assert profile.review_budget("routine", background=True).reasoning_effort == effort
+
+
 @pytest.mark.parametrize("limit", [0, 8193, True])
 def test_profile_rejects_unbounded_output_limits(limit: object) -> None:
     with pytest.raises(ValueError, match="codex_runtime_output_limit_invalid"):

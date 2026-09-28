@@ -20,6 +20,7 @@ from yoetz.adapters.sqlite.observation_advice_semantic import (
     SqliteObservationAdviceSemanticRepository,
 )
 from yoetz.application.observation_advice import (
+    ADVICE_SEMANTIC_DEFERRED_GAP,
     ADVICE_SEMANTIC_PENDING_GAP,
     ADVICE_SEMANTIC_UNAVAILABLE_GAP,
     ObservationAdviceContextBuilder,
@@ -33,6 +34,8 @@ from yoetz.application.observation_advice_semantic import (
     ObservationAdviceSemanticSupervisor,
     ObservationAdviceSemanticWorker,
     addon_from_attempt,
+    advice_candidate_identity,
+    advice_semantic_retry_delay_seconds,
 )
 from yoetz.application.observation_coordinator import ObservationCoordinator
 from yoetz.domain.observation import (
@@ -46,7 +49,10 @@ from yoetz.domain.observation import (
 )
 from yoetz.domain.values import JsonObject, Timestamp
 from yoetz.ports.runtime import TaskRuntime
-from yoetz.ports.semantic_budget import current_semantic_budget_profile
+from yoetz.ports.semantic_budget import (
+    current_semantic_background,
+    current_semantic_budget_profile,
+)
 from yoetz.protocol.canonical import JsonValue, canonical_digest, strict_json_parse
 from yoetz.protocol.coverage import CheckType
 
@@ -248,7 +254,8 @@ def test_unattempted_pending_rows_are_superseded_by_a_newer_basis() -> None:
         enqueued_at=_clock(),
         max_pending=16,
     )
-    assert first is not None and second is not None
+    assert isinstance(first, ObservationAdviceSemanticAttempt)
+    assert isinstance(second, ObservationAdviceSemanticAttempt)
     assert second.status == "pending"
     superseded = repository.lookup(yoetz_session_id=_SESSION, basis_digest=first.basis_digest)
     assert superseded is not None
@@ -271,7 +278,7 @@ def test_queue_bound_records_unavailable_without_an_attempt() -> None:
             enqueued_at=_clock(),
             max_pending=2,
         )
-        assert row is not None
+        assert isinstance(row, ObservationAdviceSemanticAttempt)
         assert row.status == "pending"
     overflow = repository.schedule(
         workspace=_COMMITMENT,
@@ -283,7 +290,7 @@ def test_queue_bound_records_unavailable_without_an_attempt() -> None:
         enqueued_at=_clock(),
         max_pending=2,
     )
-    assert overflow is not None
+    assert isinstance(overflow, ObservationAdviceSemanticAttempt)
     assert (overflow.status, overflow.failure_reason) == ("unavailable", "queue_full")
     assert overflow.attempt_count == 0
     addon = addon_from_attempt(overflow)
@@ -988,33 +995,341 @@ def test_rebind_already_waiting_yields_newly_registered_advisory_handle() -> Non
     assert released == [owned]
 
 
+def _at(stamp: str) -> Callable[[], str]:
+    return lambda: stamp
+
+
+def _complete_next(
+    repository: SqliteObservationAdviceSemanticRepository,
+    outcome: ObservationAdviceSemanticOutcome,
+    *,
+    at: str,
+) -> ObservationAdviceSemanticAttempt:
+    async def dispatch(
+        _attempt: ObservationAdviceSemanticAttempt,
+    ) -> ObservationAdviceSemanticOutcome:
+        assert current_semantic_budget_profile() == "routine"
+        assert current_semantic_background() is True
+        return outcome
+
+    worker = ObservationAdviceSemanticWorker(
+        repository=repository,
+        dispatch=dispatch,
+        service_generation=1,
+        lease_owner="svc-1",
+        now=_at(at),
+        lease_expires_at=_at("2026-09-08T23:00:00.000Z"),
+    )
+    attempt = asyncio.run(worker.run_once())
+    assert attempt is not None
+    return attempt
+
+
+def _scheduler_builder(
+    stamp: str,
+    revisits: list[tuple[str, str, float]] | None = None,
+    *,
+    route_ready: bool | None = None,
+) -> ObservationAdviceContextBuilder:
+    async def ready(_session: str) -> bool:
+        assert route_ready is not None
+        return route_ready
+
+    return ObservationAdviceContextBuilder(
+        semantic_scheduler=ObservationAdviceSemanticScheduler(
+            now=_at(stamp),
+            route_ready=None if route_ready is None else ready,
+            revisit=None if revisits is None else lambda w, s, d: revisits.append((w, s, d)),
+        )
+    )
+
+
+_SUCCEEDED = ObservationAdviceSemanticOutcome(status="succeeded", attempt_receipt="egr_ok")
+
+
 def test_rate_limit_survives_repository_reopen_and_admits_changed_condition() -> None:
     db, repository = _repository()
     store = _Store(repository)
     first = asyncio.run(_builder().build(_COMMITMENT, store, yoetz_session_id=_SESSION))  # type: ignore[arg-type]
     assert first is not None
+    _complete_next(repository, _SUCCEEDED, at="2026-09-08T21:00:00.000Z")
     (original,) = _rows(db, repository)
     # A genuinely different packet is rate limited; a fresh repository/scheduler cannot reset it.
     store.repository = SqliteObservationAdviceSemanticRepository(db)
     store.gaps = (ObservationGapCode.SOURCE_LAG.value,)
+    revisits: list[tuple[str, str, float]] = []
     for _ in range(1, 180):
-        builder = ObservationAdviceContextBuilder(
-            semantic_scheduler=ObservationAdviceSemanticScheduler(
-                now=lambda: "2026-09-08T21:02:59.000Z"
+        deferred = asyncio.run(
+            _scheduler_builder("2026-09-08T21:02:59.000Z", revisits).build(
+                _COMMITMENT,
+                store,
+                yoetz_session_id=_SESSION,  # type: ignore[arg-type]
             )
         )
-        asyncio.run(builder.build(_COMMITMENT, store, yoetz_session_id=_SESSION))  # type: ignore[arg-type]
+        assert deferred is not None
+        assert ADVICE_SEMANTIC_DEFERRED_GAP in deferred.confidence_coverage.known_gaps
+        assert ADVICE_SEMANTIC_PENDING_GAP not in deferred.confidence_coverage.known_gaps
+        assert deferred.semantic_attempt_state == "unavailable"
     assert _rows(db, repository) == (original,)
-    builder = ObservationAdviceContextBuilder(
-        semantic_scheduler=ObservationAdviceSemanticScheduler(
-            now=lambda: "2026-09-08T21:03:00.000Z"
+    # Each refusal asks for a trailing-edge revisit when the interval elapses.
+    assert revisits and all(item[:2] == (_COMMITMENT, _SESSION) for item in revisits)
+    assert revisits[0][2] == pytest.approx(1.0)
+    admitted_snapshot = asyncio.run(
+        _scheduler_builder("2026-09-08T21:03:00.000Z").build(
+            _COMMITMENT,
+            store,
+            yoetz_session_id=_SESSION,  # type: ignore[arg-type]
         )
     )
-    asyncio.run(builder.build(_COMMITMENT, store, yoetz_session_id=_SESSION))  # type: ignore[arg-type]
+    assert admitted_snapshot is not None
+    assert ADVICE_SEMANTIC_PENDING_GAP in admitted_snapshot.confidence_coverage.known_gaps
     prior, admitted = _rows(db, repository)
-    assert prior.failure_reason == "superseded"
+    assert prior == original
     assert admitted.basis_digest != prior.basis_digest
     assert admitted.status == "pending"
+
+
+def test_unattempted_pending_row_does_not_consume_the_session_rate_limit() -> None:
+    # A row the provider never saw is superseded by the newer identity, not rate limited.
+    db, repository = _repository()
+    store = _Store(repository)
+    asyncio.run(_builder().build(_COMMITMENT, store, yoetz_session_id=_SESSION))  # type: ignore[arg-type]
+    store.gaps = (ObservationGapCode.SOURCE_LAG.value,)
+    asyncio.run(
+        _scheduler_builder("2026-09-08T21:00:05.000Z").build(
+            _COMMITMENT,
+            store,
+            yoetz_session_id=_SESSION,  # type: ignore[arg-type]
+        )
+    )
+    first, second = _rows(db, repository)
+    assert (first.status, first.failure_reason) == ("cancelled", "superseded")
+    assert second.status == "pending"
+
+
+def test_identity_ignores_evidence_counts_but_not_new_candidates() -> None:
+    base: dict[str, object] = {
+        "format": "yoetz.observation-advice-semantic/1",
+        "policy": "p/1",
+        "evidence_basis_digest": "sha256:" + "1" * 64,
+        "coverage_gaps": ("source_lag",),
+        "finding_summaries": ("failed_command",),
+        "deterministic_rules": (
+            {
+                "kind": "k",
+                "rule_code": "failed_command",
+                "next_action": "resolve_failed_command",
+                "evidence_ref_count": 1,
+                "summary": "s",
+            },
+        ),
+    }
+    more_evidence = dict(base)
+    more_evidence["evidence_basis_digest"] = "sha256:" + "2" * 64
+    more_evidence["deterministic_rules"] = (
+        {**base["deterministic_rules"][0], "evidence_ref_count": 7},  # type: ignore[index]
+    )
+    new_rule = dict(base)
+    new_rule["deterministic_rules"] = (
+        *base["deterministic_rules"],  # type: ignore[misc]
+        {
+            "kind": "k",
+            "rule_code": "edit_without_verification",
+            "next_action": "run_verification",
+            "evidence_ref_count": 1,
+            "summary": "t",
+        },
+    )
+    new_action = dict(base)
+    new_action["deterministic_rules"] = (
+        {**base["deterministic_rules"][0], "next_action": "inspect"},  # type: ignore[index]
+    )
+    assert advice_candidate_identity(base) == advice_candidate_identity(more_evidence)
+    assert advice_candidate_identity(base) != advice_candidate_identity(new_rule)
+    assert advice_candidate_identity(base) != advice_candidate_identity(new_action)
+
+
+def test_more_evidence_for_the_same_rule_reuses_the_reviewed_identity() -> None:
+    db, repository = _repository()
+    store = _Store(repository)
+    asyncio.run(_builder().build(_COMMITMENT, store, yoetz_session_id=_SESSION))  # type: ignore[arg-type]
+    _complete_next(repository, _SUCCEEDED, at=_clock())
+    envelopes = (
+        _envelope("hook:fail", {"tool_name": "shell", "exit_status": 1, "correlation_id": "a"}),
+        _envelope(
+            "hook:fail-2", {"tool_name": "shell", "exit_status": 1, "correlation_id": "b"}, pos=2
+        ),
+    )
+    store.list_envelopes = lambda _workspace: envelopes  # type: ignore[method-assign]
+    later = asyncio.run(
+        _scheduler_builder("2026-09-08T22:00:00.000Z").build(
+            _COMMITMENT,
+            store,
+            yoetz_session_id=_SESSION,  # type: ignore[arg-type]
+        )
+    )
+    assert later is not None
+    assert later.semantic_attempt_state == "ready"
+    (only,) = _rows(db, repository)
+    assert only.status == "succeeded"
+
+
+def test_authorization_missing_retries_after_backoff_or_once_route_is_active() -> None:
+    """Review P1 (#890): a non-success row is not sticky for an unchanged condition."""
+
+    db, repository = _repository()
+    store = _Store(repository)
+    asyncio.run(_builder().build(_COMMITMENT, store, yoetz_session_id=_SESSION))  # type: ignore[arg-type]
+    _complete_next(
+        repository,
+        ObservationAdviceSemanticOutcome(
+            status="unavailable", failure_reason="authorization_missing"
+        ),
+        at="2026-09-08T21:00:01.000Z",
+    )
+    # Inside the backoff with the route still inactive: no new row, truthful reason, revisit.
+    revisits: list[tuple[str, str, float]] = []
+    held = asyncio.run(
+        _scheduler_builder("2026-09-08T21:01:00.000Z", revisits, route_ready=False).build(
+            _COMMITMENT,
+            store,
+            yoetz_session_id=_SESSION,  # type: ignore[arg-type]
+        )
+    )
+    assert held is not None
+    assert ADVICE_SEMANTIC_UNAVAILABLE_GAP in held.confidence_coverage.known_gaps
+    assert len(_rows(db, repository)) == 1
+    assert revisits == [(_COMMITMENT, _SESSION, pytest.approx(121.0))]
+    # The route became active: retry at once. Pre-provider failures consume no rate limit.
+    asyncio.run(
+        _scheduler_builder("2026-09-08T21:01:30.000Z", route_ready=True).build(
+            _COMMITMENT,
+            store,
+            yoetz_session_id=_SESSION,  # type: ignore[arg-type]
+        )
+    )
+    first, retry = _rows(db, repository)
+    assert first.failure_reason == "authorization_missing"
+    assert retry.basis_digest == first.basis_digest + "#1"
+    assert retry.status == "pending"
+    retried = _complete_next(repository, _SUCCEEDED, at="2026-09-08T21:01:40.000Z")
+    assert retried.attempt_id == retry.attempt_id
+    ready = asyncio.run(
+        _scheduler_builder("2026-09-08T21:30:00.000Z").build(
+            _COMMITMENT,
+            store,
+            yoetz_session_id=_SESSION,  # type: ignore[arg-type]
+        )
+    )
+    assert ready is not None and ready.semantic_attempt_state == "ready"
+    assert len(_rows(db, repository)) == 2
+
+
+def test_provider_failure_backs_off_exponentially_then_retries_without_a_new_hook() -> None:
+    db, repository = _repository()
+    store = _Store(repository)
+    asyncio.run(_builder().build(_COMMITMENT, store, yoetz_session_id=_SESSION))  # type: ignore[arg-type]
+    failed = ObservationAdviceSemanticOutcome(status="failed", failure_reason="provider_failed")
+    _complete_next(repository, failed, at="2026-09-08T21:00:00.000Z")
+    # Generation 1 backoff is the 180 s base; the rate limit is also 180 s.
+    asyncio.run(
+        _scheduler_builder("2026-09-08T21:02:59.000Z").build(
+            _COMMITMENT,
+            store,
+            yoetz_session_id=_SESSION,  # type: ignore[arg-type]
+        )
+    )
+    assert len(_rows(db, repository)) == 1
+    asyncio.run(
+        _scheduler_builder("2026-09-08T21:03:00.000Z").build(
+            _COMMITMENT,
+            store,
+            yoetz_session_id=_SESSION,  # type: ignore[arg-type]
+        )
+    )
+    assert len(_rows(db, repository)) == 2
+    _complete_next(repository, failed, at="2026-09-08T21:03:00.000Z")
+    # Generation 2 doubles to 360 s.
+    revisits: list[tuple[str, str, float]] = []
+    asyncio.run(
+        _scheduler_builder("2026-09-08T21:08:59.000Z", revisits).build(
+            _COMMITMENT,
+            store,
+            yoetz_session_id=_SESSION,  # type: ignore[arg-type]
+        )
+    )
+    assert len(_rows(db, repository)) == 2
+    assert revisits == [(_COMMITMENT, _SESSION, pytest.approx(1.0))]
+    asyncio.run(
+        _scheduler_builder("2026-09-08T21:09:00.000Z").build(
+            _COMMITMENT,
+            store,
+            yoetz_session_id=_SESSION,  # type: ignore[arg-type]
+        )
+    )
+    rows = _rows(db, repository)
+    assert [row.basis_digest[-2:] for row in rows[1:]] == ["#1", "#2"]
+    assert rows[-1].status == "pending"
+
+
+def test_retry_delay_schedule_is_bounded() -> None:
+    def row(reason: str) -> ObservationAdviceSemanticAttempt:
+        return ObservationAdviceSemanticAttempt(
+            attempt_id="a",
+            workspace_commitment=_COMMITMENT,
+            yoetz_session_id=_SESSION,
+            basis_digest="b",
+            subject_digest="sha256:" + "0" * 64,
+            coverage_gaps=(),
+            packet_json=b"{}",
+            status="failed",
+            state_token=1,
+            failure_reason=reason,
+        )
+
+    delays = [
+        advice_semantic_retry_delay_seconds(row("provider_failed"), generation=n, base_seconds=180)
+        for n in range(1, 8)
+    ]
+    assert delays == [180, 360, 720, 1440, 2880, 2880, 2880]
+    assert (
+        advice_semantic_retry_delay_seconds(row("superseded"), generation=3, base_seconds=180) == 0
+    )
+    assert (
+        advice_semantic_retry_delay_seconds(
+            row("authorization_missing"), generation=5, base_seconds=180
+        )
+        == 180
+    )
+
+
+def test_supervisor_revisit_timer_rebuilds_once_per_session_and_stops_cleanly() -> None:
+    async def scenario() -> list[tuple[str, str]]:
+        supervisor = ObservationAdviceSemanticSupervisor(service_generation=1)
+        calls: list[tuple[str, str]] = []
+
+        async def handler(workspace: str, session: str) -> None:
+            calls.append((workspace, session))
+
+        supervisor.schedule_revisit(_COMMITMENT, _SESSION, 0.01)  # no handler: ignored
+        assert supervisor.pending_revisits() == ()
+        supervisor.set_revisit_handler(handler)
+        supervisor.schedule_revisit(_COMMITMENT, _SESSION, 0.01)
+        supervisor.schedule_revisit(_COMMITMENT, _SESSION, 0.01)
+        assert supervisor.pending_revisits() == ((_COMMITMENT, _SESSION),)
+        await asyncio.sleep(1.2)
+        assert supervisor.pending_revisits() == ()
+        supervisor.schedule_revisit(_COMMITMENT, _SESSION, 30.0)
+        await supervisor.stop()
+        assert supervisor.pending_revisits() == ()
+        return calls
+
+    assert asyncio.run(scenario()) == [(_COMMITMENT, _SESSION)]
+
+
+def test_explicit_dispatch_outside_the_worker_is_not_background() -> None:
+    # Explicit ``check`` dispatches never enter the background scope.
+    assert current_semantic_background() is False
 
 
 def test_disabled_scheduler_never_enqueues() -> None:

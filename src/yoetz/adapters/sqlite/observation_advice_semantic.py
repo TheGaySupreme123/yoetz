@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Sequence
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import apsw
@@ -14,7 +14,9 @@ from yoetz.application.observation_advice_semantic import (
     MAX_ADVICE_SEMANTIC_ATTEMPTS,
     AttemptStatus,
     ObservationAdviceSemanticAttempt,
+    ObservationAdviceSemanticDeferral,
     ObservationAdviceSemanticOutcome,
+    advice_semantic_retry_delay_seconds,
 )
 from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
@@ -63,6 +65,11 @@ def _row(values: tuple[object, ...]) -> ObservationAdviceSemanticAttempt:
     )
 
 
+def _parse_time(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
 def _encode(values: tuple[str, ...]) -> bytes:
     return canonical_encode(cast(JsonValue, list(values)))
 
@@ -83,38 +90,66 @@ class SqliteObservationAdviceSemanticRepository:
         enqueued_at: str,
         max_pending: int,
         min_interval_seconds: int = 0,
-    ) -> ObservationAdviceSemanticAttempt | None:
-        attempt_id = (
-            "sadv_"
-            + hashlib.sha256(
-                f"{workspace}\0{yoetz_session_id}\0{basis_digest}".encode()
-            ).hexdigest()[:48]
-        )
+        retry_base_seconds: int = 0,
+        retry_now: bool = False,
+    ) -> ObservationAdviceSemanticAttempt | ObservationAdviceSemanticDeferral:
+        """Admit, reuse, or defer one candidate identity for a session (#619, #888).
+
+        ``basis_digest`` is the stable identity key. Its rows form one family: the first is
+        stored under the key itself and each retry under ``<key>#<generation>``. A pending,
+        running, or succeeded latest row is reused. A terminal non-success is re-admitted once
+        its backoff elapses (or at once when ``retry_now``). Admission is refused while the
+        session's last provider-reaching attempt is younger than ``min_interval_seconds``.
+        Every check and the insert share one transaction, so a reopened service cannot reset
+        either bound, and a refusal writes no row.
+        """
+
+        now = _parse_time(enqueued_at)
         inserted: object = None
         with self._db:
-            existing = self._db.execute(
-                f"SELECT {_COLUMNS} FROM observation_advice_semantic_attempts "
-                "WHERE yoetz_session_id=? AND basis_digest=?",
-                (yoetz_session_id, basis_digest),
-            ).fetchone()
-            if existing is not None:
-                stored = _row(cast(tuple[object, ...], tuple(existing)))
-                return stored
-            # Admission and the timestamp check share one transaction. Reopening the service
-            # cannot reset the per-session rate limit, and rejected work adds no queue rows.
+            family = self._family(yoetz_session_id, basis_digest)
+            latest = family[0][0] if family else None
+            if latest is not None:
+                if latest.status in {"pending", "running", "succeeded"}:
+                    return latest
+                if not retry_now or latest.failure_reason != "authorization_missing":
+                    delay = advice_semantic_retry_delay_seconds(
+                        latest, generation=len(family), base_seconds=retry_base_seconds
+                    )
+                    eligible = _parse_time(family[0][1]) + timedelta(seconds=delay)
+                    if now < eligible:
+                        return ObservationAdviceSemanticDeferral(
+                            reason="retry_backoff",
+                            retry_after_seconds=(eligible - now).total_seconds(),
+                            previous=latest,
+                        )
             if min_interval_seconds > 0:
-                latest = self._db.execute(
-                    "SELECT MAX(created_at) FROM observation_advice_semantic_attempts "
-                    "WHERE yoetz_session_id=?",
+                # Only attempts that could have reached a provider consume the session budget.
+                # Unattempted pending rows are superseded below instead, never double-counted.
+                anchor_row = self._db.execute(
+                    "SELECT MAX(updated_at) FROM observation_advice_semantic_attempts "
+                    "WHERE yoetz_session_id=? AND attempt_count>0 AND (failure_reason IS NULL "
+                    "OR failure_reason NOT IN ('authorization_missing','provider_unavailable'))",
                     (yoetz_session_id,),
                 ).fetchone()
-                if latest is not None and latest[0] is not None:
-                    eligible = datetime.fromisoformat(str(latest[0])) + timedelta(
+                if anchor_row is not None and anchor_row[0] is not None:
+                    eligible = _parse_time(str(anchor_row[0])) + timedelta(
                         seconds=min_interval_seconds
                     )
-                    if datetime.fromisoformat(enqueued_at) < eligible:
-                        return None
-            # A new basis for the same session supersedes that session's unattempted rows:
+                    if now < eligible:
+                        return ObservationAdviceSemanticDeferral(
+                            reason="rate_limited",
+                            retry_after_seconds=(eligible - now).total_seconds(),
+                            previous=latest,
+                        )
+            key = basis_digest if not family else f"{basis_digest}#{len(family)}"
+            attempt_id = (
+                "sadv_"
+                + hashlib.sha256(f"{workspace}\0{yoetz_session_id}\0{key}".encode()).hexdigest()[
+                    :48
+                ]
+            )
+            # A new admission for the same session supersedes that session's unattempted rows:
             # the provider would otherwise review evidence the advice no longer stands on. A
             # row already running finishes and keeps its own receipt.
             self._db.execute(
@@ -147,7 +182,7 @@ class SqliteObservationAdviceSemanticRepository:
                     attempt_id,
                     workspace,
                     yoetz_session_id,
-                    basis_digest,
+                    key,
                     subject_digest,
                     _encode(coverage_gaps),
                     packet_json,
@@ -165,6 +200,27 @@ class SqliteObservationAdviceSemanticRepository:
         if inserted is None:
             raise RuntimeError("advice_semantic_attempt_missing")
         return _row(tuple(cast(Sequence[object], inserted)))
+
+    def _family(
+        self, yoetz_session_id: str, identity: str
+    ) -> list[tuple[ObservationAdviceSemanticAttempt, str]]:
+        """Every row of one identity for a session, newest first, with its ``updated_at``."""
+
+        rows = self._db.execute(
+            f"SELECT {_COLUMNS},updated_at FROM observation_advice_semantic_attempts "
+            "WHERE yoetz_session_id=? AND (basis_digest=? OR "
+            "(basis_digest>=? AND basis_digest<?)) ORDER BY state_token DESC",
+            (yoetz_session_id, identity, identity + "#", identity + "$"),
+        ).fetchall()
+        return [
+            (_row(cast(tuple[object, ...], tuple(row)[:-1])), str(tuple(row)[-1])) for row in rows
+        ]
+
+    def latest_for_identity(
+        self, *, yoetz_session_id: str, identity: str
+    ) -> ObservationAdviceSemanticAttempt | None:
+        family = self._family(yoetz_session_id, identity)
+        return family[0][0] if family else None
 
     def lookup(
         self, *, yoetz_session_id: str, basis_digest: str
