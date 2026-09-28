@@ -6780,3 +6780,10 @@ and receipts. No new event schema, persisted proof metadata, or command executio
 Historical event bytes remain intact; rebuilding a projection applies this bounded derivation to
 its accepted history. A held old check is still invalidated by a later response to a finding that
 check did not return. Resolved history does not remove receipt coverage limitations.
+
+### Observation latency and capacity (#887)
+
+`observation-budget-v3-capacity` uses resource occupancy for admission and effective detail.
+`oldest_pending_age_ms` and the historical `max_pending_age_ms` field remain readable diagnostic
+values; age alone neither rejects structural input nor disables content. Real count, byte,
+session-share, pending-pair and capture limits and recovery dwell remain authoritative. See ADR-029.
