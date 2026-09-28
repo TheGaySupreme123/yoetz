@@ -303,6 +303,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "repository_identity_required",
     "request_identity_conflict",
     "request_timeout",
+    "resolution_attempt_required",
     "response_fields_invalid",
     "response_projection_failed",
     "runtime_attempt_evidence_json_shape_invalid",
@@ -355,7 +356,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
 )
 
 _REASON_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
-assert len(_PROTOCOL_REASON_CODE_VALUES) == 298
+assert len(_PROTOCOL_REASON_CODE_VALUES) == 299
 assert len(_PROTOCOL_REASON_CODE_VALUES) == len(set(_PROTOCOL_REASON_CODE_VALUES))
 assert _PROTOCOL_REASON_CODE_VALUES == tuple(sorted(_PROTOCOL_REASON_CODE_VALUES, key=str.encode))
 assert all(_REASON_CODE_PATTERN.fullmatch(value) for value in _PROTOCOL_REASON_CODE_VALUES)
@@ -524,6 +525,8 @@ REASON_CODE_CONTINUATIONS: Mapping[str, str] = MappingProxyType(
         "frontier_changed": "frontier_refresh_required",
         "frontier_digest_mismatch": "frontier_refresh_required",
         "operation_recovery_unavailable": "recovery_check_then_correct",
+        # Issue #885: record one concrete attempt, then answer the finding under a new identity.
+        "resolution_attempt_required": "input_correction_new_identity",
         "schema_digest_mismatch": "resource_integrity_repair",
         "session_superseded": "session_rebind_required",
         "unsorted_set_field": "sorted_set_required",

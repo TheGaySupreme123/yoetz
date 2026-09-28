@@ -6801,3 +6801,7 @@ an explicitly assessable conclusion enables capture-baseline resolution. An unas
 conclusion blocks semantic absence proof even if a producer omitted its coverage-gap marker.
 Failed and local-only attempts retain their existing version. The owning schema generator and
 `fixtures/canonical/check-conclusion-1.3.0.case.json` lock the new and legacy bytes.
+
+`resolution_attempt_required` is the `respond` rejection for an `acknowledged` response to a
+`semantic_model_derived` finding whose `evidence_refs` cite no evidence or result recorded after
+the finding frontier. It writes nothing; the continuation is `input_correction_new_identity`.

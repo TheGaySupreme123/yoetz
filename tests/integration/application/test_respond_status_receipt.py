@@ -5,7 +5,7 @@ frozen frontier, all driven through the real ``Application`` facade and the memo
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Literal, cast
@@ -104,7 +104,7 @@ from yoetz.ports.objects import (
 )
 from yoetz.ports.publish_response_catalog import PublishResponseCatalogPort
 from yoetz.ports.runtime import BundleProvisionCommand, BundleRuntimePort, RouteCommand, TaskRuntime
-from yoetz.ports.semantic import SamplingParams, SemanticJudgment
+from yoetz.ports.semantic import ReviewerChallenge, SamplingParams, SemanticJudgment
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.coverage import (
     ArtifactObservation,
@@ -473,6 +473,7 @@ def _build_app(
     seed_offset: int = 0,
     semantic: Literal["disabled", "optional"] = "disabled",
     ledger_backend: Literal["memory", "sqlite"] = "memory",
+    semantic_evaluator: Callable[..., Awaitable[object]] | None = None,
 ) -> tuple[Application, _WorkflowRuntime, _ProjectionSpy]:
     start_app, start_runtime, clock, catalog = start_composition()
     projection = _ProjectionSpy()
@@ -490,7 +491,13 @@ def _build_app(
             :32
         ],
         waiver_policy_digest=_DIGEST,
-        semantic_evaluator=_semantic_disabled if semantic == "disabled" else _semantic_succeeds,
+        semantic_evaluator=(
+            semantic_evaluator
+            if semantic_evaluator is not None
+            else _semantic_disabled
+            if semantic == "disabled"
+            else _semantic_succeeds
+        ),
         disclosure_scope_for=_scope,
         receipt_version_resolver=lambda _: _versions(),
         waiver_authorizer=(lambda _: False) if waiver_authorizer is None else waiver_authorizer,
@@ -4489,3 +4496,110 @@ async def test_succeeded_review_records_assessable_conclusion_durably(
     assert row.payload.semantic_conclusion == "no_material_discrepancy"
     rebuilt = replay(records)
     assert Frontier(rebuilt.frontier, rebuilt.head_digest) == checked.result_frontier
+
+
+def _semantic_challenge_evaluator(claim_ref: str) -> Callable[..., Awaitable[object]]:
+    async def evaluate(
+        frozen: object,
+        findings: object,
+        runtime: object | None = None,
+        lineage_evaluation: object | None = None,
+    ) -> object:
+        succeeded = cast(FinalSemanticEvaluation, await _semantic_succeeds(frozen, findings))
+        challenge = ReviewerChallenge(
+            FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE,
+            "The completion claim has no readable support.",
+            (claim_ref,),
+            "The claim cites only an open obligation.",
+            "The work may be done but unrecorded.",
+            "Record the result that supports the claim.",
+            "state_unresolved_limitation",
+            "No result content is in the packet.",
+        )
+        return replace(succeeded, judgment=SemanticJudgment("challenges_returned", (challenge,)))
+
+    return evaluate
+
+
+async def test_accepting_a_semantic_finding_requires_a_recorded_resolution_attempt() -> None:
+    """Issue #885: "limitation accepted" is not an answer until one concrete attempt is recorded."""
+
+    seed = 5300
+    app, _runtime, _ = _build_app(
+        seed_offset=53,
+        semantic="optional",
+        semantic_evaluator=_semantic_challenge_evaluator(protocol_id("clm_", seed + 5)),
+    )
+    started, checked, _obligation = await _bootstrap_finding(
+        app, seed=seed, mode="semantic_if_configured"
+    )
+    finding = next(
+        item for item in checked.findings if item.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+    )
+
+    def respond_wire(
+        request_seed: int,
+        frontier: Frontier | FrontierModel,
+        disposition: str,
+        refs: tuple[str, ...] = (),
+    ) -> RespondRequest:
+        wire: dict[str, JsonValue] = {
+            **_request_base(protocol_id("req_", request_seed)),
+            "session_id": started.session_id,
+            "writer_id": started.writer_id,
+            "expected_frontier": _frontier(frontier),
+            "finding_id": finding.finding_id,
+            "finding_frontier": _frontier(checked.result_frontier),
+            "disposition": disposition,
+            "reason": "The evidence-provenance limitation is accepted.",
+        }
+        if refs:
+            wire["evidence_refs"] = refs
+        return RespondRequest.model_validate(wire)
+
+    with pytest.raises(PublicOperationError) as refused:
+        await app.respond(respond_wire(seed + 10, checked.result_frontier, "acknowledged"))
+    assert refused.value.code is PublicErrorCode.INVALID_REQUEST, refused.value.message
+    assert dict(refused.value.safe_details) == {
+        "continuation": "input_correction_new_identity",
+        "field": "/evidence_refs",
+        "reason_code": "resolution_attempt_required",
+    }
+
+    # A dispute is not an acceptance and keeps its own contract.
+    disputed = await app.respond(respond_wire(seed + 11, checked.result_frontier, "rejected"))
+    assert disputed.response.disposition == "rejected"
+
+    evidence_ref = protocol_id("evd_", seed + 12)
+    published = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 13)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(disputed.result_frontier),
+                "event_drafts": (
+                    {
+                        "event_id": protocol_id("evt_", seed + 14),
+                        "schema": {"name": "evidence_recorded", "version": "1.0.0"},
+                        "occurred_at": "2026-07-19T12:00:02.000Z",
+                        "causal_parents": (),
+                        "payload": {
+                            "evidence_id": evidence_ref,
+                            "evidence_kind": "artifact",
+                            "strength": "mutable_reference",
+                            "observed_at": "2026-07-19T12:00:02.000Z",
+                            "reference": "attempted-verification",
+                        },
+                        "artifact_refs": (),
+                        "evidence_refs": (),
+                    },
+                ),
+            }
+        )
+    )
+    accepted = await app.respond(
+        respond_wire(seed + 15, published.result_frontier, "acknowledged", (evidence_ref,))
+    )
+    assert accepted.response.disposition == "acknowledged"
+    assert tuple(item.reference_id for item in accepted.response.evidence) == (evidence_ref,)

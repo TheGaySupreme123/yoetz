@@ -507,6 +507,8 @@ result; put exact requested items on an obligation in the effective plan and rec
 `attempted_items` on the action. Do not resolve an obligation while its requested items remain
 unattempted. If authority or an unavailable dependency prevents the attempt, record that exact
 blocker instead of widening disclosure, credentials or runtime authority. Only then report the
-remaining limitation or narrow the claim. An acknowledgement or “limitation accepted” is not a
-repair, a verification result, or a finding resolution. Recheck after a material repair, and
+remaining limitation or narrow the claim. `respond` rejects an `acknowledged` answer to an
+AI-powered review finding unless `evidence_refs` cites evidence or a result recorded after the
+finding (`resolution_attempt_required`); a recorded blocked result counts. An acknowledgement or
+“limitation accepted” is not a repair, a verification result, or a finding resolution. Recheck after a material repair, and
 avoid another identical check when the same content is still unavailable.
