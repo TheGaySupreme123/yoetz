@@ -6801,3 +6801,9 @@ an explicitly assessable conclusion enables capture-baseline resolution. An unas
 conclusion blocks semantic absence proof even if a producer omitted its coverage-gap marker.
 Failed and local-only attempts retain their existing version. The owning schema generator and
 `fixtures/canonical/check-conclusion-1.3.0.case.json` lock the new and legacy bytes.
+### Observation latency and capacity (#887)
+
+`observation-budget-v3-capacity` uses resource occupancy for admission and effective detail.
+`oldest_pending_age_ms` and the historical `max_pending_age_ms` field remain readable diagnostic
+values; age alone neither rejects structural input nor disables content. Real count, byte,
+session-share, pending-pair and capture limits and recovery dwell remain authoritative. See ADR-029.
