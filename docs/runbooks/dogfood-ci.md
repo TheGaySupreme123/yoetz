@@ -104,7 +104,9 @@ trusted-console ceremonies from a pseudo-terminal. Phases, in order, each record
    on `PATH`, so packaged hooks and recovery commands resolve that instance. Then
    `observe status`, `observe drain`, `observe status`, `service status`. A
    `service_unavailable`, `storage_*`, or `vault_locked` hook diagnostic after the agent is
-   catastrophic; a non-zero agent exit is not.
+   catastrophic; a non-zero agent exit is not. Drain verification follows `retry_pending` or
+   `pass_limit` continuations for at most 60 seconds and requires an observed `drained` result
+   with zero pending rows. Every attempt is retained; errors and deadline exhaustion stay red.
 5. **lifecycle** — `service restart`, `service unlock` (headless runners have no keyring, so the
    restarted service comes back `locked`), one more `semantic_required` check on the probe
    session (informational, recorded as `semantic.after_restart`), `observe status` again.
