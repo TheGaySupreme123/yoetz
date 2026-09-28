@@ -19,14 +19,19 @@ was disposed. With `DOGFOOD_FIREWORKS_API_KEY` present it additionally means the
 stored and the check reached a real AI-powered review attempt (any attempted status counts,
 including a provider that rejects the model; only a pre-dispatch refusal such as
 `not_configured` or `blocked_by_policy` is red). With the agent credential for that host present
-it also means the native session finished and left no service or storage failure in the hook
-diagnostics. Without those secrets the corresponding steps are recorded as skipped and the lane
-is an install-and-mechanics smoke, not the full path.
+the native session is attempted and any service or storage failure in the hook diagnostics
+is fatal. Native completion is required only with `strict_agent`. Without those secrets the
+corresponding steps are recorded as skipped and the lane is an install-and-mechanics smoke, not
+the full path.
 
 It does **not** mean Yoetz is correct or useful. A native model that ignores the Yoetz tools,
 times out, or exits nonzero is recorded in the lane report (`agent_ok: false`) and the lane stays
 green unless the `strict_agent` input is set, because model compliance with a one-paragraph prompt
-is not what this lane certifies. Read `lane-report.json` before quoting any cell.
+is not what this lane certifies. `agent_ok: true` requires zero exit, an observation mapping,
+and a standalone final `DONE` line in a successful host response. Tool outputs, prompt echoes,
+malformed output, and error results cannot supply that marker. The mapping can predate the native
+run, and the completion marker is a model assertion: neither independently proves every MCP step
+or semantic usefulness. Read `lane-report.json` and the native transcript before quoting any cell.
 
 ## Matrix and connection modes
 
@@ -92,7 +97,8 @@ trusted-console ceremonies from a pseudo-terminal. Phases, in order, each record
    accidental sibling tasks, not a lane defect.
 4. **native** — one headless agent session in the probe project (`codex exec`, `claude -p`,
    `cursor-agent -p`) asked to call `start`, `publish_work`, and `receipt` and answer `DONE`;
-   then `observe status`, `observe drain`, `observe status`, `service status`. A
+   host discovery and execution wrappers are allowed solely to reach deferred Yoetz tools. Then
+   `observe status`, `observe drain`, `observe status`, `service status`. A
    `service_unavailable`, `storage_*`, or `vault_locked` hook diagnostic after the agent is
    catastrophic; a non-zero agent exit is not.
 5. **lifecycle** — `service restart`, `service unlock` (headless runners have no keyring, so the

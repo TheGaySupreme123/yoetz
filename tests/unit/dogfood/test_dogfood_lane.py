@@ -16,6 +16,7 @@ import textwrap
 from pathlib import Path
 from types import ModuleType
 from typing import Any, cast
+from unittest.mock import Mock
 
 import pytest
 
@@ -304,3 +305,101 @@ def test_prompt_regexes_match_the_product_prompts_as_rendered() -> None:
     assert re.search(_LANE.PROMPT_DECISION, "Decision [approve/deny/edit]: ")
     assert 'f"Password for {account}: "' in sources["linux_presence"]
     assert re.search(_LANE.PROMPT_PAM_PASSWORD, "Password for runner: ")
+
+
+def _native_output(host: str, text: str) -> str:
+    if host == "codex":
+        return "\n".join(
+            json.dumps(event)
+            for event in [
+                {"type": "turn.started"},
+                {"type": "item.completed", "item": {"type": "agent_message", "text": text}},
+                {"type": "turn.completed"},
+            ]
+        )
+    return json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": text})
+
+
+@pytest.mark.parametrize("host", ["codex", "claude", "cursor"])
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("DONE", True),
+        ("Probe completed.\n\nDONE\n", True),
+        ("The required Yoetz MCP tools are not available in this session.", False),
+        ("NOT_DONE", False),
+        ("   ", False),
+        ('The prompt says "DONE".', False),
+        ("DONE\nBut the probe failed.", False),
+    ],
+)
+def test_native_completion_requires_final_standalone_marker(
+    host: str, text: str, expected: bool
+) -> None:
+    assert _LANE._native_done(host, _native_output(host, text)) is expected
+
+
+@pytest.mark.parametrize("host", ["claude", "cursor"])
+def test_native_result_error_and_malformed_output_cannot_supply_completion(host: str) -> None:
+    for output in [
+        "DONE",
+        '{"result":"DONE"}',
+        "[]",
+        "not json",
+        _native_output(host, "DONE") + "bad",
+    ]:
+        assert _LANE._native_done(host, output) is False
+    result = json.loads(_native_output(host, "DONE"))
+    result["is_error"] = True
+    assert _LANE._native_done(host, json.dumps(result)) is False
+    result["is_error"] = False
+    result["subtype"] = "error_max_turns"
+    assert _LANE._native_done(host, json.dumps(result)) is False
+
+
+def test_codex_completion_ignores_tool_output_and_requires_completed_turn() -> None:
+    tool_done = json.dumps(
+        {
+            "type": "item.completed",
+            "item": {"type": "command_execution", "aggregated_output": "DONE"},
+        }
+    )
+    assert _LANE._native_done("codex", tool_done + '\n{"type":"turn.completed"}') is False
+    good = _native_output("codex", "DONE")
+    assert _LANE._native_done("codex", good.rsplit("\n", 1)[0]) is False
+    for suffix in [
+        '{"type":"turn.failed"}',
+        '{"type":"error"}',
+        '{"type":"turn.started"}',
+        '{"type":"item.completed","item":{"type":"agent_message","text":"Unavailable"}}',
+        "malformed",
+    ]:
+        assert _LANE._native_done("codex", good + "\n" + suffix) is False
+
+
+@pytest.mark.parametrize("host", ["codex", "claude", "cursor"])
+@pytest.mark.parametrize("done", [False, True])
+def test_native_phase_requires_completion_even_with_preexisting_mapping(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    host: str,
+    done: bool,
+) -> None:
+    lane = _LANE.Lane(_namespace(tmp_path, host=host, strict_agent=True, skip_agent=False))
+    lane.evidence.mkdir()
+    monkeypatch.setattr(lane, "_agent_command", Mock(return_value=(["native"], {}, None)))
+    output = _native_output(host, "DONE" if done else "Yoetz MCP tools unavailable")
+    monkeypatch.setattr(lane, "_run", Mock(return_value=(0, output, "", 1)))
+    monkeypatch.setattr(lane, "_observe_status", Mock(return_value={"mapping_present": True}))
+    monkeypatch.setattr(lane, "_observe_drain", Mock(return_value=None))
+    monkeypatch.setattr(lane, "_yoetz", Mock(return_value=(0, {})))
+    lane.phase_native_agent()
+    verdict = lane.report()["verdict"]
+    assert verdict["agent_ok"] is done
+    assert verdict["green"] is done
+    step = next(s for s in lane.steps if s.name == "agent_run")
+    assert step.status == ("pass" if done else "fail")
+    assert step.reason == (None if done else "agent_completion_missing")
+    lane.strict_agent = False
+    assert lane.report()["verdict"]["green"] is True
+    assert lane.report()["verdict"]["agent_ok"] is done

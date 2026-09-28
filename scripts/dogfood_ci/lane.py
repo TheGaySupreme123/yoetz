@@ -102,8 +102,10 @@ PROMPT_PRIVACY_CHOICE: Final = r"Choose a privacy option \[\d\]: "
 PROMPT_PRIVACY_CREATE: Final = r"Create this exact privacy proposal .*\? \[y/N\]: "
 PROMPT_PAM_PASSWORD: Final = r"Password for .*: "
 _PROMPT_TEMPLATE: Final = (
-    "You are a small integration probe. Use only the Yoetz MCP tools, whose names contain "
-    "'{tool_hint}'. Do exactly these steps and nothing else. "
+    "You are a small integration probe. Use the Yoetz MCP tools, whose names contain "
+    "'{tool_hint}'. You may use host tool discovery/search and execution wrappers solely "
+    "to discover and invoke these tools. If they are deferred, discover them before deciding "
+    "they are unavailable. Do exactly these steps and nothing else. "
     "1) Call the start tool with protocol_version '0.1', schema_version '1.0.0', a fresh "
     "request_id of the form req_<random uuid4>, mode 'create', task_title 'dogfood native probe', "
     "workspace_ref '{workspace}', external_ref '{external_ref}', requested_view 'compact', "
@@ -119,6 +121,61 @@ _PROMPT_TEMPLATE: Final = (
     "as expected_frontier, format 'markdown', include 'standard', redaction_profile "
     "'default_local_export'. Then answer with the single word DONE. Do not create or edit files."
 )
+
+
+def _native_done(host: str, output: str) -> bool:
+    """Accept DONE only in a successful host final response, never in tool output or echoes."""
+
+    final: str | None = None
+    if host == "codex":
+        # Codex --json is JSONL. The last completed assistant message is authoritative;
+        # a later refusal or turn failure must not inherit an earlier DONE.
+        completed = False
+        for line in output.splitlines():
+            try:
+                event = json.loads(line)
+            except ValueError:
+                return False
+            if not isinstance(event, dict):
+                return False
+            event = cast(dict[str, Any], event)
+            if event.get("type") in ("error", "turn.failed"):
+                return False
+            if event.get("type") == "turn.started":
+                final = None
+                completed = False
+            if event.get("type") == "turn.completed":
+                completed = True
+            item = event.get("item")
+            if (
+                event.get("type") == "item.completed"
+                and isinstance(item, dict)
+                and cast(dict[str, Any], item).get("type") == "agent_message"
+            ):
+                value = cast(dict[str, Any], item).get("text")
+                final = value if isinstance(value, str) else None
+        if not completed:
+            return False
+    elif host in {"claude", "cursor"}:
+        try:
+            result = json.loads(output)
+        except ValueError:
+            return False
+        if not isinstance(result, dict):
+            return False
+        result = cast(dict[str, Any], result)
+        if (
+            result.get("type") != "result"
+            or result.get("subtype") != "success"
+            or result.get("is_error") is not False
+        ):
+            return False
+        value = result.get("result")
+        final = value if isinstance(value, str) else None
+    # Stop hooks may require a disclosure before the terminal marker. Accept a final
+    # standalone line, not strings such as NOT_DONE or a quoted marker in prose.
+    lines = final.strip().splitlines() if final else []
+    return bool(lines and lines[-1].strip() == "DONE")
 
 
 class LaneAbort(Exception):
@@ -1645,7 +1702,7 @@ class Lane:
         )
         output_file = self._save("agent-output", out or "", ".txt")
         stderr_file = self._save("agent-stderr", err or "", ".txt")
-        done = "DONE" in out
+        done = _native_done(self.host, out)
         self.agent = {
             "ran": True,
             "exit_code": rc,
@@ -1657,14 +1714,22 @@ class Lane:
             "output_file": output_file,
             "stderr_file": stderr_file,
         }
-        ok = rc == 0
+        ok = rc == 0 and done
         self._record(
             "agent_run",
             phase,
             status="pass" if ok else "fail",
             exit_code=rc,
             duration_ms=ms,
-            reason=None if ok else ("agent_timeout" if rc == 124 else f"agent_exit_{rc}"),
+            reason=(
+                None
+                if ok
+                else "agent_completion_missing"
+                if rc == 0
+                else "agent_timeout"
+                if rc == 124
+                else f"agent_exit_{rc}"
+            ),
             summary={"done_marker": done, "output_bytes": len(out)},
             stderr=err,
         )
@@ -1860,7 +1925,11 @@ class Lane:
         failed = [s.name for s in self.steps if s.status == "fail"]
         agent_ok: bool | None = None
         if self.agent.get("ran"):
-            agent_ok = self.agent.get("exit_code") == 0 and bool(self.agent.get("mapping_present"))
+            agent_ok = (
+                self.agent.get("exit_code") == 0
+                and self.agent.get("done_marker") is True
+                and self.agent.get("mapping_present") is True
+            )
         agent_failures = {"agent_run"}
         catastrophic = [name for name in failed if name not in agent_failures]
         verdict = {
