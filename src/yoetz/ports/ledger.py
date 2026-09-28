@@ -1890,6 +1890,7 @@ class LedgerPort(Protocol):
         request_id: str,
         *,
         scope: CheckScopeModel | None = None,
+        semantic_conclusion: str | None = None,
     ) -> CheckCommitResult: ...
 
     async def fail_check_if_current(

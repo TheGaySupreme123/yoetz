@@ -599,8 +599,8 @@ retries, disclosure-wait resume, and started-attempt recovery, dispatches under 
 value; changed configuration or a later claim cannot re-select it. Snapshots written before
 this amendment lack the key and replay as `final`, which is the pre-amendment single-effort
 behavior. The `yoetz.semantic-case/2` reader ignores unknown execution keys, so no case-schema
-bump is needed. Dispatches outside a check (credential probes, observation advice) also use
-`final`.
+bump is needed. Unscoped credential probes also use `final`. Background observation advice uses `routine`
+(issue #888); it cannot infer completion from a hook and must not consume a final-check budget.
 
 The Codex subscription binding (`[external_runtime]`) expresses the two profiles separately:
 
@@ -690,3 +690,106 @@ service-owned check holds them, only `status view=operation` reads are admitted 
 check closes that window and drains admitted readers before it releases the gates, so maintenance,
 recovery, and observation sweeps remain excluded. Every other read still waits as before. A read
 from a different session or writer of the same task can still receive retryable `BUNDLE_BUSY`.
+
+
+### Background observation review admission (issue #888)
+
+The shared service deduplicates advisory review by the stable advice-candidate identity: the set
+of distinct candidates (kind, rule, next action, summary), the scoped coverage gaps and the packet
+policy. It excludes the rolling observation stream digest, per-rule evidence counts and repeats of
+the same candidate, so more evidence for an already-reviewed candidate reuses that review, while a
+new candidate, changed next action or changed gap is new advice. The frozen packet retains its
+original basis; its exact digest remains the disclosure subject. Reusing a review is only review of
+those structural summaries, never evidence that later source was read.
+
+A durable per-session admission interval defaults to 180 seconds and counts only attempts that
+could have reached a provider (`authorization_missing` and `provider_unavailable` rows do not). A
+refused admission writes no attempt, never claims review, and is reported with the coverage gap
+`advice_semantic_deferred`; the service schedules an in-memory revisit that rebuilds advice when
+the interval elapses, so the trailing condition is reviewed without waiting for another hook (the
+next hook re-derives the same deferral after a restart). A terminal non-success is never sticky:
+the same identity is re-admitted as `<identity>#<generation>`, keeping every earlier receipt, after
+a backoff from its terminal time. `superseded` retries immediately; other pre-provider reasons
+(`authorization_missing`, `provider_unavailable`, `queue_full`) wait the base interval, and
+`authorization_missing` retries at once when the task route has become ACTIVE with repository
+authority; provider-reaching failures double from the base interval up to 16 times it. The
+admission interval still applies to every retry. Explicit checks retain their separate authority,
+completion-profile selection and scheduling.
+
+Background dispatch runs under the `routine` profile inside a background scope. The Codex adapter
+then uses the owner's `routine_reasoning_effort` when set, and otherwise `low` when the configured
+effort is a known effort above it (it never raises or rewrites an effort). API-key adapters
+(`openai-responses`, `openai-chat-completions`) send no reasoning-effort parameter and already cap
+output at 2,048 tokens, below the routine limit; the admission interval, deduplication, backoff and
+disable switch are enforced before dispatch and therefore apply to every provider identically.
+
+`observation.semantic_advice_enabled` can disable background scheduling and dispatch, including
+rediscovered pending work. Re-enabling it on service restart permits pending work to drain.
+`observation.semantic_advice_min_interval_seconds` accepts 1–86400. Both settings apply to Codex,
+Claude Code and Cursor on macOS, Linux and Windows through WSL 2. This does not change capture
+consent, deterministic advice, or the explicit check policy.
+
+### Unassessable content and repair-first feedback (issue #885)
+
+The existing `insufficient_packet` judgment is the nonblocking outcome when missing content
+prevents assessment and readable evidence establishes no separate discrepancy. It has no
+challenges and now adds `semantic_packet_insufficient` to committed check coverage: provider
+execution succeeded, assessment coverage did not. Receipts retain insufficient coverage;
+this outcome cannot resolve an existing semantic finding. Local checks remain independent.
+A digest-only diff or an already reported capture gap alone must not become a new unsupported
+claim finding. Concrete discrepancies grounded in readable evidence still produce challenges.
+
+Reviewer and agent guidance require a specific authorized resolution attempt before accepting a
+remediable limitation, or an explicit authority/dependency blocker. The existing obligation
+requested-items and action-attempt records make the attempted work inspectable. `respond`
+enforces the minimum: an `acknowledged` response to a `semantic_model_derived` finding must cite
+in `evidence_refs` at least one evidence or result record first recorded or revised after the
+finding frontier, otherwise it is rejected with `resolution_attempt_required` before any write.
+A recorded failed or blocked result that names the authority blocker qualifies. Disputes
+(`rejected`, `provenance_disputed`) are unchanged. Yoetz does not judge whether the attempt was
+adequate, and `respond` still records only a disposition and never clears a finding. No provider
+schema or new finding kind is required.
+The same prompt, result commitment and guidance serve all hosts and supported operating systems.
+
+
+### Capture baseline for semantic finding resolution (issue #884)
+
+A completed semantic re-review with a recorded assessable conclusion may resolve an absent issue
+while retaining the original readable finding's closed native capture limits:
+`content_unselected`, `content_capture_unavailable`, `captured_object_unavailable`,
+`host_outcome_unavailable`, `unpaired_event`, and `semantic_case_content_over_item_limit`
+(recorded clipping of an oversized item). Only codes already present on that original finding are
+tolerated. The check stamps the capture limits its review ran under onto every semantic finding it
+raises, so the baseline is durable finding coverage rather than the deterministic case alone.
+Original and current freshness must be readable (`current` or `partial`); `redacted_gap` is
+accepted only when a tolerated `captured_object_unavailable` explains it, mirroring the local
+host-limited exception. New gaps, redacted or missing ledger payloads, stale/unknown state,
+withheld reviewer context, dropped challenges, reference-limit clipping, an `insufficient_packet`
+answer, failed review, suppression, scope mismatch and a returned issue still prevent resolution.
+
+A semantic finding also resolves only over state that changed materially after it was recorded
+and at or before the tested frontier: a new or revised readable action, result or evidence record,
+or a revision of a claim or obligation the finding names (including a superseding claim). A
+reviewer that merely does not repeat an issue over unchanged state proves nothing, so a re-roll
+never resolves a finding (`no_material_change_since_finding`). Yoetz cannot bind arbitrary new
+evidence to reviewer prose; this requires new work, not proof of its relevance, and the later
+review must still complete without returning the issue. Local findings are unaffected. Local
+re-derivations reuse only local finding IDs, so a same-subject semantic row can no longer be
+rewritten as a local one.
+
+This is absence of a previously raised issue under the same bounded coverage, not proof of
+unseen code correctness. Coverage gaps remain verbatim and keep the receipt insufficient.
+Acknowledging or accepting a limitation alone never resolves a defect. Coverage-only review
+outcomes use `insufficient_packet`; `ledger_stale_or_incomplete` remains the existing nonblocking
+finding kind. Do not retroactively relabel a historical unsupported-claim finding by matching
+its prose. Actual defects and omitted material limitations remain actionable until qualified.
+The same pure replay rule drives all hosts' CLI, MCP, status and receipt projections on every
+supported OS. Legacy findings with unreadable original proof stay explicitly unresolved.
+
+
+Check event version `1.3.0` records `semantic_conclusion` for succeeded provider attempts. Its
+closed values are `no_material_discrepancy`, `challenges_returned`, and `insufficient_packet`.
+Older event bytes stay unchanged and read with no conclusion. Only a recorded assessable
+conclusion enables the capture-baseline exception; legacy succeeded status alone is insufficient,
+because older engines could collapse an unassessable answer to zero findings without a gap.
+Failed/local-only checks retain their prior event shape. Public check-result schemas are unchanged.

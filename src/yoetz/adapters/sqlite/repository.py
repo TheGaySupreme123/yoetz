@@ -782,6 +782,7 @@ class SqliteLedger:
                 )
             self._state.records = records
             self._state.projection = projection
+            self._state.trusted_projections.remember(projection, records)
             newly_quarantined: list[OperationRecord] = []
             for pending_row in self._db.execute(
                 "SELECT writer_id,operation_id,operation_kind,request_digest,phase,"
@@ -1967,6 +1968,8 @@ class SqliteLedger:
             operations=dict(self._state.operations),
             writers=dict(self._state.writers),
             projection=self._state.projection,
+            trusted_projections=self._state.trusted_projections,
+            case_dependency_digests=self._state.case_dependency_digests,
             frozen_cases=dict(self._state.frozen_cases),
             check_results=dict(self._state.check_results),
             check_errors=dict(self._state.check_errors),
@@ -2075,6 +2078,12 @@ class SqliteLedger:
                 new_records,
                 pending_capture_task_id=pending_capture_task_id,
             )
+
+    async def load_trusted_projection(
+        self, session_id: str, frontier: Frontier
+    ) -> ProjectionState | None:
+        await self._ensure_recovered()
+        return await self._oracle().load_trusted_projection(session_id, frontier)
 
     async def load_projection(
         self, session_id: str, view: ProjectionView
@@ -2644,6 +2653,7 @@ class SqliteLedger:
         request_id: str,
         *,
         scope: CheckScopeModel | None = None,
+        semantic_conclusion: str | None = None,
     ) -> CheckCommitResult:
         await self._ensure_recovered()
         async with self._lock:
@@ -2669,6 +2679,7 @@ class SqliteLedger:
                     semantic_provenance,
                     request_id,
                     scope=scope,
+                    semantic_conclusion=semantic_conclusion,
                 )
             except PublicOperationError:
                 # The memory oracle terminalizes a frontier conflict before raising it. Preserve

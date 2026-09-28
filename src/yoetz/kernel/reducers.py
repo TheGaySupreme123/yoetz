@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Final, cast
@@ -78,6 +79,7 @@ from yoetz.kernel.projections import (
     PlanProjectionRecord,
     ProjectionRecord,
     ProjectionState,
+    derive_projection_state,
     empty_projection_state,
 )
 from yoetz.protocol.canonical import canonical_digest
@@ -242,6 +244,15 @@ class EvidenceObjectSource:
             raise _corrupt() from exc
 
 
+_ABSENT: Final = object()
+# Set only by ``extend_replay_index`` around one constructor call: entries carried unchanged (by
+# identity) from the already-validated prior index skip per-id re-validation, which otherwise made
+# every stepwise replay quadratic in ledger length (issue #886). Whole-index invariants still run.
+_TRUSTED_PRIOR_INDEX: ContextVar[ReplayIndex | None] = ContextVar(
+    "yoetz_trusted_prior_replay_index", default=None
+)
+
+
 @dataclass(frozen=True, slots=True)
 class ReplayIndex:
     frontier: int
@@ -261,9 +272,20 @@ class ReplayIndex:
                 validate_sha256_digest(self.head_digest)
         except ValueError as exc:
             raise _corrupt() from exc
-        payloads = self._copy_payload_owners(self.payload_event_by_object)
-        evidence = self._copy_evidence_sources(self.evidence_sources_by_object)
-        roots = self._copy_redaction_roots(self.redaction_root_by_object)
+        prior = _TRUSTED_PRIOR_INDEX.get()
+        if type(prior) is not ReplayIndex or prior.frontier > self.frontier:
+            prior = None
+        payloads = self._copy_payload_owners(
+            self.payload_event_by_object, None if prior is None else prior.payload_event_by_object
+        )
+        evidence = self._copy_evidence_sources(
+            self.evidence_sources_by_object,
+            None if prior is None else prior.evidence_sources_by_object,
+        )
+        roots = self._copy_redaction_roots(
+            self.redaction_root_by_object,
+            None if prior is None else prior.redaction_root_by_object,
+        )
         accepted_event_ids = frozenset(payloads.values())
         if len(payloads) != self.frontier or len(accepted_event_ids) != len(payloads):
             raise _corrupt()
@@ -285,12 +307,16 @@ class ReplayIndex:
     @staticmethod
     def _copy_payload_owners(
         source: Mapping[ObjectId, EventId],
+        trusted: Mapping[ObjectId, EventId] | None,
     ) -> dict[ObjectId, EventId]:
         if not isinstance(cast(object, source), Mapping):
             raise _corrupt()
         result: dict[ObjectId, EventId] = {}
         try:
             for raw_object, raw_event in source.items():
+                if trusted is not None and trusted.get(raw_object, _ABSENT) is raw_event:
+                    result[raw_object] = raw_event
+                    continue
                 result[object_id(raw_object)] = event_id(raw_event)
         except ValueError as exc:
             raise _corrupt() from exc
@@ -299,12 +325,16 @@ class ReplayIndex:
     @staticmethod
     def _copy_evidence_sources(
         source: Mapping[ObjectId, tuple[EvidenceObjectSource, ...]],
+        trusted: Mapping[ObjectId, tuple[EvidenceObjectSource, ...]] | None,
     ) -> dict[ObjectId, tuple[EvidenceObjectSource, ...]]:
         if not isinstance(cast(object, source), Mapping):
             raise _corrupt()
         result: dict[ObjectId, tuple[EvidenceObjectSource, ...]] = {}
         try:
             for raw_object, raw_sources in source.items():
+                if trusted is not None and trusted.get(raw_object, _ABSENT) is raw_sources:
+                    result[raw_object] = raw_sources
+                    continue
                 key = object_id(raw_object)
                 if type(raw_sources) is not tuple or any(
                     type(item) is not EvidenceObjectSource for item in raw_sources
@@ -331,12 +361,16 @@ class ReplayIndex:
     @staticmethod
     def _copy_redaction_roots(
         source: Mapping[ObjectId, EventId],
+        trusted: Mapping[ObjectId, EventId] | None,
     ) -> dict[ObjectId, EventId]:
         if not isinstance(cast(object, source), Mapping):
             raise _corrupt()
         result: dict[ObjectId, EventId] = {}
         try:
             for raw_object, raw_event in source.items():
+                if trusted is not None and trusted.get(raw_object, _ABSENT) is raw_event:
+                    result[raw_object] = raw_event
+                    continue
                 result[object_id(raw_object)] = event_id(raw_event)
         except ValueError as exc:
             raise _corrupt() from exc
@@ -412,13 +446,17 @@ def extend_replay_index(index: ReplayIndex, event: LedgerRecord) -> ReplayIndex:
         for target in targets:
             redaction_roots.setdefault(target, event.event_id)
 
-    return ReplayIndex(
-        frontier=event.ledger.ingestion_sequence,
-        head_digest=event.entry_digest,
-        payload_event_by_object=payload_owners,
-        evidence_sources_by_object=evidence_sources,
-        redaction_root_by_object=redaction_roots,
-    )
+    token = _TRUSTED_PRIOR_INDEX.set(index)
+    try:
+        return ReplayIndex(
+            frontier=event.ledger.ingestion_sequence,
+            head_digest=event.entry_digest,
+            payload_event_by_object=payload_owners,
+            evidence_sources_by_object=evidence_sources,
+            redaction_root_by_object=redaction_roots,
+        )
+    finally:
+        _TRUSTED_PRIOR_INDEX.reset(token)
 
 
 def _projection_record[T](event: AcceptedEvent, payload: T) -> ProjectionRecord[T]:
@@ -1332,7 +1370,8 @@ def reduce_event(
         stale=stale,
         check_freshness=None if latest is None else latest.coverage.ledger_freshness,
     )
-    return ProjectionState(
+    return derive_projection_state(
+        state,
         frontier=frontier,
         head_digest=event.entry_digest,
         plans=plans,

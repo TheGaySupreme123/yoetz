@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -14,6 +15,7 @@ from pydantic import BaseModel
 
 from yoetz.application.check import CheckScope, run_deterministic_policies
 from yoetz.application.coordination import CoordinationAdvice
+from yoetz.application.ledger_snapshot import projection_for_records
 from yoetz.application.projects import ProjectApplication, ProjectCommandError
 from yoetz.application.status_faults import (
     StatusFault,
@@ -966,10 +968,10 @@ async def _candidate_page(
             )
         ]
     )
-    from yoetz.kernel.reducers import replay
-
     try:
-        projection = replay(records)
+        projection = await projection_for_records(
+            runtime.ledger, runtime.session_id, frontier, records
+        )
     except ValueError as exc:
         # Replay is genesis-anchored; a chain it rejects is a storage fact, not an engine bug, so
         # it leaves here as a bounded public error rather than an unbounded internal one. The
@@ -982,7 +984,13 @@ async def _candidate_page(
         runtime.session_id, frontier, projection
     )
     try:
-        case = build_deterministic_case(projection, records, availability)
+        case = await asyncio.to_thread(
+            build_deterministic_case,
+            projection,
+            records,
+            availability,
+            _projection_validated=True,
+        )
     except ValueError as exc:
         if str(exc) == "deterministic_case_invalid":
             raise StatusFault(StatusFaultStage.REPLAY, "The status case is unreadable.") from exc

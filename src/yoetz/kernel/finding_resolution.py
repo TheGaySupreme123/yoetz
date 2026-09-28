@@ -29,6 +29,7 @@ from yoetz.domain.receipts import (
     SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
     SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
     SEMANTIC_CHALLENGES_REJECTED_GAP,
+    SEMANTIC_PACKET_INSUFFICIENT_GAP,
     SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
     SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP,
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
@@ -42,6 +43,7 @@ from yoetz.protocol.coverage import LedgerFreshness
 from yoetz.protocol.models import SemanticReason, SemanticStatus
 
 __all__ = [
+    "SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS",
     "IssueKey",
     "apply_check_resolution",
     "finding_is_resolved",
@@ -67,6 +69,7 @@ _SEMANTIC_ONLY_GAPS: Final = frozenset(
         OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
         OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP,
         SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP,
+        SEMANTIC_PACKET_INSUFFICIENT_GAP,
         SEMANTIC_CHALLENGES_REJECTED_GAP,
         SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
         SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
@@ -108,6 +111,17 @@ _DETERMINISTIC_PROOF_TOLERATED_GAPS: Final = (
     _BASE_DETERMINISTIC_PROOF_TOLERATED_GAPS | _HOST_OBSERVATION_GAPS
 )
 _SEMANTIC_PROOF_TOLERATED_GAPS: Final = _EVIDENCE_STRENGTH_GAPS
+# These native capture limits may be compared with the readable original finding's baseline.
+# The check stamps the ones its review ran under onto every semantic finding it raises, so the
+# baseline is durable finding coverage, not a later reconstruction (issue #884). Recorded clipping
+# of an oversized item is included: it stays disclosed on every receipt, but an unchanged,
+# already-recorded limit must not make a repaired issue permanently unresolvable. They never
+# tolerate a new limitation, hidden ledger payloads, withheld review categories, dropped
+# challenges, or an insufficient-packet answer.
+SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS: Final = _HOST_OBSERVATION_GAPS | frozenset(
+    {"content_capture_unavailable", SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP}
+)
+_SEMANTIC_BASELINE_CAPTURE_GAPS: Final = SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS
 _UNPROVEN_FRESHNESS: Final = frozenset(
     {
         LedgerFreshness.UNKNOWN,
@@ -279,6 +293,75 @@ def _deterministic_freshness_proven(
     )
 
 
+def _semantic_freshness_proven(
+    freshness: LedgerFreshness, gaps: frozenset[str], tolerated: frozenset[str]
+) -> bool:
+    """Whether freshness is proven for semantic proof under a recorded capture baseline.
+
+    ``redacted_gap`` is normally unproven. Mirroring the local host-limited exception, it is
+    accepted only when a tolerated ``captured_object_unavailable`` explains it and every gap is
+    tolerated; redacted events, unavailable payloads and redacted objects cap the same freshness
+    but carry their own gap codes, which are never tolerated. Unknown and stale state always fail
+    closed.
+    """
+
+    if freshness not in _UNPROVEN_FRESHNESS:
+        return True
+    return (
+        freshness is LedgerFreshness.REDACTED_GAP
+        and "captured_object_unavailable" in gaps & tolerated
+        and gaps <= tolerated
+    )
+
+
+def _semantic_subject_changed(
+    finding: Finding,
+    finding_source_frontier: int,
+    check: CheckRecordedPayload,
+    state: ProjectionState | None,
+) -> bool:
+    """Whether material work changed after *finding* and at or before the checked state.
+
+    Counted: a new or revised action, result or evidence record (a repair, verification or
+    content), or a revision of a claim or obligation the finding names, including a claim that
+    supersedes a named claim. Unreadable records, responses, checks, findings and observations
+    never count. Yoetz cannot bind arbitrary new evidence to a reviewer's prose, so this proves
+    new material work, not its relevance; the later completed review must still not return the
+    issue. Without the pre-check projection nothing is proven.
+    """
+
+    if state is None or state.frontier < check.subject_frontier.sequence:
+        return False
+    low = finding_source_frontier
+    high = check.subject_frontier.sequence
+
+    def changed(row: object) -> bool:
+        # An unreadable (redacted) record cannot show what changed, so it proves nothing.
+        source = getattr(row, "source_frontier", 0)
+        readable = getattr(row, "payload", None) is not None
+        return readable and type(source) is int and low < source <= high
+
+    for rows in (state.actions, state.results, state.evidence):
+        if any(changed(row) for row in rows.values()):
+            return True
+    subjects = frozenset(str(ref) for ref in finding.subject_refs)
+    for key, row in state.obligations.items():
+        if (str(key) in subjects or str(row.source_event_id) in subjects) and changed(row):
+            return True
+    for key, row in state.claims.items():
+        if not changed(row):
+            continue
+        payload = row.payload
+        supersedes = getattr(payload, "supersedes_claim_refs", ()) if payload is not None else ()
+        if (
+            str(key) in subjects
+            or str(row.source_event_id) in subjects
+            or any(str(ref) in subjects for ref in supersedes)
+        ):
+            return True
+    return False
+
+
 def qualifying_check_resolves(
     finding: Finding,
     finding_source_frontier: int,
@@ -328,8 +411,27 @@ def resolution_blockers(
     gaps = frozenset(check.coverage.known_gaps)
     if finding.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED:
         tolerated = _SEMANTIC_PROOF_TOLERATED_GAPS
-        if check.coverage.ledger_freshness in _UNPROVEN_FRESHNESS:
+        if check.semantic_conclusion == "insufficient_packet":
+            reasons.append("semantic_packet_insufficient")
+        original_gaps = frozenset(finding.coverage.known_gaps)
+        baseline_tolerated = _SEMANTIC_PROOF_TOLERATED_GAPS | _SEMANTIC_BASELINE_CAPTURE_GAPS
+        baseline_readable = original_gaps <= baseline_tolerated and _semantic_freshness_proven(
+            finding.coverage.ledger_freshness, original_gaps, baseline_tolerated
+        )
+        if (
+            check.semantic_conclusion in {"no_material_discrepancy", "challenges_returned"}
+            and baseline_readable
+        ):
+            # Absence proof is no weaker than the readable review that raised this issue.
+            # The later review still must complete and not return the issue. Its unchanged
+            # capture limitations remain on the receipt; a response alone changes nothing.
+            tolerated |= original_gaps & _SEMANTIC_BASELINE_CAPTURE_GAPS
+        if not _semantic_freshness_proven(check.coverage.ledger_freshness, gaps, tolerated):
             reasons.append("freshness_unproven")
+        if not _semantic_subject_changed(finding, finding_source_frontier, check, proof_state):
+            # A stochastic reviewer that merely does not repeat an issue proves nothing; the
+            # issue may only close over state that changed materially after it was raised.
+            reasons.append("no_material_change_since_finding")
         if (
             check.semantic_status is not SemanticStatus.SUCCEEDED
             or check.semantic_reason is not SemanticReason.SEMANTIC_COMPLETED
@@ -527,8 +629,10 @@ def finding_resolution_explanation(
         issue_key(row.payload) for row in returned if row is not None and row.payload is not None
     )
     proof_state = None
-    if _command_partition_candidate(
-        finding_record.payload, finding_record.source_frontier, check, keys
+    if finding_record.payload.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED or (
+        _command_partition_candidate(
+            finding_record.payload, finding_record.source_frontier, check, keys
+        )
     ):
         proof_state = _historical_proof_state(
             check,

@@ -22,7 +22,6 @@ import pytest
 
 import yoetz.application.status as status_module
 import yoetz.application.task_views as task_views_module
-import yoetz.kernel.reducers as reducers_module
 import yoetz.observability.diagnostics as diagnostics
 from builders.multi_agent import MultiAgentService, multi_agent_service
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
@@ -481,13 +480,13 @@ async def test_candidate_frontier_fault_is_classified_at_status_boundary(
 ) -> None:
     async with multi_agent_service(tmp_path / "state") as service:
         first, _second, _project_id = await _two_roots_with_receipts(service, _workspace(tmp_path))
-        real_replay = reducers_module.replay
+        real_projection = status_module.projection_for_records
 
-        def inconsistent_replay(records: object) -> object:
-            projection = real_replay(records)  # type: ignore[arg-type]
+        async def inconsistent_projection(*args: object) -> object:
+            projection = await real_projection(*args)  # type: ignore[arg-type]
             return replace(projection, frontier=projection.frontier + 1)
 
-        monkeypatch.setattr(reducers_module, "replay", inconsistent_replay)
+        monkeypatch.setattr(status_module, "projection_for_records", inconsistent_projection)
         request_id = new_id(IdKind.REQUEST)
         with pytest.raises(PublicOperationError) as caught:
             await _status(

@@ -133,7 +133,20 @@ SEMANTIC_REVIEW_INSTRUCTION: Final = (
     "cited_refs must come from the packet's citable_refs array and nothing else: an item_id from "
     "items[] is not citable, and a challenge citing anything outside citable_refs is discarded "
     "unread. Do not invent repository facts, fetch more context, overrule deterministic results, "
-    "waive findings, or claim stronger coverage than the packet."
+    "waive findings, or claim stronger coverage than the packet. "
+    "Use insufficient_packet with reviewer_challenges=[] when missing or withheld content "
+    "prevents assessment and the readable material establishes no separate discrepancy. This "
+    "means unassessable, not no_material_discrepancy. A digest-only diff or a recorded capture "
+    "gap alone is not evidence of an unsupported claim. Do not re-raise a coverage gap already "
+    "recorded by deterministic assessment as a new semantic defect. Preserve concrete problems "
+    "supported by readable material even when other content is missing. For each such problem, "
+    "name the specific supplied artifact or verification target that would resolve it: relevant "
+    "diff hunks, a test or doctest, or a lint check justified by the changed files shown. Never "
+    "invent a path or command absent from the packet. Request one authorized concrete repair "
+    "or evidence attempt before state_unresolved_limitation; use that limitation response only "
+    "when the packet records the attempt and its remaining limit, or a specific authority blocker. "
+    "Do not offer accepting a limitation as an equivalent alternative to performing available "
+    "verification. Disclosure does not repair a defect or prove completion."
 )
 _SYSTEM_INSTRUCTION: Final = SEMANTIC_REVIEW_INSTRUCTION
 
@@ -369,7 +382,8 @@ def _strip_schema_titles(node: object) -> object:
 FINDING_KIND_GLOSSARY: Final[dict[str, str]] = {
     "action_without_result": "an action was taken but no outcome for it was ever recorded",
     "claim_without_admissible_evidence": (
-        "a claim of fact or completion rests on no evidence the packet actually contains"
+        "readable claim and evidence records establish missing support; omitted source content "
+        "or an already recorded capture gap alone makes content unassessable, not a new defect"
     ),
     "completion_with_open_obligations": (
         "work is presented as finished while obligations it was meant to satisfy remain open"
@@ -432,7 +446,8 @@ CHALLENGE_FIELD_GLOSSARY: Final[dict[str, str]] = {
         "The single kind of response you are asking the agent for. act: do the missing work; "
         "provide_evidence: record evidence that already exists; revise_claim: correct or withdraw "
         "what was claimed; dispute_with_evidence: rebut this challenge if you believe it is wrong; "
-        "state_unresolved_limitation: say plainly that this cannot be settled here."
+        "state_unresolved_limitation: disclose what remains after a recorded concrete resolution "
+        "attempt, or name the specific authority blocker preventing that attempt."
     ),
     "uncertainty": (
         "What you could not determine from the packet and what would settle it. Say so plainly "

@@ -197,8 +197,32 @@ def _check(
 _SEMANTIC_OK = (SemanticStatus.SUCCEEDED, SemanticReason.SEMANTIC_COMPLETED)
 
 
-def _resolves(finding: Finding, check: CheckRecordedPayload, *, recorded_at: int = 4) -> bool:
-    return qualifying_check_resolves(finding, recorded_at, check, frozenset())
+def _changed_state(check: CheckRecordedPayload, *, recorded_at: int = 4) -> ProjectionState:
+    """The pre-check projection with one new action recorded after the finding (issue #884)."""
+
+    from builders.policy_cases import act, record
+    from yoetz.domain.events import ActionKind, ActionRecordedPayload
+
+    changed = record(ActionRecordedPayload(act(9), ActionKind.EDIT, "Repair"), recorded_at + 1)
+    return replace(
+        empty_projection_state(),
+        frontier=max(check.subject_frontier.sequence, recorded_at + 1),
+        head_digest=_DIGEST,
+        actions={act(9): changed},
+    )
+
+
+def _resolves(
+    finding: Finding,
+    check: CheckRecordedPayload,
+    *,
+    recorded_at: int = 4,
+    changed: bool = True,
+) -> bool:
+    """Resolve with a material change after the finding unless ``changed`` is false."""
+
+    state = _changed_state(check, recorded_at=recorded_at) if changed else None
+    return qualifying_check_resolves(finding, recorded_at, check, frozenset(), proof_state=state)
 
 
 def test_the_happy_path_resolves_a_deterministic_finding() -> None:
@@ -433,7 +457,11 @@ def test_a_semantic_finding_needs_a_completed_semantic_review() -> None:
 
 @pytest.mark.parametrize(
     "gap",
-    ("semantic_review_context_withheld", "semantic_challenges_rejected"),
+    (
+        "semantic_review_context_withheld",
+        "semantic_challenges_rejected",
+        "semantic_packet_insufficient",
+    ),
 )
 def test_a_weakened_semantic_review_cannot_resolve_a_semantic_finding(gap: str) -> None:
     finding = _finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED)
@@ -563,14 +591,22 @@ def test_resolution_explains_only_disqualifying_semantic_gaps(gap: str) -> None:
             gaps=tuple(sorted((gap, "evidence_content_digest_only"))), semantic=True
         ),
     )
-    assert resolution_blockers(finding, 4, check, frozenset()) == ("coverage:" + gap,)
+    state = _changed_state(check)
+    assert resolution_blockers(finding, 4, check, frozenset(), proof_state=state) == (
+        "coverage:" + gap,
+    )
     assert not _resolves(finding, check)
     tolerated = _check(
         semantic=_SEMANTIC_OK,
         coverage=_coverage(gaps=("evidence_content_digest_only",), semantic=True),
     )
-    assert resolution_blockers(finding, 4, tolerated, frozenset()) == ()
+    assert resolution_blockers(finding, 4, tolerated, frozenset(), proof_state=state) == ()
     assert _resolves(finding, tolerated)
+    # Without a material change after the finding, a review that merely did not repeat the issue
+    # proves nothing.
+    assert resolution_blockers(finding, 4, tolerated, frozenset()) == (
+        "no_material_change_since_finding",
+    )
 
 
 def test_resolution_explanation_preserves_scope_policy_suppression_and_refire() -> None:
@@ -951,3 +987,160 @@ def test_supersession_wording_needs_a_closure_for_that_coordination_finding(
         state, fnd(1), cast(tuple[LedgerRecord, ...], records)
     )
     assert explanation == f"Resolved by qualifying check {evt(12)}; retained as history."
+
+
+@pytest.mark.parametrize(
+    "gap",
+    [
+        "captured_object_unavailable",
+        "content_unselected",
+        "host_outcome_unavailable",
+        "unpaired_event",
+        "content_capture_unavailable",
+        "semantic_case_content_over_item_limit",
+    ],
+)
+def test_completed_semantic_recheck_can_retain_original_readable_capture_limits(gap: str) -> None:
+    coverage = _coverage(gaps=(gap,), semantic=True, freshness=LedgerFreshness.PARTIAL)
+    original = replace(_finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED), coverage=coverage)
+    later = replace(
+        _check(semantic=_SEMANTIC_OK, coverage=coverage),
+        semantic_conclusion="no_material_discrepancy",
+    )
+    assert _resolves(original, later) is True
+    # The same review over unchanged state is a re-roll, not proof (issue #884).
+    assert _resolves(original, later, changed=False) is False
+    # A legacy check did not record whether it was unassessable: no inferred success.
+    assert _resolves(original, _check(semantic=_SEMANTIC_OK, coverage=coverage)) is False
+    assert _resolves(original, replace(later, semantic_conclusion="insufficient_packet")) is False
+    # A new capture weakness is not licensed by an originally unbounded finding.
+    assert (
+        _resolves(
+            _finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED),
+            _check(semantic=_SEMANTIC_OK, coverage=coverage),
+        )
+        is False
+    )
+    # An acknowledgement/local check cannot supply the independent semantic proof.
+    assert _resolves(original, _check(coverage=coverage)) is False
+    assert original.coverage.known_gaps == (gap,)
+
+
+@pytest.mark.parametrize(
+    "gap",
+    [
+        "semantic_packet_insufficient",
+        "semantic_case_finding_refs_over_limit",
+        "semantic_review_context_withheld",
+        "semantic_challenges_rejected",
+        "truncated_payload",
+        "content_redacted",
+        "event_payload_unavailable",
+        "redacted_event",
+        "missing_ref",
+        "observation_input_loss",
+    ],
+)
+def test_matching_material_gaps_never_become_semantic_absence_proof(gap: str) -> None:
+    from yoetz.kernel.finding_resolution import resolution_blockers
+
+    coverage = _coverage(gaps=(gap,), semantic=True, freshness=LedgerFreshness.PARTIAL)
+    original = replace(_finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED), coverage=coverage)
+    # An assessable conclusion and a material change reach the capture-baseline branch, so the
+    # original gap alone is what must keep blocking.
+    later = replace(
+        _check(semantic=_SEMANTIC_OK, coverage=coverage),
+        semantic_conclusion="no_material_discrepancy",
+    )
+    blockers = resolution_blockers(
+        original, 4, later, frozenset(), proof_state=_changed_state(later)
+    )
+    assert "coverage:" + gap in blockers
+    assert "no_material_change_since_finding" not in blockers
+    assert _resolves(original, later) is False
+
+
+def test_redacted_freshness_from_a_recorded_captured_object_gap_is_a_baseline() -> None:
+    """The deterministic case caps freshness at redacted_gap for captured_object_unavailable."""
+
+    coverage = _coverage(
+        gaps=("captured_object_unavailable",),
+        semantic=True,
+        freshness=LedgerFreshness.REDACTED_GAP,
+    )
+    original = replace(_finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED), coverage=coverage)
+    later = replace(
+        _check(semantic=_SEMANTIC_OK, coverage=coverage),
+        semantic_conclusion="no_material_discrepancy",
+    )
+    assert _resolves(original, later) is True
+    assert _resolves(original, later, changed=False) is False
+    # Not recorded on the original finding: still unproven.
+    fresh = _finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED)
+    assert _resolves(fresh, later) is False
+    # A redaction with its own gap code is never explained by the capture baseline.
+    hidden = _coverage(
+        gaps=("captured_object_unavailable", "redacted_object"),
+        semantic=True,
+        freshness=LedgerFreshness.REDACTED_GAP,
+    )
+    assert _resolves(original, replace(later, coverage=hidden)) is False
+
+
+def test_semantic_resolution_needs_new_work_or_a_subject_revision() -> None:
+    from builders.policy_cases import claim_record
+    from yoetz.domain.events import ClaimKind, ClaimRecordedPayload
+    from yoetz.kernel.finding_resolution import resolution_blockers
+
+    original = _finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED, subject_refs=(clm(1),))
+    later = replace(_check(semantic=_SEMANTIC_OK), semantic_conclusion="no_material_discrepancy")
+    base = replace(empty_projection_state(), frontier=8, head_digest=_DIGEST)
+    # Nothing new, or only a record older than the finding: no proof.
+    assert resolution_blockers(original, 4, later, frozenset(), proof_state=base) == (
+        "no_material_change_since_finding",
+    )
+    unrelated = claim_record(
+        ClaimRecordedPayload(
+            clm(2), ClaimKind.COMPLETION, "Other", (obl(2),), obligation_refs=(obl(2),)
+        ),
+        6,
+    )
+    assert not qualifying_check_resolves(
+        original, 4, later, frozenset(), proof_state=replace(base, claims={clm(2): unrelated})
+    )
+    revised = claim_record(
+        ClaimRecordedPayload(
+            clm(1), ClaimKind.COMPLETION, "Revised", (obl(1),), obligation_refs=(obl(1),)
+        ),
+        6,
+    )
+    assert qualifying_check_resolves(
+        original, 4, later, frozenset(), proof_state=replace(base, claims={clm(1): revised})
+    )
+    # A change after the checked frontier is not part of the tested state.
+    late = _changed_state(later, recorded_at=8)
+    assert late.frontier == 9 and later.subject_frontier.sequence == 8
+    assert not qualifying_check_resolves(original, 4, later, frozenset(), proof_state=late)
+
+
+@pytest.mark.parametrize(
+    "freshness",
+    [
+        LedgerFreshness.REDACTED_GAP,
+        LedgerFreshness.UNKNOWN,
+        LedgerFreshness.STALE_AFTER_MATERIAL_CHANGE,
+    ],
+)
+def test_capture_baseline_cannot_rehabilitate_unreadable_original_proof(
+    freshness: LedgerFreshness,
+) -> None:
+    coverage = _coverage(gaps=("content_unselected",), semantic=True, freshness=freshness)
+    original = replace(_finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED), coverage=coverage)
+    later = replace(coverage, ledger_freshness=LedgerFreshness.PARTIAL)
+    assert _resolves(original, _check(semantic=_SEMANTIC_OK, coverage=later)) is False
+
+
+def test_unassessable_conclusion_blocks_proof_even_without_a_coverage_gap() -> None:
+    original = _finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED)
+    later = replace(_check(semantic=_SEMANTIC_OK), semantic_conclusion="insufficient_packet")
+    assert _resolves(original, later) is False

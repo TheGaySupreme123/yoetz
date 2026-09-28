@@ -250,6 +250,7 @@ class _Ledger:
         request_id: str,
         *,
         scope: CheckScopeModel | None = None,
+        semantic_conclusion: str | None = None,
     ) -> CheckCommitResult:
         assert frozen == self.frozen
         if self.commit_failure is not None:
@@ -1251,3 +1252,19 @@ async def test_native_resolution_omission_survives_successful_semantic_check() -
     result = await execute_check_commit(app, _request("semantic_if_configured"))
     assert {"captured_object_unavailable", "content_unselected"} <= set(result.coverage.known_gaps)
     assert result.verdict.value != "no_issue_detected"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["semantic_if_configured", "semantic_required"])
+async def test_insufficient_packet_is_nonblocking_but_never_clean(mode: str) -> None:
+    app = _App(semantic=True)
+    app.ledger.frozen = replace(app.ledger.frozen, case=make_case())
+    app.semantic_result = _succeeded(SemanticJudgment("insufficient_packet", ()))
+    checked = await execute_check_commit(app, _request(mode))
+    assert checked.findings == ()
+    assert "semantic_packet_insufficient" in checked.coverage.known_gaps
+    assert checked.verdict.value == "insufficient_coverage"
+    assert checked.semantic_status is SemanticStatus.SUCCEEDED
+    # The gap is in the committed result, so replay/CLI/MCP do not have to infer it from prose.
+    assert app.ledger.last_ranked is not None
+    assert "semantic_packet_insufficient" in app.ledger.last_ranked.coverage.known_gaps

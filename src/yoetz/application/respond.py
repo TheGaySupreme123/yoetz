@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
 
+from yoetz.application.ledger_snapshot import projection_for_records
 from yoetz.application.unit_of_work import PreparedMutation, run_prepared_append
 from yoetz.domain.events import (
     EventDraft,
@@ -15,7 +16,7 @@ from yoetz.domain.events import (
     encode_payload,
     media_type_for,
 )
-from yoetz.domain.findings import ResponseDisposition, WaiverScope
+from yoetz.domain.findings import FindingOrigin, ResponseDisposition, WaiverScope
 from yoetz.domain.values import (
     Actor,
     ActorType,
@@ -29,7 +30,7 @@ from yoetz.domain.values import (
     timestamp_from_datetime,
     timestamp_from_string,
 )
-from yoetz.kernel.reducers import replay
+from yoetz.kernel.projections import FindingProjectionRecord, ProjectionState
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.ids import IdPort
@@ -252,7 +253,9 @@ async def _preflight(
     )
 
 
-async def _records_through(runtime: TaskRuntime, frontier: Frontier) -> tuple[LedgerRecord, ...]:
+async def _records_through(
+    runtime: TaskRuntime, frontier: Frontier
+) -> tuple[tuple[LedgerRecord, ...], ProjectionState]:
     records = tuple(
         [
             record
@@ -262,14 +265,50 @@ async def _records_through(runtime: TaskRuntime, frontier: Frontier) -> tuple[Le
         ]
     )
     try:
-        projection = replay(records)
+        projection = await projection_for_records(
+            runtime.ledger, runtime.session_id, frontier, records
+        )
     except ValueError as exc:
         # Replay is genesis-anchored; a chain it rejects is a storage fact, not an engine bug, so
         # it leaves here as a bounded public error rather than an unbounded internal one.
         raise _error(PublicErrorCode.STORAGE_CORRUPT, "The task ledger is unreadable.") from exc
     if Frontier(projection.frontier, projection.head_digest) != frontier:
         raise _error(PublicErrorCode.FRONTIER_CONFLICT, "The response frontier is not current.")
-    return records
+    return records, projection
+
+
+def _finding_from_current_prefix(
+    current_records: tuple[LedgerRecord, ...],
+    current_projection: ProjectionState,
+    finding_frontier: Frontier,
+    raw_finding_id: str,
+) -> FindingProjectionRecord | None:
+    """Read the finding at ``finding_frontier`` from the current projection without a replay.
+
+    ``current_records`` is the hash-chained prefix the current projection was authenticated
+    against. When the record at ``finding_frontier.sequence`` carries exactly that head digest,
+    the finding frontier is an in-chain prefix of the current one. A finding whose source event is
+    at or before that prefix, and whose payload is still present, is the same immutable payload
+    the prefix replay would yield. Anything else (a later re-record, redaction, or a foreign
+    frontier) returns ``None`` so the caller keeps the genesis-replay path (issue #886).
+    """
+
+    sequence = finding_frontier.sequence
+    if not 0 < sequence <= len(current_records):
+        return None
+    anchor = current_records[sequence - 1]
+    if (
+        anchor.ledger.ingestion_sequence != sequence
+        or anchor.entry_digest != finding_frontier.head_digest
+    ):
+        return None
+    try:
+        record = current_projection.findings.get(finding_id(raw_finding_id))
+    except ValueError:
+        return None
+    if record is None or record.payload is None or record.source_frontier > sequence:
+        return None
+    return record
 
 
 async def _accepted_record(runtime: TaskRuntime, result: AppendResult) -> LedgerRecord:
@@ -379,9 +418,18 @@ async def execute_respond(app: Application, request: RespondRequest) -> RespondI
             finding_frontier = Frontier(
                 int(request.finding_frontier.sequence), request.finding_frontier.head_digest
             )
-            finding_records = await _records_through(runtime, finding_frontier)
-            finding_projection = replay(finding_records)
-            finding_record = finding_projection.findings.get(finding_id(request.finding_id))
+            current = Frontier(
+                int(request.expected_frontier.sequence), request.expected_frontier.head_digest
+            )
+            current_records, current_projection = await _records_through(runtime, current)
+            finding_record = _finding_from_current_prefix(
+                current_records, current_projection, finding_frontier, request.finding_id
+            )
+            if finding_record is None:
+                _finding_records, finding_projection = await _records_through(
+                    runtime, finding_frontier
+                )
+                finding_record = finding_projection.findings.get(finding_id(request.finding_id))
             if finding_record is None or finding_record.payload is None:
                 raise _error(
                     PublicErrorCode.INVALID_REQUEST,
@@ -394,11 +442,7 @@ async def execute_respond(app: Application, request: RespondRequest) -> RespondI
                     reason_code="finding_not_in_prefix",
                     field="finding_frontier",
                 )
-            current = Frontier(
-                int(request.expected_frontier.sequence), request.expected_frontier.head_digest
-            )
-            current_records = await _records_through(runtime, current)
-            current_projection = replay(current_records)
+            attempted = False
             for ref in () if request.evidence_refs is None else request.evidence_refs:
                 present = (
                     current_projection.evidence.get(evidence_id(ref))
@@ -409,6 +453,28 @@ async def execute_respond(app: Application, request: RespondRequest) -> RespondI
                     raise _error(
                         PublicErrorCode.INVALID_REQUEST, "A response reference is invalid."
                     )
+                attempted = attempted or present.source_frontier > finding_frontier.sequence
+            if (
+                request.disposition == "acknowledged"
+                and finding_record.payload.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+                and not attempted
+            ):
+                # Issue #885: accepting a reviewer finding (including as an unresolved limitation)
+                # needs one recorded concrete resolution attempt after the finding. A recorded
+                # failed or blocked result naming an authority blocker also counts. Disputes keep
+                # their own dispositions; acknowledgement still never resolves the finding.
+                raise _error(
+                    PublicErrorCode.INVALID_REQUEST,
+                    (
+                        "Acknowledging an AI-powered review finding requires one concrete "
+                        "resolution attempt recorded after the finding. Publish the repair, "
+                        "requested evidence, or verification result (a failed or blocked result "
+                        "naming the exact authority blocker also counts), then cite it in "
+                        "evidence_refs. Use rejected or provenance_disputed to dispute it."
+                    ),
+                    reason_code="resolution_attempt_required",
+                    field="/evidence_refs",
+                )
             coverage = coverage_for_channel(_channel(request))
             payload = ResponseRecordedPayload(
                 finding_id(request.finding_id),

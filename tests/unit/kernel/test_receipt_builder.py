@@ -1331,3 +1331,31 @@ def test_child_receipt_retains_provider_usage_under_the_combined_contract() -> N
     assert restored.children.children == (child,)
     assert restored.semantic_provenance == provenance
     assert restored == receipt
+
+
+@pytest.mark.parametrize("resolved", [False, True])
+def test_resolved_semantic_issue_keeps_capture_coverage_limit(resolved: bool) -> None:
+    code = "content_unselected"
+    coverage = _coverage(gaps=(code,))
+    semantic = replace(
+        _finding(),
+        origin=FindingOrigin.SEMANTIC_MODEL_DERIVED,
+        provenance=_provenance(),
+        coverage=coverage,
+    )
+    receipt = _build(
+        _context(
+            finding=semantic,
+            resolved=resolved,
+            coverage=coverage,
+            gaps=(CaseGap(code, code, ()),),
+            check=_check(CheckVerdict.INSUFFICIENT_COVERAGE, coverage),
+        )
+    )
+    assert receipt.coverage.known_gaps == (code,)
+    assert receipt.conclusion is (
+        ReceiptConclusion.INSUFFICIENT_COVERAGE
+        if resolved
+        else ReceiptConclusion.UNRESOLVED_FINDINGS_REMAIN
+    )
+    assert bool(resolved_finding_ids_for_render(receipt)) is resolved

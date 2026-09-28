@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import threading
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import replace
@@ -2316,6 +2317,29 @@ def test_legacy_binding_keeps_its_single_effort_for_routine_checks() -> None:
     assert profile.required_reasoning_efforts == ("high",)
 
 
+def test_background_advice_uses_lower_default_effort_without_routine_config() -> None:
+    """Issue #888: background advice is cheaper even when no routine effort is configured.
+
+    Explicit checks (no background scope) keep the legacy single effort.
+    """
+
+    legacy = _phased_profile(routine=None)
+    assert legacy.review_budget("routine", background=True) == CodexReviewBudget(
+        "routine", "low", 4096
+    )
+    assert legacy.review_budget("routine") == CodexReviewBudget("routine", "high", 4096)
+    assert legacy.review_budget("final", background=True) == CodexReviewBudget(
+        "final", "high", 8192
+    )
+    # An owner routine effort always wins, and a configured effort already at or below the
+    # background default (or an unknown vendor effort) is never raised or rewritten.
+    configured = _phased_profile(routine="medium")
+    assert configured.review_budget("routine", background=True).reasoning_effort == "medium"
+    for effort in ("minimal", "low", "vendor-custom"):
+        profile = replace(_phased_profile(routine=None), reasoning_effort=effort)
+        assert profile.review_budget("routine", background=True).reasoning_effort == effort
+
+
 @pytest.mark.parametrize("limit", [0, 8193, True])
 def test_profile_rejects_unbounded_output_limits(limit: object) -> None:
     with pytest.raises(ValueError, match="codex_runtime_output_limit_invalid"):
@@ -2558,3 +2582,23 @@ async def test_progress_sink_failure_never_changes_the_review_outcome(
     assert type(result) is SemanticResultSuccess
     assert result.provenance.runtime_evidence is not None
     assert result.provenance.runtime_evidence.process_cleanup == "terminated"
+
+
+async def test_launch_binding_hash_runs_off_loop_and_failure_prevents_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop_thread = threading.get_ident()
+    threads: list[int] = []
+
+    def changed_binding(_profile: CodexAppServerProfile) -> None:
+        threads.append(threading.get_ident())
+        raise ValueError("codex_runtime_executable_changed")
+
+    async def forbidden_spawn(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("changed executable must not launch")
+
+    monkeypatch.setattr(CodexAppServerProfile, "verify_local_binding", changed_binding)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden_spawn)
+    with pytest.raises(ValueError, match="codex_runtime_executable_changed"):
+        await module._launch(_profile())  # pyright: ignore[reportPrivateUsage]
+    assert len(threads) == 1 and threads[0] != loop_thread

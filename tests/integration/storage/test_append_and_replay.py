@@ -677,22 +677,26 @@ async def test_cancelled_append_joins_offloop_replay_before_releasing_ledger_loc
 ) -> None:
     command, objects = command_from_records(replay_records("projection-rebuild")[:1])
     ledger = memory_for(command, objects)
-    original_replay = memory_ledger_module.replay_with_index
+    original_replay = memory_ledger_module.replay_extension_with_index
     started = threading.Event()
     release = threading.Event()
     replay_threads: list[int] = []
     calls = 0
 
-    def blocked_replay(records: tuple[LedgerRecord, ...]) -> tuple[ProjectionState, ReplayIndex]:
+    def blocked_replay(
+        prior: ProjectionState,
+        prior_records: tuple[LedgerRecord, ...],
+        appended: tuple[LedgerRecord, ...],
+    ) -> tuple[ProjectionState, ReplayIndex]:
         nonlocal calls
         calls += 1
         replay_threads.append(threading.get_ident())
         if calls == 1:
             started.set()
             assert release.wait(timeout=2)
-        return original_replay(records)
+        return original_replay(prior, prior_records, appended)
 
-    monkeypatch.setattr(memory_ledger_module, "replay_with_index", blocked_replay)
+    monkeypatch.setattr(memory_ledger_module, "replay_extension_with_index", blocked_replay)
     event_loop_thread = threading.get_ident()
     append = asyncio.create_task(ledger.append_batch(command))
     assert await asyncio.to_thread(started.wait, 1)

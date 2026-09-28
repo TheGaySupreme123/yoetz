@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final, Literal, Protocol, cast
 
+from yoetz.application.ledger_snapshot import projection_for_records
 from yoetz.domain.coordination import CoordinationError, CoordinationErrorCode
 from yoetz.domain.events import LedgerRecord
 from yoetz.domain.findings import (
@@ -30,6 +31,7 @@ from yoetz.domain.receipts import (
     SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
     SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
     SEMANTIC_CHALLENGES_REJECTED_GAP,
+    SEMANTIC_PACKET_INSUFFICIENT_GAP,
     SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
     SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP,
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
@@ -59,6 +61,7 @@ from yoetz.kernel.deterministic_checks import (
     finding_basis_to_json,
     render_deterministic_finding_text,
 )
+from yoetz.kernel.finding_resolution import SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS
 from yoetz.kernel.lineage import LineageEvaluation, evaluate_recorded_lineage
 from yoetz.kernel.policies.research_evidence import research_evidence_findings
 from yoetz.kernel.policies.response_support import (
@@ -68,7 +71,6 @@ from yoetz.kernel.policies.response_support import (
 from yoetz.kernel.policies.work_integrity import work_integrity_findings
 from yoetz.kernel.projections import PROJECTION_VERSION, ProjectionState
 from yoetz.kernel.ranking import CheckCompleteness, RankingContext, rank_findings
-from yoetz.kernel.reducers import replay
 from yoetz.observability.logging import (
     record_bounded_counts_without_raising,
     record_unexpected_exception_without_raising,
@@ -516,7 +518,16 @@ async def _current_task_findings(
                     async for record in child_runtime.ledger.load_events(child_runtime.session_id)
                 ]
             )
-            projection = replay(records)
+            projection = await projection_for_records(
+                child_runtime.ledger,
+                child_runtime.session_id,
+                (
+                    Frontier(records[-1].ledger.ingestion_sequence, records[-1].entry_digest)
+                    if records
+                    else Frontier(0, "genesis")
+                ),
+                records,
+            )
         finally:
             await runtime_port.release(child_runtime)
     except Exception as exc:
@@ -1562,11 +1573,20 @@ def prior_finding_ids(projection: ProjectionState) -> dict[FindingIdentity, Find
     A finding a later qualifying check already resolved is history, not a live row: an issue that
     fires again after that proof is a successor and takes a fresh ID, so the resolved row keeps
     its proof and the new row starts unresolved (issue #458).
+
+    Only local rows are offered: local candidates are the only ones allocated against this map.
+    An AI-powered finding with the same kind, policy and subject is a different issue; letting a
+    local re-derivation take its ID would rewrite that row's origin and leave the real local row
+    unreturned, and so look resolved (issue #884).
     """
 
     prior: dict[FindingIdentity, FindingId] = {}
     for key, record in projection.findings.items():
-        if record.payload is None or record.resolved_by_check_event_id is not None:
+        if (
+            record.payload is None
+            or record.resolved_by_check_event_id is not None
+            or record.payload.origin is not FindingOrigin.DETERMINISTIC
+        ):
             continue
         prior[(record.payload.kind, record.payload.policy_id, record.payload.subject_refs)] = key
     return prior
@@ -1781,6 +1801,20 @@ def _claims_unchanged_over_hidden_source(
     )
 
 
+def semantic_capture_baseline_gaps(result: FinalSemanticEvaluation) -> frozenset[str]:
+    """The closed native capture limits a completed review ran under (issue #884).
+
+    These are the same codes the commit path adds to check coverage from the semantic case. Only
+    this closed set becomes a finding's baseline; every other packet limitation stays check-only
+    and keeps blocking semantic absence proof.
+    """
+
+    gaps = set(result.case_content_gaps) & SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS
+    if result.case_content_over_item_limit:
+        gaps.add(SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP)
+    return frozenset(gaps)
+
+
 def validate_semantic_judgment(
     case: DeterministicCase,
     deterministic: tuple[Finding, ...],
@@ -1788,8 +1822,14 @@ def validate_semantic_judgment(
     provenance: SemanticProvenance,
     *,
     expected_frontier: Frontier,
+    capture_baseline_gaps: frozenset[str] = frozenset(),
 ) -> SemanticJudgmentReview:
     """Fence AI-powered challenges to the exact frozen refs, coverage, and final provenance.
+
+    ``capture_baseline_gaps`` are the closed native capture limits under which this review ran
+    (issue #884). They are stamped onto every accepted challenge's coverage, so each semantic
+    finding durably records the capture baseline it was raised under; a later review can compare
+    against that baseline instead of an under-reported deterministic-only one.
 
     Each challenge is fenced independently against the same frozen case. A challenge that fails is
     dropped and counted by reason; the challenges beside it are unaffected, because nothing about
@@ -1815,6 +1855,20 @@ def validate_semantic_judgment(
     if judgment.conclusion != "challenges_returned":
         return SemanticJudgmentReview((), 0, ())
     coverage = case_coverage(case, semantic=True)
+    if not capture_baseline_gaps <= SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS:
+        raise _rejected("semantic_judgment_invalid")
+    stamped = capture_baseline_gaps - set(coverage.known_gaps)
+    if stamped:
+        # Mirror exactly how the check folds the same gaps into its own coverage below.
+        coverage = replace(
+            coverage,
+            ledger_freshness=(
+                LedgerFreshness.PARTIAL
+                if coverage.ledger_freshness is LedgerFreshness.CURRENT
+                else coverage.ledger_freshness
+            ),
+            known_gaps=tuple(sorted(set(coverage.known_gaps) | stamped, key=str.encode)),
+        )
     candidates: list[CandidateFinding] = []
     rejections: dict[str, int] = {}
     for challenge in judgment.challenges:
@@ -2308,6 +2362,7 @@ async def execute_check_commit(
                     semantic_result.judgment,
                     semantic_result.provenance,
                     expected_frontier=frozen.case.frontier,
+                    capture_baseline_gaps=semantic_capture_baseline_gaps(semantic_result),
                 )
             except SemanticJudgmentRejected as exc:
                 # The reviewer's answer is unusable, so the check has no AI-powered review result — but the
@@ -2332,6 +2387,12 @@ async def execute_check_commit(
         }
         semantic_gap = semantic_coverage_gap_code(semantic_result.status, semantic_result.reason)
         declared_gaps: set[str] = set() if semantic_gap is None else {semantic_gap}
+        if (
+            semantic_result.status is SemanticStatus.SUCCEEDED
+            and semantic_result.judgment is not None
+            and semantic_result.judgment.conclusion == "insufficient_packet"
+        ):
+            declared_gaps.add(SEMANTIC_PACKET_INSUFFICIENT_GAP)
         if (
             route_profile == "strict"
             and semantic_result.status is SemanticStatus.BLOCKED_BY_POLICY
@@ -2423,6 +2484,12 @@ async def execute_check_commit(
             semantic_result.provenance,
             request.request_id,
             scope=CheckScopeModel(claim_ids=scope.claim_ids, obligation_ids=scope.obligation_ids),
+            semantic_conclusion=(
+                semantic_result.judgment.conclusion
+                if semantic_result.status is SemanticStatus.SUCCEEDED
+                and semantic_result.judgment is not None
+                else None
+            ),
         )
         preview = _lineage_preview(lineage_evaluation, frozen.case.frontier)
         projected = committed if preview is None else replace(committed, children=preview)
