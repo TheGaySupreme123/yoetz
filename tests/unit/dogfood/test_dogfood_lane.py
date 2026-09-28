@@ -330,10 +330,10 @@ def _native_output(host: str, text: str) -> str:
         ("NOT_DONE", False),
         ("   ", False),
         ('The prompt says "DONE".', False),
-        ("DONE\nBut the probe failed.", False),
+        ("DONE\nCoverage limitation: check_not_recorded.", True),
     ],
 )
-def test_native_completion_requires_final_standalone_marker(
+def test_native_completion_requires_standalone_marker_in_final_response(
     host: str, text: str, expected: bool
 ) -> None:
     assert _LANE._native_done(host, _native_output(host, text)) is expected

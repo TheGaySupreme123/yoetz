@@ -175,10 +175,10 @@ def _native_done(host: str, output: str) -> bool:
             return False
         value = result.get("result")
         final = value if isinstance(value, str) else None
-    # Stop hooks may require a disclosure before the terminal marker. Accept a final
-    # standalone line, not strings such as NOT_DONE or a quoted marker in prose.
+    # Stop hooks may require a disclosure after the completion marker. Accept a
+    # standalone line in the final response, not tool output, NOT_DONE, or a prose quote.
     lines = final.strip().splitlines() if final else []
-    return bool(lines and lines[-1].strip() == "DONE")
+    return any(line.strip() == "DONE" for line in lines)
 
 
 class LaneAbort(Exception):
