@@ -50,6 +50,11 @@ _FIELD_ORDER: Final = (
     "semantic_challenges_rejected",
     "semantic_findings_selected",
     "semantic_findings_suppressed",
+    "semantic_capture_parts_resolved",
+    "semantic_diff_parts_resolved",
+    "semantic_excerpts_selected",
+    "semantic_diff_excerpts_selected",
+    "semantic_excerpt_bytes_selected",
     # Loop-health counters. Both are already fenced as integers by redact_diagnostic_value; only
     # this projection list was missing them, so a saturation record reached stderr and then
     # vanished from the durable ring an operator actually reads.

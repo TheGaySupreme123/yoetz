@@ -4285,6 +4285,31 @@ def _privacy_gated_semantic_evaluator(
                     operation_lease=current_lease[0],
                     withheld_review_categories=withheld,
                 )
+            # Structural composition diagnostics only: never persist content, paths or hashes.
+            # These counters precede privacy minimization and do not certify provider delivery.
+            record_bounded_counts_without_raising(
+                component="semantic_composition",
+                operation="semantic_case_built",
+                outcome="built",
+                request_id=frozen.lease.operation_id,
+                counts={
+                    "semantic_capture_parts_resolved": len(captured_content),
+                    "semantic_diff_parts_resolved": sum(
+                        part.manifest.content_kind.value in {"workspace_diff", "changed_file"}
+                        for part in captured_content
+                    ),
+                    "semantic_excerpts_selected": len(semantic_case.packet.targeted_excerpts),
+                    "semantic_diff_excerpts_selected": sum(
+                        item.source_kind == "diff"
+                        for item in semantic_case.packet.targeted_excerpts
+                    ),
+                    "semantic_excerpt_bytes_selected": sum(
+                        item.content_bytes
+                        for item in semantic_case.items
+                        if item.section == "excerpt"
+                    ),
+                },
+            )
             if captured_local_fence_required and captured_content_scope is not None:
                 # A resolver may authenticate a group that the active excerpt selection then
                 # omits. Keep the final disclosure fence only when retained bytes actually became

@@ -6880,3 +6880,10 @@ after routine traffic rolls over the ring, but cannot reconstruct captures evict
 bounded reservation. Workspace/session fences and capture/disclosure authorization still apply.
 The selection policy is shared by all three hosts and supported OSes; it needs no extra Codex
 content profile and does not increase the owner's configured capacity.
+
+The owner-only `service diagnostics` ring also records `semantic_composition/semantic_case_built`
+with integer counts: `semantic_capture_parts_resolved`, `semantic_diff_parts_resolved`,
+`semantic_excerpts_selected`, `semantic_diff_excerpts_selected`, and
+`semantic_excerpt_bytes_selected`. Resolved parts have passed capture authentication; selected
+excerpts are in the built packet. These counts precede privacy minimization and do not prove
+provider delivery or code correctness. The record contains no content, paths, or content hashes.

@@ -528,7 +528,9 @@ def test_ready_semantic_content_binding_fails_closed_for_ambiguous_or_mismatched
 async def test_ready_semantic_content_resolution_and_fence_use_observation_workspace(
     monkeypatch: pytest.MonkeyPatch,
     fence_allowed: bool,
+    tmp_path: Path,
 ) -> None:
+    monkeypatch.setattr(diagnostics_module, "log_dir", lambda: tmp_path)
     adapter = memory_adapter(append_command())
     frozen, runtime = await _durable_semantic_case(adapter)
     runtime = replace(
@@ -600,6 +602,16 @@ async def test_ready_semantic_content_resolution_and_fence_use_observation_works
         for call in local_fence.calls
     )
     assert privacy.calls == (3 if fence_allowed else 0)
+    records = [
+        json.loads(line)
+        for line in diagnostics_module.diagnostic_log_path(root=tmp_path).read_text().splitlines()
+    ]
+    built = [row for row in records if row["operation"] == "semantic_case_built"]
+    assert len(built) == 1
+    assert built[0]["semantic_capture_parts_resolved"] == 0
+    assert built[0]["semantic_diff_parts_resolved"] == 0
+    assert built[0]["semantic_diff_excerpts_selected"] == 0
+    assert built[0]["semantic_excerpt_bytes_selected"] >= 0
 
 
 async def _durable_semantic_case(
@@ -715,7 +727,7 @@ def _records(tmp_path: Path) -> tuple[Mapping[str, object], ...]:
 
 
 def _assert_record(tmp_path: Path, operation: str, reason: SemanticReason) -> None:
-    records = _records(tmp_path)
+    records = tuple(row for row in _records(tmp_path) if row["operation"] != "semantic_case_built")
     assert records == (
         {
             "timestamp": records[0]["timestamp"],
@@ -1156,7 +1168,8 @@ async def test_provider_binding_is_re_resolved_without_rebuilding_evaluator(
     )
     assert privacy.calls == 1
     assert [record["operation"] for record in _records(tmp_path)] == [
-        "semantic_not_dispatched_credential_unavailable"
+        "semantic_not_dispatched_credential_unavailable",
+        "semantic_case_built",
     ]
 
 
