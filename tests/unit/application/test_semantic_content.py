@@ -1353,3 +1353,52 @@ async def test_resolver_discloses_selected_capture_it_cannot_reach() -> None:
 
     assert resolved.content == ()
     assert "content_unselected" in resolved.gaps
+
+
+@pytest.mark.anyio
+async def test_response_linked_multipart_repair_precedes_old_claim_evidence() -> None:
+    from builders.policy_cases import BASE_COVERAGE, finding_record, fnd, record
+    from yoetz.domain.events import ResponseRecordedPayload
+    from yoetz.domain.findings import Finding, FindingKind, FindingOrigin, ResponseDisposition
+
+    frozen, runtime, objects = _multipart_fixture()
+    finding = Finding(
+        finding_id=fnd(1),
+        kind=FindingKind.COMPLETION_WITH_OPEN_OBLIGATIONS,
+        origin=FindingOrigin.DETERMINISTIC,
+        priority=1,
+        summary="Repair needs review",
+        detail="Review the changed evidence",
+        subject_refs=(clm(1),),
+        policy_id="work-integrity",
+        policy_version="0.1.0",
+        subject_frontier=frozen.case.frontier,
+        coverage=BASE_COVERAGE,
+    )
+    response = ResponseRecordedPayload(
+        fnd(1), frozen.case.frontier, ResponseDisposition.ACKNOWLEDGED, evidence_refs=(evd(4),)
+    )
+    case = make_case(
+        evidence=frozen.case.projection.evidence,
+        claims={
+            clm(1): claim_record(
+                ClaimRecordedPayload(
+                    clm(1), ClaimKind.MATERIAL, "Old evidence in group A", (evd(1),)
+                ),
+                10,
+            )
+        },
+        findings={fnd(1): finding_record(finding, 11)},
+        responses={fnd(1): record(response, 12)},
+        extra_refs=tuple(sorted(frozen.case.allowed_ids)),
+    )
+    resolved = await resolve_captured_semantic_content(
+        runtime=runtime,
+        frozen=FrozenCase(case, frozen.lease),
+        workspace_commitment=_WORKSPACE,
+        max_parts=2,
+        max_total_bytes=1024,
+    )
+    assert b"".join(item.content for item in resolved.content) == b"group-b-0:group-b-1:"
+    assert objects.open_calls == 2
+    assert "content_unselected" in resolved.gaps
