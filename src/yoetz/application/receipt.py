@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from dataclasses import dataclass, replace
 from typing import Final, Literal, Protocol, cast
 
+from yoetz.application.ledger_snapshot import projection_for_records
 from yoetz.application.unit_of_work import (
     PreparedMutation,
     PreSubmissionCancelled,
@@ -46,6 +48,7 @@ from yoetz.domain.values import (
 from yoetz.kernel.deterministic_checks import CaseGap, build_deterministic_case, case_coverage
 from yoetz.kernel.finding_resolution import finding_is_resolved
 from yoetz.kernel.lineage import evaluate_recorded_lineage
+from yoetz.kernel.projections import ProjectionState
 from yoetz.kernel.receipt_builder import (
     CheckSuffixClass,
     ReceiptBuildContext,
@@ -56,7 +59,6 @@ from yoetz.kernel.receipt_capacity import current_receipt_findings
 from yoetz.kernel.reducers import (
     invalidates_recorded_check,
     is_material_event_family,
-    replay,
 )
 from yoetz.observability.logging import (
     record_classified_exception_without_raising,
@@ -393,7 +395,9 @@ async def _preflight(
     )
 
 
-async def _records_through(runtime: TaskRuntime, frontier: Frontier) -> tuple[LedgerRecord, ...]:
+async def _records_through(
+    runtime: TaskRuntime, frontier: Frontier
+) -> tuple[tuple[LedgerRecord, ...], ProjectionState]:
     records = tuple(
         [
             record
@@ -403,7 +407,9 @@ async def _records_through(runtime: TaskRuntime, frontier: Frontier) -> tuple[Le
         ]
     )
     try:
-        projection = replay(records)
+        projection = await projection_for_records(
+            runtime.ledger, runtime.session_id, frontier, records
+        )
     except ValueError as exc:
         # Replay is genesis-anchored; a chain it rejects is a storage fact, not an engine bug, so
         # it leaves here as a bounded public error rather than an unbounded internal one.
@@ -422,12 +428,10 @@ async def _records_through(runtime: TaskRuntime, frontier: Frontier) -> tuple[Le
                 "head_digest": replayed.head_digest,
             },
         )
-    return records
+    return records, projection
 
 
 def _finding_states(projection: object) -> tuple[ReceiptFindingState, ...]:
-    from yoetz.kernel.projections import ProjectionState
-
     assert type(projection) is ProjectionState
     # Resolution is proof-based: the projection carries which later qualifying check, if any,
     # proved each current issue absent, and a response disposition never sets it. Reading the
@@ -445,7 +449,6 @@ def _context(
     records: tuple[LedgerRecord, ...],
 ) -> ReceiptBuildContext:
     from yoetz.kernel.deterministic_checks import DeterministicCase
-    from yoetz.kernel.projections import ProjectionState
 
     assert type(projection) is ProjectionState
     assert type(case) is DeterministicCase
@@ -767,13 +770,18 @@ async def execute_receipt(app: Application, request: ReceiptRequest) -> ReceiptI
         frontier = Frontier(
             int(request.expected_frontier.sequence), request.expected_frontier.head_digest
         )
-        records = await _records_through(runtime, frontier)
-        projection = replay(records)
+        records, projection = await _records_through(runtime, frontier)
         availability = await runtime.ledger.load_case_availability(
             runtime.session_id, frontier, projection
         )
         try:
-            case = build_deterministic_case(projection, records, availability)
+            case = await asyncio.to_thread(
+                build_deterministic_case,
+                projection,
+                records,
+                availability,
+                _projection_validated=True,
+            )
             context = _context(projection, frontier, case, records)
             now = app.clock.now_utc()
             document = build_receipt(

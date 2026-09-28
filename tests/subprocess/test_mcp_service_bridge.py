@@ -331,9 +331,9 @@ async def test_exact_six_dispatchers_use_one_ordinary_client(
         ("start", 30_000),
         ("publish_work", 30_000),
         ("check", 300_000),
-        ("respond", 30_000),
+        ("respond", 50_000),
         ("status", 30_000),
-        ("receipt", 30_000),
+        ("receipt", 50_000),
     ]
     assert client.closed is False
     await bridge.close_bridge_runtime(runtime)
@@ -788,9 +788,18 @@ async def test_write_timeout_preserves_unknown_outcome_and_same_request_remedy(
     error = cast(dict[str, JsonValue], result.structuredContent["error"])
     assert error["code"] == "SERVICE_UNAVAILABLE"
     assert error["retryable"] is True
+    # The bridge probed status view=operation once; the fake service could not answer it, so the
+    # outcome stays unknown and the typed handle names the exact polling identity.
+    assert [name for name, _request in client.calls] == ["publish_work", "status"]
+    assert client.deadlines[-1] == ("status", 5_000)
     assert error["safe_details"] == {
         "continuation": "write_timeout_same_identity",
         "reason_code": "request_timeout",
+        "replay_request_id": request["request_id"],
+        "session_id": request["session_id"],
+        "writer_id": request["writer_id"],
+        "view": "operation",
+        "state": "unknown",
     }
     assert error["message"] == (
         "The local operation timed out and may still have committed. Retry with the same "
@@ -803,6 +812,106 @@ async def test_write_timeout_preserves_unknown_outcome_and_same_request_remedy(
     assert result.structuredContent["request_id"] == request["request_id"]
     assert client.closed is False
     await bridge.close_bridge_runtime(runtime)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("operation", ["respond", "receipt"])
+async def test_write_timeout_reports_pending_operation_handle(
+    monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    client = _FakeClient(ControlError("request_timeout", retryable=True))
+    _install_clients(monkeypatch, [client])
+    runtime = bridge.build_bridge_runtime()
+    request = _requests()[operation]
+    probes: list[str | None] = []
+
+    async def pending(
+        arguments: object, _runtime: object, request_id: str | None
+    ) -> tuple[object, str, str]:
+        del arguments
+        probes.append(request_id)
+        return (
+            bridge._TimeoutOperationState.PENDING,  # pyright: ignore[reportPrivateUsage]
+            cast(str, request["session_id"]),
+            cast(str, request["writer_id"]),
+        )
+
+    monkeypatch.setattr(bridge, "_timeout_operation_state", pending)
+    dispatch = bridge.dispatch_respond if operation == "respond" else bridge.dispatch_receipt
+    result = await dispatch(request, runtime)
+
+    assert probes == [request["request_id"]]
+    assert result.isError is True
+    assert result.structuredContent is not None
+    error = cast(dict[str, JsonValue], result.structuredContent["error"])
+    assert error["code"] == "SERVICE_UNAVAILABLE"
+    assert error["retryable"] is True
+    assert error["safe_details"] == {
+        "continuation": "write_timeout_same_identity",
+        "reason_code": "request_timeout",
+        "replay_request_id": request["request_id"],
+        "session_id": request["session_id"],
+        "writer_id": request["writer_id"],
+        "view": "operation",
+        "state": "pending",
+    }
+    # Pending is not replayed: exactly one write reached the service.
+    assert [name for name, _request in client.calls] == [operation]
+    await bridge.close_bridge_runtime(runtime)
+
+
+@pytest.mark.anyio
+async def test_write_timeout_returns_committed_outcome_via_same_request_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeClient(ControlError("request_timeout", retryable=True))
+    _install_clients(monkeypatch, [client])
+    runtime = bridge.build_bridge_runtime()
+    request = _requests()["receipt"]
+
+    async def complete(
+        arguments: object, _runtime: object, request_id: str | None
+    ) -> tuple[object, str, str]:
+        del arguments, request_id
+        return (
+            bridge._TimeoutOperationState.COMPLETE,  # pyright: ignore[reportPrivateUsage]
+            cast(str, request["session_id"]),
+            cast(str, request["writer_id"]),
+        )
+
+    monkeypatch.setattr(bridge, "_timeout_operation_state", complete)
+    result = await bridge.dispatch_receipt(request, runtime)
+
+    # The committed write is recovered by one idempotent same-request replay, whose stored
+    # outcome (here the fake service's typed body) replaces the timeout.
+    assert [name for name, _request in client.calls] == ["receipt", "receipt"]
+    assert [call[1].request_id for call in client.calls] == [  # type: ignore[attr-defined]
+        request["request_id"],
+        request["request_id"],
+    ]
+    assert result.structuredContent is not None
+    error = cast(dict[str, JsonValue], result.structuredContent["error"])
+    assert error["code"] == "SESSION_CONFLICT"
+    await bridge.close_bridge_runtime(runtime)
+
+
+def test_rpc_deadlines_are_configurable_per_tool_with_sane_defaults() -> None:
+    deadline = bridge._rpc_deadline_ms  # pyright: ignore[reportPrivateUsage]
+    assert [deadline(tool, {}) for tool in ("start", "status", "publish_work")] == [30_000] * 3
+    assert deadline("respond", {}) == 50_000
+    assert deadline("receipt", {}) == 50_000
+    assert deadline("check", {}) == 300_000
+    env = {"YOETZ_MCP_DEADLINE_MS": "90000", "YOETZ_MCP_DEADLINE_MS_RECEIPT": " 45000 "}
+    assert deadline("receipt", env) == 45_000
+    assert deadline("respond", env) == 90_000
+    # The global knob never shortens or lengthens check's semantic-review budget.
+    assert deadline("check", env) == 300_000
+    assert deadline("check", {"YOETZ_MCP_DEADLINE_MS_CHECK": "600000"}) == 600_000
+    # Clamped and fail-safe.
+    assert deadline("status", {"YOETZ_MCP_DEADLINE_MS": "5"}) == 1_000
+    assert deadline("status", {"YOETZ_MCP_DEADLINE_MS": "99999999"}) == 900_000
+    assert deadline("status", {"YOETZ_MCP_DEADLINE_MS": "-1"}) == 30_000
+    assert deadline("status", {"YOETZ_MCP_DEADLINE_MS": "1e5"}) == 30_000
 
 
 @pytest.mark.anyio

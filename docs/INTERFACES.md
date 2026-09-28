@@ -2468,12 +2468,25 @@ reopened, and never replace the newer service: the one per-user endpoint belongs
 installation in use. Installed bridges and services run from retained release copies, including
 code, dependencies and resources, so package replacement does not change the bytes available to
 an open process (ADR-007). The MCP bridge supplies a
-**30-second** call deadline for `start`, `publish_work`, `respond`, `status`, and `receipt`, and a
-**300-second** deadline for `check`; these use the existing private `deadline_ms` envelope field and
-do not change the public workflow-tool schemas. A timed-out write has an unknown outcome: the bridge
+default **30-second** call deadline for `start`, `publish_work`, and `status`, a default
+**50-second** deadline for `respond` and `receipt` (below the common 60-second host MCP tool
+limit, so the bridge's typed timeout reaches the agent first), and a default **300-second**
+deadline for `check`; these use the existing private `deadline_ms` envelope field and do not
+change the public workflow-tool schemas. The bridge environment may override them in integer
+milliseconds, clamped to 1,000-900,000: `YOETZ_MCP_DEADLINE_MS_<TOOL>` (for example
+`YOETZ_MCP_DEADLINE_MS_RECEIPT`) sets one tool, and `YOETZ_MCP_DEADLINE_MS` sets every tool except
+`check`; an unparsable value keeps the default. Raising a deadline above the host's own MCP tool
+timeout only lets the host give up first. A timed-out write has an unknown outcome: the bridge
 must preserve its retryable failure shape, say that it may already have committed, and direct the
 caller to retry with the same `request_id` (and operation status where applicable). A timed-out
-read may simply be repeated.
+read may simply be repeated. For a timed-out `publish_work`, `respond` or `receipt`, the bridge
+probes `status view=operation` once (5-second budget) for that exact `request_id`. When the
+operation is already `complete`, it replays the unchanged request once under the same
+`request_id` and returns the stored outcome instead of the timeout. Otherwise the timeout carries
+a pollable handle in `safe_details`: `replay_request_id` (the value for
+`filter.operation_request_id`), `session_id`, `writer_id`, `view: operation` and the probed
+`state` (`absent`, `pending`, `quarantined` or `unknown`). This is an unknown write outcome, not a
+failed commit. CLI callers retain their explicit `--deadline-ms` override.
 
 The private `ControlCallRequest` envelope may carry `route_profile=policy|strict` only for `check`
 and `status`. It is set by the MCP bridge from its immutable process profile, is absent from public
@@ -4038,7 +4051,8 @@ Shared closed types:
   advice is asynchronous (issue #619): the advice build never calls a provider.
   `application/observation_advice_semantic.ObservationAdviceSemanticScheduler` looks up or enqueues
   one durable attempt row in `observation_advice_semantic_attempts` (migration 0012), keyed by
-  (workspace commitment, Yoetz session, pre-review evidence basis), storing the exact scoped
+  (workspace commitment, Yoetz session, advice-candidate identity; retries of a terminal
+  non-success use `<identity>#<generation>` after a backoff, see ADR-006 issue #888), storing the exact scoped
   observation gap tuple and the minimized packet that carries it. Repeated identical builds coalesce
   onto that row; a newer basis for the same session supersedes that session's unattempted pending
   rows (`cancelled` / `superseded`) and keeps every completed row's receipt. At most 16 rows may be
@@ -4047,7 +4061,8 @@ Shared closed types:
   `advice_semantic_pending`; a `failed`, `unavailable`, or `cancelled` row adds
   `advice_semantic_unavailable` with its closed reason (`authorization_missing`,
   `provider_unavailable`, `provider_failed`, `output_invalid`, `queue_full`, `superseded`,
-  `cancelled`, `interrupted`). Only a `succeeded` row with validated finding ids adds
+  `cancelled`, `interrupted`). An admission refused by the per-session interval writes no row and
+  adds `advice_semantic_deferred` (semantic state `unavailable`). Only a `succeeded` row with validated finding ids adds
   `semantic_model_derived`; a succeeded attempt that returned no challenges is an honest receipt and
   no finding.
 
@@ -6781,7 +6796,6 @@ Historical event bytes remain intact; rebuilding a projection applies this bound
 its accepted history. A held old check is still invalidated by a later response to a finding that
 check did not return. Resolved history does not remove receipt coverage limitations.
 
-
 `semantic_packet_insufficient` is a coverage gap on a committed check whose valid provider
 judgment is `insufficient_packet`. It reports unassessable content without adding a defect
 finding, and must remain visible in CLI, MCP and receipt coverage. A succeeded attempt with this
@@ -6808,3 +6822,37 @@ Failed and local-only attempts retain their existing version. The owning schema 
 `resolution_attempt_required` is the `respond` rejection for an `acknowledged` response to a
 `semantic_model_derived` finding whose `evidence_refs` cite no evidence or result recorded after
 the finding frontier. It writes nothing; the continuation is `input_correction_new_identity`.
+
+### Observation latency and capacity (#887)
+
+`observation-budget-v3-capacity` uses resource occupancy for admission and effective detail.
+`oldest_pending_age_ms` and the historical `max_pending_age_ms` field remain readable diagnostic
+values; age alone neither rejects structural input nor disables content. Real count, byte,
+session-share, pending-pair and capture limits and recovery dwell remain authoritative. See ADR-029.
+
+### Exact-frontier workflow snapshot reuse (issue #886)
+
+Respond, receipt, check, publish and candidate-finding status use an adapter-owned projection
+only when its frontier exactly matches the requested prefix: the live head, or one of at most 16
+recent exact frontiers the adapter itself produced by replay or append. A retained frontier is
+honoured only while the current chain still holds the identical record objects it was folded
+from, so recovery, a rolled-back SQLite sync or any record replacement invalidates it, and a
+redaction append drops every retained frontier. Anything else falls back to genesis replay in a
+worker thread that stops at the next record when its caller is cancelled. Respond reads a finding
+at an older in-chain finding frontier from the current projection when the record at that
+sequence carries the requested head digest and the finding's source event is at or before it.
+
+Appends fold only the new records onto the adapter's trusted projection (the whole prefix is
+still re-authenticated into a fresh reverse index), so a write no longer re-reduces the ledger
+while holding the ledger lock. Receipt-time anchoring of a stale-by-observation frontier accepts
+the adapter's own projection by identity instead of replaying on the loop. Folding carries
+records unchanged from the already validated prior projection by identity rather than re-encoding
+and re-digesting every payload on each step, which had made genesis replay quadratic; new or
+replaced records are validated in full. Receipt/candidate/check case assembly still validates
+record chains and builds its reverse index, without reducing the already validated prefix again.
+There is no process-global task-content cache. Status retains at most eight exact-frontier row
+indexes per ledger; append-only extension may reuse pinned pages, while prefix replacement,
+truncation or redaction invalidates them. Snapshot reuse never substitutes frontier equality
+alone for an adapter's recovery/authentication authority. All host/OS clients share this path.
+`tests/integration/application/test_ledger_replay_bench.py` is an opt-in latency benchmark
+(`YOETZ_BENCH_886=1`) at 1,500 and 3,000 observation events.

@@ -3,6 +3,7 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 from types import TracebackType
+from typing import cast
 
 import pytest
 
@@ -13,14 +14,21 @@ from yoetz.config.write import (
     write_config_toml,
     write_config_toml_if_unchanged,
 )
+from yoetz.protocol.canonical import JsonValue
+from yoetz.protocol.schemas import validate_schema_instance
 
 
 def test_observation_config_toml_round_trip(tmp_path: Path) -> None:
-    config = YoetzConfig(observation=ObservationConfig(enabled=False))
+    config = YoetzConfig(
+        observation=ObservationConfig(
+            enabled=False, semantic_advice_enabled=False, semantic_advice_min_interval_seconds=600
+        )
+    )
 
     rendered = render_config_toml(config)
     assert "[observation]\nenabled = false\n" in rendered
     assert YoetzConfig.model_validate(tomllib.loads(rendered), strict=True) == config
+    validate_schema_instance("yoetz-config", "1.3.0", cast(JsonValue, tomllib.loads(rendered)))
 
     path = write_config_toml(config, path=tmp_path / "config.toml")
     assert load_config({}, {}, path) == config
@@ -113,3 +121,11 @@ def test_config_writer_refuses_preplanted_lock_symlink(tmp_path: Path) -> None:
     assert caught.value.reason_code == "config_value_invalid"
     assert victim.read_bytes() == b"owner content"
     assert not path.exists()
+
+
+@pytest.mark.parametrize("interval", [0, -1, 86401, True, "180"])
+def test_advice_interval_rejects_invalid_values(interval: object) -> None:
+    with pytest.raises(ConfigError):
+        ObservationConfig.model_validate(
+            {"semantic_advice_min_interval_seconds": interval}, strict=True
+        )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Final, Protocol, cast
@@ -477,6 +478,17 @@ class ContradictionRecord:
         object.__setattr__(self, "source_frontier", _positive_frontier(self.source_frontier))
 
 
+_ABSENT: Final = object()
+# Set only by ``derive_projection_state`` for the duration of one constructor call. A record
+# object that the already-validated prior projection holds under the same key was validated when
+# that prior was built; records are frozen, so re-encoding and re-digesting its payload on every
+# fold step only turned a linear replay quadratic (issue #886). New or replaced records, keys and
+# every scalar field are still validated in full.
+_TRUSTED_PRIOR: ContextVar[ProjectionState | None] = ContextVar(
+    "yoetz_trusted_prior_projection", default=None
+)
+
+
 @dataclass(frozen=True, slots=True)
 class ProjectionState:
     frontier: int
@@ -554,9 +566,13 @@ class ProjectionState:
             ):
                 raise _invalid()
 
-        plans = self._copy_plans(self.plans)
+        prior = _TRUSTED_PRIOR.get()
+        if type(prior) is not ProjectionState or prior.frontier > self.frontier:
+            prior = None
+        plans = self._copy_plans(self.plans, None if prior is None else prior.plans)
         obligations = self._copy_mapping(
             self.obligations,
+            None if prior is None else prior.obligations,
             obligation_id,
             ObligationProjectionRecord,
             ObligationPublishedPayload,
@@ -564,18 +580,21 @@ class ProjectionState:
         )
         decisions = self._copy_event_mapping(
             self.decisions,
+            None if prior is None else prior.decisions,
             DecisionProjectionRecord,
             DecisionRecordedPayload,
             source_key=True,
         )
         assignments = self._copy_event_mapping(
             self.assignments,
+            None if prior is None else prior.assignments,
             ProjectionRecord,
             AssignmentRecordedPayload,
             source_key=True,
         )
         actions = self._copy_mapping(
             self.actions,
+            None if prior is None else prior.actions,
             action_id,
             ProjectionRecord,
             ActionRecordedPayload,
@@ -583,6 +602,7 @@ class ProjectionState:
         )
         results = self._copy_mapping(
             self.results,
+            None if prior is None else prior.results,
             result_id,
             ProjectionRecord,
             ResultRecordedPayload,
@@ -590,6 +610,7 @@ class ProjectionState:
         )
         evidence = self._copy_mapping(
             self.evidence,
+            None if prior is None else prior.evidence,
             evidence_id,
             EvidenceProjectionRecord,
             EvidenceRecordedPayload,
@@ -597,6 +618,7 @@ class ProjectionState:
         )
         claims = self._copy_mapping(
             self.claims,
+            None if prior is None else prior.claims,
             claim_id,
             ClaimProjectionRecord,
             (ClaimRecordedPayload, ClaimRecordedPayloadV1_1),
@@ -604,6 +626,7 @@ class ProjectionState:
         )
         findings = self._copy_mapping(
             self.findings,
+            None if prior is None else prior.findings,
             finding_id,
             FindingProjectionRecord,
             Finding,
@@ -611,6 +634,7 @@ class ProjectionState:
         )
         responses = self._copy_mapping(
             self.responses,
+            None if prior is None else prior.responses,
             finding_id,
             ProjectionRecord,
             ResponseRecordedPayload,
@@ -621,6 +645,7 @@ class ProjectionState:
             EventId, ProjectionRecord[CoordinationContextRecordedPayload]
         ] = self._copy_event_mapping(
             self.coordination_contexts,
+            None if prior is None else prior.coordination_contexts,
             ProjectionRecord,
             CoordinationContextRecordedPayload,
             source_key=True,
@@ -629,6 +654,7 @@ class ProjectionState:
             EventId, ProjectionRecord[CoordinationDispositionRecordedPayload]
         ] = self._copy_event_mapping(
             self.coordination_dispositions,
+            None if prior is None else prior.coordination_dispositions,
             ProjectionRecord,
             CoordinationDispositionRecordedPayload,
             source_key=True,
@@ -637,6 +663,7 @@ class ProjectionState:
             EventId, ProjectionRecord[CoordinationObligationDeclaredPayload]
         ] = self._copy_event_mapping(
             self.coordination_declarations,
+            None if prior is None else prior.coordination_declarations,
             ProjectionRecord,
             CoordinationObligationDeclaredPayload,
             source_key=True,
@@ -679,11 +706,15 @@ class ProjectionState:
     def _copy_plans(
         self,
         source: Mapping[int, PlanProjectionRecord],
+        trusted: Mapping[int, PlanProjectionRecord] | None,
     ) -> dict[int, PlanProjectionRecord]:
         if not isinstance(cast(object, source), Mapping):
             raise _invalid()
         result: dict[int, PlanProjectionRecord] = {}
         for key, record in source.items():
+            if trusted is not None and trusted.get(key, _ABSENT) is record:
+                result[key] = record
+                continue
             if type(key) is not int or not 1 <= key <= _MAX_SAFE_INTEGER:
                 raise _invalid()
             if type(record) is not PlanProjectionRecord:
@@ -697,6 +728,7 @@ class ProjectionState:
     def _copy_event_mapping[T: _ProjectionRecordLike](
         self,
         source: Mapping[EventId, T],
+        trusted: Mapping[EventId, T] | None,
         record_type: type[object],
         payload_type: type[object],
         *,
@@ -706,6 +738,9 @@ class ProjectionState:
             raise _invalid()
         result: dict[EventId, T] = {}
         for raw_key, record in source.items():
+            if trusted is not None and trusted.get(raw_key, _ABSENT) is record:
+                result[raw_key] = record
+                continue
             try:
                 key = event_id(raw_key)
             except ValueError as exc:
@@ -723,6 +758,7 @@ class ProjectionState:
     def _copy_mapping[K: str, T: _ProjectionRecordLike](
         self,
         source: Mapping[K, T],
+        trusted: Mapping[K, T] | None,
         key_validator: Callable[[object], K],
         record_type: type[object],
         payload_type: type[object] | tuple[type[object], ...],
@@ -732,6 +768,9 @@ class ProjectionState:
             raise _invalid()
         result: dict[K, T] = {}
         for raw_key, record in source.items():
+            if trusted is not None and trusted.get(raw_key, _ABSENT) is record:
+                result[raw_key] = record
+                continue
             try:
                 key = key_validator(raw_key)
             except ValueError as exc:
@@ -768,6 +807,23 @@ class ProjectionState:
                 raise _invalid()
             result[key] = record
         return result
+
+
+def derive_projection_state(
+    prior: ProjectionState,
+    **fields: object,
+) -> ProjectionState:
+    """Build the next projection, skipping re-validation of records carried unchanged from prior.
+
+    ``prior`` must itself be a constructed (and therefore validated) ``ProjectionState`` at a
+    frontier no later than the new one; otherwise every record is validated in full.
+    """
+
+    token = _TRUSTED_PRIOR.set(prior)
+    try:
+        return ProjectionState(**fields)  # type: ignore[arg-type]
+    finally:
+        _TRUSTED_PRIOR.reset(token)
 
 
 def empty_projection_state() -> ProjectionState:
