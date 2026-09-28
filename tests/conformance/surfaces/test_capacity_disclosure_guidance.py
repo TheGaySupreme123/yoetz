@@ -96,11 +96,13 @@ def test_workflow_gives_the_preview_accept_apply_commands_and_the_no_cap_outcome
 
 
 def test_agent_instructions_keep_the_safety_floor_within_budget() -> None:
-    text = _AGENT_INSTRUCTIONS.read_text(encoding="utf-8")
+    text = _collapsed(_AGENT_INSTRUCTIONS)
     for phrase in (
-        "Never publish hidden reasoning, full prompts/transcripts,",
+        "Never publish hidden reasoning or chain-of-thought,",
+        "full prompts, transcripts, conversation history, credentials, secrets, whole files/repositories,",
         "Select `semantic_required` when the user, effective policy, or named acceptance criterion",
-        "Before evidence publication, paginate `status view=evidence`",
+        "Before material evidence or a completion claim, read `status` and paginate "
+        "`view=evidence` at one frontier.",
     ):
         assert phrase in text, phrase
 
