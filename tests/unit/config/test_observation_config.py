@@ -3,6 +3,7 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 from types import TracebackType
+from typing import cast
 
 import pytest
 
@@ -13,6 +14,8 @@ from yoetz.config.write import (
     write_config_toml,
     write_config_toml_if_unchanged,
 )
+from yoetz.protocol.canonical import JsonValue
+from yoetz.protocol.schemas import validate_schema_instance
 
 
 def test_observation_config_toml_round_trip(tmp_path: Path) -> None:
@@ -25,6 +28,7 @@ def test_observation_config_toml_round_trip(tmp_path: Path) -> None:
     rendered = render_config_toml(config)
     assert "[observation]\nenabled = false\n" in rendered
     assert YoetzConfig.model_validate(tomllib.loads(rendered), strict=True) == config
+    validate_schema_instance("yoetz-config", "1.3.0", cast(JsonValue, tomllib.loads(rendered)))
 
     path = write_config_toml(config, path=tmp_path / "config.toml")
     assert load_config({}, {}, path) == config
