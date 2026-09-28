@@ -2600,8 +2600,9 @@ def _competing_session(
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("host", ("codex", "claude", "cursor"))
+@pytest.mark.parametrize("later_structural_events", (0, 300))
 async def test_early_planted_edit_outranks_many_captured_outputs_in_the_packet(
-    tmp_path: Path, host: str
+    tmp_path: Path, host: str, later_structural_events: int
 ) -> None:
     """#883: an early edit hunk must reach the check packet ahead of later tool output."""
 
@@ -2682,6 +2683,23 @@ async def test_early_planted_edit_outranks_many_captured_outputs_in_the_packet(
 
     envelopes = task_observation.list_envelopes_for_session(workspace, session_commitment)
     assert sum(1 for item in envelopes if item.content_object_refs) == 21
+    # Exercise real SQLite retention, not a mocked latest-window lookup. Captured
+    # edit objects and ledger evidence outlive routine observation traffic.
+    last = envelopes[-1]
+    for index in range(later_structural_events):
+        noise = replace(
+            last,
+            source_identity=f"hook:retention-noise-{index}",
+            cursor=replace(
+                last.cursor,
+                event_position=last.cursor.event_position + index + 1,
+                byte_position=last.cursor.byte_position + index + 1,
+            ),
+            content_object_refs=(),
+        )
+        admitted = await task_observation.ingest(noise)
+        assert admitted.disposition is ObservationIngestDisposition.ACCEPTED
+    assert len(task_observation.list_envelopes(workspace)) <= 256
     frontier = await ledger.load_frontier()
     frozen = await ledger.freeze_case(
         runtime.session_id,

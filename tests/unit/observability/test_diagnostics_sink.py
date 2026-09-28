@@ -280,3 +280,40 @@ def test_bounded_counts_reach_the_durable_ring(
     assert found[0]["reason"] == "event_loop_lag"
     assert found[0]["duration_ms"] == 12_345
     assert found[0]["operation_count"] == 7
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "semantic_capture_parts_resolved",
+        "semantic_diff_parts_resolved",
+        "semantic_excerpts_selected",
+        "semantic_diff_excerpts_selected",
+        "semantic_excerpt_bytes_selected",
+    ),
+)
+def test_packet_composition_diagnostics_admit_counts_but_not_content(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+) -> None:
+    import yoetz.observability.diagnostics as diagnostics
+
+    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
+    correlation = record_bounded_counts_without_raising(
+        component="semantic_composition",
+        operation="semantic_case_built",
+        outcome="built",
+        counts={field: 17, "raw_patch": "PRIVATE_CODE_CANARY"},
+        request_id=_REQUEST,
+    )
+    found = lookup_diagnostic_records(correlation, root=tmp_path)
+    assert found[0][field] == 17
+    record_bounded_counts_without_raising(
+        component="semantic_composition",
+        operation="semantic_case_built",
+        outcome="built",
+        counts={field: "PRIVATE_CODE_CANARY"},
+        request_id=_REQUEST,
+    )
+    assert "PRIVATE_CODE_CANARY" not in diagnostic_log_path(root=tmp_path).read_text()

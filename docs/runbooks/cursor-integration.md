@@ -1514,7 +1514,7 @@ duplicated nor kept as raw tool input. Each captured edit names the host-reporte
 code. Every file locator is made workspace-relative; a locator outside the workspace, a
 home-relative or drive-relative locator, or any `..` path is replaced by `<outside-workspace>` or
 dropped. The rule is lexical and identical on macOS, Linux and Windows through WSL 2: POSIX
-(`/home/...`, `/Users/...`), Windows drive (`C:\...`), UNC (`\\server\share\...`) and WSL
+(`/home/<user>/...`, `/Users/<user>/...`), Windows drive (`C:\...`), UNC (`\\server\share\...`) and WSL
 mount (`/mnt/c/...`) spellings are compared, with drive, mount and UNC forms matched
 case-insensitively, and no filesystem lookup is made. Edits use the ordinary capture caps (at most
 16 chunks and about 680 KB per event), not the routine-output budgets, and remain subject to the

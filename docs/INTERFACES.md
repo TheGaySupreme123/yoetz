@@ -6878,3 +6878,20 @@ excerpt relevance. A directly linked readable result contributes its own evidenc
 no recursive traversal). The complete chain must be case-allowed. Capture resolution and packet
 selection prioritize this set ahead of other linked evidence, under existing capture, privacy,
 count and byte limits. Neither linkage nor acknowledgement changes finding-resolution rules.
+
+### Native capture provenance retention (#883 follow-up)
+
+`SqliteObservationStore` keeps at most 256 observation envelopes per workspace, reserving up to
+64 slots for the newest envelopes with content references. Other slots keep the most recent
+remaining events. `list_envelopes_for_content_refs` can therefore authenticate retained captures
+after routine traffic rolls over the ring, but cannot reconstruct captures evicted from this
+bounded reservation. Workspace/session fences and capture/disclosure authorization still apply.
+The selection policy is shared by all three hosts and supported OSes; it needs no extra Codex
+content profile and does not increase the owner's configured capacity.
+
+The owner-only `service diagnostics` ring also records `semantic_composition/semantic_case_built`
+with integer counts: `semantic_capture_parts_resolved`, `semantic_diff_parts_resolved`,
+`semantic_excerpts_selected`, `semantic_diff_excerpts_selected`, and
+`semantic_excerpt_bytes_selected`. Resolved parts have passed capture authentication; selected
+excerpts are in the built packet. These counts precede privacy minimization and do not prove
+provider delivery or code correctness. The record contains no content, paths, or content hashes.
