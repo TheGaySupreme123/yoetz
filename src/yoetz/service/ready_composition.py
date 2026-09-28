@@ -5630,8 +5630,28 @@ async def provide_service_ready_context(
     advice_semantic_supervisor = ObservationAdviceSemanticSupervisor(
         service_generation=service_generation
     )
+    advice_semantic_enabled = (
+        semantic_configured
+        and config.observation.enabled
+        and config.observation.semantic_advice_enabled
+    )
+
+    async def _advice_semantic_route_ready(yoetz_session_id: str) -> bool:
+        # The same predicate the dispatch uses; lets an ``authorization_missing`` row retry
+        # as soon as the route is active instead of waiting out its backoff (#888).
+        route = await catalog.resolve_route(yoetz_session_id)
+        return (
+            route is not None
+            and route.state is TaskRouteState.ACTIVE
+            and route.repository_privacy_commitment is not None
+        )
+
     advice_semantic_scheduler = ObservationAdviceSemanticScheduler(
-        now=lambda: timestamp_from_datetime(clock.now_utc()).wire
+        now=lambda: timestamp_from_datetime(clock.now_utc()).wire,
+        enabled=advice_semantic_enabled,
+        min_interval_seconds=config.observation.semantic_advice_min_interval_seconds,
+        route_ready=_advice_semantic_route_ready,
+        revisit=advice_semantic_supervisor.schedule_revisit,
     )
 
     verification_supervisor = ObservationVerificationSupervisor(
@@ -6149,11 +6169,13 @@ async def provide_service_ready_context(
         consent_invalidation_applier=project_application.apply_source_workspace_consent_invalidation,
         advice_context_builder=ObservationAdviceContextBuilder(
             composition=observation_composition_fact,
-            semantic_scheduler=advice_semantic_scheduler if semantic_configured else None,
+            semantic_scheduler=advice_semantic_scheduler if advice_semantic_enabled else None,
         ),
         verification_supervisor=verification_supervisor,
         advice_semantic_supervisor=advice_semantic_supervisor,
-        advice_semantic_dispatch=_dispatch_observation_advice_semantic,
+        advice_semantic_dispatch=(
+            _dispatch_observation_advice_semantic if advice_semantic_enabled else None
+        ),
         advice_semantic_cancellation_reconciler=_reconcile_cancelled_observation_advice_semantic,
         observation_enabled=config.observation.enabled,
         lineage_coordinator=lineage_manifest_coordinator,
@@ -6163,6 +6185,10 @@ async def provide_service_ready_context(
         capture_budget_bootstrap=bootstrap_capture_reservations,
         capture_handoff_reconcile=reconcile_capture_handoffs,
     )
+    if advice_semantic_enabled:
+        advice_semantic_supervisor.set_revisit_handler(
+            observation_coordinator.revisit_advice_semantic
+        )
     observation_sweeper = ObservationOutboxSweeper(
         local_observation,
         observation_coordinator,

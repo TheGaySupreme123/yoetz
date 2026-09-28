@@ -6211,6 +6211,46 @@ class ObservationCoordinator:
                     if release is not None:
                         await release(runtime)
 
+    async def revisit_advice_semantic(self, workspace: str, yoetz_session_id: str) -> None:
+        """Rebuild one session's advice once a deferred background review may run (#888).
+
+        Called by the supervisor's revisit timer, never on the hook path. The rebuild re-runs the
+        scheduler, which admits the review if the rate limit or backoff has elapsed, defers again
+        otherwise, and registers the drain exactly as a hook-driven build would.
+        """
+
+        supervisor = self.advice_semantic_supervisor
+        if supervisor is None or self.advice_semantic_dispatch is None or supervisor.closed:
+            return
+        consent = await self._local(partial(self.local.consent_for, workspace))
+        if consent is None or not consent.active:
+            return
+        sessions = await self._local(partial(self.local.codex_sessions_for_workspace, workspace))
+        for codex_session_id in sessions:
+            mapping = self.mapping_loader(codex_session_id, _state=self.state_root)
+            if mapping is None or mapping.yoetz_session_id != yoetz_session_id:
+                continue
+            predecessor_writer_id = mapping.yoetz_writer_id
+            runtime: TaskRuntime | None = None
+            try:
+                runtime, mapping = await self._route_observation_mapping(mapping)
+                store = self._observation_store(runtime)
+                await self._run_advice(
+                    workspace, runtime, store, legacy_writer_id=predecessor_writer_id
+                )
+            except Exception as exc:  # noqa: BLE001 - the next hook build retries naturally
+                record_unexpected_exception_without_raising(
+                    exc,
+                    component="application.observation_coordinator",
+                    operation="advice_semantic_revisit_failed",
+                )
+            finally:
+                if runtime is not None:
+                    release = getattr(self.runtime, "release", None)
+                    if release is not None:
+                        await release(runtime)
+            return
+
     def _advice_semantic_repository(
         self, store: object
     ) -> ObservationAdviceSemanticRepository | None:
