@@ -96,7 +96,7 @@ def test_agent_instructions_say_not_to_list_resources() -> None:
     assert "not a reason to read product source" in collapsed
     assert "call `read_guidance` with the same URI" in collapsed
     assert "Only if that result is also empty" in collapsed
-    assert collapsed.index("# Guidance catalog") > collapsed.index("# What Yoetz is not")
+    assert collapsed.index("# Guidance catalog") > collapsed.index("Yoetz is not an enforcement system")
     read_more = text.split("# Read more", 1)[1]
     for uri in (
         "yoetz://guidance/agent-instructions.md",
