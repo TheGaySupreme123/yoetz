@@ -2049,7 +2049,17 @@ class MemoryLedgerAdapter:
             head = Frontier(projection.frontier, projection.head_digest)
             records = state.records
             if state.query_records is not records:
-                state.query_cache.clear()
+                previous = state.query_records
+                # A pinned page remains valid after an append-only extension. Redaction,
+                # replacement, truncation or rebuilding the prefix invalidates every cache.
+                unchanged_prefix = len(records) >= len(previous) and all(
+                    old is new for old, new in zip(previous, records, strict=False)
+                )
+                redaction = any(
+                    row.schema.name == "redaction_recorded" for row in records[len(previous) :]
+                )
+                if not unchanged_prefix or redaction:
+                    state.query_cache.clear()
                 state.query_records = records
             key = (query.requested_frontier, query.view, query.session_id)
             cached = state.query_cache.get(key)

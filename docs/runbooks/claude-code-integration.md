@@ -1356,3 +1356,12 @@ per-session interval on macOS, Linux and Windows through WSL 2. See
 [background review frequency](../usage/providers.md#background-review-frequency) for disable,
 resume and interval settings. The setting gates recovered pending work as well as new scheduling;
 explicit checks and deterministic advice retain their independent behavior.
+
+## Response and receipt timeout recovery
+
+The shared MCP bridge allows 120 seconds for `respond` and `receipt`; ordinary reads retain
+30 seconds. A timeout may follow a committed write. Use its exact `safe_details.replay_request_id`
+as `status`'s `filter.operation_request_id` with `view=operation`, or replay the unchanged write
+body under that same request ID. Never mint a replacement write ID to recover an unknown outcome.
+A lost first `start` still uses exact same-body replay because session/writer IDs may be absent.
+This behavior is identical on macOS, Linux and Windows via WSL 2. CLI callers may set `--deadline-ms`.

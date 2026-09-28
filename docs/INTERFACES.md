@@ -2468,12 +2468,15 @@ reopened, and never replace the newer service: the one per-user endpoint belongs
 installation in use. Installed bridges and services run from retained release copies, including
 code, dependencies and resources, so package replacement does not change the bytes available to
 an open process (ADR-007). The MCP bridge supplies a
-**30-second** call deadline for `start`, `publish_work`, `respond`, `status`, and `receipt`, and a
-**300-second** deadline for `check`; these use the existing private `deadline_ms` envelope field and
+**30-second** call deadline for `start`, `publish_work`, and `status`, a **120-second**
+deadline for `respond` and `receipt`, and a **300-second** deadline for `check`; these use the existing private `deadline_ms` envelope field and
 do not change the public workflow-tool schemas. A timed-out write has an unknown outcome: the bridge
 must preserve its retryable failure shape, say that it may already have committed, and direct the
 caller to retry with the same `request_id` (and operation status where applicable). A timed-out
-read may simply be repeated.
+read may simply be repeated. For a timed-out non-start write, `safe_details.replay_request_id`
+is the exact polling identity for `status view=operation` with `filter.operation_request_id`.
+This is an unknown write outcome, not a failed commit. CLI callers retain their explicit
+`--deadline-ms` override.
 
 The private `ControlCallRequest` envelope may carry `route_profile=policy|strict` only for `check`
 and `status`. It is set by the MCP bridge from its immutable process profile, is absent from public
@@ -6807,3 +6810,14 @@ Failed and local-only attempts retain their existing version. The owning schema 
 `oldest_pending_age_ms` and the historical `max_pending_age_ms` field remain readable diagnostic
 values; age alone neither rejects structural input nor disables content. Real count, byte,
 session-share, pending-pair and capture limits and recovery dwell remain authoritative. See ADR-029.
+
+### Exact-frontier workflow snapshot reuse (issue #886)
+
+Respond, receipt and candidate-finding status use an adapter-owned, fully rebuilt current
+projection only when its frontier exactly matches the requested prefix. Older prefixes fall
+back to genesis replay off the service loop. Receipt/candidate case assembly still validates
+record chains and builds its reverse index, without reducing the already validated prefix again.
+There is no process-global task-content cache. Status retains at most eight exact-frontier row
+indexes per ledger; append-only extension may reuse pinned pages, while prefix replacement,
+truncation or redaction invalidates them. Snapshot reuse never substitutes frontier equality
+alone for an adapter's recovery/authentication authority. All host/OS clients share this path.
