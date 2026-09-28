@@ -19,14 +19,25 @@ was disposed. With `DOGFOOD_FIREWORKS_API_KEY` present it additionally means the
 stored and the check reached a real AI-powered review attempt (any attempted status counts,
 including a provider that rejects the model; only a pre-dispatch refusal such as
 `not_configured` or `blocked_by_policy` is red). With the agent credential for that host present
-it also means the native session finished and left no service or storage failure in the hook
-diagnostics. Without those secrets the corresponding steps are recorded as skipped and the lane
-is an install-and-mechanics smoke, not the full path.
+the native session is attempted and any service or storage failure in the hook diagnostics
+is fatal. Native completion is required only with `strict_agent`. Without those secrets the
+corresponding steps are recorded as skipped and the lane is an install-and-mechanics smoke, not
+the full path.
 
 It does **not** mean Yoetz is correct or useful. A native model that ignores the Yoetz tools,
 times out, or exits nonzero is recorded in the lane report (`agent_ok: false`) and the lane stays
 green unless the `strict_agent` input is set, because model compliance with a one-paragraph prompt
-is not what this lane certifies. Read `lane-report.json` before quoting any cell.
+is not what this lane certifies. `agent_ok: true` requires zero exit, an observation mapping,
+and confirmed completion. For Codex, the native JSONL must record successful Yoetz MCP `start`,
+an accepted/projected plan publication, and a receipt for the same task/session/writer, followed
+by a completed turn. Model text cannot replace those calls; later hook disclosures do not undo
+them. `native_mcp_completed` records this proof separately from the informational `done_marker`.
+Claude and Cursor's result-only output confirms completion through a `DONE` marker in the
+successful final response (a standalone line, or a terminal token after a disclosure). Tool
+outputs, prompt echoes, malformed output, and error results cannot supply that marker. Those
+hosts' marker remains a model assertion, not independent proof of every MCP step. The mapping
+can predate the native run. None of these checks establishes semantic usefulness. Read
+`lane-report.json` and the native transcript before quoting any cell.
 
 ## Matrix and connection modes
 
@@ -92,9 +103,15 @@ trusted-console ceremonies from a pseudo-terminal. Phases, in order, each record
    accidental sibling tasks, not a lane defect.
 4. **native** — one headless agent session in the probe project (`codex exec`, `claude -p`,
    `cursor-agent -p`) asked to call `start`, `publish_work`, and `receipt` and answer `DONE`;
-   then `observe status`, `observe drain`, `observe status`, `service status`. A
+   the prompt identifies the MCP namespace separately from its function names. Host discovery
+   and execution wrappers are allowed solely to reach deferred Yoetz tools; empty resource lists
+   do not prove tool absence. Every native child receives the disposable pinned runtime first
+   on `PATH`, so packaged hooks and recovery commands resolve that instance. Then
+   `observe status`, `observe drain`, `observe status`, `service status`. A
    `service_unavailable`, `storage_*`, or `vault_locked` hook diagnostic after the agent is
-   catastrophic; a non-zero agent exit is not.
+   catastrophic; a non-zero agent exit is not. Drain verification follows `retry_pending` or
+   `pass_limit` continuations for at most 60 seconds and requires an observed `drained` result
+   with zero pending rows. Every attempt is retained; errors and deadline exhaustion stay red.
 5. **lifecycle** — `service restart`, `service unlock` (headless runners have no keyring, so the
    restarted service comes back `locked`), one more `semantic_required` check on the probe
    session (informational, recorded as `semantic.after_restart`), `observe status` again.

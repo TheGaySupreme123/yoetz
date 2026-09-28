@@ -102,8 +102,13 @@ PROMPT_PRIVACY_CHOICE: Final = r"Choose a privacy option \[\d\]: "
 PROMPT_PRIVACY_CREATE: Final = r"Create this exact privacy proposal .*\? \[y/N\]: "
 PROMPT_PAM_PASSWORD: Final = r"Password for .*: "
 _PROMPT_TEMPLATE: Final = (
-    "You are a small integration probe. Use only the Yoetz MCP tools, whose names contain "
-    "'{tool_hint}'. Do exactly these steps and nothing else. "
+    "You are a small integration probe. Use the MCP server/namespace containing '{tool_hint}': "
+    "its functions include start, publish_work, and receipt. A function name may omit the "
+    "server/namespace prefix; it need not itself contain '{tool_hint}'. Empty MCP resource "
+    "or resource-template lists do not mean these callable tools are unavailable. "
+    "You may use host tool discovery/search and execution wrappers solely "
+    "to discover and invoke these tools. If they are deferred, discover them before deciding "
+    "they are unavailable. Do exactly these steps and nothing else. "
     "1) Call the start tool with protocol_version '0.1', schema_version '1.0.0', a fresh "
     "request_id of the form req_<random uuid4>, mode 'create', task_title 'dogfood native probe', "
     "workspace_ref '{workspace}', external_ref '{external_ref}', requested_view 'compact', "
@@ -119,6 +124,145 @@ _PROMPT_TEMPLATE: Final = (
     "as expected_frontier, format 'markdown', include 'standard', redaction_profile "
     "'default_local_export'. Then answer with the single word DONE. Do not create or edit files."
 )
+
+
+def _native_done(host: str, output: str) -> bool:
+    """Accept DONE only in a successful host final response, never in tool output or echoes."""
+
+    final: str | None = None
+    if host == "codex":
+        # Codex --json is JSONL. The last completed assistant message is authoritative;
+        # a later refusal or turn failure must not inherit an earlier DONE.
+        completed = False
+        for line in output.splitlines():
+            try:
+                event = json.loads(line)
+            except ValueError:
+                return False
+            if not isinstance(event, dict):
+                return False
+            event = cast(dict[str, Any], event)
+            if event.get("type") in ("error", "turn.failed"):
+                return False
+            if event.get("type") == "turn.started":
+                final = None
+                completed = False
+            if event.get("type") == "turn.completed":
+                completed = True
+            item = event.get("item")
+            if (
+                event.get("type") == "item.completed"
+                and isinstance(item, dict)
+                and cast(dict[str, Any], item).get("type") == "agent_message"
+            ):
+                value = cast(dict[str, Any], item).get("text")
+                final = value if isinstance(value, str) else None
+        if not completed:
+            return False
+    elif host in {"claude", "cursor"}:
+        try:
+            result = json.loads(output)
+        except ValueError:
+            return False
+        if not isinstance(result, dict):
+            return False
+        result = cast(dict[str, Any], result)
+        if (
+            result.get("type") != "result"
+            or result.get("subtype") != "success"
+            or result.get("is_error") is not False
+        ):
+            return False
+        value = result.get("result")
+        final = value if isinstance(value, str) else None
+    # Stop hooks may require a disclosure after the completion marker. Accept a
+    # standalone line or terminal DONE token in the final response, never tool output,
+    # NOT_DONE, or a quoted marker in prose.
+    lines = final.strip().splitlines() if final else []
+    return any(line.strip() == "DONE" for line in lines) or bool(
+        final and re.search(r"(?:^|\s)DONE\s*$", final)
+    )
+
+
+def _codex_workflow_completed(output: str) -> bool:
+    """Correlate native MCP successes; later hook disclosures do not undo recorded work."""
+
+    started: set[tuple[str, str, str]] = set()
+    published: set[tuple[str, str, str]] = set()
+    receipted = False
+    completed = False
+    for line in output.splitlines():
+        try:
+            raw = json.loads(line)
+        except ValueError:
+            return False
+        if not isinstance(raw, dict):
+            return False
+        event = cast(dict[str, Any], raw)
+        if event.get("type") in ("error", "turn.failed"):
+            return False
+        if event.get("type") == "turn.started":
+            completed = False
+        elif event.get("type") == "turn.completed":
+            completed = True
+        item = event.get("item")
+        if event.get("type") != "item.completed" or not isinstance(item, dict):
+            continue
+        item = cast(dict[str, Any], item)
+        if (
+            item.get("type") != "mcp_tool_call"
+            or item.get("server") != "yoetz"
+            or item.get("status") != "completed"
+            or item.get("error") is not None
+        ):
+            continue
+        result = item.get("result")
+        args = item.get("arguments")
+        if not isinstance(result, dict) or not isinstance(args, dict):
+            continue
+        result = cast(dict[str, Any], result).get("structured_content")
+        args = cast(dict[str, Any], args)
+        if not isinstance(result, dict):
+            continue
+        result = cast(dict[str, Any], result)
+        if result.get("ok") is not True:
+            continue
+        tool = item.get("tool")
+        ids = (
+            result.get("task_id"),
+            result.get("session_id"),
+            result.get("writer_id") if tool == "start" else args.get("writer_id"),
+        )
+        if not all(isinstance(value, str) and value for value in ids):
+            continue
+        binding = cast(tuple[str, str, str], ids)
+        if tool == "start":
+            started.add(binding)
+        elif args.get("session_id") == binding[1]:
+            if (
+                tool == "publish_work"
+                and binding in started
+                and result.get("writer_id") == binding[2]
+            ):
+                accepted = result.get("accepted_events")
+                if result.get("outcome") == "accepted" and isinstance(accepted, list):
+                    for accepted_row in cast(list[object], accepted):
+                        if isinstance(accepted_row, dict):
+                            row = cast(dict[str, Any], accepted_row)
+                            if (
+                                row.get("schema_name") == "plan_published"
+                                and row.get("projection_status") == "projected"
+                            ):
+                                published.add(binding)
+            elif (
+                tool == "receipt"
+                and binding in published
+                and args.get("task_id") == binding[0]
+                and isinstance(result.get("receipt_id"), str)
+                and result["receipt_id"].startswith("rcp_")
+            ):
+                receipted = True
+    return completed and receipted
 
 
 class LaneAbort(Exception):
@@ -1069,13 +1213,34 @@ class Lane:
         return status
 
     def _observe_drain(self, name: str, phase: str, *, fatal: bool) -> dict[str, Any] | None:
-        _, drain = self._yoetz(
-            name,
-            phase,
-            ["observe", "drain", "--workspace", str(self.project), "--json"],
-            expect_zero=False,
-        )
+        deadline = time.monotonic() + 60.0
+        polls = 0
+        drain: dict[str, Any] | None = None
+        drain_step: Step | None = None
+        while (remaining := deadline - time.monotonic()) > 0:
+            polls += 1
+            drain_step, drain = self._yoetz(
+                name if polls == 1 else f"{name}_poll_{polls}",
+                phase,
+                ["observe", "drain", "--workspace", str(self.project), "--json"],
+                expect_zero=False,
+                timeout=min(remaining, 30.0),
+            )
+            if (
+                drain_step.exit_code != 0
+                or drain is None
+                or drain.get("terminal")
+                not in (
+                    "retry_pending",
+                    "pass_limit",
+                )
+            ):
+                break
+            # Observe real drain state after allowing the background worker to advance.
+            # A delay alone never establishes success; the final result must be drained.
+            time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
         summary = {
+            "polls": polls,
             "terminal": (drain or {}).get("terminal"),
             "pending_after": (drain or {}).get("pending_after"),
             "acknowledged": (drain or {}).get("acknowledged"),
@@ -1084,7 +1249,9 @@ class Lane:
         }
         self.observation[name] = summary
         ok = (
-            drain is not None
+            drain_step is not None
+            and drain_step.exit_code == 0
+            and drain is not None
             and drain.get("terminal") == "drained"
             and drain.get("pending_after") == 0
         )
@@ -1546,7 +1713,12 @@ class Lane:
             workspace=str(self.project),
             external_ref=f"native-{self.host}-{self.stamp}",
         )
-        env: dict[str, str] = {}
+        assert self.launcher is not None
+        # setup run supplies this launch PATH because packaged hooks invoke bare yoetz.
+        # The first executable is the disposable instance-pinned launcher (ADR-028).
+        env: dict[str, str] = {
+            "PATH": str(self.launcher.parent) + os.pathsep + os.environ.get("PATH", ""),
+        }
         if self.host == "codex":
             exe = self.host_path or shutil.which("codex")
             if exe is None:
@@ -1645,7 +1817,9 @@ class Lane:
         )
         output_file = self._save("agent-output", out or "", ".txt")
         stderr_file = self._save("agent-stderr", err or "", ".txt")
-        done = "DONE" in out
+        done = _native_done(self.host, out)
+        native_mcp_completed = _codex_workflow_completed(out) if self.host == "codex" else None
+        completion_confirmed = native_mcp_completed if self.host == "codex" else done
         self.agent = {
             "ran": True,
             "exit_code": rc,
@@ -1654,18 +1828,33 @@ class Lane:
             "output_digest": _digest(out),
             "output_bytes": len(out.encode("utf-8")),
             "done_marker": done,
+            "native_mcp_completed": native_mcp_completed,
+            "completion_confirmed": completion_confirmed,
             "output_file": output_file,
             "stderr_file": stderr_file,
         }
-        ok = rc == 0
+        ok = rc == 0 and completion_confirmed
         self._record(
             "agent_run",
             phase,
             status="pass" if ok else "fail",
             exit_code=rc,
             duration_ms=ms,
-            reason=None if ok else ("agent_timeout" if rc == 124 else f"agent_exit_{rc}"),
-            summary={"done_marker": done, "output_bytes": len(out)},
+            reason=(
+                None
+                if ok
+                else "agent_completion_missing"
+                if rc == 0
+                else "agent_timeout"
+                if rc == 124
+                else f"agent_exit_{rc}"
+            ),
+            summary={
+                "done_marker": done,
+                "native_mcp_completed": native_mcp_completed,
+                "completion_confirmed": completion_confirmed,
+                "output_bytes": len(out),
+            },
             stderr=err,
         )
         status = self._observe_status("observe_status_after_agent", phase)
@@ -1860,7 +2049,11 @@ class Lane:
         failed = [s.name for s in self.steps if s.status == "fail"]
         agent_ok: bool | None = None
         if self.agent.get("ran"):
-            agent_ok = self.agent.get("exit_code") == 0 and bool(self.agent.get("mapping_present"))
+            agent_ok = (
+                self.agent.get("exit_code") == 0
+                and self.agent.get("completion_confirmed") is True
+                and self.agent.get("mapping_present") is True
+            )
         agent_failures = {"agent_run"}
         catastrophic = [name for name in failed if name not in agent_failures]
         verdict = {
