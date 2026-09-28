@@ -793,3 +793,16 @@ Older event bytes stay unchanged and read with no conclusion. Only a recorded as
 conclusion enables the capture-baseline exception; legacy succeeded status alone is insufficient,
 because older engines could collapse an unassessable answer to zero findings without a gap.
 Failed/local-only checks retain their prior event shape. Public check-result schemas are unchanged.
+
+
+### Repair evidence selection for rechecks (2026-09-28, #884)
+
+A response to a readable, unresolved, in-scope finding establishes a relevance link for its
+readable evidence, including evidence named by one directly linked result. Both captured-object
+preselection and final excerpt selection prioritize that repair evidence before other linked
+material. The finding, response event, optional result and evidence must remain inside the frozen
+allowed-reference fence. Redacted/missing inputs and resolved findings cannot establish this link.
+This changes relevance, not proof: every capture still requires authentication, each excerpt still
+obeys the selected privacy profile and byte/count limits, and a response never clears a finding.
+An insufficient packet or a deterministic-only recheck still cannot resolve a semantic defect.
+The same selection applies to all hosts and supported OSes.

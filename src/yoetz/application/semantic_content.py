@@ -24,6 +24,7 @@ from yoetz.application.semantic_case import (
     MAX_CAPTURED_SEMANTIC_CONTENT_BYTES,
     CapturedContentScope,
     CapturedSemanticContent,
+    repair_evidence_refs,
 )
 from yoetz.domain.events import (
     EvidenceContentAvailability,
@@ -828,6 +829,7 @@ async def resolve_captured_semantic_content(
     # Metadata selection is bounded independently from AI-powered review part admission:
     # selecting only the first object ID could split a valid multipart group and
     # turn an otherwise admissible capture into a false unavailable gap.
+    repair_refs = repair_evidence_refs(frozen.case.projection, allowed)
     linked_evidence = {
         str(ref)
         for _, claim in effective_claim_items(frozen.case.projection)
@@ -851,6 +853,7 @@ async def resolve_captured_semantic_content(
         sorted(
             candidates,
             key=lambda object_id: (
+                0 if any(row[0] in repair_refs for row in candidates[object_id]) else 1,
                 0 if any(row[0] in linked_evidence for row in candidates[object_id]) else 1,
                 0 if object_id in edit_objects else 1,
                 -object_frontier[object_id] if object_id in edit_objects else 0,
@@ -1073,6 +1076,7 @@ async def resolve_captured_semantic_content(
         complete_groups.append(rows)
     complete_groups.sort(
         key=lambda rows: (
+            0 if any(row[3] in repair_refs for row in rows) else 1,
             0 if any(row[3] in linked_evidence for row in rows) else 1,
             0 if rows[0][-1].content_kind in _EDIT_CONTENT_KINDS else 1,
             -max(object_frontier.get(row[4], 0) for row in rows)

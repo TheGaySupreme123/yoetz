@@ -6869,3 +6869,12 @@ Authenticated code uses bounded UTF-8 chunks and preserves `content_unselected` 
 `truncated_payload` coverage when caps omit bytes. Successful application and current repository
 state remain distinct.
 See ADR-006 and the three host integration runbooks for capture and disclosure boundaries.
+
+
+### Recheck repair evidence (#884 follow-up)
+
+For readable unresolved findings in the frozen case, response `evidence_refs` now establish
+excerpt relevance. A directly linked readable result contributes its own evidence refs (one hop,
+no recursive traversal). The complete chain must be case-allowed. Capture resolution and packet
+selection prioritize this set ahead of other linked evidence, under existing capture, privacy,
+count and byte limits. Neither linkage nor acknowledgement changes finding-resolution rules.

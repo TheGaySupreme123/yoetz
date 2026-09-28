@@ -110,7 +110,10 @@ to 8,192 characters, so the field limit does not protect against excerpt truncat
 
 Cite the evidence id in the claim's `supporting_refs`. Evidence referenced only from
 `result_recorded.evidence_refs` does not qualify for excerpt selection under linked-subject
-relevance.
+relevance unless that result is linked by a readable response to an unresolved in-scope finding.
+For a repair recheck, link the repair evidence directly (or through that result) in the finding
+response; the next packet prioritizes it within existing limits. A response is not proof of repair:
+a semantic finding still requires a later successful, assessable semantic check to resolve.
 
 Do not submit `approved_check` or `import_observed` provenance through ordinary publication. Those
 values are reserved for the capability-proven service path and trusted importer. Historical

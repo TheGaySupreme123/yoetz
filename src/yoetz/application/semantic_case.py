@@ -76,7 +76,7 @@ from yoetz.kernel.deterministic_checks import (
     FrozenHistoryEvent,
 )
 from yoetz.kernel.lineage import LineageEvaluation
-from yoetz.kernel.projections import EvidenceProjectionRecord
+from yoetz.kernel.projections import EvidenceProjectionRecord, ProjectionState
 from yoetz.ports.objects import ObjectKind, ObjectRef
 from yoetz.ports.semantic import (
     MAX_SEMANTIC_ITEM_SUBJECT_REFS,
@@ -119,6 +119,7 @@ __all__ = [
     "assemble_filtered_review_packet",
     "build_semantic_case",
     "review_selection_digest",
+    "repair_evidence_refs",
     "semantic_case_to_candidate_context",
     "semantic_case_to_prepared_payload",
 ]
@@ -997,6 +998,47 @@ def _match_assessments(
     return tuple(matched)
 
 
+def repair_evidence_refs(projection: ProjectionState, allowed: frozenset[str]) -> frozenset[str]:
+    """Select readable evidence linked by responses to in-scope, unresolved findings.
+
+    A response may link evidence directly or one result with evidence refs. This is relevance
+    selection only: it never clears a finding or bypasses capture authentication or privacy.
+    """
+
+    evidence = {str(key): row for key, row in projection.evidence.items()}
+    results = {str(key): row for key, row in projection.results.items()}
+    selected: set[str] = set()
+    for finding_id, response in projection.responses.items():
+        finding = projection.findings.get(finding_id)
+        if (
+            str(finding_id) not in allowed
+            or finding is None
+            or finding.payload is None
+            or finding.redacted
+            or finding.resolved_by_check_event_id is not None
+            or response.payload is None
+            or response.redacted
+            or str(response.source_event_id) not in allowed
+        ):
+            continue
+        refs: set[str] = set()
+        for ref in response.payload.evidence_refs:
+            value = str(ref)
+            if value not in allowed:
+                continue
+            if value in evidence:
+                refs.add(value)
+            result = results.get(value)
+            if result is not None and result.payload is not None and not result.redacted:
+                refs.update(str(item) for item in result.payload.evidence_refs)
+        selected.update(
+            ref
+            for ref in refs & allowed
+            if ref in evidence and evidence[ref].payload is not None and not evidence[ref].redacted
+        )
+    return frozenset(selected)
+
+
 def build_semantic_case(
     *,
     case_id: str,
@@ -1603,7 +1645,8 @@ def build_semantic_case(
     # --- Targeted excerpts (recorded text only; never fetch objects) ---
     excerpt_bytes_used = 0
     if "targeted_excerpts" in sections and selection.max_excerpts > 0:
-        linked_subjects: set[str] = set()
+        repair_refs = repair_evidence_refs(projection, frozenset(allowed))
+        linked_subjects: set[str] = set(repair_refs)
         for finding in findings:
             linked_subjects.update(str(ref) for ref in finding.subject_refs)
         for claim_id, _ in effective_claim_items(projection):
@@ -1626,6 +1669,17 @@ def build_semantic_case(
         evidence_rows = sorted(
             projection.evidence.items(),
             key=lambda pair: (
+                0
+                if str(pair[0]) in repair_refs
+                or any(
+                    ref in repair_refs
+                    for ref in (
+                        captured_groups[str(pair[0])].evidence_refs
+                        if str(pair[0]) in captured_groups
+                        else ()
+                    )
+                )
+                else 1,
                 0
                 if str(pair[0]) in linked_subjects
                 or any(
