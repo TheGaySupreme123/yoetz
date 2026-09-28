@@ -28,8 +28,8 @@ It does **not** mean Yoetz is correct or useful. A native model that ignores the
 times out, or exits nonzero is recorded in the lane report (`agent_ok: false`) and the lane stays
 green unless the `strict_agent` input is set, because model compliance with a one-paragraph prompt
 is not what this lane certifies. `agent_ok: true` requires zero exit, an observation mapping,
-and a standalone `DONE` line in a successful host final response (coverage disclosures may
-follow it). Tool outputs, prompt echoes,
+and a `DONE` completion marker in a successful host final response: a standalone line
+(coverage disclosures may follow it) or a terminal token after a disclosure. Tool outputs, prompt echoes,
 malformed output, and error results cannot supply that marker. The mapping can predate the native
 run, and the completion marker is a model assertion: neither independently proves every MCP step
 or semantic usefulness. Read `lane-report.json` and the native transcript before quoting any cell.
