@@ -58,6 +58,11 @@ _FIELD_ORDER: Final = (
     "semantic_challenges_rejected",
     "semantic_findings_selected",
     "semantic_findings_suppressed",
+    "semantic_capture_parts_resolved",
+    "semantic_diff_parts_resolved",
+    "semantic_excerpts_selected",
+    "semantic_diff_excerpts_selected",
+    "semantic_excerpt_bytes_selected",
     # Admits the loop-health connection count into _CALLER_FIELDS/_COUNT_FIELDS below, so a
     # bounded-counts caller can report how much work was in flight during a stall.
     "operation_count",
