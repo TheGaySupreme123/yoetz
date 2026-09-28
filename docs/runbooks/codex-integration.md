@@ -1638,3 +1638,13 @@ New completion claims must declare scope explicitly; obligation support is not s
 `[]` remains coverage-incomplete and cannot carry obligation support. No host hook invents scope or
 performs this repair. The shared service behavior applies on macOS, Linux and Windows through WSL 2;
 source tests do not establish native host/platform acceptance.
+
+
+## Response and receipt timeout recovery
+
+The shared MCP bridge allows 120 seconds for `respond` and `receipt`; ordinary reads retain
+30 seconds. A timeout may follow a committed write. Use its exact `safe_details.replay_request_id`
+as `status`'s `filter.operation_request_id` with `view=operation`, or replay the unchanged write
+body under that same request ID. Never mint a replacement write ID to recover an unknown outcome.
+A lost first `start` still uses exact same-body replay because session/writer IDs may be absent.
+This behavior is identical on macOS, Linux and Windows via WSL 2. CLI callers may set `--deadline-ms`.

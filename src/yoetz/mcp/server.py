@@ -141,6 +141,7 @@ __all__ = [
 
 _SERVER_NAME: Final = "yoetz"
 _WORKFLOW_RPC_DEADLINE_MS: Final = 30_000
+_RECEIPT_RESPONSE_RPC_DEADLINE_MS: Final = 120_000
 _SEMANTIC_CHECK_RPC_DEADLINE_MS: Final = 300_000
 _CURSOR_ROOTS_REQUEST_TIMEOUT_SECONDS: Final = 5.0
 _MAX_CURSOR_ROOTS: Final = 32
@@ -1458,6 +1459,8 @@ def _control_error_result(
         # message, which the native text channel drops by design; a typed continuation carries it
         # to the model that has to act on it (issue #669).
         timeout_details: dict[str, object] = {"reason_code": "request_timeout"}
+        if operation_kind == "write" and request_id is not None:
+            timeout_details["replay_request_id"] = request_id
         continuation = continuation_for_reason("request_timeout", operation_kind=operation_kind)
         if continuation is not None:
             timeout_details["continuation"] = continuation
@@ -2424,7 +2427,9 @@ async def dispatch_respond(
         arguments,
         RespondRequest,
         RespondResult,
-        lambda client, request: client.respond(request, deadline_ms=_WORKFLOW_RPC_DEADLINE_MS),
+        lambda client, request: client.respond(
+            request, deadline_ms=_RECEIPT_RESPONSE_RPC_DEADLINE_MS
+        ),
         runtime,
         "respond",
     )
@@ -2454,7 +2459,9 @@ async def dispatch_receipt(
         arguments,
         ReceiptRequest,
         ReceiptResult,
-        lambda client, request: client.receipt(request, deadline_ms=_WORKFLOW_RPC_DEADLINE_MS),
+        lambda client, request: client.receipt(
+            request, deadline_ms=_RECEIPT_RESPONSE_RPC_DEADLINE_MS
+        ),
         runtime,
         "receipt",
     )

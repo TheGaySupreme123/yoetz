@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
 
+from yoetz.application.ledger_snapshot import projection_for_records
 from yoetz.application.unit_of_work import PreparedMutation, run_prepared_append
 from yoetz.domain.events import (
     EventDraft,
@@ -29,7 +30,7 @@ from yoetz.domain.values import (
     timestamp_from_datetime,
     timestamp_from_string,
 )
-from yoetz.kernel.reducers import replay
+from yoetz.kernel.projections import ProjectionState
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.ids import IdPort
@@ -252,7 +253,9 @@ async def _preflight(
     )
 
 
-async def _records_through(runtime: TaskRuntime, frontier: Frontier) -> tuple[LedgerRecord, ...]:
+async def _records_through(
+    runtime: TaskRuntime, frontier: Frontier
+) -> tuple[tuple[LedgerRecord, ...], ProjectionState]:
     records = tuple(
         [
             record
@@ -262,14 +265,16 @@ async def _records_through(runtime: TaskRuntime, frontier: Frontier) -> tuple[Le
         ]
     )
     try:
-        projection = replay(records)
+        projection = await projection_for_records(
+            runtime.ledger, runtime.session_id, frontier, records
+        )
     except ValueError as exc:
         # Replay is genesis-anchored; a chain it rejects is a storage fact, not an engine bug, so
         # it leaves here as a bounded public error rather than an unbounded internal one.
         raise _error(PublicErrorCode.STORAGE_CORRUPT, "The task ledger is unreadable.") from exc
     if Frontier(projection.frontier, projection.head_digest) != frontier:
         raise _error(PublicErrorCode.FRONTIER_CONFLICT, "The response frontier is not current.")
-    return records
+    return records, projection
 
 
 async def _accepted_record(runtime: TaskRuntime, result: AppendResult) -> LedgerRecord:
@@ -379,8 +384,7 @@ async def execute_respond(app: Application, request: RespondRequest) -> RespondI
             finding_frontier = Frontier(
                 int(request.finding_frontier.sequence), request.finding_frontier.head_digest
             )
-            finding_records = await _records_through(runtime, finding_frontier)
-            finding_projection = replay(finding_records)
+            _finding_records, finding_projection = await _records_through(runtime, finding_frontier)
             finding_record = finding_projection.findings.get(finding_id(request.finding_id))
             if finding_record is None or finding_record.payload is None:
                 raise _error(
@@ -397,8 +401,10 @@ async def execute_respond(app: Application, request: RespondRequest) -> RespondI
             current = Frontier(
                 int(request.expected_frontier.sequence), request.expected_frontier.head_digest
             )
-            current_records = await _records_through(runtime, current)
-            current_projection = replay(current_records)
+            if current == finding_frontier:
+                current_projection = finding_projection
+            else:
+                _current_records, current_projection = await _records_through(runtime, current)
             for ref in () if request.evidence_refs is None else request.evidence_refs:
                 present = (
                     current_projection.evidence.get(evidence_id(ref))

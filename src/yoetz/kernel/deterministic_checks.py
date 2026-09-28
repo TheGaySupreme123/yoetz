@@ -1471,9 +1471,10 @@ def build_deterministic_case(
 ) -> DeterministicCase:
     """Freeze one exact accepted prefix into the pure local-policy input.
 
-    ``_projection_validated`` and ``_replay_index`` are internal append-time seams. The
-    SQLite/memory append path already replayed the same immutable prefix and passes the resulting
-    projection and reverse index here so the capacity check does not replay or rebuild it a second
+    ``_projection_validated`` and ``_replay_index`` are internal trusted-snapshot seams. The
+    SQLite/memory append path and exact-frontier application snapshot loader already validate the
+    immutable prefix and pass its projection (and, when available, reverse index),
+    so the case builder does not replay or rebuild it a second
     time. Public callers keep the default genesis replay and therefore retain the full standalone
     validation contract.
     """

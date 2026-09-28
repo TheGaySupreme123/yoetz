@@ -12,6 +12,7 @@ import pytest
 from builders.replay import replay_records
 from integration.storage.test_append_and_replay import command_from_records, memory_for, sqlite_for
 from yoetz.adapters.memory import ledger as module
+from yoetz.application import ledger_snapshot
 from yoetz.domain.events import LedgerRecord
 from yoetz.domain.values import Frontier
 from yoetz.kernel.projections import ProjectionState
@@ -119,7 +120,9 @@ async def test_historical_query_yields_and_joins_cancelled_worker(
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("backend", ["memory", "sqlite"])
-async def test_append_invalidates_rows_without_changing_historical_page(backend: str) -> None:
+async def test_append_retains_pinned_rows_without_replay(
+    backend: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     records = replay_records("all-event-families")
     command, objects = command_from_records(records[:4], expected_frontier=0)
     db = None
@@ -143,10 +146,93 @@ async def test_append_invalidates_rows_without_changing_historical_page(backend:
         )
         assert len(before.items) == 4
         assert len(after.items) == 5
+
+        def forbidden_replay(_records: tuple[LedgerRecord, ...]) -> ProjectionState:
+            pytest.fail("unchanged pinned prefix must reuse its authenticated projection")
+
+        monkeypatch.setattr(module, "replay", forbidden_replay)
         historical = await ledger.query_projection(query)
         assert historical.items == before.items
         assert historical.effective_frontier == before.effective_frontier
         assert historical.head_frontier == appended.result_frontier
+    finally:
+        if db is not None:
+            db.close()
+
+
+@pytest.mark.anyio
+async def test_application_snapshot_reuses_current_and_replays_old_prefix_off_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    records = replay_records("all-event-families")
+    command, objects = command_from_records(records, expected_frontier=0)
+    ledger = memory_for(command, objects)
+    await ledger.append_batch(command)
+    accepted = tuple([row async for row in ledger.load_events(command.session_id)])
+    head = await ledger.load_frontier()
+    original = ledger_snapshot.replay
+    replay_threads: list[int] = []
+    loop_thread = threading.get_ident()
+
+    def replay(prefix: tuple[LedgerRecord, ...]) -> ProjectionState:
+        replay_threads.append(threading.get_ident())
+        return original(prefix)
+
+    monkeypatch.setattr(ledger_snapshot, "replay", replay)
+    current = await ledger_snapshot.projection_for_records(
+        ledger, command.session_id, head, accepted
+    )
+    assert Frontier(current.frontier, current.head_digest) == head
+    assert replay_threads == []
+    prefix = accepted[:4]
+    past = Frontier(prefix[-1].ledger.ingestion_sequence, prefix[-1].entry_digest)
+    historical = await ledger_snapshot.projection_for_records(
+        ledger, command.session_id, past, prefix
+    )
+    assert Frontier(historical.frontier, historical.head_digest) == past
+    assert len(replay_threads) == 1 and replay_threads[0] != loop_thread
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+async def test_redaction_append_invalidates_pinned_page_cache(
+    backend: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    records = replay_records("all-event-families")
+    redaction_index = next(
+        i for i, row in enumerate(records) if row.schema.name == "redaction_recorded"
+    )
+    command, objects = command_from_records(records[:redaction_index], expected_frontier=0)
+    db = None
+    if backend == "memory":
+        ledger = memory_for(command, objects)
+    else:
+        db = apsw.Connection(":memory:")
+        ledger = sqlite_for(command, objects, db)
+    try:
+        accepted = await ledger.append_batch(command)
+        query = ProjectionQuery(
+            command.session_id, "history", None, accepted.result_frontier, 100, None, None
+        )
+        await ledger.query_projection(query)
+        appended, _ = command_from_records(
+            records[redaction_index : redaction_index + 1],
+            expected_frontier=redaction_index,
+            request_number=100,
+            objects=objects,
+        )
+        await ledger.append_batch(appended)
+        calls: list[int] = []
+        original = module.replay
+
+        def counted(prefix: tuple[LedgerRecord, ...]) -> ProjectionState:
+            calls.append(len(prefix))
+            return original(prefix)
+
+        monkeypatch.setattr(module, "replay", counted)
+        await ledger.query_projection(query)
+        assert calls == [redaction_index]
     finally:
         if db is not None:
             db.close()

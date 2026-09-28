@@ -778,9 +778,18 @@ async def test_status_is_task_read_only_paginated_and_projection_receipted() -> 
     _ = runtime
 
 
-async def test_receipt_matches_check_and_response_state() -> None:
-    app, _runtime, _ = _build_app(seed_offset=2)
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+async def test_receipt_matches_check_and_response_state(
+    backend: Literal["memory", "sqlite"], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, _runtime, _ = _build_app(seed_offset=2, ledger_backend=backend)
     started, checked, _obligation = await _bootstrap_finding(app, seed=500)
+
+    def forbidden_replay(_records: object) -> object:
+        pytest.fail("respond/receipt must reuse the authenticated current projection")
+
+    monkeypatch.setattr("yoetz.application.ledger_snapshot.replay", forbidden_replay)
+    monkeypatch.setattr("yoetz.kernel.deterministic_checks.replay", forbidden_replay)
     finding = checked.findings[0]
 
     respond_wire: dict[str, JsonValue] = {
