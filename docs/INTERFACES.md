@@ -6821,3 +6821,13 @@ There is no process-global task-content cache. Status retains at most eight exac
 indexes per ledger; append-only extension may reuse pinned pages, while prefix replacement,
 truncation or redaction invalidates them. Snapshot reuse never substitutes frontier equality
 alone for an adapter's recovery/authentication authority. All host/OS clients share this path.
+
+### Native edit evidence selection
+
+Dedicated visible edit arguments may be retained as `workspace_diff` / changed-file capture content
+through the existing observation contract. This does not admit generic command input or ambient
+repository reads. The shared resolver prioritizes claim-linked captured groups before unrelated
+objects; the builder also prioritizes claim/assessment-linked evidence. Authenticated code uses
+bounded UTF-8 chunks and preserves `content_unselected` and `truncated_payload` coverage when caps
+omit bytes. Pre-tool intent, successful application and current repository state remain distinct.
+See ADR-006 and the three host integration runbooks for capture and disclosure boundaries.

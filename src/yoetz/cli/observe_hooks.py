@@ -1364,6 +1364,86 @@ def _visible_content_chunks(
             except ProtocolValueError, TypeError, ValueError:
                 return
 
+    # Dedicated native edit arguments are visible task content, not arbitrary command input.
+    # Retain them through the existing consent/redaction/capture path. A pre-tool patch is a
+    # proposed edit; its separate outcome and state evidence decide whether it was applied.
+    edit_content = False
+    if event_name in {"PreToolUse", "PostToolUse"}:
+        tool = _token_or_none(payload.get("tool_name"))
+        arguments = payload.get("tool_input")
+        if tool in {"apply_patch", "ApplyPatch", "functions.apply_patch"}:
+            patch = arguments
+            if isinstance(arguments, Mapping):
+                patch = arguments.get("patch") or arguments.get("input")
+            if type(patch) is str and patch:
+                add(ObservationContentKind.WORKSPACE_DIFF, "patch", patch)
+                edit_content = True
+        elif tool in {
+            "Write",
+            "write_file",
+            "create_file",
+            "Edit",
+            "MultiEdit",
+            "StrReplace",
+            "str_replace",
+            "edit_file",
+        } and isinstance(arguments, Mapping):
+            # Preserve only the host's public edit fields; never serialize unknown nested
+            # prompt, reasoning or credential fields just because they share an input object.
+            selected_edit: dict[str, JsonValue] = {
+                key: value
+                for key, value in arguments.items()
+                if key
+                in {
+                    "file_path",
+                    "path",
+                    "content",
+                    "contents",
+                    "old_string",
+                    "new_string",
+                    "old_str",
+                    "new_str",
+                }
+                and type(value) is str
+            }
+            for path_key in ("file_path", "path"):
+                path_value = selected_edit.get(path_key)
+                if type(path_value) is not str:
+                    continue
+                path = Path(path_value)
+                if ".." in path.parts or "\\" in path_value:
+                    selected_edit.pop(path_key)
+                elif path.is_absolute():
+                    if workspace_locator is None:
+                        selected_edit.pop(path_key)
+                    else:
+                        try:
+                            selected_edit[path_key] = path.relative_to(workspace_locator).as_posix()
+                        except ValueError:
+                            selected_edit.pop(path_key)
+            edits = arguments.get("edits")
+            if type(edits) is list:
+                selected_edit["edits"] = [
+                    {
+                        key: value
+                        for key, value in item.items()
+                        if key in {"old_string", "new_string", "old_str", "new_str"}
+                        and type(value) is str
+                    }
+                    for item in edits
+                    if isinstance(item, Mapping)
+                ]
+            if any(
+                key in selected_edit
+                for key in {"content", "contents", "new_string", "new_str", "edits"}
+            ):
+                add(
+                    ObservationContentKind.CHANGED_FILE,
+                    "changed-file",
+                    cast(JsonValue, selected_edit),
+                )
+                edit_content = True
+
     if event_name == "UserPromptSubmit":
         add(
             ObservationContentKind.VISIBLE_USER_MESSAGE,
@@ -1383,11 +1463,11 @@ def _visible_content_chunks(
             payload.get("message") or payload.get("output") or payload.get("content"),
         )
     elif event_name == "PreToolUse":
-        # Codex input bytes have no capture consumer and are excluded from
+        # Generic Codex input bytes have no capture consumer and are excluded from
         # AI-powered selection. Keep the structural envelope/correlation, but
         # avoid encrypting a second copy of command arguments. Ordinary native
         # profiles retain their explicitly selected capture contract.
-        if envelope.source is not ObservationSource.CODEX_HOOK:
+        if not edit_content and envelope.source is not ObservationSource.CODEX_HOOK:
             add(ObservationContentKind.TOOL_INPUT, "tool-input", payload.get("tool_input"))
     elif event_name == "PostToolUse":
         add(
@@ -1427,7 +1507,11 @@ def _visible_content_chunks(
             continue
         part_limit = remaining
         if optional_limits is not None:
-            if kind is ObservationContentKind.TOOL_INPUT:
+            if kind is ObservationContentKind.TOOL_INPUT or (
+                edit_content
+                and kind
+                in {ObservationContentKind.WORKSPACE_DIFF, ObservationContentKind.CHANGED_FILE}
+            ):
                 part_limit = min(part_limit, optional_limits.max_input_bytes)
             elif kind is ObservationContentKind.TOOL_OUTPUT:
                 part_limit = min(part_limit, optional_limits.max_output_bytes)

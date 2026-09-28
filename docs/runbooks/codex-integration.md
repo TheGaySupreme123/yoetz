@@ -824,10 +824,10 @@ separate evidence; none proves that the provider selected native Codex bytes.
 The Codex hook capture arm is eligible only for content explicitly linked to the hook event and its
 exact task, workspace, host/Yoetz session, source generation, tool-call correlation, multipart set,
 object kind, and digest. Codex session-stream records remain outside the native ticket lane and are
-excluded from AI-powered review selection. Tool input and path/locator content are excluded from
-AI-powered review selection too, although the current Codex hook path may still stage consented
-input/locator chunks locally in the bounded encrypted capture lane pending a follow-up staging
-filter. Encrypted capture and AI-powered review disclosure have separate authority: selecting these
+excluded from AI-powered review selection. Generic tool input and path/locator content are excluded from
+AI-powered review selection. Recognized `apply_patch` arguments are captured as workspace-diff
+content; recognized edit/write fields use changed-file content under the same input-byte limits.
+Encrypted capture and AI-powered review disclosure have separate authority: selecting these
 bytes into a frozen AI-powered review case still requires the effective repository privacy grant and
 the independently authorized provider attempt.
 
@@ -844,9 +844,8 @@ selection remains after drain, and advice is committed only after the host outpu
 advice, because the closing host cannot receive it. A later hook or the service sweeper drains the
 end event and refreshes advice. The encrypted capture-ticket handoff does not change Codex's
 historical session-stream path. Session-stream reconciliation remains a separate source and cannot
-supply content to a `codex_hook` ticket; session-stream, input, and locator content remain excluded
-from AI-powered review selection. The current hook path may still stage consented input/locator
-chunks locally pending the follow-up staging filter. Codex keeps its existing replay semantics; the
+supply content to a `codex_hook` ticket; session-stream, generic input, and locator content remain excluded
+from AI-powered review selection. Codex keeps its existing replay semantics; the
 shared operation-replay, source-generation fencing, and teardown repairs apply to all host adapters.
 
 Provider-repair advice is standing advice, so Codex delivers it only at session boundaries (#844).
@@ -1656,3 +1655,19 @@ as `status`'s `filter.operation_request_id` with `view=operation`, or replay the
 body under that same request ID. Never mint a replacement write ID to recover an unknown outcome.
 A lost first `start` still uses exact same-body replay because session/writer IDs may be absent.
 This behavior is identical on macOS, Linux and Windows via WSL 2. CLI callers may set `--deadline-ms`.
+
+### Reviewable native edits
+
+Recognized visible patch, edit and write arguments enter the shared encrypted capture lane as
+workspace-diff or changed-file content. The adapter keeps only public edit fields, removes absolute
+path locators from edit metadata, and retains the existing capture consent, secret scanning and
+input-byte limits. A pre-tool patch describes a proposed edit; it does not prove application or
+current repository state. Generic command input does not become code evidence.
+
+Claim-linked evidence is selected before unrelated captures. Retained code is split into bounded
+UTF-8 excerpts, with omitted content and truncated prefixes disclosed under the existing count and
+byte limits. These rules apply on macOS, Linux and Windows through WSL 2; they add no OS-specific
+filesystem lookup. Hooks do not create a fresh check-time Git diff. Shell-mediated edits, missing
+capture and stale code still require explicit content/state evidence; bounded packet inclusion does
+not prove that the reviewer detects a defect. Pause, revoke and content-capture disable continue to
+stop admission through the existing shared controls.

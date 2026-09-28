@@ -551,10 +551,9 @@ limits remain in the host integration runbooks.
     spool or offline acceptance guarantee. The Codex arm admits only explicitly linked hook tool
     output, selected changed-file/code bytes, and workspace-diff bytes for captured-content evidence
     and AI-powered review selection. Its session-stream records remain outside this native ticket
-    lane and are excluded from AI-powered review selection. Tool input and path/locator content are
-    excluded from AI-powered review selection too, although the current Codex hook path may still
-    stage consented input/locator chunks in the bounded encrypted local capture lane pending a
-    follow-up staging filter. Captured-content staging does not authorize egress: AI-powered review
+    lane and are excluded from AI-powered review selection. Generic tool input and path/locator content are
+    excluded from AI-powered review selection. Recognized visible edit arguments are projected
+    separately as diff/changed-file content under the same capture and input-byte limits (ADR-006). Captured-content staging does not authorize egress: AI-powered review
     case selection still requires effective repository privacy authority and an independently
     authorized provider/attempt route. Codex's historical session-stream path otherwise remains
     unchanged, while the shared generation, operation-replay, and teardown repairs apply to all

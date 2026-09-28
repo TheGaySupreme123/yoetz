@@ -12,7 +12,7 @@ from typing import cast
 
 import pytest
 
-from builders.policy_cases import evd, make_case
+from builders.policy_cases import claim_record, clm, evd, make_case
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.application.observation_materialize import (
     MATERIALIZATION_MAPPING_VERSION,
@@ -25,6 +25,8 @@ from yoetz.application.semantic_case import (
 )
 from yoetz.application.semantic_content import resolve_captured_semantic_content
 from yoetz.domain.events import (
+    ClaimKind,
+    ClaimRecordedPayload,
     EvidenceContentAvailability,
     EvidenceDigestBinding,
     EvidenceDigestProvenance,
@@ -1269,3 +1271,25 @@ async def test_local_resume_rearms_content_after_pause(tmp_path: Path) -> None:
     assert len(resolved.content) == 1
     assert resolved.local_fence_generation == after.generation
     assert objects.open_calls == 1
+
+
+@pytest.mark.anyio
+async def test_linked_multipart_code_group_wins_bounded_resolver_admission() -> None:
+    frozen, runtime, objects = _multipart_fixture()
+    claim = ClaimRecordedPayload(clm(1), ClaimKind.MATERIAL, "Review group B", (evd(4),))
+    case = make_case(
+        evidence=frozen.case.projection.evidence,
+        claims={clm(1): claim_record(claim, 10)},
+        extra_refs=tuple(sorted(frozen.case.allowed_ids)),
+    )
+    resolved = await resolve_captured_semantic_content(
+        runtime=runtime,
+        frozen=FrozenCase(case, frozen.lease),
+        workspace_commitment=_WORKSPACE,
+        max_parts=2,
+        max_total_bytes=1024,
+    )
+    assert len(resolved.content) == 2
+    assert b"".join(item.content for item in resolved.content) == b"group-b-0:group-b-1:"
+    assert objects.open_calls == 2
+    assert "content_unselected" in resolved.gaps
