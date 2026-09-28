@@ -331,9 +331,9 @@ async def test_exact_six_dispatchers_use_one_ordinary_client(
         ("start", 30_000),
         ("publish_work", 30_000),
         ("check", 300_000),
-        ("respond", 30_000),
+        ("respond", 120_000),
         ("status", 30_000),
-        ("receipt", 30_000),
+        ("receipt", 120_000),
     ]
     assert client.closed is False
     await bridge.close_bridge_runtime(runtime)
@@ -791,6 +791,7 @@ async def test_write_timeout_preserves_unknown_outcome_and_same_request_remedy(
     assert error["safe_details"] == {
         "continuation": "write_timeout_same_identity",
         "reason_code": "request_timeout",
+        "replay_request_id": request["request_id"],
     }
     assert error["message"] == (
         "The local operation timed out and may still have committed. Retry with the same "
