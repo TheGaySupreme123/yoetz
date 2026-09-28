@@ -28,11 +28,16 @@ It does **not** mean Yoetz is correct or useful. A native model that ignores the
 times out, or exits nonzero is recorded in the lane report (`agent_ok: false`) and the lane stays
 green unless the `strict_agent` input is set, because model compliance with a one-paragraph prompt
 is not what this lane certifies. `agent_ok: true` requires zero exit, an observation mapping,
-and a `DONE` completion marker in a successful host final response: a standalone line
-(coverage disclosures may follow it) or a terminal token after a disclosure. Tool outputs, prompt echoes,
-malformed output, and error results cannot supply that marker. The mapping can predate the native
-run, and the completion marker is a model assertion: neither independently proves every MCP step
-or semantic usefulness. Read `lane-report.json` and the native transcript before quoting any cell.
+and confirmed completion. For Codex, the native JSONL must record successful Yoetz MCP `start`,
+an accepted/projected plan publication, and a receipt for the same task/session/writer, followed
+by a completed turn. Model text cannot replace those calls; later hook disclosures do not undo
+them. `native_mcp_completed` records this proof separately from the informational `done_marker`.
+Claude and Cursor's result-only output confirms completion through a `DONE` marker in the
+successful final response (a standalone line, or a terminal token after a disclosure). Tool
+outputs, prompt echoes, malformed output, and error results cannot supply that marker. Those
+hosts' marker remains a model assertion, not independent proof of every MCP step. The mapping
+can predate the native run. None of these checks establishes semantic usefulness. Read
+`lane-report.json` and the native transcript before quoting any cell.
 
 ## Matrix and connection modes
 

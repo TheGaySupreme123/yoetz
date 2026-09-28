@@ -390,6 +390,8 @@ def test_native_phase_requires_completion_even_with_preexisting_mapping(
     lane.evidence.mkdir()
     monkeypatch.setattr(lane, "_agent_command", Mock(return_value=(["native"], {}, None)))
     output = _native_output(host, "DONE" if done else "Yoetz MCP tools unavailable")
+    if host == "codex" and done:
+        output = _codex_probe_output("Coverage is bounded; the probe completed.")
     monkeypatch.setattr(lane, "_run", Mock(return_value=(0, output, "", 1)))
     monkeypatch.setattr(lane, "_observe_status", Mock(return_value={"mapping_present": True}))
     monkeypatch.setattr(lane, "_observe_drain", Mock(return_value=None))
@@ -495,3 +497,127 @@ def test_drain_nonzero_exit_cannot_claim_drained(
     lane._observe_drain("drain", "native", fatal=False)
     assert invoke.call_count == 1
     assert lane.steps[-1].status == "fail"
+
+
+def _codex_probe_events() -> list[dict[str, Any]]:
+    binding = {"task_id": "tsk_probe", "session_id": "ses_probe", "writer_id": "wri_probe"}
+    values: list[tuple[str, dict[str, Any], dict[str, Any]]] = [
+        ("start", {}, {"ok": True, **binding}),
+        (
+            "publish_work",
+            binding,
+            {
+                "ok": True,
+                **binding,
+                "outcome": "accepted",
+                "accepted_events": [
+                    {"schema_name": "plan_published", "projection_status": "projected"}
+                ],
+            },
+        ),
+        (
+            "receipt",
+            binding,
+            {
+                "ok": True,
+                "task_id": "tsk_probe",
+                "session_id": "ses_probe",
+                "receipt_id": "rcp_probe",
+            },
+        ),
+    ]
+    return [
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "mcp_tool_call",
+                "server": "yoetz",
+                "tool": tool,
+                "arguments": dict(args),
+                "status": "completed",
+                "error": None,
+                "result": {"structured_content": result},
+            },
+        }
+        for tool, args, result in values
+    ]
+
+
+def _codex_probe_output(final: str, events: list[dict[str, Any]] | None = None) -> str:
+    return "\n".join(
+        json.dumps(event)
+        for event in [
+            {"type": "turn.started"},
+            *(events if events is not None else _codex_probe_events()),
+            {"type": "item.completed", "item": {"type": "agent_message", "text": final}},
+            {"type": "turn.completed"},
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    "final",
+    ["DONE", "DONE — coverage is bounded.", "The probe finished; a coverage limitation remains."],
+)
+def test_codex_completion_uses_correlated_mcp_results_not_wording(final: str) -> None:
+    assert _LANE._codex_workflow_completed(_codex_probe_output(final)) is True
+    assert _LANE._codex_workflow_completed(_native_output("codex", "DONE")) is False
+
+
+@pytest.mark.parametrize("omitted", [0, 1, 2])
+def test_codex_workflow_requires_every_successful_step(omitted: int) -> None:
+    events = _codex_probe_events()
+    del events[omitted]
+    assert _LANE._codex_workflow_completed(_codex_probe_output("DONE", events)) is False
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "other_server",
+        "in_progress",
+        "error",
+        "not_ok",
+        "wrong_session",
+        "wrong_writer",
+        "wrong_result_writer",
+        "wrong_task",
+        "no_plan",
+        "dry_run",
+        "no_receipt",
+    ],
+)
+def test_codex_workflow_rejects_uncorrelated_or_unaccepted_results(mutation: str) -> None:
+    events = _codex_probe_events()
+    item = events[1]["item"]
+    result = item["result"]["structured_content"]
+    if mutation == "other_server":
+        item["server"] = "other"
+    elif mutation == "in_progress":
+        item["status"] = "in_progress"
+    elif mutation == "error":
+        item["error"] = {"message": "failed"}
+    elif mutation == "not_ok":
+        result["ok"] = False
+    elif mutation == "wrong_session":
+        item["arguments"]["session_id"] = "ses_other"
+    elif mutation == "wrong_writer":
+        item["arguments"]["writer_id"] = "wri_other"
+    elif mutation == "wrong_result_writer":
+        result["writer_id"] = "wri_other"
+    elif mutation == "wrong_task":
+        events[2]["item"]["arguments"]["task_id"] = "tsk_other"
+    elif mutation == "no_plan":
+        result["accepted_events"] = []
+    elif mutation == "dry_run":
+        result["outcome"] = "dry_run"
+    elif mutation == "no_receipt":
+        del events[2]["item"]["result"]["structured_content"]["receipt_id"]
+    assert _LANE._codex_workflow_completed(_codex_probe_output("DONE", events)) is False
+
+
+@pytest.mark.parametrize(
+    "suffix", ['{"type":"turn.failed"}', '{"type":"turn.started"}', "bad json"]
+)
+def test_codex_workflow_requires_completed_native_turn(suffix: str) -> None:
+    assert _LANE._codex_workflow_completed(_codex_probe_output("DONE") + "\n" + suffix) is False
