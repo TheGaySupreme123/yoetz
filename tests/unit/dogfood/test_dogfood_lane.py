@@ -403,3 +403,26 @@ def test_native_phase_requires_completion_even_with_preexisting_mapping(
     lane.strict_agent = False
     assert lane.report()["verdict"]["green"] is True
     assert lane.report()["verdict"]["agent_ok"] is done
+
+
+@pytest.mark.parametrize("host", ["codex", "claude", "cursor"])
+def test_native_launch_resolves_pinned_runtime_before_ambient_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    host: str,
+) -> None:
+    monkeypatch.setenv("PATH", str(tmp_path / "ambient-bin"))
+    lane = _LANE.Lane(_namespace(tmp_path, host=host, host_path="/synthetic/host"))
+    lane.launcher = tmp_path / "disposable" / "runtime" / "bin" / "yoetz"
+    lane.fireworks_key = "synthetic-provider-key"
+    lane.cursor_key = "synthetic-cursor-key"
+    argv, env, reason = lane._agent_command()
+    assert argv is not None and reason is None
+    assert env["PATH"].split(_LANE.os.pathsep) == [
+        str(lane.launcher.parent),
+        str(tmp_path / "ambient-bin"),
+    ]
+    child = _LANE._clean_env(env, drop=_LANE._LANE_SECRET_ENV)
+    assert child["PATH"] == env["PATH"]
+    assert "DOGFOOD_VAULT_PASSPHRASE" not in child
+    assert "DOGFOOD_OS_PASSWORD" not in child

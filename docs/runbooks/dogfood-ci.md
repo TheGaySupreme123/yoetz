@@ -99,7 +99,8 @@ trusted-console ceremonies from a pseudo-terminal. Phases, in order, each record
    `cursor-agent -p`) asked to call `start`, `publish_work`, and `receipt` and answer `DONE`;
    the prompt identifies the MCP namespace separately from its function names. Host discovery
    and execution wrappers are allowed solely to reach deferred Yoetz tools; empty resource lists
-   do not prove tool absence. Then
+   do not prove tool absence. Every native child receives the disposable pinned runtime first
+   on `PATH`, so packaged hooks and recovery commands resolve that instance. Then
    `observe status`, `observe drain`, `observe status`, `service status`. A
    `service_unavailable`, `storage_*`, or `vault_locked` hook diagnostic after the agent is
    catastrophic; a non-zero agent exit is not.

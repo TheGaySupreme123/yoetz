@@ -1606,7 +1606,12 @@ class Lane:
             workspace=str(self.project),
             external_ref=f"native-{self.host}-{self.stamp}",
         )
-        env: dict[str, str] = {}
+        assert self.launcher is not None
+        # setup run supplies this launch PATH because packaged hooks invoke bare yoetz.
+        # The first executable is the disposable instance-pinned launcher (ADR-028).
+        env: dict[str, str] = {
+            "PATH": str(self.launcher.parent) + os.pathsep + os.environ.get("PATH", ""),
+        }
         if self.host == "codex":
             exe = self.host_path or shutil.which("codex")
             if exe is None:
