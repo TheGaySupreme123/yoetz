@@ -3904,6 +3904,9 @@ async def test_drain_service_unavailable_retires_its_session_but_not_the_workspa
         codex_session_id="poisoned",
         connect=connect,  # type: ignore[arg-type]
         _state=tmp_path,
+        # This test owns ordering/fairness, not the 200 ms hook deadline. Deadline
+        # exhaustion is covered by the dedicated shared-budget tests below.
+        budget_seconds=30.0,
     )
     assert attempts.count(poisoned) == 1, "the failed head is probed once, never stepped over"
     assert len(attempts) == 3, "the healthy session still delivers fully"

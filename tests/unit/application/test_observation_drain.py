@@ -1403,8 +1403,16 @@ async def test_next_pass_never_overlaps_a_worker_a_cancelled_pass_left_running(
         assert dict(yielded.reasons) == {"observation_store_busy": 1}
         assert yielded.attempted == 0
         assert store.entries == 1
+        # Releasing the store gate does not establish worker completion. Observe the
+        # actual worker before testing resumed delivery, keeping the 50 ms busy check above.
+        with sweeper._inflight_guard:  # pyright: ignore[reportPrivateUsage]
+            workers = tuple(sweeper._inflight)  # pyright: ignore[reportPrivateUsage]
+        assert len(workers) == 1
         store.block = False
         store.release.set()
+        await asyncio.wait_for(
+            asyncio.gather(*(asyncio.wrap_future(worker) for worker in workers)), timeout=30
+        )
         delivered = await sweeper.sweep()
     finally:
         store.release.set()
