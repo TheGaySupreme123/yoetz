@@ -673,3 +673,21 @@ service-owned check holds them, only `status view=operation` reads are admitted 
 check closes that window and drains admitted readers before it releases the gates, so maintenance,
 recovery, and observation sweeps remain excluded. Every other read still waits as before. A read
 from a different session or writer of the same task can still receive retryable `BUNDLE_BUSY`.
+
+
+### Unassessable content and repair-first feedback (issue #885)
+
+The existing `insufficient_packet` judgment is the nonblocking outcome when missing content
+prevents assessment and readable evidence establishes no separate discrepancy. It has no
+challenges and now adds `semantic_packet_insufficient` to committed check coverage: provider
+execution succeeded, assessment coverage did not. Receipts retain insufficient coverage;
+this outcome cannot resolve an existing semantic finding. Local checks remain independent.
+A digest-only diff or an already reported capture gap alone must not become a new unsupported
+claim finding. Concrete discrepancies grounded in readable evidence still produce challenges.
+
+Reviewer and agent guidance require a specific authorized resolution attempt before accepting a
+remediable limitation, or an explicit authority/dependency blocker. The existing obligation
+requested-items and action-attempt records make the attempted work inspectable. This is a
+workflow instruction, not a new execution-enforcement claim: `respond` still records only a
+disposition and never clears a finding. No provider schema or new finding kind is required.
+The same prompt, result commitment and guidance serve all hosts and supported operating systems.

@@ -6780,3 +6780,9 @@ and receipts. No new event schema, persisted proof metadata, or command executio
 Historical event bytes remain intact; rebuilding a projection applies this bounded derivation to
 its accepted history. A held old check is still invalidated by a later response to a finding that
 check did not return. Resolved history does not remove receipt coverage limitations.
+
+
+`semantic_packet_insufficient` is a coverage gap on a committed check whose valid provider
+judgment is `insufficient_packet`. It reports unassessable content without adding a defect
+finding, and must remain visible in CLI, MCP and receipt coverage. A succeeded attempt with this
+gap is not a complete review and cannot prove absence of a prior semantic issue.

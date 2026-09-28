@@ -30,6 +30,7 @@ from yoetz.domain.receipts import (
     SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
     SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
     SEMANTIC_CHALLENGES_REJECTED_GAP,
+    SEMANTIC_PACKET_INSUFFICIENT_GAP,
     SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
     SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP,
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
@@ -2332,6 +2333,12 @@ async def execute_check_commit(
         }
         semantic_gap = semantic_coverage_gap_code(semantic_result.status, semantic_result.reason)
         declared_gaps: set[str] = set() if semantic_gap is None else {semantic_gap}
+        if (
+            semantic_result.status is SemanticStatus.SUCCEEDED
+            and semantic_result.judgment is not None
+            and semantic_result.judgment.conclusion == "insufficient_packet"
+        ):
+            declared_gaps.add(SEMANTIC_PACKET_INSUFFICIENT_GAP)
         if (
             route_profile == "strict"
             and semantic_result.status is SemanticStatus.BLOCKED_BY_POLICY

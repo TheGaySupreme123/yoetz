@@ -511,3 +511,22 @@ only its fenced lease was yielded. Replay the exact start body and request ID on
 inventing session or writer IDs. `start_pending_same_identity` instead means a live lease remains:
 wait up to 60 seconds before the one exact replay. If still busy or pending, retain the original
 request and report the unresolved start. These continuations do not authorize a new task.
+
+
+### Missing review content and concrete repair attempts
+
+`insufficient_packet` means the reviewer could not assess the supplied content. It produces no
+new defect finding and carries `semantic_packet_insufficient`; it is never a clean review or
+permission to claim the work is verified. Existing findings and coverage limitations remain.
+
+Before choosing to leave a remediable finding as an unresolved limitation, attempt one specific,
+authorized resolution: publish the relevant bounded diff or test/failure excerpt, run the
+relevant test/doctest/lint check, or repair the named defect. Select the target from the actual
+changed files and existing project checks, never invent a command. Record the action and its
+result; put exact requested items on an obligation in the effective plan and record their
+`attempted_items` on the action. Do not resolve an obligation while its requested items remain
+unattempted. If authority or an unavailable dependency prevents the attempt, record that exact
+blocker instead of widening disclosure, credentials or runtime authority. Only then report the
+remaining limitation or narrow the claim. An acknowledgement or “limitation accepted” is not a
+repair, a verification result, or a finding resolution. Recheck after a material repair, and
+avoid another identical check when the same content is still unavailable.
