@@ -815,7 +815,8 @@ def _process_environment(profile: CodexAppServerProfile) -> dict[str, str]:
 
 
 async def _launch(profile: CodexAppServerProfile) -> _CodexProcess:
-    profile.verify_local_binding()
+    # Revalidate every launch, but do not hash the runtime executable on the service loop.
+    await asyncio.to_thread(profile.verify_local_binding)
     runtime_root = profile.codex_home / "runtime"
     ensure_owner_only_dir(runtime_root)
     verify_private_local_bundle(runtime_root)

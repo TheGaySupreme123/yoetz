@@ -46,7 +46,8 @@ from yoetz.domain.observation import (
 )
 from yoetz.domain.values import JsonObject, Timestamp
 from yoetz.ports.runtime import TaskRuntime
-from yoetz.protocol.canonical import strict_json_parse
+from yoetz.ports.semantic_budget import current_semantic_budget_profile
+from yoetz.protocol.canonical import JsonValue, canonical_digest, strict_json_parse
 from yoetz.protocol.coverage import CheckType
 
 _COMMITMENT = "hmac-sha256:" + "a" * 64
@@ -176,10 +177,10 @@ def test_hook_path_build_enqueues_once_and_never_dispatches() -> None:
     assert attempt.yoetz_session_id == _SESSION
     assert attempt.coverage_gaps == tuple(sorted(_GAPS, key=str.encode))
     assert _packet(attempt)["coverage_gaps"] == list(sorted(_GAPS, key=str.encode))
-    assert _packet(attempt)["evidence_basis_digest"] == attempt.basis_digest
+    assert attempt.subject_digest == canonical_digest(cast(JsonValue, _packet(attempt)))
 
 
-def test_changed_basis_schedules_a_new_attempt_and_retains_the_prior_receipt() -> None:
+def test_stream_churn_reuses_condition_review_and_retains_the_prior_receipt() -> None:
     db, repository = _repository()
     store = _Store(repository)
     builder = _builder()
@@ -191,6 +192,7 @@ def test_changed_basis_schedules_a_new_attempt_and_retains_the_prior_receipt() -
     async def dispatch(
         attempt: ObservationAdviceSemanticAttempt,
     ) -> ObservationAdviceSemanticOutcome:
+        assert current_semantic_budget_profile() == "routine"
         return ObservationAdviceSemanticOutcome(
             status="succeeded",
             attempt_receipt="egr_first",
@@ -209,25 +211,16 @@ def test_changed_basis_schedules_a_new_attempt_and_retains_the_prior_receipt() -
     assert asyncio.run(worker.run_once()) is not None
     assert asyncio.run(worker.run_once()) is None
 
-    # New evidence changes the basis: a second row is scheduled, the first keeps its receipt,
-    # and the rebuilt advice over the old basis still reads the succeeded row.
+    # The reviewable rule summaries did not change, even though the stream digest did.
     store.failed_identity = "hook:fail-2"
     second = asyncio.run(builder.build(_COMMITMENT, store, yoetz_session_id=_SESSION))  # type: ignore[arg-type]
     assert second is not None
     assert second.evidence_basis_digest != first.evidence_basis_digest
-    assert ADVICE_SEMANTIC_PENDING_GAP in second.confidence_coverage.known_gaps
-    retained, scheduled = _rows(db, repository)
+    assert ADVICE_SEMANTIC_PENDING_GAP not in second.confidence_coverage.known_gaps
+    (retained,) = _rows(db, repository)
     assert retained.basis_digest == first_row.basis_digest
     assert (retained.status, retained.attempt_receipt) == ("succeeded", "egr_first")
-    assert scheduled.basis_digest != retained.basis_digest
-    assert scheduled.status == "pending"
-    # Rebuilding over the original evidence reads the succeeded row: no pending or unavailable
-    # gap, and no re-dispatch.
-    replay = asyncio.run(builder.build(_COMMITMENT, _Store(repository), yoetz_session_id=_SESSION))  # type: ignore[arg-type]
-    assert replay is not None
-    assert ADVICE_SEMANTIC_PENDING_GAP not in replay.confidence_coverage.known_gaps
-    assert ADVICE_SEMANTIC_UNAVAILABLE_GAP not in replay.confidence_coverage.known_gaps
-    assert len(_rows(db, repository)) == 2
+    assert asyncio.run(worker.run_once()) is None
 
 
 def test_unattempted_pending_rows_are_superseded_by_a_newer_basis() -> None:
@@ -255,6 +248,7 @@ def test_unattempted_pending_rows_are_superseded_by_a_newer_basis() -> None:
         enqueued_at=_clock(),
         max_pending=16,
     )
+    assert first is not None and second is not None
     assert second.status == "pending"
     superseded = repository.lookup(yoetz_session_id=_SESSION, basis_digest=first.basis_digest)
     assert superseded is not None
@@ -277,6 +271,7 @@ def test_queue_bound_records_unavailable_without_an_attempt() -> None:
             enqueued_at=_clock(),
             max_pending=2,
         )
+        assert row is not None
         assert row.status == "pending"
     overflow = repository.schedule(
         workspace=_COMMITMENT,
@@ -288,6 +283,7 @@ def test_queue_bound_records_unavailable_without_an_attempt() -> None:
         enqueued_at=_clock(),
         max_pending=2,
     )
+    assert overflow is not None
     assert (overflow.status, overflow.failure_reason) == ("unavailable", "queue_full")
     assert overflow.attempt_count == 0
     addon = addon_from_attempt(overflow)
@@ -990,3 +986,58 @@ def test_rebind_already_waiting_yields_newly_registered_advisory_handle() -> Non
 
     asyncio.run(scenario())
     assert released == [owned]
+
+
+def test_rate_limit_survives_repository_reopen_and_admits_changed_condition() -> None:
+    db, repository = _repository()
+    store = _Store(repository)
+    first = asyncio.run(_builder().build(_COMMITMENT, store, yoetz_session_id=_SESSION))  # type: ignore[arg-type]
+    assert first is not None
+    (original,) = _rows(db, repository)
+    # A genuinely different packet is rate limited; a fresh repository/scheduler cannot reset it.
+    store.repository = SqliteObservationAdviceSemanticRepository(db)
+    store.gaps = (ObservationGapCode.SOURCE_LAG.value,)
+    for _ in range(1, 180):
+        builder = ObservationAdviceContextBuilder(
+            semantic_scheduler=ObservationAdviceSemanticScheduler(
+                now=lambda: "2026-09-08T21:02:59.000Z"
+            )
+        )
+        asyncio.run(builder.build(_COMMITMENT, store, yoetz_session_id=_SESSION))  # type: ignore[arg-type]
+    assert _rows(db, repository) == (original,)
+    builder = ObservationAdviceContextBuilder(
+        semantic_scheduler=ObservationAdviceSemanticScheduler(
+            now=lambda: "2026-09-08T21:03:00.000Z"
+        )
+    )
+    asyncio.run(builder.build(_COMMITMENT, store, yoetz_session_id=_SESSION))  # type: ignore[arg-type]
+    prior, admitted = _rows(db, repository)
+    assert prior.failure_reason == "superseded"
+    assert admitted.basis_digest != prior.basis_digest
+    assert admitted.status == "pending"
+
+
+def test_disabled_scheduler_never_enqueues() -> None:
+    db, repository = _repository()
+    builder = ObservationAdviceContextBuilder(
+        semantic_scheduler=ObservationAdviceSemanticScheduler(now=_clock, enabled=False)
+    )
+    snapshot = asyncio.run(
+        builder.build(_COMMITMENT, _Store(repository), yoetz_session_id=_SESSION)
+    )  # type: ignore[arg-type]
+    assert snapshot is not None and snapshot.ranked_items
+    assert _rows(db, repository) == ()
+
+
+def test_disabled_dispatch_does_not_rediscover_pending_work() -> None:
+    # Disabling in READY removes the dispatch callback. Recovery must not enter any runtime
+    # or inspect pending work, even when the service supervisor exists.
+    coordinator = ObservationCoordinator(
+        runtime=object(),  # type: ignore[arg-type]
+        local=object(),  # type: ignore[arg-type]
+        clock=object(),  # type: ignore[arg-type]
+        ids=object(),  # type: ignore[arg-type]
+        advice_semantic_supervisor=ObservationAdviceSemanticSupervisor(service_generation=2),
+        advice_semantic_dispatch=None,
+    )
+    asyncio.run(coordinator.rediscover_pending_advice_semantic())

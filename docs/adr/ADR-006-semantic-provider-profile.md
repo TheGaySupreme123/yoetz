@@ -582,8 +582,8 @@ retries, disclosure-wait resume, and started-attempt recovery, dispatches under 
 value; changed configuration or a later claim cannot re-select it. Snapshots written before
 this amendment lack the key and replay as `final`, which is the pre-amendment single-effort
 behavior. The `yoetz.semantic-case/2` reader ignores unknown execution keys, so no case-schema
-bump is needed. Dispatches outside a check (credential probes, observation advice) also use
-`final`.
+bump is needed. Unscoped credential probes also use `final`. Background observation advice uses `routine`
+(issue #888); it cannot infer completion from a hook and must not consume a final-check budget.
 
 The Codex subscription binding (`[external_runtime]`) expresses the two profiles separately:
 
@@ -673,3 +673,20 @@ service-owned check holds them, only `status view=operation` reads are admitted 
 check closes that window and drains admitted readers before it releases the gates, so maintenance,
 recovery, and observation sweeps remain excluded. Every other read still waits as before. A read
 from a different session or writer of the same task can still receive retryable `BUNDLE_BUSY`.
+
+
+### Background observation review admission (issue #888)
+
+The shared service deduplicates advisory review by the minimized candidate packet (policy, rules,
+actions, counts and coverage gaps), excluding the rolling observation stream digest. The frozen
+packet retains its original basis; its exact digest remains the disclosure subject. Reusing a
+review is only review of those structural summaries, never evidence that later source was read.
+A durable per-session admission interval defaults to 180 seconds; deferred work adds no attempt
+and does not claim review. The next advice build can admit a changed condition after the interval.
+Explicit checks retain their separate authority, completion-profile selection and scheduling.
+
+`observation.semantic_advice_enabled` can disable background scheduling and dispatch, including
+rediscovered pending work. Re-enabling it on service restart permits pending work to drain.
+`observation.semantic_advice_min_interval_seconds` accepts 1–86400. Both settings apply to Codex,
+Claude Code and Cursor on macOS, Linux and Windows through WSL 2. This does not change capture
+consent, deterministic advice, or the explicit check policy.

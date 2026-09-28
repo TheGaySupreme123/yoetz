@@ -16,7 +16,11 @@ from yoetz.config.write import (
 
 
 def test_observation_config_toml_round_trip(tmp_path: Path) -> None:
-    config = YoetzConfig(observation=ObservationConfig(enabled=False))
+    config = YoetzConfig(
+        observation=ObservationConfig(
+            enabled=False, semantic_advice_enabled=False, semantic_advice_min_interval_seconds=600
+        )
+    )
 
     rendered = render_config_toml(config)
     assert "[observation]\nenabled = false\n" in rendered
@@ -113,3 +117,11 @@ def test_config_writer_refuses_preplanted_lock_symlink(tmp_path: Path) -> None:
     assert caught.value.reason_code == "config_value_invalid"
     assert victim.read_bytes() == b"owner content"
     assert not path.exists()
+
+
+@pytest.mark.parametrize("interval", [0, -1, 86401, True, "180"])
+def test_advice_interval_rejects_invalid_values(interval: object) -> None:
+    with pytest.raises(ConfigError):
+        ObservationConfig.model_validate(
+            {"semantic_advice_min_interval_seconds": interval}, strict=True
+        )

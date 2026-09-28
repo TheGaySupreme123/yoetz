@@ -564,3 +564,23 @@ yoetz setup status        # read-only posture, mutates nothing
 yoetz service status      # is the service up, is the vault unlocked
 yoetz version --json      # installed package and runtime identity
 ```
+
+
+## Background review frequency
+
+Background AI-powered advice uses the routine review budget and reuses a review when its rule
+summaries and coverage gaps are unchanged. New conditions are reviewed at most once every three
+minutes per session by default. Explicit checks continue to use their normal review policy.
+
+To change background advice, edit the existing `[observation]` table in your Yoetz configuration:
+
+```toml
+[observation]
+semantic_advice_enabled = true
+semantic_advice_min_interval_seconds = 180
+```
+
+Set `semantic_advice_enabled = false` to stop background reviews while keeping deterministic
+advice and explicit AI-powered checks available. Set it back to `true` to resume. Restart the
+Yoetz service after changing these settings. The interval accepts 1–86400 seconds. The same
+settings work with Codex, Claude Code and Cursor on macOS, Linux and Windows through WSL 2.
