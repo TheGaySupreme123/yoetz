@@ -34,6 +34,7 @@ from yoetz.domain.events import (
     EVIDENCE_SCHEMA_VERSION,
     ActionKind,
     ActionRecordedPayload,
+    CheckRecordedPayload,
     DecisionRecordedPayload,
     EventDraft,
     EventSchema,
@@ -4608,6 +4609,22 @@ async def test_empty_claim_repair_converges_across_views_and_receipts(
         assert receipt.conclusion != "no_issue_detected"
 
 
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+async def test_succeeded_review_records_assessable_conclusion_durably(
+    backend: Literal["memory", "sqlite"],
+) -> None:
+    app, runtime, _ = _build_app(seed_offset=40, semantic="optional", ledger_backend=backend)
+    started, checked, _ = await _bootstrap_finding(app, seed=8000, mode="semantic_if_configured")
+    ledger, _ = runtime.resources[started.task_id]
+    records = tuple([row async for row in ledger.load_events(started.session_id)])
+    row = next(row for row in reversed(records) if type(row.payload) is CheckRecordedPayload)
+    assert row.schema.version == "1.3.0"
+    assert type(row.payload) is CheckRecordedPayload
+    assert row.payload.semantic_conclusion == "no_material_discrepancy"
+    rebuilt = replay(records)
+    assert Frontier(rebuilt.frontier, rebuilt.head_digest) == checked.result_frontier
+
+
 def _semantic_challenge_evaluator(claim_ref: str) -> Callable[..., Awaitable[object]]:
     async def evaluate(
         frozen: object,
@@ -4713,3 +4730,231 @@ async def test_accepting_a_semantic_finding_requires_a_recorded_resolution_attem
     )
     assert accepted.response.disposition == "acknowledged"
     assert tuple(item.reference_id for item in accepted.response.evidence) == (evidence_ref,)
+
+
+def _scripted_semantic_evaluator(
+    claim_ref: str,
+    conclusions: list[str],
+    *,
+    case_gaps: tuple[str, ...],
+    over_item_limit: bool,
+) -> Callable[..., Awaitable[object]]:
+    """Answer each check with the next scripted conclusion under the same capture limits."""
+
+    async def evaluate(
+        frozen: object,
+        findings: object,
+        runtime: object | None = None,
+        lineage_evaluation: object | None = None,
+    ) -> object:
+        raised = cast(
+            FinalSemanticEvaluation,
+            await _semantic_challenge_evaluator(claim_ref)(frozen, findings),
+        )
+        conclusion = conclusions.pop(0)
+        judgment = (
+            raised.judgment
+            if conclusion == "challenges_returned"
+            else SemanticJudgment("no_material_discrepancy", ())
+        )
+        return replace(
+            raised,
+            judgment=judgment,
+            case_content_gaps=case_gaps,
+            case_content_over_item_limit=over_item_limit,
+        )
+
+    return evaluate
+
+
+@pytest.mark.parametrize(
+    ("case_gaps", "over_item_limit"),
+    [
+        (("content_capture_unavailable",), False),
+        (("content_unselected",), False),
+        (("captured_object_unavailable", "content_capture_unavailable"), False),
+        ((), True),
+    ],
+)
+async def test_semantic_finding_resolves_within_its_recorded_capture_baseline(
+    case_gaps: tuple[str, ...], over_item_limit: bool
+) -> None:
+    """Issue #884 through the real check, replay, status and receipt path.
+
+    The finding records the capture limits its review ran under. An unchanged re-run proves
+    nothing; after material work, a completed review under the same recorded limits resolves it,
+    while every limit stays on the receipt and the conclusion is never clean.
+    """
+
+    seed = 5400
+    expected_gaps: set[str] = set(case_gaps)
+    if over_item_limit:
+        expected_gaps.add("semantic_case_content_over_item_limit")
+    conclusions = ["challenges_returned", "no_material_discrepancy", "no_material_discrepancy"]
+    app, _runtime, _ = _build_app(
+        seed_offset=54,
+        semantic="optional",
+        semantic_evaluator=_scripted_semantic_evaluator(
+            protocol_id("clm_", seed + 5),
+            conclusions,
+            case_gaps=case_gaps,
+            over_item_limit=over_item_limit,
+        ),
+    )
+    started, checked, _obligation = await _bootstrap_finding(
+        app, seed=seed, mode="semantic_if_configured"
+    )
+    finding = next(
+        item for item in checked.findings if item.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+    )
+    # P0: the capture baseline is durable finding coverage, not only check coverage.
+    assert expected_gaps <= set(finding.coverage.known_gaps)
+    assert expected_gaps <= set(checked.coverage.known_gaps)
+
+    async def recheck(request_seed: int, frontier: Frontier | FrontierModel) -> CheckCommitResult:
+        result = await app.check(
+            CheckRequest.model_validate(
+                {
+                    **_request_base(protocol_id("req_", request_seed)),
+                    "session_id": started.session_id,
+                    "writer_id": started.writer_id,
+                    "expected_frontier": _frontier(frontier),
+                    "mode": "semantic_if_configured",
+                    "max_findings": "8",
+                }
+            )
+        )
+        assert type(result) is CheckCommitResult
+        return result
+
+    async def resolved(request_seed: int) -> bool:
+        view = await _findings_view(app, started, request_seed, include_resolved=True)
+        return next(item for item in view.items if item.finding_id == finding.finding_id).resolved
+
+    # A re-run over unchanged state that merely does not repeat the issue is not proof.
+    rerolled = await recheck(seed + 20, checked.result_frontier)
+    assert finding.finding_id not in {item.finding_id for item in rerolled.findings}
+    assert await resolved(seed + 21) is False
+
+    evidence_ref = protocol_id("evd_", seed + 30)
+    published = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 31)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(rerolled.result_frontier),
+                "event_drafts": (
+                    {
+                        "event_id": protocol_id("evt_", seed + 32),
+                        "schema": {"name": "evidence_recorded", "version": "1.0.0"},
+                        "occurred_at": "2026-07-19T12:00:03.000Z",
+                        "causal_parents": (),
+                        "payload": {
+                            "evidence_id": evidence_ref,
+                            "evidence_kind": "artifact",
+                            "strength": "mutable_reference",
+                            "observed_at": "2026-07-19T12:00:03.000Z",
+                            "reference": "repair-evidence",
+                        },
+                        "artifact_refs": (),
+                        "evidence_refs": (),
+                    },
+                ),
+            }
+        )
+    )
+    repaired = await recheck(seed + 40, published.result_frontier)
+    assert expected_gaps <= set(repaired.coverage.known_gaps)
+    assert await resolved(seed + 41) is True
+    assert conclusions == []
+
+    receipt = await app.receipt(
+        ReceiptRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 50)),
+                "task_id": started.task_id,
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(repaired.result_frontier),
+                "format": "json",
+                "include": "standard",
+                "redaction_profile": "full_local",
+            }
+        )
+    )
+    # Resolution never removes the recorded capture limits, and no clean receipt results.
+    assert expected_gaps <= set(receipt.coverage.known_gaps)
+    assert receipt.conclusion != "no_issue_detected"
+
+
+async def test_a_defect_the_review_still_finds_after_repair_stays_current() -> None:
+    """Material work does not close a finding the later completed review returns again."""
+
+    seed = 5500
+    conclusions = ["challenges_returned", "challenges_returned"]
+    app, _runtime, _ = _build_app(
+        seed_offset=55,
+        semantic="optional",
+        semantic_evaluator=_scripted_semantic_evaluator(
+            protocol_id("clm_", seed + 5),
+            conclusions,
+            case_gaps=("content_capture_unavailable",),
+            over_item_limit=False,
+        ),
+    )
+    started, checked, _obligation = await _bootstrap_finding(
+        app, seed=seed, mode="semantic_if_configured"
+    )
+    finding = next(
+        item for item in checked.findings if item.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+    )
+    published = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 31)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(checked.result_frontier),
+                "event_drafts": (
+                    {
+                        "event_id": protocol_id("evt_", seed + 32),
+                        "schema": {"name": "evidence_recorded", "version": "1.0.0"},
+                        "occurred_at": "2026-07-19T12:00:03.000Z",
+                        "causal_parents": (),
+                        "payload": {
+                            "evidence_id": protocol_id("evd_", seed + 30),
+                            "evidence_kind": "artifact",
+                            "strength": "mutable_reference",
+                            "observed_at": "2026-07-19T12:00:03.000Z",
+                            "reference": "unrelated-evidence",
+                        },
+                        "artifact_refs": (),
+                        "evidence_refs": (),
+                    },
+                ),
+            }
+        )
+    )
+    rechecked = await app.check(
+        CheckRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 40)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(published.result_frontier),
+                "mode": "semantic_if_configured",
+                "max_findings": "8",
+            }
+        )
+    )
+    assert type(rechecked) is CheckCommitResult
+    view = await _findings_view(app, started, seed + 41, include_resolved=True)
+    by_id = {item.finding_id: item for item in view.items}
+    assert by_id[finding.finding_id].resolved is False
+    refired = [
+        item
+        for item in rechecked.findings
+        if item.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED and item.kind is finding.kind
+    ]
+    assert refired and all(not by_id[item.finding_id].resolved for item in refired)

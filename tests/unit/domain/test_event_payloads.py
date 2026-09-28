@@ -560,6 +560,7 @@ def test_exact_schema_pair_dispatch_and_unknown_boundary() -> None:
         SCHEMA_VERSION,
         "1.1.0",
         "1.2.0",
+        "1.3.0",
     }
     assert {schema.version for schema in PAYLOAD_TYPES if schema.name == "finding_recorded"} == {
         SCHEMA_VERSION,

@@ -6801,6 +6801,24 @@ judgment is `insufficient_packet`. It reports unassessable content without addin
 finding, and must remain visible in CLI, MCP and receipt coverage. A succeeded attempt with this
 gap is not a complete review and cannot prove absence of a prior semantic issue.
 
+
+Semantic finding resolution compares the later completed review's native capture gaps against
+the readable original finding's capture baseline (ADR-006, issue #884). Only the closed existing
+baseline is tolerated; it does not remove any receipt coverage gap. `insufficient_packet` cannot
+resolve a prior semantic finding. Response disposition and limitation acceptance are not proofs.
+Semantic findings carry their review's closed capture limits in their own coverage, and resolve
+only after a readable material change recorded after the finding
+(`no_material_change_since_finding` otherwise).
+
+
+`check_recorded` version `1.3.0` adds required `semantic_conclusion` on succeeded attempts. The
+closed values are `no_material_discrepancy`, `challenges_returned`, and `insufficient_packet`.
+Versions 1.0–1.2 keep their frozen payload shapes and read without a recorded conclusion. Only
+an explicitly assessable conclusion enables capture-baseline resolution. An unassessable
+conclusion blocks semantic absence proof even if a producer omitted its coverage-gap marker.
+Failed and local-only attempts retain their existing version. The owning schema generator and
+`fixtures/canonical/check-conclusion-1.3.0.case.json` lock the new and legacy bytes.
+
 `resolution_attempt_required` is the `respond` rejection for an `acknowledged` response to a
 `semantic_model_derived` finding whose `evidence_refs` cite no evidence or result recorded after
 the finding frontier. It writes nothing; the continuation is `input_correction_new_identity`.

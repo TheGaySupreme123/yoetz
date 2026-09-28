@@ -250,6 +250,7 @@ class _Ledger:
         request_id: str,
         *,
         scope: CheckScopeModel | None = None,
+        semantic_conclusion: str | None = None,
     ) -> CheckCommitResult:
         assert frozen == self.frozen
         if self.commit_failure is not None:

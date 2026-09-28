@@ -1280,6 +1280,18 @@ def _check_result_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     return document
 
 
+def _check_recorded_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    document = _simple_versioned_schema(entry, "events/check-recorded-1.2.0.schema.json", {})
+    properties = cast(dict[str, JsonValue], document["properties"])
+    properties["semantic_conclusion"] = {
+        "type": "string",
+        "enum": ["no_material_discrepancy", "challenges_returned", "insufficient_packet"],
+    }
+    cast(list[JsonValue], document["required"]).append("semantic_conclusion")
+    properties["semantic_status"] = {"const": "succeeded", "type": "string"}
+    return document
+
+
 def _check_recorded_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     document = _load_versioned_template(
         entry,
@@ -3132,6 +3144,7 @@ def _event_draft_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         )
 
     add_branch("check_recorded", "1.2.0")
+    add_branch("check_recorded", "1.3.0")
     add_branch("session_opened", "1.2.0")
     add_branch("finding_recorded", "1.2.0")
     add_branch("finding_recorded", "1.3.0")
@@ -3208,6 +3221,14 @@ def _opaque_unknown_event_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonVa
         {
             "additionalProperties": False,
             "properties": {"name": {"const": "finding_recorded"}, "version": {"const": "1.3.0"}},
+            "required": ["name", "version"],
+            "type": "object",
+        }
+    )
+    values.append(
+        {
+            "additionalProperties": False,
+            "properties": {"name": {"const": "check_recorded"}, "version": {"const": "1.3.0"}},
             "required": ["name", "version"],
             "type": "object",
         }
@@ -5538,6 +5559,18 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         ),
     ),
     _RegistryEntry(
+        "events/check-recorded-1.3.0.schema.json",
+        "check-recorded",
+        "1.3.0",
+        "event",
+        "event-payload",
+        lambda: (
+            __import__(
+                "yoetz.domain.events", fromlist=["CheckRecordedPayload"]
+            ).CheckRecordedPayload
+        ),
+    ),
+    _RegistryEntry(
         "events/claim-recorded-1.0.0.schema.json",
         "claim-recorded",
         "1.0.0",
@@ -6906,6 +6939,7 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
 # regenerating them would silently rewrite frozen history.
 _BUILDER_OWNED_SCHEMA_PATHS: Final[frozenset[str]] = frozenset(
     {
+        "events/check-recorded-1.3.0.schema.json",
         "consent/status-7.0.0.schema.json",
         "consent/review-result-7.0.0.schema.json",
         "consent/prepare-result-7.0.0.schema.json",
@@ -7194,6 +7228,8 @@ def build_schema_documents(
             normalized = _event_draft_v1_2_schema(entry)
         elif entry.relative_path == "events/check-recorded-1.1.0.schema.json":
             normalized = _check_recorded_v1_1_schema(entry)
+        elif entry.relative_path == "events/check-recorded-1.3.0.schema.json":
+            normalized = _check_recorded_v1_3_schema(entry)
         elif entry.relative_path == "events/check-recorded-1.2.0.schema.json":
             normalized = _simple_versioned_schema(
                 entry,

@@ -2653,6 +2653,7 @@ class SqliteLedger:
         request_id: str,
         *,
         scope: CheckScopeModel | None = None,
+        semantic_conclusion: str | None = None,
     ) -> CheckCommitResult:
         await self._ensure_recovered()
         async with self._lock:
@@ -2678,6 +2679,7 @@ class SqliteLedger:
                     semantic_provenance,
                     request_id,
                     scope=scope,
+                    semantic_conclusion=semantic_conclusion,
                 )
             except PublicOperationError:
                 # The memory oracle terminalizes a frontier conflict before raising it. Preserve
