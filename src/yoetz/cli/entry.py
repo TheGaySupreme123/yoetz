@@ -8,6 +8,7 @@ fast-pathed; everything else falls through to the full CLI unchanged, so usage e
 
 from __future__ import annotations
 
+import errno
 import os
 import sys
 import time
@@ -331,8 +332,23 @@ def main() -> None:
             )
             sys.stderr.write(f"release_runtime_unavailable: {message}\n")
             raise SystemExit(20) from None
-        except OSError:
-            sys.stderr.write("release_runtime_unavailable: retry from the installed launcher.\n")
+        except OSError as error:
+            # Closed OS categories only: exception text and filenames may contain private paths.
+            reason = {
+                errno.EACCES: "permission_denied",
+                errno.EPERM: "operation_not_permitted",
+                errno.ENOENT: "file_missing",
+                errno.ENAMETOOLONG: "path_too_long",
+                errno.EMFILE: "process_file_limit",
+                errno.ENFILE: "system_file_limit",
+                errno.ENOSPC: "storage_full",
+                errno.ELOOP: "symlink_loop",
+                errno.ENOEXEC: "executable_format",
+                errno.ETXTBSY: "executable_busy",
+            }.get(error.errno, "os_error")
+            sys.stderr.write(
+                f"release_runtime_unavailable: {reason}; retry from the installed launcher.\n"
+            )
             raise SystemExit(20) from None
     if (
         len(argv) == 6
