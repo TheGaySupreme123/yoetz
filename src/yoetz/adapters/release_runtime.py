@@ -209,6 +209,8 @@ def _prepare_locked(prefix: Path, root: Path) -> Path:
     target = root / key
     if target.exists() or target.is_symlink():
         _private_directory(target)
+        if target.stat().st_mode & 0o222:
+            raise ReleaseRuntimeError("release_runtime_incomplete")
         marker = _marker(target)
         if marker is None or marker["origin"] != str(prefix):
             raise ReleaseRuntimeError("release_runtime_invalid")
