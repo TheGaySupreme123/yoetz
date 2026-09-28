@@ -15,7 +15,7 @@ from yoetz.domain.events import (
     encode_payload,
     media_type_for,
 )
-from yoetz.domain.findings import ResponseDisposition, WaiverScope
+from yoetz.domain.findings import FindingOrigin, ResponseDisposition, WaiverScope
 from yoetz.domain.values import (
     Actor,
     ActorType,
@@ -399,6 +399,7 @@ async def execute_respond(app: Application, request: RespondRequest) -> RespondI
             )
             current_records = await _records_through(runtime, current)
             current_projection = replay(current_records)
+            attempted = False
             for ref in () if request.evidence_refs is None else request.evidence_refs:
                 present = (
                     current_projection.evidence.get(evidence_id(ref))
@@ -409,6 +410,28 @@ async def execute_respond(app: Application, request: RespondRequest) -> RespondI
                     raise _error(
                         PublicErrorCode.INVALID_REQUEST, "A response reference is invalid."
                     )
+                attempted = attempted or present.source_frontier > finding_frontier.sequence
+            if (
+                request.disposition == "acknowledged"
+                and finding_record.payload.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+                and not attempted
+            ):
+                # Issue #885: accepting a reviewer finding (including as an unresolved limitation)
+                # needs one recorded concrete resolution attempt after the finding. A recorded
+                # failed or blocked result naming an authority blocker also counts. Disputes keep
+                # their own dispositions; acknowledgement still never resolves the finding.
+                raise _error(
+                    PublicErrorCode.INVALID_REQUEST,
+                    (
+                        "Acknowledging an AI-powered review finding requires one concrete "
+                        "resolution attempt recorded after the finding. Publish the repair, "
+                        "requested evidence, or verification result (a failed or blocked result "
+                        "naming the exact authority blocker also counts), then cite it in "
+                        "evidence_refs. Use rejected or provenance_disputed to dispute it."
+                    ),
+                    reason_code="resolution_attempt_required",
+                    field="/evidence_refs",
+                )
             coverage = coverage_for_channel(_channel(request))
             payload = ResponseRecordedPayload(
                 finding_id(request.finding_id),
