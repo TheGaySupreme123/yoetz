@@ -483,3 +483,27 @@ def test_runtime_os_failure_has_bounded_reason_without_private_text(
         == f"release_runtime_unavailable: {reason}; retry from the installed launcher.\n"
     )
     assert "PRIVATE" not in captured.err
+
+
+@pytest.mark.parametrize("phase", ["snapshot", "lease", "exec"])
+def test_runtime_io_phase_excludes_source_exception_text(
+    phase: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from typing import Literal, cast
+
+    from yoetz.adapters import release_runtime
+
+    def refuse(_arguments: list[str]) -> None:
+        raise release_runtime.ReleaseRuntimeIOError(
+            PermissionError(13, "PRIVATE_ERROR", "PRIVATE_PATH"),
+            cast(Literal["snapshot", "lease", "exec"], phase),
+        )
+
+    monkeypatch.setattr(release_runtime, "enter_release_runtime", refuse)
+    monkeypatch.setattr(sys, "argv", ["yoetz", "service", "run"])
+    with pytest.raises(SystemExit):
+        entry.main()
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert f"{phase}_permission_denied" in captured.err
+    assert "PRIVATE" not in captured.err

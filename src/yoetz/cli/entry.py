@@ -317,7 +317,11 @@ def main() -> None:
         and not any(token in {"--help", "-h"} for token in argv)
         and "--prune-runtimes" not in argv
     ):
-        from yoetz.adapters.release_runtime import ReleaseRuntimeError, enter_release_runtime
+        from yoetz.adapters.release_runtime import (
+            ReleaseRuntimeError,
+            ReleaseRuntimeIOError,
+            enter_release_runtime,
+        )
 
         try:
             enter_release_runtime(argv)
@@ -345,9 +349,10 @@ def main() -> None:
                 errno.ELOOP: "symlink_loop",
                 errno.ENOEXEC: "executable_format",
                 errno.ETXTBSY: "executable_busy",
-            }.get(error.errno, "os_error")
+            }.get(error.errno or 0, "os_error")
+            phase = f"{error.phase}_" if isinstance(error, ReleaseRuntimeIOError) else ""
             sys.stderr.write(
-                f"release_runtime_unavailable: {reason}; retry from the installed launcher.\n"
+                f"release_runtime_unavailable: {phase}{reason}; retry from the installed launcher.\n"
             )
             raise SystemExit(20) from None
     if (
