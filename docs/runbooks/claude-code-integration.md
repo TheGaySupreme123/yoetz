@@ -458,8 +458,9 @@ nonblocking and is released on cancellation or after the bounded drain; a busy o
 an explicit content gap. The hook commits its structural envelope, pairing, mapping, and outbox
 intent locally before attempting the bounded service drain. Teardown `SessionEnd` has no service
 drain: its local lifecycle and outbox intent are durable before the hook returns, and a later hook
-or the service sweeper retries delivery. With no later hook, a ready service's idle sweep interval
-is 60 seconds. Content-bearing ordinary-profile events retain a one-second drain window; contentless
+or the service sweeper retries delivery. With no later hook, a ready service polls for undelivered
+rows every 5 seconds while idle and sweeps as soon as one is waiting; a row that already failed an
+attempt retries at the 60-second idle interval. Content-bearing ordinary-profile events retain a one-second drain window; contentless
 structural rows defer service delivery. When chunks exist, the pass prioritizes the current row
 after its same-session FIFO prefix, within that one-second drain and sixteen-row bound. Teardown
 keeps its host-clamped three-second hook and skips local advice construction because the closing

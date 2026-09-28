@@ -2546,6 +2546,8 @@ class _EnvelopeCodec:
         self._decoded: OrderedDict[str, tuple[ObservationEnvelope, int]] = OrderedDict()
         self._encoded: OrderedDict[int, tuple[object, CanonicalFragment]] = OrderedDict()
         self._dedup: OrderedDict[tuple[str, int], tuple[ObservationEnvelope, str]] = OrderedDict()
+        # Pressure facts per envelope identity: (envelope, byte length, protected).
+        self._facts: dict[int, tuple[ObservationEnvelope, int, bool]] = {}
 
     @staticmethod
     def decode_key(raw: object) -> str | None:
@@ -2600,6 +2602,26 @@ class _EnvelopeCodec:
             while len(self._encoded) > self._capacity:
                 self._encoded.popitem(last=False)
         return fragment
+
+    def pressure_facts(self, envelope: ObservationEnvelope) -> tuple[int, bool]:
+        """Return an envelope's persisted byte length and protection in one lookup.
+
+        Pressure sampling walks every retained row on each hook admission; one
+        unlocked identity lookup per row keeps that walk cheap at a backlog of
+        thousands (#887). Entries hold the envelope, so an identity cannot be
+        reused while cached; a racing fill computes the same pure value.
+        """
+
+        cached = self._facts.get(id(envelope))
+        if cached is not None and cached[0] is envelope:
+            return cached[1], cached[2]
+        size = _envelope_fragment(envelope).byte_length
+        protected = _outbox_row_is_protected(envelope)
+        with self._guard:
+            if len(self._facts) >= self._capacity:
+                self._facts.clear()
+            self._facts[id(envelope)] = (envelope, size, protected)
+        return size, protected
 
     def dedup_key(self, workspace: str, envelope: ObservationEnvelope) -> str:
         key = (workspace, id(envelope))
@@ -2686,17 +2708,36 @@ def _envelope_bytes(envelope: ObservationEnvelope) -> int:
     return _envelope_fragment(envelope).byte_length
 
 
-def _delivery_unit_bytes(codex_session_id: str, envelope: ObservationEnvelope) -> int:
-    """Return the canonical byte length of one ``{codex_session_id, envelope}`` unit."""
+@functools.lru_cache(maxsize=1024)
+def _delivery_unit_overhead(codex_session_id: str) -> int:
+    """Return the canonical bytes of one delivery unit other than its envelope.
 
-    return len(
-        canonical_encode(
-            cast(
-                JsonValue,
-                {"codex_session_id": codex_session_id, "envelope": _envelope_fragment(envelope)},
+    The canonical object is ``{"codex_session_id":<id>,"envelope":<fragment>}``
+    (members sort in that order) and a fragment splices verbatim, so the unit
+    length is this wrapper's length with an empty ``{}`` envelope, minus those
+    two bytes, plus the fragment's own length.
+    """
+
+    return (
+        len(
+            canonical_encode(
+                cast(JsonValue, {"codex_session_id": codex_session_id, "envelope": {}})
             )
         )
+        - 2
     )
+
+
+def _delivery_unit_bytes(codex_session_id: str, envelope: ObservationEnvelope) -> int:
+    """Return the canonical byte length of one ``{codex_session_id, envelope}`` unit.
+
+    Pressure sampling sizes every pending row on each hook admission, so this
+    must not re-encode the unit: at a retained backlog of thousands of rows a
+    per-row encode dominated hook wall time (#887). The memoized envelope
+    fragment plus a per-session-id wrapper overhead gives the identical length.
+    """
+
+    return _delivery_unit_overhead(codex_session_id) + _envelope_fragment(envelope).byte_length
 
 
 def _outbox_row_fragment(row: ObservationOutboxRow) -> CanonicalFragment:
@@ -7569,32 +7610,42 @@ class LocalObservationStore:
         rows = tuple(state.pending_outbox or ())
         buffered = tuple(state.admission_buffer.inputs)
         queue_count = len(rows) + len(buffered)
-        row_sizes = tuple(_delivery_unit_bytes(row.codex_session_id, row.envelope) for row in rows)
-        buffered_sizes = tuple(_envelope_bytes(item.envelope) for item in buffered)
-        queue_bytes = sum(row_sizes) + sum(buffered_sizes)
-        protected_count = sum(_outbox_row_is_protected(row.envelope) for row in rows) + len(
-            buffered
-        )
-        protected_bytes = sum(
-            size
-            for row, size in zip(rows, row_sizes, strict=True)
-            if _outbox_row_is_protected(row.envelope)
-        ) + sum(buffered_sizes)
-        if state_bytes is None:
-            state_bytes = len(canonical_encode(self._state_to_json(workspace, state))) + 1
-        session_rows = tuple(
-            row for row in rows if row.envelope.session_commitment == session_commitment
-        )
-        session_buffered = tuple(
-            item for item in buffered if item.envelope.session_commitment == session_commitment
-        )
-        session_bytes = sum(_envelope_bytes(row.envelope) for row in session_rows) + sum(
-            _envelope_bytes(item.envelope) for item in session_buffered
-        )
+        # One pass with one memoized lookup per row: this runs on every hook
+        # admission, and a retained backlog can reach the session fair share
+        # (thousands of rows) now that age no longer refuses input (#887).
+        facts = _CODEC.pressure_facts
+        overhead = _delivery_unit_overhead
+        queue_bytes = 0
+        protected_count = len(buffered)
+        protected_bytes = 0
+        session_count = 0
+        session_bytes = 0
         # Retries must not make a stalled row look young.  The envelope
         # receipt is the original observation time; ``last_attempt_at`` is
         # only delivery-attempt metadata.
-        oldest = min((row.envelope.receipt_time for row in rows), default=None)
+        oldest: Timestamp | None = None
+        for row in rows:
+            envelope = row.envelope
+            size, protected = facts(envelope)
+            unit = overhead(row.codex_session_id) + size
+            queue_bytes += unit
+            if protected:
+                protected_count += 1
+                protected_bytes += unit
+            if envelope.session_commitment == session_commitment:
+                session_count += 1
+                session_bytes += size
+            if oldest is None or envelope.receipt_time < oldest:
+                oldest = envelope.receipt_time
+        for item in buffered:
+            size, _protected = facts(item.envelope)
+            queue_bytes += size
+            protected_bytes += size
+            if item.envelope.session_commitment == session_commitment:
+                session_count += 1
+                session_bytes += size
+        if state_bytes is None:
+            state_bytes = len(canonical_encode(self._state_to_json(workspace, state))) + 1
         (
             capture_tickets,
             capture_bytes,
@@ -7641,7 +7692,7 @@ class LocalObservationStore:
             capture_bytes=capture_bytes,
             protected_count=protected_count,
             protected_bytes=protected_bytes,
-            session_queue_count=len(session_rows) + len(session_buffered),
+            session_queue_count=session_count,
             session_queue_bytes=session_bytes,
         )
 
@@ -8032,6 +8083,21 @@ class LocalObservationStore:
             return tuple(
                 row for row in state.pending_outbox if row.codex_session_id == codex_session_id
             )
+
+    @_read_mostly
+    def has_unattempted_outbox_rows(self) -> bool:
+        """Report whether any workspace holds an outbox row no drain has attempted yet.
+
+        The idle service sweeper polls this read-only probe so a row a hook deferred without
+        contacting the service is swept promptly instead of an idle interval later (#887).
+        Rows that already failed an attempt are excluded: they keep the ordinary retry cadence.
+        """
+
+        with self._reading():
+            for _workspace, state in self._iter_workspaces():
+                if any(row.attempts == 0 for row in state.pending_outbox or ()):
+                    return True
+            return False
 
     @_read_mostly
     def pending_workspaces(self) -> tuple[str, ...]:

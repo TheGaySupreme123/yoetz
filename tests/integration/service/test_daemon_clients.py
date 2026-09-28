@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -3736,23 +3736,98 @@ async def test_observation_sweep_wake_survives_timeout_boundary(
     timeout_started = asyncio.Event()
     release_timeout = asyncio.Event()
 
-    async def timeout_barrier(awaitable: object, timeout: float) -> object:
-        del timeout
+    async def timeout_barrier(
+        awaitables: object, *, timeout: float, return_when: object
+    ) -> tuple[set[object], set[object]]:
+        del timeout, return_when
         timeout_started.set()
         await release_timeout.wait()
         wake.set()
-        close = getattr(awaitable, "close", None)
-        if callable(close):
-            close()
-        raise TimeoutError
+        # Report the timeout, as asyncio.wait does, with nothing completed.
+        return set(), set(cast(set[object], awaitables))
 
-    monkeypatch.setattr(daemon_module.asyncio, "wait_for", timeout_barrier)
+    monkeypatch.setattr(daemon_module.asyncio, "wait", timeout_barrier)
     waiting = asyncio.create_task(daemon._await_observation_sweep_turn(60.0))  # pyright: ignore[reportPrivateUsage]
     await timeout_started.wait()
     release_timeout.set()
     await waiting
 
     assert wake.is_set()
+    await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_hook_ingest_moves_the_next_observation_sweep_forward(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hook ingest wakes an idle sweeper after a short coalescing window (issue #887).
+
+    A hook drains only a few rows within its own budget, so the remainder must not wait the
+    60 s idle interval. A burst of ingests coalesces into one early pass.
+    """
+
+    monkeypatch.setattr(daemon_module, "_OBSERVATION_SWEEP_INGEST_COALESCE_SECONDS", 0.05)
+    daemon, _application, _vault, _listener = _daemon()
+    ingest = daemon._observation_ingest_wake  # pyright: ignore[reportPrivateUsage]
+    waiting = asyncio.create_task(daemon._await_observation_sweep_turn(60.0))  # pyright: ignore[reportPrivateUsage]
+    await asyncio.sleep(0)
+    assert not waiting.done()
+    ingest.set()
+    ingest.set()
+    # The idle interval is 60 s; only the ingest wake can end this turn this soon.
+    await asyncio.wait_for(waiting, timeout=5)
+    assert not ingest.is_set()
+    assert not daemon._observation_sweep_wake.is_set()  # pyright: ignore[reportPrivateUsage]
+    await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_idle_sweep_turn_ends_when_the_backlog_probe_finds_a_deferred_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hook row deferred without any service call is swept before the idle interval (#887)."""
+
+    monkeypatch.setattr(daemon_module, "_OBSERVATION_SWEEP_BACKLOG_POLL_SECONDS", 0.01)
+    daemon, _application, _vault, _listener = _daemon()
+    probes = 0
+
+    def probe() -> bool:
+        nonlocal probes
+        probes += 1
+        if probes == 1:
+            raise RuntimeError("probe_failed")
+        return probes >= 3
+
+    # The idle interval is 60 s; only the probe can end this turn this soon.
+    await asyncio.wait_for(
+        daemon._await_observation_sweep_turn(60.0, probe),  # pyright: ignore[reportPrivateUsage]
+        timeout=5,
+    )
+    assert probes == 3
+    await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_observation_ingest_dispatch_arms_the_sweep_wake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every hook ingest request arms the coalesced sweep wake, even if it later fails."""
+
+    daemon, _application, _vault, _listener = _daemon()
+    ingest = daemon._observation_ingest_wake  # pyright: ignore[reportPrivateUsage]
+
+    async def fail(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("ingest_failed")
+
+    monkeypatch.setattr(daemon, "_dispatch_ready_once", fail)
+    other = SimpleNamespace(method=ControlMethod.OBSERVATION_STATUS, body=None)
+    with pytest.raises(RuntimeError):
+        await daemon._dispatch_ready(cast(Any, None), cast(Any, other), None)  # pyright: ignore[reportPrivateUsage]
+    assert not ingest.is_set()
+    request = SimpleNamespace(method=ControlMethod.OBSERVATION_INGEST, body=None)
+    with pytest.raises(RuntimeError):
+        await daemon._dispatch_ready(cast(Any, None), cast(Any, request), None)  # pyright: ignore[reportPrivateUsage]
+    assert ingest.is_set()
     await daemon.close()
 
 

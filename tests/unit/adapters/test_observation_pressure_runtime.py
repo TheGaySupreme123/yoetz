@@ -575,3 +575,71 @@ def test_aged_backlog_retains_new_inputs_across_restart(
         assert reopened.acknowledge_outbox_row(workspace, row)
     assert reopened.list_pending_outbox_rows(workspace) == ()
     assert reopened.selection_accounting(workspace)["unrecoverable_input_count"] == 0
+
+
+def test_delivery_unit_bytes_match_the_encoded_unit() -> None:
+    envelope = _pending_envelope(session=_SESSION, receipt_time=_OLD)
+    for codex_session_id in ("", "session", 'é "\\', "019a-" * 12, "\U0001f600"):
+        encoded = local_mod.canonical_encode(
+            cast(
+                local_mod.JsonValue,
+                {
+                    "codex_session_id": codex_session_id,
+                    "envelope": local_mod._envelope_fragment(envelope),  # pyright: ignore[reportPrivateUsage]
+                },
+            )
+        )
+        assert local_mod._delivery_unit_bytes(codex_session_id, envelope) == len(encoded)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_admission_pressure_sampling_does_not_reencode_retained_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hook admission cost must not re-encode each retained row (#887).
+
+    With age no longer refusing input, a stalled backlog can reach the session fair share. The
+    admission check then samples every pending row, so its encoder calls must not scale with it.
+    """
+
+    from yoetz.adapters.integrations.observation_admission import AdmissionBuffer, AdmissionPlan
+
+    monotonic = [0.0]
+    store, workspace = _store(tmp_path, monotonic)
+    _select_detailed(store, workspace)
+    old = _pending_envelope(session=_SESSION, receipt_time=_OLD)
+
+    def admit(index: int) -> bool:
+        fresh = replace(
+            old, source_identity=f"input-{index}", cursor=replace(old.cursor, event_position=index)
+        )
+        plan = AdmissionPlan(AdmissionBuffer(), (("session", fresh),), False)
+        return store.commit_selected_admission(workspace, plan, incoming=fresh, newly_observed=True)
+
+    for index in range(1, 101):
+        assert admit(index)
+    real_encode = local_mod.canonical_encode
+    calls = 0
+
+    def counting_encode(value: object) -> bytes:
+        nonlocal calls
+        calls += 1
+        return real_encode(cast(local_mod.JsonValue, value))
+
+    monkeypatch.setattr(local_mod, "canonical_encode", counting_encode)
+    assert admit(101)
+    # A handful of whole-document and new-row encodes, never one per retained row.
+    assert calls < 20
+    assert store.selection_accounting(workspace)["unrecoverable_input_count"] == 0
+
+
+def test_backlog_probe_reports_only_unattempted_rows(tmp_path: Path) -> None:
+    monotonic = [0.0]
+    store, workspace = _store(tmp_path, monotonic)
+    assert not store.has_unattempted_outbox_rows()
+    envelope = _pending_envelope(session=_SESSION, receipt_time=_OLD)
+    assert store.enqueue_outbox(workspace, "session", envelope) is None
+    assert store.has_unattempted_outbox_rows()
+    (row,) = store.list_pending_outbox_rows(workspace)
+    assert store.bump_outbox_row_attempt(workspace, row, reason=None) is not None
+    # A row that already failed an attempt keeps the ordinary retry cadence.
+    assert not store.has_unattempted_outbox_rows()
