@@ -6796,6 +6796,15 @@ Historical event bytes remain intact; rebuilding a projection applies this bound
 its accepted history. A held old check is still invalidated by a later response to a finding that
 check did not return. Resolved history does not remove receipt coverage limitations.
 
+`semantic_packet_insufficient` is a coverage gap on a committed check whose valid provider
+judgment is `insufficient_packet`. It reports unassessable content without adding a defect
+finding, and must remain visible in CLI, MCP and receipt coverage. A succeeded attempt with this
+gap is not a complete review and cannot prove absence of a prior semantic issue.
+
+`resolution_attempt_required` is the `respond` rejection for an `acknowledged` response to a
+`semantic_model_derived` finding whose `evidence_refs` cite no evidence or result recorded after
+the finding frontier. It writes nothing; the continuation is `input_correction_new_identity`.
+
 ### Observation latency and capacity (#887)
 
 `observation-budget-v3-capacity` uses resource occupancy for admission and effective detail.

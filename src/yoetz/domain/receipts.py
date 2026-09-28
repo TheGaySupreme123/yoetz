@@ -93,6 +93,7 @@ __all__ = [
     "SEMANTIC_CHALLENGES_REJECTED_GAP",
     "SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP",
     "SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP",
+    "SEMANTIC_PACKET_INSUFFICIENT_GAP",
     "SEMANTIC_REVIEW_NOT_CONFIGURED_GAP",
     "SEMANTIC_REVIEW_NOT_REQUESTED_GAP",
     "SchemaVersionEntry",
@@ -133,6 +134,8 @@ SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP: Final = "semantic_relevance_review_not_ru
 # The review ran, but the inference channel withheld categories the review profile
 # selected, so it judged the work without material it was configured to receive.
 SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP: Final = "semantic_review_context_withheld"
+# A valid provider answer that could not assess the supplied content is not a clean review.
+SEMANTIC_PACKET_INSUFFICIENT_GAP: Final = "semantic_packet_insufficient"
 # The review ran and returned challenges, and at least one of them was dropped by the
 # post-validation fence. The reviewer said something the check did not carry; coverage says so
 # rather than letting the drop look like the reviewer having found nothing there.

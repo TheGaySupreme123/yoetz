@@ -433,7 +433,11 @@ def test_a_semantic_finding_needs_a_completed_semantic_review() -> None:
 
 @pytest.mark.parametrize(
     "gap",
-    ("semantic_review_context_withheld", "semantic_challenges_rejected"),
+    (
+        "semantic_review_context_withheld",
+        "semantic_challenges_rejected",
+        "semantic_packet_insufficient",
+    ),
 )
 def test_a_weakened_semantic_review_cannot_resolve_a_semantic_finding(gap: str) -> None:
     finding = _finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED)

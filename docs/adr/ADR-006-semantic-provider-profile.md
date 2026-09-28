@@ -711,3 +711,25 @@ rediscovered pending work. Re-enabling it on service restart permits pending wor
 `observation.semantic_advice_min_interval_seconds` accepts 1–86400. Both settings apply to Codex,
 Claude Code and Cursor on macOS, Linux and Windows through WSL 2. This does not change capture
 consent, deterministic advice, or the explicit check policy.
+
+### Unassessable content and repair-first feedback (issue #885)
+
+The existing `insufficient_packet` judgment is the nonblocking outcome when missing content
+prevents assessment and readable evidence establishes no separate discrepancy. It has no
+challenges and now adds `semantic_packet_insufficient` to committed check coverage: provider
+execution succeeded, assessment coverage did not. Receipts retain insufficient coverage;
+this outcome cannot resolve an existing semantic finding. Local checks remain independent.
+A digest-only diff or an already reported capture gap alone must not become a new unsupported
+claim finding. Concrete discrepancies grounded in readable evidence still produce challenges.
+
+Reviewer and agent guidance require a specific authorized resolution attempt before accepting a
+remediable limitation, or an explicit authority/dependency blocker. The existing obligation
+requested-items and action-attempt records make the attempted work inspectable. `respond`
+enforces the minimum: an `acknowledged` response to a `semantic_model_derived` finding must cite
+in `evidence_refs` at least one evidence or result record first recorded or revised after the
+finding frontier, otherwise it is rejected with `resolution_attempt_required` before any write.
+A recorded failed or blocked result that names the authority blocker qualifies. Disputes
+(`rejected`, `provenance_disputed`) are unchanged. Yoetz does not judge whether the attempt was
+adequate, and `respond` still records only a disposition and never clears a finding. No provider
+schema or new finding kind is required.
+The same prompt, result commitment and guidance serve all hosts and supported operating systems.
