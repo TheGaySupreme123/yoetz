@@ -4,11 +4,7 @@ Use Yoetz for material multi-step, delegated, resumable, or verification-heavy w
 
 If the tool list shows only names, load the `start` schema first. If material work already began without a task, call `start` now, publish the work so far as a bounded plan, and disclose the uncovered prefix in the receipt.
 
-# What Yoetz is
-
 Yoetz is a local work ledger and checker; AI-powered review is optional. It records only what participants publish and checks that record at a named frontier.
-
-# What Yoetz is not
 
 Yoetz is not an enforcement system, observer, authorship proof, transcript recorder, or orchestrator. A clean check does not mean the underlying work is correct.
 
@@ -40,13 +36,12 @@ Parents use `start mode=delegate`; children attach with the complete returned ha
 their own returned bindings. A receipt never closes work or refreshes a child dependency manifest.
 # Essential boundaries
 
-Publish only material, state-bound facts. Never publish hidden reasoning, full prompts/transcripts,
-credentials, secrets, whole repositories, or broad unrelated source. A digest identifies bytes; it
-does not prove content inspection. A completion claim is an assertion, not a conclusion. Final
-wording must respect the receipt's weakest material coverage and gaps. `respond` records a
-disposition; it does not clear the finding. Only a qualifying check can do that.
-
-Never publish chain-of-thought or hidden reasoning; full prompts, transcripts, conversation history, credentials, secrets, whole files, whole repositories, or broad unrelated source. A small problem-local excerpt is permitted only when material, in scope, and bound to relevant state.
+Publish only material, state-bound facts. Never publish hidden reasoning or chain-of-thought,
+full prompts, transcripts, conversation history, credentials, secrets, whole files/repositories,
+or broad unrelated source. Small problem-local excerpts must be material, in scope and bound to
+relevant state. A digest identifies bytes, not content inspection. A completion claim is an
+assertion, not a conclusion. Final wording must respect the receipt's weakest material coverage
+and gaps. `respond` records a disposition; only a qualifying check clears the finding.
 
 # Completion and findings
 
@@ -60,7 +55,7 @@ Select `semantic_required` when the user, effective policy, or named acceptance 
 independent semantic review. If relying on the configured default, omit `mode`; use
 `semantic_if_configured` only when review is known to be optional. Reserve `deterministic_only` for
 explicitly local or structural checks, a semantic-disabled policy, or a deliberate no-egress choice,
-and disclose that limitation. Never use deterministic-only merely to shorten a follow-up check.
+and disclose that limitation and any unmet required review. Never use deterministic-only merely to shorten a follow-up check.
 
 Host authorization and a Yoetz disclosure decision are different things. An active semantic route is a bounded standing policy chosen during setup. `check` cannot widen privacy authority, route, workspace, scope, categories, retention, or credential authority; dispatch remains enforced by the installed route binding and privacy policy.
 
@@ -113,14 +108,6 @@ For provider credentials, grant repository privacy first, then prepare the crede
 
 At SessionStart, Yoetz may provide one bounded cached recommendation with an exact recommendation id and `yoetz recommend accept <id>` / `yoetz recommend decline <id>` commands. Explain its trade-off and ask the user. Run either command only after explicit approval or decline of that exact recommendation in the current chat; do not edit configuration or activate a plugin directly. Codex activation decisions bind executable, home, preview, and cache digests; acceptance does not prove activation. On update or provider-repair notices, tell the user and offer a subagent fix.
 
-# Read more
-
-- `yoetz://guidance/agent-instructions.md` - this document; re-read it if the initialize copy is not in context.
-- `yoetz://guidance/workflow.md` - read before your first `start`: the cooperative workflow, cadence, resume behavior, and final response.
-- `yoetz://guidance/coverage-and-receipts.md` - read before your first `check`: coverage, findings, freshness, and receipt wording.
-- `yoetz://guidance/publication-policy.md` - read before your first `publish_work`: what is material and safe to publish.
-- `yoetz://guidance/request-templates.md` - complete fallback request bodies for all six operations and ordinary publication families; replace every illustrative value before use.
-
 # Additional recovery and authority boundaries
 
 Host authorization and a Yoetz disclosure decision are different things. Ordinary `check` uses the
@@ -129,12 +116,6 @@ already-configured route. A host auto-review refusal is not a Yoetz result: Yoet
 `awaiting_human` is nonterminal. Preserve the exact request, show its continuation, and do not
 claim completion, request a receipt, or downgrade required review while approval is pending.
 Read coverage guidance before checking or handling either boundary.
-
-Select `semantic_required` when the user, effective policy, or named acceptance criterion requires
-independent AI-powered review. If relying on the configured default, omit `mode`; use
-`semantic_if_configured` only when review is known to be optional. Reserve `deterministic_only` for
-explicit local/structural work or a deliberate no-egress choice and disclose the unmet required
-review when applicable. Never use local-only merely to shorten a follow-up check.
 
 Setup, imports, credential/vault operations, and recommendations require their exact authority
 procedure in request templates before acting. Recommendations are advisory. Generic task approval,
@@ -179,9 +160,8 @@ Load only the resource needed for the current operation; retain it across calls 
   receipts, and pending approvals; read its Recovery section on errors or inherited outages.
 - `yoetz://guidance/request-templates.md` - missing/rejected schema metadata; before setup, settings,
   credentials, vault operations, import, or recommendation decisions, read Setup and consent /
-  Recommendations. These procedures are not prerequisites for ordinary configured workflow calls.
-
-Before evidence publication, paginate `status view=evidence`; reuse matching IDs with per-item limits.
+  Recommendations. Includes complete fallback bodies for all six operations and ordinary publication
+  families; replace illustrative values. These procedures are not prerequisites for ordinary configured workflow calls.
 
 # Repair then finish
 
@@ -196,7 +176,7 @@ review status/reason, and coverage limits. Stop repeating an unchanged check whe
 qualify, and disclose the blocker.
 
 
-### Missing review content and concrete repair attempts
+### Repair missing review content
 
 `insufficient_packet` means the reviewer could not assess the supplied content. It produces no
 new defect finding and carries `semantic_packet_insufficient`; it is never a clean review or
