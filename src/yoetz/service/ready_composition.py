@@ -5628,8 +5628,15 @@ async def provide_service_ready_context(
     advice_semantic_supervisor = ObservationAdviceSemanticSupervisor(
         service_generation=service_generation
     )
+    advice_semantic_enabled = (
+        semantic_configured
+        and config.observation.enabled
+        and config.observation.semantic_advice_enabled
+    )
     advice_semantic_scheduler = ObservationAdviceSemanticScheduler(
-        now=lambda: timestamp_from_datetime(clock.now_utc()).wire
+        now=lambda: timestamp_from_datetime(clock.now_utc()).wire,
+        enabled=advice_semantic_enabled,
+        min_interval_seconds=config.observation.semantic_advice_min_interval_seconds,
     )
 
     verification_supervisor = ObservationVerificationSupervisor(
@@ -6147,11 +6154,13 @@ async def provide_service_ready_context(
         consent_invalidation_applier=project_application.apply_source_workspace_consent_invalidation,
         advice_context_builder=ObservationAdviceContextBuilder(
             composition=observation_composition_fact,
-            semantic_scheduler=advice_semantic_scheduler if semantic_configured else None,
+            semantic_scheduler=advice_semantic_scheduler if advice_semantic_enabled else None,
         ),
         verification_supervisor=verification_supervisor,
         advice_semantic_supervisor=advice_semantic_supervisor,
-        advice_semantic_dispatch=_dispatch_observation_advice_semantic,
+        advice_semantic_dispatch=(
+            _dispatch_observation_advice_semantic if advice_semantic_enabled else None
+        ),
         advice_semantic_cancellation_reconciler=_reconcile_cancelled_observation_advice_semantic,
         observation_enabled=config.observation.enabled,
         lineage_coordinator=lineage_manifest_coordinator,

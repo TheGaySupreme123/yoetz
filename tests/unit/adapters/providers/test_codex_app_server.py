@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import threading
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import replace
@@ -2558,3 +2559,23 @@ async def test_progress_sink_failure_never_changes_the_review_outcome(
     assert type(result) is SemanticResultSuccess
     assert result.provenance.runtime_evidence is not None
     assert result.provenance.runtime_evidence.process_cleanup == "terminated"
+
+
+async def test_launch_binding_hash_runs_off_loop_and_failure_prevents_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop_thread = threading.get_ident()
+    threads: list[int] = []
+
+    def changed_binding(_profile: CodexAppServerProfile) -> None:
+        threads.append(threading.get_ident())
+        raise ValueError("codex_runtime_executable_changed")
+
+    async def forbidden_spawn(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("changed executable must not launch")
+
+    monkeypatch.setattr(CodexAppServerProfile, "verify_local_binding", changed_binding)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden_spawn)
+    with pytest.raises(ValueError, match="codex_runtime_executable_changed"):
+        await module._launch(_profile())  # pyright: ignore[reportPrivateUsage]
+    assert len(threads) == 1 and threads[0] != loop_thread

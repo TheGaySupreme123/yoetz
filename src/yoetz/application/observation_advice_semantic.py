@@ -1,7 +1,7 @@
 """Bounded asynchronous AI-powered review for observation advice (issue #619).
 
 Hook ingest never calls a provider. The advice builder asks the scheduler for the durable
-attempt that matches the current evidence basis; when none exists it enqueues one minimized
+attempt that matches the current reviewable condition; when eligible it enqueues one minimized
 packet and reports ``advice_semantic_pending``. A generation-fenced background worker later
 claims the row, resolves repository-scoped provider authority at dispatch time, performs the
 privacy-gated attempt, and records the outcome. Only a ``succeeded`` row with validated output
@@ -23,6 +23,7 @@ from yoetz.application.observation_advice import (
 )
 from yoetz.domain.findings import FindingId
 from yoetz.observability.logging import record_unexpected_exception_without_raising
+from yoetz.ports.semantic_budget import semantic_budget_profile_scope
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 
 __all__ = [
@@ -71,7 +72,7 @@ MAX_ADVICE_SEMANTIC_ATTEMPTS: Final = 3
 
 @dataclass(frozen=True, slots=True)
 class ObservationAdviceSemanticAttempt:
-    """One durable attempt row keyed by (workspace, session, evidence basis)."""
+    """One durable attempt keyed by session and candidate packet digest (legacy rows use basis)."""
 
     attempt_id: str
     workspace_commitment: str
@@ -129,7 +130,8 @@ class ObservationAdviceSemanticRepository(Protocol):
         packet_json: bytes,
         enqueued_at: str,
         max_pending: int,
-    ) -> ObservationAdviceSemanticAttempt: ...
+        min_interval_seconds: int = 0,
+    ) -> ObservationAdviceSemanticAttempt | None: ...
 
     def lookup(
         self, *, yoetz_session_id: str, basis_digest: str
@@ -226,6 +228,7 @@ class ObservationAdviceSemanticScheduler:
     now: NowProvider
     max_pending: int = DEFAULT_ADVICE_SEMANTIC_MAX_PENDING
     enabled: bool = True
+    min_interval_seconds: int = 180
 
     async def review(
         self,
@@ -242,9 +245,6 @@ class ObservationAdviceSemanticScheduler:
         repository = _repository_for(store)
         if repository is None:
             return None
-        existing = repository.lookup(yoetz_session_id=yoetz_session_id, basis_digest=basis)
-        if existing is not None:
-            return addon_from_attempt(existing)
         sorted_gaps = tuple(sorted({gap for gap in gaps if gap}, key=str.encode))
         packet = minimized_semantic_evidence_packet(
             candidates,
@@ -252,21 +252,29 @@ class ObservationAdviceSemanticScheduler:
             coverage_gaps=sorted_gaps,
             finding_summaries=tuple(str(item.rule_code) for item in candidates),
         )
-        payload = canonical_encode(cast(JsonValue, dict(packet)))
-        subject = (
-            basis
-            if basis.startswith("sha256:")
-            else canonical_digest(cast(JsonValue, {"basis": basis}))
+        # The packet contains rule summaries, not source content. Key reuse by exactly that
+        # reviewable condition, excluding the rolling stream digest. Keep the original basis
+        # in the frozen packet and hash those exact bytes for disclosure provenance.
+        condition = dict(packet)
+        condition.pop("evidence_basis_digest")
+        condition_digest = canonical_digest(cast(JsonValue, condition))
+        existing = repository.lookup(
+            yoetz_session_id=yoetz_session_id, basis_digest=condition_digest
         )
+        if existing is not None:
+            return addon_from_attempt(existing)
+        payload = canonical_encode(cast(JsonValue, dict(packet)))
+        subject = canonical_digest(cast(JsonValue, dict(packet)))
         scheduled = repository.schedule(
             workspace=workspace,
             yoetz_session_id=yoetz_session_id,
-            basis_digest=basis,
+            basis_digest=condition_digest,
             subject_digest=subject,
             coverage_gaps=sorted_gaps,
             packet_json=payload,
             enqueued_at=self.now(),
             max_pending=self.max_pending,
+            min_interval_seconds=self.min_interval_seconds,
         )
         return addon_from_attempt(scheduled)
 
@@ -340,7 +348,8 @@ class ObservationAdviceSemanticWorker:
             )
             return attempt
         try:
-            outcome = await self.dispatch(attempt)
+            with semantic_budget_profile_scope("routine"):
+                outcome = await self.dispatch(attempt)
         except asyncio.CancelledError:
             self._complete(attempt, await self._cancelled_outcome(attempt))
             raise

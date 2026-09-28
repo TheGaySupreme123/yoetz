@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Sequence
+from datetime import datetime, timedelta
 from typing import cast
 
 import apsw
@@ -81,7 +82,8 @@ class SqliteObservationAdviceSemanticRepository:
         packet_json: bytes,
         enqueued_at: str,
         max_pending: int,
-    ) -> ObservationAdviceSemanticAttempt:
+        min_interval_seconds: int = 0,
+    ) -> ObservationAdviceSemanticAttempt | None:
         attempt_id = (
             "sadv_"
             + hashlib.sha256(
@@ -98,6 +100,20 @@ class SqliteObservationAdviceSemanticRepository:
             if existing is not None:
                 stored = _row(cast(tuple[object, ...], tuple(existing)))
                 return stored
+            # Admission and the timestamp check share one transaction. Reopening the service
+            # cannot reset the per-session rate limit, and rejected work adds no queue rows.
+            if min_interval_seconds > 0:
+                latest = self._db.execute(
+                    "SELECT MAX(created_at) FROM observation_advice_semantic_attempts "
+                    "WHERE yoetz_session_id=?",
+                    (yoetz_session_id,),
+                ).fetchone()
+                if latest is not None and latest[0] is not None:
+                    eligible = datetime.fromisoformat(str(latest[0])) + timedelta(
+                        seconds=min_interval_seconds
+                    )
+                    if datetime.fromisoformat(enqueued_at) < eligible:
+                        return None
             # A new basis for the same session supersedes that session's unattempted rows:
             # the provider would otherwise review evidence the advice no longer stands on. A
             # row already running finishes and keeps its own receipt.

@@ -33,9 +33,9 @@ __all__ = [
 type SemanticBudgetProfile = Literal["routine", "final"]
 
 SEMANTIC_BUDGET_PROFILES: Final[tuple[SemanticBudgetProfile, ...]] = ("routine", "final")
-# Dispatches outside a check (credential probes, observation advice) and execution snapshots
+# Unscoped dispatches (credential probes) and execution snapshots
 # frozen before profiles existed keep the pre-#571 behavior: the binding's single configured
-# effort, which is the final profile.
+# effort, which is the final profile. Background observation advice explicitly uses routine.
 LEGACY_SEMANTIC_BUDGET_PROFILE: Final[SemanticBudgetProfile] = "final"
 
 _current_profile: ContextVar[SemanticBudgetProfile | None] = ContextVar(
