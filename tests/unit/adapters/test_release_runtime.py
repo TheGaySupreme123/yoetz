@@ -251,3 +251,14 @@ def test_failed_root_seal_removes_only_new_generation_and_can_retry(
     assert (prefix / "pyvenv.cfg").is_file()
     target = runtimes.prepare_release_runtime(prefix)
     assert not target.stat().st_mode & 0o222
+
+
+def test_writable_published_root_is_not_reused_as_a_sealed_generation(prefix: Path) -> None:
+    target = runtimes.prepare_release_runtime(prefix)
+    target.chmod(0o700)
+    with pytest.raises(runtimes.ReleaseRuntimeError, match="release_runtime_incomplete"):
+        runtimes.prepare_release_runtime(prefix)
+    # Supported pruning can remove the unleased, owned incomplete generation before retry.
+    assert runtimes.prune_release_runtimes(prefix) == (1, 0)
+    repaired = runtimes.prepare_release_runtime(prefix)
+    assert not repaired.stat().st_mode & 0o222
