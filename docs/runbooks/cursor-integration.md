@@ -1492,3 +1492,19 @@ per-session interval on macOS, Linux and Windows through WSL 2. See
 [background review frequency](../usage/providers.md#background-review-frequency) for disable,
 resume and interval settings. The setting gates recovered pending work as well as new scheduling;
 explicit checks and deterministic advice retain their independent behavior.
+
+## Response and receipt timeout recovery
+
+The shared MCP bridge allows 50 seconds for `respond` and `receipt` by default, below the
+common 60-second host MCP tool limit; `start`, `publish_work` and `status` keep 30 seconds and
+`check` keeps 300 seconds. Set `YOETZ_MCP_DEADLINE_MS_<TOOL>` (one tool) or
+`YOETZ_MCP_DEADLINE_MS` (every tool except `check`) in the MCP server environment to change them;
+values are milliseconds, clamped to 1,000-900,000. Keep them below the host's own tool timeout.
+A timeout may follow a committed write. For `publish_work`, `respond` and `receipt` the bridge
+checks `status view=operation` once and, when the write already completed, returns its stored
+outcome directly. Otherwise use the timeout's pollable handle: `safe_details.replay_request_id`
+as `status`'s `filter.operation_request_id` with `view=operation` and the carried `session_id`
+and `writer_id` (`safe_details.state` is the probed state), or replay the unchanged write body
+under that same request ID. Never mint a replacement write ID to recover an unknown outcome.
+A lost first `start` still uses exact same-body replay because session/writer IDs may be absent.
+This behavior is identical on macOS, Linux and Windows via WSL 2. CLI callers may set `--deadline-ms`.

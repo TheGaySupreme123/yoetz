@@ -119,6 +119,8 @@ class TestTimeoutDirectivesFromTheBridgeMapper:
             ("start", "start_timeout_same_identity"),
             ("publish_work", "write_timeout_same_identity"),
             ("check", "write_timeout_same_identity"),
+            ("respond", "write_timeout_same_identity"),
+            ("receipt", "write_timeout_same_identity"),
             ("status", "read_timeout_new_identity"),
         ),
     )
@@ -132,7 +134,10 @@ class TestTimeoutDirectivesFromTheBridgeMapper:
         )
         error = _error_of(result)
         details = cast(dict[str, object], error["safe_details"])
-        assert details == {"continuation": token, "reason_code": "request_timeout"}
+        expected = {"continuation": token, "reason_code": "request_timeout"}
+        if operation in {"publish_work", "check", "respond", "receipt"}:
+            expected["replay_request_id"] = _REQUEST
+        assert details == expected
         text = _text(result)
         assert f"Continuation: {token}." in text
         assert RECOVERY_DIRECTIVES[token].directive in text

@@ -19,6 +19,7 @@ from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from typing import Final, Protocol, cast
 
+from yoetz.application.ledger_snapshot import projection_for_records
 from yoetz.application.unit_of_work import (
     PreparedMutation,
     abandon_preappend_objects,
@@ -56,6 +57,7 @@ from yoetz.domain.values import (
     Actor,
     ActorType,
     EventId,
+    Frontier,
     actor_id,
     task_id,
     timestamp_from_datetime,
@@ -805,9 +807,16 @@ class LineageManifestCoordinator:
         records = await self._load_records(child_runtime)
         if any(record.task_id != child_task_id for record in records):
             raise _invalid()
-        from yoetz.kernel.reducers import replay
-
-        projection = replay(records)
+        projection = await projection_for_records(
+            child_runtime.ledger,
+            child_runtime.session_id,
+            (
+                Frontier(records[-1].ledger.ingestion_sequence, records[-1].entry_digest)
+                if records
+                else Frontier(0, "genesis")
+            ),
+            records,
+        )
         current_frontier = await child_runtime.ledger.load_frontier()
         if (
             projection.frontier != current_frontier.sequence
