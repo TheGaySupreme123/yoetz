@@ -458,3 +458,52 @@ def test_runtime_cleanup_does_not_take_its_own_serving_lease(
     monkeypatch.setattr(entry, "_run_full_cli", lambda: None)
     monkeypatch.setattr(sys, "argv", ["yoetz", "upgrade", "--prune-runtimes"])
     entry.main()
+
+
+@pytest.mark.parametrize(
+    "os_errno, reason", [(13, "permission_denied"), (2, "file_missing"), (9999, "os_error")]
+)
+def test_runtime_os_failure_has_bounded_reason_without_private_text(
+    os_errno: int, reason: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from yoetz.adapters import release_runtime
+
+    def refuse(_arguments: list[str]) -> None:
+        raise OSError(os_errno, "PRIVATE_ERROR_CANARY", "PRIVATE_PATH_CANARY")
+
+    monkeypatch.setattr(release_runtime, "enter_release_runtime", refuse)
+    monkeypatch.setattr(sys, "argv", ["yoetz", "service", "run"])
+    with pytest.raises(SystemExit) as error:
+        entry.main()
+    assert error.value.code == 20
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert (
+        captured.err
+        == f"release_runtime_unavailable: {reason}; retry from the installed launcher.\n"
+    )
+    assert "PRIVATE" not in captured.err
+
+
+@pytest.mark.parametrize("phase", ["snapshot", "lease", "exec"])
+def test_runtime_io_phase_excludes_source_exception_text(
+    phase: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from typing import Literal, cast
+
+    from yoetz.adapters import release_runtime
+
+    def refuse(_arguments: list[str]) -> None:
+        raise release_runtime.ReleaseRuntimeIOError(
+            PermissionError(13, "PRIVATE_ERROR", "PRIVATE_PATH"),
+            cast(Literal["snapshot", "lease", "exec"], phase),
+        )
+
+    monkeypatch.setattr(release_runtime, "enter_release_runtime", refuse)
+    monkeypatch.setattr(sys, "argv", ["yoetz", "service", "run"])
+    with pytest.raises(SystemExit):
+        entry.main()
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert f"{phase}_permission_denied" in captured.err
+    assert "PRIVATE" not in captured.err

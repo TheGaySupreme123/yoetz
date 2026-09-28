@@ -21,7 +21,7 @@ import tempfile
 import time
 from collections.abc import Generator
 from pathlib import Path
-from typing import Final, cast
+from typing import Final, Literal, cast
 
 _MARKER: Final = "yoetz-release-runtime.json"
 _SCHEMA: Final = "yoetz.release-runtime/1"
@@ -36,6 +36,20 @@ _original_interpreter: str | None = None
 
 class ReleaseRuntimeError(ValueError):
     """A bounded refusal, never an installation path or package-manager output."""
+
+
+class ReleaseRuntimeIOError(OSError):
+    """A closed operation label plus errno; never retains an exception message or path."""
+
+    def __init__(
+        self,
+        error: OSError,
+        phase: Literal[
+            "snapshot", "snapshot_copy", "snapshot_seal", "snapshot_publish", "lease", "exec"
+        ],
+    ) -> None:
+        super().__init__(error.errno, "release_runtime_io")
+        self.phase = phase
 
 
 def _private_directory(path: Path, *, create: bool = False) -> None:
@@ -195,6 +209,8 @@ def _prepare_locked(prefix: Path, root: Path) -> Path:
     target = root / key
     if target.exists() or target.is_symlink():
         _private_directory(target)
+        if target.stat().st_mode & 0o222:
+            raise ReleaseRuntimeError("release_runtime_incomplete")
         marker = _marker(target)
         if marker is None or marker["origin"] != str(prefix):
             raise ReleaseRuntimeError("release_runtime_invalid")
@@ -213,8 +229,11 @@ def _prepare_locked(prefix: Path, root: Path) -> Path:
             if source.is_symlink():
                 destination.symlink_to(source.resolve(strict=True))
             else:
-                shutil.copyfile(source, destination, follow_symlinks=False)
-                destination.chmod(0o700 if os.access(source, os.X_OK) else 0o600)
+                try:
+                    shutil.copyfile(source, destination, follow_symlinks=False)
+                    destination.chmod(0o700 if os.access(source, os.X_OK) else 0o600)
+                except OSError as error:
+                    raise ReleaseRuntimeIOError(error, "snapshot_copy") from None
         if before != _members(prefix) or key != _release_key(prefix):
             raise ReleaseRuntimeError("release_runtime_changed_retry")
         (temporary / _MARKER).write_text(
@@ -224,14 +243,29 @@ def _prepare_locked(prefix: Path, root: Path) -> Path:
         (temporary / _MARKER).chmod(0o600)
         lease = _open_lock(temporary / _LEASE)
         os.close(lease)
-        for path in temporary.rglob("*"):
-            if path.is_file() and not path.is_symlink() and path.name != _LEASE:
-                path.chmod(0o500 if os.access(path, os.X_OK) else 0o400)
-        for path in sorted(temporary.rglob("*"), reverse=True):
-            if path.is_dir():
-                path.chmod(0o500)
-        temporary.chmod(0o500)
-        temporary.rename(target)
+        try:
+            for path in temporary.rglob("*"):
+                if path.is_file() and not path.is_symlink() and path.name != _LEASE:
+                    path.chmod(0o500 if os.access(path, os.X_OK) else 0o400)
+            for path in sorted(temporary.rglob("*"), reverse=True):
+                if path.is_dir():
+                    path.chmod(0o500)
+        except OSError as error:
+            raise ReleaseRuntimeIOError(error, "snapshot_seal") from None
+        try:
+            # macOS may require a writable source directory for rename. Keep only the
+            # private staging root writable until publication, under the manager lock.
+            # Consumers cannot acquire that lock or a lease until sealing completes.
+            temporary.rename(target)
+            try:
+                target.chmod(0o500)
+            except OSError:
+                # This call created the unpublished/unleased generation. Remove it rather
+                # than leave a writable root that a later prepare could mistake for ready.
+                _remove_copy(target)
+                raise
+        except OSError as error:
+            raise ReleaseRuntimeIOError(error, "snapshot_publish") from None
         return target
     finally:
         if temporary.exists():
@@ -385,10 +419,19 @@ def enter_release_runtime(arguments: list[str]) -> None:
     if sys.prefix == sys.base_prefix or not package.is_relative_to(prefix.resolve()):
         return
     with release_update_lock(prefix) as root:
-        target = _prepare_locked(prefix, root)
+        try:
+            target = _prepare_locked(prefix, root)
+        except ReleaseRuntimeIOError:
+            raise
+        except OSError as error:
+            raise ReleaseRuntimeIOError(error, "snapshot") from None
         fd = _open_lock(target / _LEASE)
-        fcntl.flock(fd, fcntl.LOCK_SH)
-        os.set_inheritable(fd, True)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH)
+            os.set_inheritable(fd, True)
+        except OSError as error:
+            os.close(fd)
+            raise ReleaseRuntimeIOError(error, "lease") from None
         try:
             with contextlib.suppress(OSError, ReleaseRuntimeError):
                 _prune_locked(root, keep=target)

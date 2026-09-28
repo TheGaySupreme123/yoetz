@@ -522,6 +522,8 @@ class _ReadyObservationSweep:
 
     callback: Callable[[], Awaitable[ObservationDrainSummary]]
     row_gate_bound: bool
+    # Lock-free read-only probe the idle sweeper polls for undelivered rows (#887).
+    backlog_probe: Callable[[], bool] | None = None
 
     async def __call__(self) -> ObservationDrainSummary:
         return await self.callback()
@@ -6323,6 +6325,7 @@ async def provide_service_ready_context(
         observation_sweep=_ReadyObservationSweep(
             sweep_observation,
             row_gate_bound=observation_gate is not None,
+            backlog_probe=local_observation.has_unattempted_outbox_rows,
         ),
         coordination_sweep=sweep_coordination,
         observation_sweep_close=close_observation_maintenance,

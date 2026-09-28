@@ -234,6 +234,17 @@ _LINEAGE_RECOVERY_DEADLINE_SECONDS: Final = 30.0
 # Yield between two immediately consecutive drain passes. One scheduler turn is not a fair share
 # when the next pass may take a cross-process store lock a hook process also wants.
 _OBSERVATION_SWEEP_PROGRESS_DELAY_SECONDS: Final = 0.05
+# Hook ingest is the signal that a host is producing observation input, and a hook drains at most
+# a few rows within its own 0.2 s budget. Each hook ingest therefore moves the next sweep forward
+# instead of leaving the remainder for the 60 s idle interval (#887). A burst of hook ingests is
+# coalesced: the sweeper waits this long after the first wake, so hook-driven passes stay at most
+# about one per second and never contend with every hook for the store lock.
+_OBSERVATION_SWEEP_INGEST_COALESCE_SECONDS: Final = 1.0
+# Some hooks commit a contentless structural row locally and defer delivery without any service
+# call, so no ingest wake exists for it. While idle the sweeper polls a lock-free, read-only probe
+# at this cadence and sweeps as soon as an unattempted row is waiting. Rows that already failed an
+# attempt keep the idle interval, so a retrying row cannot turn this poll into a retry storm.
+_OBSERVATION_SWEEP_BACKLOG_POLL_SECONDS: Final = 5.0
 _READY_RECOMMENDATION_REFRESH_DEADLINE_SECONDS: Final = 10.0
 _READY_RECOMMENDATION_REFRESH_INTERVAL_SECONDS: Final = 3600.0
 # Soft locks may re-apply the same scoped auto-unlock / keyring load the service already uses at
@@ -696,6 +707,8 @@ class ServiceDaemon:
         # held both dispatch gates, so the handoff's structural delivery could not run; waking the
         # sweeper drains it as soon as those gates are free instead of an idle interval later.
         self._observation_sweep_wake = asyncio.Event()
+        # Set by each hook observation ingest; the sweeper coalesces a burst into one early pass.
+        self._observation_ingest_wake = asyncio.Event()
         self._ready_maintenance_task: asyncio.Task[None] | None = None
 
     @property
@@ -1088,6 +1101,10 @@ class ServiceDaemon:
         repository_privacy_context: RepositoryPrivacyContext | None,
     ) -> object:
         body = request.body
+        if request.method is ControlMethod.OBSERVATION_INGEST:
+            # Set before dispatch: a busy hook ingest can time out client-side, and the rows it
+            # could not drain are exactly the ones the sweep should pick up promptly.
+            self._observation_ingest_wake.set()
         try:
             if (
                 request.method is ControlMethod.CHECK
@@ -1813,6 +1830,8 @@ class ServiceDaemon:
                 await self._note_sweep_liveness(summary)
             next_recommendation_refresh = 0.0
             next_recovery = asyncio.get_running_loop().time() + _OBSERVATION_SWEEP_INTERVAL_SECONDS
+            probe = getattr(observation_sweep, "backlog_probe", None)
+            backlog_probe = cast(Callable[[], bool], probe) if callable(probe) else None
             while self._ready_generation_is_current(
                 application, service_generation, vault_generation
             ):
@@ -1834,7 +1853,8 @@ class ServiceDaemon:
                     await self._await_observation_sweep_turn(
                         _OBSERVATION_SWEEP_INTERVAL_SECONDS
                         if resolved == 0
-                        else _OBSERVATION_SWEEP_PROGRESS_DELAY_SECONDS
+                        else _OBSERVATION_SWEEP_PROGRESS_DELAY_SECONDS,
+                        backlog_probe,
                     )
                 if observation_sweep is not None:
                     summary = await self._bounded_observation_sweep(observation_sweep)
@@ -1856,22 +1876,79 @@ class ServiceDaemon:
         except asyncio.CancelledError:
             raise
 
-    async def _await_observation_sweep_turn(self, delay: float) -> None:
-        """Wait for the next sweep: the idle or progress delay, or an earlier admission wake.
+    async def _await_observation_sweep_turn(
+        self, delay: float, backlog_probe: Callable[[], bool] | None = None
+    ) -> None:
+        """Wait for the next sweep: the idle or progress delay, or an earlier wake.
 
         A wake only moves the next bounded pass forward; it never adds a pass or skips the gates
-        the sweep takes per row.
+        the sweep takes per row. While idle, ``backlog_probe`` is polled off the loop every
+        ``_OBSERVATION_SWEEP_BACKLOG_POLL_SECONDS``: a hook that deferred its structural row
+        without contacting the service leaves no wake, so an undelivered row ends the idle wait
+        instead of waiting out the full interval (#887).
         """
 
         wake = self._observation_sweep_wake
-        if not wake.is_set():
+        ingest = self._observation_ingest_wake
+        loop = asyncio.get_running_loop()
+        idle_until = loop.time() + delay
+        while not wake.is_set() and not ingest.is_set():
+            # Always await at least once, even for a zero progress delay, so consecutive passes
+            # yield the loop instead of spinning it.
+            remaining = max(0.0, idle_until - loop.time())
+            poll = (
+                min(remaining, _OBSERVATION_SWEEP_BACKLOG_POLL_SECONDS)
+                if backlog_probe is not None
+                else remaining
+            )
+            waiters = {
+                asyncio.ensure_future(wake.wait()),
+                asyncio.ensure_future(ingest.wait()),
+            }
             try:
-                await asyncio.wait_for(wake.wait(), timeout=delay)
-            except TimeoutError:
-                # A wake can be set after wait_for decides the timeout but before this task
-                # resumes.  Leave it armed so that boundary wake is observed by the next turn.
+                done, _pending = await asyncio.wait(
+                    waiters, timeout=poll, return_when=asyncio.FIRST_COMPLETED
+                )
+            finally:
+                for waiter in waiters:
+                    waiter.cancel()
+            if done:
+                break
+            if wake.is_set() or ingest.is_set():
+                # A wake can be set after the wait times out but before this task resumes.
+                # Leave it armed so that boundary wake is observed by the next turn.
                 return
+            if backlog_probe is None or idle_until - loop.time() <= 0.0:
+                return
+            if await self._observation_backlog_pending(backlog_probe):
+                return
+        if (
+            not wake.is_set()
+            and ingest.is_set()
+            and delay > _OBSERVATION_SWEEP_INGEST_COALESCE_SECONDS
+        ):
+            # Coalesce a burst of hook ingests into one early pass; a targeted wake still
+            # cuts the coalescing short.
+            try:
+                await asyncio.wait_for(
+                    wake.wait(), timeout=_OBSERVATION_SWEEP_INGEST_COALESCE_SECONDS
+                )
+            except TimeoutError:
+                pass
+        ingest.clear()
         wake.clear()
+
+    @staticmethod
+    async def _observation_backlog_pending(backlog_probe: Callable[[], bool]) -> bool:
+        """Run the read-only backlog probe off the loop; any failure means keep waiting."""
+
+        try:
+            async with asyncio.timeout(_OBSERVATION_SWEEP_BACKLOG_POLL_SECONDS):
+                return (await asyncio.to_thread(backlog_probe)) is True
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return False
 
     async def _refresh_ready_recommendations(
         self, recommendation_refresh: Callable[[], Awaitable[object]]
