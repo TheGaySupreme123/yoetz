@@ -99,10 +99,10 @@ async def test_observation_history_no_longer_forces_full_reference_inventory(
     snapshot = await ledger.load_projection(base.session_id, ProjectionView.CANDIDATE_FINDINGS)
     assert snapshot is not None and type(snapshot.state) is ProjectionState
 
-    def forbidden_replay(_records: object) -> ProjectionState:
+    def forbidden_replay(*_args: object) -> ProjectionState:
         pytest.fail("mature current snapshot must not replay observation history")
 
-    monkeypatch.setattr(ledger_snapshot, "replay", forbidden_replay)
+    monkeypatch.setattr(ledger_snapshot, "_replay_until_cancelled", forbidden_replay)
     frontier = Frontier(snapshot.state.frontier, snapshot.state.head_digest)
     for _ in range(10):
         assert (

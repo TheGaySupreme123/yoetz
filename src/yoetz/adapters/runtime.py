@@ -326,6 +326,16 @@ class _ReadLedger:
     ) -> StoredProjection | None:
         return await self._value.load_projection(session_id, view)
 
+    async def load_trusted_projection(
+        self, session_id: str, frontier: Frontier
+    ) -> ProjectionState | None:
+        loader = getattr(self._value, "load_trusted_projection", None)
+        if not callable(loader):
+            return None
+        return await cast(Callable[[str, Frontier], Awaitable[ProjectionState | None]], loader)(
+            session_id, frontier
+        )
+
     async def load_case_availability(
         self,
         session_id: str,

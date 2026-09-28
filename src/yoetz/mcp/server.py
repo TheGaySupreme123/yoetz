@@ -141,8 +141,29 @@ __all__ = [
 
 _SERVER_NAME: Final = "yoetz"
 _WORKFLOW_RPC_DEADLINE_MS: Final = 30_000
-_RECEIPT_RESPONSE_RPC_DEADLINE_MS: Final = 120_000
+# Respond and receipt no longer replay the ledger per call (issue #886). Their default stays
+# below the common 60-second host MCP tool limit (Codex ``tool_timeout_sec``) so the bridge's own
+# typed timeout, with its operation handle, reaches the agent before the host gives up.
+_RECEIPT_RESPONSE_RPC_DEADLINE_MS: Final = 50_000
 _SEMANTIC_CHECK_RPC_DEADLINE_MS: Final = 300_000
+_DEFAULT_RPC_DEADLINES_MS: Final = MappingProxyType(
+    {
+        "start": _WORKFLOW_RPC_DEADLINE_MS,
+        "publish_work": _WORKFLOW_RPC_DEADLINE_MS,
+        "status": _WORKFLOW_RPC_DEADLINE_MS,
+        "respond": _RECEIPT_RESPONSE_RPC_DEADLINE_MS,
+        "receipt": _RECEIPT_RESPONSE_RPC_DEADLINE_MS,
+        "check": _SEMANTIC_CHECK_RPC_DEADLINE_MS,
+    }
+)
+# ``YOETZ_MCP_DEADLINE_MS_<TOOL>`` sets one tool; ``YOETZ_MCP_DEADLINE_MS`` sets every tool except
+# ``check``, whose semantic-review budget is only changed by its own variable. Values are integer
+# milliseconds, clamped to a sane range; anything unparsable keeps the default.
+_RPC_DEADLINE_ENV: Final = "YOETZ_MCP_DEADLINE_MS"
+_MIN_RPC_DEADLINE_MS: Final = 1_000
+_MAX_RPC_DEADLINE_MS: Final = 900_000
+# A write that timed out is probed once for its durable operation state with this budget.
+_TIMEOUT_PROBE_DEADLINE_MS: Final = 5_000
 _CURSOR_ROOTS_REQUEST_TIMEOUT_SECONDS: Final = 5.0
 _MAX_CURSOR_ROOTS: Final = 32
 _MAX_CURSOR_ROOT_URI_BYTES: Final = MAX_WORKSPACE_LOCATOR_BYTES * 2
@@ -1306,6 +1327,7 @@ def _control_error_result(
     *,
     host_profile: McpHostProfile = "generic",
     vault_initialization_details: Mapping[str, object] | None = None,
+    timeout_handle: Mapping[str, object] | None = None,
 ) -> types.CallToolResult:
     # Prefer the service-minted diagnostic id when present so the agent-facing public error
     # resolves the same durable sink record the daemon already wrote. Never mint a second id for
@@ -1461,6 +1483,10 @@ def _control_error_result(
         timeout_details: dict[str, object] = {"reason_code": "request_timeout"}
         if operation_kind == "write" and request_id is not None:
             timeout_details["replay_request_id"] = request_id
+            if timeout_handle is not None:
+                # A pollable handle: status with these ids, view=operation and
+                # filter.operation_request_id=replay_request_id returns the stored outcome.
+                timeout_details.update(timeout_handle)
         continuation = continuation_for_reason("request_timeout", operation_kind=operation_kind)
         if continuation is not None:
             timeout_details["continuation"] = continuation
@@ -1904,6 +1930,98 @@ async def _inherit_after_inflight_availability(
     return await _inherit_terminal_availability(runtime, request_id, concurrent_waiter=waited)
 
 
+def _rpc_deadline_ms(tool: str, environ: Mapping[str, str] | None = None) -> int:
+    """Return the bridge-to-service deadline for one workflow tool, honouring env overrides."""
+
+    source = os.environ if environ is None else environ
+    names = [f"{_RPC_DEADLINE_ENV}_{tool.upper()}"]
+    if tool != "check":
+        names.append(_RPC_DEADLINE_ENV)
+    for name in names:
+        raw = source.get(name)
+        if raw is None:
+            continue
+        text = raw.strip()
+        if not text.isascii() or not text.isdigit():
+            continue
+        return max(_MIN_RPC_DEADLINE_MS, min(_MAX_RPC_DEADLINE_MS, int(text)))
+    return _DEFAULT_RPC_DEADLINES_MS[tool]
+
+
+class _TimeoutPollView(Enum):
+    OPERATION = "operation"
+
+
+class _TimeoutOperationState(Enum):
+    ABSENT = "absent"
+    PENDING = "pending"
+    COMPLETE = "complete"
+    QUARANTINED = "quarantined"
+    UNKNOWN = "unknown"
+
+
+_TIMEOUT_PROBED_WRITES: Final = frozenset({"publish_work", "respond", "receipt"})
+
+
+async def _timeout_operation_state(
+    arguments: Mapping[str, object],
+    runtime: BridgeRuntime,
+    request_id: str | None,
+) -> tuple[_TimeoutOperationState, str, str] | None:
+    """Probe ``status view=operation`` once for a write whose response deadline expired.
+
+    Returns ``(state, session_id, writer_id)`` for a complete envelope, else ``None``. Any probe
+    failure is ``UNKNOWN``: the write outcome stays unknown and nothing is inferred from silence.
+    """
+
+    envelope = _publish_envelope_fields(arguments)
+    if envelope is None:
+        return None
+    op_request_id, session_id, writer_id, actor, client = envelope
+    try:
+        status_request = StatusRequest.model_validate(
+            {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "request_id": new_id(IdKind.REQUEST),
+                "session_id": session_id,
+                "writer_id": writer_id,
+                "view": "operation",
+                "limit": "1",
+                "filter": {"operation_request_id": op_request_id},
+                "actor": dict(actor),
+                "client": dict(client),
+            }
+        )
+        status_result = await _invoke_with_reconnect(
+            runtime,
+            status_request,
+            lambda service, request: service.status(
+                request, deadline_ms=_TIMEOUT_PROBE_DEADLINE_MS
+            ),
+            request_id,
+        )
+        wire = public_model_to_wire(status_result)
+        page = wire.get("page") if wire.get("ok") is True else None
+        state = cast(dict[str, object], page).get("state") if type(page) is dict else None
+        return (
+            _TimeoutOperationState(state)
+            if type(state) is str and state in {item.value for item in _TimeoutOperationState}
+            else _TimeoutOperationState.UNKNOWN,
+            session_id,
+            writer_id,
+        )
+    except Exception as exc:  # noqa: BLE001 - a failed probe only leaves the outcome unknown
+        if not isinstance(exc, (ControlError, PublicOperationError, ValidationError)):
+            record_unexpected_exception_without_raising(
+                exc,
+                component="mcp.bridge",
+                operation="write_timeout_probe_internal_error",
+                request_id=request_id,
+            )
+        return (_TimeoutOperationState.UNKNOWN, session_id, writer_id)
+
+
 async def _invoke_with_reconnect[RequestT: BaseModel, ResultT: BaseModel](
     runtime: BridgeRuntime,
     request: RequestT,
@@ -2035,13 +2153,37 @@ async def _dispatch[RequestT: BaseModel, ResultT: BaseModel](
             vault_initialization_details = await _vault_initialization_continuation(
                 runtime, request_id
             )
-        return _control_error_result(
-            exc,
-            request_id,
-            operation,
-            host_profile=runtime.host_profile,
-            vault_initialization_details=vault_initialization_details,
-        )
+        timeout_handle: dict[str, object] | None = None
+        recovered: ResultT | None = None
+        if exc.reason == "request_timeout" and operation in _TIMEOUT_PROBED_WRITES:
+            probed = await _timeout_operation_state(arguments, runtime, request_id)
+            if probed is not None:
+                state, session_id, writer_id = probed
+                if state is _TimeoutOperationState.COMPLETE:
+                    # The write committed after the response deadline. Its same-request replay
+                    # is idempotent and returns the stored outcome without appending again.
+                    try:
+                        recovered = await _invoke_with_reconnect(
+                            runtime, request, invoke, request_id
+                        )
+                    except Exception:  # noqa: BLE001 - fall back to the typed pollable handle
+                        recovered = None
+                timeout_handle = {
+                    "session_id": session_id,
+                    "writer_id": writer_id,
+                    "view": _TimeoutPollView.OPERATION,
+                    "state": state,
+                }
+        if recovered is None:
+            return _control_error_result(
+                exc,
+                request_id,
+                operation,
+                host_profile=runtime.host_profile,
+                vault_initialization_details=vault_initialization_details,
+                timeout_handle=timeout_handle,
+            )
+        result = recovered
     except Exception as exc:
         correlation_id = record_unexpected_exception_without_raising(
             exc,
@@ -2087,7 +2229,7 @@ async def dispatch_start(
         arguments,
         StartRequest,
         StartResult,
-        lambda client, request: client.start(request, deadline_ms=_WORKFLOW_RPC_DEADLINE_MS),
+        lambda client, request: client.start(request, deadline_ms=_rpc_deadline_ms("start")),
         runtime,
         "start",
     )
@@ -2396,7 +2538,9 @@ async def dispatch_publish_work(
         arguments,
         PublishWorkRequest,
         PublishWorkResult,
-        lambda client, request: client.publish_work(request, deadline_ms=_WORKFLOW_RPC_DEADLINE_MS),
+        lambda client, request: client.publish_work(
+            request, deadline_ms=_rpc_deadline_ms("publish_work")
+        ),
         runtime,
         "publish_work",
     )
@@ -2411,7 +2555,7 @@ async def dispatch_check(
         CheckResult,
         lambda client, request: client.check(
             request,
-            deadline_ms=_SEMANTIC_CHECK_RPC_DEADLINE_MS,
+            deadline_ms=_rpc_deadline_ms("check"),
             route_profile=runtime.route_profile,
             host_profile=runtime.host_profile,
         ),
@@ -2427,9 +2571,7 @@ async def dispatch_respond(
         arguments,
         RespondRequest,
         RespondResult,
-        lambda client, request: client.respond(
-            request, deadline_ms=_RECEIPT_RESPONSE_RPC_DEADLINE_MS
-        ),
+        lambda client, request: client.respond(request, deadline_ms=_rpc_deadline_ms("respond")),
         runtime,
         "respond",
     )
@@ -2444,7 +2586,7 @@ async def dispatch_status(
         StatusResult,
         lambda client, request: client.status(
             request,
-            deadline_ms=_WORKFLOW_RPC_DEADLINE_MS,
+            deadline_ms=_rpc_deadline_ms("status"),
             route_profile=runtime.route_profile,
         ),
         runtime,
@@ -2459,9 +2601,7 @@ async def dispatch_receipt(
         arguments,
         ReceiptRequest,
         ReceiptResult,
-        lambda client, request: client.receipt(
-            request, deadline_ms=_RECEIPT_RESPONSE_RPC_DEADLINE_MS
-        ),
+        lambda client, request: client.receipt(request, deadline_ms=_rpc_deadline_ms("receipt")),
         runtime,
         "receipt",
     )

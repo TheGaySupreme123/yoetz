@@ -2468,15 +2468,25 @@ reopened, and never replace the newer service: the one per-user endpoint belongs
 installation in use. Installed bridges and services run from retained release copies, including
 code, dependencies and resources, so package replacement does not change the bytes available to
 an open process (ADR-007). The MCP bridge supplies a
-**30-second** call deadline for `start`, `publish_work`, and `status`, a **120-second**
-deadline for `respond` and `receipt`, and a **300-second** deadline for `check`; these use the existing private `deadline_ms` envelope field and
-do not change the public workflow-tool schemas. A timed-out write has an unknown outcome: the bridge
+default **30-second** call deadline for `start`, `publish_work`, and `status`, a default
+**50-second** deadline for `respond` and `receipt` (below the common 60-second host MCP tool
+limit, so the bridge's typed timeout reaches the agent first), and a default **300-second**
+deadline for `check`; these use the existing private `deadline_ms` envelope field and do not
+change the public workflow-tool schemas. The bridge environment may override them in integer
+milliseconds, clamped to 1,000-900,000: `YOETZ_MCP_DEADLINE_MS_<TOOL>` (for example
+`YOETZ_MCP_DEADLINE_MS_RECEIPT`) sets one tool, and `YOETZ_MCP_DEADLINE_MS` sets every tool except
+`check`; an unparsable value keeps the default. Raising a deadline above the host's own MCP tool
+timeout only lets the host give up first. A timed-out write has an unknown outcome: the bridge
 must preserve its retryable failure shape, say that it may already have committed, and direct the
 caller to retry with the same `request_id` (and operation status where applicable). A timed-out
-read may simply be repeated. For a timed-out non-start write, `safe_details.replay_request_id`
-is the exact polling identity for `status view=operation` with `filter.operation_request_id`.
-This is an unknown write outcome, not a failed commit. CLI callers retain their explicit
-`--deadline-ms` override.
+read may simply be repeated. For a timed-out `publish_work`, `respond` or `receipt`, the bridge
+probes `status view=operation` once (5-second budget) for that exact `request_id`. When the
+operation is already `complete`, it replays the unchanged request once under the same
+`request_id` and returns the stored outcome instead of the timeout. Otherwise the timeout carries
+a pollable handle in `safe_details`: `replay_request_id` (the value for
+`filter.operation_request_id`), `session_id`, `writer_id`, `view: operation` and the probed
+`state` (`absent`, `pending`, `quarantined` or `unknown`). This is an unknown write outcome, not a
+failed commit. CLI callers retain their explicit `--deadline-ms` override.
 
 The private `ControlCallRequest` envelope may carry `route_profile=policy|strict` only for `check`
 and `status`. It is set by the MCP bridge from its immutable process profile, is absent from public
@@ -6787,11 +6797,27 @@ check did not return. Resolved history does not remove receipt coverage limitati
 
 ### Exact-frontier workflow snapshot reuse (issue #886)
 
-Respond, receipt and candidate-finding status use an adapter-owned, fully rebuilt current
-projection only when its frontier exactly matches the requested prefix. Older prefixes fall
-back to genesis replay off the service loop. Receipt/candidate case assembly still validates
+Respond, receipt, check, publish and candidate-finding status use an adapter-owned projection
+only when its frontier exactly matches the requested prefix: the live head, or one of at most 16
+recent exact frontiers the adapter itself produced by replay or append. A retained frontier is
+honoured only while the current chain still holds the identical record objects it was folded
+from, so recovery, a rolled-back SQLite sync or any record replacement invalidates it, and a
+redaction append drops every retained frontier. Anything else falls back to genesis replay in a
+worker thread that stops at the next record when its caller is cancelled. Respond reads a finding
+at an older in-chain finding frontier from the current projection when the record at that
+sequence carries the requested head digest and the finding's source event is at or before it.
+
+Appends fold only the new records onto the adapter's trusted projection (the whole prefix is
+still re-authenticated into a fresh reverse index), so a write no longer re-reduces the ledger
+while holding the ledger lock. Receipt-time anchoring of a stale-by-observation frontier accepts
+the adapter's own projection by identity instead of replaying on the loop. Folding carries
+records unchanged from the already validated prior projection by identity rather than re-encoding
+and re-digesting every payload on each step, which had made genesis replay quadratic; new or
+replaced records are validated in full. Receipt/candidate/check case assembly still validates
 record chains and builds its reverse index, without reducing the already validated prefix again.
 There is no process-global task-content cache. Status retains at most eight exact-frontier row
 indexes per ledger; append-only extension may reuse pinned pages, while prefix replacement,
 truncation or redaction invalidates them. Snapshot reuse never substitutes frontier equality
 alone for an adapter's recovery/authentication authority. All host/OS clients share this path.
+`tests/integration/application/test_ledger_replay_bench.py` is an opt-in latency benchmark
+(`YOETZ_BENCH_886=1`) at 1,500 and 3,000 observation events.

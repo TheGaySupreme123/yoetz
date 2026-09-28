@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Final, Literal, Protocol, cast
 
+from yoetz.application.ledger_snapshot import replay_off_loop, trusted_projection_at
 from yoetz.application.unit_of_work import (
     PreparedMutation,
     PreSubmissionCancelled,
@@ -82,7 +83,7 @@ from yoetz.domain.values import (
 )
 from yoetz.kernel.completion_scope import with_completion_scope_coverage
 from yoetz.kernel.projections import PROJECTION_VERSION, ProjectionState
-from yoetz.kernel.reducers import replay
+from yoetz.kernel.reducers import replay_extension
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.ledger import (
@@ -976,7 +977,7 @@ async def _projection_at_result_frontier(
             )
         ]
     )
-    return replay(prefix)
+    return await replay_off_loop(prefix)
 
 
 def _accepted_model(record: LedgerRecord) -> PublishWorkAcceptedEventModel:
@@ -1392,7 +1393,28 @@ async def _preflight_dry_run_feasibility(
             )
             provisional.append(record)
             previous_ledger = record.entry_digest
-        projected = replay((*existing_records, *provisional))
+        prior_records = tuple(existing_records)
+        prior_projection = (
+            None
+            if not prior_records
+            else await trusted_projection_at(
+                runtime.ledger,
+                runtime.session_id,
+                Frontier(
+                    prior_records[-1].ledger.ingestion_sequence, prior_records[-1].entry_digest
+                ),
+            )
+        )
+        if prior_projection is None:
+            projected = await replay_off_loop((*prior_records, *provisional))
+        else:
+            # Fold only the provisional drafts onto the adapter-owned projection; the extension
+            # still re-authenticates the whole prefix into a fresh reverse index (issue #886).
+            trusted_prior = prior_projection
+            appended = tuple(provisional)
+            projected = await asyncio.to_thread(
+                replay_extension, trusted_prior, prior_records, appended
+            )
     except ObligationResolutionMismatch as exc:
         draft_index: int | None = None
         if exc.event_id is not None:

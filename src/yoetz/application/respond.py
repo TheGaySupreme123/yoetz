@@ -30,7 +30,7 @@ from yoetz.domain.values import (
     timestamp_from_datetime,
     timestamp_from_string,
 )
-from yoetz.kernel.projections import ProjectionState
+from yoetz.kernel.projections import FindingProjectionRecord, ProjectionState
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.ids import IdPort
@@ -277,6 +277,40 @@ async def _records_through(
     return records, projection
 
 
+def _finding_from_current_prefix(
+    current_records: tuple[LedgerRecord, ...],
+    current_projection: ProjectionState,
+    finding_frontier: Frontier,
+    raw_finding_id: str,
+) -> FindingProjectionRecord | None:
+    """Read the finding at ``finding_frontier`` from the current projection without a replay.
+
+    ``current_records`` is the hash-chained prefix the current projection was authenticated
+    against. When the record at ``finding_frontier.sequence`` carries exactly that head digest,
+    the finding frontier is an in-chain prefix of the current one. A finding whose source event is
+    at or before that prefix, and whose payload is still present, is the same immutable payload
+    the prefix replay would yield. Anything else (a later re-record, redaction, or a foreign
+    frontier) returns ``None`` so the caller keeps the genesis-replay path (issue #886).
+    """
+
+    sequence = finding_frontier.sequence
+    if not 0 < sequence <= len(current_records):
+        return None
+    anchor = current_records[sequence - 1]
+    if (
+        anchor.ledger.ingestion_sequence != sequence
+        or anchor.entry_digest != finding_frontier.head_digest
+    ):
+        return None
+    try:
+        record = current_projection.findings.get(finding_id(raw_finding_id))
+    except ValueError:
+        return None
+    if record is None or record.payload is None or record.source_frontier > sequence:
+        return None
+    return record
+
+
 async def _accepted_record(runtime: TaskRuntime, result: AppendResult) -> LedgerRecord:
     if len(result.accepted) != 1:
         raise _error(PublicErrorCode.STORAGE_CORRUPT, "The response event range is invalid.")
@@ -384,8 +418,18 @@ async def execute_respond(app: Application, request: RespondRequest) -> RespondI
             finding_frontier = Frontier(
                 int(request.finding_frontier.sequence), request.finding_frontier.head_digest
             )
-            _finding_records, finding_projection = await _records_through(runtime, finding_frontier)
-            finding_record = finding_projection.findings.get(finding_id(request.finding_id))
+            current = Frontier(
+                int(request.expected_frontier.sequence), request.expected_frontier.head_digest
+            )
+            current_records, current_projection = await _records_through(runtime, current)
+            finding_record = _finding_from_current_prefix(
+                current_records, current_projection, finding_frontier, request.finding_id
+            )
+            if finding_record is None:
+                _finding_records, finding_projection = await _records_through(
+                    runtime, finding_frontier
+                )
+                finding_record = finding_projection.findings.get(finding_id(request.finding_id))
             if finding_record is None or finding_record.payload is None:
                 raise _error(
                     PublicErrorCode.INVALID_REQUEST,
@@ -398,13 +442,6 @@ async def execute_respond(app: Application, request: RespondRequest) -> RespondI
                     reason_code="finding_not_in_prefix",
                     field="finding_frontier",
                 )
-            current = Frontier(
-                int(request.expected_frontier.sequence), request.expected_frontier.head_digest
-            )
-            if current == finding_frontier:
-                current_projection = finding_projection
-            else:
-                _current_records, current_projection = await _records_through(runtime, current)
             for ref in () if request.evidence_refs is None else request.evidence_refs:
                 present = (
                     current_projection.evidence.get(evidence_id(ref))
