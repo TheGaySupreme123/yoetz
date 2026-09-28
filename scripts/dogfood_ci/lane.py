@@ -184,6 +184,87 @@ def _native_done(host: str, output: str) -> bool:
     )
 
 
+def _codex_workflow_completed(output: str) -> bool:
+    """Correlate native MCP successes; later hook disclosures do not undo recorded work."""
+
+    started: set[tuple[str, str, str]] = set()
+    published: set[tuple[str, str, str]] = set()
+    receipted = False
+    completed = False
+    for line in output.splitlines():
+        try:
+            raw = json.loads(line)
+        except ValueError:
+            return False
+        if not isinstance(raw, dict):
+            return False
+        event = cast(dict[str, Any], raw)
+        if event.get("type") in ("error", "turn.failed"):
+            return False
+        if event.get("type") == "turn.started":
+            completed = False
+        elif event.get("type") == "turn.completed":
+            completed = True
+        item = event.get("item")
+        if event.get("type") != "item.completed" or not isinstance(item, dict):
+            continue
+        item = cast(dict[str, Any], item)
+        if (
+            item.get("type") != "mcp_tool_call"
+            or item.get("server") != "yoetz"
+            or item.get("status") != "completed"
+            or item.get("error") is not None
+        ):
+            continue
+        result = item.get("result")
+        args = item.get("arguments")
+        if not isinstance(result, dict) or not isinstance(args, dict):
+            continue
+        result = cast(dict[str, Any], result).get("structured_content")
+        args = cast(dict[str, Any], args)
+        if not isinstance(result, dict):
+            continue
+        result = cast(dict[str, Any], result)
+        if result.get("ok") is not True:
+            continue
+        tool = item.get("tool")
+        ids = (
+            result.get("task_id"),
+            result.get("session_id"),
+            result.get("writer_id") if tool == "start" else args.get("writer_id"),
+        )
+        if not all(isinstance(value, str) and value for value in ids):
+            continue
+        binding = cast(tuple[str, str, str], ids)
+        if tool == "start":
+            started.add(binding)
+        elif args.get("session_id") == binding[1]:
+            if (
+                tool == "publish_work"
+                and binding in started
+                and result.get("writer_id") == binding[2]
+            ):
+                accepted = result.get("accepted_events")
+                if result.get("outcome") == "accepted" and isinstance(accepted, list):
+                    for accepted_row in cast(list[object], accepted):
+                        if isinstance(accepted_row, dict):
+                            row = cast(dict[str, Any], accepted_row)
+                            if (
+                                row.get("schema_name") == "plan_published"
+                                and row.get("projection_status") == "projected"
+                            ):
+                                published.add(binding)
+            elif (
+                tool == "receipt"
+                and binding in published
+                and args.get("task_id") == binding[0]
+                and isinstance(result.get("receipt_id"), str)
+                and result["receipt_id"].startswith("rcp_")
+            ):
+                receipted = True
+    return completed and receipted
+
+
 class LaneAbort(Exception):
     """A catastrophic step already recorded; stop the lane and go to teardown."""
 
@@ -1737,6 +1818,8 @@ class Lane:
         output_file = self._save("agent-output", out or "", ".txt")
         stderr_file = self._save("agent-stderr", err or "", ".txt")
         done = _native_done(self.host, out)
+        native_mcp_completed = _codex_workflow_completed(out) if self.host == "codex" else None
+        completion_confirmed = native_mcp_completed if self.host == "codex" else done
         self.agent = {
             "ran": True,
             "exit_code": rc,
@@ -1745,10 +1828,12 @@ class Lane:
             "output_digest": _digest(out),
             "output_bytes": len(out.encode("utf-8")),
             "done_marker": done,
+            "native_mcp_completed": native_mcp_completed,
+            "completion_confirmed": completion_confirmed,
             "output_file": output_file,
             "stderr_file": stderr_file,
         }
-        ok = rc == 0 and done
+        ok = rc == 0 and completion_confirmed
         self._record(
             "agent_run",
             phase,
@@ -1764,7 +1849,12 @@ class Lane:
                 if rc == 124
                 else f"agent_exit_{rc}"
             ),
-            summary={"done_marker": done, "output_bytes": len(out)},
+            summary={
+                "done_marker": done,
+                "native_mcp_completed": native_mcp_completed,
+                "completion_confirmed": completion_confirmed,
+                "output_bytes": len(out),
+            },
             stderr=err,
         )
         status = self._observe_status("observe_status_after_agent", phase)
@@ -1961,7 +2051,7 @@ class Lane:
         if self.agent.get("ran"):
             agent_ok = (
                 self.agent.get("exit_code") == 0
-                and self.agent.get("done_marker") is True
+                and self.agent.get("completion_confirmed") is True
                 and self.agent.get("mapping_present") is True
             )
         agent_failures = {"agent_run"}
