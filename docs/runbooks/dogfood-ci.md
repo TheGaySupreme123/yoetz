@@ -97,7 +97,9 @@ trusted-console ceremonies from a pseudo-terminal. Phases, in order, each record
    accidental sibling tasks, not a lane defect.
 4. **native** — one headless agent session in the probe project (`codex exec`, `claude -p`,
    `cursor-agent -p`) asked to call `start`, `publish_work`, and `receipt` and answer `DONE`;
-   host discovery and execution wrappers are allowed solely to reach deferred Yoetz tools. Then
+   the prompt identifies the MCP namespace separately from its function names. Host discovery
+   and execution wrappers are allowed solely to reach deferred Yoetz tools; empty resource lists
+   do not prove tool absence. Then
    `observe status`, `observe drain`, `observe status`, `service status`. A
    `service_unavailable`, `storage_*`, or `vault_locked` hook diagnostic after the agent is
    catastrophic; a non-zero agent exit is not.
