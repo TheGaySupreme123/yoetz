@@ -61,7 +61,10 @@ from yoetz.kernel.deterministic_checks import (
     finding_basis_to_json,
     render_deterministic_finding_text,
 )
-from yoetz.kernel.finding_resolution import SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS
+from yoetz.kernel.finding_resolution import (
+    SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS,
+    SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP,
+)
 from yoetz.kernel.lineage import LineageEvaluation, evaluate_recorded_lineage
 from yoetz.kernel.policies.research_evidence import research_evidence_findings
 from yoetz.kernel.policies.response_support import (
@@ -125,6 +128,7 @@ from yoetz.protocol.models import (
 from yoetz.version import ENGINE_VERSION
 
 __all__ = [
+    "SEMANTIC_CASE_CONTENT_GAPS",
     "SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM",
     "SEMANTIC_REJECTED_REF_OUTSIDE_CASE",
     "Application",
@@ -178,6 +182,19 @@ _WORK_KINDS = frozenset(
 
 SEMANTIC_REJECTED_REF_OUTSIDE_CASE: Final = "ref_outside_case"
 SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM: Final = "hidden_source_claim"
+# The closed packet content gaps a semantic evaluation may carry into check coverage. Each is
+# classified for finding resolution in ``kernel/finding_resolution.py`` (issue #904); adding one
+# here without deciding its resolution class is caught by that module's tests.
+SEMANTIC_CASE_CONTENT_GAPS: Final = frozenset(
+    {
+        "captured_object_unavailable",
+        "content_capture_unavailable",
+        "truncated_payload",
+        "content_unselected",
+        "content_redacted",
+        SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
+    }
+)
 
 
 class SemanticJudgmentRejected(ValueError):
@@ -961,15 +978,7 @@ class FinalSemanticEvaluation:
         if (
             type(self.case_content_gaps) is not tuple
             or self.case_content_gaps != tuple(sorted(set(self.case_content_gaps)))
-            or not set(self.case_content_gaps)
-            <= {
-                "captured_object_unavailable",
-                "content_capture_unavailable",
-                "truncated_payload",
-                "content_unselected",
-                "content_redacted",
-                SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
-            }
+            or not set(self.case_content_gaps) <= SEMANTIC_CASE_CONTENT_GAPS
         ):
             raise _invalid("semantic_judgment_invalid")
         validate_semantic_outcome(self.status, self.reason)
@@ -1802,16 +1811,19 @@ def _claims_unchanged_over_hidden_source(
 
 
 def semantic_capture_baseline_gaps(result: FinalSemanticEvaluation) -> frozenset[str]:
-    """The closed native capture limits a completed review ran under (issue #884).
+    """The closed native capture limits a completed review ran under (issues #884, #904).
 
-    These are the same codes the commit path adds to check coverage from the semantic case. Only
-    this closed set becomes a finding's baseline; every other packet limitation stays check-only
-    and keeps blocking semantic absence proof.
+    These are the same codes the commit path adds to check coverage from the semantic case,
+    including the reduced reference scope of a bounded review packet. Only this closed set becomes
+    a finding's baseline; every other packet limitation, such as a truncated payload, stays
+    check-only and keeps blocking semantic absence proof.
     """
 
     gaps = set(result.case_content_gaps) & SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS
     if result.case_content_over_item_limit:
         gaps.add(SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP)
+    if result.case_reference_scope_reduced:
+        gaps.add(SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP)
     return frozenset(gaps)
 
 
@@ -2423,7 +2435,7 @@ async def execute_check_commit(
         if semantic_result.case_content_over_item_limit:
             declared_gaps.add(SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP)
         if semantic_result.case_reference_scope_reduced:
-            declared_gaps.add("semantic_reference_scope_reduced")
+            declared_gaps.add(SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP)
         new_gaps = declared_gaps - set(coverage.known_gaps)
         if new_gaps:
             gaps = set(coverage.known_gaps) | new_gaps

@@ -1388,7 +1388,10 @@ fresh installed native Codex dogfood run.
 
 Codex uses the shared service status snapshot cache and bounded AI-powered review reference
 selection. A reduced reference scope reports `semantic_reference_scope_reduced`; it is not full-task
-AI-powered review coverage. `failed/case_capacity_exceeded` and `semantic_case_capacity_exceeded`
+AI-powered review coverage, and check, status and receipts keep saying so. It does not stop a
+repaired local finding from resolving. An AI-powered finding raised under the same bound can
+resolve after repair and a later completed review; a newly reduced scope or a `truncated_payload`
+gap still blocks it (#904). `failed/case_capacity_exceeded` and `semantic_case_capacity_exceeded`
 mean the required packet could not fit before any provider attempt. Select a smaller
 claim/obligation scope for a new check. Shorter prose alone need not fix structural capacity.
 

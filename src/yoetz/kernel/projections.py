@@ -322,21 +322,27 @@ class FindingProjectionRecord(ProjectionRecord[Finding]):
     qualified to resolve this finding's issue (``kernel/finding_resolution.py``). It is ``None``
     while the finding is current. A response disposition never sets it; a check that returns the
     finding again clears it; redacting the proving check clears it.
+
+    ``reduced_scope_raising_check_event_id`` names the ``check_recorded`` event whose completed
+    AI-powered review raised this finding when that check's recorded coverage carried
+    ``semantic_reference_scope_reduced`` (issue #904). It is the replay-derived lifecycle fallback
+    for findings recorded before the raise-time stamp: the finding's own recorded coverage is never
+    rewritten. Redacting that check clears it.
     """
 
     resolved_by_check_event_id: EventId | None = None
+    reduced_scope_raising_check_event_id: EventId | None = None
 
     def __post_init__(self) -> None:
         super().__post_init__()
         if self.payload is not None and type(self.payload) is not Finding:
             raise _invalid()
-        if self.resolved_by_check_event_id is not None:
+        for name in ("resolved_by_check_event_id", "reduced_scope_raising_check_event_id"):
+            value = getattr(self, name)
+            if value is None:
+                continue
             try:
-                object.__setattr__(
-                    self,
-                    "resolved_by_check_event_id",
-                    event_id(self.resolved_by_check_event_id),
-                )
+                object.__setattr__(self, name, event_id(value))
             except ValueError as exc:
                 raise _invalid() from exc
 
@@ -902,6 +908,11 @@ def _record_snapshot(record: _ProjectionRecordLike) -> dict[str, JsonValue]:
         # stays byte-identical to the generation-1 shape frozen before proof-based resolution.
         if record.resolved_by_check_event_id is not None:
             result["resolved_by_check_event_id"] = record.resolved_by_check_event_id
+        # Likewise emitted only when a raising check recorded a reduced reference scope.
+        if record.reduced_scope_raising_check_event_id is not None:
+            result["reduced_scope_raising_check_event_id"] = (
+                record.reduced_scope_raising_check_event_id
+            )
     return result
 
 
@@ -1171,7 +1182,7 @@ def _record_from_snapshot(
         required = _RECORD_KEYS | frozenset({"object_available"})
         optional = frozenset({"redacted_object_id"})
     elif collection == "findings":
-        optional = frozenset({"resolved_by_check_event_id"})
+        optional = frozenset({"resolved_by_check_event_id", "reduced_scope_raising_check_event_id"})
     else:
         optional = frozenset()
     source = _snapshot_object(value, required=required, optional=optional)
@@ -1260,8 +1271,9 @@ def _record_from_snapshot(
             redacted_object_id=cast(ObjectId | None, source.get("redacted_object_id")),
         )
     if collection == "findings":
-        if "resolved_by_check_event_id" in source and source["resolved_by_check_event_id"] is None:
-            raise _invalid()
+        for name in ("resolved_by_check_event_id", "reduced_scope_raising_check_event_id"):
+            if name in source and source[name] is None:
+                raise _invalid()
         return FindingProjectionRecord(
             payload=cast(Finding | None, payload),
             payload_digest=payload_digest,
@@ -1270,6 +1282,9 @@ def _record_from_snapshot(
             source_frontier=source_frontier,
             resolved_by_check_event_id=cast(
                 EventId | None, source.get("resolved_by_check_event_id")
+            ),
+            reduced_scope_raising_check_event_id=cast(
+                EventId | None, source.get("reduced_scope_raising_check_event_id")
             ),
         )
     return ProjectionRecord(

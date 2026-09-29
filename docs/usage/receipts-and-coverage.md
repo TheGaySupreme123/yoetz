@@ -163,6 +163,14 @@ finding. Redacted or unavailable event payloads, redacted objects, missing refer
 unknown events, weak original finding coverage, suppression, stale state, scoped-away work, or a
 failed pack still change nothing, and a check that reports the same issue again keeps it current.
 
+In a long session the AI-powered review sees a bounded part of the record, and coverage says so
+with `semantic_reference_scope_reduced`. That limitation stays on every check, status view, and
+receipt. It does not stop a repaired local finding from resolving, because the local check still
+reads the whole record. An AI-powered finding raised under the same bounded review can resolve
+once you repair it and a later AI-powered review completes without returning it. A review whose
+scope became bounded only after the finding was raised, or a clipped payload
+(`truncated_payload`), still leaves the finding current.
+
 A resolved finding is not erased. Status still lists it (`resolved: true`, shown when
 `include_resolved` is requested), the receipt still carries it as history, and the receipt wording
 says how many earlier findings were resolved by a later qualifying check, apart from any findings

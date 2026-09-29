@@ -80,6 +80,8 @@ from yoetz.domain.values import (
     session_id,
     timestamp_from_datetime,
 )
+from yoetz.kernel.finding_resolution import finding_is_resolved
+from yoetz.kernel.projections import projection_from_snapshot, projection_snapshot
 from yoetz.kernel.receipt_capacity import receipt_gap_codes
 from yoetz.kernel.reducers import replay
 from yoetz.mcp.summaries import summary_for_status
@@ -4738,8 +4740,13 @@ def _scripted_semantic_evaluator(
     *,
     case_gaps: tuple[str, ...],
     over_item_limit: bool,
+    scope_reduced: list[bool] | None = None,
 ) -> Callable[..., Awaitable[object]]:
-    """Answer each check with the next scripted conclusion under the same capture limits."""
+    """Answer each check with the next scripted conclusion under the same capture limits.
+
+    ``scope_reduced`` scripts, per check, whether the review packet carried a reduced reference
+    scope; omitted, no packet is reduced.
+    """
 
     async def evaluate(
         frozen: object,
@@ -4762,6 +4769,7 @@ def _scripted_semantic_evaluator(
             judgment=judgment,
             case_content_gaps=case_gaps,
             case_content_over_item_limit=over_item_limit,
+            case_reference_scope_reduced=bool(scope_reduced and scope_reduced.pop(0)),
         )
 
     return evaluate
@@ -4958,3 +4966,269 @@ async def test_a_defect_the_review_still_finds_after_repair_stays_current() -> N
         if item.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED and item.kind is finding.kind
     ]
     assert refired and all(not by_id[item.finding_id].resolved for item in refired)
+
+
+_SCOPE_REDUCED = "semantic_reference_scope_reduced"
+
+
+async def _semantic_recheck(
+    app: Application,
+    started: StartInternalResult,
+    seed: int,
+    frontier: Frontier | FrontierModel,
+) -> CheckCommitResult:
+    result = await app.check(
+        CheckRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(frontier),
+                "mode": "semantic_if_configured",
+                "max_findings": "8",
+            }
+        )
+    )
+    assert type(result) is CheckCommitResult
+    return result
+
+
+async def _publish_repair_evidence(
+    app: Application,
+    started: StartInternalResult,
+    seed: int,
+    frontier: Frontier | FrontierModel,
+) -> PublishWorkInternalResult:
+    published = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 1)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(frontier),
+                "event_drafts": (
+                    {
+                        "event_id": protocol_id("evt_", seed + 2),
+                        "schema": {"name": "evidence_recorded", "version": "1.0.0"},
+                        "occurred_at": "2026-07-19T12:00:03.000Z",
+                        "causal_parents": (),
+                        "payload": {
+                            "evidence_id": protocol_id("evd_", seed),
+                            "evidence_kind": "artifact",
+                            "strength": "mutable_reference",
+                            "observed_at": "2026-07-19T12:00:03.000Z",
+                            "reference": "repair-evidence",
+                        },
+                        "artifact_refs": (),
+                        "evidence_refs": (),
+                    },
+                ),
+            }
+        )
+    )
+    assert type(published) is PublishWorkInternalResult
+    return published
+
+
+async def _assert_reduced_scope_disclosed(
+    app: Application,
+    started: StartInternalResult,
+    seed: int,
+    frontier: Frontier | FrontierModel,
+) -> None:
+    """Status and every receipt rendering still say the review saw a bounded scope."""
+
+    status = await app.status(
+        StatusRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "view": "compact",
+                "limit": "10",
+            }
+        )
+    )
+    compact = cast(StatusCompactPageModel, status.page).items[0]
+    assert _SCOPE_REDUCED in compact.coverage.known_gaps
+    for offset, fmt in enumerate(("json", "markdown", "text"), start=1):
+        receipt = await app.receipt(
+            ReceiptRequest.model_validate(
+                {
+                    **_request_base(protocol_id("req_", seed + offset)),
+                    "task_id": started.task_id,
+                    "session_id": started.session_id,
+                    "writer_id": started.writer_id,
+                    "expected_frontier": _frontier(frontier),
+                    "format": fmt,
+                    "include": "standard",
+                    "redaction_profile": "full_local",
+                }
+            )
+        )
+        frontier = receipt.result_frontier
+        assert _SCOPE_REDUCED in receipt.coverage.known_gaps
+        assert receipt.coverage.ledger_freshness is not LedgerFreshness.CURRENT
+        assert receipt.conclusion != "no_issue_detected"
+        if fmt != "json":
+            assert receipt.human_text is not None
+            assert _SCOPE_REDUCED in receipt.human_text
+
+
+@pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))
+async def test_semantic_finding_resolves_under_its_recorded_reduced_reference_scope(
+    ledger_backend: Literal["memory", "sqlite"],
+) -> None:
+    """Issue #904 through the real check, replay, status and receipt path.
+
+    Every review of a long session runs over a reduced reference scope. The finding records the
+    one its review ran under, so a completed review under the same bound resolves it after a
+    repair, while check, status and receipts keep disclosing the bounded scope.
+    """
+
+    seed = 5600
+    conclusions = ["challenges_returned", "no_material_discrepancy", "no_material_discrepancy"]
+    app, runtime, _ = _build_app(
+        seed_offset=56,
+        semantic="optional",
+        ledger_backend=ledger_backend,
+        semantic_evaluator=_scripted_semantic_evaluator(
+            protocol_id("clm_", seed + 5),
+            conclusions,
+            case_gaps=("content_unselected",),
+            over_item_limit=False,
+            scope_reduced=[True, True, True],
+        ),
+    )
+    started, checked, _obligation = await _bootstrap_finding(
+        app, seed=seed, mode="semantic_if_configured"
+    )
+    finding = next(
+        item for item in checked.findings if item.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+    )
+    # The raise-time stamp: durable finding coverage, beside the check's own disclosure.
+    assert _SCOPE_REDUCED in finding.coverage.known_gaps
+    assert _SCOPE_REDUCED in checked.coverage.known_gaps
+
+    rerolled = await _semantic_recheck(app, started, seed + 20, checked.result_frontier)
+    assert finding.finding_id not in {item.finding_id for item in rerolled.findings}
+    view = await _findings_view(app, started, seed + 21, include_resolved=True)
+    row = next(item for item in view.items if item.finding_id == finding.finding_id)
+    assert row.resolved is False
+    # Only the missing repair is named; the unchanged scope is not a blocker.
+    assert "no_material_change_since_finding" in str(row.detail)
+    assert "coverage:" + _SCOPE_REDUCED not in str(row.detail)
+
+    published = await _publish_repair_evidence(app, started, seed + 30, rerolled.result_frontier)
+    repaired = await _semantic_recheck(app, started, seed + 40, published.result_frontier)
+    assert _SCOPE_REDUCED in repaired.coverage.known_gaps
+    view = await _findings_view(app, started, seed + 41, include_resolved=True)
+    assert next(item for item in view.items if item.finding_id == finding.finding_id).resolved
+    assert conclusions == []
+
+    ledger, _objects = next(iter(runtime.resources.values()))
+    records = tuple([row async for row in ledger.load_events(started.session_id)])
+    rebuilt = replay(records)
+    assert finding_is_resolved(rebuilt, finding.finding_id)
+    stored = await ledger.load_projection(started.session_id, ProjectionView.CANDIDATE_FINDINGS)
+    assert stored is not None and stored.state == rebuilt
+
+    await _assert_reduced_scope_disclosed(app, started, seed + 50, repaired.result_frontier)
+
+
+async def test_pre_upgrade_semantic_finding_resolves_through_its_raising_checks_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lifecycle fallback: a finding raised before the stamp is never rewritten, and resolves.
+
+    The raising check is recorded by a service that did not stamp the reduced scope onto the
+    findings it raised. The upgraded service reads that check's recorded coverage instead, and a
+    projection rebuild over the same ledger gives the same answer.
+    """
+
+    import yoetz.application.check as check_module
+
+    stamp = check_module.semantic_capture_baseline_gaps
+
+    def pre_upgrade_stamp(result: FinalSemanticEvaluation) -> frozenset[str]:
+        return stamp(result) - {_SCOPE_REDUCED}
+
+    seed = 5700
+    conclusions = ["challenges_returned", "no_material_discrepancy"]
+    app, runtime, _ = _build_app(
+        seed_offset=57,
+        semantic="optional",
+        semantic_evaluator=_scripted_semantic_evaluator(
+            protocol_id("clm_", seed + 5),
+            conclusions,
+            case_gaps=("content_unselected",),
+            over_item_limit=False,
+            scope_reduced=[True, True],
+        ),
+    )
+    monkeypatch.setattr(check_module, "semantic_capture_baseline_gaps", pre_upgrade_stamp)
+    started, checked, _obligation = await _bootstrap_finding(
+        app, seed=seed, mode="semantic_if_configured"
+    )
+    monkeypatch.undo()
+    finding = next(
+        item for item in checked.findings if item.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+    )
+    assert "content_unselected" in finding.coverage.known_gaps
+    assert _SCOPE_REDUCED not in finding.coverage.known_gaps
+    assert _SCOPE_REDUCED in checked.coverage.known_gaps
+
+    published = await _publish_repair_evidence(app, started, seed + 30, checked.result_frontier)
+    repaired = await _semantic_recheck(app, started, seed + 40, published.result_frontier)
+    assert finding.finding_id not in {item.finding_id for item in repaired.findings}
+    view = await _findings_view(app, started, seed + 41, include_resolved=True)
+    row = next(item for item in view.items if item.finding_id == finding.finding_id)
+    assert row.resolved is True, row.detail
+
+    ledger, _objects = next(iter(runtime.resources.values()))
+    records = tuple([row async for row in ledger.load_events(started.session_id)])
+    rebuilt = replay(records)
+    record = rebuilt.findings[finding.finding_id]
+    assert finding_is_resolved(rebuilt, finding.finding_id)
+    # Never retro-stamped: the recorded finding keeps the coverage it was raised with.
+    assert record.payload is not None
+    assert _SCOPE_REDUCED not in record.payload.coverage.known_gaps
+    assert record.reduced_scope_raising_check_event_id is not None
+    assert finding_is_resolved(
+        projection_from_snapshot(projection_snapshot(rebuilt)), finding.finding_id
+    )
+    await _assert_reduced_scope_disclosed(app, started, seed + 50, repaired.result_frontier)
+
+
+async def test_a_newly_reduced_reference_scope_still_blocks_semantic_resolution() -> None:
+    """A finding raised by a review that saw the whole ledger is not cleared by a bounded one."""
+
+    seed = 5800
+    conclusions = ["challenges_returned", "no_material_discrepancy"]
+    app, _runtime, _ = _build_app(
+        seed_offset=58,
+        semantic="optional",
+        semantic_evaluator=_scripted_semantic_evaluator(
+            protocol_id("clm_", seed + 5),
+            conclusions,
+            case_gaps=("content_unselected",),
+            over_item_limit=False,
+            scope_reduced=[False, True],
+        ),
+    )
+    started, checked, _obligation = await _bootstrap_finding(
+        app, seed=seed, mode="semantic_if_configured"
+    )
+    finding = next(
+        item for item in checked.findings if item.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+    )
+    assert _SCOPE_REDUCED not in finding.coverage.known_gaps
+    assert _SCOPE_REDUCED not in checked.coverage.known_gaps
+
+    published = await _publish_repair_evidence(app, started, seed + 30, checked.result_frontier)
+    repaired = await _semantic_recheck(app, started, seed + 40, published.result_frontier)
+    assert _SCOPE_REDUCED in repaired.coverage.known_gaps
+    view = await _findings_view(app, started, seed + 41, include_resolved=True)
+    row = next(item for item in view.items if item.finding_id == finding.finding_id)
+    assert row.resolved is False
+    assert "coverage:" + _SCOPE_REDUCED in str(row.detail)

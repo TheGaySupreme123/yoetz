@@ -1144,3 +1144,381 @@ def test_unassessable_conclusion_blocks_proof_even_without_a_coverage_gap() -> N
     original = _finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED)
     later = replace(_check(semantic=_SEMANTIC_OK), semantic_conclusion="insufficient_packet")
     assert _resolves(original, later) is False
+
+
+# Issue #904: a bounded AI-powered review selection is disclosure, not a veto on repair proof.
+_SCOPE_REDUCED = "semantic_reference_scope_reduced"
+# The agent-visible gaps of an ordinary semantic check in a long hook-observed session.
+_LONG_SESSION_REVIEW_GAPS = (
+    "content_unselected",
+    "evidence_content_digest_only",
+    "host_outcome_unavailable",
+    _SCOPE_REDUCED,
+    "unpaired_event",
+)
+
+
+def _assessed(check: CheckRecordedPayload) -> CheckRecordedPayload:
+    return replace(check, semantic_conclusion="no_material_discrepancy")
+
+
+def _review_check(*gaps: str, tested: int = 8) -> CheckRecordedPayload:
+    """A completed, assessable semantic check whose coverage carries exactly *gaps*."""
+
+    coverage = _coverage(gaps=gaps, semantic=True, freshness=LedgerFreshness.PARTIAL)
+    return _assessed(_check(tested=tested, semantic=_SEMANTIC_OK, coverage=coverage))
+
+
+def _semantic_finding(*gaps: str) -> Finding:
+    """An AI-powered finding whose own recorded coverage carries exactly *gaps*."""
+
+    coverage = _coverage(gaps=gaps, semantic=True, freshness=LedgerFreshness.PARTIAL)
+    return replace(_finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED), coverage=coverage)
+
+
+def _blockers(
+    finding: Finding,
+    check: CheckRecordedPayload,
+    *,
+    raised_under_reduced_scope: bool = False,
+) -> tuple[str, ...]:
+    from yoetz.kernel.finding_resolution import resolution_blockers
+
+    return resolution_blockers(
+        finding,
+        4,
+        check,
+        frozenset(),
+        proof_state=_changed_state(check),
+        raised_under_reduced_scope=raised_under_reduced_scope,
+    )
+
+
+def test_a_reduced_review_scope_never_weakens_local_proof() -> None:
+    """The local-check case is not reduced (ADR-006), so only the review packet is bounded."""
+
+    finding = _finding()
+    readable = _check(semantic=_SEMANTIC_OK, coverage=_coverage(semantic=True))
+    reduced = _check(
+        semantic=_SEMANTIC_OK,
+        coverage=_coverage(gaps=(_SCOPE_REDUCED,), semantic=True),
+    )
+    assert _blockers(finding, readable) == ()
+    assert _blockers(finding, reduced) == ()
+    assert _resolves(finding, reduced) is True
+    # The same holds when the bounded review itself did not run to completion.
+    not_run = _check(
+        coverage=_coverage(gaps=(_SCOPE_REDUCED, "semantic_relevance_review_not_run")),
+    )
+    assert _blockers(finding, not_run) == ()
+
+
+def test_the_dateutil_local_finding_shape_resolves_under_a_reduced_review_scope() -> None:
+    """dateutil ``fnd_2c29e40c``: its only blocker was ``semantic_reference_scope_reduced``."""
+
+    finding = replace(
+        _finding(kind=FindingKind.LEDGER_STALE_OR_INCOMPLETE),
+        coverage=_coverage(
+            gaps=("evidence_content_digest_only",), freshness=LedgerFreshness.CURRENT
+        ),
+    )
+    later = _review_check(*_LONG_SESSION_REVIEW_GAPS)
+    assert _blockers(finding, later) == ()
+    assert _resolves(finding, later) is True
+    # Not returned is still required; the interim leaves a truncated payload blocking.
+    assert not qualifying_check_resolves(finding, 4, later, frozenset({issue_key(finding)}))
+    truncated = _review_check(*_LONG_SESSION_REVIEW_GAPS, "truncated_payload")
+    assert _blockers(finding, truncated) == ("coverage:truncated_payload",)
+
+
+def test_a_semantic_finding_stamped_with_the_scope_resolves_under_the_same_limit() -> None:
+    """A post-upgrade finding records the reduced scope its review ran under (issue #904)."""
+
+    original = _semantic_finding(
+        "content_unselected", "host_outcome_unavailable", _SCOPE_REDUCED, "unpaired_event"
+    )
+    later = _review_check(*_LONG_SESSION_REVIEW_GAPS)
+    assert _blockers(original, later) == ()
+    assert _resolves(original, later) is True
+    # Every other requirement stands: a re-roll, an unassessable answer, an unfinished review.
+    assert _resolves(original, later, changed=False) is False
+    insufficient = replace(
+        later,
+        semantic_conclusion="insufficient_packet",
+        coverage=replace(
+            later.coverage,
+            known_gaps=tuple(sorted((*later.coverage.known_gaps, "semantic_packet_insufficient"))),
+        ),
+    )
+    assert _blockers(original, insufficient) == (
+        "semantic_packet_insufficient",
+        "coverage:content_unselected",
+        "coverage:host_outcome_unavailable",
+        "coverage:semantic_packet_insufficient",
+        "coverage:" + _SCOPE_REDUCED,
+        "coverage:unpaired_event",
+    )
+    assert _resolves(original, _check(coverage=later.coverage)) is False
+
+
+def test_a_new_reduced_review_scope_still_blocks_semantic_proof() -> None:
+    """A review that saw the whole ledger raised it; a bounded later review is a new limit."""
+
+    original = _semantic_finding("content_unselected", "host_outcome_unavailable", "unpaired_event")
+    later = _review_check(*_LONG_SESSION_REVIEW_GAPS)
+    assert _blockers(original, later) == ("coverage:" + _SCOPE_REDUCED,)
+    assert _resolves(original, later) is False
+
+
+def test_a_pre_upgrade_finding_uses_its_raising_checks_recorded_scope() -> None:
+    """Lifecycle fallback: the raising check recorded the code the finding could not carry."""
+
+    original = _semantic_finding("content_unselected", "host_outcome_unavailable", "unpaired_event")
+    later = _review_check(*_LONG_SESSION_REVIEW_GAPS)
+    assert _blockers(original, later, raised_under_reduced_scope=True) == ()
+    assert qualifying_check_resolves(
+        original,
+        4,
+        later,
+        frozenset(),
+        proof_state=_changed_state(later),
+        raised_under_reduced_scope=True,
+    )
+    # The fallback supplies only the scope code: no other limitation and no other requirement.
+    truncated = _review_check(*_LONG_SESSION_REVIEW_GAPS, "truncated_payload")
+    assert _blockers(original, truncated, raised_under_reduced_scope=True) == (
+        "coverage:truncated_payload",
+    )
+    assert _blockers(
+        original, replace(later, semantic_conclusion=None), raised_under_reduced_scope=True
+    ) == (
+        "coverage:content_unselected",
+        "coverage:host_outcome_unavailable",
+        "coverage:" + _SCOPE_REDUCED,
+        "coverage:unpaired_event",
+    )
+    # The finding's recorded coverage is never rewritten.
+    assert _SCOPE_REDUCED not in original.coverage.known_gaps
+
+
+def _raising_check(*gaps: str) -> CheckRecordedPayload:
+    """The completed review that raised ``_semantic_finding`` at subject frontier 3."""
+
+    return _review_check(*gaps, tested=3)
+
+
+def test_apply_records_the_raising_check_only_for_a_reduced_scope_review() -> None:
+    raised = _semantic_finding("content_unselected", "host_outcome_unavailable", "unpaired_event")
+    local = _finding(2, subject_refs=(obl(2),))
+    assert raised.subject_frontier == local.subject_frontier == _raising_check().subject_frontier
+    findings = {fnd(1): finding_record(raised, 4), fnd(2): finding_record(local, 4)}
+
+    apply_check_resolution(
+        findings, replace(_raising_check(), returned_finding_ids=(fnd(1), fnd(2))), evt(5)
+    )
+    assert findings[fnd(1)].reduced_scope_raising_check_event_id is None, "scope was not reduced"
+
+    apply_check_resolution(
+        findings,
+        replace(_raising_check(*_LONG_SESSION_REVIEW_GAPS), returned_finding_ids=(fnd(1), fnd(2))),
+        evt(6),
+    )
+    assert findings[fnd(1)].reduced_scope_raising_check_event_id == evt(6)
+    assert findings[fnd(2)].reduced_scope_raising_check_event_id is None, "local proof needs none"
+
+    # A later check that returns the same row again is not the check that raised it.
+    later_return = replace(
+        _review_check(*_LONG_SESSION_REVIEW_GAPS), returned_finding_ids=(fnd(1),)
+    )
+    fresh = {fnd(1): finding_record(raised, 4)}
+    apply_check_resolution(fresh, later_return, evt(9))
+    assert fresh[fnd(1)].reduced_scope_raising_check_event_id is None
+
+
+def test_the_recorded_raising_scope_resolves_through_the_fold_until_redacted() -> None:
+    raised = _semantic_finding("content_unselected", "host_outcome_unavailable", "unpaired_event")
+    findings = {fnd(1): finding_record(raised, 4)}
+    raising = replace(_raising_check(*_LONG_SESSION_REVIEW_GAPS), returned_finding_ids=(fnd(1),))
+    apply_check_resolution(findings, raising, evt(5))
+    assert findings[fnd(1)].reduced_scope_raising_check_event_id == evt(5)
+
+    # Redacting the raising check removes the fallback: its coverage is no longer readable.
+    redacted = dict(findings)
+    reopen_findings_resolved_by(redacted, frozenset({evt(5)}))
+    assert redacted[fnd(1)].reduced_scope_raising_check_event_id is None
+    later = _review_check(*_LONG_SESSION_REVIEW_GAPS)
+    apply_check_resolution(redacted, later, evt(9), proof_state=_changed_state(later))
+    assert redacted[fnd(1)].resolved_by_check_event_id is None
+
+    apply_check_resolution(findings, later, evt(9), proof_state=_changed_state(later))
+    assert findings[fnd(1)].resolved_by_check_event_id == evt(9)
+    # Redacting the raising check after resolution leaves that proof intact.
+    reopen_findings_resolved_by(findings, frozenset({evt(5)}))
+    assert findings[fnd(1)].resolved_by_check_event_id == evt(9)
+    assert findings[fnd(1)].reduced_scope_raising_check_event_id is None
+
+
+def test_snapshot_round_trips_the_raising_scope_and_omits_it_when_absent() -> None:
+    raised = _semantic_finding("content_unselected")
+    plain = finding_record(_finding(2, subject_refs=(obl(2),)), 5)
+    recorded = replace(finding_record(raised, 4), reduced_scope_raising_check_event_id=evt(6))
+    state = replace(
+        empty_projection_state(),
+        frontier=9,
+        head_digest=_DIGEST,
+        findings={fnd(1): recorded, fnd(2): plain},
+        freshness=LedgerFreshness.CURRENT,
+    )
+    snapshot = projection_snapshot(state)
+    rows = snapshot["findings"]
+    assert isinstance(rows, dict)
+    assert "reduced_scope_raising_check_event_id" not in rows[fnd(2)]  # type: ignore[operator]
+    assert rows[fnd(1)]["reduced_scope_raising_check_event_id"] == evt(6)  # type: ignore[index]
+    decoded = projection_from_snapshot(snapshot)
+    assert decoded == state
+    assert canonical_encode(projection_snapshot(decoded)) == canonical_encode(snapshot)
+    rows[fnd(1)]["reduced_scope_raising_check_event_id"] = None  # type: ignore[index]
+    with pytest.raises(ValueError, match="invalid_projection_state"):
+        projection_from_snapshot(snapshot)
+
+
+# drizzle ``fnd_8d68fbc3``: raised by a review whose coverage carried a gap outside the baseline.
+_DRIZZLE_RAISED_UNDER = (
+    "completion_plan_not_claimed",
+    "content_unselected",
+    "evidence_content_digest_only",
+    "host_outcome_unavailable",
+    "semantic_case_content_over_item_limit",
+    "unpaired_event",
+)
+_DRIZZLE_LATER_REVIEW = (
+    "content_unselected",
+    "evidence_content_digest_only",
+    "host_outcome_unavailable",
+    "semantic_case_content_over_item_limit",
+    _SCOPE_REDUCED,
+    "unpaired_event",
+)
+
+
+@pytest.mark.parametrize(
+    "beyond_baseline",
+    ["completion_plan_not_claimed", "content_redacted", "command_attempt_uncorroborated"],
+)
+def test_a_lapsed_limit_beyond_the_baseline_makes_the_baseline_readable(
+    beyond_baseline: str,
+) -> None:
+    """Secondary edge: the first later check without that limit saw at least as much."""
+
+    raised_under = (
+        *(gap for gap in _DRIZZLE_RAISED_UNDER if gap != "completion_plan_not_claimed"),
+        beyond_baseline,
+    )
+    original = _semantic_finding(*raised_under)
+    later = _review_check(*_DRIZZLE_LATER_REVIEW)
+    assert _blockers(original, later, raised_under_reduced_scope=True) == ()
+    # Post-upgrade the scope is stamped instead; the answer is the same.
+    stamped = _semantic_finding(*raised_under, _SCOPE_REDUCED)
+    assert _blockers(stamped, later) == ()
+    # The interim still refuses a truncated payload.
+    truncated = _review_check(*_DRIZZLE_LATER_REVIEW, "truncated_payload")
+    assert _blockers(stamped, truncated) == ("coverage:truncated_payload",)
+
+    # While the limitation is still present it keeps blocking, exactly as before.
+    still = _review_check(*_DRIZZLE_LATER_REVIEW, beyond_baseline)
+    assert _blockers(original, still, raised_under_reduced_scope=True) == tuple(
+        "coverage:" + gap
+        for gap in sorted(
+            {*_DRIZZLE_LATER_REVIEW, beyond_baseline} - {"evidence_content_digest_only"}
+        )
+    )
+
+
+def test_a_lapsed_limit_never_rehabilitates_unproven_original_freshness() -> None:
+    original = replace(
+        _semantic_finding(*_DRIZZLE_RAISED_UNDER),
+        coverage=_coverage(
+            gaps=_DRIZZLE_RAISED_UNDER, semantic=True, freshness=LedgerFreshness.REDACTED_GAP
+        ),
+    )
+    later = _review_check(*_DRIZZLE_LATER_REVIEW)
+    assert _blockers(original, later, raised_under_reduced_scope=True) == tuple(
+        "coverage:" + gap for gap in _DRIZZLE_LATER_REVIEW if gap != "evidence_content_digest_only"
+    )
+
+
+@pytest.mark.parametrize(
+    "gap",
+    [
+        "content_redacted",
+        "event_payload_unavailable",
+        "redacted_event",
+        "redacted_object",
+        "truncated_payload",
+        "semantic_packet_insufficient",
+        "semantic_review_context_withheld",
+        "semantic_challenges_rejected",
+    ],
+)
+def test_a_newly_appearing_real_limit_still_blocks_semantic_proof(gap: str) -> None:
+    """Regression: the scope tolerance does not open the closed default (issue #904)."""
+
+    original = _semantic_finding(*_LONG_SESSION_REVIEW_GAPS)
+    later = _review_check(*_LONG_SESSION_REVIEW_GAPS, gap)
+    blockers = _blockers(original, later, raised_under_reduced_scope=True)
+    assert "coverage:" + gap in blockers
+    assert "coverage:" + _SCOPE_REDUCED not in blockers
+    assert _resolves(original, later) is False
+
+
+def test_capture_failures_block_local_proof_too() -> None:
+    """The interim tolerance is the selection code alone; truncation waits for its source test."""
+
+    for gap in ("content_redacted", "truncated_payload"):
+        later = _review_check(*_LONG_SESSION_REVIEW_GAPS, gap)
+        assert _blockers(_finding(), later) == ("coverage:" + gap,)
+
+
+def test_selection_and_capture_failure_classes_are_disjoint_and_closed() -> None:
+    from yoetz.application.check import SEMANTIC_CASE_CONTENT_GAPS
+    from yoetz.domain.receipts import SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP
+    from yoetz.kernel.finding_resolution import (
+        CAPTURE_FAILURE_GAPS,
+        REVIEW_SELECTION_GAPS,
+        SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS,
+        SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP,
+    )
+
+    assert SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP == _SCOPE_REDUCED
+    assert SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP in REVIEW_SELECTION_GAPS
+    assert not REVIEW_SELECTION_GAPS & CAPTURE_FAILURE_GAPS
+    assert REVIEW_SELECTION_GAPS <= SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS
+    assert not CAPTURE_FAILURE_GAPS & SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS
+
+    # Every code a review packet can fold into check coverage has a decided resolution class:
+    # (blocks local proof, tolerated for semantic proof when unchanged from the finding's own
+    # recorded baseline). A new packet code fails here until someone decides its row.
+    decided = {
+        "captured_object_unavailable": (False, True),
+        "content_capture_unavailable": (True, True),
+        "content_unselected": (False, True),
+        "content_redacted": (True, False),
+        "truncated_payload": (True, False),
+        "semantic_case_finding_refs_over_limit": (False, False),
+        SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP: (False, True),
+        SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP: (False, True),
+    }
+    packet_codes = SEMANTIC_CASE_CONTENT_GAPS | {
+        SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
+        SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP,
+    }
+    assert packet_codes == set(decided)
+    for code, (blocks_local, unchanged_tolerated) in decided.items():
+        later = _review_check(code)
+        assert bool(_blockers(_finding(), later)) is blocks_local, code
+        assert (not _blockers(_semantic_finding(code), later)) is unchanged_tolerated, code
+        assert _blockers(_semantic_finding(), later) == ("coverage:" + code,), code
+        if code in REVIEW_SELECTION_GAPS:
+            assert (blocks_local, unchanged_tolerated) == (False, True), code
+        if code in CAPTURE_FAILURE_GAPS:
+            assert (blocks_local, unchanged_tolerated) == (True, False), code

@@ -6,9 +6,10 @@ state contains the finding, whose matching policy pack ran to completion with no
 whose scope covers the finding's subject, whose coverage carries no weakening gap for the
 finding's proof class, and which did not return the same issue again. A closed local-only
 exception lets case-wide host-observation limitations remain on the receipt without vetoing clean
-structured-ledger proof. A response disposition never resolves a finding; it only answers it on
-the record. Weak, skipped, failed, capped, stale, unreadable, or non-overlapping checks do nothing,
-and nothing here ever strengthens coverage.
+structured-ledger proof, and a bounded AI-powered review selection stays disclosure rather than a
+veto on proof it did not weaken. A response disposition never resolves a finding; it only answers
+it on the record. Weak, skipped, failed, capped, stale, unreadable, or non-overlapping checks do
+nothing, and nothing here ever strengthens coverage.
 
 Everything in this module is pure and replay-derived, so a receipt, a status counter, and a
 projection checkpoint all read the same fact.
@@ -43,7 +44,10 @@ from yoetz.protocol.coverage import LedgerFreshness
 from yoetz.protocol.models import SemanticReason, SemanticStatus
 
 __all__ = [
+    "CAPTURE_FAILURE_GAPS",
+    "REVIEW_SELECTION_GAPS",
     "SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS",
+    "SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP",
     "IssueKey",
     "apply_check_resolution",
     "finding_is_resolved",
@@ -54,6 +58,34 @@ __all__ = [
 ]
 
 IssueKey = tuple[object, ...]
+
+# The AI-powered review packet carried the bounded dependency closure of what it selected rather
+# than every reference at the frozen frontier (ADR-006, #675). The ledger outgrows the packet in any
+# real session, so this is the normal case, not an exception.
+SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP: Final = "semantic_reference_scope_reduced"
+# Selection versus capture failure (issue #904). A *selection* code records a deliberate, bounded
+# choice of what material to show; a *capture-failure* code records material that was clipped,
+# redacted, or lost. Selection codes keep bounding every coverage they are folded into, and the
+# receipt keeps saying the review saw a bounded scope, but they never describe the complete local
+# case, so they never weaken local proof; for AI-powered proof they are compared with the finding's
+# recorded baseline, so an unchanged selection is tolerated and a new one still blocks. Capture
+# failures are never tolerated by either proof class and never become a baseline. This names only
+# the codes #904 decided; every tolerated set below stays closed, so an unclassified code still
+# blocks both proof classes until someone decides otherwise here.
+REVIEW_SELECTION_GAPS: Final = frozenset(
+    {"content_unselected", SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP}
+)
+CAPTURE_FAILURE_GAPS: Final = frozenset(
+    {
+        "content_redacted",
+        "event_payload_unavailable",
+        "redacted_event",
+        "redacted_object",
+        # Waits for the truncation-source test and relevance rule (issue #904); until then a
+        # clipped payload may be the finding's own evidence, so it blocks.
+        "truncated_payload",
+    }
+)
 
 # Coverage gaps that describe only the AI-powered review's own absence or weakness. A
 # local finding is proven absent by the local pack that owns it, so these gaps
@@ -107,19 +139,25 @@ _HOST_OBSERVATION_GAPS: Final = frozenset(
     }
 )
 _BASE_DETERMINISTIC_PROOF_TOLERATED_GAPS: Final = _SEMANTIC_ONLY_GAPS | _EVIDENCE_STRENGTH_GAPS
+# A reduced AI-powered review scope bounds the review packet only; the local-check case is not
+# reduced (ADR-006), so review selection never weakens a local absence proof (issue #904).
 _DETERMINISTIC_PROOF_TOLERATED_GAPS: Final = (
-    _BASE_DETERMINISTIC_PROOF_TOLERATED_GAPS | _HOST_OBSERVATION_GAPS
+    _BASE_DETERMINISTIC_PROOF_TOLERATED_GAPS | _HOST_OBSERVATION_GAPS | REVIEW_SELECTION_GAPS
 )
 _SEMANTIC_PROOF_TOLERATED_GAPS: Final = _EVIDENCE_STRENGTH_GAPS
 # These native capture limits may be compared with the readable original finding's baseline.
 # The check stamps the ones its review ran under onto every semantic finding it raises, so the
 # baseline is durable finding coverage, not a later reconstruction (issue #884). Recorded clipping
 # of an oversized item is included: it stays disclosed on every receipt, but an unchanged,
-# already-recorded limit must not make a repaired issue permanently unresolvable. They never
-# tolerate a new limitation, hidden ledger payloads, withheld review categories, dropped
-# challenges, or an insufficient-packet answer.
-SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS: Final = _HOST_OBSERVATION_GAPS | frozenset(
-    {"content_capture_unavailable", SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP}
+# already-recorded limit must not make a repaired issue permanently unresolvable. Review selection
+# is included for the same reason (issue #904): every review of a long session runs over a reduced
+# reference scope, and a later review under that same bound saw no less than the one that raised
+# the issue. They never tolerate a new limitation, hidden ledger payloads, withheld review
+# categories, dropped challenges, truncated payloads, or an insufficient-packet answer.
+SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS: Final = (
+    _HOST_OBSERVATION_GAPS
+    | REVIEW_SELECTION_GAPS
+    | frozenset({"content_capture_unavailable", SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP})
 )
 _SEMANTIC_BASELINE_CAPTURE_GAPS: Final = SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS
 _UNPROVEN_FRESHNESS: Final = frozenset(
@@ -369,13 +407,16 @@ def qualifying_check_resolves(
     returned_issue_keys: frozenset[IssueKey],
     *,
     proof_state: ProjectionState | None = None,
+    raised_under_reduced_scope: bool = False,
 ) -> bool:
     """True when *check* proves the issue *finding* reports is absent from the state it tested.
 
     ``finding_source_frontier`` is the ledger sequence at which the finding was recorded; a check
     whose tested subject frontier is earlier never saw the finding, so it cannot speak to it.
     ``returned_issue_keys`` are the issue keys of every finding the check returned; a check that
-    returned the same issue re-fired it rather than proving it gone.
+    returned the same issue re-fired it rather than proving it gone. ``raised_under_reduced_scope``
+    is the replay-derived fact that the check which raised *finding* recorded a reduced review
+    reference scope (``FindingProjectionRecord.reduced_scope_raising_check_event_id``).
     """
 
     if type(finding) is not Finding or type(check) is not CheckRecordedPayload:
@@ -383,7 +424,31 @@ def qualifying_check_resolves(
     if type(finding_source_frontier) is not int or finding_source_frontier < 1:
         raise ValueError("finding_resolution_invalid")
     return not resolution_blockers(
-        finding, finding_source_frontier, check, returned_issue_keys, proof_state=proof_state
+        finding,
+        finding_source_frontier,
+        check,
+        returned_issue_keys,
+        proof_state=proof_state,
+        raised_under_reduced_scope=raised_under_reduced_scope,
+    )
+
+
+def _raises_under_reduced_scope(check: CheckRecordedPayload, finding: Finding) -> bool:
+    """Whether *check* is the review that raised *finding* under a reduced reference scope.
+
+    This feeds the lifecycle fallback for AI-powered findings recorded before the raise-time stamp
+    existed (issue #904): their own coverage never carries ``semantic_reference_scope_reduced``,
+    while the raising check's recorded coverage does. The raising check is the one whose completed
+    review produced the finding: same tested frontier and same AI-powered review attempt.
+    """
+
+    return (
+        finding.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+        and SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP in check.coverage.known_gaps
+        and finding.subject_frontier == check.subject_frontier
+        and finding.provenance is not None
+        and check.semantic_provenance is not None
+        and finding.provenance.semantic_attempt_id == check.semantic_provenance.semantic_attempt_id
     )
 
 
@@ -394,6 +459,7 @@ def resolution_blockers(
     returned_issue_keys: frozenset[IssueKey],
     *,
     proof_state: ProjectionState | None = None,
+    raised_under_reduced_scope: bool = False,
 ) -> tuple[str, ...]:
     """Explain the exact qualification predicate without weakening its proof requirements."""
 
@@ -414,8 +480,18 @@ def resolution_blockers(
         if check.semantic_conclusion == "insufficient_packet":
             reasons.append("semantic_packet_insufficient")
         original_gaps = frozenset(finding.coverage.known_gaps)
+        if raised_under_reduced_scope:
+            # Lifecycle fallback (issue #904): a finding recorded before the raise-time stamp
+            # lacks the scope code its raising check recorded. That recorded check coverage
+            # supplies this one baseline code; the finding's own coverage is never rewritten.
+            original_gaps |= {SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP}
         baseline_tolerated = _SEMANTIC_PROOF_TOLERATED_GAPS | _SEMANTIC_BASELINE_CAPTURE_GAPS
-        baseline_readable = original_gaps <= baseline_tolerated and _semantic_freshness_proven(
+        # A limitation outside the baseline set that the raising review ran under keeps its
+        # baseline unreadable only while that limitation lasts (issue #904): a later check that
+        # carries none of those codes saw at least as much as the raising one. A later check that
+        # still carries one keeps blocking, and unproven original freshness is never rehabilitated.
+        beyond_baseline = original_gaps - baseline_tolerated
+        baseline_readable = not (beyond_baseline & gaps) and _semantic_freshness_proven(
             finding.coverage.ledger_freshness, original_gaps, baseline_tolerated
         )
         if (
@@ -641,7 +717,12 @@ def finding_resolution_explanation(
             {} if proof_state_cache is None else proof_state_cache,
         )
     reasons = resolution_blockers(
-        finding_record.payload, finding_record.source_frontier, check, keys, proof_state=proof_state
+        finding_record.payload,
+        finding_record.source_frontier,
+        check,
+        keys,
+        proof_state=proof_state,
+        raised_under_reduced_scope=finding_record.reduced_scope_raising_check_event_id is not None,
     )
     returned_again = "issue_returned_again" in reasons
     relation = "Returned again" if returned_again else "Not returned; absence remains unproven"
@@ -683,21 +764,27 @@ def apply_check_resolution(
     """Fold one recorded check into the resolution facts of the findings it could speak to.
 
     Every finding the check returned becomes current again, whatever an earlier check proved.
-    If any returned finding is unreadable, the check cannot prove which issues it re-fired, so it
-    resolves nothing. Otherwise each readable, still-current finding that the qualification
-    relation admits is marked resolved by this check.
+    An AI-powered finding this check's review raised under a reduced reference scope records this
+    check as its raising check (issue #904). If any returned finding is unreadable, the check
+    cannot prove which issues it re-fired, so it resolves nothing. Otherwise each readable,
+    still-current finding that the qualification relation admits is marked resolved by this check.
     """
 
     returned_keys: set[IssueKey] = set()
     readable = True
     for returned_id in check.returned_finding_ids:
         record = findings.get(returned_id)
-        if record is None or record.payload is None:
+        if record is None or (payload := record.payload) is None:
             readable = False
             continue
-        returned_keys.add(issue_key(record.payload))
+        returned_keys.add(issue_key(payload))
         if record.resolved_by_check_event_id is not None:
-            findings[returned_id] = replace(record, resolved_by_check_event_id=None)
+            record = replace(record, resolved_by_check_event_id=None)
+        if record.reduced_scope_raising_check_event_id is None and _raises_under_reduced_scope(
+            check, payload
+        ):
+            record = replace(record, reduced_scope_raising_check_event_id=check_event_id)
+        findings[returned_id] = record
     if not readable:
         return
     frozen_keys = frozenset(returned_keys)
@@ -709,7 +796,12 @@ def apply_check_resolution(
         ):
             continue
         if qualifying_check_resolves(
-            record.payload, record.source_frontier, check, frozen_keys, proof_state=proof_state
+            record.payload,
+            record.source_frontier,
+            check,
+            frozen_keys,
+            proof_state=proof_state,
+            raised_under_reduced_scope=record.reduced_scope_raising_check_event_id is not None,
         ):
             findings[current_id] = replace(record, resolved_by_check_event_id=check_event_id)
 
@@ -718,11 +810,18 @@ def reopen_findings_resolved_by(
     findings: dict[FindingId, FindingProjectionRecord],
     event_ids: frozenset[EventId],
 ) -> None:
-    """Drop resolution whose proving check was redacted: unreadable proof is no proof."""
+    """Drop resolution whose proving check was redacted: unreadable proof is no proof.
+
+    A redacted raising check likewise no longer supplies the reduced-scope fallback (issue #904),
+    matching a rebuild that cannot read that check's coverage.
+    """
 
     for current_id, record in tuple(findings.items()):
         if record.resolved_by_check_event_id in event_ids:
-            findings[current_id] = replace(record, resolved_by_check_event_id=None)
+            record = replace(record, resolved_by_check_event_id=None)
+        if record.reduced_scope_raising_check_event_id in event_ids:
+            record = replace(record, reduced_scope_raising_check_event_id=None)
+        findings[current_id] = record
 
 
 def finding_is_resolved(state: ProjectionState, finding_id: FindingId) -> bool:
