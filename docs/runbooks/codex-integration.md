@@ -1401,8 +1401,13 @@ These shared-path regressions do not certify a fresh installed native-host sessi
 
 ### Evidence-first closure
 
-The shared guidance instructs this host to paginate `status view=evidence` before publishing
-replacement evidence, match state and source identity, and reuse only suitable observed IDs.
+The shared guidance instructs this host to cite the evidence IDs it published and to find native
+captures with a filtered `status view=evidence` read (`filter.strength=immutable_snapshot`) before
+publishing replacement evidence, reusing only IDs a structural link (a `view=results` row's
+`evidence_refs`, or a matching digest) ties to the claim. It no longer asks for an unfiltered walk
+that matches on descriptions: under the default `agent_context` ceiling, other writers' and
+host-observed descriptions are omitted (`local_disclosure_not_authorized`), which is a privacy
+setting, not missing evidence.
 Digest-only, unavailable, unselected and clipped items remain separate limits. Evidence discovery
 and reuse do not prove native capture coverage or command success. Read `command_attempts` on
 obligation rows: this profile may omit command text, in which case reconciliation is `unknown`.

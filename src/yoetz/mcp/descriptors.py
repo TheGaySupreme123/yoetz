@@ -1702,8 +1702,8 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
     _descriptor(
         "publish_work",
         "Publish recorded work",
-        "Before evidence or a completion claim, read status view=evidence at one frontier and "
-        "reuse matching IDs. Put feedback and requested delivery in the effective "
+        "Before evidence or a completion claim, cite IDs you published; reuse only linked "
+        "native captures. Put feedback and requested delivery in the effective "
         "plan via a revision. Accepted records are assertions, not repair proof. "
         "Previews or appends asserted work to the local Yoetz ledger. It does not publish to GitHub "
         "or run an AI-powered evaluation. Set-valued lists must be unique and already in "
@@ -1824,10 +1824,11 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "accepted_at; forward-skew classification compares clocks, not truth, and order follows "
         "ingestion sequence. view=operation with filter.operation_request_id recovers the stored "
         "outcome without resending the body; for a running or finished check it adds structural "
-        "semantic_progress (phase, elapsed time, deadline). Before evidence publication or completion claims, "
-        "paginate view=evidence at one frontier with the same limit and filter; match identity and "
-        "state, then reuse suitable IDs in supporting_refs. Capture, selection and clipping limits "
-        "are per item, not absence of all content. Obligations expose exact requested_items, "
+        "semantic_progress (phase, elapsed time, deadline). Before evidence or completion claims, "
+        "cite IDs you published; find native captures via view=evidence "
+        "filter.strength=immutable_snapshot and reuse IDs a results row's evidence_refs links. "
+        "Omitted descriptions (a privacy setting) and capture, selection or clipping limits "
+        "are per item, not absence of content. Obligations expose exact requested_items, "
         "unattempted_items and command_attempts; the latter separates observed attempts, mismatch "
         "and unknown without establishing success. Results map res_ IDs to bounded structural facts "
         "without result prose. After repair, read view=findings with filter.include_resolved=true "
@@ -1916,10 +1917,10 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         "policy": MappingProxyType(
             {
                 "start": "sha256:3a2186a2db53b91fcf7a8f3117cb8ff6a2b8bad6bc78e3e796e5e611e8598405",
-                "publish_work": "sha256:5b7e151a4583762f500803165aa48d3c49ec61172a36945a6af92064ffc171ff",
+                "publish_work": "sha256:a8dd06954e2f2ff65d3fb269a143b13745342e973e270179dc8b952fde7df115",
                 "check": "sha256:9befe13b257acf10535009c1dd69d9a933f3d94f5cd2aaac1655d4867596f89e",
                 "respond": "sha256:8b5dc94f431a411ef332021af01050a4b0c248a800e46d5b3bdb567f770d25a5",
-                "status": "sha256:517eb05aa015834d98bd96ed59d4b647a95e6c42a13013803caf19b9b4b07875",
+                "status": "sha256:a4930e261aeb8f30064d14e20a4adc8e9059c8b0b6aad9d5fe26e14d1bb47a32",
                 "receipt": "sha256:c7676e1ca9afd96d9d7e74503edd5b31a758a05d7e7e1cf0d62c763611ffcecb",
                 "read_guidance": "sha256:4198e5fd133f7b37cc25c0c1a63161657c5d4396a1718f1f4f1f3db7c302a13d",
             }
@@ -1927,10 +1928,10 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         "strict": MappingProxyType(
             {
                 "start": "sha256:3a2186a2db53b91fcf7a8f3117cb8ff6a2b8bad6bc78e3e796e5e611e8598405",
-                "publish_work": "sha256:5b7e151a4583762f500803165aa48d3c49ec61172a36945a6af92064ffc171ff",
+                "publish_work": "sha256:a8dd06954e2f2ff65d3fb269a143b13745342e973e270179dc8b952fde7df115",
                 "check": "sha256:2bd9947abc7b60564474840a73d99a80bfa528b98af1a725d11fdfde5dac9795",
                 "respond": "sha256:8b5dc94f431a411ef332021af01050a4b0c248a800e46d5b3bdb567f770d25a5",
-                "status": "sha256:517eb05aa015834d98bd96ed59d4b647a95e6c42a13013803caf19b9b4b07875",
+                "status": "sha256:a4930e261aeb8f30064d14e20a4adc8e9059c8b0b6aad9d5fe26e14d1bb47a32",
                 "receipt": "sha256:c7676e1ca9afd96d9d7e74503edd5b31a758a05d7e7e1cf0d62c763611ffcecb",
                 "read_guidance": "sha256:4198e5fd133f7b37cc25c0c1a63161657c5d4396a1718f1f4f1f3db7c302a13d",
             }
@@ -1939,8 +1940,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:9c103a3fa8fdb85a6c2c20608bdde6294651e94b24407bca719c7e32a8c50722",
-        "strict": "sha256:e272d0216684ffa792ad0b10b55cdd4c436f1a8877cc03033b2fa14126a737b0",
+        "policy": "sha256:b4c56b857c07791a16cc8ed1658272d9d7d486499e9ee08ffd086abc8045801b",
+        "strict": "sha256:3ee0aa7d7cf749712ada96d80d604092bba150cad319e875a21d50b1db206860",
     }
 )
 

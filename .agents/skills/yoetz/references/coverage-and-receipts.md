@@ -63,9 +63,10 @@ Any other material event after the check — published work, a new finding (incl
 
 For a material repair, use one bounded status → repair → check → read → receipt sequence:
 
-1. Read current `status`, retain its frontier, and paginate `view=evidence` at that frontier before
-   authoring replacement evidence or a completion claim. Keep the cursor-bound filter and original
-   `limit`; reuse only matching permitted native IDs.
+1. Read current `status` and retain its frontier. Before authoring replacement evidence or a
+   completion claim, cite the evidence IDs you published and find native captures with a filtered
+   `view=evidence` read at that frontier. Keep the cursor-bound filter and original `limit`; reuse
+   only permitted native IDs a structural link ties to the claim.
 2. Publish the real repair results, corrected claim/evidence, and any required plan revision. Do not
    fabricate success or infer scope from the user's prompt. A feedback obligation is complete only
    when it is included in an effective plan revision or exact next-version restatement.
@@ -197,12 +198,21 @@ Installing a harness integration or firing a trigger-only hook does not strength
 
 ## Discover evidence before authoring replacements
 
-Before publishing evidence for a material claim, read every page of `status view=evidence` at
-one frontier. Preserve the view, filter, frontier and original `limit` with each cursor; changing
-page size starts a fresh query with no cursor. Match task, observed action/result, subject-state
-digests, byte digest and bounded description. A captured object ID alone is not a typed provenance
-label or evidence of relevance. Read the matching history/source identity when available; if that
-cannot establish the relation, leave it unknown.
+Before publishing evidence for a material claim, check what already exists instead of
+re-authoring it. Cite the `evidence_id`s you already published: they are in your own
+`publish_work` requests, and each accepted result confirms the events were recorded. Find native
+captures with `status view=evidence` and `filter.strength=immutable_snapshot`. Preserve the view,
+filter, frontier and original `limit` with each cursor; changing page size starts a fresh query
+with no cursor. Cite a native capture only when a structural link you can read ties it to the
+claim: a `status view=results` row whose `evidence_refs` names it, with that result's `action_id`
+and `outcome`, or a matching subject-state or byte digest. A captured object ID alone is not a
+typed provenance label or evidence of relevance; if no structural link establishes the relation,
+leave it unknown.
+
+A `description` or `reference` returned as omitted with `local_disclosure_not_authorized` is a
+privacy setting, not missing evidence: the item still exists, and republishing it does not reveal
+it. Walk the unfiltered list and match on descriptions only when the current projection shows
+them; never page through every item to match prose the projection omits.
 
 Reuse suitable existing native evidence IDs directly in the claim's `supporting_refs` and relevant
 result evidence references. Do not replace matching observed bytes with a duplicate

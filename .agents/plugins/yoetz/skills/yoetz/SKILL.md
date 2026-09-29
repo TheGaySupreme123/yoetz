@@ -191,9 +191,10 @@ stronger than the receipt's weakest material coverage.
 
 For a material repair, follow the shared ledger sequence:
 
-1. Read current `status`; retain its frontier and paginate `status view=evidence` before replacing
-   evidence or claiming completion. Preserve the cursor-bound filter and original `limit`; reuse only
-   matching observed native IDs.
+1. Read current `status` and retain its frontier. Before replacing evidence or claiming
+   completion, cite the evidence IDs you published and find native captures with a filtered
+   `status view=evidence` read. Preserve the cursor-bound filter and original `limit`; reuse only
+   native IDs a structural link ties to the claim.
 2. Publish actual repair results, corrected evidence/claim, and any needed plan revision. A feedback
    obligation is in effective scope only after a supported plan revision or exact next-version
    restatement includes it. Do not infer scope or success from the prompt.
@@ -218,11 +219,15 @@ advertises no tested harness version or hook.
 
 ## Evidence-first closure
 
-Before a material evidence publication or completion claim, paginate `status view=evidence` at
-one frontier, preserving the cursor-bound filter and limit. Reuse only matching observed IDs;
-do not author duplicate digest-only placeholders. Read per-item availability and subject state:
-a digest-only or clipped item does not make other native excerpts absent. The full procedure and
-mixed example are in `yoetz://guidance/publication-policy.md`.
+Before a material evidence publication or completion claim, cite the evidence IDs your own
+`publish_work` requests carry, and find native captures with `status view=evidence` and
+`filter.strength=immutable_snapshot`, preserving the cursor-bound filter and limit. Reuse only
+native IDs a structural link ties to the claim (a `view=results` row's `evidence_refs`, or a
+matching digest); do not author duplicate digest-only placeholders. An omitted description
+(`local_disclosure_not_authorized`) is a privacy setting, not missing evidence: do not page through
+every item to match prose you cannot see, and do not republish to reveal it. Read per-item
+availability and subject state: a digest-only or clipped item does not make other native excerpts
+absent. The full procedure and mixed example are in `yoetz://guidance/publication-policy.md`.
 
 `status view=obligations` separates asserted `unattempted_items` accounting from `command_attempts`:
 matching observation supports an attempt only; mismatch requires correcting the assertion or a

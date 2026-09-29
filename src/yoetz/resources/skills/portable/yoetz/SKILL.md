@@ -39,9 +39,11 @@ The normal sequence is:
 
 1. Start or attach once with stable workspace and external references.
 2. Publish a bounded plan and explicit obligations before substantive work.
-3. Read status and paginate `status view=evidence` at one frontier before publishing replacement evidence
-   or a completion claim; preserve the cursor-bound filter and original `limit` and reuse only
-   matching observed IDs. A feedback obligation is in effective scope only after a supported plan
+3. Read status before publishing replacement evidence or a completion claim: cite the evidence IDs
+   you published and find native captures with `status view=evidence` and
+   `filter.strength=immutable_snapshot`; preserve the cursor-bound filter and original `limit` and
+   reuse only IDs a structural link ties to the claim. An omitted description is a privacy setting,
+   not missing evidence. A feedback obligation is in effective scope only after a supported plan
    revision or exact next-version restatement includes it.
 4. Publish material transitions, evidence, and the completion claim without transcripts, secrets,
    broad source, or hidden reasoning.

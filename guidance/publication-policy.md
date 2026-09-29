@@ -50,12 +50,21 @@ An obligation names what must be satisfied. Evidence is a bounded, provenance-la
 
 ## Discover evidence before authoring replacements
 
-Before publishing evidence for a material claim, read every page of `status view=evidence` at
-one frontier. Preserve the view, filter, frontier and original `limit` with each cursor; changing
-page size starts a fresh query with no cursor. Match task, observed action/result, subject-state
-digests, byte digest and bounded description. A captured object ID alone is not a typed provenance
-label or evidence of relevance. Read the matching history/source identity when available; if that
-cannot establish the relation, leave it unknown.
+Before publishing evidence for a material claim, check what already exists instead of
+re-authoring it. Cite the `evidence_id`s you already published: they are in your own
+`publish_work` requests, and each accepted result confirms the events were recorded. Find native
+captures with `status view=evidence` and `filter.strength=immutable_snapshot`. Preserve the view,
+filter, frontier and original `limit` with each cursor; changing page size starts a fresh query
+with no cursor. Cite a native capture only when a structural link you can read ties it to the
+claim: a `status view=results` row whose `evidence_refs` names it, with that result's `action_id`
+and `outcome`, or a matching subject-state or byte digest. A captured object ID alone is not a
+typed provenance label or evidence of relevance; if no structural link establishes the relation,
+leave it unknown.
+
+A `description` or `reference` returned as omitted with `local_disclosure_not_authorized` is a
+privacy setting, not missing evidence: the item still exists, and republishing it does not reveal
+it. Walk the unfiltered list and match on descriptions only when the current projection shows
+them; never page through every item to match prose the projection omits.
 
 Reuse suitable existing native evidence IDs directly in the claim's `supporting_refs` and relevant
 result evidence references. Do not replace matching observed bytes with a duplicate
@@ -153,9 +162,11 @@ Use this bounded sequence for a material repair or closure. It applies to the si
 operations and does not add a composer or a new protocol field:
 
 1. Read current `status` and retain its returned frontier. Before replacing evidence or a claim,
-   paginate `status view=evidence` at one frontier, preserving its filter and original `limit` with
-   every cursor. Reuse only matching observed IDs; a missing MCP capture call, one digest-only item,
-   or one clipped item does not establish that all native evidence is unavailable.
+   cite the evidence IDs you published and find native captures with a filtered
+   `status view=evidence` read, preserving its filter and original `limit` with every cursor.
+   Reuse only native IDs a structural link ties to the claim; a missing MCP capture call, one
+   digest-only item, or one clipped item does not establish that all native evidence is
+   unavailable.
 2. Publish the actual repair results, corrected evidence or claim, and any required plan revision.
    Do not fabricate success or infer completion scope from the prompt. A feedback obligation is in
    effective scope only after a supported `plan_revised` event or an exact next-version

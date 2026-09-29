@@ -142,10 +142,10 @@ named repair/retry ending in terminal unavailability, with no pending write or a
 when the user/host permits it. A first non-retryable failure alone does not qualify. Follow
 [startup failure precedence](coverage-and-receipts.md#startup-failure-precedence); invent no state.
 
-Before material evidence or a completion claim, read `status` and paginate
-`view=evidence` at one frontier. Preserve the filter and original `limit` with every cursor; reuse
-only matching observed IDs. No MCP capture operation does not mean no native evidence exists, and
-one digest-only or clipped item does not make every item unavailable. A feedback obligation counts
+Before material evidence or a completion claim, read `status`; cite IDs you published and find
+native captures with `view=evidence` filter `strength=immutable_snapshot`, reusing only IDs a
+structural link ties to the claim. Omitted descriptions are a privacy setting, not missing
+evidence; one digest-only item does not make all unavailable. A feedback obligation counts
 as complete only after a supported plan revision or exact next-version restatement includes it.
 
 # Read more

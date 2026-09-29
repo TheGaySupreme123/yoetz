@@ -334,7 +334,7 @@ async def build_projection_application(
         ids=ids,
         verification_policy=VerificationPolicy(semantic=semantic, max_findings=max_findings),
         privacy=coordinator,
-        status_cursor_key=b"projection-workflow-cursor-key",
+        status_cursor_key=b"projection-workflow-status-cursor-key",
         waiver_policy_digest=PROJECTION_DIGEST,
         semantic_evaluator=_semantic_never if semantic == "disabled" else _semantic_succeeds,
         disclosure_scope_for=_scope,
