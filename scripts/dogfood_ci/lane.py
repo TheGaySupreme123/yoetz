@@ -1206,6 +1206,9 @@ class Lane:
                 "recent_count": status.get("recent_count"),
                 "source_coverage": status.get("source_coverage"),
                 "diagnostic_reasons": diagnostics.get("reasons"),
+                # Per-(host, event, path) hook cost over every pass (#915), so each
+                # host/OS lane reports what its hooks actually cost.
+                "hook_pass_timings": diagnostics.get("pass_timings"),
                 "quarantine_causes": status.get("quarantine_causes"),
                 "delivery_causes": status.get("delivery_causes"),
                 "pending_delivery_causes": status.get("pending_delivery_causes"),

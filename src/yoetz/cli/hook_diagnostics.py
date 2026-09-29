@@ -11,6 +11,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Final, cast
 
+from yoetz.cli.hook_timing import hook_pass_timing_summary
 from yoetz.config.paths import PathSafetyError, ensure_owner_only_dir, state_dir
 from yoetz.domain.observation import (
     ObservationEnvelope,
@@ -567,9 +568,10 @@ def record_hook_timing(
 ) -> None:
     """Append one bounded end-to-end timing row for a hook pass.
 
-    Emitted only over budget or at session boundaries: the diagnostics file is
-    64 KiB with one rotation, and a per-hook row would halve the retained
-    failure-reason window.
+    Emitted only over budget, at session boundaries, or on a legacy spool
+    hard-cap breach: the diagnostics file is 64 KiB with one rotation, and a
+    per-hook row would halve the retained failure-reason window. The typical
+    cost of every pass lives in the separate ``hook_timing`` aggregate (#915).
     """
 
     bounded = {
@@ -884,6 +886,9 @@ def hook_diagnostic_summary(
     Every tally is reported twice — over everything retained, and over the last
     `window_seconds` — and every count carries the span it covers, so a reader
     can tell a live failure from one that was fixed days ago (#310).
+
+    ``pass_timings`` is the separate bounded aggregate over every hook pass
+    (#915); ``timings`` stays the over-budget and session-boundary rows.
     """
 
     root = state_dir() if _state is None else _state
@@ -929,6 +934,7 @@ def hook_diagnostic_summary(
             # Newest payload-free ownership facts for lock timeouts and long
             # holds: which role and store phase held the lock, and for how long.
             "store_lock_events": tuple(locks[-_STORE_LOCK_SUMMARY_ROWS:]),
+            "pass_timings": hook_pass_timing_summary(_state=_state, _now=_now),
             "timings": timing.as_json(),
             "window_seconds": _RECENT_WINDOW_SECONDS,
         }

@@ -890,9 +890,49 @@ structural-only append and must not connect to the service, drain an outbox, or 
 observation store. The READY service forwards those records asynchronously through the normal
 fenced outbox path. The proposed (issue #362) host-visible budget is p95 `<=250ms`, with a hard
 `500ms` cap per synchronous leg including process startup. `yoetz observe status` reports pending
-spool work as a coverage gap (`source_lag`), and its hook diagnostics retain the host-visible total
-and `sync_fallback_spool` path. Do not treat a pending spool as delivered evidence; keep the
-service running and wait for it to drain before making receipt claims.
+spool work as a coverage gap (`source_lag`). Every spool pass feeds the `sync_fallback_spool` entry
+of `hook_diagnostics.pass_timings`, which reads the p95 target and the hard cap against every pass
+(`p95_target_ms`, `hard_cap_ms`, `hard_cap_breach_count`); only a pass over the hard cap also keeps
+a timing row and a `hook_slo_breached` reason, so a busy legacy host no longer evicts the
+failure-reason history one row per tool call (issue #915). Do not treat a pending spool as
+delivered evidence; keep the service running and wait for it to drain before making receipt
+claims.
+
+### Hook cost and timing aggregates (issue #915)
+
+Every Codex observation hook pass (`hooks observe` and the legacy `hooks spool`) folds one sample
+into a bounded aggregate that `yoetz observe status --json` reports as
+`hook_diagnostics.pass_timings` and the text form prints as `hook_pass_timing`. Entries are keyed
+by host, raw event and path (`codex PostToolUse observe`, `codex PreToolUse sync_fallback_spool`,
+...) and carry `count`, `sum_ms`, `mean_ms`, `p50_ms_at_most`, `p95_ms_at_most`, `max_ms`, an
+`outcomes` tally (`ingested`, `followup_deferred`, `not_ingested`, `failed`), the histogram
+`bucket_counts`, and a `recent` view over the current and previous clock hour. Read these limits
+before quoting a number:
+
+- A sample runs from the console entry to the end of the pass, after the hook's stdout was
+  written. Python interpreter start and process exit are not in it (`excludes`), so the
+  host-visible cost per call is the sample plus that start/exit term. Measure the term on the same
+  machine as the wall time of a bare `python -c pass` from the runtime's interpreter, or from host
+  timestamps (the session rollout's nested-call spacing).
+- `p50_ms_at_most` and `p95_ms_at_most` are histogram bucket bounds, not interpolated values.
+  150 ms is an exact bucket edge, so the share of passes within the per-call goal is exact: sum
+  `bucket_counts` through the 150 ms edge (`bucket_upper_bounds_ms`).
+- `hooks session-start` (resume/compact re-ground), the `start`-scoped `hooks post-tool-use`, and
+  `hooks user-prompt-submit` are not in the aggregate; none of them runs per tool call.
+- The aggregate spans every pass since `since`; a fresh test instance starts empty. It is local
+  diagnostics: owner-only, fixed-size, and not fsynced, so a crash can restart it (`since` moves).
+
+Registration decision on Codex (issue #915, recorded 2026-09-30): the `PostToolUse` observe
+handler stays synchronous for now. The DeepSWE v2 run inferred about 0.6–0.9 s per nested
+code-mode call from rollout timestamps; the aggregate is what confirms or refutes that on a
+product-side measurement, and the issue orders measurement before any registration change. The
+candidate change, async ingress behind the same `0.148.0-alpha.6` gate as `PreToolUse` plus a
+synchronous advice handler scoped to the Yoetz MCP tools or a minimal-import fast path, is not
+shipped: making both halves of a tool call async lets Codex run them concurrently, which can store
+a `PostToolUse` before its `PreToolUse`, and the `unpaired_event` contract that must absorb that
+belongs to #917. The per-call goal is ≤150 ms added latency
+(a goal, not a merge gate). Measured numbers per OS (macOS, Linux, WSL 2) from a code-mode dogfood
+run are not recorded yet; that gap is owned by issue #915, together with the async split.
 
 ### Capture and compare the live tool boundary
 

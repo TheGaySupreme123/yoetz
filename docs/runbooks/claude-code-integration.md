@@ -791,6 +791,30 @@ none of the response bytes or prose. Confirm `mapping_present: true`, then drain
 rows before claiming hook coverage. Pause, resume, revoke, deduplication, restart, and gap behavior
 require their own evidence.
 
+### Hook cost and timing (issue #915)
+
+Every `hooks claude-observe` pass folds one sample into the bounded aggregate that
+`yoetz observe status --json` reports as `hook_diagnostics.pass_timings` (text: `hook_pass_timing`).
+Entries are keyed by host `claude`, the raw Claude event (`PreToolUse`, `PostToolUse`,
+`PostToolUseFailure`, `SessionStart`, ...) and the rendered profile path (`structural` or
+`ordinary`), with `count`, `p50_ms_at_most`, `p95_ms_at_most` (histogram bucket bounds), `max_ms`,
+an `outcomes` tally and a `recent` view. A sample runs from the console entry to the end of the
+pass; Python interpreter start and process exit are excluded, so add that term, measured on the same
+machine, before comparing with host-visible latency. A structural `PostToolUse` for a generic tool
+is filtered at ingress and counts as `not_ingested`; it still cost a process. The
+`hooks startup-gate` and `hooks startup-context` commands are not in the aggregate.
+
+Registration decision on Claude Code (issue #915, recorded 2026-09-30): unchanged, and no latency
+improvement is claimed. Claude Code runs every hook as a synchronous command (5 s for tool events,
+10 s for `SessionStart`/`Stop`, 3 s for `SessionEnd`). The structural default subscribes
+`PostToolUse`/`PostToolUseFailure` only for the Yoetz workflow tools, so ordinary tool calls pay no
+Yoetz hook process. The ordinary profile subscribes `PreToolUse`, `PostToolUse` and
+`PostToolUseFailure` on `.*`, which is two synchronous Yoetz processes per tool call; required
+startup mode adds a `startup-gate` process to each of those events. Whether those hooks can be made
+cheaper (a minimal-import fast path or a narrower matcher) without losing ingress is decided from
+the aggregate of a Claude Code dogfood run in both profiles on macOS, Linux and WSL 2. Those
+measurements are not recorded yet; the gap is owned by issue #915.
+
 ### Oversized hook payloads (issue #667)
 
 A Claude Code hook body over the 256 KiB ingress cap (`MAX_HOOK_STDIN_BYTES`) is refused at

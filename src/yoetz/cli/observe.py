@@ -51,6 +51,7 @@ from yoetz.application.observation_drain import (
 from yoetz.application.observation_verification import run_bound_approved_check
 from yoetz.cli.exits import exit_code_for, remediation_message
 from yoetz.cli.hook_diagnostics import hook_diagnostic_summary
+from yoetz.cli.hook_timing import hook_pass_timing_text
 from yoetz.cli.render import (
     error_recovery_json,
     local_recovery_json,
@@ -1424,7 +1425,14 @@ def observe_status(
         ),
         "mapping_present": str(mapping_present),
         "plugin_activation": plugin_activation,
-        "hook_diagnostics": canonical_encode(diagnostics).decode("utf-8"),
+        # The per-pass timing aggregate gets its own readable line; the diagnostics
+        # blob keeps its historical content (#915).
+        "hook_diagnostics": canonical_encode(
+            JsonObject({key: value for key, value in diagnostics.items() if key != "pass_timings"})
+        ).decode("utf-8"),
+        "hook_pass_timing": hook_pass_timing_text(
+            cast(Mapping[str, DomainJsonValue], diagnostics["pass_timings"])
+        ),
         "advice_frontier": status.advice_frontier or "none",
         "gaps": ",".join(status.gaps) if status.gaps else "none",
         "summary_refusals": (

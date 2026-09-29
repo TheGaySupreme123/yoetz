@@ -4650,7 +4650,25 @@ interruption, so subsequent writers can proceed. Hook timing rows attribute queu
 `store_lock_wait` and the pass's own critical sections as
 `store_lock_hold`, cover the previously unwindowed resolve/deliver regions, and name any remaining
 wall-time difference as `unattributed`; nested store sub-stages are reported separately from the
-end-to-end partition (issues #310 and #311). A hook pass whose capture batch cannot take the lock
+end-to-end partition (issues #310 and #311). Timing rows stay reserved for over-budget passes,
+session boundaries and legacy-spool hard-cap breaches, so routine passes never evict the
+failure-reason window. The cost of every hook pass lives in a separate fixed-size aggregate
+(issue #915): each host ingress entry (`hooks observe` and `hooks spool` for Codex,
+`hooks claude-observe`, `hooks cursor-observe`) folds exactly one sample per process into the
+owner-only `observation/hook-pass-timing.json`, keyed by host (`codex`, `claude`, `cursor`), raw
+host event name, and path (`observe`, `sync_fallback_spool`, `structural`, `ordinary`,
+`invalid_profile`), with an outcome tally (`ingested`, `followup_deferred`, `not_ingested`,
+`failed`). A sample is in-process time from the console entry to the end of the pass, after the
+host output was written; interpreter start and process exit are excluded. Each entry keeps the exact
+count, sum, mean and maximum, a fixed-bucket histogram whose edges include 150 ms, 250 ms, 500 ms and
+the 3, 5 and 10 s host timeouts, and the same histogram for the current and previous clock hour
+(`recent`, dated by `since`). `p50_ms_at_most` and `p95_ms_at_most` are the bucket bound that the
+nearest-rank percentile falls at or below, never an interpolation. The document holds at most 48
+entries (evictions are counted) and 64 KiB, is rewritten in place under an exclusive lock that
+readers share, and is not fsynced; a document that fails validation reads as `unreadable` and
+restarts with a new `since`. Nested calls and the service's legacy-spool replay run the observe pass
+without a host entry and contribute no sample. `observe status --json` reports the aggregate as
+`hook_diagnostics.pass_timings`; the text form prints it on a `hook_pass_timing` line. A hook pass whose capture batch cannot take the lock
 within its budget still exits 0 with its host's fail-open output, and reports
 `store_lock_timeout` instead of the generic `observe` or a false `workspace_unconsented`; that
 input is not retained. Serialization splices a cached canonical fragment for each immutable

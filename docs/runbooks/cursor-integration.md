@@ -657,6 +657,28 @@ This hook sends its Cursor content profile only with
 Cursor rows; a queued Codex or Claude Code row drained from the same workspace carries no profile, so
 it is not refused as `content_capture_profile_mismatch`.
 
+### Hook cost and timing (issue #915)
+
+Every `hooks cursor-observe` pass folds one sample into the bounded aggregate that
+`yoetz observe status --json` reports as `hook_diagnostics.pass_timings` (text: `hook_pass_timing`).
+Entries are keyed by host `cursor`, the raw Cursor event (`afterFileEdit`, `afterMCPExecution`,
+`preToolUse`, `postToolUse`, `postToolUseFailure`, `sessionStart`, `stop`, `sessionEnd`) and the
+rendered profile path (`structural` or `ordinary`), with `count`, `p50_ms_at_most`,
+`p95_ms_at_most` (histogram bucket bounds), `max_ms`, an `outcomes` tally and a `recent` view. A
+`preToolUse` sample includes the neutral permission write. A sample runs from the console entry to
+the end of the pass; Python interpreter start and process exit are excluded, so add that term,
+measured on the same machine, before comparing with host-visible latency. The `hooks startup-gate`
+and `hooks startup-context` commands are not in the aggregate.
+
+Registration decision on Cursor (issue #915, recorded 2026-09-30): unchanged, and no latency
+improvement is claimed. Cursor hooks are synchronous by host design (5 s for tool events). The
+structural default subscribes `afterFileEdit` and `afterMCPExecution` per edit or MCP call plus the
+session events; the ordinary profile adds `preToolUse`, `postToolUse` and `postToolUseFailure` for
+every tool call, and required startup mode adds `startup-gate` processes. Cursor has no async hook
+form, so the lever, if the measurements call for one, is a minimal-import fast path rather than an
+async split. That is decided from the aggregate of a Cursor dogfood run in both profiles on macOS,
+Linux and WSL 2; those measurements are not recorded yet, and the gap is owned by issue #915.
+
 ### Oversized hook payloads (issue #667)
 
 A Cursor hook body over the 256 KiB trusted parse cap (`MAX_HOOK_STDIN_BYTES`) is not admitted as

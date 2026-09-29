@@ -1,0 +1,456 @@
+"""Every host hook pass is timed per host, event and path (issue #915).
+
+Payloads follow the current host hook contracts rather than pre-normalised envelopes:
+
+* Codex 0.157.1 code mode: one ``exec`` cell makes nested ``apply_patch``, ``exec_command`` and
+  ``mcp__yoetz__status`` calls, each firing its own ``PreToolUse``/``PostToolUse`` with the
+  generated hook input fields (``session_id``, ``turn_id``, ``transcript_path``, ``cwd``,
+  ``model``, ``permission_mode``, ``tool_name``, ``tool_input``, ``tool_use_id`` and, after the
+  call, ``tool_response``).
+* Claude Code ``PostToolUse`` with ``tool_use_id`` for a plugin-scoped Yoetz tool (structural
+  profile) and for ``Bash`` (ordinary profile).
+* Cursor 3.17 ``postToolUse`` (ordinary profile) and ``afterMCPExecution`` (structural profile)
+  keyed by ``conversation_id``.
+"""
+
+from __future__ import annotations
+
+import io
+import json
+from collections.abc import Mapping
+from pathlib import Path
+from typing import cast
+
+import pytest
+
+from yoetz.adapters.integrations.observation_local import LocalObservationStore
+from yoetz.cli import observe as observe_cli
+from yoetz.cli import observe_hooks
+from yoetz.cli.hook_diagnostics import hook_diagnostic_summary
+from yoetz.cli.hook_timing import hook_pass_timing_summary
+from yoetz.domain.observation_profiles import (
+    CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
+    CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
+)
+from yoetz.protocol.canonical import JsonValue, canonical_encode
+
+_CODEX_SESSION = "019a0000-0000-7000-8000-000000000915"
+
+
+def _consented(tmp_path: Path) -> tuple[LocalObservationStore, str]:
+    store = LocalObservationStore(_state=tmp_path)
+    commitment = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(commitment)
+    return store, commitment
+
+
+def _codex(
+    event: str,
+    tool_name: str,
+    tool_use_id: str,
+    tool_input: JsonValue,
+    workspace: Path,
+    response: JsonValue | None = None,
+) -> bytes:
+    payload: dict[str, JsonValue] = {
+        "session_id": _CODEX_SESSION,
+        "transcript_path": f"{workspace}/.codex/sessions/rollout-2026-09-29.jsonl",
+        "cwd": str(workspace),
+        "hook_event_name": event,
+        "model": "gpt-6-sol",
+        "permission_mode": "default",
+        "turn_id": "turn-7",
+        "tool_name": tool_name,
+        "tool_input": tool_input,
+        "tool_use_id": tool_use_id,
+    }
+    if response is not None:
+        payload["tool_response"] = response
+    return json.dumps(payload).encode()
+
+
+def _code_mode_cell(workspace: Path) -> list[tuple[str, str, JsonValue, JsonValue]]:
+    """The nested calls of one Codex code-mode ``exec`` cell, in the order they ran."""
+
+    patch = (
+        "*** Begin Patch\n"
+        f"*** Update File: {workspace}/bandit/plugins/tainted_injection.py\n"
+        "@@ def check():\n"
+        "-    return sink(value)\n"
+        "+    return sink(sanitize(value))\n"
+        "*** End Patch\n"
+    )
+    return [
+        (
+            "apply_patch",
+            "call_915_patch",
+            {"command": patch},
+            "Exit code: 0\nWall time: 0.0 seconds\nOutput:\nSuccess. Updated the following files:\n"
+            "M bandit/plugins/tainted_injection.py\n",
+        ),
+        (
+            "exec_command",
+            "call_915_exec",
+            {"cmd": "python -m pytest -q tests/unit/test_taint.py", "yield_time_ms": 10_000},
+            "Exit code: 0\nWall time: 1.2 seconds\nOutput:\n3 passed in 0.41s\n",
+        ),
+        (
+            "mcp__yoetz__status",
+            "call_915_status",
+            {"request": {"session_id": "ses_00000000-0000-4000-8000-000000000915"}},
+            {"content": [], "structuredContent": {"ok": True}, "isError": False},
+        ),
+    ]
+
+
+def _entries(state: Path) -> dict[tuple[str, str, str], Mapping[str, object]]:
+    summary = hook_pass_timing_summary(_state=state)
+    return {
+        (cast(str, entry["host"]), cast(str, entry["event"]), cast(str, entry["path"])): entry
+        for entry in cast(tuple[Mapping[str, object], ...], summary["entries"])
+    }
+
+
+def _assert_no_per_pass_rows(state: Path) -> None:
+    """Rows stay reserved for over-budget passes: none is a routine, in-budget pass."""
+
+    summary = hook_diagnostic_summary(_state=state)
+    reasons = cast(Mapping[str, Mapping[str, object]], summary["reasons"])
+    over_budget = cast(int, reasons.get("hook_budget_exceeded", {}).get("count", 0))
+    assert cast(Mapping[str, object], summary["timings"])["count"] == over_budget
+
+
+def test_codex_code_mode_nested_calls_are_each_one_timed_pass_without_rows(
+    tmp_path: Path,
+) -> None:
+    _consented(tmp_path)
+    cell = _code_mode_cell(tmp_path)
+    for tool_name, tool_use_id, tool_input, response in cell:
+        for event, body in (
+            ("PreToolUse", _codex("PreToolUse", tool_name, tool_use_id, tool_input, tmp_path)),
+            (
+                "PostToolUse",
+                _codex("PostToolUse", tool_name, tool_use_id, tool_input, tmp_path, response),
+            ),
+        ):
+            stdout = io.BytesIO()
+            assert (
+                observe_hooks.handle_codex_observe(
+                    event_name=event,
+                    stdin_bytes=body,
+                    stdout=stdout,
+                    workspace=str(tmp_path),
+                    _state=tmp_path,
+                    skip_service=True,
+                )
+                == 0
+            )
+            assert stdout.getvalue().endswith(b"\n")
+
+    entries = _entries(tmp_path)
+    assert set(entries) == {("codex", "PreToolUse", "observe"), ("codex", "PostToolUse", "observe")}
+    for entry in entries.values():
+        assert entry["count"] == len(cell)
+        assert cast(Mapping[str, int], entry["outcomes"])["ingested"] == len(cell)
+        assert entry["p50_ms_at_most"] is not None
+        assert entry["p95_ms_at_most"] is not None
+        assert entry["max_ms"] is not None
+    _assert_no_per_pass_rows(tmp_path)
+
+
+def test_codex_sample_is_the_host_entry_to_pass_end_interval(tmp_path: Path) -> None:
+    ticks = iter((10.0, 10.25))
+
+    assert (
+        observe_hooks.handle_codex_observe(
+            event_name="PostToolUse",
+            stdin_bytes=_codex("PostToolUse", "exec_command", "call_1", {"cmd": "ls"}, tmp_path),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+            _monotonic=lambda: next(ticks),
+        )
+        == 0
+    )
+
+    entry = _entries(tmp_path)[("codex", "PostToolUse", "observe")]
+    assert entry["max_ms"] == 250
+    # Nothing was consented, so the pass ended before capture and is named so.
+    assert cast(Mapping[str, int], entry["outcomes"])["not_ingested"] == 1
+
+
+def test_codex_pass_that_faults_is_counted_as_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("private detail")
+
+    monkeypatch.setattr(observe_hooks, "read_hook_payload", broken)
+    stdout = io.BytesIO()
+    assert (
+        observe_hooks.handle_codex_observe(
+            event_name="PostToolUse",
+            stdin_bytes=b"{}",
+            stdout=stdout,
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+
+    assert stdout.getvalue() == b"{}\n"
+    entry = _entries(tmp_path)[("codex", "PostToolUse", "observe")]
+    assert cast(Mapping[str, int], entry["outcomes"])["failed"] == 1
+    raw = (tmp_path / "observation" / "hook-pass-timing.json").read_text()
+    assert "private detail" not in raw
+
+
+def test_nested_and_service_replay_passes_never_count_as_host_passes(tmp_path: Path) -> None:
+    """The service replays legacy spool rows through the same pass; that is not host cost."""
+
+    _consented(tmp_path)
+    assert (
+        observe_hooks.handle_observe(
+            event_name="PostToolUse",
+            stdin_bytes=_codex("PostToolUse", "exec_command", "call_2", {"cmd": "ls"}, tmp_path),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+
+    assert hook_pass_timing_summary(_state=tmp_path)["status"] == "absent"
+
+
+def test_claude_structural_and_ordinary_tool_hooks_are_separate_paths(tmp_path: Path) -> None:
+    _consented(tmp_path)
+    structural: dict[str, JsonValue] = {
+        "session_id": "5b3c1d2e-0000-4000-8000-000000000915",
+        "transcript_path": "/Users/{user}/.claude/projects/proj/session.jsonl",
+        "cwd": str(tmp_path),
+        "permission_mode": "default",
+        "hook_event_name": "PostToolUse",
+        "tool_name": "mcp__plugin_yoetz_yoetz__status",
+        "tool_input": {"request": {}},
+        "tool_response": {"ok": True},
+        "tool_use_id": "toolu_01STATUS",
+    }
+    ordinary: dict[str, JsonValue] = {
+        **structural,
+        "tool_name": "Bash",
+        "tool_input": {"command": "pytest -q", "description": "Run tests"},
+        "tool_response": {"stdout": "3 passed", "stderr": "", "interrupted": False},
+        "tool_use_id": "toolu_01BASH",
+    }
+    for payload, profile in (
+        (structural, None),
+        (ordinary, CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID),
+    ):
+        assert (
+            observe_hooks.handle_claude_observe(
+                event_name="PostToolUse",
+                stdin_bytes=canonical_encode(cast(JsonValue, payload)),
+                stdout=io.BytesIO(),
+                workspace=str(tmp_path),
+                _state=tmp_path,
+                skip_service=True,
+                observation_profile=profile,
+            )
+            == 0
+        )
+    # A generic tool on the structural profile is filtered at ingress but still costs a process.
+    assert (
+        observe_hooks.handle_claude_observe(
+            event_name="PostToolUse",
+            stdin_bytes=canonical_encode(cast(JsonValue, ordinary)),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+
+    entries = _entries(tmp_path)
+    assert set(entries) == {
+        ("claude", "PostToolUse", "structural"),
+        ("claude", "PostToolUse", "ordinary"),
+    }
+    assert entries[("claude", "PostToolUse", "structural")]["outcomes"] == {
+        "ingested": 1,
+        "followup_deferred": 0,
+        "not_ingested": 1,
+        "failed": 0,
+    }
+    assert (
+        cast(Mapping[str, int], entries[("claude", "PostToolUse", "ordinary")]["outcomes"])[
+            "ingested"
+        ]
+        == 1
+    )
+    _assert_no_per_pass_rows(tmp_path)
+
+
+def test_cursor_tool_and_mcp_hooks_are_timed_per_raw_event_and_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("CURSOR_PROJECT_DIR", raising=False)
+    _consented(tmp_path)
+    base: dict[str, object] = {
+        "conversation_id": "cursor-conv-915",
+        "generation_id": "gen-1",
+        "model": "claude-opus-4-7-thinking-max",
+        "cursor_version": "3.17.8",
+        "workspace_roots": [str(tmp_path.resolve())],
+        "user_email": None,
+        "transcript_path": None,
+    }
+    calls: list[tuple[str, dict[str, object], str | None]] = [
+        (
+            "preToolUse",
+            {"tool_name": "Shell", "tool_use_id": "t1", "tool_input": {"command": "ls"}},
+            CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
+        ),
+        (
+            "postToolUse",
+            {
+                "tool_name": "Shell",
+                "tool_use_id": "t1",
+                "tool_input": {"command": "ls"},
+                "tool_output": '{"exitCode":0}',
+                "duration": 12,
+            },
+            CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
+        ),
+        (
+            "afterMCPExecution",
+            {"tool_name": "MCP:fixture_echo", "result_json": "fixture result", "duration": 3.5},
+            None,
+        ),
+    ]
+    outputs: dict[str, object] = {}
+    for event, fields, profile in calls:
+        stdout = io.BytesIO()
+        assert (
+            observe_hooks.handle_cursor_observe(
+                event_name=event,
+                # Plain JSON bytes as Cursor writes them, fractional duration included.
+                stdin_bytes=json.dumps({**base, "hook_event_name": event, **fields}).encode(),
+                stdout=stdout,
+                workspace=str(tmp_path),
+                _state=tmp_path,
+                skip_service=True,
+                observation_profile=profile,
+            )
+            == 0
+        )
+        outputs[event] = json.loads(stdout.getvalue())
+
+    assert outputs["preToolUse"] == {"permission": "allow"}
+    entries = _entries(tmp_path)
+    assert set(entries) == {
+        ("cursor", "preToolUse", "ordinary"),
+        ("cursor", "postToolUse", "ordinary"),
+        ("cursor", "afterMCPExecution", "structural"),
+    }
+    assert all(entry["count"] == 1 for entry in entries.values())
+    _assert_no_per_pass_rows(tmp_path)
+
+
+def test_legacy_spool_counts_every_pass_and_keeps_rows_for_hard_cap_breaches_only(
+    tmp_path: Path,
+) -> None:
+    _consented(tmp_path)
+    body = _codex("PostToolUse", "exec_command", "call_3", {"cmd": "ls"}, tmp_path)
+    for _ in range(3):
+        assert (
+            observe_hooks.handle_spool(
+                event_name="PostToolUse",
+                stdin_bytes=body,
+                stdout=io.BytesIO(),
+                workspace=str(tmp_path),
+                _state=tmp_path,
+                _monotonic=iter((0.0, 0.04, 0.04)).__next__,
+            )
+            == 0
+        )
+    entry = _entries(tmp_path)[("codex", "PostToolUse", "sync_fallback_spool")]
+    assert entry["count"] == 3
+    assert cast(Mapping[str, int], entry["outcomes"])["ingested"] == 3
+    assert entry["hard_cap_breach_count"] == 0
+    summary = hook_diagnostic_summary(_state=tmp_path)
+    assert cast(Mapping[str, object], summary["timings"])["count"] == 0
+
+    assert (
+        observe_hooks.handle_spool(
+            event_name="PostToolUse",
+            stdin_bytes=body,
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            _monotonic=iter((0.0, 0.61, 0.61)).__next__,
+        )
+        == 0
+    )
+    entry = _entries(tmp_path)[("codex", "PostToolUse", "sync_fallback_spool")]
+    assert entry["count"] == 4
+    assert entry["hard_cap_breach_count"] == 1
+    summary = hook_diagnostic_summary(_state=tmp_path)
+    timings = cast(Mapping[str, object], summary["timings"])
+    assert timings["count"] == 1
+    assert (
+        cast(
+            Mapping[str, object],
+            cast(Mapping[str, object], timings["paths"])["sync_fallback_spool"],
+        )["recent_hard_cap_breach_count"]
+        == 1
+    )
+    assert "hook_slo_breached" in cast(Mapping[str, object], summary["reasons"])
+
+
+def test_observe_status_reports_pass_timing_in_json_and_text(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unexpected_inspection(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("status must not inspect activation without an exact executable")
+
+    monkeypatch.setattr(observe_cli, "inspect_activation", unexpected_inspection)
+    _consented(tmp_path)
+    observe_hooks.handle_codex_observe(
+        event_name="PostToolUse",
+        stdin_bytes=_codex("PostToolUse", "apply_patch", "call_5", {"command": ""}, tmp_path),
+        stdout=io.BytesIO(),
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        skip_service=True,
+    )
+
+    assert (
+        observe_cli.observe_status(workspace=str(tmp_path), json_output=True, _state=tmp_path) == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    pass_timings = payload["hook_diagnostics"]["pass_timings"]
+    assert pass_timings["status"] == "retained"
+    assert pass_timings["measured_from"] == "console_entry"
+    (entry,) = pass_timings["entries"]
+    assert (entry["host"], entry["event"], entry["path"], entry["count"]) == (
+        "codex",
+        "PostToolUse",
+        "observe",
+        1,
+    )
+    assert set(entry) >= {"p50_ms_at_most", "p95_ms_at_most", "max_ms", "recent", "outcomes"}
+
+    assert (
+        observe_cli.observe_status(workspace=str(tmp_path), json_output=False, _state=tmp_path) == 0
+    )
+    lines = capsys.readouterr().out.splitlines()
+    timing_line = next(line for line in lines if line.startswith("hook_pass_timing: "))
+    assert "codex PostToolUse observe: n=1 " in timing_line
+    assert "percentiles are histogram bucket bounds" in timing_line
+    diagnostics_line = next(line for line in lines if line.startswith("hook_diagnostics: "))
+    assert "pass_timings" not in diagnostics_line
