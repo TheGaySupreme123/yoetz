@@ -30,6 +30,9 @@ __all__ = [
     "ADVERTISED_SURFACE_BUDGET",
     "CLAUDE_CODE_INITIALIZE_INSTRUCTIONS",
     "CLAUDE_CODE_INSTRUCTIONS_BUDGET",
+    "COMPACT_INITIALIZE_INSTRUCTIONS",
+    "COMPACT_INSTRUCTIONS_BUDGET",
+    "COMPACT_INSTRUCTIONS_HOST_PROFILES",
     "INITIALIZE_GUIDANCE_URIS",
     "ORDINARY_MCP_PRESENTATION_SCHEMA_VERSIONS",
     "ORDINARY_MCP_PUBLISH_EVENT_FAMILIES",
@@ -233,7 +236,8 @@ SERVER_INSTRUCTIONS_BUDGET: Final[Mapping[str, int]] = MappingProxyType(
 # before the rule that says to call `start`. The packaged Claude text is bounded so that it, the
 # policy route tail, and the longest admissible destination disclosure
 # (`MAX_DISCLOSURE_ENCODED_BYTES`, issue #479) fit under the cap together: the privacy disclosure
-# is never the part that gets cut. Other hosts keep the full `agent-instructions.md` document.
+# is never the part that gets cut. Codex and Cursor receive the compact body below (#918); the
+# generic host keeps the full `agent-instructions.md` document.
 # `packaged_max_chars` is derived: cap - len("\n\nRoute profile: policy. ") - len(policy tail)
 # - 1 joiner - disclosure ceiling - 1 trailing newline = 2048 - 25 - 57 - 1 - 1000 - 1.
 CLAUDE_CODE_INSTRUCTIONS_BUDGET: Final[Mapping[str, int]] = MappingProxyType(
@@ -274,6 +278,67 @@ CLAUDE_CODE_INITIALIZE_INSTRUCTIONS: Final = (
     "is correct."
 )
 
+# Hosts that receive the compact initialize body instead of the full packaged document (#918).
+COMPACT_INSTRUCTIONS_HOST_PROFILES: Final[frozenset[str]] = frozenset({"codex", "cursor"})
+# Reviewed byte cap for the compact body (issue #918). Codex code mode builds every advertised
+# tool's description from these instructions, the tool description and a generated declaration,
+# so the body is charged once per tool (seven copies) on every turn. The full
+# `agent-instructions.md` document cost 19,835 bytes per copy there. `packaged_max_encoded_bytes`
+# bounds the packaged body alone. `max_encoded_bytes` is derived: that bound plus
+# len("\n\nRoute profile: policy. ") + len(policy tail) + 1 joiner + the disclosure ceiling (#479)
+# + 1 trailing newline = 2048 + 25 + 57 + 1 + 1000 + 1. The strict rendering is shorter. The
+# disclosure is never trimmed to fit.
+COMPACT_INSTRUCTIONS_BUDGET: Final[Mapping[str, int]] = MappingProxyType(
+    {
+        "packaged_max_encoded_bytes": 2_048,
+        "max_encoded_bytes": 2_048
+        + len("\n\nRoute profile: policy. ")
+        + len(_POLICY_ROUTE_TAIL)
+        + 1
+        + MAX_DISCLOSURE_ENCODED_BYTES
+        + 1,
+    }
+)
+# The compact initialize text for the Codex and Cursor hosts. It keeps the rules an agent needs
+# before its first guidance read: when to call `start`, the late-start and no-false-activation
+# rules, where every guidance document is and when to read it, the cadence, the consent,
+# disclosure and recovery boundaries, and coverage-honest wording. The full
+# `agent-instructions.md` safety floor it summarizes is one `read_guidance` call away, and the
+# text says to read it before the first `start`. It names no host, so one body serves both.
+COMPACT_INITIALIZE_INSTRUCTIONS: Final = (
+    "# Yoetz: call start first\n"
+    "\n"
+    "If this session will edit files, run state-changing commands, or delegate, call "
+    "`start` before that work. If material work already began without a task, call "
+    "`start` now, publish it as a plan, and disclose the uncovered prefix in the receipt. "
+    "If the tool list shows only names, load the `start` schema first. Read-only questions "
+    "skip it. So does a subagent whose assignment names no handle or parent session.\n"
+    "\n"
+    "Before the first `start`, call `read_guidance` on "
+    "`yoetz://guidance/agent-instructions.md` (the full safety floor) and "
+    "`yoetz://guidance/workflow.md`. Read `yoetz://guidance/publication-policy.md` before "
+    "the first `publish_work`, `yoetz://guidance/coverage-and-receipts.md` before the first "
+    "`check`, and `yoetz://guidance/request-templates.md` for a missing or rejected schema and "
+    "before setup, consent, credential, import or recommendation steps. Do not list resources "
+    "to find them or call `start` on an empty guidance body.\n"
+    "\n"
+    "Cadence: `start` once, `publish_work` per material transition, `check` after the "
+    "completion claim and evidence, `respond` per finding, `receipt` last. `respond` records "
+    "a disposition; it does not clear a finding. Never claim Yoetz is active before `start` "
+    "returns; never invent a ledger task, id, finding, verdict or receipt. If `start` fails, "
+    "follow its typed continuation, then ask the user; do not work without a task. On "
+    "`retryable: false`, follow only the typed `continuation`. If Yoetz is unavailable, say "
+    "no live record or receipt exists.\n"
+    "\n"
+    "Publish only material, state-bound facts, never hidden reasoning, transcripts, "
+    "credentials, secrets or whole files. Setup, privacy, credential and recommendation "
+    "changes need the user's explicit approval of that exact action; never handle a vault "
+    "secret. Recover through `status`, never Yoetz databases or source.\n"
+    "\n"
+    "Yoetz records only what participants publish; a clean check does not mean the work is "
+    "correct. Keep the final answer no stronger than the receipt's weakest coverage."
+)
+
 # Reviewed budget for everything one host renders into the model's context to advertise Yoetz:
 # the instructions block charged once per tool, plus every tool description, plus every advertised
 # input schema. Per-item budgets cannot catch this — each item can sit inside its own bound while
@@ -284,7 +349,7 @@ CLAUDE_CODE_INITIALIZE_INSTRUCTIONS: Final = (
 # current-main initialize guidance, including the #789 late-start rule carried from the 0.2 line.
 # That makes the measured generic-host packaged surface about 221 KB; the reviewed 224 KB ceiling
 # leaves bounded headroom without dropping an admitted family, example, or startup rule. Claude
-# Code receives the compact initialize body instead and is bounded separately above.
+# Code, Codex and Cursor receive compact initialize bodies instead, bounded separately above.
 # The aggregate likewise carries the packaged bound plus one disclosure allowance per advertised
 # tool, because the host that inlines the instructions inlines the disclosure with them.
 ADVERTISED_SURFACE_BUDGET: Final[Mapping[str, int]] = MappingProxyType(
@@ -2032,8 +2097,10 @@ def server_instructions(
 
     ``host_profile`` selects the packaged body (issue #789): the ``claude`` host receives
     ``CLAUDE_CODE_INITIALIZE_INSTRUCTIONS``, sized for that host's observed 2,048-character cap;
-    every other host receives the ``INITIALIZE_GUIDANCE_URIS`` document unchanged. The route
-    tail and the disclosure are composed identically for both bodies.
+    the ``codex`` and ``cursor`` hosts receive ``COMPACT_INITIALIZE_INSTRUCTIONS`` (issue #918),
+    bounded by ``COMPACT_INSTRUCTIONS_BUDGET`` because Codex charges it once per advertised tool;
+    the ``generic`` host receives the ``INITIALIZE_GUIDANCE_URIS`` document unchanged. The route
+    tail and the disclosure are composed identically for every body.
     """
 
     if profile not in TOOL_DESCRIPTORS:
@@ -2046,6 +2113,8 @@ def server_instructions(
         raise TypeError("semantic_destination_wrong_type")
     if host_profile == "claude":
         base = CLAUDE_CODE_INITIALIZE_INSTRUCTIONS
+    elif host_profile in COMPACT_INSTRUCTIONS_HOST_PROFILES:
+        base = COMPACT_INITIALIZE_INSTRUCTIONS
     else:
         base = "\n\n".join(
             read_resource(uri).decode("utf-8", errors="strict").rstrip()
@@ -2082,8 +2151,36 @@ def _lint_claude_code_instructions() -> None:
         raise RuntimeError("claude_code_instructions_over_budget")
 
 
+def _lint_compact_initialize_instructions() -> None:
+    """Fail import when the Codex and Cursor text outgrows its reviewed byte cap (#918)."""
+
+    text = COMPACT_INITIALIZE_INSTRUCTIONS
+    budget = COMPACT_INSTRUCTIONS_BUDGET
+    encoded = len(text.encode("utf-8"))
+    if not text.isascii() or encoded > budget["packaged_max_encoded_bytes"]:
+        raise RuntimeError("compact_instructions_over_budget")
+    if _FORBIDDEN_CLAIMS.search(text) is not None:
+        raise RuntimeError("descriptor_honesty_lint_failed")
+    if _BOUNDARY_TERMS.search(_GUIDANCE_URI.sub("yoetz-guidance-resource", text)) is not None:
+        raise RuntimeError("descriptor_boundary_lint_failed")
+    worst_case = (
+        encoded
+        + max(
+            len(f"\n\nRoute profile: policy. {_POLICY_ROUTE_TAIL} ") + MAX_DISCLOSURE_ENCODED_BYTES,
+            len(f"\n\nRoute profile: strict. {_STRICT_ROUTE_TAIL}"),
+        )
+        + 1
+    )
+    if worst_case > budget["max_encoded_bytes"]:
+        raise RuntimeError("compact_instructions_over_budget")
+    # The generic body stays the fallback, and Claude keeps its own capped body (#789).
+    if not COMPACT_INSTRUCTIONS_HOST_PROFILES <= _HOST_PROFILES - {"generic", "claude"}:
+        raise RuntimeError("compact_instructions_host_invalid")
+
+
 _lint_descriptor_sets()
 _lint_claude_code_instructions()
+_lint_compact_initialize_instructions()
 
 # Eagerly build presentation schemas so import fails closed on projection errors.
 for descriptor_set in TOOL_DESCRIPTORS.values():

@@ -61,7 +61,13 @@ def test_step_zero_stops_on_an_empty_guidance_read() -> None:
     # #300 trimmed the inlined set to agent-instructions.md. The skill must not tell the agent it
     # already has workflow.md or coverage-and-receipts.md in context — a false pre-delivery claim
     # licenses skipping the fetch, which is strictly worse than the #203 empty read it replaced.
-    assert "Initialize `instructions` already include `agent-instructions.md`;" in collapsed
+    # Since #918 the Codex host receives a compact summary, so the same rule now covers
+    # agent-instructions.md itself: the skill says to read it before the first `start`.
+    assert "Initialize `instructions` already include `agent-instructions.md`" not in collapsed
+    assert (
+        "Initialize `instructions` carry a compact summary of `agent-instructions.md`, not the "
+        "document; read it before the first `start`" in collapsed
+    )
     assert "`workflow.md`, and `coverage-and-receipts.md`" not in collapsed
     assert "Both are already in initialize `instructions`" not in collapsed
     assert "Coverage and setup details are not prerequisites" in collapsed

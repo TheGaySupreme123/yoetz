@@ -311,6 +311,18 @@ bounded the adjacent surface since #128. Per-item budgets cannot catch this clas
 item can sit inside its own bound while the total doubles. Anyone inlining a document here again
 will fail CI rather than a live session.
 
+**Amendment (2026-09-30, issue #918; also records #789): tier 0 is host-profiled.** The bridge's
+declared `--host` selects the tier-0 body. `generic` keeps `agent-instructions.md` verbatim.
+`claude` receives a compact body sized for Claude Code's observed 2,048-character cap (#789).
+`codex` and `cursor` receive one host-neutral compact body with a 2,048-byte cap, because Codex
+code mode charges tier 0 once per advertised tool and the full document cost 19.8 KB per copy.
+Each compact body still carries the rules whose absence would cause harm before the first read:
+when to call `start`, never to claim Yoetz is active before it returns, never to fabricate state,
+the consent, disclosure and coverage-wording boundaries, and all five URIs with `read_guidance`
+and an instruction to read `agent-instructions.md` before the first `start`. That is the same
+"name a reachable path" rule as the 2026-08-17 amendment, applied to the safety floor itself. The
+route tail and destination disclosure are composed identically for every body.
+
 **Amendment (ADR-023, 2026-08-21, issue #149): tier 2 gains a portable carrier; artifact and
 activation are sibling ports.** Tier 2 on-disk delivery may now be carried either by a host-native
 projection (the existing Codex layout) or by a portable Agent Plugins 1.0.0 artifact, both
