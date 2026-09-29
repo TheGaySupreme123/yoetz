@@ -321,7 +321,9 @@ when to call `start`, never to claim Yoetz is active before it returns, never to
 the consent, disclosure and coverage-wording boundaries, and all five URIs with `read_guidance`
 and an instruction to read `agent-instructions.md` before the first `start`. That is the same
 "name a reachable path" rule as the 2026-08-17 amendment, applied to the safety floor itself. The
-route tail and destination disclosure are composed identically for every body.
+route tail and destination disclosure are composed identically for every body. Separately, on
+`codex` only, a `read_guidance` result's text `content` points at `structuredContent.text`
+instead of repeating the document; tier 1 and tier 2 bytes and the output schema are unchanged.
 
 **Amendment (ADR-023, 2026-08-21, issue #149): tier 2 gains a portable carrier; artifact and
 activation are sibling ports.** Tier 2 on-disk delivery may now be carried either by a host-native

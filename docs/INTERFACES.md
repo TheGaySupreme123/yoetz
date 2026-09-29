@@ -374,6 +374,14 @@ routes keep the bounded weaker projection above, preserving the shared portable 
 identity is a serving and diagnostic fact; it does not grant host admission or agent-chat
 attestation, which retain their independent client allowlists and authorization checks.
 
+`read_guidance` is the one success result whose text `content` normally repeats a whole document:
+generic, Claude and Cursor hosts receive the guidance text in both `content[0].text` and
+`structuredContent.text`. On the `codex` profile only (issue #918), `content[0].text` is a bounded
+ASCII pointer, `Guidance <uri>: <n> bytes; full text in structuredContent.text.`, built from the
+registered URI and byte count alone. `structuredContent`, and so the `read-guidance-result` schema,
+is identical for every host. This item is revertible: it stays only while Codex dogfood shows no
+additional guidance re-read turns.
+
 Protocol reason
 `expected_frontier_required` marks a state-sensitive `publish_work` batch that omitted
 `expected_frontier`. It names that field and is retryable because validation wrote no durable

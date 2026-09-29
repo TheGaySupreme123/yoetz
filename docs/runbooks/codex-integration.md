@@ -285,6 +285,11 @@ ceremony step and makes each one cheaper:
   tested by running its exact snippet 10,000 times per id prefix under Node, both in a fresh
   context with no `crypto` and as an ES module with `crypto` removed, against the `req_`, `evt_`,
   `act_`, `res_`, `evd_`, `clm_` and `obl_` patterns in `schemas/`; the patterns stay strict.
+- **Single-copy guidance.** On this profile only, a `read_guidance` result's `content[0].text` is
+  the bounded pointer `Guidance <uri>: <n> bytes; full text in structuredContent.text.`;
+  `structuredContent` and the output schema are unchanged. This is the lowest-priority item and is
+  revertible: if a Codex dogfood run shows additional guidance re-read turns, restore the full
+  text in `content`. The other items stand alone.
 
 Lifecycles: a running Codex session keeps the instructions it received at `initialize`; a fresh
 session, which starts a new bridge, picks up the compact body after an upgrade. Skill changes take
@@ -292,7 +297,7 @@ effect when the plugin or skill is reinstalled or updated through the normal upg
 
 Evidence boundary: the changes above are verified by unit tests only. The Codex code-mode dogfood
 acceptance (0 `crypto is not defined` failures, 0 `request_id` pattern rejections, a semantic
-`check` that completes without a `wait` turn) is pending on the
+`check` that completes without a `wait` turn, and no extra guidance re-reads) is pending on the
 dogfood lane for macOS, Linux and WSL 2. Codex does not document a maximum `yield_time_ms` for code
 mode; a run observed 120,000 ms honored. If a cell still replies `Script running`, the skill directs
 one covering `wait` rather than repeated short polls. The Claude Code body and `read_guidance`

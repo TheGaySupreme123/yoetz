@@ -78,7 +78,8 @@ const decl = (name) => {
 text(decl("start"));
 ```
 
-Read guidance from `structuredContent.text`, which carries the whole document:
+Read guidance from `structuredContent.text`. On this host the text `content` of a `read_guidance`
+result names that field instead of repeating the document:
 
 ```js
 const g = await tools.mcp__yoetz__read_guidance({ uri: "yoetz://guidance/workflow.md" });
