@@ -3597,6 +3597,17 @@ effort and output limit:
 A snapshot over the limit ends the turn as `output_oversize`. The provenance wire shape is
 unchanged.
 
+**Review phase and question set (issue #906).** The same selector names the review phase for every
+provider path. `review_question_set(phase)` (`yoetz.application.semantic_case`) leads the case
+`question_set` with `REVIEW_PHASE_QUESTIONS[phase]` ("Review phase: routine. …" or "Review phase:
+final. …"), followed by three phase-independent questions that neither presuppose a defect nor ask
+for the agent's next step. The question set was already bound into `case_digest`; its JSON shape is
+unchanged. `SEMANTIC_REVIEW_INSTRUCTION` (`yoetz.adapters.providers.openai_responses`) is the one
+reviewer instruction: the Responses request and the Codex app-server `baseInstructions` send it
+verbatim, and `CHAT_COMPLETIONS_INSTRUCTION` is that text plus `CHAT_COMPLETIONS_JSON_SHAPE_SUFFIX`.
+Its `PACKET_GAP_GLOSSARY` glosses each packet coverage gap code and omission reason as a packet
+limit, never an agent defect.
+
 `semantic_required` means AI-powered review success is required for a complete verdict, not required
 for returning already-computed local truth. Missing approved external/local capability, privacy
 block, forbidden/uncertain context, human denial or expiry, provider refusal, timeout, invalid
@@ -6822,6 +6833,12 @@ Failed and local-only attempts retain their existing version. The owning schema 
 `resolution_attempt_required` is the `respond` rejection for an `acknowledged` response to a
 `semantic_model_derived` finding whose `evidence_refs` cite no evidence or result recorded after
 the finding frontier. It writes nothing; the continuation is `input_correction_new_identity`.
+One structural exception applies (issue #906, a process finding): when every `subject_refs` entry of
+the finding is an event recorded as `check_recorded` or `finding_recorded` (never an agent's
+`response_recorded` answer), and a `check_recorded` event whose `semantic_status`/`semantic_reason`
+is `succeeded`/`semantic_completed` follows the finding's source event, that completed review is the
+resolution and `acknowledged` is accepted without a new attempt. A finding naming any obligation,
+claim or other record keeps the rejection. Acknowledgement still never resolves a finding.
 
 ### Observation latency and capacity (#887)
 

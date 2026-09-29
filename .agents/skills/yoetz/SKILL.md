@@ -151,6 +151,8 @@ independent AI-powered review. If relying on the configured default, omit `mode`
 `semantic_if_configured` only when review is known to be optional. Reserve `deterministic_only` for
 explicit local/structural work or a deliberate no-egress choice, and disclose the unmet required
 review when applicable. Never use local-only merely to shorten a follow-up check.
+Track required review through `mode` and the receipt, never as a plan obligation: the check is the
+review.
 
 ## Boundaries
 

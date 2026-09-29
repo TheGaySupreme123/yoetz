@@ -89,6 +89,7 @@ from yoetz.ports.ledger import (
     AppendCommand,
     AppendEntry,
     CheckCommitResult,
+    FrozenCase,
     LedgerPort,
     OperationKind,
     ProjectionView,
@@ -519,6 +520,7 @@ async def _bootstrap_finding(
     seed: int,
     mode: str = "deterministic_only",
     refs: bool = False,
+    max_findings: str = "3",
 ) -> tuple[StartInternalResult, CheckCommitResult, str]:
     """Publish one open obligation plus an unsupported completion claim about it, then check.
 
@@ -577,7 +579,7 @@ async def _bootstrap_finding(
         "writer_id": started.writer_id,
         "expected_frontier": _frontier(published.result_frontier),
         "mode": mode,
-        "max_findings": "3",
+        "max_findings": max_findings,
     }
     checked = await app.check(CheckRequest.model_validate(check_wire))
     assert type(checked) is CheckCommitResult, f"unexpected nonterminal check: {type(checked)}"
@@ -4730,6 +4732,211 @@ async def test_accepting_a_semantic_finding_requires_a_recorded_resolution_attem
     )
     assert accepted.response.disposition == "acknowledged"
     assert tuple(item.reference_id for item in accepted.response.evidence) == (evidence_ref,)
+
+
+def _scripted_reviewer(
+    rounds: list[Callable[[FrozenCase], tuple[ReviewerChallenge, ...]]],
+) -> Callable[..., Awaitable[object]]:
+    """Answer each check with the next scripted round of reviewer challenges."""
+
+    async def evaluate(
+        frozen: object,
+        findings: object,
+        runtime: object | None = None,
+        lineage_evaluation: object | None = None,
+    ) -> object:
+        succeeded = cast(FinalSemanticEvaluation, await _semantic_succeeds(frozen, findings))
+        challenges = rounds.pop(0)(cast(FrozenCase, frozen))
+        return replace(succeeded, judgment=SemanticJudgment("challenges_returned", challenges))
+
+    return evaluate
+
+
+async def test_process_finding_is_answered_by_the_completed_review_but_work_findings_are_not() -> (
+    None
+):
+    """Issue #906 scripted replay of the kea/dateutil shapes through check and respond.
+
+    Check 1 (kea check 1): the reviewer reports two distinct problems in one round, an open work
+    obligation under a completion claim and a code defect; both land as findings. The agent rejects
+    the defect. Check 2: the reviewer cites only an earlier ``check_recorded`` row (Yoetz process
+    state). ``acknowledged`` on that process finding needs no filler publish, because the completed
+    review recorded after it is its resolution. The work-obligation finding, a finding that mixes a
+    process row with the claim, and a finding about the agent's own response keep the
+    ``resolution_attempt_required`` gate.
+    """
+
+    seed = 5600
+    obligation_ref = protocol_id("obl_", seed + 1)
+    claim_ref = protocol_id("clm_", seed + 5)
+
+    def two_distinct_problems(_frozen: FrozenCase) -> tuple[ReviewerChallenge, ...]:
+        return (
+            ReviewerChallenge(
+                FindingKind.COMPLETION_WITH_OPEN_OBLIGATIONS,
+                "Completion is claimed while the result obligation is open.",
+                (obligation_ref,),
+                "The obligation to publish a result is still open under the completion claim.",
+                "The result may exist but was not recorded against the obligation.",
+                "Publish the result and resolve the obligation, or narrow the claim.",
+                "act",
+                "The packet carries no result for the obligation.",
+            ),
+            ReviewerChallenge(
+                FindingKind.DIFF_DOES_NOT_MATCH_ACCOUNT,
+                "Map dependency paths collide for distinct keys with the same string form.",
+                (claim_ref,),
+                "The change keys dependencies by String(key), so distinct keys collide.",
+                "Keys may never share a string form in practice.",
+                "Key dependency paths by identity and add a collision test.",
+                "act",
+                "No test exercises two keys with one string form.",
+            ),
+        )
+
+    def process_rows(frozen: FrozenCase) -> tuple[ReviewerChallenge, ...]:
+        prior_check = next(
+            str(item.event_id)
+            for item in frozen.case.history
+            if item.schema_name == "check_recorded"
+        )
+        agent_answer = next(
+            str(item.event_id)
+            for item in frozen.case.history
+            if item.schema_name == "response_recorded"
+        )
+        return (
+            ReviewerChallenge(
+                FindingKind.WEAK_OR_STALE_RESPONSE,
+                "The rejection of the collision finding gives no grounds.",
+                (agent_answer,),
+                "The response rejects the finding without citing a test or the change.",
+                "The agent may hold unrecorded grounds for the rejection.",
+                "Cite the test or change that shows distinct keys cannot collide.",
+                "dispute_with_evidence",
+                "The packet carries no evidence for the rejection.",
+            ),
+            ReviewerChallenge(
+                FindingKind.LEDGER_STALE_OR_INCOMPLETE,
+                "The earlier check left its findings unsettled.",
+                (prior_check,),
+                "The earlier check still carries open findings.",
+                "Those findings may simply await this review.",
+                "Record the outcome of the earlier check.",
+                "provide_evidence",
+                "The packet does not show the earlier findings resolved.",
+            ),
+            ReviewerChallenge(
+                FindingKind.EVIDENCE_DOES_NOT_SUPPORT_CLAIM,
+                "The completion claim rests on the earlier check.",
+                (prior_check, claim_ref),
+                "The claim cites the earlier check rather than a recorded result.",
+                "The earlier check may have covered the result.",
+                "Record the result that supports the claim.",
+                "provide_evidence",
+                "No result content is in the packet.",
+            ),
+        )
+
+    rounds = [two_distinct_problems, process_rows]
+    app, _runtime, _ = _build_app(
+        seed_offset=56, semantic="optional", semantic_evaluator=_scripted_reviewer(rounds)
+    )
+    started, checked, _obligation = await _bootstrap_finding(
+        app, seed=seed, mode="semantic_if_configured", max_findings="8"
+    )
+    assert checked.suppressed_count == 0
+    first_round = [
+        item for item in checked.findings if item.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+    ]
+    # Every distinct problem the reviewer returned in one round is recorded; nothing drops the
+    # open work obligation as "process state".
+    assert {item.kind for item in first_round} == {
+        FindingKind.COMPLETION_WITH_OPEN_OBLIGATIONS,
+        FindingKind.DIFF_DOES_NOT_MATCH_ACCOUNT,
+    }
+    work_finding = next(
+        item for item in first_round if item.kind is FindingKind.COMPLETION_WITH_OPEN_OBLIGATIONS
+    )
+    defect_finding = next(
+        item for item in first_round if item.kind is FindingKind.DIFF_DOES_NOT_MATCH_ACCOUNT
+    )
+    answered = await app.respond(
+        RespondRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 15)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(checked.result_frontier),
+                "finding_id": defect_finding.finding_id,
+                "finding_frontier": _frontier(checked.result_frontier),
+                "disposition": "rejected",
+                "reason": "Keys never share a string form in this store.",
+            }
+        )
+    )
+
+    rechecked = await app.check(
+        CheckRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 20)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(answered.result_frontier),
+                "mode": "semantic_if_configured",
+                "max_findings": "8",
+            }
+        )
+    )
+    assert type(rechecked) is CheckCommitResult
+    assert rounds == []
+    second_round = {
+        item.kind: item
+        for item in rechecked.findings
+        if item.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+    }
+    process_finding = second_round[FindingKind.LEDGER_STALE_OR_INCOMPLETE]
+    mixed_finding = second_round[FindingKind.EVIDENCE_DOES_NOT_SUPPORT_CLAIM]
+    response_finding = second_round[FindingKind.WEAK_OR_STALE_RESPONSE]
+
+    def acknowledge(
+        request_seed: int,
+        finding: Finding,
+        finding_frontier: Frontier | FrontierModel,
+        expected: Frontier | FrontierModel,
+    ) -> RespondRequest:
+        return RespondRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", request_seed)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(expected),
+                "finding_id": finding.finding_id,
+                "finding_frontier": _frontier(finding_frontier),
+                "disposition": "acknowledged",
+                "reason": "The completed review recorded after this finding answers it.",
+            }
+        )
+
+    accepted = await app.respond(
+        acknowledge(
+            seed + 30, process_finding, rechecked.result_frontier, rechecked.result_frontier
+        )
+    )
+    assert accepted.response.disposition == "acknowledged"
+    assert accepted.response.evidence == ()
+
+    for request_seed, finding, finding_frontier in (
+        (seed + 31, mixed_finding, rechecked.result_frontier),
+        (seed + 32, response_finding, rechecked.result_frontier),
+        (seed + 33, work_finding, checked.result_frontier),
+    ):
+        with pytest.raises(PublicOperationError) as refused:
+            await app.respond(
+                acknowledge(request_seed, finding, finding_frontier, accepted.result_frontier)
+            )
+        assert refused.value.code is PublicErrorCode.INVALID_REQUEST, refused.value.message
+        assert refused.value.safe_details["reason_code"] == "resolution_attempt_required"
 
 
 def _scripted_semantic_evaluator(

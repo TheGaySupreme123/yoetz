@@ -90,7 +90,8 @@ actual tool names. Call only the exposed Yoetz operations (`start`, `publish_wor
 Start or attach once, publish the bounded plan before substantive work, and
 keep the returned session/task identity. For a required independent AI-powered judgment, select
 `semantic_required`; omit `mode` for the configured default, and use `semantic_if_configured`
-only when review is known to be optional. Keep a strict route's AI-powered review ceiling.
+only when review is known to be optional. Keep a strict route's AI-powered review ceiling. Track
+required review through `mode` and the receipt, never as a plan obligation: the check is the review.
 
 ## Guardrails
 

@@ -35,6 +35,7 @@ from yoetz.adapters.providers.codex_app_server import (
     CodexRuntimeStatus,
 )
 from yoetz.adapters.providers.data_use_catalog import data_use_record_for_endpoint
+from yoetz.adapters.providers.openai_responses import SEMANTIC_REVIEW_INSTRUCTION
 from yoetz.domain.findings import SemanticFailureClass
 from yoetz.domain.privacy import (
     ApprovedOutboundCase,
@@ -2373,6 +2374,25 @@ async def test_routine_attempt_dispatches_and_records_the_routine_selection(
             "reasoning_effort": "medium",
         }
     )
+
+
+async def test_codex_thread_uses_the_one_shared_reviewer_instruction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #906: the benchmark path sends the same instruction bytes as the API adapters."""
+
+    runtime = _Runtime(_profile())
+
+    result = await _evaluate(monkeypatch, runtime)
+
+    assert type(result) is SemanticResultSuccess
+    thread = cast(Mapping[str, object], runtime.params["thread/start"])
+    assert thread["baseInstructions"] == SEMANTIC_REVIEW_INSTRUCTION
+    assert "You are the requested review:" in SEMANTIC_REVIEW_INSTRUCTION
+    expected = "sha256:" + hashlib.sha256(SEMANTIC_REVIEW_INSTRUCTION.encode()).hexdigest()
+    assert result.provenance.prompt_digest == expected
+    evidence = result.provenance.runtime_evidence
+    assert evidence is not None and evidence.instruction_sha256 == expected
 
 
 async def test_final_attempt_uses_the_configured_high_effort_and_final_limit(

@@ -222,6 +222,16 @@ Inside that confirmed policy, review is direct-to-agent. The reviewer returns a 
 the main agent, which can act, supply evidence, revise its claim, dispute with evidence, or state an
 unresolved limitation — then recheck. Routine checks and retries need no human prompt.
 
+The reviewer works as a verifying reviewer: it checks the change against the task and the recorded
+verification against the change. It judges recorded test and command output itself instead of
+asking the agent to run it again, reports every distinct problem it finds (up to three per review),
+and names the exact missing item when it needs more. It knows it is the review that was asked for,
+so it does not report its own review, Yoetz checks, findings, or coverage codes as problems in the
+work, and it never asks the agent to install tools or change the environment. Work left open while
+completion is claimed is still reported. Every provider — the Codex subscription, OpenAI, and
+OpenAI-compatible endpoints — gets the same instructions. Track a required review by choosing
+`semantic_required` for each check, not as a plan item.
+
 AI-powered output is advisory, provenance-labeled, and deterministically fenced. It never silently
 becomes local-check truth, and it never upgrades a coverage claim.
 
@@ -316,6 +326,9 @@ tokens.
 - **What is recorded.** Every check result and receipt names the exact model, reasoning effort,
   and output limit used. A review whose visible answer exceeds its limit is stopped and reported
   as an invalid answer.
+- **What the reviewer judges.** On every provider, a routine checkpoint reports problems in the
+  work so far without judging whether it is complete; a final review judges whether the change and
+  its recorded verification support the completion claim.
 
 ### Cancelled background review
 

@@ -100,7 +100,8 @@ claim separate from the implementation result. Publish per material transition, 
 Select `semantic_required` when the user, effective policy, or named acceptance criterion requires
 independent AI-powered review. Omit `mode` when relying on the configured default. Use
 `semantic_if_configured` only when review is known optional, and never downgrade a required review
-because Claude's host approval is pending or unavailable.
+because Claude's host approval is pending or unavailable. Track required review through `mode` and
+the receipt, never as a plan obligation: the check is the review.
 
 Honor Claude's current permission mode and applicable approvals. They do not widen Yoetz's standing
 disclosure or setup authority. A host hold before invocation is not a Yoetz result: preserve the
