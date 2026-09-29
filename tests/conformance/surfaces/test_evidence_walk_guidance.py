@@ -18,7 +18,7 @@ from typing import Final
 
 import pytest
 
-from yoetz.mcp.descriptors import TOOL_DESCRIPTORS, descriptor_for
+from yoetz.mcp.descriptors import TOOL_DESCRIPTORS, McpRouteProfile, descriptor_for
 
 _REPO_ROOT: Final = Path(__file__).resolve().parents[3]
 _GUIDANCE: Final = _REPO_ROOT / "guidance"
@@ -66,7 +66,7 @@ def test_no_shipped_guidance_prescribes_the_unfiltered_description_walk(path: Pa
 
 
 @pytest.mark.parametrize("profile", sorted(TOOL_DESCRIPTORS))
-def test_no_tool_description_prescribes_the_unfiltered_walk(profile: str) -> None:
+def test_no_tool_description_prescribes_the_unfiltered_walk(profile: McpRouteProfile) -> None:
     for descriptor in TOOL_DESCRIPTORS[profile]:
         for pattern in _RETIRED:
             assert pattern.search(descriptor.description) is None, (descriptor.name, pattern)

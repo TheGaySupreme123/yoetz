@@ -41,6 +41,7 @@ from yoetz.adapters.objects.encrypted_files import EncryptedFilesObjectStore
 from yoetz.adapters.privacy.catalog import CatalogPrivacyAudit, CatalogPrivacyPolicyStore
 from yoetz.adapters.privacy.gateway import PolicyEnforcingOutboundGateway
 from yoetz.adapters.privacy.local_enforcer import LocalPrivacyEnforcer
+from yoetz.adapters.privacy.provenance import LedgerAuthorshipProvenanceResolver
 from yoetz.adapters.providers.codex_app_server import (
     CodexAppServerProfile,
     codex_binding_from_config,
@@ -343,6 +344,7 @@ from yoetz.version import build_version_manifest, version_manifest_json
 
 __all__ = [
     "IdPort",
+    "build_local_privacy_enforcer",
     "build_privacy_coordinator",
     "build_ready_application_factory",
     "build_runtime_adapter_factories",
@@ -2643,6 +2645,19 @@ def _denied_policy(
     )
 
 
+def build_local_privacy_enforcer() -> LocalPrivacyEnforcer:
+    """Compose the production local classifier with its trusted provenance resolver.
+
+    Without a resolver every agent-context item is ambiguous, so the INTERFACES
+    ``DisclosureProvenance`` rule never fires and an agent cannot read back even the evidence it
+    published (issue #914). The resolver only consults ledger authorship the service read at the
+    page's frozen frontier; the never-send scan, absolute data classes and the per-projection
+    receipt are unchanged.
+    """
+
+    return LocalPrivacyEnforcer(provenance_resolver=LedgerAuthorshipProvenanceResolver())
+
+
 async def build_privacy_coordinator(
     *,
     catalog_db: apsw.Connection,
@@ -2657,7 +2672,7 @@ async def build_privacy_coordinator(
     """Build and reconcile the fail-closed local privacy coordinator."""
 
     policies = CatalogPrivacyPolicyStore(catalog_db, clock)
-    classifier = LocalPrivacyEnforcer()
+    classifier = build_local_privacy_enforcer()
     audit_key = vault.installation_mac_handle(MacKeyPurpose.PRIVACY_AUDIT)
     audit = CatalogPrivacyAudit(
         catalog_db,

@@ -610,10 +610,13 @@ Session-stream, input, and locator content remain excluded from AI-powered revie
 Consented input/locator chunks may still be locally staged by the current hook path until the
 staging filter follow-up lands.
 
-ADR-009 includes `other_writer` disclosure provenance. The production privacy enforcer currently
-ships without a provenance resolver. When that resolver is implemented, this harness writer must
-classify as `engine_derived_from_self_authored`: a hook observation is an observation of the agent's
-own action, not unrelated third-party authorship.
+ADR-009 includes `other_writer` disclosure provenance. When this ADR was written the production
+privacy enforcer shipped without a provenance resolver, and it recorded that this harness writer
+should then classify as `engine_derived_from_self_authored`: a hook observation is an observation of
+the agent's own action, not unrelated third-party authorship. The resolver that shipped for issue
+#914 does not implement that forward classification: rows this writer authors stay `other_writer`,
+so host-captured prose is never widened into the default `agent_context` ceiling (see ADR-009's
+2026-09-29 revision). Adopting the forward classification would be a separate, explicit decision.
 
 ## Consequences
 

@@ -16,6 +16,7 @@ from typing import cast
 
 import pytest
 
+from builders.ledger_adapters import MemoryObjects
 from builders.projection_workflow import (
     ProjectionCase,
     build_projection_application,
@@ -23,8 +24,10 @@ from builders.projection_workflow import (
     project_case,
     request_base,
 )
-from builders.start_application import protocol_id, start_request
+from builders.start_application import MemoryStartRuntime, protocol_id, start_request
 from fixture_loader import load_fixture_json
+from yoetz.adapters.memory.ledger import MemoryLedgerAdapter
+from yoetz.adapters.memory.privacy import MemoryPrivacyAudit
 from yoetz.application.observation_materialize import (
     materialize_observation_envelope,
     observation_author,
@@ -49,11 +52,18 @@ from yoetz.domain.observation import (
     ObservationEnvelope,
     ObservationSource,
 )
+from yoetz.domain.privacy import (
+    AgentProjectionAuditSubject,
+    DataCategory,
+    DisclosureProvenance,
+)
 from yoetz.domain.values import (
     Actor,
+    ActorType,
     Frontier,
     JsonObject,
     Timestamp,
+    actor_id,
     event_id,
     evidence_id,
     object_id,
@@ -62,18 +72,21 @@ from yoetz.domain.values import (
 from yoetz.ports.control import ControlMethod
 from yoetz.ports.ledger import AppendCommand, AppendEntry, OperationKind
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectSource
+from yoetz.ports.privacy import PrivacyReceiptAudience
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.coverage import (
+    AuthorshipAssurance,
     Coverage,
     EvidenceImmutability,
     PublicationChannel,
     coverage_for_channel,
 )
-from yoetz.protocol.models import PublishWorkRequest, StatusRequest
+from yoetz.protocol.models import FrontierModel, PublishWorkRequest, StatusRequest
 
 pytestmark = pytest.mark.anyio
 
 _DIGEST = "sha256:" + "4" * 64
+_MUTABLE_REFERENCE = EvidenceImmutability.MUTABLE_REFERENCE
 _OMITTED = {
     "category": "evidence_excerpt",
     "omitted": True,
@@ -138,7 +151,7 @@ async def _publish(
     app: Application,
     started: StartInternalResult,
     seed: int,
-    frontier: Frontier,
+    frontier: Frontier | FrontierModel,
     drafts: Sequence[dict[str, JsonValue]],
 ) -> PublishWorkInternalResult:
     body: dict[str, JsonValue] = {
@@ -181,9 +194,8 @@ async def _publish_agent_evidence(
     return published, protocol_id("evd_", seed + 1), protocol_id("evd_", seed + 2)
 
 
-def _ledger(app: Application, task_id: str) -> tuple[object, object]:
-    resources = cast(Mapping[str, tuple[object, object]], getattr(app.runtime, "resources"))
-    return resources[task_id]
+def _ledger(app: Application, task_id: str) -> tuple[MemoryLedgerAdapter, MemoryObjects]:
+    return cast(MemoryStartRuntime, app.runtime).resources[task_id]
 
 
 async def _append(
@@ -207,10 +219,10 @@ async def _append(
         metadata = ObjectMetadata(
             ObjectKind.EVENT_PAYLOAD, media_type_for(draft.schema.name), started.task_id, now
         )
-        staged = await objects.stage(  # type: ignore[attr-defined]
+        staged = await objects.stage(
             ObjectSource(data=payload_bytes, declared_size=len(payload_bytes)), metadata
         )
-        payload_ref = await objects.finalize(staged)  # type: ignore[attr-defined]
+        payload_ref = await objects.finalize(staged)
         entries.append(
             AppendEntry(
                 draft,
@@ -224,7 +236,7 @@ async def _append(
                 "projected",
             )
         )
-    result = await ledger.append_batch(  # type: ignore[attr-defined]
+    result = await ledger.append_batch(
         AppendCommand(
             started.task_id,
             started.session_id,
@@ -408,3 +420,233 @@ async def test_immutable_snapshot_filter_lists_native_captures_across_pages() ->
     assert diff_id not in listed and test_id not in listed
     assert protocol_id("evd_", 9170) in listed
     assert protocol_id("evd_", 9171) not in listed
+
+
+def _agent_actor(name: str) -> Actor:
+    return Actor(actor_id(name), ActorType.LOGICAL_AGENT, AuthorshipAssurance.SELF_ASSERTED)
+
+
+def _audit(app: Application) -> MemoryPrivacyAudit:
+    audit = app.privacy._audit  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+    assert type(audit) is MemoryPrivacyAudit
+    return audit
+
+
+async def test_agent_reads_back_its_own_evidence_under_the_default_policy() -> None:
+    """codex.txt L169: the agent's own two items come back readable, host rows stay omitted."""
+
+    app, policy = await build_projection_application(seed=9200)
+    assert DataCategory.EVIDENCE_EXCERPT not in policy.agent_context_categories
+    started = await _start(app, 9201)
+    published, diff_id, test_id = await _publish_agent_evidence(app, started, 9210)
+    captured, captured_coverage = _captured_observation(started.task_id)
+    await _append(
+        app,
+        started,
+        seed=9220,
+        expected_frontier=published.result_frontier.sequence,
+        writer=observation_writer_id(started.task_id, started.session_id),
+        author=observation_author(),
+        channel=PublicationChannel.HOOK_OBSERVED,
+        drafts=captured,
+        coverage=captured_coverage,
+    )
+
+    _internal, projected = await _status(
+        app, started, 9230, evidence_filter={"strength": "content_digest"}
+    )
+    rows = _rows(projected)
+    assert set(rows) == {diff_id, test_id}
+    assert rows[diff_id]["description"] == _DIFF_DESCRIPTION
+    assert rows[diff_id]["reference"] == "git show de58a86"
+    assert rows[test_id]["description"] == _TEST_DESCRIPTION
+    assert rows[test_id]["reference"] == "pytest tests -q"
+
+    _internal, everything = await _status(app, started, 9232)
+    all_rows = _rows(everything)
+    hook_rows = [row for key, row in all_rows.items() if key not in {diff_id, test_id}]
+    assert hook_rows, "the captured host observation must be listed"
+    for row in hook_rows:
+        assert row["description"] in (None, _OMITTED)
+        assert row["reference"] in (None, _OMITTED)
+    assert any(row["description"] == _OMITTED for row in hook_rows)
+
+    # The projection still ran and still wrote its receipt; the receipt shows the inclusion.
+    projection = cast(Mapping[str, JsonValue], everything["privacy_projection"])
+    assert projection["sink"] == "agent_context"
+    assert "evidence_excerpt" in cast(Sequence[str], projection["included_categories"])
+    assert "evidence_excerpt" in cast(Sequence[str], projection["blocked_categories"])
+    receipt_id = cast(str, projection["local_disclosure_receipt_id"])
+    audit = _audit(app)
+    view = await audit.get_receipt(receipt_id, PrivacyReceiptAudience.TRUSTED_LOCAL_CONTROL)
+    assert view is not None
+    assert DataCategory.EVIDENCE_EXCERPT in view.receipt.approved_categories
+    assert DataCategory.EVIDENCE_EXCERPT in view.receipt.blocked_categories
+    rows_by_receipt = [
+        row
+        for row in audit._state.audit.values()  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+        if row.receipt is not None and row.receipt.receipt_id == receipt_id
+    ]
+    assert len(rows_by_receipt) == 1
+    subject = rows_by_receipt[0].subject
+    assert type(subject) is AgentProjectionAuditSubject
+    assert subject.provenance == (
+        DisclosureProvenance.OTHER_WRITER,
+        DisclosureProvenance.SELF_AUTHORED,
+    )
+
+
+async def test_other_writers_hook_rows_and_imports_stay_blanked() -> None:
+    """Only the requester's own cooperative rows widen; every other source keeps the ceiling."""
+
+    app, _policy = await build_projection_application(seed=9300)
+    started = await _start(app, 9301)
+    published, diff_id, test_id = await _publish_agent_evidence(app, started, 9310)
+    frontier = published.result_frontier.sequence
+    # A hook-shaped row stamped under the agent's own writer and session: the session matching is
+    # not authorship, the observation stamp and channel are.
+    frontier = (
+        await _append(
+            app,
+            started,
+            seed=9320,
+            expected_frontier=frontier,
+            writer=started.writer_id,
+            author=observation_author(),
+            channel=PublicationChannel.HOOK_OBSERVED,
+            drafts=(
+                _plain_evidence(
+                    9321, "hook row under the agent writer", strength=_MUTABLE_REFERENCE
+                ),
+            ),
+        )
+    ).sequence
+    # Another cooperative writer in the same task and session.
+    frontier = (
+        await _append(
+            app,
+            started,
+            seed=9330,
+            expected_frontier=frontier,
+            writer=protocol_id("wri_", 9331),
+            author=_agent_actor("delegate-writer"),
+            channel=PublicationChannel.COOPERATIVE_MCP,
+            drafts=(
+                _plain_evidence(9332, "another writer's evidence", strength=_MUTABLE_REFERENCE),
+            ),
+        )
+    ).sequence
+    # An import appended under the agent's own writer is imported, not self-authored.
+    await _append(
+        app,
+        started,
+        seed=9340,
+        expected_frontier=frontier,
+        writer=started.writer_id,
+        author=Actor(actor_id("local-human"), ActorType.HUMAN, AuthorshipAssurance.SELF_ASSERTED),
+        channel=PublicationChannel.HUMAN_IMPORT,
+        drafts=(_plain_evidence(9341, "imported transcript note", strength=_MUTABLE_REFERENCE),),
+    )
+
+    _internal, projected = await _status(app, started, 9350)
+    rows = _rows(projected)
+    assert rows[diff_id]["description"] == _DIFF_DESCRIPTION
+    assert rows[test_id]["description"] == _TEST_DESCRIPTION
+    for seed in (9321, 9332, 9341):
+        row = rows[protocol_id("evd_", seed)]
+        assert row["description"] == _OMITTED, seed
+        assert row["reference"] == _OMITTED, seed
+
+
+async def test_never_send_match_in_own_evidence_stays_redacted() -> None:
+    """Self-authorship never bypasses the never-send scan on the projected bytes."""
+
+    app, _policy = await build_projection_application(seed=9400)
+    started = await _start(app, 9401)
+    secret = "api_key=sk-proj-abcdefghijklmnopqrstuvwxyz012345"
+    published = await _publish(
+        app,
+        started,
+        9410,
+        started.frontier,
+        (
+            _evidence_draft(
+                9411,
+                kind="test_result",
+                subject="test_stdout",
+                description=f"Test output leaked {secret}",
+                reference="pytest tests -q",
+            ),
+        ),
+    )
+    assert published.accepted_events
+
+    _internal, projected = await _status(app, started, 9420)
+    row = _rows(projected)[protocol_id("evd_", 9411)]
+    assert row["description"] == {
+        "category": "evidence_excerpt",
+        "omitted": True,
+        "reason": "never_send_redacted",
+    }
+    # The clean sibling leaf of the same self-authored row is still returned.
+    assert row["reference"] == "pytest tests -q"
+    assert secret.encode() not in canonical_encode(cast(JsonValue, dict(projected)))
+
+
+async def test_provenance_is_recomputed_per_session_and_frontier() -> None:
+    """Reattach opens a new session: the old session's rows are not self-authored in it.
+
+    The later ``start`` attach is the event that changes the answer for the same task and writer
+    identity; the successor's read of the very frontier the predecessor already read must not
+    reuse the predecessor's decision.
+    """
+
+    app, _policy = await build_projection_application(seed=9500)
+    started = await _start(app, 9501)
+    published, diff_id, _test_id = await _publish_agent_evidence(app, started, 9510)
+    first = published.result_frontier.sequence
+
+    _internal, own = await _status(app, started, 9520, at_frontier=first)
+    assert _rows(own)[diff_id]["description"] == _DIFF_DESCRIPTION
+
+    attached = await app.start(start_request(9530, title="Evidence read-back", refs=True))
+    assert type(attached) is StartInternalResult
+    assert attached.outcome == "attached"
+    assert attached.task_id == started.task_id
+    assert attached.session_id != started.session_id
+
+    for seed, at_frontier in ((9540, None), (9542, first)):
+        _internal, successor = await _status(
+            app,
+            started,
+            seed,
+            session=attached.session_id,
+            writer=attached.writer_id,
+            at_frontier=at_frontier,
+        )
+        row = _rows(successor)[diff_id]
+        assert row["description"] == _OMITTED, at_frontier
+        assert row["reference"] == _OMITTED, at_frontier
+
+    # The successor's own publication is readable to it, at its own later frontier.
+    later = await _publish(
+        app,
+        attached,
+        9550,
+        (await _status(app, attached, 9552))[0].subject_frontier,
+        (
+            _evidence_draft(
+                9551,
+                kind="test_result",
+                subject="test_stdout",
+                description="Successor rerun: 2036 passed.",
+                reference="pytest tests -q",
+            ),
+        ),
+    )
+    _internal, successor = await _status(
+        app, attached, 9560, at_frontier=later.result_frontier.sequence
+    )
+    rows = _rows(successor)
+    assert rows[protocol_id("evd_", 9551)]["description"] == "Successor rerun: 2036 passed."
+    assert rows[diff_id]["description"] == _OMITTED

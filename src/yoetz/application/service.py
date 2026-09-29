@@ -2781,10 +2781,13 @@ class Application:
         if all(source.get(key) is not None for key in ("session_id", "writer_id")) and (
             source.get("subject_frontier") is not None or source.get("frontier") is not None
         ):
+            # Row authorship is read by the service from the ledger at the page's own frozen
+            # frontier; the resolver applies the provenance rule to it for this writer only.
             provenance = ProjectionProvenanceContext(
                 cast(str, source["session_id"]),
                 cast(str, source["writer_id"]),
                 _frontier_for_projection(source),
+                result.item_authorship if type(result) is StatusInternalResult else (),
             )
         candidate = CandidateContext(
             request_id=projection_request_id,

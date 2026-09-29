@@ -60,6 +60,7 @@ from yoetz.domain.findings import (
     rank_key,
     semantic_provenance_to_json,
 )
+from yoetz.domain.privacy import SourceAuthorship
 from yoetz.domain.receipts import CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP
 from yoetz.domain.values import (
     Actor,
@@ -1170,6 +1171,38 @@ def _compact_obligation_item(obligation: str, record: object) -> StatusCompactOb
     if typed.payload.acceptance_criteria is not None:
         values["acceptance_criteria"] = typed.payload.acceptance_criteria
     return StatusCompactObligationModel.model_validate(values)
+
+
+def _evidence_source_authorship(
+    projection: ProjectionState, records: tuple[LedgerRecord, ...]
+) -> dict[str, SourceAuthorship]:
+    """Read each readable evidence row's source-event authorship from the frozen prefix.
+
+    Every value comes from the accepted event envelope (writer chain, session, ingestion sequence,
+    service-derived publication channel and observation stamp). It is recomputed for every query
+    so a requester-specific decision is never cached across frontiers or writers.
+    """
+
+    wanted = {
+        record.source_event_id: evidence
+        for evidence, record in projection.evidence.items()
+        if record.payload is not None
+    }
+    found: dict[str, SourceAuthorship] = {}
+    if not wanted:
+        return found
+    for row in records:
+        evidence = wanted.get(row.event_id)
+        if evidence is None:
+            continue
+        found[evidence] = SourceAuthorship(
+            row.writer.writer_id,
+            row.session_id,
+            row.ledger.ingestion_sequence,
+            row.publication_channel,
+            is_observation_authored(row),
+        )
+    return found
 
 
 def _projection_items(
@@ -2322,6 +2355,14 @@ class MemoryLedgerAdapter:
                 if len(filtered_items) > query.limit:
                     break
         selected = tuple(filtered_items[: query.limit])
+        item_sources: tuple[tuple[SourceAuthorship, ...], ...] = ()
+        if view is ProjectionView.EVIDENCE and selected:
+            sources = _evidence_source_authorship(effective_projection, prefix)
+            item_sources = tuple(
+                () if (source := sources.get(item.evidence_id)) is None else (source,)
+                for item in selected
+                if type(item) is StatusEvidenceItemModel
+            )
         next_position = None
         if selected and len(filtered_items) > len(selected):
             last = selected[-1]
@@ -2375,6 +2416,7 @@ class MemoryLedgerAdapter:
             coverage,
             status_gaps,
             next_position,
+            item_sources,
         )
 
         return page, effective_projection, all_items

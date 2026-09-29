@@ -3111,6 +3111,17 @@ only a category the host demonstrably already has. Provenance is recomputed at p
 against the frozen frontier and is never cached across frontiers, and each projection still reserves
 and completes its `AgentProjectionAuditSubject` receipt.
 
+Production composes `LocalPrivacyEnforcer` with the ledger-authorship `TrustedProvenanceResolver`
+(`build_local_privacy_enforcer`). Its only input is `ProjectionProvenanceContext.item_authorship`:
+per projected row, the `SourceAuthorship` (writer, session, ingestion sequence, service-derived
+publication channel, observation-coordinator stamp) of each contributing accepted event, read by the
+ledger at the page's frozen frontier and carried inside the service, never on the wire. Status
+evidence rows are attributed; every other leaf resolves as ambiguous and keeps the category ceiling.
+Self-authorship additionally requires a cooperative channel (`cooperative_mcp` or `local_cli`)
+without the observation stamp, so hook-observed rows — written by the observation coordinator's own
+writer — stay `other_writer` even when session and host match. Reattach opens a new session, so the
+same writer's earlier-session rows are not `self_authored` in it.
+
 `PrivacyPolicyStorePort` alone loads/intersects and mutates the machine ceiling plus
 repository/task/request overlays. Its `repository_authority(scope) -> RepositoryPrivacyAuthority`
 read returns the bound scope, composed `EffectivePrivacyPolicy`, repository commitment,

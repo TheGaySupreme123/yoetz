@@ -25,6 +25,7 @@ from yoetz.domain.findings import (
     RuntimeTokenUsage,
     SemanticProvenance,
 )
+from yoetz.domain.privacy import SourceAuthorship
 from yoetz.domain.values import (
     Actor,
     Frontier,
@@ -1656,6 +1657,11 @@ class ProjectionPage:
     coverage: Coverage
     gaps: tuple[str, ...]
     next_position: ProjectionPosition | None
+    # Evidence pages only: the service-read ledger authorship of each returned row, parallel to
+    # ``items``, taken from the same frozen frontier. It is a trusted structural fact for the
+    # disclosure boundary and never becomes wire content. An empty member means the row's source
+    # could not be attributed, which the boundary treats as ambiguous.
+    item_sources: tuple[tuple[SourceAuthorship, ...], ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.view) is not str or self.view not in {
@@ -1673,6 +1679,19 @@ class ProjectionPage:
             type(self.items) is not tuple
             or len(self.items) > 100
             or any(not _is_projection_item(item) for item in self.items)
+        ):
+            raise _invalid()
+        if type(self.item_sources) is not tuple or (
+            self.item_sources
+            and (
+                self.view != "evidence"
+                or len(self.item_sources) != len(self.items)
+                or any(
+                    type(sources) is not tuple
+                    or any(type(source) is not SourceAuthorship for source in sources)
+                    for sources in self.item_sources
+                )
+            )
         ):
             raise _invalid()
         item_type_by_view = {

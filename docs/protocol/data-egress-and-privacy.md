@@ -147,8 +147,11 @@ instead; a client never selects its own sink. `agent_context` is further conditi
 `imported`): material the requesting writer authored at the frozen frontier, and prose derived
 solely from it, project without an extra grant, because withholding a writer's own words discloses
 nothing new. Everything else — other-writer material, imports, and every provider-derived AI-powered
-finding — requires the explicit `agent_context_categories` grant. No sink or provenance combination
-ever admits `sensitive_confidential` content or anything in the never-send set. Serving the static
+finding — requires the explicit `agent_context_categories` grant. The shipped resolver attributes
+status evidence rows from ledger authorship: an agent reads back the evidence it published in its
+current session, while host-observed rows, other writers' rows, and imports stay omitted without a
+grant. No sink or provenance combination ever admits `sensitive_confidential` content or anything in
+the never-send set. Serving the static
 `guidance/` documents over MCP resources is not a disclosure sink at all — those bytes carry no
 ledger, task, or user content and are identical for every installation.
 

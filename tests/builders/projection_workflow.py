@@ -37,7 +37,6 @@ from yoetz.adapters.memory.privacy import (
     MemoryPrivacyCatalogState,
     MemoryPrivacyPolicyStore,
 )
-from yoetz.adapters.privacy.local_enforcer import LocalPrivacyEnforcer
 from yoetz.application.check import FinalSemanticEvaluation
 from yoetz.application.egress import PrivacyCoordinator
 from yoetz.application.publish_work import PublishWorkInternalResult
@@ -319,7 +318,8 @@ async def build_projection_application(
     )
     coordinator = PrivacyCoordinator(
         policies,
-        LocalPrivacyEnforcer(),
+        # The enforcer the daemon composes, including its trusted provenance resolver (#914).
+        ready_composition.build_local_privacy_enforcer(),
         audit,
         _Gateway(),  # type: ignore[arg-type]
         clock,
