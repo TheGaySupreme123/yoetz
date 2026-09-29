@@ -10,6 +10,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import Final, Literal, cast
 
 from yoetz.adapters.importers.codex_jsonl import (
@@ -142,6 +143,17 @@ _SUBAGENT_ACTIVITY_KINDS: Final = (
 # child's own start signal; the parent task it belongs to is resolved from admitted catalog
 # lineage, never from these host tokens.
 _SUBAGENT_THREAD_SOURCE: Final = "subagent"
+# Codex 0.150.1+ rollouts record a finished host tool call as ``event_msg`` whose payload is
+# ``item_completed`` and whose ``item.type`` names the tool family (issue #910, recorded 0.157.1
+# shape in ``observations/codex-post-tool-outcomes-0.157.1.case.json``). ``status`` and
+# ``exit_code`` on that item are the host's closed outcome facts. A command or patch item names no
+# tool, so it is recorded under its item family in the ``codex exec --json`` spelling; an MCP item
+# keeps its own ``tool`` name.
+_STREAM_COMPLETED_PAYLOAD: Final = "item_completed"
+_STREAM_TOOL_ITEM_NAMES: Final[Mapping[str, str]] = MappingProxyType(
+    {"CommandExecution": "command_execution", "FileChange": "file_change"}
+)
+_STREAM_COMPLETED_TOOL_ITEMS: Final = frozenset({"CommandExecution", "FileChange", "McpToolCall"})
 
 
 _JSONL_SUFFIXES: Final = (".jsonl", ".jsonl.zst")
@@ -617,6 +629,15 @@ def _normalize_tool_name(value: object) -> str | None:
     if token in YOETZ_TOOL_NAMES:
         return token
     return token
+
+
+def _completed_tool_item(record: CodexParsedRecord) -> bool:
+    """True for an ``event_msg``/``item_completed`` record of a command, MCP or patch item."""
+
+    if record.wrapper_type != "event_msg" or record.item_type not in _STREAM_COMPLETED_TOOL_ITEMS:
+        return False
+    payload = record.value.get("payload")
+    return isinstance(payload, JsonObject) and payload.get("type") == _STREAM_COMPLETED_PAYLOAD
 
 
 def _structural_body(record: CodexParsedRecord) -> JsonObject | None:
@@ -1097,13 +1118,20 @@ def structural_from_stream_record(
         type_token = _token(body.get("type"))
         if tool is None and type_token is not None and type_token not in item_types:
             tool = _normalize_tool_name(type_token)
+        if tool is None and item_type is not None:
+            # A completed command or patch item names no tool of its own; use the host's own
+            # item family, spelled as ``codex exec --json`` spells it, so the call keeps its
+            # command/edit family instead of an anonymous one (#910).
+            tool = _STREAM_TOOL_ITEM_NAMES.get(item_type)
         if tool is not None:
             fields["tool_name"] = tool
         status = _token(body.get("status")) or _token(body.get("result_status"))
         if status is not None:
             fields["result_status"] = status
         exit_code = body.get("exit_code")
-        if "exit_code" in body:
+        if "exit_code" in body and exit_code is not None:
+            # ``exit_code: null`` is a command that never exited (declined or still running):
+            # no outcome fact, not an unsupported shape.
             if type(exit_code) is int and -1 <= exit_code <= 255:
                 fields["exit_status"] = exit_code
             else:
@@ -1204,6 +1232,11 @@ def envelope_from_stream_record(
         ).removeprefix("sha256:")[:48]
     )
     event_kind = _token(record.wrapper_type) or "unsupported_event"
+    if _completed_tool_item(record):
+        # ``event_msg``/``item_completed`` carrying a command, MCP or patch item is a completed
+        # host tool call with a closed ``status``/``exit_code`` outcome. Name its phase so the
+        # materializer records a result instead of an opaque ``event_msg`` row (#910).
+        event_kind = "item_completed"
     if record.item_type == "SubAgentActivity" and body is not None:
         activity_kind = _token(body.get("kind"))
         if activity_kind in _SUBAGENT_ACTIVITY_START_KINDS:

@@ -110,6 +110,14 @@ bytes. Normal installers retain their existing modified/foreign-tree protections
   - `tests/packaging/` when your change affects release artifacts or public metadata;
   - `tests/property/`, `tests/integration/`, `tests/subprocess/` as the change warrants.
 - Avoid mixing unrelated behavioral changes into one patch.
+- Host payload contract: every host adapter has, for each event type it consumes, at least one
+  test driven by a host payload fixture under `fixtures/`, fed to the real hook handler exactly
+  as the host delivers it. Never test an adapter with a pre-normalized envelope or an invented
+  field (such as a top-level `exit_status` Codex never sends). Each fixture states its
+  provenance — a raw hook stdin capture, or a shape derived from a recorded rollout or the host's
+  documentation — and whether a raw capture is still pending; a derived shape is replaced by a
+  capture when one is made. `tests/unit/cli/test_host_outcome_contract.py` enforces this for
+  every tool-result event (issue #910).
 - Keep release-related and security-sensitive changes clearly labeled in your commit/PR description.
 - Preserve the public/private boundary: nothing under `docs/architecture/` or any other gitignored
   local drafting input belongs in a public file. `scripts/scan_public_boundary.py` enforces this.

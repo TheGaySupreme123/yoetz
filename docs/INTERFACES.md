@@ -4417,7 +4417,14 @@ Outcome semantics and back-pressure vocabulary (ADR-022 decisions 12–13):
 - Paired `PostToolUse` materialization consumes `exit_status`, `denied`, boolean `success`, and a
   closed `result_status` spelling table. Rollout `exit_code` preserves the structural wire range
   `-1..255` exactly (including `-1` as a nonzero failure); a present value outside that range or of
-  another JSON type is unsupported evidence, never a clean `completed` success. The Claude ordinary
+  another JSON type is unsupported evidence, never a clean `completed` success, and a `null` value
+  (a declined or unfinished command) states no outcome. The Codex hook mapping reads these facts
+  where Codex states them, nested in `tool_response` (issue #910): a shell/exec result's
+  `exit_code` (object, or JSON text carrying an exec-result key), the `Exit code: N` /
+  `Process exited with code N` function-output header, and an MCP result's `isError`; output text
+  is never read as an outcome. A rollout `event_msg`/`item_completed` whose item is a
+  `CommandExecution`, `McpToolCall` or `FileChange` is a completed tool call (event kind
+  `item_completed`) whose `status` and `exit_code` are its outcome. The Claude ordinary
   `claude-code-hooks-ordinary-v2` mapping also treats Claude's documented `PostToolUse` event as
   an explicit host-tool success fact, without fabricating `exit_status: 0`; `PostToolUseFailure`
   and explicit failure, denial, interruption, invalid/unknown status, or conflicting facts retain

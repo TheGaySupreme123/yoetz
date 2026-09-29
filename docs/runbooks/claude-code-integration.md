@@ -409,6 +409,20 @@ A background Bash launch
 is recorded as partial until the host supplies completion evidence. These decisions do not add
 filesystem or batch observation.
 
+**Shell outcome contract (issue #910).** On the ordinary profile a `Bash` `PostToolUse` is recorded
+as `success`. Claude's Bash result (`stdout`, `stderr`, `interrupted`, `isImage`) has no exit field,
+so the result has no `exit_status`. A `Bash` `PostToolUseFailure` is recorded as `failure`, with
+the closed status `interrupted` when `is_interrupt` is true and `error` otherwise. Its `error` text
+is never parsed for an exit code, so it too carries no `exit_status`. An exit status is kept only
+from a closed `exit_code`/`exitCode` field that Claude supplies. An ordinary-profile shell call is
+therefore `unknown`, with `host_outcome_unavailable`, only when Claude supplies an invalid or
+unrecognized outcome field; a background launch stays partial.
+The default structural profile observes no generic tool calls, so it records no shell outcomes.
+The shapes are pinned by `fixtures/observations/claude-code-bash-outcomes.case.json`, which is
+derived from the documented hook payloads. A raw hook stdin capture from an installed Claude Code
+is still owed, owned by issue #910. Native acceptance on macOS, Linux and Windows through WSL 2 is
+not established by source tests.
+
 Stale-verification advice is scoped to the logical tool call, not to the observed phase. On this
 profile one edit is observed twice — a `PreToolUse` attempt and a `PostToolUse` result sharing the
 normalized `tool_call_id` (Claude's `tool_use_id`) — and the pair reports one

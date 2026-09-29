@@ -666,3 +666,28 @@ The exact-reference lookup remains workspace/session fenced and the resolver sti
 consent, manifests, objects, and ledger provenance. Evicted, redacted, revoked, or unavailable
 captures remain coverage gaps. Already-pruned envelopes cannot be repaired by upgrading. This
 shared SQLite behavior applies to Codex, Claude Code and Cursor on macOS, Linux and WSL 2.
+
+### Codex tool outcomes read where Codex states them (2026-09-30, #910)
+
+Decision 12 consumes host-stated outcome facts, but on Codex the only reader was the
+`apply_patch` `Exit code: N` prefix. Codex 0.157.x sends no top-level outcome: a shell, exec or MCP
+result states it nested in `tool_response`. Every Codex shell result was therefore `unknown`, and
+every Codex session carried `host_outcome_unavailable`. The Codex hook mapping now reads the
+closed facts of each tool family on every `PostToolUse`. Shell and exec tools contribute the exec
+result's `exit_code` (an object, or JSON text that carries a Codex exec-result key) and the
+`Exit code: N` / `Process exited with code N` line of the function-output header, which ends at
+`Output:`. `apply_patch` contributes that header. MCP tools contribute only the protocol-level
+`isError`. The facts pass through the shared native reducer, so `exit_status` stays in `-1..255`,
+conflicting facts resolve failure-first, and a result with no fact stays `UNKNOWN` with the
+`host_outcome_unavailable` gap on that record only. Output text is never read. Selection
+classifies the same facts, so a failed read cannot be summarized as a proven routine success.
+
+The session stream now names a rollout `event_msg`/`item_completed` command, MCP or patch item as
+the completed tool call it is (event kind `item_completed`). Its `status` and `exit_code` become a
+result instead of an opaque row, and `exit_code: null` states no outcome. Where the hook call id
+equals the rollout item id, decision 15's correction path applies unchanged. Pairing rows with
+different ids is #917. Mapping versions are unchanged. Already-stored envelopes keep their
+recorded facts, so historical `unknown` rows and their gap are not re-materialized. Recording
+failures makes the failed-work rules reachable on Codex, so this change is sequenced after the
+failure-supersession change of #909. The shapes are pinned by the OUT-001 fixture, which is derived
+from recorded 0.157.1 rollouts; a raw hook stdin capture is still owed on #910.

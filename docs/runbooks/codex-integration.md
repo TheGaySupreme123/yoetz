@@ -541,7 +541,10 @@ A successful Codex `shell` call is a command outcome, not a check. Deterministic
 verification baseline only on a current `passed` approved-check fact or an explicit success from a
 dedicated verification tool, and a routine read never moves it — including in Detailed mode, where
 a routine read keeps its `function_call_output` action and carries no routine marker (issue #681).
-Unresolved-command advice still reads every `shell` outcome.
+Unresolved-command advice reads the outcome Codex states for each `Bash`/`shell` call, as
+described in [Tool outcomes](#tool-outcomes-issue-910) below. Before issue #910 no Codex shell call
+had a recorded outcome, so this advice never fired on Codex. A call whose outcome Codex did not
+state is `unknown`: it neither opens nor resolves a failed command.
 
 Native child tool callbacks can carry the parent's host session ID together with a child
 `agent_id`. A successful delegated `start` preserves the parent mapping: its task result names the
@@ -929,6 +932,48 @@ descriptor advertises `publish-work-request/1.1.0`, which admits `claim_recorded
 descriptors remain limited to the frozen v1.0 draft union. The CLI command uses the same public
 request and service boundary. Neither Codex hooks nor imported observations synthesize, replace,
 or supersede claims.
+
+## Tool outcomes (issue #910)
+
+Codex states a tool call's outcome only inside the `PostToolUse` `tool_response`, never as a
+top-level field. For each tool family Yoetz reads only closed facts. It records them as the result's
+`outcome` and, when the host states one, its `exit_status` in the range `-1..255`:
+
+- **Shell and exec calls** (`Bash`, `exec_command`, `shell`, `local_shell`, including each nested
+  `tools.exec_command` in a code-mode `exec` cell): the `exit_code` of the exec result object,
+  sent as an object or as JSON text, or the `Exit code: N` / `Process exited with code N` line of
+  the function-output header. JSON text is read only when it carries one of Codex's exec-result
+  keys (`chunk_id`, `wall_time_seconds`, `original_token_count`), so a command's own JSON output
+  is never taken for the host's result.
+- **`apply_patch`**: the `Exit code: N` header.
+- **MCP tools**, including Yoetz's own: only the protocol-level `isError`. The result body is
+  tool-domain data.
+
+Output text is never searched for words such as `FAILED`, and conflicting facts resolve
+failure-first. A result that states no fact stays `unknown` and carries `host_outcome_unavailable`
+for that record only. Examples are a unified-exec process still running (`Process running with
+session ID N`), an MCP result without `isError`, and a shape outside this list. The gap therefore
+leaves a session's coverage only when every observed call had an outcome. Outcomes are structural
+facts: they are read whether or not content capture is granted, and no command or output text is
+kept.
+
+The session stream carries the same facts. A rollout `event_msg` whose payload is
+`item_completed` and whose item is a `CommandExecution`, `McpToolCall` or `FileChange` is a
+completed tool call, and its `status` (`completed`, `failed`) and `exit_code` are its outcome. A
+command item names no tool, so it is recorded as `command_execution` (a patch item as
+`file_change`). An `exit_code` of `null`, as on a declined command, states no outcome. When a
+hook call id equals the rollout item id, the stream fact appends a correction to an `unknown` hook
+result and never rewrites it (ADR-022 decision 15). Pairing hook and stream rows whose ids differ
+is issue #917. Until then a command observed on both paths can appear as two results.
+
+These shapes are pinned by `fixtures/observations/codex-post-tool-outcomes-0.157.1.case.json`,
+which is derived from recorded Codex 0.157.1 rollouts. The benchmark that exposed the defect did not
+archive raw hook stdin, so a raw-stdin capture is still owed on a machine with Codex, owned by issue
+#910. It should cover a nested `exec_command` with exit 0 and non-zero, a direct shell call,
+`apply_patch` success and failure, and a Yoetz MCP call. Until that capture lands, the reader
+accepts both the structured and the header forms. Source tests do not establish native Codex
+acceptance on macOS, Linux or Windows through WSL 2. Dogfood confirmation per platform is owed on
+the same issue.
 
 ## Smart observation selection (issue #687)
 
