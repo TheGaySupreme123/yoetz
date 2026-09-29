@@ -74,7 +74,11 @@ from yoetz.kernel.completion_scope import (
     SCOPE_REPAIR,
     completion_scope_differences,
 )
-from yoetz.kernel.deterministic_checks import CaseAvailabilityFacts, CaseGap
+from yoetz.kernel.deterministic_checks import (
+    CALLER_DIGEST_PROVENANCE_GAPS,
+    CaseAvailabilityFacts,
+    CaseGap,
+)
 from yoetz.kernel.finding_resolution import finding_resolution_explanation
 from yoetz.kernel.lineage import LineageEvaluation, LineageRollupState
 from yoetz.kernel.plan_scope import CurrentPlanScope, current_plan_scope
@@ -351,6 +355,10 @@ class ReceiptBuildContext:
             record = self.projection.findings.get(state.finding_id)
             if record is None or record.payload is None:
                 raise ValueError(_CONTEXT_INVALID)
+            # A resolved row is history: a later qualifying check proved its issue absent, so its
+            # coverage no longer bounds the conclusion (issue #912). Current rows still must.
+            if state.resolved:
+                continue
             if weakest(self.coverage, record.payload.coverage) != self.coverage:
                 raise ValueError(_CONTEXT_INVALID)
         if self.applicable_check is not None:
@@ -885,6 +893,43 @@ def _resolved_history_sentence(resolved_count: int) -> str:
     )
 
 
+def _caller_digest_count(context: ReceiptBuildContext) -> int:
+    """Count cited evidence items whose caller-asserted digest Yoetz did not verify.
+
+    The case records one per-item gap, rooted at the evidence's source event, for each cited
+    ``digest_only`` or ``withheld`` binding. A code carried only by check coverage or a retained
+    finding has no per-item root and is named without a count.
+    """
+
+    return len(
+        {
+            gap.subject_refs
+            for gap in context.gaps
+            if gap.code in CALLER_DIGEST_PROVENANCE_GAPS and gap.subject_refs
+        }
+    )
+
+
+def _caller_digest_sentence(count: int) -> str:
+    """Name the caller-asserted digest provenance limitation once, with a count (issue #912).
+
+    This is the fallback provenance label: an unverified caller digest raises no finding, yet
+    the receipt must still say that Yoetz did not verify those bytes. Nothing an agent publishes
+    changes the recorded provenance, so the sentence names no remedy.
+    """
+
+    if count == 0:
+        subject = "Cited evidence carries caller-asserted digests"
+    elif count == 1:
+        subject = "One cited evidence item carries a caller-asserted digest"
+    else:
+        subject = f"{count} cited evidence items carry caller-asserted digests"
+    return (
+        f"{subject} that Yoetz did not verify: the bytes were not retained, so this provenance "
+        "limitation stays disclosed here and no response or recheck changes it."
+    )
+
+
 def _suffix_record_kinds(context: ReceiptBuildContext) -> tuple[str | None, bool]:
     """Return whether an attributable suffix contains service lineage and host observations.
 
@@ -1112,6 +1157,7 @@ def _sections(
     check_suffix: CheckSuffixClass | None = None,
     engine_derived_suffix: str | None = None,
     host_observation_suffix: bool = False,
+    caller_digest_count: int = 0,
 ) -> tuple[ReceiptSection, ...]:
     gap_codes = coverage.known_gaps
     bodies: dict[ReceiptSectionKey, str] = {}
@@ -1314,6 +1360,8 @@ def _sections(
                 "loss remains a limitation after queue recovery; rerunning a read supplies "
                 "evidence for its new time and state only."
             )
+        if CALLER_DIGEST_PROVENANCE_GAPS & set(gap_codes):
+            gap_body += " " + _caller_digest_sentence(caller_digest_count)
         bodies[ReceiptSectionKey.LIMITATIONS_AND_COVERAGE] = gap_body
         items[ReceiptSectionKey.LIMITATIONS_AND_COVERAGE] = gap_codes
     elif redactions:
@@ -1467,6 +1515,7 @@ def build_receipt(
         check_suffix=context.check_suffix,
         engine_derived_suffix=engine_derived_suffix,
         host_observation_suffix=host_observation_suffix,
+        caller_digest_count=_caller_digest_count(context),
     )
     suppressed_count = (
         0 if context.applicable_check is None else context.applicable_check.suppressed_count

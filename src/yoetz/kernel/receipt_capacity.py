@@ -177,7 +177,10 @@ def _receipt_gap_codes(
     else:
         codes.add(_CHECK_PAYLOAD_UNAVAILABLE)
 
+    # Resolved rows remain receipt history but no longer fold into its coverage (issue #912).
     for finding in current_receipt_findings(projection):
+        if finding_is_resolved(projection, finding.finding_id):
+            continue
         codes.update(finding.coverage.known_gaps)
     return tuple(sorted(codes, key=str.encode))
 

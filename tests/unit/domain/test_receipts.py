@@ -233,6 +233,26 @@ def test_receipt_weakest_coverage_matches_supports() -> None:
     _assert_reason(exc_info, "receipt_coverage_mismatch")
 
 
+def test_resolved_history_is_carried_without_bounding_document_coverage() -> None:
+    """Issue #912: only current rows bound the coverage; summary-listed resolved rows do not."""
+
+    wire = _variant("semantic-advisory.case.json", "success_after_durable_receipt")
+    finding = cast(list[dict[str, Any]], wire["findings"])[0]
+    cast(dict[str, Any], finding["coverage"])["artifact_observation"] = "published_only"
+    sections = cast(list[dict[str, Any]], wire["sections"])
+    summary = next(section for section in sections if section["key"] == "summary")
+    summary["items"] = [finding["finding_id"]]
+
+    document = receipt_document_from_json(wire)
+    assert receipt_weakest_coverage(document) == document.coverage
+    assert tuple(item.finding_id for item in document.findings) == (finding["finding_id"],)
+    # The same weaker row without the resolved-history marker is a current row again.
+    summary["items"] = []
+    with pytest.raises(ProtocolValueError) as exc_info:
+        receipt_document_from_json(wire)
+    _assert_reason(exc_info, "receipt_coverage_mismatch")
+
+
 def test_section_order_and_redaction_notes_are_stable() -> None:
     wire = _variant("redacted-gap.case.json", "redacted_object")
     document = receipt_document_from_json(wire)

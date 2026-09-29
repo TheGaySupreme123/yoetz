@@ -1531,6 +1531,17 @@ content/state evidence; bounded packet inclusion does not prove that the reviewe
 defect. Pause, revoke and content-capture disable continue to stop admission through the existing
 shared controls.
 
+### Caller digests and capture binding (#912)
+
+A `content_digest` the agent publishes through ordinary publication is recorded as `caller_asserted`
+with `digest_only` (or `withheld`) availability. On this host, as on every host, it raises no local
+finding; the receipt's limitations name once, with a count, the cited evidence items whose
+caller-asserted digests Yoetz did not verify. The service-side binding that would upgrade a caller
+digest matching captured bytes to verified provenance (#912 part (b)) is not implemented yet, so
+every caller digest keeps that unverified label here. When it lands, the captures it can bind to on
+this host are Cursor `Write` changed-file captures under the ordinary profile (a whole capture or a
+hunk-sized byte range of it) and shell heredoc captures. The follow-up owner is issue #912.
+
 ## Background semantic advice controls
 
 Background review uses the shared service's routine budget, condition deduplication and durable

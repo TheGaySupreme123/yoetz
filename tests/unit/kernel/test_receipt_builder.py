@@ -374,6 +374,92 @@ def test_digest_provenance_limitation_is_retained_in_receipt() -> None:
     assert receipt.conclusion is ReceiptConclusion.INSUFFICIENT_COVERAGE
     assert receipt.coverage.known_gaps == (code,)
     assert tuple(item.code for item in receipt.gaps) == (code,)
+    limitations = next(
+        section.body
+        for section in receipt.sections
+        if section.key is ReceiptSectionKey.LIMITATIONS_AND_COVERAGE
+    )
+    assert "One cited evidence item carries a caller-asserted digest that Yoetz did not verify" in (
+        limitations
+    )
+
+
+@pytest.mark.parametrize(
+    ("gaps", "expected"),
+    (
+        pytest.param(
+            (
+                CaseGap(
+                    f"evidence_content_digest_only:{_SOURCE_EVENT_ID}",
+                    "evidence_content_digest_only",
+                    (_SOURCE_EVENT_ID,),
+                ),
+                CaseGap(
+                    "evidence_content_withheld:evt_00000000-0000-4000-8000-000000000009",
+                    "evidence_content_withheld",
+                    (event_id("evt_00000000-0000-4000-8000-000000000009"),),
+                ),
+            ),
+            "2 cited evidence items carry caller-asserted digests that Yoetz did not verify",
+            id="two-items",
+        ),
+        pytest.param(
+            (
+                CaseGap(
+                    "check_coverage:evidence_content_digest_only",
+                    "evidence_content_digest_only",
+                    (),
+                ),
+            ),
+            "Cited evidence carries caller-asserted digests that Yoetz did not verify",
+            id="check-coverage-only",
+        ),
+    ),
+)
+def test_caller_digest_label_is_named_once_with_its_count(
+    gaps: tuple[CaseGap, ...], expected: str
+) -> None:
+    """Issue #912 fallback (a): the receipt, not a finding, discloses unverified caller digests."""
+
+    codes = tuple(sorted({gap.code for gap in gaps}))
+    coverage = _coverage(gaps=codes)
+    ordered = tuple(sorted(gaps, key=lambda gap: gap.marker))
+    receipt = _build(
+        _context(
+            coverage=coverage,
+            gaps=ordered,
+            check=_check(CheckVerdict.NO_ISSUE_DETECTED, coverage),
+        )
+    )
+    limitations = next(
+        section.body
+        for section in receipt.sections
+        if section.key is ReceiptSectionKey.LIMITATIONS_AND_COVERAGE
+    )
+    assert expected in limitations
+    assert limitations.count("caller-asserted digest") == 1
+    assert "no response or recheck changes it" in limitations
+    assert "content-bearing" not in limitations
+
+
+def test_resolved_history_no_longer_lowers_receipt_coverage() -> None:
+    """Issue #912: a resolved row stays listed as history but its coverage is not folded."""
+
+    weaker = replace(_finding(), coverage=_coverage(gaps=("cursor_stale",)))
+    check = _check(CheckVerdict.NO_ISSUE_DETECTED, _coverage())
+    receipt = _build(_context(finding=weaker, resolved=True, check=check))
+    assert receipt.coverage == _coverage()
+    assert receipt.conclusion is ReceiptConclusion.NO_UNRESOLVED_DETERMINISTIC_FINDINGS
+    assert tuple(finding.finding_id for finding in receipt.findings) == (_FINDING_ID,)
+    summary = next(
+        section for section in receipt.sections if section.key is ReceiptSectionKey.SUMMARY
+    )
+    assert summary.items == (_FINDING_ID,)
+    assert "resolved by a later qualifying check" in summary.body
+
+    # A current row must still bound the coverage the application supplies.
+    with pytest.raises(ValueError, match="receipt_build_context_invalid"):
+        _context(finding=weaker, resolved=False, check=check)
 
 
 def test_suppressed_findings_block_clear_conclusion_until_fresh_check() -> None:

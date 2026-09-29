@@ -89,6 +89,7 @@ from yoetz.protocol.coverage import (
 )
 
 __all__ = [
+    "CALLER_DIGEST_PROVENANCE_GAPS",
     "DETERMINISTIC_FINDING_TEMPLATES",
     "DETERMINISTIC_TEXT_CONTRACT_DIGEST",
     "EVIDENCE_PROVENANCE_GAPS",
@@ -456,6 +457,19 @@ EVIDENCE_PROVENANCE_GAPS: Final[frozenset[str]] = frozenset(
         "evidence_digest_subject_legacy_unknown",
     }
 )
+# Caller digests whose bytes Yoetz neither retained nor verified (issue #912). Every service
+# producer (approved check, trusted-import report, observation capture) records ``captured``
+# availability, so a cited ``digest_only`` or ``withheld`` binding comes from ordinary publication
+# and is ``caller_asserted``. Nothing an agent can publish changes that recorded provenance, so
+# these codes stay exact coverage limitations that the receipt discloses once, with a count, and
+# never become a ledger finding whose remedy the agent cannot perform. A legacy digest without a
+# binding keeps its finding: its subject is unknown, not merely unverified.
+CALLER_DIGEST_PROVENANCE_GAPS: Final[frozenset[str]] = frozenset(
+    {
+        "evidence_content_digest_only",
+        "evidence_content_withheld",
+    }
+)
 
 
 def render_deterministic_finding_text(
@@ -483,9 +497,16 @@ def render_deterministic_finding_text(
             f" Main agent: {template.next_action}"
         )
         if EVIDENCE_PROVENANCE_GAPS & set(gap_codes):
+            # Name only actions an agent can take (issue #912): ordinary publication cannot
+            # record captured content, so the old "record content-bearing evidence" remedy sent
+            # agents into publishing more digest-only items.
             detail = (
-                f"{detail} An evidence-provenance gap is not resolved by a finding response:"
-                " record content-bearing evidence or accept the gap in the receipt."
+                f"{detail} Evidence provenance is recorded history: no finding response, recheck,"
+                " or further digest-only publication changes it, and the receipt discloses it, so"
+                " no response is needed for it. Where a claim needs stronger support, cite an"
+                " existing captured evidence id (status view=evidence, filter.strength"
+                " immutable_snapshot) or new evidence with a typed digest_binding in a"
+                " replacement claim."
             )
     if kind is FindingKind.MATERIAL_LIMITATION_OMITTED:
         limitation_refs = tuple(
@@ -588,7 +609,7 @@ def _text_contract_corpus() -> tuple[JsonValue, ...]:
         (
             "stale_provenance_addendum",
             FindingKind.LEDGER_STALE_OR_INCOMPLETE,
-            ("evidence_content_withheld",),
+            ("evidence_digest_subject_legacy_unknown",),
             (),
         ),
         ("limitation_result", FindingKind.MATERIAL_LIMITATION_OMITTED, (), (limitation_result,)),

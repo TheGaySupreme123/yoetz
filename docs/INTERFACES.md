@@ -1305,7 +1305,16 @@ coverage.
   Relevant digest evidence additionally contributes `evidence_digest_subject_legacy_unknown`,
   `evidence_content_digest_only`, or `evidence_content_withheld`. Relevance follows the current
   claim/obligation/response support graph (including referenced results); unrelated historical
-  evidence contributes no gap to the current case.
+  evidence contributes no gap to the current case. The two caller-digest codes
+  (`kernel/deterministic_checks.CALLER_DIGEST_PROVENANCE_GAPS`: `evidence_content_digest_only`,
+  `evidence_content_withheld`) stay exact case gaps and weaken every ref they root, but they are
+  never subjects of the work-integrity `ledger_stale_or_incomplete` finding (issue #912). Every
+  service producer records `captured` availability, so these bindings are always
+  `caller_asserted`; no response, recheck, or ordinary publication can change them. The receipt
+  instead names them once as a provenance label whose count is the number of distinct per-item gap
+  roots (a code carried only by check coverage is named without a count).
+  `evidence_digest_subject_legacy_unknown` still roots that finding, and the finding's
+  provenance addendum names only agent-performable actions.
 - `FindingBasisRef` is exactly
   `EventId|ObligationId|ClaimId|ActionId|ResultId|EvidenceId|FindingId`. `FindingFact.subject_refs`
   and `FindingBasis.supporting_refs` use that nominal union, never raw unvalidated strings.
@@ -1352,9 +1361,16 @@ coverage.
   check, AI-powered review, and availability accounting, and `applicable_check` is the exact
   readable `CheckRecordedPayload` that still applies to this material state or `None`. The
   application folds coverage from the frozen current case, the applicable check, and every retained
-  current finding row. When a historical finding contributes a gap absent from the recovered current
-  case/check, that code remains in top-level coverage and is represented once by the task-global
-  internal marker `retained_finding_coverage:<code>`; the finding's own coverage remains unchanged.
+  current finding row that is not resolved. A resolved row stays in the document's `findings` as
+  history (named by the summary items), but a later qualifying check proved its issue absent, so
+  its coverage no longer lowers the receipt coverage (issue #912); the builder's corruption guard,
+  `ReceiptDocument` validation, `receipt_weakest_coverage`, and the append-time
+  `kernel/receipt_capacity` gap union all skip resolved rows the same way. Documents issued before
+  this rule also folded resolved rows; they still satisfy the weaker requirement and stay readable
+  as issued. When an unresolved historical finding contributes a gap absent from the recovered
+  current case/check, that code remains in top-level coverage and is represented once by the
+  task-global internal marker `retained_finding_coverage:<code>`; the finding's own coverage remains
+  unchanged.
   A check applies when no event appended after the check's own record supersedes it under
   `kernel/reducers.invalidates_recorded_check`: the atomic check-result events — the
   `finding_recorded` records it returned and its `check_recorded` — land with it and never revoke it
