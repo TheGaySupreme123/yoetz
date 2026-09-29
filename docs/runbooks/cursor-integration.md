@@ -905,8 +905,10 @@ Advice uses Cursor's native output contract rather than the Codex/Claude Code en
 `sessionStart` may emit `additional_context`. `stop` does not emit `followup_message` because Cursor
 would auto-submit it as a new user message. `afterFileEdit`, `afterMCPExecution`, and `sessionEnd`
 have no advice output channel and emit `{}`. Only a successfully written, nonempty `sessionStart`
-object commits advice delivery; output-less events do not acquire the delivery lease or consume a
-frontier-motion notice. Provider-repair advice uses that `sessionStart` channel only (#844).
+object commits advice delivery; output-less events do not acquire the delivery lease. No hook
+delivers a frontier-motion notice (issue #915), including the ordinary-profile `postToolUse`: every
+such notice described observation-authored motion, which leaves a held frontier admissible.
+Provider-repair advice uses that `sessionStart` channel only (#844).
 A private or no-egress install, an install with no provider endpoint, and an install whose
 verification is disabled do not put `connect_provider` or another provider-repair request in
 `additional_context`. The service emits it only when verification is not disabled, a provider

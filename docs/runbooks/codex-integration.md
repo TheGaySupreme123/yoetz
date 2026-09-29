@@ -874,7 +874,8 @@ and keeps the pre-event of every Yoetz call and the post-event of a non-failed `
 or `read_guidance` in the bounded local store only. Yoetz tool input/output is never captured as
 content. The same policy applies to the legacy spool replay and to the Codex session stream, so
 neither path reintroduces the rows. The shared host-spelling advice guard suppresses pending
-frontier or recommendation delivery on a Yoetz-owned hook without an explicit failure. Explicit
+recommendation delivery on a Yoetz-owned hook without an explicit failure; no hook delivers a
+frontier-motion notice at all (issue #915). Explicit
 self-call failures stay retained, enqueued, and eligible for pending advice. Ordinary tools are
 unchanged. To confirm closure converged,
 run `yoetz observe drain --workspace . --json` after the agent stops and require
@@ -930,7 +931,8 @@ candidate change, async ingress behind the same `0.148.0-alpha.6` gate as `PreTo
 synchronous advice handler scoped to the Yoetz MCP tools or a minimal-import fast path, is not
 shipped: making both halves of a tool call async lets Codex run them concurrently, which can store
 a `PostToolUse` before its `PreToolUse`, and the `unpaired_event` contract that must absorb that
-belongs to #917. The per-call goal is ≤150 ms added latency
+belongs to #917. The frontier-motion notice no longer rides `PostToolUse`, so on a session with no
+pending advice the synchronous handler now returns `{}`. The per-call goal is ≤150 ms added latency
 (a goal, not a merge gate). Measured numbers per OS (macOS, Linux, WSL 2) from a code-mode dogfood
 run are not recorded yet; that gap is owned by issue #915, together with the async split.
 

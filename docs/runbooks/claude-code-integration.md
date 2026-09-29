@@ -777,9 +777,10 @@ or `_respond` enqueues one row; every `PostToolUseFailure` enqueues one row. Cla
 pre-event to hold back. Its `tool_use_id`, when present, identifies the observed result; no
 missing-pre gap is created for a legacy post-only hook. The `PostToolUse` advice
 guard recognizes Claude's plugin spelling together with the other host spellings, so a self-owned
-hook without an explicit failure does not lease pending frontier or recommendation context for
-the call being observed. Explicit self-call failures remain retained, enqueued, and eligible for
-pending advice. The manual
+hook without an explicit failure does not lease pending recommendation context for the call being
+observed. No hook delivers a frontier-motion notice (issue #915): every such notice described
+observation-authored motion, which leaves a held frontier admissible. Explicit self-call failures
+remain retained, enqueued, and eligible for pending advice. The manual
 `yoetz observe drain --json` reports `terminal: drained` once nothing is pending.
 
 Grant observation separately for the exact project. Exercise every advertised event and inspect
@@ -813,7 +814,9 @@ Yoetz hook process. The ordinary profile subscribes `PreToolUse`, `PostToolUse` 
 startup mode adds a `startup-gate` process to each of those events. Whether those hooks can be made
 cheaper (a minimal-import fast path or a narrower matcher) without losing ingress is decided from
 the aggregate of a Claude Code dogfood run in both profiles on macOS, Linux and WSL 2. Those
-measurements are not recorded yet; the gap is owned by issue #915.
+measurements are not recorded yet; the gap is owned by issue #915. The frontier-motion notice
+change applies here unchanged: an ordinary-profile `PostToolUse` with no pending advice returns
+`{}`.
 
 ### Oversized hook payloads (issue #667)
 

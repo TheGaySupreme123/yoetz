@@ -32,6 +32,11 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- Hooks no longer tell the agent "task frontier moved … run status before an exact-frontier check"
+  after routine tool calls. Every such notice described motion by the Yoetz observation writer,
+  which leaves a held publish frontier valid, and the text contradicted the `status` cadence in the
+  workflow guidance. Motion by any other writer still surfaces as `frontier_conflict` on the next
+  state-sensitive call (#915).
 - With the Codex subscription evaluator bound, the service no longer re-hashes the retained Codex
   runtime (about 359 MB on Linux) on the event loop for every observation advice cycle. Structural
   readiness is memoized by binding and file fingerprints and re-checked off the event loop only

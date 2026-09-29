@@ -4024,7 +4024,8 @@ Shared closed types:
   advice is disabled because `followup_message` auto-submits a user message; and `afterFileEdit`,
   `afterMCPExecution`, and `sessionEnd` emit `{}`. Cursor leases and commits advice only for a
   nonempty `sessionStart` object after its bytes are written successfully. Output-less events never
-  lease or consume advice or frontier-motion notices. Provider-repair advice is standing advice and
+  lease or consume advice. No hook on any host delivers a frontier-motion notice: every recorded
+  notice describes observation-authored motion, which leaves held frontiers admissible (issue #915). Provider-repair advice is standing advice and
   uses only the session-boundary channels (#844). Service composition sets `semantic_configured`
   only when verification is not disabled, a provider endpoint is bound, network egress is permitted,
   and an LLM inference channel is enabled. The verification default, including absent config, is not

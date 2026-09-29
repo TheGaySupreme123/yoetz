@@ -208,7 +208,7 @@ _STAGES: Final = frozenset(
         "store",
         # Formerly unwindowed regions of the pass (#310/#311): workspace
         # resolution and the consent probe before the store window opens, and
-        # advice selection, the stdout write and both delivery commits after
+        # advice selection, the stdout write and the delivery commit after
         # the drain window closes. Together with 'import' and 'store' they
         # partition the pass, and 'unattributed' names whatever they miss.
         "deliver",

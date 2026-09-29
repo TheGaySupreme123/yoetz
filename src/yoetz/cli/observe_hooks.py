@@ -36,7 +36,6 @@ from yoetz.adapters.integrations.observation_local import (
     HOOK_MAPPING_VERSION,
     YOETZ_OWNED_TOOL_NAMES,
     AdviceDelivery,
-    FrontierMotionNotice,
     LocalObservationConsent,
     LocalObservationStore,
     ObservationOutboxRow,
@@ -2041,16 +2040,6 @@ def _cached_recommendation_context(*, _state: Path | None) -> str:
             "start a fresh session afterwards. Fully restart the host only if activation requires it."
         )
     return text[:_MAX_ADVICE_CONTEXT]
-
-
-def _frontier_motion_context(notice: FrontierMotionNotice) -> str:
-    return (
-        "Yoetz: task frontier moved from "
-        f"{notice.from_sequence} to {notice.to_sequence} when the Yoetz observation writer "
-        f"appended {notice.observation_record_count} ledger record(s). "
-        "Held publish frontiers remain valid across observation-only motion; "
-        "run status before an exact-frontier check."
-    )
 
 
 async def _try_service_ingest(
@@ -4862,7 +4851,6 @@ def handle_observe(
         # a blocked host pipe delays advice, never observation ingest or outbox work.
         # Commit remains after emit, so a failed write never suppresses a later delivery.
         pending_delivery: AdviceDelivery | None = None
-        pending_frontier_notice: FrontierMotionNotice | None = None
         delivery_session_id: str | None = None
         # stop_hook_active is the host loop guard: a prior Stop already
         # continued this turn. Blocking again would loop; leave advice for a
@@ -4896,12 +4884,12 @@ def handle_observe(
         with delivery_gate as delivery_acquired:
             if delivery_eligible and delivery_acquired:
                 delivery_session_id = None if mapping is None else mapping.yoetz_session_id
-                if resolved_event == "PostToolUse":
-                    pending_frontier_notice = store.peek_frontier_motion(
-                        workspace_commitment, codex_session_id
-                    )
-                    if pending_frontier_notice is not None:
-                        additional = _frontier_motion_context(pending_frontier_notice)
+                # No frontier-motion notice rides this channel (#915). Every recorded
+                # notice describes observation-authored motion, which leaves a held
+                # cooperative frontier admissible (ADR-022), so it carried nothing to act
+                # on and asked for `status` between routine tool calls. Motion by any
+                # other writer still reaches the agent as `frontier_conflict` on its next
+                # state-sensitive operation.
                 delivery = store.peek_advice_for_delivery(
                     workspace_commitment,
                     yoetz_session_id=delivery_session_id,
@@ -4975,18 +4963,8 @@ def handle_observe(
                         yoetz_session_id=delivery_session_id,
                         session_commitment=session_commitment,
                     )
-            if emitted and host_consumable and pending_frontier_notice is not None:
-                with contextlib.suppress(BaseException):
-                    store.commit_frontier_motion_delivery(
-                        workspace_commitment,
-                        codex_session_id,
-                        pending_frontier_notice.delivery_identity,
-                        emitted_to_sequence=pending_frontier_notice.to_sequence,
-                        emitted_task_id=pending_frontier_notice.task_id,
-                        emitted_head_digest=pending_frontier_notice.head_digest,
-                    )
-        # Advice selection, the lease, the stdout write itself and both delivery
-        # commits sit past the 'drain' window; a blocked host pipe or a
+        # Advice selection, the lease, the stdout write itself and the delivery
+        # commit sit past the 'drain' window; a blocked host pipe or a
         # contended commit was previously invisible (#310/#311).
         stages["deliver"] = _elapsed_ms(deliver_started, _monotonic())
         # Attribute the whole pass's store work (#290), folded in last because

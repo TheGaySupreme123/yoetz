@@ -25,7 +25,9 @@ selection fence; 2026-09-25 for issue #836 (a handoff its own structural row can
 is retired at delivery, by the READY sweep, or at the CHECK preflight, and drains send a content
 profile only with their own host's rows); 2026-09-26 for the reopened issue #689 (shared-store
 contention: observable lock ownership, lock-free committed reads, host-window lock budgets,
-change-proportional critical sections, and non-overlapping sweep settlement, decision 23).
+change-proportional critical sections, and non-overlapping sweep settlement, decision 23);
+2026-09-30 for issue #915 (no hook delivers a notice for observation-authored frontier motion,
+decision 11).
 **Implemented by:** `src/yoetz/application/observation_materialize.py`,
 `src/yoetz/application/observation_coordinator.py`, `src/yoetz/cli/observe_hooks.py`,
 `src/yoetz/adapters/memory/ledger.py`,
@@ -199,10 +201,20 @@ unsupported claims and unbounded duplicate findings.
     per-entry recency ordinals, evict ended sessions first, then evict the least-recently-used entry
     at the cap even after restart. A legacy delivered mark without frontier-digest and recency
     identity is ignored, failing open to a duplicate rather than suppressing unknown lineage.
-    A later advice-safe `PostToolUse` hook surfaces that the motion was hook-observed, explains
+    Amended for issue #915: no hook delivers this notice any more. Every recorded notice
+    describes observation-authored motion, and such motion leaves a held cooperative publish
+    frontier admissible, so the notice carried nothing an agent could act on; its text asked for
+    `status` between routine tool calls, against the workflow cadence, and agents did not follow
+    it (DeepSWE v2: 3,442 deliveries, next-cell `status` 6.9% after a notice against an 18.9%
+    baseline). Motion by any other writer past a held frontier still reaches the agent on its next
+    state-sensitive operation as `frontier_conflict` (`reason_code` `frontier_changed`) carrying
+    the current sequence and head digest as repair facts. The bounded pending-notice and
+    delivered-mark bookkeeping described in this decision is unchanged and is no longer consumed
+    by a hook; retiring it is follow-up work. Until #915 the notice worked as follows:
+    a later advice-safe `PostToolUse` hook surfaced that the motion was hook-observed, explained
     that held cooperative publish frontiers remain admissible only across observation-authored
-    motion, and directs callers to use repair facts when an operation still conflicts. The pending notice is
-    removed only after its bytes reach the hook consumer. When a contiguous merge races that
+    motion, and directed callers to use repair facts when an operation still conflicts. The
+    pending notice was removed only after its bytes reached the hook consumer. When a contiguous merge races that
     peek/commit window, identity mismatches; commit still advances the delivered high-water to
     the peeked frontier (sequence and digest) and clamps the merged remainder rather than
     re-announcing the emitted range. When the queued same-task notice instead sits below the
@@ -624,9 +636,11 @@ advice without impersonating the agent or minting the same standing finding inde
 reads retain their local observation evidence without producing an unbounded task-ledger trail,
 Yoetz's own tool calls are observed without recursively feeding the outbox they are drained
 from, and
-cooperative writers learn about meaningful observation-authored frontier motion before their next
-state-sensitive operation. Captured objects contribute immutable byte identity without being
-upgraded to validation, reproduction, or disclosure authority. Observation-advice policy `0.1.3`
+cooperative writers learn about frontier motion that actually invalidates a held frontier from the
+`frontier_conflict` response of their next state-sensitive operation; observation-authored motion,
+which never does, is no longer announced on the hook channel (issue #915). Captured objects
+contribute immutable byte identity without being upgraded to validation, reproduction, or
+disclosure authority. Observation-advice policy `0.1.3`
 applies the condition-scoped identity to new materialization (`0.1.1` first introduced it;
 `0.1.2` rebased the standing `provider_not_ready` condition onto per-build structural machine facts
 for issue #265; `0.1.3` keeps the full evidence basis while bounding advice projection and requires

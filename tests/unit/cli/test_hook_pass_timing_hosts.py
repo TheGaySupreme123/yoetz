@@ -1,4 +1,4 @@
-"""Every host hook pass is timed per host, event and path (issue #915).
+"""Every host hook pass is timed, and observation-only motion is no hook notice (issue #915).
 
 Payloads follow the current host hook contracts rather than pre-normalised envelopes:
 
@@ -17,17 +17,23 @@ from __future__ import annotations
 
 import io
 import json
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import cast
 
 import pytest
 
-from yoetz.adapters.integrations.observation_local import LocalObservationStore
+from yoetz.adapters.integrations.observation_local import (
+    AdviceDelivery,
+    LocalObservationStore,
+)
+from yoetz.application import observation_advice
 from yoetz.cli import observe as observe_cli
 from yoetz.cli import observe_hooks
 from yoetz.cli.hook_diagnostics import hook_diagnostic_summary
 from yoetz.cli.hook_timing import hook_pass_timing_summary
+from yoetz.domain.observation import AdviceSnapshot
 from yoetz.domain.observation_profiles import (
     CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
     CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
@@ -35,6 +41,7 @@ from yoetz.domain.observation_profiles import (
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 
 _CODEX_SESSION = "019a0000-0000-7000-8000-000000000915"
+_REPOSITORY = Path(__file__).resolve().parents[3]
 
 
 def _consented(tmp_path: Path) -> tuple[LocalObservationStore, str]:
@@ -410,6 +417,161 @@ def test_legacy_spool_counts_every_pass_and_keeps_rows_for_hard_cap_breaches_onl
         == 1
     )
     assert "hook_slo_breached" in cast(Mapping[str, object], summary["reasons"])
+
+
+def _pending_observation_motion(
+    store: LocalObservationStore, commitment: str, session: str
+) -> None:
+    store.bind_codex_session(commitment, session)
+    store.note_frontier_motion(
+        commitment,
+        session,
+        from_sequence=2,
+        to_sequence=11,
+        head_digest="sha256:" + "9" * 64,
+        observation_record_count=9,
+        task_id="tsk_frontier_915",
+    )
+
+
+def _post_tool_use(host: str, tmp_path: Path) -> bytes:
+    stdout = io.BytesIO()
+    if host == "codex":
+        observe_hooks.handle_codex_observe(
+            event_name="PostToolUse",
+            stdin_bytes=_codex(
+                "PostToolUse", "exec_command", "call_4", {"cmd": "ls"}, tmp_path, "Exit code: 0\n"
+            ),
+            stdout=stdout,
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+    elif host == "claude":
+        observe_hooks.handle_claude_observe(
+            event_name="PostToolUse",
+            stdin_bytes=canonical_encode(
+                {
+                    "session_id": "claude-915",
+                    "cwd": str(tmp_path),
+                    "hook_event_name": "PostToolUse",
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "ls"},
+                    "tool_response": {"stdout": "", "stderr": "", "interrupted": False},
+                    "tool_use_id": "toolu_01LS",
+                }
+            ),
+            stdout=stdout,
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+            observation_profile=CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
+        )
+    else:
+        observe_hooks.handle_cursor_observe(
+            event_name="postToolUse",
+            stdin_bytes=canonical_encode(
+                {
+                    "conversation_id": "cursor-915",
+                    "hook_event_name": "postToolUse",
+                    "cursor_version": "3.17.8",
+                    "workspace_roots": [str(tmp_path.resolve())],
+                    "tool_name": "Read",
+                    "tool_use_id": "t9",
+                    "tool_output": "{}",
+                }
+            ),
+            stdout=stdout,
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+            observation_profile=CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
+        )
+    return stdout.getvalue()
+
+
+_HOST_SESSIONS = {
+    "codex": _CODEX_SESSION,
+    "claude": "claude:claude-915",
+    "cursor": "cursor:cursor-915",
+}
+
+
+@pytest.mark.parametrize("host", sorted(_HOST_SESSIONS))
+def test_observation_only_frontier_motion_is_no_hook_notice_on_any_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host: str
+) -> None:
+    monkeypatch.delenv("CURSOR_PROJECT_DIR", raising=False)
+    store, commitment = _consented(tmp_path)
+    _pending_observation_motion(store, commitment, _HOST_SESSIONS[host])
+
+    emitted = _post_tool_use(host, tmp_path)
+
+    assert json.loads(emitted) == {}
+    assert b"frontier moved" not in emitted
+    assert b"run status" not in emitted
+
+
+@pytest.mark.parametrize("host", sorted(_HOST_SESSIONS))
+def test_pending_advice_is_still_delivered_on_the_next_post_tool_use(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host: str
+) -> None:
+    """Dropping the notice delays nothing else: pending advice keeps its channel and commit."""
+
+    monkeypatch.delenv("CURSOR_PROJECT_DIR", raising=False)
+    store, commitment = _consented(tmp_path)
+    _pending_observation_motion(store, commitment, _HOST_SESSIONS[host])
+    advice = AdviceDelivery(
+        snapshot=cast(AdviceSnapshot, object()),
+        item=None,
+        delivery_identity="deliver-915",
+        text="Yoetz: Unresolved failed command observed. Next: resolve_failed_command.",
+    )
+    commits: list[str] = []
+
+    def fake_peek(self: LocalObservationStore, workspace: str, **_kwargs: object) -> AdviceDelivery:
+        del self, workspace
+        return advice
+
+    def fake_commit(
+        self: LocalObservationStore, workspace: str, identity: str, **_kwargs: object
+    ) -> None:
+        del self, workspace
+        commits.append(identity)
+
+    monkeypatch.setattr(LocalObservationStore, "peek_advice_for_delivery", fake_peek)
+    monkeypatch.setattr(LocalObservationStore, "commit_advice_delivery", fake_commit)
+
+    emitted = cast(Mapping[str, object], json.loads(_post_tool_use(host, tmp_path)))
+
+    context = (
+        emitted["additional_context"]
+        if host == "cursor"
+        else cast(Mapping[str, object], emitted["hookSpecificOutput"])["additionalContext"]
+    )
+    assert context == advice.text
+    assert commits == ["deliver-915"]
+
+
+# An instruction to call the MCP ``status`` operation; the host-shell ``yoetz observe status`` and
+# provider status commands are different things and stay allowed.
+_STATUS_INSTRUCTION = re.compile(r"\b(?:run|call|read|re-read|check)\s+`?status\b", re.IGNORECASE)
+
+
+def test_no_per_call_hook_text_tells_the_agent_to_run_status_between_tool_calls() -> None:
+    workflow = (_REPOSITORY / "guidance" / "workflow.md").read_text(encoding="utf-8")
+    status_row = next(line for line in workflow.splitlines() if line.startswith("| `status` |"))
+    # The guidance this pins: status runs at recovery points and before completion claims only.
+    assert "Not between routine tool calls." in status_row
+
+    assert not hasattr(observe_hooks, "_frontier_motion_context")
+    texts = [
+        observation_advice._hook_next_sentence(token)  # pyright: ignore[reportPrivateUsage]
+        for token in sorted(observation_advice._VALID_ADVICE_NEXT_ACTIONS)  # pyright: ignore[reportPrivateUsage]
+    ]
+    assert texts
+    for text in texts:
+        assert _STATUS_INSTRUCTION.search(text) is None, text
 
 
 def test_observe_status_reports_pass_timing_in_json_and_text(
