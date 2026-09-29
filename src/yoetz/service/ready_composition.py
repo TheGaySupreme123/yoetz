@@ -108,6 +108,7 @@ from yoetz.application.observation_advice_semantic import (
     ObservationAdviceSemanticOutcome,
     ObservationAdviceSemanticScheduler,
     ObservationAdviceSemanticSupervisor,
+    reconcile_cancelled_advice_request,
 )
 from yoetz.application.observation_control import build_observation_support_handlers
 from yoetz.application.observation_coordinator import ObservationCoordinator
@@ -5295,14 +5296,18 @@ async def provide_service_ready_context(
     # after setup, sign-in, or disconnect replaces it, so a repaired path starts clean.
     semantic_attention = SemanticAttentionTracker((candidate_binding, fallback_candidate_binding))
 
-    async def observation_composition_fact() -> ObservationCompositionFact | None:
-        # Standing provider advice must rest on current machine facts, not this
-        # READY-time snapshot: credential presence changes at runtime and the
-        # connected registry only fills lazily on repository-scoped dispatch, so
-        # the frozen values would advise connect_provider against an installation
-        # that just dispatched successfully (#265). Structural usability claims
-        # no repository authority; an unreadable fact (for example a vault
-        # locking race) yields no fact rather than a false not-ready claim.
+    async def semantic_review_facts() -> tuple[bool, bool] | None:
+        """Current ``(review intended, structurally usable)`` machine facts, or ``None``.
+
+        Standing provider advice and background advice admission (#923) both rest on these,
+        read now rather than from the READY-time snapshot.
+        """
+
+        # Credential presence changes at runtime and the connected registry only fills lazily
+        # on repository-scoped dispatch, so frozen values would advise connect_provider against
+        # an installation that just dispatched successfully (#265). Structural usability claims
+        # no repository authority; an unreadable fact (for example a vault locking race) yields
+        # no fact rather than a false not-ready claim.
         try:
             if privacy_application is None:
                 return None
@@ -5321,9 +5326,6 @@ async def provide_service_ready_context(
                     for channel in effective.policy.channel_policies
                 )
             )
-            connected_now = cast(
-                tuple[str, ...], tuple(getattr(gateway, "connected_provider_ids", lambda: ())())
-            )
             # provider_factory_ids is provider-id grain while factories are
             # keyed by full binding; the id test is exact today because the
             # factory set is built from this same config.provider through the
@@ -5336,6 +5338,19 @@ async def provide_service_ready_context(
             )
         except Exception:
             return None
+        return review_intended, structurally_usable
+
+    async def observation_composition_fact() -> ObservationCompositionFact | None:
+        facts = await semantic_review_facts()
+        if facts is None:
+            return None
+        review_intended, structurally_usable = facts
+        try:
+            connected_now = cast(
+                tuple[str, ...], tuple(getattr(gateway, "connected_provider_ids", lambda: ())())
+            )
+        except Exception:
+            return None
         attention = semantic_attention.current(candidate_binding, fallback_candidate_binding)
         return ObservationCompositionFact(
             semantic_configured=review_intended,
@@ -5345,6 +5360,17 @@ async def provide_service_ready_context(
             semantic_attention=None if attention is None else attention[0],
             semantic_attention_provider=None if attention is None else attention[1],
         )
+
+    async def advice_semantic_provider_ready() -> bool:
+        """Background advice may reach a provider only when one is usable now (#923).
+
+        The same facts as standing provider advice: review wanted, an endpoint bound, the
+        machine policy admitting LLM-inference egress, and the configured credential present.
+        An unreadable fact admits nothing.
+        """
+
+        facts = await semantic_review_facts()
+        return facts is not None and facts[0] and facts[1]
 
     capabilities = {
         RuntimeCapability.STRUCTURAL_READ,
@@ -5530,23 +5556,15 @@ async def provide_service_ready_context(
     ) -> ObservationAdviceSemanticOutcome | None:
         """Close the egress audit for an advisory attempt cancelled by a foreground rebind.
 
-        ``None`` means the cancelled dispatch never consumed a disclosure authorization, so the
-        plain ``cancelled`` row is the whole truth. Otherwise the consumed attempt is terminally
-        unknown: the row records that provenance and the provider is never re-entered.
+        ``None`` means no provider call can have started, so the plain ``cancelled`` row is the
+        whole truth. Otherwise the call's usage is unknown (#923): the row names the provider,
+        plus the consumed attempt's terminal provenance when the bounded lookup finds it, and the
+        provider is never re-entered.
         """
 
-        identity = advice_semantic_inflight.pop(attempt.attempt_id, None)
-        if identity is None or type(privacy) is not PrivacyCoordinator:
-            return None
-        request_id, provider_id = identity
-        recovered = await privacy.recover_started_request(request_id)
-        if recovered is None:
-            return None
-        return ObservationAdviceSemanticOutcome(
-            status="cancelled",
-            failure_reason="cancelled",
-            attempt_receipt=recovered.receipt_id or recovered.privacy_proposal_id,
-            provider_identity=provider_id,
+        return await reconcile_cancelled_advice_request(
+            advice_semantic_inflight.pop(attempt.attempt_id, None),
+            privacy.recover_started_request if type(privacy) is PrivacyCoordinator else None,
         )
 
     async def _dispatch_observation_advice_semantic(
@@ -5561,6 +5579,12 @@ async def provide_service_ready_context(
         provider answer supports.
         """
 
+        if not await advice_semantic_provider_ready():
+            # A row queued while a provider was usable (or by an older service that scheduled
+            # without one) drains here with no provider work and no rate-limit charge (#923).
+            return ObservationAdviceSemanticOutcome(
+                status="unavailable", failure_reason="provider_unavailable"
+            )
         route = await catalog.resolve_route(attempt.yoetz_session_id)
         if (
             route is None
@@ -5655,6 +5679,9 @@ async def provide_service_ready_context(
     advice_semantic_supervisor = ObservationAdviceSemanticSupervisor(
         service_generation=service_generation
     )
+    # The owner's switches decide whether background advice exists at all; provider readiness is
+    # re-read per build and per dispatch (#923). A credential or channel change takes effect on
+    # the next observation; a binding change recomposes the service, never the host session.
     advice_semantic_enabled = (
         semantic_configured
         and config.observation.enabled
@@ -5677,6 +5704,7 @@ async def provide_service_ready_context(
         min_interval_seconds=config.observation.semantic_advice_min_interval_seconds,
         route_ready=_advice_semantic_route_ready,
         revisit=advice_semantic_supervisor.schedule_revisit,
+        provider_ready=advice_semantic_provider_ready,
     )
 
     verification_supervisor = ObservationVerificationSupervisor(

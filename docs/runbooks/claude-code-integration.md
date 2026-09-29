@@ -1393,6 +1393,14 @@ per-session interval on macOS, Linux and Windows through WSL 2. See
 resume and interval settings. The setting gates recovered pending work as well as new scheduling;
 explicit checks and deterministic advice retain their independent behavior.
 
+Background review is also admitted only while a provider is usable: an endpoint bound, the machine
+policy admitting `llm_inference`, and the configured credential present (issue #923). Without one
+the service writes no advice rows and reports `advice_semantic_unavailable`, not
+`advice_semantic_pending`; rows queued earlier close as `provider_unavailable` without provider
+work. A foreground-cancelled call that may have started names its provider on the `cancelled` row
+(usage unknown). This is service-side and identical on every host and supported OS; hook advice
+rendering is unchanged.
+
 ## Response and receipt timeout recovery
 
 The shared MCP bridge allows 50 seconds for `respond` and `receipt` by default, below the
