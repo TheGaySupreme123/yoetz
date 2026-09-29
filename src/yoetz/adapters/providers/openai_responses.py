@@ -146,7 +146,16 @@ SEMANTIC_REVIEW_INSTRUCTION: Final = (
     "or evidence attempt before state_unresolved_limitation; use that limitation response only "
     "when the packet records the attempt and its remaining limit, or a specific authority blocker. "
     "Do not offer accepting a limitation as an equivalent alternative to performing available "
-    "verification. Disclosure does not repair a defect or prove completion."
+    "verification. Disclosure does not repair a defect or prove completion. "
+    # Issue #905: the review is a dialogue that must converge. One challenge per round let a
+    # stale item hold the only slot while a real defect waited, and a reviewer blind to its own
+    # answered findings restated them under new ids. Kept as one self-contained paragraph.
+    "Return one challenge for each distinct material problem the readable material supports, up "
+    "to the challenge limit, never only the most important one and never two for one problem. "
+    "The packet records earlier findings and the main agent's responses to them. Do not raise "
+    "again a finding the main agent has answered, or request an action the packet shows was "
+    "already done, unless material newer than that response shows the problem remains; then cite "
+    "that newer material and the earlier finding's fnd_ id from citable_refs."
 )
 _SYSTEM_INSTRUCTION: Final = SEMANTIC_REVIEW_INSTRUCTION
 

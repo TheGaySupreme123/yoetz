@@ -15,7 +15,10 @@ from yoetz.adapters.providers.openai_chat_completions import (
     normalize_response,
     render_case,
 )
-from yoetz.adapters.providers.openai_responses import owner_declared_data_use_profile
+from yoetz.adapters.providers.openai_responses import (
+    SEMANTIC_REVIEW_INSTRUCTION,
+    owner_declared_data_use_profile,
+)
 from yoetz.domain.findings import SemanticFailureClass
 from yoetz.domain.privacy import ApprovedOutboundCase, DataCategory, ProviderBinding
 from yoetz.ports.semantic import (
@@ -171,6 +174,30 @@ def test_response_format_follows_the_recorded_endpoint_capability() -> None:
     instruction = cast(str, system["content"])
     assert "one JSON object and nothing else" in instruction
     assert "reviewer_challenges" in instruction
+
+
+def test_every_protocol_cell_sends_the_one_shared_review_instruction() -> None:
+    """A private Chat Completions copy had drifted behind the shared rules (issue #905).
+
+    Both structured-output cells lead with the exact instruction the Responses and Codex cells
+    send, so the convergence rules (every distinct problem, no re-raise of an answered finding
+    without newer cited material) reach every provider; only the shape suffix is local.
+    """
+
+    for enforcement in ("provider_enforced", "prompt_only"):
+        body = cast(
+            dict[str, JsonValue],
+            strict_json_parse(render_case(_case(), _profile(enforcement)).body),
+        )
+        system = cast(dict[str, JsonValue], cast(list[JsonValue], body["messages"])[0])
+        instruction = cast(str, system["content"])
+        assert instruction.startswith(SEMANTIC_REVIEW_INSTRUCTION + " ")
+    assert "one challenge for each distinct material problem" in SEMANTIC_REVIEW_INSTRUCTION
+    assert "never only the most important one" in SEMANTIC_REVIEW_INSTRUCTION
+    assert "Do not raise again a finding the main agent has answered" in (
+        SEMANTIC_REVIEW_INSTRUCTION
+    )
+    assert "earlier finding's fnd_ id from citable_refs" in SEMANTIC_REVIEW_INSTRUCTION
 
 
 def test_grok_profile_renders_the_exact_xai_chat_completions_shape() -> None:

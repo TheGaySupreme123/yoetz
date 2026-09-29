@@ -127,6 +127,7 @@ from yoetz.version import ENGINE_VERSION
 __all__ = [
     "SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM",
     "SEMANTIC_REJECTED_REF_OUTSIDE_CASE",
+    "SEMANTIC_REJECTED_SUBJECTS_OVER_LIMIT",
     "Application",
     "CheckScope",
     "FinalSemanticEvaluation",
@@ -178,6 +179,7 @@ _WORK_KINDS = frozenset(
 
 SEMANTIC_REJECTED_REF_OUTSIDE_CASE: Final = "ref_outside_case"
 SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM: Final = "hidden_source_claim"
+SEMANTIC_REJECTED_SUBJECTS_OVER_LIMIT: Final = "subject_refs_over_limit"
 
 
 class SemanticJudgmentRejected(ValueError):
@@ -237,7 +239,11 @@ class SemanticJudgmentReview:
 
 
 _SEMANTIC_REJECTION_REASONS: Final = frozenset(
-    {SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM, SEMANTIC_REJECTED_REF_OUTSIDE_CASE}
+    {
+        SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM,
+        SEMANTIC_REJECTED_REF_OUTSIDE_CASE,
+        SEMANTIC_REJECTED_SUBJECTS_OVER_LIMIT,
+    }
 )
 _EMPTY_SEMANTIC_REVIEW: Final = SemanticJudgmentReview((), 0, ())
 
@@ -1746,16 +1752,26 @@ def _resolve_challenge_refs(
     Every per-ref test below is byte-identical to the fence this replaced; only the disposition of
     a failure changed, from raising (which discarded the entire judgment, and with it the check)
     to returning ``None`` so the caller can drop this one challenge and count it.
+
+    A cited ``fnd_`` resolves to that finding's subjects. It is either one of this check's local
+    findings or a recorded finding the frozen case carries: ``citable_refs`` offers every recorded
+    finding id, and the prompt asks the reviewer to name the earlier finding a re-raise concerns,
+    so a challenge that does exactly that must not be dropped as outside the case (issue #905).
     """
 
     findings = {str(item.finding_id): item for item in deterministic}
     resolved: set[str] = set()
     for ref in challenge.cited_refs:
         if ref.startswith("fnd_"):
-            finding = findings.get(ref)
-            if finding is None:
+            local = findings.get(ref)
+            subjects = (
+                tuple(map(str, local.subject_refs))
+                if local is not None
+                else _recorded_finding_subjects(case, ref)
+            )
+            if subjects is None:
                 return None
-            resolved.update(map(str, finding.subject_refs))
+            resolved.update(subjects)
         elif ref not in case.allowed_ids:
             return None
         elif ref.startswith(("evt_", "obl_", "clm_")):
@@ -1783,6 +1799,29 @@ def _resolve_challenge_refs(
     if not resolved:
         return None
     return tuple(sorted(resolved, key=str.encode))
+
+
+# A finding names at most 64 subjects. Several cited findings can union past that; such a
+# challenge is dropped and counted rather than failing the whole check on the finding bound.
+_MAX_CHALLENGE_SUBJECT_REFS: Final = 64
+
+
+def _recorded_finding_subjects(case: DeterministicCase, ref: str) -> tuple[str, ...] | None:
+    """The subjects of a readable recorded finding inside the frozen case, else ``None``.
+
+    The finding id and each of its subjects must be inside the frozen fence, exactly as a
+    directly cited subject would have to be; an unreadable (redacted) finding proves nothing.
+    """
+
+    if ref not in case.allowed_ids:
+        return None
+    record = case.projection.findings.get(finding_id(ref))
+    if record is None or record.payload is None:
+        return None
+    subjects = tuple(str(item) for item in record.payload.subject_refs)
+    if any(item not in case.allowed_ids for item in subjects):
+        return None
+    return subjects
 
 
 def _claims_unchanged_over_hidden_source(
@@ -1876,6 +1915,11 @@ def validate_semantic_judgment(
         if refs is None:
             rejections[SEMANTIC_REJECTED_REF_OUTSIDE_CASE] = (
                 rejections.get(SEMANTIC_REJECTED_REF_OUTSIDE_CASE, 0) + 1
+            )
+            continue
+        if len(refs) > _MAX_CHALLENGE_SUBJECT_REFS:
+            rejections[SEMANTIC_REJECTED_SUBJECTS_OVER_LIMIT] = (
+                rejections.get(SEMANTIC_REJECTED_SUBJECTS_OVER_LIMIT, 0) + 1
             )
             continue
         if _claims_unchanged_over_hidden_source(case, challenge):

@@ -806,3 +806,28 @@ This changes relevance, not proof: every capture still requires authentication, 
 obeys the selected privacy profile and byte/count limits, and a response never clears a finding.
 An insufficient packet or a deterministic-only recheck still cannot resolve a semantic defect.
 The same selection applies to all hosts and supported OSes.
+
+
+### Converging review dialogue (2026-09-30, issue #905)
+
+The reviewer is a verifying partner the main agent converses with; a recheck must be able to
+change finding state, and the findings list must behave like a todo list that ends. Rechecks stay
+uncapped: they surfaced most real defects.
+
+**Every distinct problem, no answered re-raise.** The shared instruction asks for one challenge per
+distinct material problem up to `MAX_REVIEW_CHALLENGES` (unchanged at 3), never only the most
+important one. It forbids raising again a finding the main agent answered, or requesting an action
+the packet shows was done, unless material newer than the response shows the problem remains; the
+re-raise then cites that material and the earlier finding's `fnd_` id. Every provider cell sends
+the same instruction text; the Chat Completions cell only appends its output-shape suffix.
+
+**Citable prior findings.** A cited `fnd_` resolves to that finding's subject refs when it is one
+of this check's local findings or a readable recorded finding inside the frozen fence. Dropping a
+challenge that follows the prompt was a fence mismatch, not a reviewer error; the fence is not
+loosened otherwise, and an unreadable or unknown finding id still drops its challenge. A challenge
+whose resolved subjects exceed one finding's 64-subject bound is dropped and counted
+(`subject_refs_over_limit`) instead of failing the check.
+
+**Advisory rejections.** `weak_or_stale_response` is minted only for local findings, matching
+`questionable_finding_rejection`. Rejecting an AI-powered finding without evidence no longer adds a
+local receipt-blocking finding; the rejection is judged by the next review.

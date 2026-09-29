@@ -953,7 +953,9 @@ Work-integrity finding kinds (`FindingKind`):
 `failed_work_omitted`, `claim_without_admissible_evidence`, `result_without_action`,
 `action_without_result`,
 `stale_evidence_for_changed_state`, `contradictory_claims_unresolved`,
-`ledger_stale_or_incomplete`, `weak_or_stale_response` (flags a hollow or stale rejection/waiver).
+`ledger_stale_or_incomplete`, `weak_or_stale_response` (flags a hollow or stale rejection/waiver
+of a local finding; an AI-powered finding is advisory, so rejecting one never mints it — the next
+review judges that rejection, issue #905).
 Research/evidence-assessment kinds: `evidence_does_not_support_claim`, `diff_does_not_match_account`,
 `material_limitation_omitted`, `questionable_finding_rejection` (flags a current hollow
 rejection/waiver of a local finding).
@@ -1123,7 +1125,11 @@ Four further codes describe a review that did run but could not deliver everythi
 
 - `semantic_review_context_withheld` — the review ran without categories its own profile selected;
 - `semantic_challenges_rejected` — the reviewer returned challenges and post-validation dropped at
-  least one (a citation outside the frozen case, or an unchanged-claim over a withheld source);
+  least one (a citation outside the frozen case, an unchanged-claim over a withheld source, or
+  citations whose resolved subjects exceed one finding's 64-subject bound). A cited `fnd_` from
+  `citable_refs` resolves to that finding's subjects whether it is one of this check's local
+  findings or a readable recorded finding inside the frozen fence, so a re-raise that names the
+  earlier finding it concerns is not dropped (issue #905);
 - `semantic_case_content_over_item_limit` — recorded text the publish-side prose bound accepted
   (`MAX_TEXT_BYTES`, 8192) exceeded what one case item carries (`MAX_REVIEW_TEXT_BYTES`, 4096), so
   the case shortened it or replaced the payload with a `yoetz.bounded-content-omission/1` marker.

@@ -12,7 +12,7 @@ from yoetz.domain.events import (
     ResponseDisposition,
     ResultOutcome,
 )
-from yoetz.domain.findings import FindingKind
+from yoetz.domain.findings import FindingKind, FindingOrigin
 from yoetz.domain.values import (
     EvidenceId,
     ObligationId,
@@ -569,6 +569,10 @@ def _response_findings(case: DeterministicCase) -> list[DeterministicAssessment]
             not in {ResponseDisposition.REJECTED, ResponseDisposition.WAIVED}
             or finding_record is None
             or finding_record.payload is None
+            # An AI-powered finding is advisory: rejecting a reviewer false positive without
+            # evidence must not mint a new local, receipt-blocking finding. The later review
+            # judges that rejection; research-evidence applies the same filter (issue #905).
+            or finding_record.payload.origin is not FindingOrigin.DETERMINISTIC
         ):
             continue
         finding = finding_record.payload

@@ -28,6 +28,7 @@ from yoetz.adapters.providers.openai_responses import (
     JUDGMENT_JSON_SCHEMA,
     OPENAI_MAX_OUTPUT_TOKENS,
     OPENAI_MAX_RESPONSE_BODY_BYTES,
+    SEMANTIC_REVIEW_INSTRUCTION,
     OneAttemptCredentialTransport,
     normalize_judgment,
 )
@@ -77,20 +78,11 @@ _HOSTNAME_PATTERN: Final = re.compile(
 # an endpoint capability fact recorded per profile, never a guess made at dispatch time.
 type StructuredOutputEnforcement = Literal["provider_enforced", "prompt_only"]
 
+# The review instruction is the one every provider shares; this cell only appends the output
+# shape, because a prompt-only host never sees the schema. A private copy of the shared text had
+# drifted behind it and silently withheld later reviewer rules from this protocol (issue #905).
 _SYSTEM_INSTRUCTION: Final = (
-    "You are a bounded reviewer helping the main agent complete the user's stated goal. Review "
-    "only the supplied packet. Distinguish agent claims, deterministic observations, and "
-    "unavailable content. Never say no code changed merely because no source excerpt was "
-    "disclosed. Compare the completion claim with the goal, obligations, decisions, ordered "
-    "timeline, deterministic finding bases, state/change observations, evidence freshness, "
-    "failures, limitations, and selected excerpts. If a material discrepancy exists, address the "
-    "main agent directly, explain the discrepancy and strongest plausible alternative, cite only "
-    "supplied refs, and request the smallest resolving action or evidence. Every value in "
-    "cited_refs must come from the packet's citable_refs array and nothing else: an item_id from "
-    "items[] is not citable, and a challenge citing anything outside citable_refs is discarded "
-    "unread. Do not invent repository facts, fetch more context, overrule deterministic results, "
-    "waive findings, or claim stronger coverage than the packet. "
-    "Reply with one JSON object and nothing else: no "
+    SEMANTIC_REVIEW_INSTRUCTION + " Reply with one JSON object and nothing else: no "
     'prose, no code fence, no explanation outside it. Its exact shape is {"conclusion": one of '
     '"no_material_discrepancy" | "challenges_returned" | "insufficient_packet", '
     '"reviewer_challenges": array of objects with "finding_kind", "summary", "cited_refs", '
