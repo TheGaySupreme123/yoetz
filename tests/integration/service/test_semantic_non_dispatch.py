@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -113,6 +113,7 @@ from yoetz.protocol.canonical import canonical_digest, canonical_encode
 from yoetz.protocol.coverage import EvidenceImmutability
 from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.models import DataCategory, SemanticReason, SemanticStatus
+from yoetz.service.semantic_ceiling import ChannelAdmission
 
 _TASK = "tsk_53000000-0000-4000-8000-000000000001"
 _SESSION = "ses_53000000-0000-4000-8000-000000000001"
@@ -613,6 +614,8 @@ async def test_ready_semantic_content_resolution_and_fence_use_observation_works
     assert built[0]["semantic_diff_excerpts_selected"] == 0
     assert built[0]["semantic_excerpt_bytes_selected"] >= 0
     # The approved Assisted limits ride beside the selection counts (issue #907 Phase 1b).
+    assert built[0]["semantic_excerpt_count_approved"] == 16
+    assert built[0]["semantic_excerpt_byte_approved"] == 131_072
     assert built[0]["semantic_excerpt_count_limit"] == 16
     assert built[0]["semantic_excerpt_byte_limit"] == 131_072
 
@@ -1636,6 +1639,22 @@ def _with_channel_ceiling(monkeypatch: pytest.MonkeyPatch, limit: int) -> None:
         return limit
 
     monkeypatch.setattr(ready_composition_module, "channel_prepared_limit", fixed_limit)
+    _with_full_admission(monkeypatch)
+
+
+def _with_full_admission(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stand in for an enabled channel that releases every category it is offered."""
+
+    def every_category(
+        policy: object, bindings: Iterable[ProviderBinding | None]
+    ) -> ChannelAdmission:
+        del policy, bindings
+        return ChannelAdmission(
+            frozenset(DataCategory),
+            frozenset(DataClass) - {DataClass.SECRET_OR_CRYPTOGRAPHIC},
+        )
+
+    monkeypatch.setattr(ready_composition_module, "channel_admission", every_category)
 
 
 def _prepared_size(candidate: CandidateContext) -> int:
@@ -1706,7 +1725,53 @@ async def test_a_case_over_the_channel_ceiling_is_planned_below_it_and_disclosed
     assert len(built) == 2
     assert all(1 <= cast(int, row["semantic_excerpt_ceiling_rounds"]) <= 4 for row in built)
     assert all(16 < cast(int, row["semantic_excerpts_selected"]) < 64 for row in built)
+    # Consent approved 64 excerpts and 128 KiB; the planner, not the owner, set the narrower
+    # effective byte limit, and the diagnostics keep the two apart (R944-03).
+    assert all(row["semantic_excerpt_count_approved"] == 64 for row in built)
+    assert all(row["semantic_excerpt_byte_approved"] == 131_072 for row in built)
+    assert all(cast(int, row["semantic_excerpt_byte_limit"]) < 131_072 for row in built)
     assert digests[0] == digests[1]
+
+
+@pytest.mark.anyio
+async def test_the_planner_sizes_only_what_the_channel_releases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R944-02: excerpts the channel withholds cannot push the case over its ceiling.
+
+    The same quote-heavy case that is planned down above is left whole when the channel releases
+    only structural metadata: local minimization removes the excerpt bytes before egress, so they
+    must not be traded away to fit a ceiling they never reach.
+    """
+
+    monkeypatch.setattr(diagnostics_module, "log_dir", lambda: tmp_path)
+    privacy = _Privacy(profile=ReviewContextProfile.EXPANDED)
+    privacy.terminal_provider_result = True
+    _with_channel_ceiling(monkeypatch, 262_144)
+    seen: list[tuple[ProviderBinding | None, ...]] = []
+
+    def structural_only(
+        policy: object, bindings: Iterable[ProviderBinding | None]
+    ) -> ChannelAdmission:
+        del policy
+        seen.append(tuple(bindings))
+        return ChannelAdmission(
+            frozenset({DataCategory.BOUNDED_STRUCTURAL_METADATA}),
+            frozenset({DataClass.PUBLIC_STRUCTURAL}),
+        )
+
+    monkeypatch.setattr(ready_composition_module, "channel_admission", structural_only)
+
+    await _evaluator(privacy, lambda: _PROVIDER, _route())(
+        _excerpt_heavy_frozen(64, '"' * 8_000), ()
+    )
+
+    assert privacy.calls == 1
+    # The admission is taken for the destinations the case can be dispatched to.
+    assert seen == [(_PROVIDER, None)]
+    [built] = [row for row in _records(tmp_path) if row["operation"] == "semantic_case_built"]
+    assert built["semantic_excerpt_ceiling_rounds"] == 0
+    assert built["semantic_excerpt_byte_limit"] == built["semantic_excerpt_byte_approved"]
 
 
 @pytest.mark.anyio
@@ -1731,6 +1796,8 @@ async def test_an_unset_custom_ceiling_still_plans_below_the_disclosure_bound(
         if channel.channel is EgressChannel.LLM_INFERENCE
     )
     store._effective = replace(effective, policy=custom)  # pyright: ignore[reportPrivateUsage]
+    # The fixture's channel is off; an unset ceiling is about an enabled one.
+    _with_full_admission(monkeypatch)
 
     result = await _evaluator(privacy, lambda: _PROVIDER, _route())(
         _excerpt_heavy_frozen(64, '"' * 8_000), ()

@@ -341,6 +341,7 @@ from yoetz.service.import_publication_authority import ImportPublicationAuthorit
 from yoetz.service.project_coordination_authority import ProjectCoordinationGrantAuthority
 from yoetz.service.semantic_attention import SemanticAttentionTracker
 from yoetz.service.semantic_ceiling import (
+    channel_admission,
     channel_prepared_limit,
     plan_under_channel_ceiling,
     with_ceiling_planning_gap,
@@ -4291,6 +4292,9 @@ def _privacy_gated_semantic_evaluator(
                     lambda selection: build_case(
                         selection, with_ceiling_planning_gap(captured_content_gaps)
                     ),
+                    # Size what egress will release to either destination, not the items local
+                    # minimization withholds from the channel.
+                    channel_admission(policy, (provider, fallback_binding)),
                 )
             except LineageSemanticCapacityExceeded:
                 # Same pre-dispatch contract as an envelope that cannot be reduced: local
@@ -4331,8 +4335,11 @@ def _privacy_gated_semantic_evaluator(
                         for item in semantic_case.items
                         if item.section == "excerpt"
                     ),
-                    # The approved limits beside what was selected, so a reader can tell which
-                    # one bound: the excerpt count or the byte budget (issue #907 Phase 1b).
+                    # The owner-approved limits and the effective limits the case was built with,
+                    # so a reader can tell whether consent or ceiling planning bound the excerpts
+                    # (issue #907 Phase 1b). Neither is proof of delivery.
+                    "semantic_excerpt_count_approved": review_selection.max_excerpts,
+                    "semantic_excerpt_byte_approved": review_selection.max_total_excerpt_bytes,
                     "semantic_excerpt_count_limit": planned_selection.max_excerpts,
                     "semantic_excerpt_byte_limit": planned_selection.max_total_excerpt_bytes,
                     "semantic_excerpt_ceiling_rounds": ceiling_rounds,

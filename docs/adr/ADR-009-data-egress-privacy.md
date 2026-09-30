@@ -676,6 +676,8 @@ into the unreleased privacy-policy wire 1.2.0 (the #908 version), so one re-appr
   above the 262,144-byte disclosure bound, even when a ceiling is unset). If
   its prepared packet would exceed it, the case is rebuilt with a smaller excerpt byte budget: a
   narrowing, so it needs no consent. The dropped excerpts are disclosed as `content_unselected`.
+  The planner sizes what the channel releases after local minimization, so items in a category or
+  data class the destination withholds never cost an eligible excerpt its place.
   There are at most four rebuilds, the result is deterministic so a recovered review keeps its
   case digest, and egress still decides every dispatch.
 - `yoetz privacy show` on a terminal and `yoetz --privacy` show the current limits beside those the

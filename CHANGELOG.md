@@ -32,8 +32,10 @@ reverse-chronological released versions.
   trimmed. A case that would exceed the per-case ceiling is planned with fewer excerpts, and says
   so, instead of being refused. Resuming a stored review rechecks the current limits. Choosing
   Assisted, or proposing the earlier limits, takes you back to 16 without a new approval.
-  Semantic-case diagnostics now record the approved excerpt count and byte limits beside what was
-  selected (#907).
+  Content your channel does not allow out no longer costs allowed excerpts their room, and a case
+  too large to build is cut to fit with the dropped excerpts named. Semantic-case diagnostics now
+  record the approved excerpt limits and the effective limits the case was built with beside what
+  was selected (#907).
 
 - Codex, Claude Code and Cursor session-start context can show a fresh repository-grant snapshot
   and name the owner's missing admission command. The notice leaves route and host approval

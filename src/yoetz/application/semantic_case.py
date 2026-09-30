@@ -925,6 +925,42 @@ def _omit(
     )
 
 
+def _fit_excerpts_within_case_bound(
+    items: Sequence[SemanticCaseItem],
+    targeted: list[TargetedExcerptRef],
+    omissions: list[ReviewOmission],
+    capture_gaps: set[str],
+    *,
+    fixed_item_ids: set[str],
+) -> None:
+    """Drop the lowest-ranked excerpts until the case fits ``MAX_SEMANTIC_CASE_BYTES``.
+
+    The excerpt budget and the case's aggregate item bound are independent. Since the Expanded
+    excerpt count rose to the protocol maximum (issue #907 Phase 1b), a full excerpt budget beside
+    rich finding prose can cross the aggregate bound, and ``SemanticCase`` would refuse the whole
+    case before the channel-ceiling planner could narrow it. Only a case that would otherwise be
+    refused is changed, so every constructible case keeps its exact bytes and digest. Each dropped
+    excerpt is disclosed as ``not_selected`` with ``content_unselected``, never silently.
+    """
+
+    by_id = {item.item_id: item for item in items}
+    case_bytes = sum(by_id[item_id].content_bytes for item_id in fixed_item_ids if item_id in by_id)
+    case_bytes += sum(by_id[excerpt.excerpt_item_id].content_bytes for excerpt in targeted)
+    if case_bytes <= MAX_SEMANTIC_CASE_BYTES or not targeted:
+        return
+    dropped_refs: set[str] = set()
+    while targeted and case_bytes > MAX_SEMANTIC_CASE_BYTES:
+        excerpt = targeted.pop()
+        item = by_id[excerpt.excerpt_item_id]
+        case_bytes -= item.content_bytes
+        dropped_refs.add(item.source_ref)
+        omissions.append(_omit(item.source_ref, item.category, excerpt.source_kind, "not_selected"))
+    capture_gaps.add("content_unselected")
+    if any(by_id[excerpt.excerpt_item_id].source_ref in dropped_refs for excerpt in targeted):
+        # Later parts of a split excerpt were cut while its earlier parts stay.
+        capture_gaps.add("truncated_payload")
+
+
 def _captured_content_groups(
     projection: object,
     allowed: frozenset[str],
@@ -2322,6 +2358,26 @@ def build_semantic_case(
     review_assessments = review_assessments[: selection.max_assessments]
     changes = changes[: selection.max_change_observations]
     targeted = targeted[: selection.max_excerpts]
+    _fit_excerpts_within_case_bound(
+        items,
+        targeted,
+        omissions,
+        capture_gap_set,
+        fixed_item_ids={
+            *task_statement_ids,
+            *goal_ids,
+            *obligation_ids,
+            *claim_ids,
+            *decision_ids,
+            *timeline_ids,
+            *(
+                item_id
+                for assessment in review_assessments
+                if assessment.summary_item_id is not None and assessment.detail_item_id is not None
+                for item_id in (assessment.summary_item_id, assessment.detail_item_id)
+            ),
+        },
+    )
 
     kind_order = {
         kind: ordinal

@@ -37,6 +37,7 @@ __all__ = [
     "ReviewSelectionRuleset",
     "SecretScanRuleset",
     "TrustedProvenanceResolver",
+    "clean_item_data_class",
     "estimated_token_count",
     "scan_exact_bytes",
 ]
@@ -60,6 +61,22 @@ _SCANNER_PROFILE_DIGEST = "sha256:75d5e5545aec001901b1370f502120114b583662fd4732
 _STRUCTURAL_CATEGORIES = frozenset(
     {DataCategory.BOUNDED_STRUCTURAL_METADATA, DataCategory.DECLARED_FILE_TYPE}
 )
+
+
+def clean_item_data_class(category: DataCategory) -> DataClass:
+    """The data class an item of ``category`` receives when no forbidden data is found in it.
+
+    The review-case planner uses this to measure only what a channel will release, so it must
+    stay the classifier's own rule (issue #907 Phase 1b).
+    """
+
+    return (
+        DataClass.PUBLIC_STRUCTURAL
+        if category in _STRUCTURAL_CATEGORIES
+        else DataClass.ORDINARY_USER_CONTENT
+    )
+
+
 _FORBIDDEN_SOURCE_PREFIXES: tuple[tuple[str, ForbiddenDataKind], ...] = (
     ("credential:", ForbiddenDataKind.CREDENTIAL_FILE),
     ("environment:", ForbiddenDataKind.UNRELATED_ENVIRONMENT),
@@ -230,9 +247,7 @@ class LocalPrivacyEnforcer:
             data_class = (
                 DataClass.SECRET_OR_CRYPTOGRAPHIC
                 if source_findings
-                else DataClass.PUBLIC_STRUCTURAL
-                if item.category in _STRUCTURAL_CATEGORIES
-                else DataClass.ORDINARY_USER_CONTENT
+                else clean_item_data_class(item.category)
             )
             resolved_provenance: DisclosureProvenance | None = None
             if candidate.local_sink is LocalDisclosureSink.AGENT_CONTEXT and not source_findings:

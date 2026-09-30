@@ -7,28 +7,44 @@ smaller excerpt byte budget. That is a narrowing of the approved selection, so i
 The dropped excerpts are disclosed as ``content_unselected``, and the egress ceiling still decides
 every dispatch.
 
+The planner measures the payload the channel will release: items in a category or data class the
+channel withholds are removed by local privacy minimization before egress, so they must not cost
+eligible excerpts their room.
+
 The reduction is a pure function of the case inputs, so a recovered review rebuilds the same case
 and keeps its digest.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from dataclasses import replace
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass, replace
 from typing import Final
 
-from yoetz.adapters.privacy.local_enforcer import EGRESS_BYTES_PER_TOKEN_ESTIMATE
+from yoetz.adapters.privacy.local_enforcer import (
+    EGRESS_BYTES_PER_TOKEN_ESTIMATE,
+    clean_item_data_class,
+)
 from yoetz.application.semantic_case import (
     SemanticCaseTooLarge,
     semantic_case_to_prepared_payload,
 )
-from yoetz.domain.privacy import EgressChannel, PrivacyPolicy, ReviewSelectionPolicy
+from yoetz.domain.privacy import (
+    DataClass,
+    EgressChannel,
+    PrivacyPolicy,
+    ProviderBinding,
+    ReviewSelectionPolicy,
+)
 from yoetz.ports.privacy import MAX_MINIMIZED_DISCLOSURE_BYTES
-from yoetz.ports.semantic import SemanticCase
+from yoetz.ports.semantic import SemanticCase, SemanticCaseItem
+from yoetz.protocol.models import DataCategory
 
 __all__ = [
     "CEILING_PLANNING_GAP",
     "MAX_CEILING_PLANNING_ROUNDS",
+    "ChannelAdmission",
+    "channel_admission",
     "channel_prepared_limit",
     "plan_under_channel_ceiling",
     "with_ceiling_planning_gap",
@@ -68,15 +84,68 @@ def channel_prepared_limit(policy: PrivacyPolicy) -> int | None:
     return min([MAX_MINIMIZED_DISCLOSURE_BYTES, *limits])
 
 
+@dataclass(frozen=True, slots=True)
+class ChannelAdmission:
+    """The categories and data classes the review channel releases after local minimization."""
+
+    categories: frozenset[DataCategory]
+    data_classes: frozenset[DataClass]
+
+    def admits(self, item: SemanticCaseItem) -> bool:
+        return (
+            item.category in self.categories
+            and clean_item_data_class(item.category) in self.data_classes
+        )
+
+
+def channel_admission(
+    policy: PrivacyPolicy, bindings: Iterable[ProviderBinding | None]
+) -> ChannelAdmission | None:
+    """What egress would release to any of ``bindings``, or ``None`` without an LLM channel.
+
+    Egress approves an item only when its category and data class are both in the ceiling of the
+    transport it is sent over: the LLM channel for an external provider, the local-model ceiling
+    for a local one. With a primary and a fallback destination the union is taken, so the planner
+    never measures less than either dispatch could release. An item with forbidden data blocks the
+    whole packet at egress, so predicting its clean data class cannot under-measure a dispatch.
+    """
+
+    llm = next(
+        (
+            channel
+            for channel in policy.channel_policies
+            if channel.channel is EgressChannel.LLM_INFERENCE
+        ),
+        None,
+    )
+    if llm is None:
+        return None
+    categories: set[DataCategory] = set()
+    data_classes: set[DataClass] = set()
+    for binding in bindings:
+        if binding is None:
+            continue
+        if binding.transport == "local_af_unix":
+            if policy.local_model_enabled:
+                categories.update(policy.local_model_categories)
+                data_classes.update(policy.local_model_data_classes)
+        else:
+            categories.update(llm.allowed_categories)
+            data_classes.update(llm.allowed_data_classes)
+    data_classes.discard(DataClass.SECRET_OR_CRYPTOGRAPHIC)
+    return ChannelAdmission(frozenset(categories), frozenset(data_classes))
+
+
 def with_ceiling_planning_gap(gaps: Sequence[str]) -> tuple[str, ...]:
     """``gaps`` plus the disclosure a planned reduction adds, without duplicating it."""
 
     return tuple(sorted({*gaps, CEILING_PLANNING_GAP}, key=str.encode))
 
 
-def _prepared_size(case: SemanticCase) -> int | None:
+def _prepared_size(case: SemanticCase, admission: ChannelAdmission | None) -> int | None:
+    released = {item.item_id for item in case.items if admission is None or admission.admits(item)}
     try:
-        return len(semantic_case_to_prepared_payload(case, {item.item_id for item in case.items}))
+        return len(semantic_case_to_prepared_payload(case, released))
     except SemanticCaseTooLarge:
         return None
 
@@ -102,8 +171,12 @@ def plan_under_channel_ceiling(
     selection: ReviewSelectionPolicy,
     limit: int | None,
     rebuild: Callable[[ReviewSelectionPolicy], SemanticCase],
+    admission: ChannelAdmission | None = None,
 ) -> tuple[SemanticCase, ReviewSelectionPolicy, int]:
     """Return the case to review, the selection it was built with, and the rebuilds used.
+
+    Sizes are those of the payload ``admission`` releases (every item when ``None``), so bytes
+    local privacy minimization withholds never cost an eligible excerpt its place.
 
     ``rebuild`` builds the same case under a narrower selection and adds the planning gap. The
     first rebuild carries no excerpts, which measures the fixed part of the packet. Later rebuilds
@@ -114,14 +187,14 @@ def plan_under_channel_ceiling(
 
     if limit is None:
         return case, selection, 0
-    size = _prepared_size(case)
+    size = _prepared_size(case, admission)
     excerpt_bytes = _excerpt_bytes(case)
     if size is None or size <= limit or excerpt_bytes == 0:
         return case, selection, 0
     approved = selection
     rounds = 1
     base = rebuild(_with_excerpt_budget(approved, 0))
-    base_size = _prepared_size(base)
+    base_size = _prepared_size(base, admission)
     if base_size is None or base_size >= limit:
         # Even without excerpts the packet is over the ceiling: egress refuses it as before.
         return base, _with_excerpt_budget(approved, 0), rounds
@@ -132,7 +205,7 @@ def plan_under_channel_ceiling(
         budget = room * excerpt_bytes // (size - base_size)
         candidate_selection = _with_excerpt_budget(approved, budget)
         candidate = rebuild(candidate_selection)
-        candidate_size = _prepared_size(candidate)
+        candidate_size = _prepared_size(candidate, admission)
         if candidate_size is None:
             break
         if candidate_size <= limit:

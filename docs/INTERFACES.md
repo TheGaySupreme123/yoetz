@@ -6994,13 +6994,22 @@ plan. Names and contracts:
   `max_total_excerpt_bytes`. An unreadable payload is refused the same way.
 - The case item bound `_MAX_CASE_ITEMS` (`ports/semantic.py`) is `256 + MAX_REVIEW_EXCERPTS - 16`
   (304), and outbound-case 1.2.0 `content_items` allows 305.
-- The `semantic_case_built` counters add `semantic_excerpt_count_limit` and
-  `semantic_excerpt_byte_limit` (the limits the case was built with) and
-  `semantic_excerpt_ceiling_rounds`.
+- The `semantic_case_built` counters add `semantic_excerpt_count_approved` and
+  `semantic_excerpt_byte_approved` (the owner-approved selection),
+  `semantic_excerpt_count_limit` and `semantic_excerpt_byte_limit` (the effective limits the case
+  was built with after ceiling planning) and `semantic_excerpt_ceiling_rounds`. All precede privacy
+  minimization and certify neither consent nor delivery.
+- `build_semantic_case` drops the lowest-ranked excerpts, as `not_selected` omissions with
+  `content_unselected`, when the case would otherwise exceed `MAX_SEMANTIC_CASE_BYTES`; a case
+  within that bound is unchanged.
 - `service/semantic_ceiling.py`: `channel_prepared_limit(policy)` is the narrowest of the LLM
   channel's `max_bytes`, `max_tokens × 4` (zero is unset) and `MAX_MINIMIZED_DISCLOSURE_BYTES`
   (`ports/privacy.py`, 262,144), so an unset or high ceiling still plans below what egress can
-  prepare. `plan_under_channel_ceiling` rebuilds
+  prepare. `channel_admission(policy, bindings)` is the categories and data classes egress
+  releases to those destinations (LLM channel ceiling for external, local-model ceiling for
+  `local_af_unix`, unioned), with each item's data class from the enforcer's
+  `clean_item_data_class`. `plan_under_channel_ceiling` measures only the items that admission
+  releases, and rebuilds
   an over-ceiling case with a smaller `max_total_excerpt_bytes` (and `max_excerpt_bytes`), or no
   excerpts. It stops after at most `MAX_CEILING_PLANNING_ROUNDS` (4) rebuilds, and every rebuild
   adds `content_unselected`. It is deterministic, so a recovered case keeps its digest.
