@@ -275,6 +275,18 @@ def _output_payload(host: Host, text: str, call: int) -> dict[str, JsonValue]:
     }
 
 
+def _expanded_16() -> ReviewSelectionPolicy:
+    """The Expanded selection at the Phase 1a count of 16 excerpts (issue #907).
+
+    Phase 1b (#944) raised Expanded to 64 excerpts. These cases pin how the 1a selection fills and
+    cuts a fixed count, so they keep the 16-slot count explicitly.
+    """
+
+    return replace(
+        ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED), max_excerpts=16
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _Ledger:
     case: DeterministicCase
@@ -524,8 +536,7 @@ def _build(
         dependency_digest="sha256:" + "b" * 64,
         findings=(),
         review_context_profile=ReviewContextProfile.EXPANDED,
-        review_selection=selection
-        or ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED),
+        review_selection=selection or _expanded_16(),
         policy_id="pvy_10000000-0000-4000-8000-000000000001",
         policy_version="1",
         captured_content=ledger.captured,
@@ -735,7 +746,7 @@ def test_agent_recorded_output_clipped_by_a_narrow_bound_keeps_its_tail() -> Non
             4,
         )
     }
-    selection = ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED)
+    selection = _expanded_16()
     narrow = ReviewSelectionPolicy(
         sections=selection.sections,
         excerpt_kinds=selection.excerpt_kinds,
@@ -856,7 +867,7 @@ def test_excerpt_selection_plans_the_prepared_document_below_the_channel_ceiling
         dependency_digest="sha256:" + "b" * 64,
         findings=(),
         review_context_profile=ReviewContextProfile.EXPANDED,
-        review_selection=ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED),
+        review_selection=_expanded_16(),
         policy_id="pvy_10000000-0000-4000-8000-000000000001",
         policy_version="1",
         lineage_evaluation=None,
@@ -868,7 +879,9 @@ def test_excerpt_selection_plans_the_prepared_document_below_the_channel_ceiling
     all_ids = {item.item_id for item in unplanned.items}
     assert len(semantic_case_to_prepared_payload(unplanned, all_ids)) > 262_144
 
-    semantic = _build(ledger)
+    # The builder plans itself only below an explicit ceiling; the review composition passes the
+    # channel-aware planner instead (#907 Phase 1b).
+    semantic = _build(ledger, prepared_byte_ceiling=262_144)
     prepared = semantic_case_to_prepared_payload(
         semantic, {item.item_id for item in semantic.items}
     )
@@ -987,7 +1000,7 @@ def test_a_fresh_git_diff_of_a_captured_path_is_supplied_for_that_capture(host: 
             dependency_digest="sha256:" + "b" * 64,
             findings=(),
             review_context_profile=ReviewContextProfile.EXPANDED,
-            review_selection=ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED),
+            review_selection=_expanded_16(),
             policy_id="pvy_10000000-0000-4000-8000-000000000001",
             policy_version="1",
             captured_content=ledger.captured,
@@ -1068,7 +1081,7 @@ def test_a_runs_own_output_is_never_superseded_by_its_own_failure_summary() -> N
         dependency_digest="sha256:" + "b" * 64,
         findings=(),
         review_context_profile=ReviewContextProfile.EXPANDED,
-        review_selection=ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED),
+        review_selection=_expanded_16(),
         policy_id="pvy_10000000-0000-4000-8000-000000000001",
         policy_version="1",
     )
@@ -1186,7 +1199,9 @@ def test_ledger_excerpts_the_count_cap_cuts_are_disclosed(profile: ReviewContext
     """Every ledger excerpt the 16-slot count cuts is an omission and discloses the gap."""
 
     case, refs = _ledger_evidence_case(40)
-    semantic = _build_case(case, profile, ReviewSelectionPolicy.for_profile(profile))
+    semantic = _build_case(
+        case, profile, replace(ReviewSelectionPolicy.for_profile(profile), max_excerpts=16)
+    )
     shown = {item.source_ref for item in semantic.items if item.section == "excerpt"}
     assert len(shown) == 16
     cut = {
@@ -1201,9 +1216,7 @@ def test_ledger_excerpts_the_count_cap_cuts_are_disclosed(profile: ReviewContext
 
 def test_past_the_omission_cap_the_gap_is_the_trace() -> None:
     case, _refs = _ledger_evidence_case(40)
-    selection = replace(
-        ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED), max_omissions=4
-    )
+    selection = replace(_expanded_16(), max_omissions=4)
     semantic = _build_case(case, ReviewContextProfile.CUSTOM, selection)
     assert len(semantic.packet.omissions) <= 4
     assert "content_unselected" in semantic.packet.coverage.known_gaps
@@ -1265,7 +1278,9 @@ def test_command_excerpts_the_count_cap_cuts_are_disclosed() -> None:
     }
     profile = ReviewContextProfile.EXPANDED
     semantic = _build_case(
-        make_case(actions=actions), profile, ReviewSelectionPolicy.for_profile(profile)
+        make_case(actions=actions),
+        profile,
+        replace(ReviewSelectionPolicy.for_profile(profile), max_excerpts=16),
     )
     _assert_count_cut_disclosed(semantic, tuple(str(ref) for ref in actions))
 
@@ -1290,6 +1305,6 @@ def test_failure_excerpts_the_count_cap_cuts_are_disclosed() -> None:
     semantic = _build_case(
         make_case(actions=actions, results=results),
         profile,
-        ReviewSelectionPolicy.for_profile(profile),
+        replace(ReviewSelectionPolicy.for_profile(profile), max_excerpts=16),
     )
     _assert_count_cut_disclosed(semantic, tuple(str(ref) for ref in results))

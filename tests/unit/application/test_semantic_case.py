@@ -756,11 +756,16 @@ def test_authenticated_captured_bytes_reach_selected_case_and_prepared_packet() 
 def test_authenticated_capture_is_selected_before_opaque_metadata_rows() -> None:
     case, captured, scope, captured_ref = _opaque_before_capture_case()
 
+    # Seventeen candidates under a 16-excerpt limit (the 1.1.0 Expanded preset), so the capture
+    # has to win a slot rather than merely fit (issue #907 Phase 1b lifts the current preset).
     semantic = _build(
         case,
         ReviewContextProfile.EXPANDED,
         captured_content=(captured,),
         captured_content_scope=scope,
+        selection=ReviewSelectionPolicy.for_profile(
+            ReviewContextProfile.EXPANDED, preset_version="1.1.0"
+        ),
     )
 
     assert len(semantic.packet.targeted_excerpts) == 16

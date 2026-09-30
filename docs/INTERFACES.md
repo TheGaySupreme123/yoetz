@@ -512,7 +512,8 @@ free text from input. CLI exit classes (0/2/10/11/20/30/40/70/130) map from code
   `MAX_SEMANTIC_CASE_BYTES = 262_144` (256 KiB), measured over canonical minimized case bytes.
 - AI-powered review structure: `MAX_REVIEW_TEXT_BYTES = 4_096`,
   `MAX_REVIEW_TIMELINE_ITEMS = 64`, `MAX_REVIEW_ASSESSMENTS = 64`,
-  `MAX_REVIEW_CHANGE_OBSERVATIONS = 32`, `MAX_REVIEW_EXCERPTS = 16`,
+  `MAX_REVIEW_CHANGE_OBSERVATIONS = 32`, `MAX_REVIEW_EXCERPTS = 64` (a protocol maximum; the
+  privacy-policy 1.0.0/1.1.0 wires cap `max_excerpts` at 16, see "Excerpt count"),
   `MAX_REVIEW_OMISSIONS = 64`, and `MAX_REVIEW_CHALLENGES = 3`.
 - MCP transport cap (`adapters/mcp_stdio.py`): `MAX_JSON_FRAME_BYTES = 1_048_576` payload bytes
   excluding the single LF. This is adapter-owned and is not exported or mirrored by
@@ -7594,3 +7595,59 @@ plan. Names and contracts:
   instructions): the task statement is the specification and wins over the plan; an omitted or
   contradicted stated requirement is a discrepancy citing the statement's source ref; never request
   behaviour it excludes; weigh `agent_transcribed` as the agent's account.
+
+### Excerpt count (issue #907 Phase 1b)
+
+- `MAX_REVIEW_EXCERPTS` (`protocol/models.py`) is 64, a protocol maximum. It bounds
+  `ReviewPacket.targeted_excerpts`, `ReviewSelectionPolicy.max_excerpts` and outbound-case 1.2.0
+  `targeted_excerpts`. `PRE_1_2_MAX_EXCERPTS` (`domain/privacy.py`, 16) is the bound of wire
+  1.0.0/1.1.0.
+- `ReviewSelectionPolicy.for_profile(EXPANDED, preset_version="1.2.0")` sets `max_excerpts` to 64.
+  The 1.1.0 Expanded preset and both Assisted presets keep 16. Every preset keeps 16,384 bytes per
+  excerpt and 131,072 bytes in total.
+- `review_selection_policy_schema_version` returns 1.2.0 when a selection names `task_statement`
+  or sets `max_excerpts` above 16, and 1.1.0 otherwise. A 1.0.0/1.1.0 row that decodes to more
+  than 16 excerpts is `privacy_policy_row_corrupt`.
+- Privacy-policy 1.2.0 (unreleased, edited in place) bounds `max_excerpts` by 64 and pins the
+  Expanded preset's `max_excerpts` const at 64. The released 1.1.0 schema is unchanged.
+- Egress (`application/egress.py`): after minimization and the channel ceilings, a
+  `semantic-review` payload is `blocked_by_policy` / `policy_denied` when its `excerpt` rows exceed
+  the effective `max_excerpts`, any row exceeds `max_excerpt_bytes`, or their sum exceeds
+  `max_total_excerpt_bytes`. An unreadable payload is refused the same way.
+- The case item bound `_MAX_CASE_ITEMS` (`ports/semantic.py`) is `256 + MAX_REVIEW_EXCERPTS - 16`
+  (304), and outbound-case 1.2.0 `content_items` allows 305.
+- The `semantic_case_built` counters add `semantic_excerpt_count_approved` and
+  `semantic_excerpt_byte_approved` (the owner-approved selection),
+  `semantic_excerpt_count_cut_for_case_bound` (excerpts dropped to fit
+  `MAX_SEMANTIC_CASE_BYTES` before ceiling planning), `semantic_excerpt_count_limit` and `semantic_excerpt_byte_limit` (the effective limits the case
+  was built with after ceiling planning) and `semantic_excerpt_ceiling_rounds`. All precede privacy
+  minimization and certify neither consent nor delivery.
+- `build_semantic_case` drops the lowest-ranked excerpts, as `not_selected` omissions with
+  `content_unselected`, when the case would otherwise exceed `MAX_SEMANTIC_CASE_BYTES`; a case
+  within that bound is unchanged. The count is `SemanticCase.excerpts_cut_for_case_bound`, local
+  composition state outside the envelope and digest. When non-excerpt items alone exceed the
+  bound it raises `SemanticCaseCapacityExceeded` (the base of `LineageSemanticCapacityExceeded`),
+  reported as `case_capacity_exceeded` with operation `semantic_not_dispatched_case_capacity`.
+- `service/semantic_ceiling.py`: `channel_prepared_limit(policy)` is the narrowest of the LLM
+  channel's `max_bytes`, `max_tokens × 4` (zero is unset) and `MAX_MINIMIZED_DISCLOSURE_BYTES`
+  (`ports/privacy.py`, 262,144), so an unset or high ceiling still plans below what egress can
+  prepare. `channel_admission(policy, bindings)` is the categories and data classes egress
+  releases to those destinations (LLM channel ceiling for external, local-model ceiling for
+  `local_af_unix`, unioned), with each item's data class from the enforcer's
+  `clean_item_data_class`. `plan_under_channel_ceiling` measures only the items that admission
+  releases, and rebuilds
+  an over-ceiling case with a smaller `max_total_excerpt_bytes` (and `max_excerpt_bytes`), or no
+  excerpts. It stops after at most `MAX_CEILING_PLANNING_ROUNDS` (4) rebuilds, and every rebuild
+  adds `content_unselected`. It is deterministic, so a recovered case keeps its digest.
+- Resume (`PrivacyCoordinator._resume_admitted`) denies a stored `semantic-review` proposal,
+  external or local-model, outside the current policy's excerpt limits or LLM `max_bytes` /
+  `max_tokens` with `blocked_by_policy` / `policy_denied` before dispatch.
+- TUI: `PrivacyPosture.recipe_outdated` is true when the approved selection is an earlier version
+  of its recipe. The privacy screen then offers the newer recipe instead of saying "already on the
+  recommended privacy policy".
+- CLI: `policy_excerpt_limits_disclosure` renders the approved limits and, when the current recipe
+  for the profile differs, the proposed ones. `yoetz privacy show` on a terminal prints it as
+  "Excerpt limits: …". `yoetz --privacy` prints "Current excerpt limits: …" and the draft's
+  "Maximum: …". The ceremony adds fixed words to a `max_excerpts` change.
+- Golden vectors: TSK-001's privacy-policy wire now also pins the PRIV-004 Expanded policy under
+  both presets: 1.1.0 with 16 excerpts, byte-identical to origin/0.3, and 1.2.0 with 64.

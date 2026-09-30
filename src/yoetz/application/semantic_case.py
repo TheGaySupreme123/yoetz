@@ -140,6 +140,7 @@ __all__ = [
     "MAX_CAPTURED_SEMANTIC_CONTENT_PARTS",
     "MAX_CAPTURED_SEMANTIC_INPUT_BYTES",
     "LineageSemanticCapacityExceeded",
+    "SemanticCaseCapacityExceeded",
     "OVER_CASE_ITEM_LIMIT_REASON",
     "REVIEW_PACKET_ITEM_ID",
     "REVIEW_PHASE_QUESTIONS",
@@ -793,7 +794,16 @@ def _task_statement_item(
     )
 
 
-class LineageSemanticCapacityExceeded(ValueError):
+class SemanticCaseCapacityExceeded(ValueError):
+    """The case's fixed material alone exceeds ``MAX_SEMANTIC_CASE_BYTES``.
+
+    Excerpts are cut first, so this is raised only when the non-excerpt items (task statement,
+    goals, obligations, claims, decisions, timeline and finding prose) cannot fit on their own.
+    Callers map it to a pre-dispatch capacity outcome instead of a generic coordinator failure.
+    """
+
+
+class LineageSemanticCapacityExceeded(SemanticCaseCapacityExceeded):
     """Recorded lineage cannot be carried as complete semantic items.
 
     One child or gap fact is larger than a single item, or the partitioned set would exceed the
@@ -1119,6 +1129,45 @@ def _omit(
         source_kind=source_kind,
         reason=reason,
     )
+
+
+def _fit_excerpts_within_case_bound(
+    items: Sequence[SemanticCaseItem],
+    targeted: list[TargetedExcerptRef],
+    omissions: list[ReviewOmission],
+    capture_gaps: set[str],
+    *,
+    fixed_item_ids: set[str],
+) -> int:
+    """Drop the lowest-ranked excerpts until the case fits ``MAX_SEMANTIC_CASE_BYTES``.
+
+    The excerpt budget and the case's aggregate item bound are independent. Since the Expanded
+    excerpt count rose to the protocol maximum (issue #907 Phase 1b), a full excerpt budget beside
+    rich finding prose can cross the aggregate bound, and ``SemanticCase`` would refuse the whole
+    case before the channel-ceiling planner could narrow it. Only a case that would otherwise be
+    refused is changed, so every constructible case keeps its exact bytes and digest. Each dropped
+    excerpt is disclosed as ``not_selected`` with ``content_unselected``, never silently. Returns
+    how many excerpts were dropped. Non-excerpt material over the bound on its own is not cut here.
+    """
+
+    by_id = {item.item_id: item for item in items}
+    case_bytes = sum(by_id[item_id].content_bytes for item_id in fixed_item_ids if item_id in by_id)
+    case_bytes += sum(by_id[excerpt.excerpt_item_id].content_bytes for excerpt in targeted)
+    if case_bytes <= MAX_SEMANTIC_CASE_BYTES or not targeted:
+        return 0
+    selected = len(targeted)
+    dropped_refs: set[str] = set()
+    while targeted and case_bytes > MAX_SEMANTIC_CASE_BYTES:
+        excerpt = targeted.pop()
+        item = by_id[excerpt.excerpt_item_id]
+        case_bytes -= item.content_bytes
+        dropped_refs.add(item.source_ref)
+        omissions.append(_omit(item.source_ref, item.category, excerpt.source_kind, "not_selected"))
+    capture_gaps.add("content_unselected")
+    if any(by_id[excerpt.excerpt_item_id].source_ref in dropped_refs for excerpt in targeted):
+        # Later parts of a split excerpt were cut while its earlier parts stay.
+        capture_gaps.add("truncated_payload")
+    return selected - len(targeted)
 
 
 def _captured_content_groups(
@@ -2334,9 +2383,10 @@ def build_semantic_case(
 
     Excerpts may now fill the approved per-excerpt bound, so the case plans its excerpts below
     the channel byte ceiling as measured on the exact prepared document the gateway will size
-    (issue #907): the schema maximum, narrowed to ``prepared_byte_ceiling`` when the caller
-    passes the effective policy's own channel ceiling (its ``max_bytes`` and ``max_tokens``
-    measured the way the gateway measures them). An over-plan case is rebuilt with a smaller
+    (issue #907) when the caller passes ``prepared_byte_ceiling`` (the effective policy's own
+    channel ceiling, its ``max_bytes`` and ``max_tokens`` measured the way the gateway measures
+    them); without it the caller plans the released payload itself. An over-plan case is rebuilt
+    with a smaller
     excerpt budget; the dropped excerpts are ordinary ``not_selected`` omissions with
     ``content_unselected``. The gateway still enforces the owner's ceiling on every dispatch.
     ``workspace_root`` anchors absolute paths when the prior missing-item request's answers are
@@ -2383,6 +2433,13 @@ def build_semantic_case(
         return len(prepared) <= planning_bytes
 
     case = build(None)
+    if prepared_byte_ceiling is None:
+        # Without an explicit ceiling the caller plans (issue #907 Phase 1b): the review
+        # composition sizes the payload the channel will actually release and rebuilds below it
+        # (``service/semantic_ceiling.plan_under_channel_ceiling``), so items the channel withholds
+        # never cost eligible excerpts their room. The aggregate case bound is still enforced by
+        # the pre-construction cut either way.
+        return case
     excerpt_bytes = sum(item.content_bytes for item in case.items if item.section == "excerpt")
     if not excerpt_bytes or fits(case) is not False:
         return case
@@ -3169,6 +3226,26 @@ def _build_semantic_case_once(
     review_assessments = review_assessments[: selection.max_assessments]
     changes = changes[: selection.max_change_observations]
     targeted = targeted[: selection.max_excerpts]
+    excerpts_cut_for_case_bound = _fit_excerpts_within_case_bound(
+        items,
+        targeted,
+        omissions,
+        capture_gap_set,
+        fixed_item_ids={
+            *task_statement_ids,
+            *goal_ids,
+            *obligation_ids,
+            *claim_ids,
+            *decision_ids,
+            *timeline_ids,
+            *(
+                item_id
+                for assessment in review_assessments
+                if assessment.summary_item_id is not None and assessment.detail_item_id is not None
+                for item_id in (assessment.summary_item_id, assessment.detail_item_id)
+            ),
+        },
+    )
 
     kind_order = {
         kind: ordinal
@@ -3316,6 +3393,9 @@ def _build_semantic_case_once(
         # Refuse with the same typed pre-dispatch outcome instead of leaking the
         # constructor's generic semantic_case_invalid ValueError to the coordinator.
         raise LineageSemanticCapacityExceeded("lineage_semantic_case_too_large")
+    if sum(item.content_bytes for item in items) > MAX_SEMANTIC_CASE_BYTES:
+        # Excerpts were already cut to fit, so what remains over the bound is fixed material.
+        raise SemanticCaseCapacityExceeded("semantic_case_too_large")
 
     capture_gaps = tuple(sorted(capture_gap_set, key=str.encode))
     coverage = case_coverage(frozen_case, semantic=True)
@@ -3576,6 +3656,7 @@ def _build_semantic_case_once(
         question_set=question_set,
         case_digest=case_digest,
         omitted_reference_count=omitted_reference_count,
+        excerpts_cut_for_case_bound=excerpts_cut_for_case_bound,
     )
 
 

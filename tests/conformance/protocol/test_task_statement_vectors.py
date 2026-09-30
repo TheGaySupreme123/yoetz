@@ -24,7 +24,7 @@ from yoetz.ports.start_catalog import (
 )
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 from yoetz.protocol.errors import ProtocolValueError
-from yoetz.protocol.models import StartRequestModel
+from yoetz.protocol.models import MAX_REVIEW_EXCERPTS, StartRequestModel
 from yoetz.protocol.schemas import validate_schema_instance
 
 _ROOT = Path(__file__).resolve().parents[3]
@@ -90,6 +90,7 @@ def test_statement_free_start_keeps_its_digest_and_the_statement_is_identity() -
 def test_privacy_policy_wire_keeps_released_bytes_and_adds_the_section_only_in_1_2() -> None:
     wire_case = _case()["input"]["privacy_policy_wire"]
     for vector in wire_case["vectors"]:
+        assert vector["wire"]["review_selection"]["max_excerpts"] == vector["max_excerpts"]
         wire = cast(dict[str, JsonValue], vector["wire"])
         validate_schema_instance("privacy-policy", vector["schema_version"], wire)
         policy = decode_privacy_policy_canonical(canonical_encode(wire))
@@ -100,6 +101,19 @@ def test_privacy_policy_wire_keeps_released_bytes_and_adds_the_section_only_in_1
         assert ("task_statement" in vector["review_sections"]) == (
             vector["schema_version"] == "1.2.0"
         )
-    released, current = wire_case["vectors"]
-    assert (released["preset_version"], released["schema_version"]) == ("1.1.0", "1.1.0")
-    assert (current["preset_version"], current["schema_version"]) == ("1.2.0", "1.2.0")
+    by_key = {
+        (vector["review_context_profile"], vector["preset_version"]): vector
+        for vector in wire_case["vectors"]
+    }
+    for profile in ("goal_aware", "expanded"):
+        assert by_key[(profile, "1.1.0")]["schema_version"] == "1.1.0"
+        assert by_key[(profile, "1.2.0")]["schema_version"] == "1.2.0"
+    # Issue #907 Phase 1b: the Expanded count is 16 under the released wire and the protocol
+    # maximum under 1.2.0; the byte budget is the same in both.
+    assert by_key[("expanded", "1.1.0")]["max_excerpts"] == 16
+    assert by_key[("expanded", "1.2.0")]["max_excerpts"] == MAX_REVIEW_EXCERPTS
+    for key in ("max_excerpt_bytes", "max_total_excerpt_bytes"):
+        assert (
+            by_key[("expanded", "1.1.0")]["wire"]["review_selection"][key]
+            == by_key[("expanded", "1.2.0")]["wire"]["review_selection"][key]
+        )

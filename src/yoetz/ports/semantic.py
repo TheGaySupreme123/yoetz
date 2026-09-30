@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Final, Literal, Protocol, cast
 
@@ -182,7 +182,9 @@ _MAX_SUBJECT_REFS: Final = 16
 # the case builder must decide explicitly what to do with a wider finding (issue #858).
 MAX_SEMANTIC_ITEM_SUBJECT_REFS: Final = _MAX_SUBJECT_REFS
 _MAX_INTERNAL_SUBJECT_REFS: Final = 64
-_MAX_CASE_ITEMS: Final = 256
+# Raised with ``MAX_REVIEW_EXCERPTS`` (issue #907 Phase 1b) so the other sections keep the room
+# they had when a packet carried at most 16 excerpts.
+_MAX_CASE_ITEMS: Final = 256 + MAX_REVIEW_EXCERPTS - 16
 MAX_SEMANTIC_CASE_ITEMS: Final = _MAX_CASE_ITEMS
 # The prior-findings section (issue #905): at most eight earlier AI-powered findings, each one
 # structural row plus up to six prose rows (summary, message, three challenge fields, response).
@@ -1111,11 +1113,19 @@ class SemanticCase:
     question_set: tuple[str, ...]
     case_digest: str
     omitted_reference_count: int = 0
+    # Local composition fact, not wire or digest material: how many selected excerpts the builder
+    # dropped to fit MAX_SEMANTIC_CASE_BYTES (issue #907 Phase 1b). Diagnostics report it.
+    excerpts_cut_for_case_bound: int = field(default=0, compare=False)
 
     def __post_init__(self) -> None:
         if (
             type(self.omitted_reference_count) is not int
             or not 0 <= self.omitted_reference_count <= _MAX_SAFE_INTEGER
+        ):
+            raise _invalid_case()
+        if (
+            type(self.excerpts_cut_for_case_bound) is not int
+            or not 0 <= self.excerpts_cut_for_case_bound <= MAX_REVIEW_EXCERPTS
         ):
             raise _invalid_case()
         try:

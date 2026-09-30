@@ -1719,9 +1719,12 @@ class YoetzTui(App[int]):
 
         current = await self.runtime.privacy_posture()
         recommendation = self.runtime.privacy_recommendation(current)
-        already = current.choice is not None and current.profile == _PROFILE_FOR_RECIPE.get(
+        on_recipe = current.choice is not None and current.profile == _PROFILE_FOR_RECIPE.get(
             recommendation.recipe
         )
+        # An earlier version of the same recipe is not "already recommended": the newer one
+        # (for example Expanded under privacy policy 1.2.0) still needs its own approval.
+        already = on_recipe and not current.recipe_outdated
         authority_lines = [f"Repository grant: {current.repository_authority_summary}"]
         if current.repository_migration_summary is not None:
             authority_lines.append(current.repository_migration_summary)
@@ -1745,6 +1748,12 @@ class YoetzTui(App[int]):
                 "You are already on the recommended privacy policy.",
             )
         else:
+            if on_recipe:
+                self.say(
+                    Level.OPTIONAL,
+                    "A newer version of your recipe is available. Your current policy stays until "
+                    "you review and approve it in the trusted terminal.",
+                )
             options.append(
                 Option(
                     "recommended",

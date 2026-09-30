@@ -290,6 +290,12 @@ def test_bounded_counts_reach_the_durable_ring(
         "semantic_excerpts_selected",
         "semantic_diff_excerpts_selected",
         "semantic_excerpt_bytes_selected",
+        "semantic_excerpt_count_approved",
+        "semantic_excerpt_byte_approved",
+        "semantic_excerpt_count_limit",
+        "semantic_excerpt_count_cut_for_case_bound",
+        "semantic_excerpt_byte_limit",
+        "semantic_excerpt_ceiling_rounds",
     ),
 )
 def test_packet_composition_diagnostics_admit_counts_but_not_content(

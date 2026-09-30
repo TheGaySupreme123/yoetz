@@ -163,6 +163,52 @@ async def test_a_policy_already_matching_the_recommendation_is_not_offered_as_a_
 
 
 @pytest.mark.anyio
+async def test_an_earlier_version_of_the_recommended_recipe_offers_the_newer_one() -> None:
+    """Issue #907 Phase 1b: an Expanded 1.1.0 approval is not "already recommended"."""
+
+    from dataclasses import replace
+
+    harness = _Harness(
+        replace(_posture("confirm_every_request"), recipe_outdated=True), _recommendation()
+    )
+    harness.answers = [None]
+
+    await harness.app.command_privacy()
+
+    assert "already on the recommended privacy policy" not in harness.transcript
+    assert "A newer version of your recipe is available" in harness.transcript
+    assert harness.choices(0) == ["keep", "recommended", "other"]
+
+
+def test_the_runtime_reads_an_earlier_expanded_preset_as_outdated() -> None:
+    from typing import cast
+
+    from yoetz.domain.privacy import ReviewContextProfile, ReviewSelectionPolicy
+    from yoetz.tui.runtime import _review_recipe_outdated  # pyright: ignore[reportPrivateUsage]
+
+    def row(selection: ReviewSelectionPolicy) -> dict[str, object]:
+        fields = ReviewSelectionPolicy.__dataclass_fields__
+        return {
+            "review_context_profile": "expanded",
+            "review_selection": {
+                name: list(cast("tuple[object, ...]", value)) if isinstance(value, tuple) else value
+                for name, value in (
+                    (name, cast(object, getattr(selection, name))) for name in fields
+                )
+            },
+        }
+
+    legacy = ReviewSelectionPolicy.for_profile(
+        ReviewContextProfile.EXPANDED, preset_version="1.1.0"
+    )
+    current = ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED)
+    assert _review_recipe_outdated(row(legacy)) is True
+    assert _review_recipe_outdated(row(current)) is False
+    assert _review_recipe_outdated({"review_context_profile": "custom"}) is False
+    assert _review_recipe_outdated({}) is False
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("answer", [None, "keep"])
 async def test_cancelling_or_keeping_changes_nothing(answer: str | None) -> None:
     harness = _Harness(_posture(), _recommendation())

@@ -23,7 +23,7 @@ from yoetz.protocol.canonical import (
 )
 from yoetz.protocol.coverage import PublicationChannel
 from yoetz.protocol.ids import IdKind, validate_id
-from yoetz.protocol.models import DataCategory
+from yoetz.protocol.models import MAX_REVIEW_EXCERPTS, DataCategory
 
 __all__ = [
     "MAX_EGRESS_CASE_BYTES",
@@ -35,6 +35,7 @@ __all__ = [
     "NEVER_SEND_KINDS",
     "PRIVACY_CHANGE_AREAS",
     "PRIVACY_CHANGE_FIELDS",
+    "PRE_1_2_MAX_EXCERPTS",
     "PRIVACY_POLICY_PRESET_VERSIONS",
     "CURRENT_PRIVACY_POLICY_PRESET_VERSION",
     "PrivacyPolicyPresetVersion",
@@ -474,6 +475,9 @@ CURRENT_PRIVACY_POLICY_PRESET_VERSION: Final[PrivacyPolicyPresetVersion] = "1.2.
 _SECTION_MINIMUM_SCHEMA_VERSION: Final[Mapping[str, PrivacyPolicyPresetVersion]] = {
     "task_statement": "1.2.0",
 }
+# Wire 1.0.0/1.1.0 bound ``max_excerpts`` to 16. Wire 1.2.0 raises the bound to the protocol
+# maximum, and its Expanded preset uses it so the byte budget binds (issue #907 Phase 1b).
+PRE_1_2_MAX_EXCERPTS: Final = 16
 
 
 def review_selection_policy_schema_version(
@@ -492,6 +496,8 @@ def review_selection_policy_schema_version(
         required = _SECTION_MINIMUM_SCHEMA_VERSION.get(section)
         if required is not None and _preset_rank(required) > _preset_rank(version):
             version = required
+    if selection.max_excerpts > PRE_1_2_MAX_EXCERPTS:
+        version = "1.2.0"
     return version
 
 
@@ -531,7 +537,7 @@ class ReviewSelectionPolicy:
         _nonnegative(self.max_timeline_items, maximum=64)
         _nonnegative(self.max_assessments, maximum=64)
         _nonnegative(self.max_change_observations, maximum=32)
-        _nonnegative(self.max_excerpts, maximum=16)
+        _nonnegative(self.max_excerpts, maximum=MAX_REVIEW_EXCERPTS)
         _nonnegative(self.max_omissions, maximum=64)
         _nonnegative(self.max_excerpt_bytes, maximum=16_384)
         _nonnegative(self.max_total_excerpt_bytes, maximum=131_072)
@@ -575,12 +581,16 @@ class ReviewSelectionPolicy:
         if profile in {ReviewContextProfile.ASSISTED, ReviewContextProfile.EXPANDED}:
             sections.add("targeted_excerpts")
             kinds = set(_EXCERPT_KINDS)
-            max_excerpts = 16
+            max_excerpts = PRE_1_2_MAX_EXCERPTS
             max_excerpt_bytes = 16_384
             max_total_excerpt_bytes = 131_072
         if profile is ReviewContextProfile.EXPANDED:
             relevance = "linked_then_in_scope"
             exact_commands = True
+            if _preset_rank(preset_version) >= _preset_rank("1.2.0"):
+                # From 1.2.0 the Expanded count is the protocol maximum, so the unchanged byte
+                # budget binds instead of a 16-slot constant. Assisted keeps 16 (issue #907).
+                max_excerpts = MAX_REVIEW_EXCERPTS
         return cls(
             sections=tuple(sections),
             excerpt_kinds=tuple(kinds),

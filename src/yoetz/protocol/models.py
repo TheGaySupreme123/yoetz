@@ -205,7 +205,11 @@ MAX_TASK_STATEMENT_BYTES: Final = 65_536
 MAX_REVIEW_TIMELINE_ITEMS: Final = 64
 MAX_REVIEW_ASSESSMENTS: Final = 64
 MAX_REVIEW_CHANGE_OBSERVATIONS: Final = 32
-MAX_REVIEW_EXCERPTS: Final = 16
+# The protocol maximum on targeted excerpts in one review packet. It exists only to bound work:
+# the owner-approved byte budget (``max_total_excerpt_bytes``) is meant to bind first. Privacy
+# policy 1.2.0 lets the Expanded preset use it; wire 1.0.0/1.1.0 still cap a policy at 16
+# (issue #907 Phase 1b).
+MAX_REVIEW_EXCERPTS: Final = 64
 MAX_REVIEW_OMISSIONS: Final = 64
 MAX_REVIEW_CHALLENGES: Final = 3
 # JSON Schema ``maxLength`` counts Unicode code points, while the durable AI-powered review contract

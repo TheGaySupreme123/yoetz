@@ -247,6 +247,26 @@ approve a current recipe with `yoetz --privacy`. The approval screen, `yoetz --p
 `yoetz privacy show` say in plain words whether the task statement is sent. Your prompt as captured
 by the host is never used for review.
 
+### How many excerpts the reviewer sees
+
+Each review sends selected excerpts of recorded evidence, command output and changes, within limits
+you approved: at most 16 KiB per excerpt and 128 KiB of excerpts in total. The Assisted recipe also
+caps the count at 16 excerpts. From this version the Expanded recipe allows up to 64, so on a long
+session the byte budget, not the count, decides how much the reviewer sees. The byte limits and the
+per-case ceilings (256 KiB, 65,536 estimated tokens) do not change.
+
+An Expanded policy you approved earlier keeps its 16-excerpt limit until you approve the new
+recipe. `yoetz privacy show` and `yoetz --privacy` show your current limits beside the ones the
+current recipe offers, and the approval screen marks the higher count as a widening. When many
+large excerpts would push a review over your per-case ceiling, the review carries fewer excerpts
+and says so (`content_unselected`) instead of being refused. Content your review channel does not
+send does not count toward that ceiling. The packet's own structure always counts, and when a
+fallback destination is set, anything either destination may receive counts, so the estimate never
+comes in under what is sent. A review packet with more excerpts or
+bytes than your policy allows is still refused, never cut down to fit. To go
+back to 16, choose Assisted in `yoetz --privacy`, or propose the earlier Expanded limits with
+`yoetz privacy propose`. A lower limit is a narrowing, so it needs no new approval.
+
 ## How review comes back
 
 Inside that confirmed policy, review is direct-to-agent. The reviewer returns a bounded challenge to

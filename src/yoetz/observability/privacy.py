@@ -125,6 +125,12 @@ _LOG_FIELDS: Final = frozenset(
         "semantic_excerpts_selected",
         "semantic_diff_excerpts_selected",
         "semantic_excerpt_bytes_selected",
+        "semantic_excerpt_count_approved",
+        "semantic_excerpt_byte_approved",
+        "semantic_excerpt_count_limit",
+        "semantic_excerpt_count_cut_for_case_bound",
+        "semantic_excerpt_byte_limit",
+        "semantic_excerpt_ceiling_rounds",
     }
 )
 _MANIFEST_FIELDS: Final = frozenset(
@@ -225,6 +231,12 @@ _INTEGER_FIELDS: Final = frozenset(
         "semantic_excerpts_selected",
         "semantic_diff_excerpts_selected",
         "semantic_excerpt_bytes_selected",
+        "semantic_excerpt_count_approved",
+        "semantic_excerpt_byte_approved",
+        "semantic_excerpt_count_limit",
+        "semantic_excerpt_count_cut_for_case_bound",
+        "semantic_excerpt_byte_limit",
+        "semantic_excerpt_ceiling_rounds",
     }
 )
 _BOOLEAN_FIELDS: Final = frozenset({"sqlite_compile_options_ok"})

@@ -7,7 +7,7 @@ from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Literal, Protocol, cast
+from typing import Final, Literal, Protocol, cast
 
 from yoetz.domain.privacy import (
     AgentProjectionAuditSubject,
@@ -40,7 +40,11 @@ from yoetz.protocol.canonical import canonical_encode, strict_json_parse
 from yoetz.protocol.ids import IdKind, validate_id
 from yoetz.protocol.models import DataCategory
 
+# The largest prepared disclosure the privacy port carries, whatever a channel ceiling allows.
+MAX_MINIMIZED_DISCLOSURE_BYTES: Final = 262_144
+
 __all__ = [
+    "MAX_MINIMIZED_DISCLOSURE_BYTES",
     "ConsumedAuthorization",
     "ConsumedLocalDisclosure",
     "AgentProjectionRequest",
@@ -472,7 +476,10 @@ class MinimizedDisclosure:
     forbidden_findings: tuple[ForbiddenDataKind, ...]
 
     def __post_init__(self) -> None:
-        if type(self.prepared_bytes) is not bytes or len(self.prepared_bytes) > 262_144:
+        if (
+            type(self.prepared_bytes) is not bytes
+            or len(self.prepared_bytes) > MAX_MINIMIZED_DISCLOSURE_BYTES
+        ):
             raise _invalid()
         for values in (self.included_item_ids, self.source_item_digests):
             if type(values) is not tuple or values != tuple(sorted(set(values), key=str.encode)):

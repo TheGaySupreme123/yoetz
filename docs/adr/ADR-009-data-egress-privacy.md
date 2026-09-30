@@ -672,3 +672,46 @@ though both are `task_description`, so an approval given for the plan (`goal`) n
   records it, captured prompt text never enters a packet, and the explicit, off-by-default
   prompt-capture choice under Expanded that it would need is not implemented yet; it remains on
   issue #908.
+
+## Expanded excerpt count amendment (2026-09-30, issue #907 Phase 1b)
+
+The Expanded preset approved 16 KiB per excerpt and 128 KiB of excerpts, but it also fixed the
+count at 16, so the count bound every real review and the bytes never did. This amendment is folded
+into the unreleased privacy-policy wire 1.2.0 (the #908 version), so one re-approval covers both.
+
+- `MAX_REVIEW_EXCERPTS` is a protocol maximum of 64 that only bounds work. Wire 1.2.0 bounds
+  `review_selection.max_excerpts` by it; wire 1.0.0/1.1.0 still bound it by 16
+  (`PRE_1_2_MAX_EXCERPTS`). A selection with more than 16 excerpts can be expressed only as 1.2.0.
+- The 1.2.0 `expanded` preset sets `max_excerpts` to 64. Its byte limits, the `assisted` preset (16)
+  and the channel ceilings (262,144 bytes and 65,536 estimated tokens) do not change, so the approved
+  byte budget binds instead of the count.
+- No silent widening: an Expanded policy approved under the 1.1.0 preset keeps its exact bytes, its
+  digest and its 16-excerpt limit. Moving to the 1.2.0 preset is a `max_excerpts` widening. The
+  trusted ceremony shows it and says in fixed words that each excerpt still stays within the
+  unchanged byte limits. A 1.0.0/1.1.0 document with more than 16 excerpts is corrupt, and a
+  released boundary's 1.1.0 schema refuses the 1.2.0 Expanded document.
+- The policy stays authoritative at egress. A prepared review packet with more `excerpt` rows,
+  more bytes in one excerpt, or more excerpt bytes in total than the effective policy approved is
+  `blocked_by_policy` / `policy_denied` and is never trimmed to fit. An unreadable packet is refused
+  the same way. Resuming a stored proposal rechecks those limits and the channel `max_bytes` and
+  `max_tokens` against the policy in force at resume.
+- More excerpts must not turn a runnable review into a refused one. Before egress, the case is
+  planned below the channel ceiling (`max_bytes`, `max_tokens` at the egress estimate, and never
+  above the 262,144-byte disclosure bound, even when a ceiling is unset). If
+  its prepared packet would exceed it, the case is rebuilt with a smaller excerpt byte budget: a
+  narrowing, so it needs no consent. The dropped excerpts are disclosed as `content_unselected`.
+  The planner sizes what the channel releases after local minimization, so items in a category or
+  data class the destination withholds never cost an eligible excerpt its place.
+  There are at most four rebuilds, the result is deterministic so a recovered review keeps its
+  case digest, and egress still decides every dispatch.
+- `yoetz privacy show` on a terminal and `yoetz --privacy` show the current limits beside those the
+  current recipe offers. The policy draft prints the limits it would approve. The terminal
+  interface says a newer version of the owner's recipe exists instead of "already recommended".
+  `privacy show --json` does not carry the proposed limits: that would need a control-result
+  schema change.
+- The ceremony's count note says the byte limits are unchanged only when no byte limit widens on
+  the same screen. Otherwise it points at the limits shown there.
+- Way back: approving the earlier preset again (with `yoetz privacy propose`, or by choosing Assisted
+  in `yoetz --privacy`) is a narrowing that needs no widening approval. An Expanded policy returned
+  to the 1.1.0 preset encodes as the exact 1.1.0 bytes it had before.
+- Token budgets and raised channel ceilings are not part of this amendment (issue #924).

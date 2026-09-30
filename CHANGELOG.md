@@ -65,6 +65,21 @@ reverse-chronological released versions.
   the approval screen, `yoetz --privacy` and `yoetz privacy show` say whether it is sent.
   Host-captured prompts are not used (#908).
 
+- The Expanded review recipe no longer stops at 16 excerpts. From privacy policy 1.2.0 it allows up
+  to 64, a new protocol maximum, within its unchanged byte budget (16 KiB per excerpt, 128 KiB in
+  total), so on long sessions the bytes rather than the count decide what the reviewer sees.
+  Assisted keeps 16. An Expanded policy approved earlier keeps 16 until you re-approve through
+  `yoetz --privacy`, whose approval screen marks the higher count as a widening. `yoetz privacy
+  show` and `yoetz --privacy` show your current limits beside the proposed ones. A review packet
+  with more excerpts or bytes than the policy allows is refused as `policy_denied` and is never
+  trimmed. A case that would exceed the per-case ceiling is planned with fewer excerpts, and says
+  so, instead of being refused. Resuming a stored review rechecks the current limits. Choosing
+  Assisted, or proposing the earlier limits, takes you back to 16 without a new approval.
+  Content your channel does not allow out no longer costs allowed excerpts their room, and a case
+  too large to build is cut to fit with the dropped excerpts named. Semantic-case diagnostics now
+  record the approved excerpt limits and the effective limits the case was built with beside what
+  was selected (#907).
+
 - Codex, Claude Code and Cursor session-start context can show a fresh repository-grant snapshot
   and name the owner's missing admission command. The notice leaves route and host approval
   unconfirmed, preserves existing context and spends only spare hook time. No cross-session

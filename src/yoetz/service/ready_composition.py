@@ -148,6 +148,7 @@ from yoetz.application.semantic_case import (
     MAX_CAPTURED_SEMANTIC_CONTENT_PARTS,
     MAX_CAPTURED_SEMANTIC_INPUT_BYTES,
     LineageSemanticCapacityExceeded,
+    SemanticCaseCapacityExceeded,
     SemanticCaseTooLarge,
     SemanticPacketView,
     build_semantic_case,
@@ -302,6 +303,7 @@ from yoetz.ports.secret_memory import (
 )
 from yoetz.ports.semantic import (
     Deadline,
+    SemanticCase,
     SemanticResultInvalid,
     SemanticResultLate,
     SemanticResultRefused,
@@ -351,6 +353,12 @@ from yoetz.service.bundle_upgrade_effects import BundleUpgradeFencedLedger
 from yoetz.service.import_publication_authority import ImportPublicationAuthority
 from yoetz.service.project_coordination_authority import ProjectCoordinationGrantAuthority
 from yoetz.service.semantic_attention import SemanticAttentionTracker
+from yoetz.service.semantic_ceiling import (
+    channel_admission,
+    channel_prepared_limit,
+    plan_under_channel_ceiling,
+    with_ceiling_planning_gap,
+)
 from yoetz.service.vault import ProviderCredentialBinding, provider_credential_profile_binding
 from yoetz.version import build_version_manifest, version_manifest_json
 
@@ -4430,30 +4438,53 @@ def _privacy_gated_semantic_evaluator(
                         captured_content_gaps = ("content_capture_unavailable",)
                         captured_local_fence_required = False
             workspace_root = await _workspace_root_for_runtime(runtime)
-            try:
-                semantic_case = build_semantic_case(
-                    case_id=recovered_case_id or ids.new(IdKind.OUTBOUND_CASE),
+            semantic_case_id = recovered_case_id or ids.new(IdKind.OUTBOUND_CASE)
+
+            def build_case(selection: ReviewSelectionPolicy, gaps: tuple[str, ...]) -> SemanticCase:
+                return build_semantic_case(
+                    case_id=semantic_case_id,
                     frozen_case=frozen.case,
                     dependency_digest=frozen.lease.dependency_digest,
                     findings=typed_findings,
                     review_context_profile=review_profile,
-                    review_selection=review_selection,
+                    review_selection=selection,
                     policy_id=policy_id,
                     policy_version=policy_version,
                     lineage_evaluation=lineage_evaluation,
                     captured_content=captured_content,
                     captured_content_scope=captured_content_scope,
-                    captured_content_gaps=captured_content_gaps,
+                    captured_content_gaps=gaps,
                     prepared_byte_ceiling=_semantic_prepared_byte_ceiling(policy),
                     workspace_root=workspace_root,
                 )
-            except LineageSemanticCapacityExceeded:
+
+            try:
+                # Plan below the channel ceiling before egress would refuse the whole packet: a
+                # smaller excerpt budget is a narrowing of the approved selection (issue #907).
+                approved_case = build_case(review_selection, tuple(captured_content_gaps))
+                semantic_case, planned_selection, ceiling_rounds = plan_under_channel_ceiling(
+                    approved_case,
+                    review_selection,
+                    channel_prepared_limit(policy),
+                    lambda selection: build_case(
+                        selection, with_ceiling_planning_gap(captured_content_gaps)
+                    ),
+                    # Size what egress will release to either destination, not the items local
+                    # minimization withholds from the channel.
+                    channel_admission(policy, (provider, fallback_binding)),
+                )
+            except SemanticCaseCapacityExceeded as exc:
                 # Same pre-dispatch contract as an envelope that cannot be reduced: local
                 # findings stay recorded, no job is created, and the caller sees a capacity
-                # reason instead of a generic coordinator failure.
+                # reason instead of a generic coordinator failure. Lineage keeps its own
+                # operation; fixed non-excerpt material over the case bound gets its own too.
                 record_bounded_event_without_raising(
                     component="semantic_composition",
-                    operation="semantic_not_dispatched_lineage_capacity",
+                    operation=(
+                        "semantic_not_dispatched_lineage_capacity"
+                        if isinstance(exc, LineageSemanticCapacityExceeded)
+                        else "semantic_not_dispatched_case_capacity"
+                    ),
                     reason=SemanticReason.CASE_CAPACITY_EXCEEDED.value,
                     request_id=frozen.lease.operation_id,
                 )
@@ -4486,6 +4517,19 @@ def _privacy_gated_semantic_evaluator(
                         for item in semantic_case.items
                         if item.section == "excerpt"
                     ),
+                    # The owner-approved limits and the effective limits the case was built with,
+                    # so a reader can tell whether consent or ceiling planning bound the excerpts
+                    # (issue #907 Phase 1b). Neither is proof of delivery.
+                    "semantic_excerpt_count_approved": review_selection.max_excerpts,
+                    "semantic_excerpt_byte_approved": review_selection.max_total_excerpt_bytes,
+                    "semantic_excerpt_count_limit": planned_selection.max_excerpts,
+                    # A third cause: excerpts the approved selection lost so the case fits its
+                    # aggregate item bound, before any ceiling planning (not consent).
+                    "semantic_excerpt_count_cut_for_case_bound": (
+                        approved_case.excerpts_cut_for_case_bound
+                    ),
+                    "semantic_excerpt_byte_limit": planned_selection.max_total_excerpt_bytes,
+                    "semantic_excerpt_ceiling_rounds": ceiling_rounds,
                 },
             )
             if captured_local_fence_required and captured_content_scope is not None:

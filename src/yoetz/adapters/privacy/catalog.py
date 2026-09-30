@@ -583,8 +583,9 @@ def _policy_from_wire_mapping(source: dict[str, JsonValue]) -> PrivacyPolicy:
     if source.get("schema_version") in {"1.0.0", "1.1.0"} and (
         review_selection_policy_schema_version(review_selection) != "1.1.0"
     ):
-        # An older document cannot name a section its schema never had. Reading one as valid
-        # would let a forged or mis-stamped row widen what an older approval covered.
+        # An older document cannot name a section its schema never had, nor more than 16
+        # excerpts. Reading one as valid would let a forged or mis-stamped row widen what an
+        # older approval covered (issues #908, #907).
         raise ValueError("privacy_policy_row_corrupt")
     never_send = source.get("never_send")
     if never_send is None or tuple(_strings(never_send)) != _NEVER_SEND_WIRE:

@@ -2726,7 +2726,11 @@ async def test_early_planted_edit_outranks_many_captured_outputs_in_the_packet(
         dependency_digest=frozen.lease.dependency_digest,
         findings=(),
         review_context_profile=ReviewContextProfile.EXPANDED,
-        review_selection=ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED),
+        # The 16-excerpt Expanded preset, so twenty captured outputs still exceed the count cap
+        # (the 1.2.0 preset carries 64 excerpts since #907 Phase 1b).
+        review_selection=ReviewSelectionPolicy.for_profile(
+            ReviewContextProfile.EXPANDED, preset_version="1.1.0"
+        ),
         policy_id="research-evidence",
         policy_version="0.1.0",
         captured_content=resolved.content,

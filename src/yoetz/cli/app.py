@@ -1681,9 +1681,13 @@ async def _call_support(
             await client.close()
         _human_or_json(result, json_output=json_output)
         if method == "privacy_get_effective" and not json_output and sys.stdout.isatty():
-            line = _effective_task_statement_line(_plain_json(result))
-            if line is not None:
-                typer.echo(line)
+            plain = _plain_json(result)
+            for line in (
+                _effective_task_statement_line(plain),
+                _effective_excerpt_limits_line(plain),
+            ):
+                if line is not None:
+                    typer.echo(line)
         return 0
     except OSError, ProtocolValueError, ValidationError, ValueError:
         return _usage_failure()
@@ -1720,6 +1724,26 @@ def _effective_task_statement_line(value: JsonValue) -> str | None:
     except KeyError, StopIteration, TypeError:
         return None
     return "Task statement: " + text
+
+
+def _effective_excerpt_limits_line(value: JsonValue) -> str | None:
+    """The approved excerpt limits beside the current recipe's (issue #907 Phase 1b).
+
+    ``None`` when the body is not a readable effective-policy document, so the terminal never
+    guesses.
+    """
+
+    from yoetz.adapters.privacy.catalog import decode_privacy_policy_canonical
+    from yoetz.cli.privacy_setup import policy_excerpt_limits_disclosure
+    from yoetz.protocol.canonical import canonical_encode
+
+    try:
+        policy = decode_privacy_policy_canonical(
+            canonical_encode(cast(Mapping[str, JsonValue], value)["policy"])
+        )
+    except KeyError, TypeError, ValueError:
+        return None
+    return "Excerpt limits: " + policy_excerpt_limits_disclosure(policy)
 
 
 def _support_command(method: str) -> Callable[..., None]:

@@ -47,6 +47,7 @@ from yoetz.domain.privacy import (
     ReceiptPolicyBinding,
     ReceiptSecretScan,
     ReceiptTransformations,
+    ReviewSelectionPolicy,
 )
 from yoetz.observability.logging import record_unexpected_exception_without_raising
 from yoetz.observability.semantic_context import semantic_check_request
@@ -77,7 +78,7 @@ from yoetz.ports.semantic import (
     SemanticResultTimeout,
     SemanticResultUnavailable,
 )
-from yoetz.protocol.canonical import canonical_digest, canonical_encode
+from yoetz.protocol.canonical import canonical_digest, canonical_encode, strict_json_parse
 from yoetz.protocol.ids import IdKind
 
 if TYPE_CHECKING:
@@ -1041,6 +1042,15 @@ class PrivacyCoordinator:
                     privacy_proposal_id=proposal.privacy_proposal_id,
                 )
             effective, authority_digest = activated
+        if _exceeds_current_limits(proposal, effective):
+            # A proposal prepared before the policy narrowed must not reach a provider on resume:
+            # its excerpts and bytes answer to the policy in force now (issue #907 Phase 1b).
+            return SemanticEgressBlocked(
+                request_id,
+                PrivacyOutcome.BLOCKED_BY_POLICY,
+                PrivacyReason.POLICY_DENIED,
+                privacy_proposal_id=proposal.privacy_proposal_id,
+            )
         if status == "authorized":
             auth_id = state.authorization_id
             if type(auth_id) is not str:
@@ -1181,6 +1191,18 @@ class PrivacyCoordinator:
                 PrivacyReason.POLICY_DENIED,
             )
         if llm.max_tokens > 0 and minimized.token_count > llm.max_tokens:
+            return await self._complete_semantic_predispatch(
+                candidate,
+                effective,
+                PrivacyOutcome.BLOCKED_BY_POLICY,
+                PrivacyReason.POLICY_DENIED,
+            )
+        # The approved excerpt limits are authoritative here too: a review packet with more
+        # excerpts, or more excerpt bytes, than the effective policy approved is refused whole,
+        # never trimmed to fit (issue #907 Phase 1b).
+        if candidate.purpose == _SEMANTIC_PURPOSE and not _within_excerpt_limits(
+            minimized.prepared_bytes, effective.policy.review_selection
+        ):
             return await self._complete_semantic_predispatch(
                 candidate,
                 effective,
@@ -2160,6 +2182,63 @@ class PrivacyCoordinator:
             reason,
             1,
         )
+
+
+def _exceeds_current_limits(
+    proposal: DisclosureProposal, effective: EffectivePrivacyPolicy
+) -> bool:
+    """Whether a stored review proposal is outside the excerpt limits or channel ceilings now."""
+
+    if proposal.purpose != _SEMANTIC_PURPOSE:
+        return False
+    if not _within_excerpt_limits(proposal.prepared_bytes, effective.policy.review_selection):
+        return True
+    llm = next(
+        (
+            channel
+            for channel in effective.policy.channel_policies
+            if channel.channel is EgressChannel.LLM_INFERENCE
+        ),
+        None,
+    )
+    return llm is not None and (
+        0 < llm.max_bytes < len(proposal.prepared_bytes) or 0 < llm.max_tokens < proposal.max_tokens
+    )
+
+
+def _within_excerpt_limits(prepared: bytes, selection: ReviewSelectionPolicy) -> bool:
+    """Whether a prepared review packet stays inside the approved excerpt count and bytes.
+
+    Counted off the exact bytes that would leave, from the packet's own ``excerpt`` rows; a
+    document without item rows carries no excerpt. A document this cannot read is outside the
+    limits: the check fails closed.
+    """
+
+    try:
+        document = strict_json_parse(prepared)
+    except Exception:  # noqa: BLE001 - any unreadable packet fails closed
+        return False
+    if not isinstance(document, dict):
+        return False
+    rows = cast(dict[str, object], document).get("items", [])
+    if not isinstance(rows, list):
+        return False
+    sizes: list[int] = []
+    for row in cast(list[object], rows):
+        if not isinstance(row, dict):
+            return False
+        fields = cast(dict[str, object], row)
+        if fields.get("section") != "excerpt":
+            continue
+        size = fields.get("content_bytes")
+        if type(size) is not int:
+            return False
+        sizes.append(size)
+    return (
+        len(sizes) <= selection.max_excerpts
+        and all(size <= selection.max_excerpt_bytes for size in sizes)
+        and sum(sizes) <= selection.max_total_excerpt_bytes
+    )
 
 
 def _scope_digest(scope: AuthorizationScope) -> str:

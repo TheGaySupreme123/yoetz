@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -113,6 +113,7 @@ from yoetz.protocol.canonical import canonical_digest, canonical_encode
 from yoetz.protocol.coverage import EvidenceImmutability
 from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.models import DataCategory, SemanticReason, SemanticStatus
+from yoetz.service.semantic_ceiling import ChannelAdmission
 
 _TASK = "tsk_53000000-0000-4000-8000-000000000001"
 _SESSION = "ses_53000000-0000-4000-8000-000000000001"
@@ -612,6 +613,11 @@ async def test_ready_semantic_content_resolution_and_fence_use_observation_works
     assert built[0]["semantic_diff_parts_resolved"] == 0
     assert built[0]["semantic_diff_excerpts_selected"] == 0
     assert built[0]["semantic_excerpt_bytes_selected"] >= 0
+    # The approved Assisted limits ride beside the selection counts (issue #907 Phase 1b).
+    assert built[0]["semantic_excerpt_count_approved"] == 16
+    assert built[0]["semantic_excerpt_byte_approved"] == 131_072
+    assert built[0]["semantic_excerpt_count_limit"] == 16
+    assert built[0]["semantic_excerpt_byte_limit"] == 131_072
 
 
 async def _durable_semantic_case(
@@ -1588,6 +1594,333 @@ async def test_task_statement_gap_or_item_reaches_the_final_evaluation(
         assert {"task_statement_not_authorized", "task_statement_unavailable"} <= set(
             result.case_content_gaps
         )
+
+
+def _excerpt_heavy_frozen(count: int, description: str) -> FrozenCase:
+    """A frozen case whose completion claim cites ``count`` evidence records (issue #907)."""
+
+    from yoetz.protocol.coverage import EvidenceImmutability
+
+    evidence: dict[EvidenceId, EvidenceProjectionRecord] = {}
+    for index in range(1, count + 1):
+        evidence[evd(index)] = evidence_record(
+            EvidenceRecordedPayload(
+                evidence_id=evd(index),
+                evidence_kind=EvidenceKind.TEST_RESULT,
+                strength=EvidenceImmutability.METADATA_ONLY,
+                observed_at=timestamp_from_string("2026-07-01T00:00:00.000Z"),
+                description=description,
+            ),
+            index + 3,
+        )
+    claim = record(
+        ClaimRecordedPayload(
+            clm(1), ClaimKind.COMPLETION, "Work is complete", tuple(evidence), obligation_refs=()
+        ),
+        3,
+    )
+    case = make_case(
+        plans={1: plan_record(PlanPublishedPayload(1, "Ship it", ()), 1)},
+        claims={clm(1): claim},
+        evidence=evidence,
+        extra_refs=(clm(1), *evidence),
+    )
+    return replace(_frozen(), case=case)
+
+
+def _with_channel_ceiling(monkeypatch: pytest.MonkeyPatch, limit: int) -> None:
+    """Stand in for an enabled channel's ceiling; the fixture policy keeps its channel off.
+
+    ``channel_prepared_limit`` itself is covered in ``tests/unit/service/test_semantic_ceiling.py``.
+    """
+
+    def fixed_limit(policy: object) -> int:
+        del policy
+        return limit
+
+    monkeypatch.setattr(ready_composition_module, "channel_prepared_limit", fixed_limit)
+    _with_full_admission(monkeypatch)
+
+
+def _with_full_admission(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stand in for an enabled channel that releases every category it is offered."""
+
+    def every_category(
+        policy: object, bindings: Iterable[ProviderBinding | None]
+    ) -> ChannelAdmission:
+        del policy, bindings
+        return ChannelAdmission(
+            frozenset(DataCategory),
+            frozenset(DataClass) - {DataClass.SECRET_OR_CRYPTOGRAPHIC},
+        )
+
+    monkeypatch.setattr(ready_composition_module, "channel_admission", every_category)
+
+
+def _prepared_size(candidate: CandidateContext) -> int:
+    from yoetz.application.semantic_case import assemble_filtered_review_packet
+    from yoetz.protocol.canonical import strict_json_parse
+
+    envelope = next(item.plaintext for item in candidate.items if item.item_id == "review-packet")
+    return len(
+        assemble_filtered_review_packet(
+            cast(dict[str, object], strict_json_parse(envelope)),
+            content_by_id={item.item_id: item.plaintext for item in candidate.items},
+            included_item_ids={item.item_id for item in candidate.items},
+        )
+    )
+
+
+@pytest.mark.anyio
+async def test_expanded_1_2_0_counters_show_the_protocol_maximum_not_16(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #907 Phase 1b: 40 small items are all selected; the count limit reads 64."""
+
+    monkeypatch.setattr(diagnostics_module, "log_dir", lambda: tmp_path)
+    privacy = _Privacy(profile=ReviewContextProfile.EXPANDED)
+    privacy.terminal_provider_result = True
+    _with_channel_ceiling(monkeypatch, 262_144)
+
+    await _evaluator(privacy, lambda: _PROVIDER, _route())(
+        _excerpt_heavy_frozen(40, "test run: 12 passed, 0 failed"), ()
+    )
+
+    assert privacy.calls == 1
+    [built] = [row for row in _records(tmp_path) if row["operation"] == "semantic_case_built"]
+    assert built["semantic_excerpts_selected"] == 40
+    assert built["semantic_excerpt_count_limit"] == 64
+    assert built["semantic_excerpt_byte_limit"] == 131_072
+    assert built["semantic_excerpt_ceiling_rounds"] == 0
+    assert built["semantic_excerpt_count_cut_for_case_bound"] == 0
+
+
+@pytest.mark.anyio
+async def test_a_case_over_the_channel_ceiling_is_planned_below_it_and_disclosed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #907 Phase 1b: more excerpts must not turn a runnable review into a denied one.
+
+    Quote-heavy excerpts cost about twice their bytes once escaped, so 64 selectable excerpts
+    would prepare a packet over 262,144 bytes that egress refuses whole. The case is rebuilt with
+    a smaller excerpt byte budget instead, the dropped excerpts are disclosed as
+    ``content_unselected``, and a replay builds the identical case.
+    """
+
+    monkeypatch.setattr(diagnostics_module, "log_dir", lambda: tmp_path)
+    # About 8 KB per excerpt once escaped: excerpts carry their approved bytes rather than a 4 KiB
+    # structural clip since #907 Phase 1a, so the fixture carries 4 KB of quotes itself.
+    frozen = _excerpt_heavy_frozen(64, '"' * 4_000)
+    digests: list[str] = []
+    for _attempt in range(2):
+        privacy = _Privacy(profile=ReviewContextProfile.EXPANDED)
+        privacy.terminal_provider_result = True
+        _with_channel_ceiling(monkeypatch, 262_144)
+
+        result = await _evaluator(privacy, lambda: _PROVIDER, _route())(frozen, ())
+
+        assert privacy.calls == 1
+        [candidate] = privacy.candidates
+        assert _prepared_size(candidate) <= 262_144
+        assert "content_unselected" in result.case_content_gaps
+        digests.append(str(candidate.subject_digest))
+    built = [row for row in _records(tmp_path) if row["operation"] == "semantic_case_built"]
+    assert len(built) == 2
+    assert all(1 <= cast(int, row["semantic_excerpt_ceiling_rounds"]) <= 4 for row in built)
+    assert all(16 < cast(int, row["semantic_excerpts_selected"]) < 64 for row in built)
+    # Consent approved 64 excerpts and 128 KiB; the planner, not the owner, set the narrower
+    # effective byte limit, and the diagnostics keep the two apart (R944-03).
+    assert all(row["semantic_excerpt_count_approved"] == 64 for row in built)
+    assert all(row["semantic_excerpt_byte_approved"] == 131_072 for row in built)
+    assert all(cast(int, row["semantic_excerpt_byte_limit"]) < 131_072 for row in built)
+    assert digests[0] == digests[1]
+
+
+def _prose_heavy_frozen(
+    excerpts: int, unsupported_claims: int
+) -> tuple[FrozenCase, tuple[Finding, ...]]:
+    """Unsupported claims whose findings carry 4 KiB clipped summary and detail prose, beside one
+    claim that ``excerpts`` 2,000-byte evidence rows support (the R944-01 trigger)."""
+
+    from yoetz.protocol.coverage import EvidenceImmutability
+
+    evidence: dict[EvidenceId, EvidenceProjectionRecord] = {}
+    for index in range(1, excerpts + 1):
+        evidence[evd(index)] = evidence_record(
+            EvidenceRecordedPayload(
+                evidence_id=evd(index),
+                evidence_kind=EvidenceKind.TEST_RESULT,
+                strength=EvidenceImmutability.METADATA_ONLY,
+                observed_at=timestamp_from_string("2026-07-01T00:00:00.000Z"),
+                description="e" * 2_000,
+            ),
+            index + 30,
+        )
+    claims = {
+        clm(1): record(
+            ClaimRecordedPayload(
+                clm(1),
+                ClaimKind.COMPLETION,
+                "Work is complete",
+                tuple(evidence),
+                obligation_refs=(),
+            ),
+            3,
+        )
+    }
+    for number in range(2, unsupported_claims + 2):
+        claims[clm(number)] = record(
+            ClaimRecordedPayload(
+                clm(number), ClaimKind.COMPLETION, f"Claim {number}", (), obligation_refs=()
+            ),
+            number + 3,
+        )
+    case = make_case(
+        plans={1: plan_record(PlanPublishedPayload(1, "Ship it", ()), 1)},
+        claims=claims,
+        evidence=evidence,
+        extra_refs=(*claims, *evidence),
+    )
+    assessments, _ = run_deterministic_policies(
+        case, CheckScope((), ()), ("research-evidence/0.1.0", "work-integrity/0.1.0")
+    )
+    findings = tuple(
+        replace(finding, summary="s" * 8_192, detail="d" * 8_192)
+        for finding in allocate_findings(
+            _FindingIds(),
+            tuple(item.candidate for item in assessments),
+            prior_finding_ids(case.projection),
+        )
+    )
+    return replace(_frozen(), case=case), findings
+
+
+@pytest.mark.anyio
+async def test_excerpts_cut_for_the_case_bound_are_their_own_diagnostic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R944-01: the cut is reported apart from consent (approved) and planning (rounds, limit)."""
+
+    monkeypatch.setattr(diagnostics_module, "log_dir", lambda: tmp_path)
+    privacy = _Privacy(profile=ReviewContextProfile.EXPANDED)
+    privacy.terminal_provider_result = True
+    _with_channel_ceiling(monkeypatch, 262_144)
+    frozen, findings = _prose_heavy_frozen(64, 18)
+
+    result = await _evaluator(privacy, lambda: _PROVIDER, _route())(frozen, findings)
+
+    assert result.reason is not SemanticReason.COORDINATOR_FAILURE
+    assert privacy.calls == 1
+    assert "content_unselected" in result.case_content_gaps
+    [built] = [row for row in _records(tmp_path) if row["operation"] == "semantic_case_built"]
+    assert built["semantic_excerpt_count_approved"] == 64
+    assert cast(int, built["semantic_excerpt_count_cut_for_case_bound"]) > 0
+
+
+@pytest.mark.anyio
+async def test_fixed_material_over_the_case_bound_is_a_capacity_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without excerpts to cut, 32 findings' prose over the case bound is a typed refusal."""
+
+    monkeypatch.setattr(diagnostics_module, "log_dir", lambda: tmp_path)
+    privacy = _Privacy(profile=ReviewContextProfile.EXPANDED)
+    _with_channel_ceiling(monkeypatch, 262_144)
+    # The completion claim has no evidence either, so 31 unsupported claims give 32 findings.
+    frozen, findings = _prose_heavy_frozen(0, 31)
+    assert len(findings) == 32
+
+    result = await _evaluator(privacy, lambda: _PROVIDER, _route())(frozen, findings)
+
+    assert (result.status, result.reason) == (
+        SemanticStatus.FAILED,
+        SemanticReason.CASE_CAPACITY_EXCEEDED,
+    )
+    assert privacy.calls == 0
+    _assert_record(
+        tmp_path,
+        "semantic_not_dispatched_case_capacity",
+        SemanticReason.CASE_CAPACITY_EXCEEDED,
+    )
+
+
+@pytest.mark.anyio
+async def test_the_planner_sizes_only_what_the_channel_releases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R944-02: excerpts the channel withholds cannot push the case over its ceiling.
+
+    The same quote-heavy case that is planned down above is left whole when the channel releases
+    only structural metadata: local minimization removes the excerpt bytes before egress, so they
+    must not be traded away to fit a ceiling they never reach.
+    """
+
+    monkeypatch.setattr(diagnostics_module, "log_dir", lambda: tmp_path)
+    privacy = _Privacy(profile=ReviewContextProfile.EXPANDED)
+    privacy.terminal_provider_result = True
+    _with_channel_ceiling(monkeypatch, 262_144)
+    seen: list[tuple[ProviderBinding | None, ...]] = []
+
+    def structural_only(
+        policy: object, bindings: Iterable[ProviderBinding | None]
+    ) -> ChannelAdmission:
+        del policy
+        seen.append(tuple(bindings))
+        return ChannelAdmission(
+            frozenset({DataCategory.BOUNDED_STRUCTURAL_METADATA}),
+            frozenset({DataClass.PUBLIC_STRUCTURAL}),
+        )
+
+    monkeypatch.setattr(ready_composition_module, "channel_admission", structural_only)
+
+    await _evaluator(privacy, lambda: _PROVIDER, _route())(
+        _excerpt_heavy_frozen(64, '"' * 8_000), ()
+    )
+
+    assert privacy.calls == 1
+    # The admission is taken for the destinations the case can be dispatched to.
+    assert seen == [(_PROVIDER, None)]
+    [built] = [row for row in _records(tmp_path) if row["operation"] == "semantic_case_built"]
+    assert built["semantic_excerpt_ceiling_rounds"] == 0
+    assert built["semantic_excerpt_byte_limit"] == built["semantic_excerpt_byte_approved"]
+
+
+@pytest.mark.anyio
+async def test_an_unset_custom_ceiling_still_plans_below_the_disclosure_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #907 Phase 1b: zero ``max_bytes``/``max_tokens`` mean unset, not unbounded.
+
+    Without a bound the planner left a 64-excerpt case over the 262,144-byte disclosure limit,
+    and preparing it failed as a coordinator error instead of a planned, disclosed review.
+    """
+
+    monkeypatch.setattr(diagnostics_module, "log_dir", lambda: tmp_path)
+    privacy = _Privacy(profile=ReviewContextProfile.EXPANDED)
+    privacy.terminal_provider_result = True
+    store = privacy.policy_application.policy_store
+    effective = store._effective  # pyright: ignore[reportPrivateUsage]
+    custom = replace(effective.policy, review_context_profile=ReviewContextProfile.CUSTOM)
+    assert all(
+        (channel.max_bytes, channel.max_tokens) == (0, 0)
+        for channel in custom.channel_policies
+        if channel.channel is EgressChannel.LLM_INFERENCE
+    )
+    store._effective = replace(effective, policy=custom)  # pyright: ignore[reportPrivateUsage]
+    # The fixture's channel is off; an unset ceiling is about an enabled one.
+    _with_full_admission(monkeypatch)
+
+    result = await _evaluator(privacy, lambda: _PROVIDER, _route())(
+        _excerpt_heavy_frozen(64, '"' * 8_000), ()
+    )
+
+    assert result.reason is not SemanticReason.COORDINATOR_FAILURE
+    assert privacy.calls == 1
+    [candidate] = privacy.candidates
+    assert _prepared_size(candidate) <= 262_144
+    assert "content_unselected" in result.case_content_gaps
+    [built] = [row for row in _records(tmp_path) if row["operation"] == "semantic_case_built"]
+    assert cast(int, built["semantic_excerpt_ceiling_rounds"]) >= 1
 
 
 @pytest.mark.anyio

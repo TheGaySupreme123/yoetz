@@ -1574,6 +1574,20 @@ with byte-identical pages and receipts. This host uses that path unchanged. Its 
 timing on macOS, Linux and WSL 2 is not yet measured; issue #916 owns it. See
 [status render performance](status-render-performance.md).
 
+## Expanded excerpt count (issue #907 Phase 1b)
+
+Decision for Claude Code: nothing is host-specific, and the behaviour is identical on every host and OS.
+The excerpt count is a privacy-policy and review-packet limit. It is enforced by the service, not by
+hook or MCP adapters. From privacy policy 1.2.0 the Expanded recipe allows up to 64 excerpts within
+its unchanged byte budget (16 KiB each, 128 KiB in total). An Expanded policy approved earlier keeps
+16 until the owner re-approves through `yoetz --privacy`. A packet above the approved count or bytes
+is refused as `policy_denied`, never trimmed. A case that would exceed the per-case channel ceiling
+is planned with fewer excerpts and discloses `content_unselected` instead of being refused.
+`yoetz privacy show` shows the current limits beside
+the proposed ones. To go back to 16, choose Assisted or propose the earlier Expanded limits; that is
+a narrowing, so it needs no new approval. The selection order within the budget (issue #907 Phase
+1a) is recorded separately.
+
 ## Task statement for AI-powered review (issue #908)
 
 Decision for Claude Code: supported through the agent-supplied field, identical on every host and OS.

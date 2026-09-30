@@ -26,6 +26,7 @@ from pydantic import TypeAdapter
 from pydantic_core import core_schema
 
 from yoetz.protocol.canonical import JsonValue, canonical_encode
+from yoetz.protocol.models import MAX_REVIEW_EXCERPTS
 
 __all__ = [
     "SCHEMA_NAMESPACE",
@@ -350,12 +351,15 @@ _TASK_STATEMENT_EVENT_PAIRS: Final[tuple[tuple[str, str], ...]] = (
 
 
 def _privacy_policy_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
-    """Add the ``task_statement`` review section without widening any 1.1.0 approval.
+    """Add the ``task_statement`` review section and lift the Expanded excerpt count.
 
     Goal-aware, Assisted and Expanded presets include the section from this version on;
     Structural never does, and Custom only when its owner lists it. A 1.1.0 document can never
     name the section, so an approval given before it existed is never read as covering the
     user's request (issue #908).
+
+    ``max_excerpts`` is bounded by the protocol maximum instead of 16, and the Expanded preset uses
+    it, so the unchanged byte budget binds; Assisted keeps 16 (issue #907 Phase 1b).
     """
 
     document = _simple_versioned_schema(entry, "privacy/privacy-policy-1.1.0.schema.json", {})
@@ -371,6 +375,9 @@ def _privacy_policy_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     )
     sections = cast(dict[str, JsonValue], selection_properties["sections"])
     sections["maxItems"] = len(section_enum)
+    cast(dict[str, JsonValue], selection_properties["max_excerpts"])["maximum"] = (
+        MAX_REVIEW_EXCERPTS
+    )
     for rule in cast(list[JsonValue], document["allOf"]):
         if not isinstance(rule, dict):
             continue
@@ -397,6 +404,8 @@ def _privacy_policy_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         preset_sections = cast(list[JsonValue], preset["sections"])
         preset_sections.append("task_statement")
         preset_sections.sort(key=lambda value: cast(str, value).encode("ascii"))
+        if profile.get("const") == "expanded":
+            preset["max_excerpts"] = MAX_REVIEW_EXCERPTS
     return document
 
 
@@ -404,7 +413,8 @@ def _add_task_statement_to_outbound_case(document: dict[str, JsonValue]) -> None
     """Carry the source-labelled task statement section in outbound-case 1.2.0 (issue #908).
 
     Applied on top of the #905 prior-findings additions, so the one unreleased 1.2.0 contract
-    requires both ``prior_finding_refs`` and ``task_statement_item_ids``.
+    requires both ``prior_finding_refs`` and ``task_statement_item_ids``. It also carries the
+    #907 Phase 1b excerpt count.
     """
 
     definitions = cast(dict[str, dict[str, JsonValue]], document["$defs"])
@@ -428,10 +438,16 @@ def _add_task_statement_to_outbound_case(document: dict[str, JsonValue]) -> None
         "uniqueItems": True,
     }
     packet = definitions["review_packet"]
-    cast(dict[str, JsonValue], packet["properties"])["task_statement_item_ids"] = {
-        "$ref": "#/$defs/item_id_list_1"
-    }
+    packet_properties = cast(dict[str, JsonValue], packet["properties"])
+    packet_properties["task_statement_item_ids"] = {"$ref": "#/$defs/item_id_list_1"}
     cast(list[JsonValue], packet["required"]).append("task_statement_item_ids")
+    # The excerpt count follows the protocol maximum, and the case keeps room for the other
+    # sections it had beside 16 excerpts (issue #907 Phase 1b).
+    excerpts = cast(dict[str, JsonValue], packet_properties["targeted_excerpts"])
+    excerpts["maxItems"] = MAX_REVIEW_EXCERPTS
+    properties = cast(dict[str, JsonValue], document["properties"])
+    content_items = cast(dict[str, JsonValue], properties["content_items"])
+    content_items["maxItems"] = cast(int, content_items["maxItems"]) + MAX_REVIEW_EXCERPTS - 16
 
 
 def _admit_privacy_policy_v1_2(document: dict[str, JsonValue]) -> dict[str, JsonValue]:

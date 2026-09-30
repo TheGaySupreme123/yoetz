@@ -1207,3 +1207,46 @@ a requirement both plan and diff omitted.
   the specification and wins over the plan; a plan or diff that omits a stated requirement is a
   discrepancy citing the statement; never request behaviour the statement excludes; weigh
   `agent_transcribed` as the agent's account.
+
+### The byte budget binds, not a 16-excerpt count (2026-09-30, issue #907 Phase 1b)
+
+Every observed review selected exactly 16 excerpts while using at most 30% of its approved excerpt
+bytes, so the count constant was the real limit.
+
+- `MAX_REVIEW_EXCERPTS` is 64, a protocol maximum that bounds work. `ReviewPacket.targeted_excerpts`
+  and outbound-case 1.2.0 `targeted_excerpts` take up to 64 entries. The case item bound
+  (`_MAX_CASE_ITEMS`, outbound-case `content_items`) rises by the same 48 items, so the other
+  sections keep the room they had.
+- The case builder still stops at the effective `max_excerpts`, so the Expanded 1.2.0 preset (64)
+  lets `max_total_excerpt_bytes` bind, and a policy approved under 1.1.0 still stops at 16. One
+  item per slot: excerpts are never concatenated to fit a count.
+- The excerpt budget and `SemanticCase`'s aggregate item bound (`MAX_SEMANTIC_CASE_BYTES`,
+  262,144) are independent, and 64 approved excerpts beside rich finding prose can cross the
+  aggregate bound. Before constructing the case, the builder drops the lowest-ranked excerpts until
+  it fits, each disclosed as a `not_selected` omission with `content_unselected` (and
+  `truncated_payload` when only later parts of a split excerpt go). Only a case the constructor
+  would otherwise refuse changes, so every constructible case keeps its bytes and digest. The
+  guarantee is that the excerpt selection never causes the bound to be exceeded. It does not cover
+  the rest of the case: non-excerpt items alone (for example 32 findings whose summary and detail
+  are each clipped to 4,096 bytes) can still exceed 262,144 bytes with no excerpt at all. That
+  residual is refused before dispatch as `SemanticCaseCapacityExceeded`, which composition reports
+  as `case_capacity_exceeded` (diagnostic operation `semantic_not_dispatched_case_capacity`), not
+  as a coordinator failure.
+- `semantic_case_built` diagnostics add `semantic_excerpt_count_approved` and
+  `semantic_excerpt_byte_approved` (the owner-approved selection),
+  `semantic_excerpt_count_cut_for_case_bound` (excerpts the approved selection lost to the
+  aggregate case bound, before any ceiling planning) and `semantic_excerpt_count_limit` and
+  `semantic_excerpt_byte_limit` (the effective limits the case was built with after ceiling
+  planning) beside the selected counts. A reader can tell whether consent, the case bound or
+  ceiling planning bound the excerpts, and otherwise that less material was available. None of
+  these is proof of delivery: all precede privacy minimization. `semantic_excerpt_ceiling_rounds`
+  counts the rebuilds that planning used.
+- Composition (`service/semantic_ceiling.py`) plans the case below the channel ceiling as
+  described in the ADR-009 amendment. It sizes the payload the channel releases: items whose
+  category or data class the destination's ceiling withholds (the LLM channel for an external
+  provider, the local-model ceiling for a local one, the union with a fallback) are left out of
+  the measure, because local minimization removes them before egress. The first rebuild carries no
+  excerpts, to measure the fixed part of the packet. Later rebuilds size the excerpt budget from
+  the prepared bytes each excerpt byte actually cost, since JSON escaping can multiply it.
+- The privacy side (consent, re-approval, egress denial) is recorded in the ADR-009 amendment of
+  the same date.
