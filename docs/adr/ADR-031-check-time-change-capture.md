@@ -8,12 +8,14 @@ the public seam of `src/yoetz/adapters/git_subject_state.py`, `src/yoetz/applica
 `CheckTimeChange` and `_check_time_change_reservation` in `src/yoetz/application/semantic_case.py`,
 the semantic evaluator in `src/yoetz/service/ready_composition.py`, `start`/`check` in
 `src/yoetz/application/service.py`, the task-base root in `src/yoetz/adapters/sqlite/repository.py`
-and `src/yoetz/adapters/memory/ledger.py`, and the suites `tests/unit/adapters/test_git_change_capture.py`,
+and `src/yoetz/adapters/memory/ledger.py`, the shown-file record (`CheckChangeShownFiles` in
+`src/yoetz/domain/events.py`) and resolution rule (`src/yoetz/kernel/finding_resolution.py`,
+`src/yoetz/kernel/projections.py`), and the suites `tests/unit/adapters/test_git_change_capture.py`,
 `tests/unit/application/test_semantic_case_check_change.py`,
 `tests/unit/application/test_check_time_change_facade.py`,
 `tests/integration/service/test_check_time_change.py` and the ledger conformance suite.
 **Relates to:** ADR-006 (AI-powered review packet), ADR-008 (service trust boundary), ADR-009
-(egress), ADR-011 (structural subject-state capture), and issues #883, #907, #920.
+(egress), ADR-011 (structural subject-state capture), and issues #883, #904, #907, #920.
 
 ## Context
 
@@ -98,14 +100,27 @@ content-returning read needed its own decision. This is that decision, for exact
 8. **Disclosed limits.** `check_time_change_unavailable` (selected but nothing carried),
    `check_time_change_base_unavailable`, `check_time_change_truncated` (a file or part not shown)
    and `check_time_change_redacted` join the packet and check coverage. They describe AI-powered
-   review input only, so they never weaken local absence proof. For AI-powered finding resolution
-   only `check_time_change_unavailable` is a capture baseline: a repair review that also carried
-   no change had exactly the material every review had before this decision. Truncation, redaction
-   and a HEAD base hide part of a change that did arrive, and the same code on a later check does
-   not say whether the hidden part is the one the finding was about, so they keep blocking
-   AI-powered resolution (as the capture failures of #904 do) until a rule compares the files each
-   review was shown. A check whose connection named no workspace has nothing to read and reports
-   no check-time code; its review is the review of the time before this decision.
+   review input only, so they never weaken local absence proof. A check whose connection named no
+   workspace has nothing to read and reports no check-time code; its review is the review of the
+   time before this decision.
+9. **AI-powered finding resolution compares the files each review was shown.** A completed review
+   whose packet carried the change records, on its `check_recorded` 1.3.0 event, keyed commitments
+   to the changed files it carried: `fully_shown` (the file's whole diff, unredacted and
+   untruncated) and `partially_shown` (any of it). Each commitment is the task bundle's object
+   commitment key over the change's base commit and the file's `diff --git` line, so no path is
+   recorded, the same file under the same base commits the same way in every check of a task, and
+   a file behind a HEAD that has since moved does not match. At most 128 files are recorded; past
+   that the record says it is incomplete and holds none. Replay stamps the files of the review that
+   raised an AI-powered finding (R) onto the finding's projection row. A later repair review's
+   `check_time_change_truncated`, `_redacted`, `_base_unavailable` and `_unavailable` codes are
+   tolerated for that finding exactly when every file in R reached the repair review whole (R ⊆
+   its `fully_shown`). An empty R (a raising review that carried no change, including every review
+   from before this decision) is always tolerated. A raising review that carried parts without a
+   readable record of them (0.3 development builds) leaves R unknown, which never tolerates. None
+   of these codes is a capture baseline stamped on the finding. Redacting the raising check makes R
+   unknown and reopens a resolution that depended on it; redacting the resolving check reopens it
+   as before. The relation is a pure fold over recorded checks, so the memory and SQLite ledgers
+   replay it identically.
 
 ## Consequences
 

@@ -759,12 +759,12 @@ The same prompt, result commitment and guidance serve all hosts and supported op
 A completed semantic re-review with a recorded assessable conclusion may resolve an absent issue
 while retaining the original readable finding's closed native capture limits:
 `content_unselected`, `content_capture_unavailable`, `captured_object_unavailable`,
-`host_outcome_unavailable`, `unpaired_event`, `semantic_case_content_over_item_limit`
-(recorded clipping of an oversized item), and the ADR-031 check-time change limits
-(`check_time_change_unavailable`, `check_time_change_base_unavailable`,
-`check_time_change_truncated`, `check_time_change_redacted`). Only codes already present on that
-original finding are tolerated. The check stamps the capture limits its review ran under onto every semantic finding it
-raises, so the baseline is durable finding coverage rather than the deterministic case alone.
+`host_outcome_unavailable`, `unpaired_event`, and `semantic_case_content_over_item_limit`
+(recorded clipping of an oversized item). Only codes already present on that original finding are
+tolerated. The check stamps the capture limits its review ran under onto every semantic finding it
+raises, so the baseline is durable finding coverage rather than the deterministic case alone. The
+ADR-031 check-time change limits are not baseline codes: ADR-031 decision 9 tolerates them on a
+re-review by comparing the files the raising and the re-review were shown.
 Original and current freshness must be readable (`current` or `partial`); `redacted_gap` is
 accepted only when a tolerated `captured_object_unavailable` explains it, mirroring the local
 host-limited exception. New gaps, redacted or missing ledger payloads, stale/unknown state,

@@ -35,6 +35,9 @@ reverse-chronological released versions.
   commit is recorded when `start` creates a task; limits are disclosed as
   `check_time_change_unavailable`, `check_time_change_base_unavailable`,
   `check_time_change_truncated` and `check_time_change_redacted` coverage gaps (#883, ADR-031).
+  Those limits on a later review still let it clear an AI-powered finding when every file the
+  review that raised the finding saw reached the later review whole; each check records which
+  files it showed as keyed commitments, never paths.
 - With the Codex subscription evaluator bound, the service no longer re-hashes the retained Codex
   runtime (about 359 MB on Linux) on the event loop for every observation advice cycle. Structural
   readiness is memoized by binding and file fingerprints and re-checked off the event loop only

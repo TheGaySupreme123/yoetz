@@ -6832,10 +6832,18 @@ baseline is tolerated; it does not remove any receipt coverage gap. `insufficien
 resolve a prior semantic finding. Response disposition and limitation acceptance are not proofs.
 Semantic findings carry their review's closed capture limits in their own coverage, and resolve
 only after a readable material change recorded after the finding
-(`no_material_change_since_finding` otherwise). Of the ADR-031 check-time change codes only
-`check_time_change_unavailable` is a capture baseline; `check_time_change_truncated`,
-`check_time_change_redacted` and `check_time_change_base_unavailable` stay check-only and block
-semantic absence proof.
+(`no_material_change_since_finding` otherwise). No ADR-031 check-time change code is a capture
+baseline. A semantic repair check's `check_time_change_*` codes are tolerated for a finding only by
+the shown-file rule (`check_change_limits_tolerated`): R, the raising review's shown files, must be
+a subset of the repair check's `check_change_files.fully_shown`; an empty R is always tolerated and
+an unknown R never. `FindingProjectionRecord` carries the replay-derived
+`check_change_raising_check_event_id`, `check_change_raised_files` (R; `None` while unknown) and
+`resolution_depends_on_check_event_id` (set when a resolution needed that tolerance). The raising
+check is the check whose returned finding has the same subject frontier and AI-powered review
+attempt. A raising check with a complete record gives R = its shown files; one with an incomplete
+record, or with carried-part codes but no record, gives an unknown R; any other gives an empty R.
+Redacting the raising check sets R unknown and reopens a resolution that depended on it; all three
+fields are emitted in projection snapshots only when set.
 
 
 `check_recorded` version `1.3.0` adds required `semantic_conclusion` on succeeded attempts. The
@@ -6843,7 +6851,11 @@ closed values are `no_material_discrepancy`, `challenges_returned`, and `insuffi
 Versions 1.0–1.2 keep their frozen payload shapes and read without a recorded conclusion. Only
 an explicitly assessable conclusion enables capture-baseline resolution. An unassessable
 conclusion blocks semantic absence proof even if a producer omitted its coverage-gap marker.
-Failed and local-only attempts retain their existing version. The owning schema generator and
+Failed and local-only attempts retain their existing version. Version `1.3.0` (unreleased, so
+edited in place) also admits optional `check_change_files`,
+`{"complete": bool, "fully_shown": [commitment], "partially_shown": [commitment]}`, only beside a
+conclusion: disjoint sorted `hmac-sha256` commitments, at most 128 in all, and both lists empty
+when `complete` is false (ADR-031 decision 9). The owning schema generator and
 `fixtures/canonical/check-conclusion-1.3.0.case.json` lock the new and legacy bytes.
 
 `resolution_attempt_required` is the `respond` rejection for an `acknowledged` response to a
@@ -6977,6 +6989,14 @@ diagnostic and never as text.
   bytes); leftovers backfill after every other excerpt. The case digest binds the object identity,
   content digest, base, flags and admitted part count; a case without a selected change keeps its
   historical digest input.
+- **Shown files.** `check_time_change_shown_files(capture, selection, admitted_parts)` returns each
+  `diff --git` section of the stored change that reached the admitted parts and whether it arrived
+  whole and without a `[REDACTED]` marker. `check_change_shown_files(runtime, change, selection,
+  admitted_parts)` commits each through `runtime.objects.commitment_for(..., CHANGE_CAPTURE)` over
+  the domain `yoetz/check-change-shown-file/v1`, the base commit and the line.
+  `CheckChangeCapture` and `yoetz.check-change/1` carry `base_commit`. The composition passes it to
+  `FinalSemanticEvaluation.check_change_files`, and `commit_check_if_current(...,
+  check_change_files=)` records it only beside a conclusion.
 - **Consent.** `ReviewSelectionPolicy.carries_check_time_change` (targeted excerpts, a positive
   excerpt count and the `diff` kind) is the one predicate for whether a recipe carries the change,
   and `required_categories()` then includes `repository_excerpt`. An inference channel without that
