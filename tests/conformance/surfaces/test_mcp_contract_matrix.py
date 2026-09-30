@@ -9,6 +9,7 @@ import pytest
 from jsonschema import Draft202012Validator
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from builders.readiness import with_checklist
 from yoetz.mcp import resources as resource_module
 from yoetz.mcp.descriptors import (
     ADVERTISED_SURFACE_BUDGET,
@@ -297,8 +298,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(TOOL_DESCRIPTORS) == ("policy", "strict")
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == ("policy", "strict")
     assert TOOL_DESCRIPTOR_SET_DIGEST == {
-        "policy": "sha256:d92a46a5293d9a4e4514bf08f0d1e7763d6f35a65944a41808d3ddaed38f17a4",
-        "strict": "sha256:29e02ef43b52c91b5375072e541241e47be17c91206c128262a8b6499d30d8f6",
+        "policy": "sha256:e63edce9f82599cadb1e736558143b8028aed6e04ffca1c492756094d0e907d1",
+        "strict": "sha256:9d390f49ba52005b27d31333f847b663068bffc81adc9d855dded3c6c15a92f6",
     }
     for profile, descriptors in TOOL_DESCRIPTORS.items():
         assert tuple(item.name for item in descriptors) == _EXPECTED_TOOL_NAMES
@@ -634,14 +635,16 @@ def _subscription_status_result() -> dict[str, Any]:
             "report_evidence_id": None,
             "source_identity_digest": None,
         },
-        "closure_readiness": {
-            "declared_obligation_count": "0",
-            "no_obligations_reason": None,
-            "open_obligation_count": "0",
-            "unanswered_finding_count": "1",
-            "receipt_blocking_finding_count": "1",
-            "blocking_conditions": ["findings_unanswered"],
-        },
+        "closure_readiness": with_checklist(
+            {
+                "declared_obligation_count": "0",
+                "no_obligations_reason": None,
+                "open_obligation_count": "0",
+                "unanswered_finding_count": "1",
+                "receipt_blocking_finding_count": "1",
+                "blocking_conditions": ["findings_unanswered"],
+            }
+        ),
         "privacy_projection": _subscription_privacy_projection(),
     }
 

@@ -8,6 +8,7 @@ from typing import cast
 
 import pytest
 
+from builders.readiness import with_checklist
 from yoetz.cli import project as project_cli
 from yoetz.cli.render import render_human_status
 from yoetz.domain.values import JsonValue
@@ -85,14 +86,16 @@ def _status_result() -> StatusResultModel:
                 "report_evidence_id": None,
                 "source_identity_digest": None,
             },
-            "closure_readiness": {
-                "declared_obligation_count": "0",
-                "no_obligations_reason": None,
-                "open_obligation_count": "0",
-                "unanswered_finding_count": "0",
-                "receipt_blocking_finding_count": "0",
-                "blocking_conditions": ["no_obligations_declared"],
-            },
+            "closure_readiness": with_checklist(
+                {
+                    "declared_obligation_count": "0",
+                    "no_obligations_reason": None,
+                    "open_obligation_count": "0",
+                    "unanswered_finding_count": "0",
+                    "receipt_blocking_finding_count": "0",
+                    "blocking_conditions": ["no_obligations_declared"],
+                }
+            ),
             "privacy_projection": {
                 "sink": "agent_context",
                 "local_disclosure_receipt_id": "egr_69000000-0000-4000-8000-000000000006",

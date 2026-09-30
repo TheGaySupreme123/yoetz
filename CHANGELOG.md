@@ -22,6 +22,22 @@ reverse-chronological released versions.
   cursor), filtering before it builds them, instead of every row in the task. Dogfood evidence per
   host remains tracked in #914.
 
+- `status` now tells an agent whether anything is left to do. `closure_readiness` carries a
+  `state` and splits what bounds a completion conclusion into `agent_actionable` work,
+  `standing_limitations` that the host, capture profile or privacy policy always has, and
+  `acknowledged_not_done` items. When only standing limitations remain, `state` is
+  `ready_with_limitations` and MCP text, the CLI and the terminal interface say: "Nothing further
+  to do. N standing limitation(s) and M acknowledged item(s) will be disclosed on the receipt.
+  Request the receipt." A closed, versioned table classifies every gap code, and a build-time test
+  fails on any unclassified code. Verdicts, receipt conclusions and coverage are unchanged: a
+  local-only check with limitations is still `insufficient_coverage`, and every gap is still
+  disclosed (#913). A missing AI-powered review is agent work only where the connection can run
+  one: on a strict MCP connection, which never dispatches AI-powered review, it is a standing
+  limitation even when the repository policy requires review.
+- Every `status` view now reports the same task coverage and gaps as the compact view at that
+  frontier. A results, history or evidence view no longer shows the newest record's own
+  `current / 0 gaps` beside a partial task (#913).
+
 - Codex, Claude Code and Cursor session-start context can show a fresh repository-grant snapshot
   and name the owner's missing admission command. The notice leaves route and host approval
   unconfirmed, preserves existing context and spends only spare hook time. No cross-session

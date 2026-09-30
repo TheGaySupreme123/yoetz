@@ -129,3 +129,5 @@ findings including resolved history, recheck after a repair or other material ch
 those responses or `work_closed`), then request `receipt` and publish `work_closed`.
 Observation-authored non-actionable findings need no answer. Report the closure counts and checked
 frontier, the check's AI-powered review status/reason, and the receipt's coverage limits.
+`closure_readiness.state` is the stop signal: at `ready_with_limitations` nothing further is to do,
+so request the receipt without another check; its `standing_limitations` are disclosed, never tasks.

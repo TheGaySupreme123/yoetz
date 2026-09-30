@@ -13,6 +13,7 @@ from yoetz.mcp.errors import VALIDATION_REASON_TOKENS
 from yoetz.protocol.canonical import JsonValue, ensure_canonical_value
 from yoetz.protocol.errors import PublicErrorCode, normalize_safe_details
 from yoetz.protocol.ids import IdKind, is_valid_id
+from yoetz.protocol.readiness_text import READINESS_STATES, readiness_directive
 from yoetz.protocol.recovery import (
     RecoveryDirective,
     continuation_for_semantic_outcome,
@@ -39,6 +40,7 @@ _VALIDATION_POINTER: Final = re.compile(
 _MAX_NAMED_VALIDATION_LOCATIONS: Final = 2
 _SAFE_TOKEN: Final = re.compile(r"^[A-Za-z0-9_+.-]{1,128}$", re.ASCII)
 _GAP_CODE: Final = re.compile(r"^[a-z][a-z0-9_]{0,127}$", re.ASCII)
+_READINESS_ITEM: Final = re.compile(r"^(?:unclassified_gap:)?[a-z][a-z0-9_]{0,127}$", re.ASCII)
 # Closed shape for the frozen field and family tokens the repair clause may carry (issue #266).
 _FIELD_NAME: Final = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
 _SAFE_COUNT: Final = re.compile(r"^(?:0|[1-9][0-9]{0,18})$", re.ASCII)
@@ -589,9 +591,14 @@ def summary_for_status(envelope: object) -> str:
     if view == "advice":
         page = source.get("page")
         count = _item_count(page.get("items")) if isinstance(page, Mapping) else "unavailable"
-        return _bounded(
+        text = (
             f"Status view: advice; {_frontier_clause(source)}; advice items: {count}; "
             "Read the structured page for coordination selectors and bounded resource details."
+        )
+        # Every view carries the closure checklist, so every view names its state (#913).
+        return _bounded(
+            text
+            + _closure_clause(source, byte_budget=_MAX_SUMMARY_BYTES - len(text.encode("ascii")))
         )
     freshness, obligations, unanswered, receipt_blocking = _compact_status_fields(source, view)
     gaps = _item_count(source.get("gaps"))
@@ -610,6 +617,9 @@ def summary_for_status(envelope: object) -> str:
     suffix = (
         f"unanswered findings: {unanswered}; "
         f"receipt-blocking findings: {receipt_blocking}; reported gaps: {gaps}."
+    )
+    suffix += _closure_clause(
+        source, byte_budget=_MAX_SUMMARY_BYTES - len((prefix + suffix).encode("ascii"))
     )
     obligation_ids = _obligation_ids_from_status(source, view)
     clause = _bounded_list_clause(
@@ -660,6 +670,72 @@ def _evidence_channel_clause(source: Mapping[str, JsonValue]) -> str:
     return f"evidence rows: {_item_count(rows)} ({', '.join(parts) or 'none'}); "
 
 
+def _readiness_tokens(readiness: Mapping[str, JsonValue], key: str) -> tuple[str, ...]:
+    raw = readiness.get(key)
+    if not isinstance(raw, list | tuple):
+        return ()
+    values = cast(Sequence[object], raw)
+    return tuple(
+        value
+        for value in values
+        if type(value) is str and _READINESS_ITEM.fullmatch(value) is not None
+    )
+
+
+def _closure_clause(source: Mapping[str, JsonValue], *, byte_budget: int) -> str:
+    """Name the closure-readiness state and its frozen directive (issue #913, ADR-032).
+
+    Only the closed state token, service counts and classified gap or condition tokens appear.
+    The first variant that fits the remaining budget wins. ``ready_with_limitations`` always keeps
+    the owner-approved stop sentence whole and shrinks the named limitations first; for
+    ``action_required`` the named items are the instruction, so they outrank the generic sentence.
+    """
+
+    readiness = source.get("closure_readiness")
+    if not isinstance(readiness, Mapping):
+        return ""
+    typed = cast(Mapping[str, JsonValue], readiness)
+    state = typed.get("state")
+    if type(state) is not str or state not in READINESS_STATES:
+        return ""
+    standing = _readiness_tokens(typed, "standing_limitations")
+    acknowledged = _safe_count(typed.get("acknowledged_not_done_count"))
+    if acknowledged == "unavailable":
+        return ""
+    head = f" Closure: {state}."
+    directive = (
+        head + " " + readiness_directive(state, standing=len(standing), acknowledged=acknowledged)
+    )
+
+    def listed(base: str, label: str, values: tuple[str, ...]) -> str:
+        budget = byte_budget - len(base.encode("ascii")) - 1
+        clause = _bounded_list_clause(label, values, byte_budget=budget)
+        return base + " " + clause.removesuffix("; ") + "." if clause else ""
+
+    variants: list[str] = []
+    if state == "action_required":
+        actionable = _readiness_tokens(typed, "agent_actionable")
+        complete = listed(directive, "Agent-actionable: ", actionable)
+        if complete and "more." not in complete:
+            variants.append(complete)
+        variants.extend((listed(head, "Agent-actionable: ", actionable), directive, head))
+    elif state == "ready_with_limitations":
+        variants.extend(
+            (
+                listed(directive, "Standing limitations: ", standing),
+                directive,
+                head + " Nothing further to do. Request the receipt.",
+                head,
+            )
+        )
+    else:
+        variants.extend((directive, head))
+    for variant in variants:
+        if variant and len(variant.encode("ascii")) <= byte_budget:
+            return variant
+    return ""
+
+
 def _operation_progress_clause(source: Mapping[str, JsonValue]) -> str:
     """Name the operation state and structural review progress with allowlisted values only."""
 
@@ -704,7 +780,11 @@ def _summary_for_multi_agent_status(source: Mapping[str, JsonValue], view: str) 
     page = source.get("page")
     prefix = f"Status view: {view}; {_frontier_clause(source)}; "
     if not isinstance(page, Mapping):
-        return _bounded(prefix + "page unavailable.")
+        text = prefix + "page unavailable."
+        return _bounded(
+            text
+            + _closure_clause(source, byte_budget=_MAX_SUMMARY_BYTES - len(text.encode("ascii")))
+        )
     lineage = page if view == "lineage" else page.get("lineage")
     if view == "project":
         project = page.get("project_id")
@@ -743,6 +823,10 @@ def _summary_for_multi_agent_status(source: Mapping[str, JsonValue], view: str) 
     suffix = "Read the structured page for child states and row identities."
     if page.get("next_cursor") is not None:
         suffix = "More pages available. " + suffix
+    # The parent's own closure checklist travels on these views too (#913).
+    suffix += _closure_clause(
+        source, byte_budget=_MAX_SUMMARY_BYTES - len((prefix + suffix).encode("ascii"))
+    )
     gap_clause = _bounded_list_clause(
         "gap codes: ",
         _safe_status_gap_codes(source),

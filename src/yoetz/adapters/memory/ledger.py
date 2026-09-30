@@ -82,6 +82,7 @@ from yoetz.domain.values import (
     timestamp_from_datetime,
     writer_id,
 )
+from yoetz.kernel.closure_readiness import ClosureReadinessFacts, closure_readiness_facts
 from yoetz.kernel.command_attempts import command_attempts
 from yoetz.kernel.completion_scope import completion_scope_codes, with_completion_scope_coverage
 from yoetz.kernel.deterministic_checks import (
@@ -2563,6 +2564,7 @@ class MemoryLedgerAdapter:
                 key=str.encode,
             )
         )
+        readiness_facts: ClosureReadinessFacts | None = None
         if view is ProjectionView.COMPACT:
             # Compact status exposes the same applicable-check fold as the item and as the
             # receipt. In particular, an observation-only suffix keeps the check attributable
@@ -2576,6 +2578,9 @@ class MemoryLedgerAdapter:
                 )
             )
             coverage = replace(compact_coverage, known_gaps=status_gaps)
+            # Derived for exactly this frontier on every request and never cached, so readiness
+            # after a restart, a reattach or an upgrade is recomputed from the recorded prefix.
+            readiness_facts = closure_readiness_facts(effective_projection, prefix)
         else:
             coverage = with_completion_scope_coverage(
                 replace(prefix[-1].coverage, known_gaps=status_gaps), effective_projection
@@ -2593,6 +2598,7 @@ class MemoryLedgerAdapter:
             status_gaps,
             next_position,
             item_sources,
+            readiness_facts,
         )
 
         return page, effective_projection, all_items

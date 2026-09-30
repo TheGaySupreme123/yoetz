@@ -904,6 +904,19 @@ SubjectIdWire = Annotated[
     ),
 ]
 CodeWire = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{0,127}$", max_length=128)]
+# One closure-readiness checklist entry: a condition token, an actionable gap code, or the
+# conservative ``unclassified_gap:<code>`` form for a code the running build does not know.
+ReadinessItemWire = Annotated[
+    str,
+    Field(pattern=r"^(?:unclassified_gap:)?[a-z][a-z0-9_]{0,127}$", max_length=145),
+]
+# An obligation or a finding the agent recorded as acknowledged, not done.
+AcknowledgedItemIdWire = Annotated[
+    str,
+    Field(
+        pattern=r"^(fnd|obl)_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    ),
+]
 HostCorrelationWire = Annotated[
     str,
     Field(
@@ -3230,6 +3243,13 @@ class StatusClosureReadinessModel(_ClosedModel):
     Advisory and derived: reading it records nothing, creates no verdict, and never strengthens
     coverage. It exists so an agent can see that a check would come back coverage-bounded instead
     of discovering it afterwards from the receipt.
+
+    ``blocking_conditions`` keeps naming everything that bounds the conclusion. The checklist
+    fields split that into what the agent can still do (``agent_actionable``), what this host,
+    profile or privacy policy always limits (``standing_limitations``, classified by the closed
+    table ``gap_classification_version`` names), and what the agent recorded as not done
+    (``acknowledged_not_done``). ``state`` is ``ready_with_limitations`` exactly when nothing is
+    left to do but the receipt will disclose limitations or acknowledged items (ADR-032).
     """
 
     declared_obligation_count: CanonicalUInt64Wire | None
@@ -3257,10 +3277,31 @@ class StatusClosureReadinessModel(_ClosedModel):
         ],
         ...,
     ]
+    # The checklist (issue #913) is emitted on every status success by this build. It is optional
+    # on the unreleased 1.4.0 wire so a result shaped by an earlier 0.3 build still validates; it
+    # is then absent as a whole, never partially present and never null.
+    state: Literal["action_required", "ready", "ready_with_limitations", "unknown"] | None = None
+    gap_classification_version: Literal["1"] | None = None
+    agent_actionable: tuple[ReadinessItemWire, ...] | None = None
+    standing_limitations: tuple[CodeWire, ...] | None = None
+    acknowledged_not_done: tuple[AcknowledgedItemIdWire, ...] | None = None
+    acknowledged_not_done_count: CanonicalUInt64Wire | None = None
+
+    optional_non_null_fields = frozenset(
+        {
+            "state",
+            "gap_classification_version",
+            "agent_actionable",
+            "standing_limitations",
+            "acknowledged_not_done",
+            "acknowledged_not_done_count",
+        }
+    )
 
     @model_validator(mode="after")
     def _validate_closure_readiness(self) -> StatusClosureReadinessModel:
         _require_unique(self.blocking_conditions, limit=8)
+        self._validate_checklist()
         # Absent counts mean the compact singleton could not be read (an unreadable task title
         # omits it). Reporting zero there would assert "nothing is open" from missing data, so
         # unknown must be null and must say so rather than look like a clean record.
@@ -3307,6 +3348,71 @@ class StatusClosureReadinessModel(_ClosedModel):
             if no_plan and (declared != 0 or self.no_obligations_reason is not None):
                 raise ValueError("closure_readiness_no_plan_blocker_mismatch")
         return self
+
+    def _validate_checklist(self) -> None:
+        checklist = (
+            self.state,
+            self.gap_classification_version,
+            self.agent_actionable,
+            self.standing_limitations,
+            self.acknowledged_not_done,
+            self.acknowledged_not_done_count,
+        )
+        if all(value is None for value in checklist):
+            return
+        if any(value is None for value in checklist):
+            raise ValueError("closure_readiness_checklist_partial")
+        state = cast(str, self.state)
+        actionable = cast(tuple[str, ...], self.agent_actionable)
+        standing = cast(tuple[str, ...], self.standing_limitations)
+        acknowledged_ids = cast(tuple[str, ...], self.acknowledged_not_done)
+        _require_unique(actionable, limit=128)
+        _require_unique(standing, limit=128)
+        _require_unique(acknowledged_ids, limit=64)
+        acknowledged = int(cast(str, self.acknowledged_not_done_count))
+        if len(acknowledged_ids) != min(acknowledged, 64):
+            raise ValueError("closure_readiness_acknowledged_count_mismatch")
+        if set(actionable) & set(standing):
+            raise ValueError("closure_readiness_group_overlap")
+        if "readiness_unknown" in self.blocking_conditions:
+            if (
+                state != "unknown"
+                or actionable != ("readiness_unknown",)
+                or standing
+                or acknowledged
+            ):
+                raise ValueError("closure_readiness_unknown_checklist_mismatch")
+            return
+        if state == "unknown" or "readiness_unknown" in actionable:
+            raise ValueError("closure_readiness_unknown_checklist_mismatch")
+        expected = (
+            "action_required"
+            if actionable
+            else "ready_with_limitations"
+            if standing or acknowledged
+            else "ready"
+        )
+        if state != expected:
+            raise ValueError("closure_readiness_state_mismatch")
+        # These conditions are always the agent's to clear; none can be classified away.
+        for condition in (
+            "obligations_open",
+            "findings_unanswered",
+            "no_plan_published",
+            "no_obligations_declared",
+            "projection_stale",
+        ):
+            if (condition in self.blocking_conditions) != (condition in actionable):
+                raise ValueError("closure_readiness_actionable_condition_mismatch")
+        receipt_condition = "receipt_findings_unresolved"
+        if receipt_condition in actionable:
+            if receipt_condition not in self.blocking_conditions:
+                raise ValueError("closure_readiness_actionable_condition_mismatch")
+        elif receipt_condition in self.blocking_conditions and not any(
+            item.startswith("fnd_") for item in acknowledged_ids
+        ):
+            # Only an acknowledgement moves a receipt-blocking finding off the agent's list.
+            raise ValueError("closure_readiness_receipt_acknowledgement_mismatch")
 
 
 class StatusRequestedItemModel(_ClosedModel):
@@ -4572,6 +4678,13 @@ _STATUS_COMMON_STRUCTURAL_POINTERS: Final = (
             "open_obligation_count",
             "unanswered_finding_count",
             "receipt_blocking_finding_count",
+            # The checklist carries only closed tokens, counts and service-minted ids (#913).
+            "state",
+            "gap_classification_version",
+            "agent_actionable/*",
+            "standing_limitations/*",
+            "acknowledged_not_done/*",
+            "acknowledged_not_done_count",
         ),
     )
 )
@@ -5255,7 +5368,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 1175:
+    if len(result) != 1181:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 

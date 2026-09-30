@@ -25,6 +25,7 @@ from yoetz.application.service import (
     ProjectionRenderMode,
     resolve_client_disclosure_sink,
 )
+from yoetz.application.status import StatusInternalResult
 from yoetz.config.models import LoggingConfig, YoetzConfig
 from yoetz.domain.observation import (
     ObservationContentChunk,
@@ -72,6 +73,7 @@ from yoetz.protocol.models import (
     StartRequest,
     StartResult,
     StatusRequest,
+    StatusSuccessModel,
 )
 from yoetz.service.client import _connected_client  # pyright: ignore[reportPrivateUsage]
 from yoetz.service.confidential_protocol import (
@@ -1509,6 +1511,83 @@ async def test_connected_service_client_accepts_coordination_check_pack() -> Non
 
         assert caught.value.reason == "response_projection_failed"
         assert application.check_requests == [request]
+    finally:
+        if service_client is not None:
+            await service_client.close()
+        server_task.cancel()
+        await asyncio.gather(server_task, return_exceptions=True)
+        await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_connected_status_carries_the_serving_route_into_closure_readiness() -> None:
+    """PR #937 review F1 over the real client and control wire (issue #913, ADR-018).
+
+    A strict MCP bridge cannot dispatch AI-powered review, so under a ``required`` policy the
+    missing review is a standing limitation on its status read; a policy-route read of the same
+    ledger still owes it. The route must survive the client, the frame and the daemon handler.
+    """
+
+    from integration.application import test_closure_readiness_checklist as checklist
+
+    session, _checked = await checklist._bandit_b(  # pyright: ignore[reportPrivateUsage]
+        "memory", semantic="required"
+    )
+    daemon, application, _vault, _listener = _daemon()
+    routes: list[object] = []
+    fallback_projection = application.project_result_for_client
+
+    async def status(
+        request: object,
+        *,
+        route_profile: McpRouteProfile | None = None,
+        repository_privacy_context: RepositoryPrivacyContext | None = None,
+    ) -> StatusInternalResult:
+        assert repository_privacy_context is None
+        assert isinstance(request, StatusRequest)
+        routes.append(route_profile)
+        return await session.app.status(request, route_profile=route_profile)
+
+    async def project(
+        context: ClientProjectionContext, binding: ControlProjectionBinding, result: object
+    ) -> ProjectedControlBody:
+        if binding.method is ControlMethod.STATUS:
+            assert type(result) is StatusInternalResult
+            return checklist.public_status(result)
+        return await fallback_projection(context, binding, result)
+
+    application.status = status  # type: ignore[method-assign]
+    application.project_result_for_client = project  # type: ignore[method-assign]
+    await daemon.start()
+    client_stream, server_stream = _connected_control_pair()
+    server_task = asyncio.create_task(daemon._serve_control_connection(server_stream))  # pyright: ignore[reportPrivateUsage]
+    service_client = None
+    try:
+        handshake = await client_handshake(client_stream, ControlClientKind.MCP_BRIDGE, "0.3.0")
+        service_client = _connected_client(  # pyright: ignore[reportPrivateUsage]
+            client_stream,  # pyright: ignore[reportArgumentType]
+            handshake,
+            ControlClientKind.MCP_BRIDGE,
+        )
+        states: dict[str, tuple[str | None, tuple[str, ...] | None]] = {}
+        for route in ("strict", "policy"):
+            result = (
+                await service_client.status(
+                    session.status_request(), deadline_ms=3_000, route_profile=route
+                )
+            ).root
+            assert type(result) is StatusSuccessModel
+            readiness = result.closure_readiness
+            states[route] = (readiness.state, readiness.agent_actionable)
+            if route == "strict":
+                assert readiness.standing_limitations is not None
+                assert "semantic_review_not_requested" in readiness.standing_limitations
+
+        assert routes == ["strict", "policy"]
+        assert states == {
+            "strict": ("ready_with_limitations", ()),
+            "policy": ("action_required", ("semantic_review_not_requested",)),
+        }
     finally:
         if service_client is not None:
             await service_client.close()

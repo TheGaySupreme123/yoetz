@@ -17,6 +17,7 @@ from yoetz.protocol.models import (
     ReceiptSuccessModel,
     StatusAdvicePageModel,
     StatusCheckAdmissionModel,
+    StatusClosureReadinessModel,
     StatusEvidencePageModel,
     StatusFindingsPageModel,
     StatusLineagePageModel,
@@ -27,6 +28,7 @@ from yoetz.protocol.models import (
     StatusSemanticProgressModel,
     StatusSuccessModel,
 )
+from yoetz.protocol.readiness_text import readiness_directive
 from yoetz.protocol.recovery import (
     RecoveryDirective,
     TimeoutOperationKind,
@@ -43,6 +45,7 @@ __all__ = [
     "error_recovery_json",
     "local_recovery_json",
     "recovery_directive_json",
+    "render_closure_readiness_lines",
     "render_error_recovery_lines",
     "render_hook_recovery_suffix",
     "render_human_awaiting_human",
@@ -276,6 +279,45 @@ def render_check_admission_lines(admission: StatusCheckAdmissionModel) -> tuple[
     )
 
 
+def render_closure_readiness_lines(readiness: StatusClosureReadinessModel) -> tuple[str, ...]:
+    """Render the closure checklist: its state, the frozen directive, and each named group.
+
+    Shared by the CLI and the terminal interface. Only the closed state token, service counts,
+    classified gap or condition tokens and service-minted item ids appear (issue #913). An
+    acknowledged item is listed as not done; it is never rendered as resolved.
+    """
+
+    if type(readiness) is not StatusClosureReadinessModel:
+        raise TypeError("status_closure_readiness_invalid")
+    if (
+        readiness.state is None
+        or readiness.agent_actionable is None
+        or readiness.standing_limitations is None
+        or readiness.acknowledged_not_done is None
+        or readiness.acknowledged_not_done_count is None
+    ):
+        return ()  # A result shaped by an earlier build carries no checklist.
+    lines = [
+        f"Closure: {readiness.state}",
+        readiness_directive(
+            readiness.state,
+            standing=len(readiness.standing_limitations),
+            acknowledged=readiness.acknowledged_not_done_count,
+        ),
+    ]
+    if readiness.agent_actionable and readiness.state != "unknown":
+        lines.append("Agent-actionable: " + ", ".join(readiness.agent_actionable))
+    if readiness.standing_limitations:
+        lines.append("Standing limitations: " + ", ".join(readiness.standing_limitations))
+    if readiness.acknowledged_not_done:
+        listed = ", ".join(readiness.acknowledged_not_done)
+        hidden = int(readiness.acknowledged_not_done_count) - len(readiness.acknowledged_not_done)
+        lines.append(
+            "Acknowledged, not done: " + listed + (f" (+{hidden} more)" if hidden > 0 else "")
+        )
+    return tuple(lines)
+
+
 def render_human_status(result: StatusSuccessModel) -> str:
     """Render current structural status without dumping the ledger."""
 
@@ -290,6 +332,7 @@ def render_human_status(result: StatusSuccessModel) -> str:
             "Receipt-blocking findings: "
             f"{_count(result.closure_readiness.receipt_blocking_finding_count)}"
         ),
+        *render_closure_readiness_lines(result.closure_readiness),
     ]
     if isinstance(result.page, StatusOperationPageModel):
         lines.extend((f"Operation: {result.page.operation_request_id} ({result.page.state})",))

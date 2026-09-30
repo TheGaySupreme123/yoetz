@@ -1191,6 +1191,29 @@ recorded repair still gets its re-check. Which conditions raise the advisory, an
 the ledger rule on the memory and SQLite backends; a live Claude Code dogfood transcript on macOS,
 Linux and WSL 2 is not yet recorded. That gap is owned by issue #911.
 
+### Closure readiness and standing limitations (#913)
+
+Claude Code's reviewed pairing contract is post-only, so its observations carry no synthetic
+`unpaired_event`, and `PostToolUseFailure` records a failed call. Its standing set therefore
+depends on the capture profile and privacy policy rather than on pairing: content selection and
+capture limits (`content_unselected`, `content_capture_unavailable`, `content_redacted`), the
+AI-powered review bounds when a review ran, and `semantic_review_not_requested` on a local-only
+route. A finished session whose remaining conditions are only standing reads
+`ready_with_limitations`.
+
+Classification is service-side and host-agnostic: the closed table in ADR-032 assigns each code
+once, a code the running build does not know stays agent-actionable as `unclassified_gap:<code>`,
+and nothing is removed from `known_gaps` or the receipt. `semantic_review_not_requested` is
+standing on a local-only or optional route and on the strict MCP route (which never dispatches
+AI-powered review), and agent-actionable only when the verification policy requires AI-powered
+review, the serving route can dispatch it, and none has succeeded since the last material change. At
+`closure_readiness.state: ready_with_limitations` the agent requests the receipt without another
+check; the receipt conclusion is unchanged (a local-only check stays `insufficient_coverage`).
+
+X-HOST evidence: the derivation is covered by service-side contract tests over a Codex-shaped
+ledger replay; a dogfood transcript on this host across macOS, Linux and WSL 2 has not been
+recorded yet. That gap is owned by issue #913.
+
 ### Bounded workflow recovery examples (#613)
 
 These examples use the existing MCP operations on the pinned local Claude Code cell. Replace

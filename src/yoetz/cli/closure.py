@@ -228,7 +228,9 @@ async def prepare_closure(
     output: dict[str, JsonValue] = {
         "preparatory_only": True,
         "frontier": cast(JsonValue, frontier),
-        "closure_readiness": cast(JsonValue, compact.closure_readiness.model_dump(mode="json")),
+        "closure_readiness": cast(
+            JsonValue, compact.closure_readiness.model_dump(mode="json", exclude_unset=True)
+        ),
         "inventory": cast(JsonValue, inventory),
         "request": None,
         "notes": [

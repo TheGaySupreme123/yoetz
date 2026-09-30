@@ -35,6 +35,11 @@ from yoetz.domain.values import (
     format_rfc3339_millis,
     repository_grant_continuation,
 )
+from yoetz.kernel.closure_readiness import (
+    GAP_CLASSIFICATION_VERSION,
+    derive_closure_readiness,
+    live_lineage_blockers,
+)
 from yoetz.kernel.deterministic_checks import (
     DeterministicAssessment,
     build_deterministic_case,
@@ -1110,6 +1115,8 @@ def _unknown_structural_coverage() -> Coverage:
 
 
 def _readiness_unknown() -> StatusClosureReadinessModel:
+    # Unknown is never "nothing to do": the one checklist entry is to read status again once the
+    # projection can be read.
     return StatusClosureReadinessModel(
         declared_obligation_count=None,
         no_obligations_reason=None,
@@ -1117,7 +1124,32 @@ def _readiness_unknown() -> StatusClosureReadinessModel:
         unanswered_finding_count=None,
         receipt_blocking_finding_count=None,
         blocking_conditions=("readiness_unknown",),
+        state="unknown",
+        gap_classification_version=GAP_CLASSIFICATION_VERSION,
+        agent_actionable=("readiness_unknown",),
+        standing_limitations=(),
+        acknowledged_not_done=(),
+        acknowledged_not_done_count="0",
     )
+
+
+def _semantic_review_required(
+    app: object, route_profile: Literal["policy", "strict"] | None
+) -> bool:
+    """True only when the serving route can and must run AI-powered review.
+
+    That is the one route on which ``semantic_review_not_requested`` stays agent-actionable
+    (ADR-032). A composition without a verification policy never makes it actionable. A strict
+    MCP process never dispatches AI-powered review (ADR-018; ``execute_check`` requests the
+    semantic capability only on the policy route), so there the missing review is a route-side
+    limitation the owner lifts by serving the policy route, not something the agent can do.
+    Callers without a route (CLI, TUI, closure preparation) check on the policy route.
+    """
+
+    if route_profile == "strict":
+        return False
+    policy = getattr(app, "verification_policy", None)
+    return getattr(policy, "semantic", None) == "required"
 
 
 async def _closure_readiness(
@@ -1127,6 +1159,8 @@ async def _closure_readiness(
     request_id: str | None = None,
     *,
     lineage_gaps: tuple[str, ...] = (),
+    semantic_review_required: bool = False,
+    check_in_flight: bool = False,
 ) -> StatusClosureReadinessModel:
     """Derive what currently bounds a completion conclusion, from the compact projection.
 
@@ -1143,6 +1177,9 @@ async def _closure_readiness(
     ``readiness_unknown`` — the same honest answer a lagging projection already produces — and
     leaves a bounded diagnostic, rather than raising into the daemon as an unbounded internal
     error on a read that changed nothing.
+
+    The checklist split (ADR-032) is derived here, per request, from the page's own gaps and
+    readiness facts; nothing about it is cached across frontiers or recorded.
     """
 
     if compact_page is not None:
@@ -1174,12 +1211,23 @@ async def _closure_readiness(
             return _readiness_unknown()
         declared_obligations = int(item.declared_obligation_count)
         open_obligations = int(item.open_obligation_count)
+        # "Is this finding still unanswered" has one source: the compact row's count from
+        # yoetz.kernel.projections.unanswered_finding_count. Readiness never recounts findings.
         unanswered_findings = int(item.unanswered_finding_count)
         receipt_blocking_findings = int(item.receipt_blocking_finding_count)
         has_plan = item.current_plan_event_id is not None
         no_obligations_reason = item.no_obligations_reason
         stale = page.rebuild_state != "current" or bool(page.lag)
-        declared_gaps = bool(page.gaps or lineage_gaps)
+        # Recorded gaps (the ones a receipt folds) are classified; live lineage tokens that no
+        # recorded evaluation carries yet cannot be promised as receipt disclosures (#913).
+        gap_markers = tuple(page.gaps)
+        live_blockers = live_lineage_blockers(lineage_gaps, gap_markers)
+        declared_gaps = bool(gap_markers or lineage_gaps)
+        facts = page.readiness_facts
+        if facts is None:
+            # Without the per-request facts readiness cannot tell whether a check applies or an
+            # item was acknowledged; "done" would be manufactured out of missing data.
+            return _readiness_unknown()
     except (AttributeError, IndexError, TypeError, ValueError) as exc:
         record_unexpected_exception_without_raising(
             exc,
@@ -1203,12 +1251,26 @@ async def _closure_readiness(
         blocking.append("projection_stale")
     if declared_gaps:
         blocking.append("coverage_gaps_declared")
+    checklist = derive_closure_readiness(
+        blocking,
+        gap_markers,
+        facts,
+        semantic_review_required=semantic_review_required,
+        check_in_flight=check_in_flight,
+        live_blockers=live_blockers,
+    )
     return StatusClosureReadinessModel(
         declared_obligation_count=str(declared_obligations),
         no_obligations_reason=no_obligations_reason,
         open_obligation_count=str(open_obligations),
         unanswered_finding_count=str(unanswered_findings),
         receipt_blocking_finding_count=str(receipt_blocking_findings),
+        state=checklist.state,
+        gap_classification_version=GAP_CLASSIFICATION_VERSION,
+        agent_actionable=checklist.agent_actionable,
+        standing_limitations=checklist.standing_limitations,
+        acknowledged_not_done=checklist.acknowledged_not_done,
+        acknowledged_not_done_count=str(checklist.acknowledged_not_done_count),
         blocking_conditions=cast(
             tuple[
                 Literal[
@@ -1226,6 +1288,47 @@ async def _closure_readiness(
             tuple(blocking),
         ),
     )
+
+
+async def _check_in_flight(runtime: TaskRuntime) -> bool:
+    """True while a check holds this session's frontier (issue #913).
+
+    Readiness must not say "nothing further to do" while a check's result — and any finding it
+    returns — is still to come. A ledger that cannot answer is treated as in flight.
+    """
+
+    probe = getattr(runtime.ledger, "has_active_frozen_case", None)
+    if not callable(probe):
+        return True
+    try:
+        return bool(await cast(Callable[[str], Awaitable[bool]], probe)(runtime.session_id))
+    except Exception:  # noqa: BLE001 - a secondary read; unknown is reported as in flight
+        return True
+
+
+async def _task_coverage(
+    runtime: TaskRuntime,
+    frontier: Frontier,
+    raw_page: ProjectionPage,
+) -> tuple[ProjectionPage | None, Coverage, tuple[str, ...]]:
+    """Return the compact page and its task coverage for a non-compact projection view.
+
+    A compact page that cannot be read leaves the view's own page coverage in place, but never
+    lets it read cleaner than unknown freshness: the task fold was not available to bound it.
+    """
+
+    try:
+        compact = await runtime.ledger.query_projection(
+            ProjectionQuery(runtime.session_id, "compact", None, frontier, 1, None, None)
+        )
+        return compact, compact.coverage, compact.gaps
+    except PublicOperationError:
+        # Lagging, rebuilding or temporarily unreadable, exactly as closure readiness treats it.
+        return (
+            None,
+            replace(raw_page.coverage, ledger_freshness=LedgerFreshness.UNKNOWN),
+            raw_page.gaps,
+        )
 
 
 async def _lineage_readiness_gaps(
@@ -1640,6 +1743,13 @@ async def execute_status(
                 )
             coverage = raw_page.coverage
             gaps = raw_page.gaps
+            if compact_page is None:
+                # One coverage definition on every view (issue #913): the envelope reports the
+                # task's coverage — the compact fold of the applicable check over the newest
+                # record — not the newest record's own envelope, which routinely read
+                # `service_authenticated / current / 0 gaps` beside a partial task. The compact
+                # page is the one closure readiness reads, so it is fetched once for both.
+                compact_page, coverage, gaps = await _task_coverage(runtime, frontier, raw_page)
             head = raw_page.head_frontier
             effective = raw_page.effective_frontier
             lag = raw_page.lag
@@ -1658,7 +1768,13 @@ async def execute_status(
                 ),
             )
         closure_readiness = await _closure_readiness(
-            runtime, frontier, compact_page, request.request_id, lineage_gaps=lineage_gaps
+            runtime,
+            frontier,
+            compact_page,
+            request.request_id,
+            lineage_gaps=lineage_gaps,
+            semantic_review_required=_semantic_review_required(app, route_profile),
+            check_in_flight=frontier == head and await _check_in_flight(runtime),
         )
         return StatusInternalResult(
             "0.1",

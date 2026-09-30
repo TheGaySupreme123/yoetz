@@ -106,7 +106,42 @@ For a material repair, use one bounded status → repair → check → read → 
    `closure_readiness.receipt_blocking_finding_count`, then report those actual counts alongside the
    receipt's checked frontier, AI-powered review status/reason, and coverage limits. If one
    current-state recheck still cannot qualify, stop repeating unchanged state and disclose the
-   blocker while continuing any distinct authorized work.
+   blocker while continuing any distinct authorized work. When `closure_readiness.state` is
+   `ready_with_limitations`, request the receipt without another check.
+
+## Closure readiness: actionable, standing, acknowledged
+
+`closure_readiness` splits what bounds a completion conclusion into three groups, derived for
+each status read and never cached across frontiers:
+
+- `agent_actionable`: work you can still do. Open obligations, unanswered findings, a missing
+  plan or scope, a stale projection, a receipt-blocking finding you have not acknowledged, a
+  check still in progress, a missing or superseded check, and every gap code whose remedy is an
+  agent action (for example
+  `completion_plan_not_claimed`, `completion_claim_outside_plan`, `missing_ref`).
+- `standing_limitations`: gap codes that no action available under this host, profile and
+  privacy policy removes, such as `host_outcome_unavailable`, `unpaired_event`,
+  `content_unselected`, `content_capture_unavailable`, `content_redacted`,
+  `check_current_as_of_earlier_frontier`, and the bounded-selection and capture disclosures of an
+  AI-powered review (`semantic_reference_scope_reduced`, `semantic_packet_insufficient`,
+  `truncated_payload`). They are disclosed on the receipt, never instructions.
+- `acknowledged_not_done`: obligations and findings recorded as not done, with a reason. This
+  build has no way to record that yet, so the group stays empty until the `acknowledged_not_done`
+  disposition ships; until then an item you cannot finish stays in `agent_actionable` and you
+  disclose it in your final answer.
+
+A closed, versioned table (`gap_classification_version`) assigns every gap code the product
+emits to exactly one group. `semantic_review_not_requested` is standing on a route where
+AI-powered review is optional or off, and on a strict connection that cannot run AI-powered review
+at all; it is actionable only when the verification policy requires AI-powered review, this
+connection can run it, and none has completed since the last material change. A code the running build
+does not know appears as `unclassified_gap:<code>` in `agent_actionable`, so an unknown limit is
+never silently treated as done.
+
+`state` is `ready_with_limitations` exactly when `agent_actionable` is empty and something is
+standing or acknowledged: nothing further to do, request the receipt. Classification never removes
+a gap from `known_gaps`, never changes a verdict or receipt conclusion, and never strengthens
+coverage; a local-only check with standing gaps is still `insufficient_coverage`.
 
 ## State examples
 

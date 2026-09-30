@@ -284,10 +284,13 @@ For a material repair, follow the shared ledger sequence:
    `closure_readiness.unanswered_finding_count` and
    `closure_readiness.receipt_blocking_finding_count`, and report those actual counts plus the
    checked frontier, AI-powered review status/reason, and coverage limits. If a recorded repair, a
-   response to another older finding, or any other material record follows the check, recheck
-   before the receipt. After `insufficient_packet`, go to the receipt unless you publish a material
-   repair; never run a `deterministic_only` fallback for it. Stop repeating an unchanged check when
-   proof still cannot qualify and disclose the blocker.
+   response to another older finding, or any other material record follows the check, recheck before
+   the receipt. After `insufficient_packet`, go to the receipt unless you publish a material repair;
+   never run a `deterministic_only` fallback for it. Stop repeating an unchanged check when proof
+   still cannot qualify and disclose the blocker. `closure_readiness.state` is the stop signal: do
+   each `agent_actionable` item while it reads `action_required`; at `ready_with_limitations`
+   nothing further is to do, so request the receipt without another check. Its
+   `standing_limitations` are disclosed, never tasks.
 
 ## Compatibility
 

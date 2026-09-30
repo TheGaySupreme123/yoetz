@@ -5,8 +5,11 @@
 **Implemented by:** `src/yoetz/domain/events.py`, `src/yoetz/kernel/plan_scope.py`,
 `src/yoetz/application/status.py`, `src/yoetz/kernel/deterministic_checks.py`,
 `src/yoetz/kernel/receipt_builder.py`, and the public event/status schemas and guidance.
-**Relates to:** ADR-002 (canonical protocol), ADR-010 (harness integration port), and ADR-011
-(structural subject-state capture).
+**Relates to:** ADR-002 (canonical protocol), ADR-010 (harness integration port), ADR-011
+(structural subject-state capture), and ADR-032 (closure readiness classifies the completion-scope
+gaps: `completion_plan_not_claimed`, `completion_claim_outside_plan` and
+`completion_scope_undeclared` are agent-actionable; `completion_scope_declared_none` is a
+disclosure).
 
 ## Context
 

@@ -382,6 +382,11 @@ class _ReadLedger:
 
         return await self._value.load_semantic_progress(writer_id, operation_id)
 
+    async def has_active_frozen_case(self, session_id: str) -> bool:
+        """Read whether a check holds this session's frontier (closure readiness, #913)."""
+
+        return await self._value.has_active_frozen_case(session_id)
+
     async def lookup_check_admission(
         self, writer_id: str, operation_id: str
     ) -> CheckAdmissionRecord | None:

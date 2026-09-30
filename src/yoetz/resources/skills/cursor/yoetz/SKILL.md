@@ -127,6 +127,8 @@ is a valid `finding_frontier`), answer only the findings that check returns that
 unanswered, and recheck only after a repair or other material record, never after those answers or
 `work_closed`. Observation-authored non-actionable findings need no answer. Request a receipt, then
 publish `work_closed` when the work is complete. Report the closure counts and checked frontier, the
-check's AI-powered review status/reason, and the receipt's coverage limits. Keep completed product
+check's AI-powered review status/reason, and the receipt's coverage limits. At
+`closure_readiness.state: ready_with_limitations` nothing further is to do: request the receipt
+without another check; its `standing_limitations` are disclosed, never tasks. Keep completed product
 work separate from unresolved verification. Activation, registration, and hook delivery do not
 establish observation, AI-powered review, or completion.
