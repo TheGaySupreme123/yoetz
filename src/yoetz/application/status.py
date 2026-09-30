@@ -34,7 +34,11 @@ from yoetz.domain.values import (
     format_rfc3339_millis,
     repository_grant_continuation,
 )
-from yoetz.kernel.closure_readiness import GAP_CLASSIFICATION_VERSION, derive_closure_readiness
+from yoetz.kernel.closure_readiness import (
+    GAP_CLASSIFICATION_VERSION,
+    derive_closure_readiness,
+    live_lineage_blockers,
+)
 from yoetz.kernel.deterministic_checks import (
     DeterministicAssessment,
     build_deterministic_case,
@@ -1195,8 +1199,11 @@ async def _closure_readiness(
         has_plan = item.current_plan_event_id is not None
         no_obligations_reason = item.no_obligations_reason
         stale = page.rebuild_state != "current" or bool(page.lag)
-        gap_markers = (*page.gaps, *lineage_gaps)
-        declared_gaps = bool(gap_markers)
+        # Recorded gaps (the ones a receipt folds) are classified; live lineage tokens that no
+        # recorded evaluation carries yet cannot be promised as receipt disclosures (#913).
+        gap_markers = tuple(page.gaps)
+        live_blockers = live_lineage_blockers(lineage_gaps, gap_markers)
+        declared_gaps = bool(gap_markers or lineage_gaps)
         facts = page.readiness_facts
         if facts is None:
             # Without the per-request facts readiness cannot tell whether a check applies or an
@@ -1231,6 +1238,7 @@ async def _closure_readiness(
         facts,
         semantic_review_required=semantic_review_required,
         check_in_flight=check_in_flight,
+        live_blockers=live_blockers,
     )
     return StatusClosureReadinessModel(
         declared_obligation_count=str(declared_obligations),

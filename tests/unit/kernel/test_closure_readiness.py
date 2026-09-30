@@ -21,6 +21,7 @@ from yoetz.kernel.closure_readiness import (
     ClosureReadinessFacts,
     closure_readiness_facts,
     derive_closure_readiness,
+    live_lineage_blockers,
 )
 from yoetz.kernel.receipt_capacity import receipt_blocking_finding_count
 from yoetz.kernel.reducers import invalidates_recorded_check, replay
@@ -307,3 +308,25 @@ def test_a_check_in_flight_is_never_nothing_further_to_do() -> None:
     assert split.state == "action_required"
     assert split.agent_actionable == ("check_in_progress",)
     assert split.standing_limitations == _BANDIT_B_GAPS
+
+
+def test_only_recorded_lineage_facts_can_be_disclosed_limitations() -> None:
+    # A live token is actionable until a recorded evaluation carries its code.
+    assert live_lineage_blockers(
+        ("lineage_child_read_gap", "lineage_child_coverage_gap"), _BANDIT_B_GAPS
+    ) == ("lineage_child_coverage_gap", "lineage_child_read_gap")
+    recorded = (*_BANDIT_B_GAPS, "lineage_child_coverage_gap", "lineage_child_unavailable")
+    assert (
+        live_lineage_blockers(("lineage_child_read_gap", "lineage_child_coverage_gap"), recorded)
+        == ()
+    )
+    split = derive_closure_readiness(
+        ("coverage_gaps_declared",),
+        _BANDIT_B_GAPS,
+        _facts(),
+        semantic_review_required=False,
+        live_blockers=("lineage_child_read_gap",),
+    )
+    assert split.state == "action_required"
+    assert split.agent_actionable == ("lineage_child_read_gap",)
+    assert "lineage_child_read_gap" not in split.standing_limitations

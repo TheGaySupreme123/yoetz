@@ -24,6 +24,7 @@ from typing import Any, Literal, cast
 import pytest
 
 import integration.application.test_respond_status_receipt as workflow
+import yoetz.application.status as status_module
 from builders.ledger_adapters import MemoryObjects
 from builders.start_application import protocol_id, start_request
 from yoetz.adapters.memory.ledger import MemoryLedgerAdapter
@@ -588,3 +589,44 @@ async def test_missing_readiness_facts_read_as_unknown_never_as_done(
     assert status.closure_readiness.state == "unknown"
     assert status.closure_readiness.blocking_conditions == ("readiness_unknown",)
     assert "Nothing further to do" not in summary_for_status(status.as_json())
+
+
+@pytest.mark.parametrize("token", ("lineage_child_read_gap", "lineage_child_provenance_restricted"))
+async def test_a_live_lineage_blocker_is_never_promised_as_a_receipt_disclosure(
+    monkeypatch: pytest.MonkeyPatch, token: str
+) -> None:
+    """Status compares children live; the receipt folds recorded lineage only (Greptile P1).
+
+    A standing-class lineage token that no recorded evaluation carries yet must not read as a
+    limitation "disclosed on the receipt": it stays agent-actionable until it is recorded.
+    """
+
+    session, _ = await _bandit_b("memory")
+
+    async def live_gaps(*_args: object) -> tuple[str, ...]:
+        return (token,)
+
+    monkeypatch.setattr(status_module, "_lineage_readiness_gaps", live_gaps)
+    status = await session.status()
+    readiness = status.closure_readiness
+    assert readiness.agent_actionable is not None and readiness.standing_limitations is not None
+    assert readiness.state == "action_required"
+    assert token in readiness.agent_actionable
+    assert token not in readiness.standing_limitations
+    assert "Nothing further to do" not in summary_for_status(status.as_json())
+    # The receipt at this frontier indeed does not carry the live token.
+    receipt = await session.app.receipt(
+        ReceiptRequest.model_validate(
+            {
+                **workflow._request_base(session.next("req_")),  # pyright: ignore[reportPrivateUsage]
+                "task_id": session.started.task_id,
+                "session_id": session.started.session_id,
+                "writer_id": session.started.writer_id,
+                "expected_frontier": workflow._frontier(session.frontier),  # pyright: ignore[reportPrivateUsage]
+                "format": "json",
+                "include": "standard",
+                "redaction_profile": "full_local",
+            }
+        )
+    )
+    assert token not in receipt.coverage.known_gaps

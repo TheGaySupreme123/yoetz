@@ -81,6 +81,9 @@ names what the receipt will disclose.
    never recorded. A restart, a reattach or an upgrade over a ledger written by an older build
    recomputes it without migrating any event, and old receipts keep their recorded wording.
    Readiness facts that an adapter cannot derive make readiness `unknown`, never a stop state.
+   `standing_limitations` promises disclosure on the receipt, so it holds only recorded gaps: a live
+   lineage token from status's catalog comparison that no recorded evaluation carries yet stays
+   agent-actionable, because a receipt folds recorded lineage only.
    Classification never removes a code from `known_gaps`, never changes a check verdict or receipt
    conclusion, and never strengthens coverage. The frozen directive for each state lives in
    `yoetz.protocol.readiness_text`; the `ready_with_limitations` sentence is the owner-approved

@@ -61,6 +61,7 @@ __all__ = [
     "derive_closure_readiness",
     "finding_acknowledged_not_done",
     "gap_base_code",
+    "live_lineage_blockers",
     "split_gaps",
 ]
 
@@ -363,6 +364,11 @@ AGENT_READINESS_CONDITIONS: Final = (
     "projection_stale",
 )
 MAX_ACKNOWLEDGED_READINESS_ITEMS: Final = 64
+# A live lineage blocker token and the code a recorded lineage evaluation (the one checks and
+# receipts fold) uses for the same fact; every other token is its own recorded code.
+_LINEAGE_RECORDED_CODES: Final[Mapping[str, str]] = MappingProxyType(
+    {"lineage_child_read_gap": "lineage_child_unavailable"}
+)
 # Check conditions readiness derives itself, in their wire order; each is classified above.
 READINESS_CHECK_CONDITIONS: Final = (
     "check_in_progress",
@@ -409,6 +415,30 @@ class ClosureReadinessFacts:
         ):
             if type(values) is not tuple or values != tuple(sorted(set(values), key=str.encode)):
                 raise ValueError("closure_readiness_facts_invalid")
+
+
+def live_lineage_blockers(tokens: Iterable[str], recorded_gaps: Iterable[str]) -> tuple[str, ...]:
+    """Return the live lineage tokens a receipt at this frontier would not yet disclose.
+
+    Status compares accepted catalog children with the parent's recorded manifest live; a receipt
+    folds only recorded lineage. A token whose recorded code is already among the task's recorded
+    gaps is disclosed through that code and classified with it. Any other token describes a
+    current dependency fact the receipt cannot carry yet, so readiness never promises to disclose
+    it as a standing limitation: it stays agent-actionable (let the service record the manifest,
+    then check) until a recorded evaluation carries it.
+    """
+
+    recorded = set(recorded_gaps)
+    return tuple(
+        sorted(
+            {
+                token
+                for token in tokens
+                if _LINEAGE_RECORDED_CODES.get(token, token) not in recorded
+            },
+            key=str.encode,
+        )
+    )
 
 
 def finding_acknowledged_not_done(state: ProjectionState, finding: FindingId) -> bool:
@@ -520,6 +550,7 @@ def derive_closure_readiness(
     *,
     semantic_review_required: bool,
     check_in_flight: bool = False,
+    live_blockers: Iterable[str] = (),
 ) -> ClosureReadinessSplit:
     """Split readiness into agent-actionable work, standing limitations and acknowledged items.
 
@@ -529,6 +560,8 @@ def derive_closure_readiness(
     ``facts`` is unavailable nothing is inferred from its absence: no acknowledgement is assumed
     and a receipt-blocking condition stays actionable. ``check_in_flight`` means a check holds the
     session frontier right now: nothing reads as done until its result is recorded.
+    ``live_blockers`` are live dependency facts a receipt cannot disclose yet
+    (``live_lineage_blockers``); they are agent-actionable whatever their recorded class.
     """
 
     conditions = tuple(blocking_conditions)
@@ -555,6 +588,10 @@ def derive_closure_readiness(
         semantic_review_current=facts is not None and facts.semantic_review_current,
     )
     actionable.extend(code for code in split.agent_actionable if code not in actionable)
+    for token in live_blockers:
+        item = token if _CODE_RE.fullmatch(token) else _unclassified(token)
+        if item not in actionable:
+            actionable.append(item)
     standing.update(split.standing_limitations)
     acknowledged: tuple[str, ...] = ()
     if facts is not None:

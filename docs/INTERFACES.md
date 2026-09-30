@@ -6035,9 +6035,13 @@ while a check holds the session frontier (read at the head through the ledger's
 `unclassified_gap:<code>` for a base code the running build does not know.
 `standing_limitations` lists the classified standing base codes (plus
 `check_payload_unavailable`). `acknowledged_not_done` lists up to 64 obligation and finding ids
-recorded as not done, and `acknowledged_not_done_count` counts them all. Every page gap and lineage
-gap is classified by its base code through `yoetz.kernel.closure_readiness.GAP_CLASSIFICATION`; no
-gap is dropped from `gaps` or `known_gaps`. `state` is `unknown` exactly with `readiness_unknown`
+recorded as not done, and `acknowledged_not_done_count` counts them all. Every recorded page gap
+is classified by its base code through `yoetz.kernel.closure_readiness.GAP_CLASSIFICATION`. A live
+lineage token from the catalog comparison is disclosed only when a recorded evaluation already
+carries its code (`live_lineage_blockers`; `lineage_child_read_gap` is recorded as
+`lineage_child_unavailable`); otherwise it is agent-actionable whatever its class, because a
+receipt folds recorded lineage only and cannot disclose it yet. No gap is dropped from `gaps` or
+`known_gaps`. `state` is `unknown` exactly with `readiness_unknown`
 (then `agent_actionable` is `("readiness_unknown",)` and the other groups are empty); otherwise it
 is `action_required` while `agent_actionable` is non-empty, `ready_with_limitations` when only
 standing or acknowledged entries remain, and `ready` when nothing remains. The five agent

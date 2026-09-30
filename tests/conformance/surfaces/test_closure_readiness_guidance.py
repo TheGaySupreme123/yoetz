@@ -15,6 +15,7 @@ from typing import Final
 
 import pytest
 
+from yoetz.protocol.canonical import JsonValue
 from yoetz.protocol.readiness_text import READINESS_STATES, readiness_directive
 
 _REPO_ROOT: Final = Path(__file__).resolve().parents[3]
@@ -125,3 +126,53 @@ def test_no_shipped_sentence_recommends_rechecking_after_the_stop_state(path: Pa
                 negation in lowered
                 for negation in ("without another check", "do not recheck", "not recheck")
             ), sentence
+
+
+@pytest.mark.parametrize("view", ("advice", "lineage", "project", "compact"))
+def test_every_status_view_summary_names_the_closure_state(view: str) -> None:
+    """The checklist rides on every view, so every view's text names it (Greptile P2)."""
+
+    from yoetz.mcp.summaries import summary_for_status
+
+    readiness: dict[str, JsonValue] = {
+        "declared_obligation_count": "1",
+        "no_obligations_reason": None,
+        "open_obligation_count": "0",
+        "unanswered_finding_count": "0",
+        "receipt_blocking_finding_count": "0",
+        "blocking_conditions": ["coverage_gaps_declared"],
+        "state": "ready_with_limitations",
+        "gap_classification_version": "1",
+        "agent_actionable": [],
+        "standing_limitations": ["host_outcome_unavailable", "unpaired_event"],
+        "acknowledged_not_done": [],
+        "acknowledged_not_done_count": "0",
+    }
+    page: dict[str, JsonValue] = {"items": [], "next_cursor": None}
+    if view == "lineage":
+        page = {"parent_task_id": None, "children": [], "annotations": [], "next_cursor": None}
+    elif view == "project":
+        page = {
+            "project_id": None,
+            "lineage": {"children": [], "annotations": []},
+            "next_cursor": None,
+        }
+    envelope: dict[str, JsonValue] = {
+        "ok": True,
+        "view": view,
+        "result_frontier": {"sequence": "9", "head_digest": "sha256:" + "a" * 64},
+        "page": page,
+        "coverage": {"ledger_freshness": "current", "known_gaps": []},
+        "gaps": ["host_outcome_unavailable", "unpaired_event"],
+        "closure_readiness": readiness,
+    }
+    summary = summary_for_status(envelope)
+    assert "Closure: ready_with_limitations. Nothing further to do." in summary
+    assert summary.endswith("Request the receipt.") or "Standing limitations:" in summary
+    if view != "project":
+        # The project page's long prefix leaves room only for the bounded short form.
+        assert (
+            "Nothing further to do. 2 standing limitation(s) and 0 acknowledged item(s) will be "
+            "disclosed on the receipt. Request the receipt." in summary
+        )
+    assert len(summary.encode("ascii")) <= 512

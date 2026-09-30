@@ -588,9 +588,14 @@ def summary_for_status(envelope: object) -> str:
     if view == "advice":
         page = source.get("page")
         count = _item_count(page.get("items")) if isinstance(page, Mapping) else "unavailable"
-        return _bounded(
+        text = (
             f"Status view: advice; {_frontier_clause(source)}; advice items: {count}; "
             "Read the structured page for coordination selectors and bounded resource details."
+        )
+        # Every view carries the closure checklist, so every view names its state (#913).
+        return _bounded(
+            text
+            + _closure_clause(source, byte_budget=_MAX_SUMMARY_BYTES - len(text.encode("ascii")))
         )
     freshness, obligations, unanswered, receipt_blocking = _compact_status_fields(source, view)
     gaps = _item_count(source.get("gaps"))
@@ -730,7 +735,11 @@ def _summary_for_multi_agent_status(source: Mapping[str, JsonValue], view: str) 
     page = source.get("page")
     prefix = f"Status view: {view}; {_frontier_clause(source)}; "
     if not isinstance(page, Mapping):
-        return _bounded(prefix + "page unavailable.")
+        text = prefix + "page unavailable."
+        return _bounded(
+            text
+            + _closure_clause(source, byte_budget=_MAX_SUMMARY_BYTES - len(text.encode("ascii")))
+        )
     lineage = page if view == "lineage" else page.get("lineage")
     if view == "project":
         project = page.get("project_id")
@@ -769,6 +778,10 @@ def _summary_for_multi_agent_status(source: Mapping[str, JsonValue], view: str) 
     suffix = "Read the structured page for child states and row identities."
     if page.get("next_cursor") is not None:
         suffix = "More pages available. " + suffix
+    # The parent's own closure checklist travels on these views too (#913).
+    suffix += _closure_clause(
+        source, byte_budget=_MAX_SUMMARY_BYTES - len((prefix + suffix).encode("ascii"))
+    )
     gap_clause = _bounded_list_clause(
         "gap codes: ",
         _safe_status_gap_codes(source),
