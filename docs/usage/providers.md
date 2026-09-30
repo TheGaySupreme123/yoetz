@@ -605,5 +605,7 @@ semantic_advice_min_interval_seconds = 180
 Set `semantic_advice_enabled = false`, or remove the line to return to the default, to stop
 background reviews while keeping deterministic advice and explicit AI-powered checks available.
 Yoetz writes this line only when you choose it, so a later default change still reaches you
-when you have not. Restart the Yoetz service after changing these settings. The interval accepts 1–86400 seconds. The same
+when you have not. Background reviews that were queued before advice was switched off are
+discarded when the service starts, without being sent, so turning advice back on never sends old
+work. Restart the Yoetz service after changing these settings. The interval accepts 1–86400 seconds. The same
 settings work with Codex, Claude Code and Cursor on macOS, Linux and Windows through WSL 2.

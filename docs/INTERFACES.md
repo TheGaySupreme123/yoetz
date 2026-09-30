@@ -4054,6 +4054,8 @@ Shared closed types:
   explicit value always wins (ADR-006 issue #888; closed reasons `owner_enabled`,
   `owner_disabled`, `explicit_checks_default`, `semantic_review_disabled`, `observation_disabled`,
   shown as `background_advice` by `yoetz provider status` and `yoetz setup status --next`).
+  While it resolves off, startup rediscovery closes rows an earlier service left `pending` as
+  `cancelled` / `cancelled` with no provider identity and no provider work.
   `application/observation_advice_semantic.ObservationAdviceSemanticScheduler` looks up or enqueues
   one durable attempt row in `observation_advice_semantic_attempts` (migration 0012), keyed by
   (workspace commitment, Yoetz session, advice-candidate identity; retries of a terminal

@@ -785,8 +785,13 @@ this change carry an explicit `true` and keep advice on until that line is remov
 `yoetz provider status` (`background_advice`), `yoetz setup status --next`
 (`facts.background_advice`) and the terminal interface status layer show the effective state and
 reason with fixed text; setting `true` is the way back. The setup wizard reports
-`semantic_advice_ready` only when the provider is ready and background advice is on, with the note
-`background_advice_off:<reason>` otherwise. This records the recommended option B of
+`semantic_advice_ready` only when the provider is ready and background advice is on, and its
+human summary renders the same fixed text for `background_advice_off:<reason>` otherwise. While
+the switch resolves off, the service still wires a closing dispatch: startup rediscovery closes a
+row an earlier service left `pending` as `cancelled` / `cancelled` with no provider identity and
+no route, authority or provider work, so it neither stays pending nor is replayed if the owner
+later turns advice back on. This supersedes the #888 statement that re-enabling lets such work
+drain. This records the recommended option B of
 #923 pending the owner's recorded choice on #888; a dedicated advice purpose and prompt (option
 A) remains open. The same resolution applies to Codex, Claude Code and Cursor on macOS, Linux and
 Windows through WSL 2.

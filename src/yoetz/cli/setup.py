@@ -3038,12 +3038,21 @@ def _emit_human_report(report: dict[str, JsonValue]) -> None:
             "  Observation readiness: "
             + ("ready to observe" if readiness.get("observation_ready") else "not ready")
         )
+        advice_note = readiness.get("semantic_advice_note")
+        advice_text: str | None = None
+        if type(advice_note) is str and advice_note.startswith("background_advice_off:"):
+            # Fixed text only; the closed reason token never renders raw (#888).
+            from yoetz.cli.provider_status import background_advice_human_line
+
+            advice_text = background_advice_human_line(
+                {"reason": advice_note.removeprefix("background_advice_off:")}
+            )
         typer.echo(
             "  AI-powered advice readiness: "
             + (
                 "ready"
                 if readiness.get("semantic_advice_ready")
-                else str(readiness.get("semantic_advice_note") or "not demonstrated")
+                else advice_text or str(advice_note or "not demonstrated")
             )
         )
     if isinstance(provider, dict):

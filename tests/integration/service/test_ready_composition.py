@@ -3236,7 +3236,52 @@ async def test_background_advice_is_off_by_default_where_explicit_checks_run(
         dispatch = getattr(coordinator, "advice_semantic_dispatch")
         app = await factory.open(context)
         assert (scheduler is not None) is scheduled
-        assert (dispatch is not None) is scheduled
+        if scheduled:
+            return
+        # Advice is off: a row an earlier service left pending is closed at startup drain as
+        # cancelled with no provider identity (nothing sent), never held for later replay.
+        from yoetz.adapters.sqlite.migrations import initialize_bundle
+        from yoetz.adapters.sqlite.observation_advice_semantic import (
+            SqliteObservationAdviceSemanticRepository,
+        )
+        from yoetz.application.observation_advice_semantic import (
+            ObservationAdviceSemanticWorker,
+        )
+
+        db = apsw.Connection(":memory:")
+        try:
+            initialize_bundle(db, {"task_id": "tsk_advice", "owner_generation": "1"})
+            repository = SqliteObservationAdviceSemanticRepository(db)
+            repository.schedule(
+                workspace="hmac-sha256:" + "a" * 64,
+                yoetz_session_id="ses_00000000-0000-4000-8000-000000000888",
+                basis_digest="queued-by-an-older-service",
+                subject_digest="sha256:" + "c" * 64,
+                coverage_gaps=(),
+                packet_json=b"{}",
+                enqueued_at="2026-07-21T17:00:00.000Z",
+                max_pending=16,
+            )
+            worker = ObservationAdviceSemanticWorker(
+                repository=repository,
+                dispatch=dispatch,
+                service_generation=1,
+                lease_owner="svc-1",
+                now=lambda: "2026-07-21T18:00:00.000Z",
+                lease_expires_at=lambda: "2026-07-21T18:02:00.000Z",
+            )
+            closed = await worker.run_once()
+            assert closed is not None
+            row = repository.lookup(
+                yoetz_session_id="ses_00000000-0000-4000-8000-000000000888",
+                basis_digest="queued-by-an-older-service",
+            )
+            assert row is not None
+            assert (row.status, row.failure_reason) == ("cancelled", "cancelled")
+            assert (row.provider_identity, row.attempt_receipt) == (None, None)
+            assert repository.list_pending_workspaces() == ()
+        finally:
+            db.close()
     finally:
         if app is not None:
             await app.close()

@@ -201,3 +201,29 @@ def test_terminal_interface_consent_layer_names_the_kept_arms(tmp_path: Path) ->
         f"native content profiles kept: {_CLAUDE}",
     )
     assert consent_layer([]) == (LayerState.VERIFIED, "")
+
+
+def test_setup_summary_explains_background_advice_off_in_fixed_words(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Issue #888: a ready provider with background advice off by default names why."""
+
+    setup._emit_human_report(  # pyright: ignore[reportPrivateUsage]
+        {
+            "registration": {},
+            "service": {"reachable": True, "state": "ready"},
+            "provider": {},
+            "integration": {},
+            "readiness": {
+                "observation_ready": True,
+                "semantic_advice_ready": False,
+                "semantic_advice_note": "background_advice_off:explicit_checks_default",
+            },
+            "next_steps": [],
+        }
+    )
+
+    out = capsys.readouterr().out
+    assert "AI-powered advice readiness: off by default" in out
+    assert "semantic_advice_enabled = true" in out
+    assert "background_advice_off:" not in out
