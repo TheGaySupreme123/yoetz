@@ -596,6 +596,15 @@ _DIRECTIVES: Final = (
         nudge="Do not move state onto a network or shared filesystem to clear this.",
     ),
     RecoveryDirective(
+        token="privacy_audit_review",
+        directive=(
+            "The request was valid; a stored privacy receipt could not be read back. Run "
+            "'yoetz privacy receipts get <receipt id>' for each reported id, and keep the "
+            "correlation_id for 'yoetz service diagnostics'."
+        ),
+        nudge="Report the unreadable receipt; never delete or rewrite audit records to clear it.",
+    ),
+    RecoveryDirective(
         token="local_service_unavailable",
         directive=(
             "The local service could not serve this request, so no work was recorded. Inspect its "

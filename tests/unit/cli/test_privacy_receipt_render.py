@@ -265,6 +265,91 @@ async def test_a_list_refusal_stays_a_bounded_error(
     assert captured.err.startswith("service_unavailable: ")
 
 
+async def test_the_old_benchmark_error_line_is_gone_for_a_store_side_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Issue #921: ``invalid_request: the local request could not be completed`` named the
+    caller for a request that had nothing wrong with it."""
+
+    correlation_id = "err_70000000-0000-4000-8000-00000000000c"
+    _install(
+        monkeypatch,
+        _FailingClient(ControlError("privacy_audit_unreadable", correlation_id=correlation_id)),
+    )
+    emitted = _captured_json(monkeypatch)
+
+    assert await _privacy_receipts_list(100, None, True) == 40
+
+    captured = capsys.readouterr()
+    assert "invalid_request" not in captured.err
+    assert captured.err.startswith(
+        "privacy_audit_unreadable: the request was valid, but the local privacy audit holds a "
+        f"receipt that could not be read back; correlation_id {correlation_id}\n"
+    )
+    assert "Continuation: privacy_audit_review" in captured.err
+    assert emitted == [
+        {
+            "ok": False,
+            "public_code": "STORAGE_CORRUPT",
+            "reason": "privacy_audit_unreadable",
+            "retryable": False,
+            "correlation_id": correlation_id,
+            "recovery": cast(dict[str, Any], emitted[0])["recovery"],
+        }
+    ]
+    assert cast(dict[str, Any], emitted[0])["recovery"]["continuation"] == "privacy_audit_review"
+
+
+async def test_a_partial_page_prints_every_readable_receipt_and_exits_non_zero(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    skipped = "egr_70000000-0000-4000-8000-00000000000d"
+    page = _receipt_page_from_wire(
+        cast(
+            JsonObject,
+            freeze_json(
+                encode_privacy_receipt_page(
+                    PrivacyReceiptPage(
+                        11, (network_receipt_view(), local_receipt_view()), None, 2, (skipped,)
+                    )
+                )
+            ),
+        )
+    )
+    _install(monkeypatch, _Client(page))
+    emitted = _captured_json(monkeypatch)
+
+    assert await _privacy_receipts_list(100, None, True) == 40
+
+    document = cast(dict[str, Any], emitted[0])
+    assert [item["receipt"]["receipt_id"] for item in document["receipts"]] == [
+        NETWORK_RECEIPT_ID,
+        LOCAL_RECEIPT_ID,
+    ]
+    assert document["undecodable_count"] == 2
+    assert document["undecodable_receipt_ids"] == [skipped]
+    captured = capsys.readouterr()
+    assert captured.err.startswith(
+        "privacy_audit_unreadable: this page is partial; 2 stored receipt(s) could not be read "
+        f"back and were skipped: {skipped}\n"
+    )
+
+
+async def test_a_complete_page_still_exits_zero_and_says_nothing_on_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _install(monkeypatch, _Client(_decoded_page(network_receipt_view(), local_receipt_view())))
+    emitted = _captured_json(monkeypatch)
+
+    assert await _privacy_receipts_list(100, None, True) == 0
+
+    assert cast(dict[str, Any], emitted[0])["undecodable_count"] == 0
+    assert capsys.readouterr().err == ""
+
+
 def test_the_converter_renders_canonical_timestamps_without_a_catch_all() -> None:
     """Bullet 2 of #731: the datetime case is typed; unsupported values still refuse."""
 

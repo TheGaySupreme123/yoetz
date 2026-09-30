@@ -289,6 +289,50 @@ def _bind_handshake_correlation(error: ControlError) -> ControlError:
     )
 
 
+PRIVACY_AUDIT_UNREADABLE_SUMMARY: Final = (
+    "privacy_audit_unreadable: the request was valid, but the local privacy audit holds a "
+    "receipt that could not be read back"
+)
+
+
+def _privacy_audit_unreadable_failure(
+    error: ControlError,
+    code: PublicErrorCode,
+    *,
+    json_output: bool,
+    stderr_writer: Callable[[str], None],
+    stdout_writer: Callable[[JsonValue], None],
+) -> int:
+    """Name a store-side receipt failure as exactly that, with its typed continuation (#921).
+
+    Before this, the store's condition reached the operator as the generic
+    ``invalid_request: the local request could not be completed`` -- a caller error for a request
+    that had nothing wrong with it, and no reason to act on.
+    """
+
+    from yoetz.cli.render import recovery_directive_json, render_recovery_directive_lines
+    from yoetz.protocol.recovery import continuation_for_reason, directive_for
+
+    directive = directive_for(continuation_for_reason(error.reason))
+    lines = [PRIVACY_AUDIT_UNREADABLE_SUMMARY]
+    if directive is not None:
+        lines.extend(render_recovery_directive_lines(directive))
+    stderr_writer(_with_correlation("\n".join(lines), error))
+    if json_output:
+        payload: dict[str, JsonValue] = {
+            "ok": False,
+            "public_code": code.value,
+            "reason": error.reason,
+            "retryable": error.retryable,
+        }
+        if error.correlation_id is not None:
+            payload["correlation_id"] = error.correlation_id
+        if directive is not None:
+            payload["recovery"] = recovery_directive_json(directive)
+        stdout_writer(payload)
+    return exit_code_for(code)
+
+
 def control_failure(
     error: ControlError,
     *,
@@ -344,6 +388,14 @@ def control_failure(
                 payload["recovery"] = recovery_directive_json(coordination_directive)
             stdout_writer(payload)
         return exit_code_for(code)
+    if error.reason == "privacy_audit_unreadable":
+        return _privacy_audit_unreadable_failure(
+            error,
+            code,
+            json_output=json_output,
+            stderr_writer=stderr_writer,
+            stdout_writer=stdout_writer,
+        )
     if error.reason in {"service_incompatible", "protocol_mismatch"}:
         if _holder_predates_this_package():
             summary = (

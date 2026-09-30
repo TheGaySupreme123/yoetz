@@ -22,6 +22,7 @@ CONTROL_ERROR_REASONS: Final = frozenset(
         "privacy_projection_blocked",
         "response_projection_failed",
         "read_projection_failed",
+        "privacy_audit_unreadable",
         "service_generation_changed",
         "endpoint_unsafe",
         "invalid_request",

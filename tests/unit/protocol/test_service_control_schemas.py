@@ -1341,7 +1341,10 @@ def test_v29_custom_capacity_runtime_validates_only_on_29_wire() -> None:
 
 
 def test_v29_changes_only_the_selection_runtime_and_keeps_frozen_v28() -> None:
-    """2.9 derives from 2.8 by one runtime definition; the 2.8 documents are not rewritten."""
+    """2.9 derives from 2.8 by one runtime definition and the partial receipt page (#921).
+
+    The 2.8 documents are not rewritten.
+    """
 
     for name in ("control-hello", "control-hello-result", "control-request", "control-result"):
         v28 = cast(
@@ -1364,7 +1367,32 @@ def test_v29_changes_only_the_selection_runtime_and_keeps_frozen_v28() -> None:
         v29_defs = cast(dict[str, Any], v29["$defs"])
         assert set(v29_defs) - set(v28_defs) == {"observation_effective_budget"}
         changed = {key for key in v28_defs if v28_defs[key] != v29_defs[key]}
-        assert changed == {"observation_selection_runtime"}
+        assert changed == {
+            "observation_selection_runtime",
+            "privacy_receipts_list_body",
+            "error_body",
+        }
+        # Issue #921: the receipt page gains only optional, paired partial-listing fields, and the
+        # error vocabulary gains only the closed, non-retryable store-side reason.
+        v28_page = cast(dict[str, Any], v28_defs["privacy_receipts_list_body"])
+        v29_page = cast(dict[str, Any], v29_defs["privacy_receipts_list_body"])
+        assert v29_page["required"] == v28_page["required"]
+        assert set(v29_page["properties"]) - set(v28_page["properties"]) == {
+            "undecodable_count",
+            "undecodable_receipt_ids",
+        }
+        assert v29_page["dependentRequired"] == {
+            "undecodable_count": ["undecodable_receipt_ids"],
+            "undecodable_receipt_ids": ["undecodable_count"],
+        }
+        v28_errors = cast(list[Any], v28_defs["error_body"]["oneOf"])
+        v29_errors = cast(list[Any], v29_defs["error_body"]["oneOf"])
+        added = [branch for branch in v29_errors if branch not in v28_errors]
+        assert [branch for branch in v29_errors if branch in v28_errors] == v28_errors
+        assert [branch["properties"]["code"] for branch in added] == [
+            {"const": "privacy_audit_unreadable"}
+        ]
+        assert added[0]["properties"]["retryable"] == {"const": False}
         assert {k: v for k, v in v28.items() if k not in {"$id", "$defs"}} == {
             k: v for k, v in v29.items() if k not in {"$id", "$defs"}
         }

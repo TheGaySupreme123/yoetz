@@ -98,6 +98,16 @@ yoetz privacy decide-disclosure # decide one exact pending disclosure by id (see
 yoetz privacy receipts          # inspect bounded structural egress receipts
 ```
 
+`yoetz privacy receipts list` pages through every receipt of what Yoetz showed locally and sent
+off the machine, newest first; pass `--cursor` with the `next_cursor` it prints to read the next
+page. If a stored receipt cannot be read back, the listing does not fail: it prints every receipt
+it could read, reports `undecodable_count` and the skipped receipt ids, explains the partial page
+on stderr, and exits `40` so a script cannot mistake it for a complete listing. Run
+`yoetz privacy receipts get <receipt id>` for each skipped id; a receipt that cannot be read is
+reported as `privacy_audit_unreadable` with a correlation id for `yoetz service diagnostics`.
+`invalid_request` means only that the command itself was wrong, such as a cursor from a different
+listing.
+
 You can also ask a capable Yoetz agent to install, configure, or change Yoetz in ordinary
 conversation. The agent should explain each consequential choice, recommend an option and its
 trade-off, perform the mechanical steps, and leave the decision with you. If you explicitly ask

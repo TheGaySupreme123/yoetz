@@ -56,6 +56,7 @@ from yoetz.ports.privacy import (
     PrivacyAuditState,
     PrivacyAuthorityAncestor,
     PrivacyReceiptAudience,
+    PrivacyReceiptCursorInvalid,
     PrivacyReceiptPage,
     PrivacyReceiptQuery,
     PrivacyReceiptView,
@@ -953,8 +954,10 @@ class MemoryPrivacyAudit:
         if query.cursor is not None:
             payload = self._decode_cursor(query.cursor)
             if payload.get("query_digest") != canonical_digest(query_identity):
-                raise ValueError("privacy_receipt_cursor_query_mismatch")
-            after = cast(str, payload["after_id"])
+                raise PrivacyReceiptCursorInvalid("privacy_receipt_cursor_query_mismatch")
+            after = payload.get("after_id")
+            if type(after) is not str:
+                raise PrivacyReceiptCursorInvalid("privacy_receipt_cursor_invalid")
             start = next(
                 (
                     index + 1
@@ -1003,7 +1006,7 @@ class MemoryPrivacyAudit:
                 raise ValueError
             return cast(dict[str, JsonValue], strict_json_parse(body))
         except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError("privacy_receipt_cursor_invalid") from exc
+            raise PrivacyReceiptCursorInvalid("privacy_receipt_cursor_invalid") from exc
 
     async def live_object_roots(
         self, task_id: str, route_identity_digest: str

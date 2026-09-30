@@ -1554,3 +1554,14 @@ and `writer_id` (`safe_details.state` is the probed state), or replay the unchan
 under that same request ID. Never mint a replacement write ID to recover an unknown outcome.
 A lost first `start` still uses exact same-body replay because session/writer IDs may be absent.
 This behavior is identical on macOS, Linux and Windows via WSL 2. CLI callers may set `--deadline-ms`.
+
+## Privacy receipts listing (issue #921)
+
+`yoetz privacy receipts list` and `get` are host-agnostic: every host's sessions write receipts
+into the same local audit, and the operator reads them through the same CLI and control method.
+Pages over 64 KiB now cross the local control socket in bounded chunks, an unreadable stored
+receipt is skipped, counted and named (exit 40) instead of failing the page, and a store-side
+failure is `privacy_audit_unreadable` rather than `invalid_request`. In-process tests drive the
+real service, socket and client. Open evidence gap, owned by #921: a dogfood run on Cursor
+(macOS, Linux and WSL 2) that completes an AI-powered review session and then shows that
+session's `network_egress` receipts in `yoetz privacy receipts list`.

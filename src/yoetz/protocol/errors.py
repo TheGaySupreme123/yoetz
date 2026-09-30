@@ -277,6 +277,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "payload_too_large",
     "peer_untrusted",
     "plan_version_conflict",
+    "privacy_audit_unreadable",
     "privacy_projection_unavailable",
     "privacy_receipt_not_durable",
     "project_dissolved",
@@ -356,7 +357,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
 )
 
 _REASON_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
-assert len(_PROTOCOL_REASON_CODE_VALUES) == 299
+assert len(_PROTOCOL_REASON_CODE_VALUES) == 300
 assert len(_PROTOCOL_REASON_CODE_VALUES) == len(set(_PROTOCOL_REASON_CODE_VALUES))
 assert _PROTOCOL_REASON_CODE_VALUES == tuple(sorted(_PROTOCOL_REASON_CODE_VALUES, key=str.encode))
 assert all(_REASON_CODE_PATTERN.fullmatch(value) for value in _PROTOCOL_REASON_CODE_VALUES)
@@ -445,6 +446,7 @@ ADMITTED_CONTINUATION_TOKENS: frozenset[str] = frozenset(
         "frontier_refresh_required",
         "input_correction_new_identity",
         "operation_pending_inspect",
+        "privacy_audit_review",
         "read_timeout_new_identity",
         "recovery_check_then_correct",
         "resource_integrity_repair",
@@ -525,6 +527,9 @@ REASON_CODE_CONTINUATIONS: Mapping[str, str] = MappingProxyType(
         "frontier_changed": "frontier_refresh_required",
         "frontier_digest_mismatch": "frontier_refresh_required",
         "operation_recovery_unavailable": "recovery_check_then_correct",
+        # Issue #921: a stored privacy receipt could not be read back. The request was valid, so
+        # the continuation names the audit, never a correction of the command.
+        "privacy_audit_unreadable": "privacy_audit_review",
         # Issue #885: record one concrete attempt, then answer the finding under a new identity.
         "resolution_attempt_required": "input_correction_new_identity",
         "schema_digest_mismatch": "resource_integrity_repair",

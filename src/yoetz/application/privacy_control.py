@@ -48,6 +48,8 @@ from yoetz.ports.control import ControlError, ControlMethod, RepositoryPrivacyCo
 from yoetz.ports.privacy import (
     EffectivePrivacyPolicy,
     NetworkEgressReceiptView,
+    PrivacyAuditUnreadable,
+    PrivacyReceiptCursorInvalid,
     PrivacyReceiptPage,
     PrivacyReceiptQuery,
     PrivacyReceiptView,
@@ -341,6 +343,11 @@ def encode_privacy_receipt_page(page: PrivacyReceiptPage) -> JsonObject:
     }
     if page.next_cursor is not None:
         values["next_cursor"] = page.next_cursor
+    if page.undecodable_count:
+        # Present only on a partial page, so a complete page keeps its exact prior bytes. The ids
+        # are structural receipt ids; nothing a skipped row stored is echoed (issue #921).
+        values["undecodable_count"] = str(page.undecodable_count)
+        values["undecodable_receipt_ids"] = list(page.undecodable_receipt_ids)
     return JsonObject(values)
 
 
@@ -413,6 +420,25 @@ def _receipt_query_from_body(body: JsonObject) -> PrivacyReceiptQuery:
         )
     except (TypeError, ValueError) as exc:
         raise ControlError("invalid_request") from exc
+
+
+def _audit_unreadable(exc: PrivacyAuditUnreadable, operation: str) -> ControlError:
+    """Name a store-side receipt failure once, record it, and never call it the caller's.
+
+    The request reached the audit store, so it was well formed: reporting ``invalid_request`` here
+    told the operator to fix a command that had nothing wrong with it and left no diagnostic
+    behind (issue #921). The closed store reason goes to the owner-only diagnostic sink under the
+    correlation id the caller receives; no receipt content travels with either.
+    """
+
+    from yoetz.observability.logging import record_public_error_without_raising
+
+    correlation_id = record_public_error_without_raising(
+        component="privacy_audit",
+        operation=operation,
+        reason=exc.reason,
+    )
+    return ControlError("privacy_audit_unreadable", retryable=False, correlation_id=correlation_id)
 
 
 def _policy_rejection() -> ControlError:
@@ -644,10 +670,14 @@ def build_privacy_support_handlers(
             page = await privacy_receipts_list(app, ListPrivacyReceiptsRequest(query))
         except ControlError:
             raise
-        except (TypeError, ValueError) as exc:
+        except PrivacyReceiptCursorInvalid as exc:
             # A cursor from a different query or a corrupt one is the caller's to fix; the
             # bounded envelope carries no detail, so it collapses to one closed reason.
             raise _policy_rejection() from exc
+        except PrivacyAuditUnreadable as exc:
+            raise _audit_unreadable(exc, "privacy_receipts_list") from exc
+        # Anything else is unexpected, not a caller error: it reaches the daemon's recorded
+        # ``read_projection_failed`` path instead of being folded into ``invalid_request``.
         return encode_privacy_receipt_page(page)
 
     async def receipts_get(request: object) -> JsonObject:
@@ -667,8 +697,8 @@ def build_privacy_support_handlers(
             view = await privacy_receipts_get(app, lookup)
         except ControlError:
             raise
-        except (TypeError, ValueError) as exc:
-            raise _policy_rejection() from exc
+        except PrivacyAuditUnreadable as exc:
+            raise _audit_unreadable(exc, "privacy_receipts_get") from exc
         if view is None:
             return JsonObject(
                 {"schema_version": _RECEIPT_WIRE_SCHEMA_VERSION, "outcome": "not_found"}

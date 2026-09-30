@@ -26,6 +26,7 @@ from yoetz.protocol.models import DataCategory
 __all__ = [
     "MAX_EGRESS_CASE_BYTES",
     "MAX_EGRESS_ITEM_BYTES",
+    "MAX_RECEIPT_FINAL_BYTES",
     "MAX_PRIVACY_CHANGES",
     "MAX_PRIVACY_CHANGE_LABELS",
     "MAX_PRIVACY_LABEL_BYTES",
@@ -104,6 +105,13 @@ MAX_EGRESS_ENVELOPE_BYTES: Final = 128 * 1024
 # It previously equalled the content budget alone, which made a maximum-content case impossible
 # to dispatch no matter how small its envelope was.
 MAX_EGRESS_CASE_BYTES: Final = 512 * 1024
+# A receipt's ``counts.final_bytes`` is bounded by the published receipt vocabulary
+# (``privacy/egress-receipt-1.0.0`` ``max_262144_decimal``), not by the outbound document bound
+# above. Every disclosure is prepared as one ``MinimizedDisclosure`` of at most 262,144 bytes and
+# every enabled channel's ``max_bytes`` is capped the same way, so no real receipt exceeds it. The
+# domain used to admit up to ``MAX_EGRESS_CASE_BYTES``, so a receipt between 256 and 512 KiB was
+# valid in the store and invalid on the wire, and failed every page it was listed on (issue #921).
+MAX_RECEIPT_FINAL_BYTES: Final = 262_144
 AUDIT_STORE_VERSION: Final = 1
 PRIVACY_REQUEST_COMMITMENT_ALGORITHM: Final = "hmac-sha256/yoetz-privacy-egress-request-v1"
 
@@ -2022,7 +2030,7 @@ class ReceiptCounts:
             self.candidate_bytes,
         ):
             _nonnegative(value)
-        _nonnegative(self.final_bytes, maximum=MAX_EGRESS_CASE_BYTES)
+        _nonnegative(self.final_bytes, maximum=MAX_RECEIPT_FINAL_BYTES)
         if self.estimated_input_tokens is not None:
             _nonnegative(self.estimated_input_tokens)
         if self.request_body_bytes is not None:

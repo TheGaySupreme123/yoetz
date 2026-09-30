@@ -92,9 +92,11 @@ from yoetz.ports.privacy import (
     PolicyTransitionProposal,
     PrivacyAuditPort,
     PrivacyAuditState,
+    PrivacyAuditUnreadable,
     PrivacyClassifierPort,
     PrivacyPolicyStorePort,
     PrivacyReceiptAudience,
+    PrivacyReceiptCursorInvalid,
     PrivacyReceiptPage,
     PrivacyReceiptQuery,
     PrivacyReceiptView,
@@ -1534,3 +1536,118 @@ def test_stored_receipts_of_both_kinds_list_together_newest_first() -> None:
         LocalDisclosureReceiptView,
     ]
     assert [view.receipt.receipt_id for view in page.receipts] == [_RECEIPT, _RECEIPT_2]
+
+
+def _stored_projection(audit: CatalogPrivacyAudit, index: int) -> LocalDisclosureReceipt:
+    receipt = replace(
+        _receipt(),
+        receipt_id=f"egr_30000000-0000-4000-8000-{index:012d}",
+        request_id=f"req_30000000-0000-4000-8000-{index:012d}",
+        privacy_proposal_id=f"ppr_30000000-0000-4000-8000-{index:012d}",
+        finished_at=_NOW - timedelta(seconds=index),
+    )
+    request = _projection_request(receipt.privacy_proposal_id, receipt.request_id)
+    asyncio.run(audit.complete_agent_projection(request, receipt))
+    return receipt
+
+
+def test_an_unreadable_row_is_skipped_counted_and_named_not_fatal_to_the_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #921: one stored row that cannot be read back used to fail every receipt beside it."""
+
+    import yoetz.observability.diagnostics as diagnostics_module
+
+    monkeypatch.setattr(diagnostics_module, "log_dir", lambda: tmp_path)
+    db = _database()
+    audit = CatalogPrivacyAudit(db, _UnusedObjects(), _Key(), _Clock())  # type: ignore[arg-type]
+    stored = [_stored_projection(audit, index) for index in range(1, 7)]
+    garbled, older, moved = stored[1], stored[3], stored[4]
+    db.execute(
+        "UPDATE privacy_audit_records SET receipt_canonical = ? WHERE receipt_id = ?",
+        (b"{not a receipt", garbled.receipt_id),
+    )
+    # An older build could store final_bytes up to 512 KiB; the published wire stops at 262,144.
+    row = db.execute(
+        "SELECT receipt_canonical FROM privacy_audit_records WHERE receipt_id = ?",
+        (older.receipt_id,),
+    ).fetchone()
+    assert row is not None
+    shape = json.loads(cast(bytes, row[0]))
+    shape["counts"]["final_bytes"] = 300_000
+    db.execute(
+        "UPDATE privacy_audit_records SET receipt_canonical = ? WHERE receipt_id = ?",
+        (canonical_encode(shape), older.receipt_id),
+    )
+    # A receipt whose own bytes disagree with the column the page is ordered by.
+    db.execute(
+        "UPDATE privacy_audit_records SET receipt_finished_at = ? WHERE receipt_id = ?",
+        (format_rfc3339_millis(_NOW - timedelta(seconds=30)), moved.receipt_id),
+    )
+
+    first = asyncio.run(
+        audit.list_receipts(
+            PrivacyReceiptQuery(limit=3), PrivacyReceiptAudience.TRUSTED_LOCAL_CONTROL
+        )
+    )
+    assert first.next_cursor is not None
+    second = asyncio.run(
+        audit.list_receipts(
+            PrivacyReceiptQuery(limit=3, cursor=first.next_cursor),
+            PrivacyReceiptAudience.TRUSTED_LOCAL_CONTROL,
+        )
+    )
+
+    assert [view.receipt for view in first.receipts] == [stored[0], stored[2]]
+    assert (first.undecodable_count, first.undecodable_receipt_ids) == (1, (garbled.receipt_id,))
+    assert [view.receipt for view in second.receipts] == [stored[5]]
+    assert (second.undecodable_count, second.undecodable_receipt_ids) == (
+        2,
+        (older.receipt_id, moved.receipt_id),
+    )
+    assert second.next_cursor is None
+    with pytest.raises(PrivacyAuditUnreadable) as fetched:
+        asyncio.run(
+            audit.get_receipt(garbled.receipt_id, PrivacyReceiptAudience.TRUSTED_LOCAL_CONTROL)
+        )
+    assert fetched.value.reason == "privacy_audit_local_row_undecodable"
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "service.diagnostics.jsonl").read_text().splitlines()
+    ]
+    assert [
+        (record["operation"], record["reason"], record["request_id"]) for record in records
+    ] == [
+        (
+            "privacy_receipts_list_row_skipped",
+            "privacy_audit_local_row_undecodable",
+            row.request_id,
+        )
+        for row in (garbled, older, moved)
+    ]
+    assert "not a receipt" not in json.dumps(records)
+
+
+@pytest.mark.parametrize("adapter", ["sqlite", "memory"])
+def test_a_bad_cursor_is_the_one_typed_caller_error(adapter: str) -> None:
+    if adapter == "sqlite":
+        audit: PrivacyAuditPort = CatalogPrivacyAudit(
+            _database(),
+            _UnusedObjects(),  # type: ignore[arg-type]
+            _Key(),
+            _Clock(),
+        )
+    else:
+        audit = MemoryPrivacyAudit(
+            MemoryPrivacyCatalogState(),
+            _UnusedObjects(),  # type: ignore[arg-type]
+            _Key(),
+            _Clock(),
+        )
+
+    with pytest.raises(PrivacyReceiptCursorInvalid):
+        asyncio.run(
+            audit.list_receipts(
+                PrivacyReceiptQuery(cursor="AAAA"), PrivacyReceiptAudience.TRUSTED_LOCAL_CONTROL
+            )
+        )

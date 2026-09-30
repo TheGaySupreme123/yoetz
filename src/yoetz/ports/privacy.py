@@ -72,6 +72,9 @@ __all__ = [
     "PrivacyReceiptAudience",
     "PendingDisclosureEntry",
     "PendingDisclosurePage",
+    "PRIVACY_AUDIT_UNREADABLE_REASONS",
+    "PrivacyAuditUnreadable",
+    "PrivacyReceiptCursorInvalid",
     "PrivacyReceiptPage",
     "PrivacyReceiptQuery",
     "PrivacyReceiptView",
@@ -103,6 +106,46 @@ _CURSOR = re.compile(
 
 def _invalid() -> ValueError:
     return ValueError("invalid_privacy_port_value")
+
+
+# Why a stored receipt, or the page built from stored receipts, could not be read. Each names the
+# store's fault, never the caller's: a request that reached the audit store was well formed, so
+# none of these may be reported as ``invalid_request`` (issue #921).
+PRIVACY_AUDIT_UNREADABLE_REASONS: frozenset[str] = frozenset(
+    {
+        "privacy_audit_generation_unavailable",
+        "privacy_audit_local_row_undecodable",
+        "privacy_audit_network_row_undecodable",
+        "privacy_audit_page_invariant_violated",
+        "privacy_audit_row_kind_invalid",
+    }
+)
+
+
+class PrivacyAuditUnreadable(Exception):
+    """The audit store holds a receipt, or yields a page, that cannot be read back.
+
+    Carries one closed reason token and nothing else: no receipt content, row bytes, or
+    exception text crosses this boundary.
+    """
+
+    __slots__ = ("reason",)
+
+    reason: str
+
+    def __init__(self, reason: str) -> None:
+        if type(reason) is not str or reason not in PRIVACY_AUDIT_UNREADABLE_REASONS:
+            raise ValueError("privacy_audit_unreadable_reason_invalid")
+        self.reason = reason
+        super().__init__(reason)
+
+
+class PrivacyReceiptCursorInvalid(ValueError):
+    """A receipt-list cursor is corrupt, forged, or was minted for a different query.
+
+    This is the one audit-read failure that is the caller's to fix, so it is the one the control
+    surface reports as ``invalid_request``.
+    """
 
 
 def _positive(value: object) -> int:
@@ -795,13 +838,34 @@ type PrivacyReceiptView = NetworkEgressReceiptView | LocalDisclosureReceiptView
 
 @dataclass(frozen=True, slots=True)
 class PrivacyReceiptPage:
+    """One page of stored receipts, newest first.
+
+    ``undecodable_count`` counts the stored rows inside this page's window that could not be read
+    back as a receipt; they are skipped rather than failing the page, and never silently: the
+    count travels with the page, and ``undecodable_receipt_ids`` names each one whose structural
+    receipt id is itself intact (issue #921). A page with a nonzero count is a partial listing.
+    """
+
     snapshot_generation: int
     receipts: tuple[PrivacyReceiptView, ...]
     next_cursor: str | None
+    undecodable_count: int = 0
+    undecodable_receipt_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _positive(self.snapshot_generation)
         if type(self.receipts) is not tuple or len(self.receipts) > 100:
+            raise _invalid()
+        _nonnegative(self.undecodable_count)
+        if len(self.receipts) + self.undecodable_count > 100:
+            raise _invalid()
+        if type(self.undecodable_receipt_ids) is not tuple:
+            raise _invalid()
+        if len(self.undecodable_receipt_ids) > self.undecodable_count:
+            raise _invalid()
+        for receipt_id in self.undecodable_receipt_ids:
+            validate_id(IdKind.EGRESS_RECEIPT, receipt_id)
+        if len(set(self.undecodable_receipt_ids)) != len(self.undecodable_receipt_ids):
             raise _invalid()
         if any(
             type(receipt) not in {NetworkEgressReceiptView, LocalDisclosureReceiptView}
@@ -818,6 +882,8 @@ class PrivacyReceiptPage:
             )
         )
         if self.receipts != expected:
+            raise _invalid()
+        if {view.receipt.receipt_id for view in self.receipts} & set(self.undecodable_receipt_ids):
             raise _invalid()
         if self.next_cursor is not None and (
             type(self.next_cursor) is not str

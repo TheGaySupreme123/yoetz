@@ -75,8 +75,10 @@ from yoetz.ports.privacy import (
     PrivacyAuditObjectRoots,
     PrivacyAuditReservation,
     PrivacyAuditState,
+    PrivacyAuditUnreadable,
     PrivacyAuthorityAncestor,
     PrivacyReceiptAudience,
+    PrivacyReceiptCursorInvalid,
     PrivacyReceiptPage,
     PrivacyReceiptQuery,
     PrivacyReceiptView,
@@ -350,6 +352,77 @@ def _receipt_view_from_row(destination_kind: object, canonical: object) -> Priva
     if destination_kind == "network":
         return NetworkEgressReceiptView("network_egress", _network_receipt_from_bytes(canonical))
     raise ValueError("privacy_audit_row_corrupt")
+
+
+_UNDECODABLE_ROW_REASONS: Final = {
+    "local": "privacy_audit_local_row_undecodable",
+    "network": "privacy_audit_network_row_undecodable",
+}
+
+
+def _decoded_receipt_row(
+    destination_kind: object,
+    canonical: object,
+    finished_at_column: object,
+    receipt_id_column: object,
+) -> PrivacyReceiptView:
+    """Read one stored receipt back, or name why its row cannot be read.
+
+    The row's indexed ``receipt_id`` and ``receipt_finished_at`` columns are what listing filters,
+    orders, and pages by, so a receipt whose own bytes disagree with them is as unreadable as one
+    that does not decode: returning it would place it out of order or under another id.
+    """
+
+    reason = (
+        _UNDECODABLE_ROW_REASONS.get(destination_kind) if type(destination_kind) is str else None
+    )
+    if reason is None:
+        raise PrivacyAuditUnreadable("privacy_audit_row_kind_invalid")
+    try:
+        view = _receipt_view_from_row(destination_kind, canonical)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise PrivacyAuditUnreadable(reason) from exc
+    if (
+        view.receipt.receipt_id != receipt_id_column
+        or format_rfc3339_millis(view.receipt.finished_at) != finished_at_column
+    ):
+        raise PrivacyAuditUnreadable(reason)
+    return view
+
+
+def _structural_receipt_id(value: object) -> str | None:
+    """Return a row's receipt id only when it is itself a well-formed structural id."""
+
+    if type(value) is not str:
+        return None
+    try:
+        return validate_id(IdKind.EGRESS_RECEIPT, value)
+    except TypeError, ValueError:
+        return None
+
+
+def _record_skipped_receipt_row(reason: str, request_id: object) -> None:
+    """Leave an owner-only diagnostic for one listed row that could not be read.
+
+    Only structural facts are recorded: the closed reason (which names the row's destination
+    kind) and the row's own request id, so ``yoetz service diagnostics --request-id`` finds it.
+    Never the receipt bytes or the decoding exception's text.
+    """
+
+    from yoetz.observability.logging import record_public_error_without_raising
+
+    structural_request_id: str | None = None
+    if type(request_id) is str:
+        try:
+            structural_request_id = validate_id(IdKind.REQUEST, request_id)
+        except TypeError, ValueError:
+            structural_request_id = None
+    record_public_error_without_raising(
+        component="privacy_audit",
+        operation="privacy_receipts_list_row_skipped",
+        reason=reason,
+        request_id=structural_request_id,
+    )
 
 
 def _scope_from_json(value: JsonValue) -> AuthorizationScope:
@@ -2436,12 +2509,13 @@ class CatalogPrivacyAudit:
         if audience is not PrivacyReceiptAudience.TRUSTED_LOCAL_CONTROL:
             raise ValueError("privacy_receipt_audience_invalid")
         row = self._db.execute(
-            "SELECT destination_kind, receipt_canonical FROM privacy_audit_records WHERE receipt_id = ?",
+            """SELECT destination_kind, receipt_canonical, receipt_finished_at, receipt_id
+               FROM privacy_audit_records WHERE receipt_id = ?""",
             (receipt_id,),
         ).fetchone()
         if row is None:
             return None
-        return _receipt_view_from_row(row[0], row[1])
+        return _decoded_receipt_row(row[0], row[1], row[2], row[3])
 
     async def list_pending_disclosures(
         self, audience: PrivacyReceiptAudience
@@ -2515,18 +2589,21 @@ class CatalogPrivacyAudit:
                 "SELECT COUNT(*) + 1 FROM privacy_audit_records"
             ).fetchone()
             if count_row is None or type(count_row[0]) is not int:
-                raise ValueError("privacy_audit_generation_unavailable")
+                raise PrivacyAuditUnreadable("privacy_audit_generation_unavailable")
             snapshot_generation = cast(int, count_row[0])
             after_at: datetime | None = None
             after_id: str | None = None
         else:
             cursor = self._decode_cursor(query.cursor)
             if cursor.get("query_digest") != query_digest:
-                raise ValueError("privacy_receipt_cursor_query_mismatch")
-            snapshot_at = parse_rfc3339_millis(cursor["snapshot_at"])
-            snapshot_generation = _integer(cursor["snapshot_generation"])
-            after_at = parse_rfc3339_millis(cursor["after_at"])
-            after_id = cast(str, cursor["after_id"])
+                raise PrivacyReceiptCursorInvalid("privacy_receipt_cursor_query_mismatch")
+            try:
+                snapshot_at = parse_rfc3339_millis(cursor["snapshot_at"])
+                snapshot_generation = _integer(cursor["snapshot_generation"])
+                after_at = parse_rfc3339_millis(cursor["after_at"])
+                after_id = validate_id(IdKind.EGRESS_RECEIPT, cursor["after_id"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise PrivacyReceiptCursorInvalid("privacy_receipt_cursor_invalid") from exc
         clauses = ["receipt_id IS NOT NULL", "receipt_finished_at <= ?"]
         parameters: list[apsw.SQLiteValue] = [format_rfc3339_millis(snapshot_at)]
         fields = (
@@ -2557,13 +2634,29 @@ class CatalogPrivacyAudit:
             parameters.extend((rendered, rendered, after_id))
         parameters.append(query.limit + 1)
         rows = self._db.execute(
-            f"""SELECT destination_kind, receipt_canonical, receipt_finished_at, receipt_id
+            f"""SELECT destination_kind, receipt_canonical, receipt_finished_at, receipt_id,
+                       request_id
                 FROM privacy_audit_records WHERE {" AND ".join(clauses)}
                 ORDER BY receipt_finished_at DESC, receipt_id DESC LIMIT ?""",  # noqa: S608
             parameters,
         ).fetchall()
         selected = rows[: query.limit]
-        receipts = [_receipt_view_from_row(kind, canonical) for kind, canonical, _, _ in selected]
+        # Rows are read one at a time. A row that cannot be read back is skipped, counted, named
+        # by its structural id, and recorded -- never allowed to take every other receipt on the
+        # page down with it, and never dropped silently (issue #921). The cursor below still
+        # advances past it, so paging neither repeats nor loses a row.
+        receipts: list[PrivacyReceiptView] = []
+        undecodable_ids: list[str] = []
+        undecodable_count = 0
+        for kind, canonical, finished_at, receipt_id, request_id in selected:
+            try:
+                receipts.append(_decoded_receipt_row(kind, canonical, finished_at, receipt_id))
+            except PrivacyAuditUnreadable as exc:
+                undecodable_count += 1
+                structural_id = _structural_receipt_id(receipt_id)
+                if structural_id is not None and structural_id not in undecodable_ids:
+                    undecodable_ids.append(structural_id)
+                _record_skipped_receipt_row(exc.reason, request_id)
         next_cursor = None
         if len(rows) > query.limit and selected:
             last = selected[-1]
@@ -2577,7 +2670,18 @@ class CatalogPrivacyAudit:
                     "version": 1,
                 }
             )
-        return PrivacyReceiptPage(snapshot_generation, tuple(receipts), next_cursor)
+        try:
+            return PrivacyReceiptPage(
+                snapshot_generation,
+                tuple(receipts),
+                next_cursor,
+                undecodable_count,
+                tuple(undecodable_ids),
+            )
+        except (TypeError, ValueError) as exc:
+            # Every row on the page decoded and agreed with its indexed columns, so an ordering or
+            # uniqueness violation here is an integrity fault in the store, not the caller's.
+            raise PrivacyAuditUnreadable("privacy_audit_page_invariant_violated") from exc
 
     def _encode_cursor(self, payload: dict[str, JsonValue]) -> str:
         body = canonical_encode(payload)
@@ -2599,13 +2703,13 @@ class CatalogPrivacyAudit:
             expected = _mac(self._key, _CURSOR_DOMAIN, body)
             actual = cast(str, envelope["mac"])
             if not hmac.compare_digest(expected, actual):
-                raise ValueError("privacy_receipt_cursor_invalid")
+                raise PrivacyReceiptCursorInvalid("privacy_receipt_cursor_invalid")
             payload = _mapping(strict_json_parse(body))
             if payload.get("version") != 1:
-                raise ValueError("privacy_receipt_cursor_invalid")
+                raise PrivacyReceiptCursorInvalid("privacy_receipt_cursor_invalid")
             return payload
         except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError("privacy_receipt_cursor_invalid") from exc
+            raise PrivacyReceiptCursorInvalid("privacy_receipt_cursor_invalid") from exc
 
     async def live_object_roots(
         self, task_id: str, route_identity_digest: str

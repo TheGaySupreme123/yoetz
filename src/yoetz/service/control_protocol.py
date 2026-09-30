@@ -957,6 +957,10 @@ def public_error_code_for_control_reason(reason: str) -> PublicErrorCode:
         return PublicErrorCode.SERVICE_UNAVAILABLE
     if reason == "privacy_projection_blocked":
         return PublicErrorCode.PRIVACY_AUTHORITY_REQUIRED
+    # The request was valid and reached the audit store; a stored receipt it holds cannot be read
+    # back. That is the store's condition, never the caller's INVALID_REQUEST (issue #921).
+    if reason == "privacy_audit_unreadable":
+        return PublicErrorCode.STORAGE_CORRUPT
     if reason == "vault_locked":
         return PublicErrorCode.VAULT_LOCKED
     if reason == "request_cancelled":

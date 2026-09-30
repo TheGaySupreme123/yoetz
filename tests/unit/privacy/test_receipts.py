@@ -7,6 +7,7 @@ import pytest
 
 from yoetz.domain.privacy import (
     MAX_EGRESS_CASE_BYTES,
+    MAX_RECEIPT_FINAL_BYTES,
     AuthorizationScope,
     AuthorizationScopeKind,
     ConsentSource,
@@ -201,9 +202,12 @@ def test_no_dispatch_forbidden_data_receipt_requires_none_consent_and_failed_sca
 
 def test_counts_scan_and_destination_cross_field_invariants_fail_closed() -> None:
     with pytest.raises(ValueError, match="invalid_privacy_value"):
-        # Track the constant rather than a literal: this previously pinned 262_145 and silently
-        # stopped testing the boundary when the egress ceiling moved.
-        ReceiptCounts(2, 2, 1, 1, 1, 10, MAX_EGRESS_CASE_BYTES + 1)
+        # Track the constant rather than a literal. The bound is the published receipt
+        # vocabulary's, not the outbound document's: it once followed MAX_EGRESS_CASE_BYTES to
+        # 512 KiB, which let the store keep receipts the wire refuses (issue #921).
+        ReceiptCounts(2, 2, 1, 1, 1, 10, MAX_RECEIPT_FINAL_BYTES + 1)
+    assert ReceiptCounts(2, 2, 1, 1, 1, 10, MAX_RECEIPT_FINAL_BYTES).final_bytes == 262_144
+    assert MAX_RECEIPT_FINAL_BYTES < MAX_EGRESS_CASE_BYTES
     with pytest.raises(ValueError, match="invalid_privacy_value"):
         ReceiptSecretScan("1", _DIGEST, 1, 1)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="invalid_privacy_value"):
