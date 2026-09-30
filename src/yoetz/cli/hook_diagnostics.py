@@ -11,7 +11,13 @@ from pathlib import Path
 from threading import Lock
 from typing import Final, cast
 
-from yoetz.config.paths import PathSafetyError, ensure_owner_only_dir, state_dir
+from yoetz.cli.hook_timing import hook_pass_timing_summary
+from yoetz.config.paths import (
+    PathSafetyError,
+    ensure_owner_only_dir,
+    existing_owner_only_dir,
+    state_dir,
+)
 from yoetz.domain.observation import (
     ObservationEnvelope,
     ObservationGapCode,
@@ -207,7 +213,7 @@ _STAGES: Final = frozenset(
         "store",
         # Formerly unwindowed regions of the pass (#310/#311): workspace
         # resolution and the consent probe before the store window opens, and
-        # advice selection, the stdout write and both delivery commits after
+        # advice selection, the stdout write and the delivery commit after
         # the drain window closes. Together with 'import' and 'store' they
         # partition the pass, and 'unattributed' names whatever they miss.
         "deliver",
@@ -257,7 +263,6 @@ _STORE_LOCK_SUMMARY_ROWS: Final = 16
 # with the moment it was observed, so a reader can date what it is looking at.
 _RECENT_WINDOW_SECONDS: Final = 3_600
 _SYNC_FALLBACK_PATH: Final = "sync_fallback_spool"
-_SYNC_FALLBACK_P95_TARGET_MS: Final = 250
 _SYNC_FALLBACK_HARD_CAP_MS: Final = 500
 _thread_lock = Lock()
 
@@ -567,9 +572,10 @@ def record_hook_timing(
 ) -> None:
     """Append one bounded end-to-end timing row for a hook pass.
 
-    Emitted only over budget or at session boundaries: the diagnostics file is
-    64 KiB with one rotation, and a per-hook row would halve the retained
-    failure-reason window.
+    Emitted only over budget, at session boundaries, or on a legacy spool
+    hard-cap breach: the diagnostics file is 64 KiB with one rotation, and a
+    per-hook row would halve the retained failure-reason window. The typical
+    cost of every pass lives in the separate ``hook_timing`` aggregate (#915).
     """
 
     bounded = {
@@ -688,9 +694,10 @@ class _Timings:
                                 "count": item.count,
                                 "recent_count": item.recent,
                                 "recent_p95_ms": item._recent_p95_ms(),
-                                "p95_target_ms": _SYNC_FALLBACK_P95_TARGET_MS
-                                if path == _SYNC_FALLBACK_PATH
-                                else None,
+                                # Spool rows are hard-cap breaches only since #915, so a p95
+                                # over them is no reading of the 250 ms target; that target is
+                                # read against every pass in ``pass_timings``.
+                                "p95_target_ms": None,
                                 "hard_cap_ms": _SYNC_FALLBACK_HARD_CAP_MS
                                 if path == _SYNC_FALLBACK_PATH
                                 else None,
@@ -724,7 +731,9 @@ def _read_rows(
     attempts: list[JsonObject] = []
     locks: list[JsonObject] = []
     try:
-        ensure_owner_only_dir(directory)
+        # A status read never creates the observation directory it reports on.
+        if not existing_owner_only_dir(directory):
+            return [], [], [], []
         for path in (
             directory / f"{_FILE_NAME}.1",
             directory / _FILE_NAME,
@@ -884,6 +893,9 @@ def hook_diagnostic_summary(
     Every tally is reported twice — over everything retained, and over the last
     `window_seconds` — and every count carries the span it covers, so a reader
     can tell a live failure from one that was fixed days ago (#310).
+
+    ``pass_timings`` is the separate bounded aggregate over every hook pass
+    (#915); ``timings`` stays the over-budget and session-boundary rows.
     """
 
     root = state_dir() if _state is None else _state
@@ -929,6 +941,7 @@ def hook_diagnostic_summary(
             # Newest payload-free ownership facts for lock timeouts and long
             # holds: which role and store phase held the lock, and for how long.
             "store_lock_events": tuple(locks[-_STORE_LOCK_SUMMARY_ROWS:]),
+            "pass_timings": hook_pass_timing_summary(_state=_state, _now=_now),
             "timings": timing.as_json(),
             "window_seconds": _RECENT_WINDOW_SECONDS,
         }

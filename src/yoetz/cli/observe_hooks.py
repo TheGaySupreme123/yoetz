@@ -36,7 +36,6 @@ from yoetz.adapters.integrations.observation_local import (
     HOOK_MAPPING_VERSION,
     YOETZ_OWNED_TOOL_NAMES,
     AdviceDelivery,
-    FrontierMotionNotice,
     LocalObservationConsent,
     LocalObservationStore,
     ObservationOutboxRow,
@@ -72,6 +71,7 @@ from yoetz.cli.hook_io import (
 from yoetz.cli.hook_io import (
     stderr_line as _stderr_line,
 )
+from yoetz.cli.hook_timing import HookPassTiming, record_hook_pass_timing
 from yoetz.domain.observation import (
     OBSERVATION_CONTENT_CAPTURE_PENDING_REASON,
     ObservationContentChunk,
@@ -137,6 +137,7 @@ __all__ = [
     "STANDING_ADVICE_CADENCE_EVENTS",
     "SUPPORTED_HOOK_EVENTS",
     "handle_claude_observe",
+    "handle_codex_observe",
     "handle_cursor_observe",
     "handle_observe",
     "handle_spool",
@@ -2071,6 +2072,31 @@ def _record_pass_timing(
         )
 
 
+def _finish_hook_pass(
+    timing: HookPassTiming,
+    *,
+    monotonic: Callable[[], float],
+    _state: Path | None,
+    ms: int | None = None,
+) -> None:
+    """Fold one host hook pass into its bounded timing aggregate (#915).
+
+    Every pass counts, in budget or not, and none adds a row to the failure-reason file, so the
+    typical cost is measurable without evicting failure history. ``ms`` lets a caller that also
+    judges the pass against a cap use the very same measurement. Never raises.
+    """
+
+    with contextlib.suppress(BaseException):
+        record_hook_pass_timing(
+            timing.host,
+            timing.event,
+            timing.path,
+            timing.outcome,
+            ms=_elapsed_ms(timing.started, monotonic()) if ms is None else ms,
+            _state=_state,
+        )
+
+
 def _cached_recommendation_context(*, _state: Path | None) -> str:
     from yoetz.application.recommendations import cached_pending_recommendations
 
@@ -2093,16 +2119,6 @@ def _cached_recommendation_context(*, _state: Path | None) -> str:
             "start a fresh session afterwards. Fully restart the host only if activation requires it."
         )
     return text[:_MAX_ADVICE_CONTEXT]
-
-
-def _frontier_motion_context(notice: FrontierMotionNotice) -> str:
-    return (
-        "Yoetz: task frontier moved from "
-        f"{notice.from_sequence} to {notice.to_sequence} when the Yoetz observation writer "
-        f"appended {notice.observation_record_count} ledger record(s). "
-        "Held publish frontiers remain valid across observation-only motion; "
-        "run status before an exact-frontier check."
-    )
 
 
 async def _try_service_ingest(
@@ -3577,6 +3593,7 @@ def handle_observe(
     _content_payload: Mapping[str, JsonValue] | None = None,
     _ingress_gap: str | None = None,
     _include_admission_notice: bool = True,
+    _pass_timing: HookPassTiming | None = None,
 ) -> int:
     """Bounded observation ingress for Codex lifecycle hooks. Always exits 0.
 
@@ -3588,6 +3605,10 @@ def handle_observe(
 
     ``_entry_monotonic`` is the console shim's pre-import sample; without it the
     recorded import stage reads zero rather than guessing.
+
+    ``_pass_timing`` is the host entry's timing sample (#915). This pass only reports how far it
+    got; the entry that owns the sample records it, so nested callers and the service's spool
+    replay never count as a host hook pass.
     """
 
     entry_started = _monotonic() if _entry_monotonic is None else _entry_monotonic
@@ -4480,6 +4501,8 @@ def handle_observe(
                                 )
         session_end_uncommitted = False
         capture_committed = True
+        if _pass_timing is not None:
+            _pass_timing.outcome = "ingested"
 
         stages["store"] = _elapsed_ms(store_started, _monotonic())
 
@@ -4492,6 +4515,8 @@ def handle_observe(
             # the service/next hook when contention spent the local allowance.
             # Never defer transient native content through this structural lane.
             record_hook_diagnostic("hook_followup_deferred", resolved_event, _state=_state)
+            if _pass_timing is not None:
+                _pass_timing.outcome = "followup_deferred"
             _stdout_json({}, stdout)
             for name, spent in store.stage_timings_ms.items():
                 stages[f"store_{name}"] = max(0, int(spent))
@@ -4905,7 +4930,6 @@ def handle_observe(
         # a blocked host pipe delays advice, never observation ingest or outbox work.
         # Commit remains after emit, so a failed write never suppresses a later delivery.
         pending_delivery: AdviceDelivery | None = None
-        pending_frontier_notice: FrontierMotionNotice | None = None
         delivery_session_id: str | None = None
         # stop_hook_active is the host loop guard: a prior Stop already
         # continued this turn. Blocking again would loop; leave advice for a
@@ -4939,12 +4963,12 @@ def handle_observe(
         with delivery_gate as delivery_acquired:
             if delivery_eligible and delivery_acquired:
                 delivery_session_id = None if mapping is None else mapping.yoetz_session_id
-                if resolved_event == "PostToolUse":
-                    pending_frontier_notice = store.peek_frontier_motion(
-                        workspace_commitment, codex_session_id
-                    )
-                    if pending_frontier_notice is not None:
-                        additional = _frontier_motion_context(pending_frontier_notice)
+                # No frontier-motion notice rides this channel (#915). Every recorded
+                # notice describes observation-authored motion, which leaves a held
+                # cooperative frontier admissible (ADR-022), so it carried nothing to act
+                # on and asked for `status` between routine tool calls. Motion by any
+                # other writer still reaches the agent as `frontier_conflict` on its next
+                # state-sensitive operation.
                 delivery = store.peek_advice_for_delivery(
                     workspace_commitment,
                     yoetz_session_id=delivery_session_id,
@@ -5018,18 +5042,8 @@ def handle_observe(
                         yoetz_session_id=delivery_session_id,
                         session_commitment=session_commitment,
                     )
-            if emitted and host_consumable and pending_frontier_notice is not None:
-                with contextlib.suppress(BaseException):
-                    store.commit_frontier_motion_delivery(
-                        workspace_commitment,
-                        codex_session_id,
-                        pending_frontier_notice.delivery_identity,
-                        emitted_to_sequence=pending_frontier_notice.to_sequence,
-                        emitted_task_id=pending_frontier_notice.task_id,
-                        emitted_head_digest=pending_frontier_notice.head_digest,
-                    )
-        # Advice selection, the lease, the stdout write itself and both delivery
-        # commits sit past the 'drain' window; a blocked host pipe or a
+        # Advice selection, the lease, the stdout write itself and the delivery
+        # commit sit past the 'drain' window; a blocked host pipe or a
         # contended commit was previously invisible (#310/#311).
         stages["deliver"] = _elapsed_ms(deliver_started, _monotonic())
         # Attribute the whole pass's store work (#290), folded in last because
@@ -5054,6 +5068,8 @@ def handle_observe(
         )
         return 0
     except BaseException as failure:
+        if _pass_timing is not None:
+            _pass_timing.outcome = "failed"
         if isinstance(failure, ObservationStoreLockTimeout):
             # The store stayed contended past this pass's lock budget. The
             # lock reporter already recorded a `store_lock_timeout` row with
@@ -5088,6 +5104,47 @@ def handle_observe(
         _release_native_drain_lease()
         with contextlib.suppress(BaseException):
             lock_context.close()
+
+
+def handle_codex_observe(
+    *,
+    event_name: str,
+    stdin_bytes: bytes | None = None,
+    stdout: BinaryIO | None = None,
+    workspace: str | None = None,
+    _state: Path | None = None,
+    connect: ServiceConnector | None = None,
+    run_async: AsyncRunner | None = None,
+    skip_service: bool = False,
+    _entry_monotonic: float | None = None,
+    _monotonic: Callable[[], float] = time.monotonic,
+) -> int:
+    """Run ``yoetz hooks observe`` as one timed Codex host hook pass (#915)."""
+
+    timing = HookPassTiming(
+        "codex",
+        event_name,
+        "observe",
+        _monotonic() if _entry_monotonic is None else _entry_monotonic,
+    )
+    try:
+        return handle_observe(
+            event_name=event_name,
+            stdin_bytes=stdin_bytes,
+            stdout=stdout,
+            workspace=workspace,
+            _state=_state,
+            connect=connect,
+            run_async=run_async,
+            skip_service=skip_service,
+            _entry_monotonic=_entry_monotonic,
+            _pass_timing=timing,
+        )
+    except BaseException:
+        timing.outcome = "failed"
+        raise
+    finally:
+        _finish_hook_pass(timing, monotonic=_monotonic, _state=_state)
 
 
 _CLAUDE_SESSION_PREFIX: Final = "claude:"
@@ -5478,6 +5535,14 @@ def _default_runner() -> AsyncRunner:
     return cast(AsyncRunner, anyio.run)
 
 
+def _native_profile_path(observation_profile: str | None, ordinary_profile_id: str) -> str:
+    """Name the rendered observation profile a Claude Code or Cursor hook ran under (#915)."""
+
+    if observation_profile is None:
+        return "structural"
+    return "ordinary" if observation_profile == ordinary_profile_id else "invalid_profile"
+
+
 def handle_claude_observe(
     *,
     event_name: str | None,
@@ -5490,6 +5555,50 @@ def handle_claude_observe(
     skip_service: bool = False,
     observation_profile: str | None = None,
     _entry_monotonic: float | None = None,
+    _monotonic: Callable[[], float] = time.monotonic,
+) -> int:
+    """Run one Claude Code hook as one timed host hook pass (#915)."""
+
+    timing = HookPassTiming(
+        "claude",
+        event_name or "unknown_event",
+        _native_profile_path(observation_profile, CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID),
+        _monotonic() if _entry_monotonic is None else _entry_monotonic,
+    )
+    try:
+        return _handle_claude_observe(
+            event_name=event_name,
+            stdin_bytes=stdin_bytes,
+            stdout=stdout,
+            workspace=workspace,
+            _state=_state,
+            connect=connect,
+            run_async=run_async,
+            skip_service=skip_service,
+            observation_profile=observation_profile,
+            _entry_monotonic=_entry_monotonic,
+            _pass_timing=timing,
+        )
+    except BaseException:
+        timing.outcome = "failed"
+        raise
+    finally:
+        _finish_hook_pass(timing, monotonic=_monotonic, _state=_state)
+
+
+def _handle_claude_observe(
+    *,
+    event_name: str | None,
+    stdin_bytes: bytes | None = None,
+    stdout: BinaryIO | None = None,
+    workspace: str | None = None,
+    _state: Path | None = None,
+    connect: ServiceConnector | None = None,
+    run_async: AsyncRunner | None = None,
+    skip_service: bool = False,
+    observation_profile: str | None = None,
+    _entry_monotonic: float | None = None,
+    _pass_timing: HookPassTiming | None = None,
 ) -> int:
     """Normalize one Claude hook into bounded Yoetz observation.
 
@@ -5859,11 +5968,14 @@ def handle_claude_observe(
                 CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID if ordinary_profile else None
             ),
             _content_payload=payload if ordinary_profile else None,
+            _pass_timing=_pass_timing,
         )
         if denied_output is not None:
             hook_io.stdout_json(denied_output, stdout)
         return result
     except BaseException:
+        if _pass_timing is not None:
+            _pass_timing.outcome = "failed"
         with contextlib.suppress(BaseException):
             hook_io.stdout_json({}, stdout)
         return 0
@@ -5954,10 +6066,21 @@ def handle_cursor_observe(
     skip_service: bool = False,
     observation_profile: str | None = None,
     _entry_monotonic: float | None = None,
+    _monotonic: Callable[[], float] = time.monotonic,
 ) -> int:
-    """Keep passive Cursor observation valid at its pre-tool permission boundary."""
+    """Keep passive Cursor observation valid at its pre-tool permission boundary.
+
+    The whole invocation, including the neutral pre-tool permission write, is one timed host hook
+    pass (#915).
+    """
     import io
 
+    timing = HookPassTiming(
+        "cursor",
+        event_name or "unknown_event",
+        _native_profile_path(observation_profile, CURSOR_ORDINARY_OBSERVATION_PROFILE_ID),
+        _monotonic() if _entry_monotonic is None else _entry_monotonic,
+    )
     raw_event = event_name
     if event_name is None:
         # Read the same bound the ingress reader applies, so an oversized body
@@ -5968,6 +6091,7 @@ def handle_cursor_observe(
         with contextlib.suppress(Exception):
             candidate = read_cursor_hook_ingress(stdin_bytes)[0].get("hook_event_name")
             raw_event = candidate if isinstance(candidate, str) else None
+        timing.event = raw_event or "unknown_event"
     pre_tool = raw_event == "preToolUse"
     # PreToolUse has no advice delivery: buffer the internal observer's empty
     # output and emit one valid neutral permission response on every path.
@@ -5984,12 +6108,19 @@ def handle_cursor_observe(
             skip_service=skip_service,
             observation_profile=observation_profile,
             _entry_monotonic=_entry_monotonic,
+            _pass_timing=timing,
         )
         completed = True
         return result
+    except BaseException:
+        timing.outcome = "failed"
+        raise
     finally:
-        if pre_tool and completed:
-            hook_io.stdout_json(_cursor_context_output("preToolUse", ""), stdout)
+        try:
+            if pre_tool and completed:
+                hook_io.stdout_json(_cursor_context_output("preToolUse", ""), stdout)
+        finally:
+            _finish_hook_pass(timing, monotonic=_monotonic, _state=_state)
 
 
 def _handle_cursor_observe(
@@ -6004,6 +6135,7 @@ def _handle_cursor_observe(
     skip_service: bool = False,
     observation_profile: str | None = None,
     _entry_monotonic: float | None = None,
+    _pass_timing: HookPassTiming | None = None,
 ) -> int:
     """Normalize one Cursor hook into bounded Yoetz observation.
 
@@ -6310,8 +6442,11 @@ def _handle_cursor_observe(
             _ingress_gap=(
                 ObservationGapCode.PAYLOAD_CONTENT_OMITTED.value if content_omitted else None
             ),
+            _pass_timing=_pass_timing,
         )
     except BaseException:
+        if _pass_timing is not None:
+            _pass_timing.outcome = "failed"
         with contextlib.suppress(BaseException):
             hook_io.stdout_json({}, stdout)
         return 0
@@ -6331,10 +6466,15 @@ def handle_spool(
 
     No service preflight, local-state hydration, outbox drain, advice refresh,
     or observation-store write occurs on this host-critical path.
+
+    Every pass feeds the bounded timing aggregate (#915); only a hard-cap breach
+    also leaves a timing row, so a busy legacy host no longer evicts the
+    failure-reason history one row per tool call.
     """
 
     started = _monotonic() if _entry_monotonic is None else _entry_monotonic
     event = event_name or "observe"
+    timing = HookPassTiming("codex", event, "sync_fallback_spool", started)
     try:
         raw = stdin_bytes if stdin_bytes is not None else sys.stdin.buffer.read(_MAX_CONTENT_CHUNK)
         payload = read_hook_payload(raw)
@@ -6366,21 +6506,27 @@ def handle_spool(
                 event_name=event_name,
                 payload=spool_payload,
             )
+            timing.outcome = "ingested"
     except Exception:
+        timing.outcome = "failed"
         record_hook_diagnostic("observe", event, _state=_state)
     finally:
-        total = _elapsed_ms(started, _monotonic())
-        # The p95 target is computed from retained host-visible timings; one
-        # individual leg is a hard breach only after the 500ms ceiling.
-        if total > 500:
-            record_hook_diagnostic("hook_slo_breached", event, _state=_state)
-        record_hook_timing(
-            event,
-            ms=total,
-            stages={"total": total},
-            path="sync_fallback_spool",
-            _state=_state,
-        )
         with contextlib.suppress(Exception):
             hook_io.stdout_json({}, stdout)
+        # One measurement, taken after the host's stdout write (the point the
+        # host waits for), feeds the breach reason, its row and the aggregate,
+        # so they can never disagree about a pass. The p95 target is read from
+        # the aggregate over every pass; one leg is a hard breach only after
+        # the 500ms ceiling, and only a breach keeps its own row.
+        total = _elapsed_ms(started, _monotonic())
+        if total > 500:
+            record_hook_diagnostic("hook_slo_breached", event, _state=_state)
+            record_hook_timing(
+                event,
+                ms=total,
+                stages={"total": total},
+                path="sync_fallback_spool",
+                _state=_state,
+            )
+        _finish_hook_pass(timing, monotonic=_monotonic, _state=_state, ms=total)
     return 0

@@ -116,9 +116,9 @@ def _observe_fast_path(arguments: list[str]) -> int | None:
     if event is None:
         return None
     try:
-        from yoetz.cli.observe_hooks import handle_observe
+        from yoetz.cli.observe_hooks import handle_codex_observe
 
-        return handle_observe(
+        return handle_codex_observe(
             event_name=event,
             workspace=workspace,
             _entry_monotonic=_ENTRY_MONOTONIC,

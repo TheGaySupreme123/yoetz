@@ -11,6 +11,7 @@ from yoetz.config.paths import (
     PathSafetyError,
     _PathProbe,  # pyright: ignore[reportPrivateUsage]
     ensure_owner_only_dir,
+    existing_owner_only_dir,
     service_generation_path,
     unlock_throttle_path,
     verify_private_local_bundle,
@@ -58,6 +59,25 @@ def test_owner_only_creation_and_fixed_locked_state_paths(
     assert throttle.name == "unlock-throttle.json"
     assert generation.parent == throttle.parent
     assert stat.S_IMODE(generation.parent.stat().st_mode) == 0o700
+
+
+def test_existing_owner_only_dir_verifies_without_creating(tmp_path: Path) -> None:
+    absent = tmp_path / "nested" / "observation"
+    assert existing_owner_only_dir(absent) is False
+    assert list(tmp_path.iterdir()) == []
+
+    ensure_owner_only_dir(absent)
+    assert existing_owner_only_dir(absent) is True
+
+    absent.chmod(0o755)
+    with pytest.raises(PathSafetyError, match="permissions_too_broad"):
+        existing_owner_only_dir(absent)
+    absent.chmod(0o700)
+
+    linked = tmp_path / "linked"
+    linked.symlink_to(absent.parent, target_is_directory=True)
+    with pytest.raises(PathSafetyError, match="path_contains_symlink"):
+        existing_owner_only_dir(linked / "observation")
 
 
 def test_ordered_symlink_permission_repository_sync_and_network_reasons(

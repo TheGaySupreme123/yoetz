@@ -86,7 +86,9 @@ def test_attribution_gap_without_child_alias_never_peeks_parent_delivery(
         == 0
     )
 
-    assert peeks == ([] if attribution_gap else ["frontier", "advice"])
+    # The hook never peeks frontier motion any more: observation-only motion is not a
+    # notice (#915), so only the advice channel is consulted.
+    assert peeks == ([] if attribution_gap else ["advice"])
 
 
 @pytest.mark.parametrize("child_signal", ["unmapped_agent", "foreign_result", "failed_request"])

@@ -4113,7 +4113,8 @@ Shared closed types:
   advice is disabled because `followup_message` auto-submits a user message; and `afterFileEdit`,
   `afterMCPExecution`, and `sessionEnd` emit `{}`. Cursor leases and commits advice only for a
   nonempty `sessionStart` object after its bytes are written successfully. Output-less events never
-  lease or consume advice or frontier-motion notices. Provider-repair advice is standing advice and
+  lease or consume advice. No hook on any host delivers a frontier-motion notice: every recorded
+  notice describes observation-authored motion, which leaves held frontiers admissible (issue #915). Provider-repair advice is standing advice and
   uses only the session-boundary channels (#844). Service composition sets `semantic_configured`
   only when verification is not disabled, a provider endpoint is bound, network egress is permitted,
   and an LLM inference channel is enabled. The verification default, including absent config, is not
@@ -4739,7 +4740,37 @@ interruption, so subsequent writers can proceed. Hook timing rows attribute queu
 `store_lock_wait` and the pass's own critical sections as
 `store_lock_hold`, cover the previously unwindowed resolve/deliver regions, and name any remaining
 wall-time difference as `unattributed`; nested store sub-stages are reported separately from the
-end-to-end partition (issues #310 and #311). A hook pass whose capture batch cannot take the lock
+end-to-end partition (issues #310 and #311). Timing rows stay reserved for over-budget passes,
+session boundaries and legacy-spool hard-cap breaches, so routine passes never evict the
+failure-reason window. The cost of every observation-ingress hook pass lives in a separate
+fixed-size aggregate (issue #915): each host ingress entry (`hooks observe` and `hooks spool` for Codex,
+`hooks claude-observe`, `hooks cursor-observe`) folds exactly one sample per process into the
+owner-only `observation/hook-pass-timing.json`, keyed by host (`codex`, `claude`, `cursor`), raw
+host event name, and path (`observe`, `sync_fallback_spool`, `structural`, `ordinary`,
+`invalid_profile`), with an outcome tally (`ingested`, `followup_deferred`, `not_ingested`,
+`failed`). Hook commands outside those ingress entries (Codex `hooks session-start`,
+`hooks user-prompt-submit` and the `start`-scoped `hooks post-tool-use`; `hooks startup-gate` and
+`hooks startup-context`) contribute no sample, so the aggregate is not a complete per-host hook
+cost profile. A sample is in-process time from the console entry to the end of the pass, after the
+host output was written; interpreter start and process exit are excluded. Each entry keeps the exact
+count, sum, mean and maximum, a fixed-bucket histogram whose edges include 150 ms, 250 ms, 500 ms and
+the 3, 5 and 10 s host timeouts, and the same histogram for the current and previous clock hour
+(`recent`, dated by `since`). `p50_ms_at_most` and `p95_ms_at_most` are the bucket bound that the
+nearest-rank percentile falls at or below, never an interpolation. The document holds at most 48
+entries (evictions are counted) and 64 KiB. Writers serialize on an exclusive lock, stage the
+next document beside the aggregate and rename it into place, and do not fsync; the aggregate path
+therefore only ever names a complete document, and a write that fails part-way leaves the previous
+one. A document that fails validation, including a timestamp past year 9999, reads as `unreadable`
+and restarts with a new `since`. Readers take no lock and create nothing: a status read on a state
+directory without the aggregate reports `absent` and leaves no directory, lock or file behind, and
+a read racing an update sees the last complete document. Every writer acquisition of the lock is
+bounded to 100 ms, so a stalled holder cannot keep a hook past its host timeout: a writer that
+cannot take it drops its sample and appends one byte to a lock-free drop counter, reported as
+`dropped_sample_count` (a lower bound for the period `since` names). Nested calls and the service's legacy-spool replay run the observe pass without a
+host entry and contribute no sample. `observe status --json` reports the aggregate as
+`hook_diagnostics.pass_timings`; the text form prints it on a `hook_pass_timing` line. The legacy
+spool judges its 500 ms hard cap and feeds the aggregate from one measurement taken after the
+host's stdout write. A hook pass whose capture batch cannot take the lock
 within its budget still exits 0 with its host's fail-open output, and reports
 `store_lock_timeout` instead of the generic `observe` or a false `workspace_unconsented`; that
 input is not retained. Serialization splices a cached canonical fragment for each immutable
@@ -4987,38 +5018,41 @@ For Yoetz-owned calls, local pairing is unaffected, so a delivered post-event ca
 the service materializes its action from the post alone. No coverage gap is recorded: the service
 already holds the authoritative record of every Yoetz-owned call it served. The same complete
 host-spelling set gates advice delivery: without an explicit failure, a Yoetz-owned hook does not
-lease pending frontier or recommendation context for the call being observed. An explicit
-self-call failure remains eligible for pending advice as well as retention and delivery.
+lease pending recommendation context for the call being observed. An explicit self-call failure
+remains eligible for pending advice as well as retention and delivery.
 
 The local observation state also owns a sparse, one-shot `FrontierMotionNotice` per Codex session:
 `from_sequence`, `to_sequence`, final `head_digest`, and exact accepted observation-record count.
-A newly accepted observation append creates it. Idempotent replay of a completed append
-reconciles a missing pending notice from that append's committed frontier metadata; a still-pending
-notice is coalesced rather than duplicated. After the hook consumer receives the notice bytes, the
-store keeps that session's delivered high-water frontier (`to_sequence` and `head_digest`), scoped
-to the announced task ledger. The coordinator binds every candidate to the routed ledger's actual
-current frontier so an older completed-operation result is still recognized as replay when the live
-head remains at or beyond the mark. An actual head below the mark, or at the same sequence with a
-different digest, proves the stored lineage was rewound: the mark and stale pending notice are
-discarded and announcement fails open from the new lineage. Otherwise a later replay at or behind
-the mark is dropped and an overlapping candidate is clamped so `from` and record count cover only
-the undelivered remainder. A mark recorded for a different task never suppresses or clamps: when
-the session's mapping moves to another task, the stale mark and any pending notice for the old task
-are discarded and announcements restart from the new ledger's motion. The notice and delivered-mark
-maps persist per-entry recency ordinals, drop ended-session entries first, and then evict the
-least-recently-used entry at their cap even after restart. A legacy delivered mark missing
-digest/recency identity or another malformed stored value is ignored as empty, failing open to a
-duplicate. Contiguous pending
-notices coalesce, and an advice-safe `PostToolUse` hook consumes the exact notice only after
-emitting its bounded agent context. If a later append merges into the pending notice between
-peek and commit, delivery identity no longer matches; commit still advances the delivered
-high-water to the peeked sequence/digest and clamps the merged remainder so the already-emitted
-range is not re-announced. If the queued same-task notice instead proves the emitted frontier was
-rewound away after the peek (a lower sequence, or the same sequence with a different digest),
-commit records no mark and leaves the rewind notice queued so the new lineage's prefix is still
-announced. This context is informational: it neither weakens
-exact-frontier checks nor expands the ADR-022 predicate that permits a cooperative publish to
-retain a stale frontier across observation-authored records.
+Since issue #915 no hook peeks, delivers, or commits it (ADR-022 decision 11, amended): every
+notice describes observation-authored motion, which leaves a held cooperative frontier admissible,
+and motion by any other writer reaches the agent as `frontier_conflict` on its next state-sensitive
+operation. The bookkeeping below is unchanged and describes the pre-#915 hook delivery; retiring it
+is follow-up work. A newly accepted observation append creates the notice. Idempotent replay of a
+completed append reconciles a missing pending notice from that append's committed frontier
+metadata; a still-pending notice is coalesced rather than duplicated. After the hook consumer
+receives the notice bytes, the store keeps that session's delivered high-water frontier
+(`to_sequence` and `head_digest`), scoped to the announced task ledger. The coordinator binds every
+candidate to the routed ledger's actual current frontier so an older completed-operation result is
+still recognized as replay when the live head remains at or beyond the mark. An actual head below
+the mark, or at the same sequence with a different digest, proves the stored lineage was rewound:
+the mark and stale pending notice are discarded and announcement fails open from the new lineage.
+Otherwise a later replay at or behind the mark is dropped and an overlapping candidate is clamped
+so `from` and record count cover only the undelivered remainder. A mark recorded for a different
+task never suppresses or clamps: when the session's mapping moves to another task, the stale mark
+and any pending notice for the old task are discarded and announcements restart from the new
+ledger's motion. The notice and delivered-mark maps persist per-entry recency ordinals, drop
+ended-session entries first, and then evict the least-recently-used entry at their cap even after
+restart. A legacy delivered mark missing digest/recency identity or another malformed stored value
+is ignored as empty, failing open to a duplicate. Contiguous pending notices coalesce, and an
+advice-safe `PostToolUse` hook consumes the exact notice only after emitting its bounded agent
+context. If a later append merges into the pending notice between peek and commit, delivery
+identity no longer matches; commit still advances the delivered high-water to the peeked
+sequence/digest and clamps the merged remainder so the already-emitted range is not re-announced.
+If the queued same-task notice instead proves the emitted frontier was rewound away after the peek
+(a lower sequence, or the same sequence with a different digest), commit records no mark and leaves
+the rewind notice queued so the new lineage's prefix is still announced. This context is
+informational: it neither weakens exact-frontier checks nor expands the ADR-022 predicate that
+permits a cooperative publish to retain a stale frontier across observation-authored records.
 
 `hook_observed` (publication channel and artifact-observation class) and `harness_observed`
 authorship require real observation evidence under an active consented observation arm — never a

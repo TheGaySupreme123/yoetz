@@ -850,7 +850,7 @@ def hooks_observe(
 
     try:
         module = importlib.import_module("yoetz.cli.observe_hooks")
-        handler = cast(Callable[..., int], getattr(module, "handle_observe"))
+        handler = cast(Callable[..., int], getattr(module, "handle_codex_observe"))
         handler(event_name=event, workspace=workspace)
     except BaseException:
         try:

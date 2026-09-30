@@ -709,102 +709,43 @@ def test_legacy_spool_canonicalizes_git_subdirectory_to_consented_root(tmp_path:
         assert records[0].workspace_commitment == root_commitment
 
 
-def test_post_tool_hook_delivers_pending_frontier_motion_once(tmp_path: Path) -> None:
+def test_post_tool_hook_never_delivers_observation_only_frontier_motion(tmp_path: Path) -> None:
+    """Observation-authored motion leaves held frontiers valid, so it is no notice (#915).
+
+    Every recorded frontier-motion notice describes observation-writer appends; the old text
+    then asked for ``status`` between routine tool calls, against the workflow guidance.
+    """
+
     store = LocalObservationStore(_state=tmp_path)
     workspace = store.workspace_commitment(str(tmp_path.resolve()))
     store.grant_consent(workspace)
     store.bind_codex_session(workspace, "frontier-motion")
-    store.note_frontier_motion(
-        workspace,
-        "frontier-motion",
-        from_sequence=4,
-        to_sequence=6,
-        head_digest="sha256:" + "3" * 64,
-        observation_record_count=2,
-        task_id="tsk-frontier-test",
-    )
-
     payload = json.dumps(
         {"session_id": "frontier-motion", "tool_name": "Read", "exit_status": 0}
     ).encode()
-    first = io.BytesIO()
-    assert (
-        handle_observe(
-            event_name="PostToolUse",
-            stdin_bytes=payload,
-            stdout=first,
-            workspace=str(tmp_path),
-            _state=tmp_path,
-            skip_service=True,
+    for from_sequence, to_sequence in ((4, 6), (6, 8)):
+        store.note_frontier_motion(
+            workspace,
+            "frontier-motion",
+            from_sequence=from_sequence,
+            to_sequence=to_sequence,
+            head_digest="sha256:" + str(to_sequence) * 64,
+            observation_record_count=2,
+            task_id="tsk-frontier-test",
         )
-        == 0
-    )
-    context = json.loads(first.getvalue())["hookSpecificOutput"]["additionalContext"]
-    assert "task frontier moved from 4 to 6" in context
-    assert "observation writer appended 2 ledger record(s)" in context
-    assert "run status before an exact-frontier check" in context
-
-    second = io.BytesIO()
-    assert (
-        handle_observe(
-            event_name="PostToolUse",
-            stdin_bytes=payload,
-            stdout=second,
-            workspace=str(tmp_path),
-            _state=tmp_path,
-            skip_service=True,
+        stdout = io.BytesIO()
+        assert (
+            handle_observe(
+                event_name="PostToolUse",
+                stdin_bytes=payload,
+                stdout=stdout,
+                workspace=str(tmp_path),
+                _state=tmp_path,
+                skip_service=True,
+            )
+            == 0
         )
-        == 0
-    )
-    assert "task frontier moved" not in second.getvalue().decode()
-
-    store.note_frontier_motion(
-        workspace,
-        "frontier-motion",
-        from_sequence=4,
-        to_sequence=6,
-        head_digest="sha256:" + "3" * 64,
-        observation_record_count=2,
-        task_id="tsk-frontier-test",
-    )
-    replayed = io.BytesIO()
-    assert (
-        handle_observe(
-            event_name="PostToolUse",
-            stdin_bytes=payload,
-            stdout=replayed,
-            workspace=str(tmp_path),
-            _state=tmp_path,
-            skip_service=True,
-        )
-        == 0
-    )
-    assert "task frontier moved" not in replayed.getvalue().decode()
-
-    store.note_frontier_motion(
-        workspace,
-        "frontier-motion",
-        from_sequence=6,
-        to_sequence=8,
-        head_digest="sha256:" + "4" * 64,
-        observation_record_count=2,
-        task_id="tsk-frontier-test",
-    )
-    advanced = io.BytesIO()
-    assert (
-        handle_observe(
-            event_name="PostToolUse",
-            stdin_bytes=payload,
-            stdout=advanced,
-            workspace=str(tmp_path),
-            _state=tmp_path,
-            skip_service=True,
-        )
-        == 0
-    )
-    advanced_context = json.loads(advanced.getvalue())["hookSpecificOutput"]["additionalContext"]
-    assert "task frontier moved from 6 to 8" in advanced_context
-    assert "observation writer appended 2 ledger record(s)" in advanced_context
+        assert stdout.getvalue() == b"{}\n"
 
 
 @pytest.mark.parametrize("tool_name", ["start", "mcp__yoetz__publish_work"])
@@ -5906,7 +5847,7 @@ def test_legacy_spool_diagnostics_identify_the_path_and_hard_breach(tmp_path: Pa
         "count": 1,
         "recent_count": 1,
         "recent_p95_ms": 501,
-        "p95_target_ms": 250,
+        "p95_target_ms": None,
         "hard_cap_ms": 500,
         "recent_hard_cap_breach_count": 1,
     }

@@ -692,6 +692,31 @@ This hook sends its Cursor content profile only with
 Cursor rows; a queued Codex or Claude Code row drained from the same workspace carries no profile, so
 it is not refused as `content_capture_profile_mismatch`.
 
+### Hook cost and timing (issue #915)
+
+Every `hooks cursor-observe` pass folds one sample into the bounded aggregate that
+`yoetz observe status --json` reports as `hook_diagnostics.pass_timings` (text: `hook_pass_timing`).
+Entries are keyed by host `cursor`, the raw Cursor event (`afterFileEdit`, `afterMCPExecution`,
+`preToolUse`, `postToolUse`, `postToolUseFailure`, `sessionStart`, `stop`, `sessionEnd`) and the
+rendered profile path (`structural` or `ordinary`), with `count`, `p50_ms_at_most`,
+`p95_ms_at_most` (histogram bucket bounds), `max_ms`, an `outcomes` tally and a `recent` view. A
+`preToolUse` sample includes the neutral permission write. A sample runs from the console entry to
+the end of the pass; Python interpreter start and process exit are excluded, so add that term,
+measured on the same machine, before comparing with host-visible latency. The `hooks startup-gate`
+and `hooks startup-context` commands are not in the aggregate, although each is its own
+synchronous process: `startup-context` on every `sessionStart`, and in required startup mode
+`startup-gate` on session, prompt, `preToolUse` and MCP events. The aggregate is therefore the cost
+of the observation hook only, not of every Yoetz hook Cursor runs.
+
+Registration decision on Cursor (issue #915, recorded 2026-09-30): unchanged, and no latency
+improvement is claimed. Cursor hooks are synchronous by host design (5 s for tool events). The
+structural default subscribes `afterFileEdit` and `afterMCPExecution` per edit or MCP call plus the
+session events; the ordinary profile adds `preToolUse`, `postToolUse` and `postToolUseFailure` for
+every tool call, and required startup mode adds `startup-gate` processes. Cursor has no async hook
+form, so the lever, if the measurements call for one, is a minimal-import fast path rather than an
+async split. That is decided from the aggregate of a Cursor dogfood run in both profiles on macOS,
+Linux and WSL 2; those measurements are not recorded yet, and the gap is owned by issue #915.
+
 ### Oversized hook payloads (issue #667)
 
 A Cursor hook body over the 256 KiB trusted parse cap (`MAX_HOOK_STDIN_BYTES`) is not admitted as
@@ -918,8 +943,10 @@ Advice uses Cursor's native output contract rather than the Codex/Claude Code en
 `sessionStart` may emit `additional_context`. `stop` does not emit `followup_message` because Cursor
 would auto-submit it as a new user message. `afterFileEdit`, `afterMCPExecution`, and `sessionEnd`
 have no advice output channel and emit `{}`. Only a successfully written, nonempty `sessionStart`
-object commits advice delivery; output-less events do not acquire the delivery lease or consume a
-frontier-motion notice. Provider-repair advice uses that `sessionStart` channel only (#844).
+object commits advice delivery; output-less events do not acquire the delivery lease. No hook
+delivers a frontier-motion notice (issue #915), including the ordinary-profile `postToolUse`: every
+such notice described observation-authored motion, which leaves a held frontier admissible.
+Provider-repair advice uses that `sessionStart` channel only (#844).
 A private or no-egress install, an install with no provider endpoint, and an install whose
 verification is disabled do not put `connect_provider` or another provider-repair request in
 `additional_context`. The service emits it only when verification is not disabled, a provider
