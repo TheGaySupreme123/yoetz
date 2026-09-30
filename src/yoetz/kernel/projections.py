@@ -327,48 +327,54 @@ class FindingProjectionRecord(ProjectionRecord[Finding]):
     finding again clears it; redacting the proving check clears it.
 
     The check-time change facts (ADR-031) are replay-derived from recorded checks, never from the
-    finding's own payload. ``check_change_raising_check_event_id`` names the ``check_recorded``
-    event whose completed AI-powered review raised this finding; ``check_change_raised_files``
-    is that review's complete record of the check-time change files it was shown (keyed
-    commitments, with the clean prefix length of each file it saw in part), empty when it carried
-    none, and ``None`` while unknown (an incomplete record, parts carried without a record, or a
-    raising check since redacted). ``resolution_depends_on_check_event_id``
-    names that raising check when the resolving check's check-time limits were tolerated only
-    because of those files; redacting it reopens the finding.
+    finding's own payload. ``check_change_raising_check_event_ids`` names, in fold order, every
+    ``check_recorded`` event whose completed AI-powered review raised or re-raised this finding;
+    ``check_change_raised_files`` merges what those reviews were shown of the check-time change
+    (keyed commitments; for each file seen in part, the bytes shown and the redacted spans among
+    them), empty when they carried none, and ``None`` while unknown (an incomplete record, parts
+    carried without a record, or a contributing check since redacted).
+    ``resolution_depends_on_check_event_ids`` are those checks when the resolving check's
+    check-time limits were tolerated only because of those files; redacting any reopens it.
     """
 
     resolved_by_check_event_id: EventId | None = None
-    check_change_raising_check_event_id: EventId | None = None
+    check_change_raising_check_event_ids: tuple[EventId, ...] = ()
     check_change_raised_files: CheckChangeShownFiles | None = None
-    resolution_depends_on_check_event_id: EventId | None = None
+    resolution_depends_on_check_event_ids: tuple[EventId, ...] = ()
 
     def __post_init__(self) -> None:
         super().__post_init__()
         if self.payload is not None and type(self.payload) is not Finding:
             raise _invalid()
-        for name in (
-            "resolved_by_check_event_id",
-            "check_change_raising_check_event_id",
-            "resolution_depends_on_check_event_id",
-        ):
-            value = getattr(self, name)
-            if value is None:
-                continue
+        if self.resolved_by_check_event_id is not None:
             try:
-                object.__setattr__(self, name, event_id(value))
+                object.__setattr__(
+                    self, "resolved_by_check_event_id", event_id(self.resolved_by_check_event_id)
+                )
             except ValueError as exc:
                 raise _invalid() from exc
+        for name in (
+            "check_change_raising_check_event_ids",
+            "resolution_depends_on_check_event_ids",
+        ):
+            value = getattr(self, name)
+            if type(value) is not tuple:
+                raise _invalid()
+            try:
+                ids = tuple(event_id(item) for item in cast(tuple[object, ...], value))
+            except ValueError as exc:
+                raise _invalid() from exc
+            if len(set(ids)) != len(ids):
+                raise _invalid()
+            object.__setattr__(self, name, ids)
         files = self.check_change_raised_files
         if files is not None and (
-            self.check_change_raising_check_event_id is None
+            not self.check_change_raising_check_event_ids
             or type(files) is not CheckChangeShownFiles
             or not files.complete
         ):
             raise _invalid()
-        if (
-            self.resolution_depends_on_check_event_id is not None
-            and self.resolved_by_check_event_id is None
-        ):
+        if self.resolution_depends_on_check_event_ids and self.resolved_by_check_event_id is None:
             raise _invalid()
 
 
@@ -934,17 +940,17 @@ def _record_snapshot(record: _ProjectionRecordLike) -> dict[str, JsonValue]:
         if record.resolved_by_check_event_id is not None:
             result["resolved_by_check_event_id"] = record.resolved_by_check_event_id
         # Likewise emitted only when set (ADR-031), so earlier snapshots keep their bytes.
-        if record.check_change_raising_check_event_id is not None:
-            result["check_change_raising_check_event_id"] = (
-                record.check_change_raising_check_event_id
+        if record.check_change_raising_check_event_ids:
+            result["check_change_raising_check_event_ids"] = list(
+                record.check_change_raising_check_event_ids
             )
         if record.check_change_raised_files is not None:
             result["check_change_raised_files"] = cast(
                 JsonValue, freeze_json(check_change_files_to_json(record.check_change_raised_files))
             )
-        if record.resolution_depends_on_check_event_id is not None:
-            result["resolution_depends_on_check_event_id"] = (
-                record.resolution_depends_on_check_event_id
+        if record.resolution_depends_on_check_event_ids:
+            result["resolution_depends_on_check_event_ids"] = list(
+                record.resolution_depends_on_check_event_ids
             )
     return result
 
@@ -1218,9 +1224,9 @@ def _record_from_snapshot(
         optional = frozenset(
             {
                 "resolved_by_check_event_id",
-                "check_change_raising_check_event_id",
+                "check_change_raising_check_event_ids",
                 "check_change_raised_files",
-                "resolution_depends_on_check_event_id",
+                "resolution_depends_on_check_event_ids",
             }
         )
     else:
@@ -1313,12 +1319,21 @@ def _record_from_snapshot(
     if collection == "findings":
         for name in (
             "resolved_by_check_event_id",
-            "check_change_raising_check_event_id",
+            "check_change_raising_check_event_ids",
             "check_change_raised_files",
-            "resolution_depends_on_check_event_id",
+            "resolution_depends_on_check_event_ids",
         ):
             if name in source and source[name] is None:
                 raise _invalid()
+
+        def event_ids(name: str) -> tuple[EventId, ...]:
+            raw = source.get(name)
+            if raw is None:
+                return ()
+            if type(raw) not in {list, tuple} or not raw:
+                raise _invalid()
+            return cast(tuple[EventId, ...], tuple(cast(list[object], raw)))
+
         raw_files = source.get("check_change_raised_files")
         try:
             raised_files = None if raw_files is None else check_change_files_from_json(raw_files)
@@ -1333,12 +1348,10 @@ def _record_from_snapshot(
             resolved_by_check_event_id=cast(
                 EventId | None, source.get("resolved_by_check_event_id")
             ),
-            check_change_raising_check_event_id=cast(
-                EventId | None, source.get("check_change_raising_check_event_id")
-            ),
+            check_change_raising_check_event_ids=event_ids("check_change_raising_check_event_ids"),
             check_change_raised_files=raised_files,
-            resolution_depends_on_check_event_id=cast(
-                EventId | None, source.get("resolution_depends_on_check_event_id")
+            resolution_depends_on_check_event_ids=event_ids(
+                "resolution_depends_on_check_event_ids"
             ),
         )
     return ProjectionRecord(

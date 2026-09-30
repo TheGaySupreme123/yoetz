@@ -439,6 +439,8 @@ def _check_time_change_chunks(text: bytes, part_limit: int) -> tuple[bytes, ...]
 
 
 _CHECK_TIME_CHANGE_FILE_START: Final = re.compile(rb"^diff --git ", re.MULTILINE)
+_CHECK_TIME_CHANGE_BINARY: Final = re.compile(rb"^Binary files ", re.MULTILINE)
+_CHECK_TIME_CHANGE_DELETED: Final = re.compile(rb"^deleted file mode ", re.MULTILINE)
 _REDACTION_MARKER: Final = b"[REDACTED]"
 
 
@@ -446,16 +448,17 @@ def check_time_change_shown_files(
     capture: CheckChangeCapture,
     selection: ReviewSelectionPolicy,
     admitted_parts: int,
-) -> tuple[tuple[bytes, bool, int], ...]:
-    """Each changed file whose diff reached the packet, whether whole, and how much (ADR-031).
+) -> tuple[tuple[bytes, bool, int, int], ...]:
+    """Each changed file whose diff reached the packet, and how much of it (ADR-031).
 
-    A file is its ``diff --git`` section of the stored change; its identity is that section's
-    first line. It was shown when any of its bytes lie in the ``admitted_parts`` parts the packet
-    carried, and fully shown when the whole section did and it holds no redaction marker. The
-    third value is the clean prefix the packet carried: the section's bytes before the packet
-    ended or the first redaction marker began. Files the change lists only in its header (not
-    shown) are not returned. The answer is a pure function of the stored object, the selection and
-    the admitted part count, so a recovered job derives the same files.
+    A file is its ``diff --git`` section of the stored change. Its identity is that section's
+    first line plus its change kind (a binary or a deleted file), so a file whose kind changed
+    between two checks never matches itself. It was shown when any of its bytes lie in the
+    ``admitted_parts`` parts the packet carried, and fully shown when the whole section did and it
+    holds no redaction marker. The third and fourth values are the section bytes that reached the
+    packet (markers included) and the ``[REDACTED]`` markers among them. Files the change lists
+    only in its header (not shown) are not returned. The answer is a pure function of the stored
+    object, the selection and the admitted part count, so a recovered job derives the same files.
     """
 
     if type(capture) is not CheckChangeCapture or type(admitted_parts) is not int:
@@ -466,17 +469,25 @@ def check_time_change_shown_files(
     shown_bytes = sum(len(chunk) for chunk in chunks[:admitted_parts])
     text = capture.text
     starts = [match.start() for match in _CHECK_TIME_CHANGE_FILE_START.finditer(text)]
-    files: list[tuple[bytes, bool, int]] = []
+    files: list[tuple[bytes, bool, int, int]] = []
     for index, start in enumerate(starts):
         if start >= shown_bytes:
             break
         end = starts[index + 1] if index + 1 < len(starts) else len(text)
         line_end = text.find(b"\n", start, end)
         identity = text[start : end if line_end < 0 else line_end]
+        section = text[start:end]
+        if _CHECK_TIME_CHANGE_BINARY.search(section) is not None:
+            identity += b"\x00binary"
+        if _CHECK_TIME_CHANGE_DELETED.search(section) is not None:
+            identity += b"\x00deleted"
         visible_end = min(end, shown_bytes)
-        marker = text.find(_REDACTION_MARKER, start, end)
-        clean_end = visible_end if marker < 0 else min(visible_end, marker)
-        files.append((identity, marker < 0 and end <= shown_bytes, clean_end - start))
+        # A marker the packet edge cut still counts: part of a redacted span was shown.
+        redactions = text.count(
+            _REDACTION_MARKER, start, min(end, visible_end + len(_REDACTION_MARKER) - 1)
+        )
+        whole = end <= shown_bytes and _REDACTION_MARKER not in section
+        files.append((identity, whole, visible_end - start, redactions))
     return tuple(files)
 
 

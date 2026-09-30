@@ -61,9 +61,10 @@ def test_check_change_files_ride_only_a_recorded_conclusion_and_stay_closed() ->
         wire["check_change_files"]["fully_shown"]
     )
     assert {
-        item.commitment: item.shown_bytes for item in payload.check_change_files.partially_shown
+        item.commitment: (item.shown_bytes, item.redactions)
+        for item in payload.check_change_files.partially_shown
     } == {
-        item["commitment"]: item["shown_bytes"]
+        item["commitment"]: (item["shown_bytes"], item["redactions"])
         for item in wire["check_change_files"]["partially_shown"]
     }
     files = wire["check_change_files"]
@@ -76,7 +77,9 @@ def test_check_change_files_ride_only_a_recorded_conclusion_and_stay_closed() ->
                 **wire,
                 "check_change_files": {
                     **files,
-                    "partially_shown": [{"commitment": files["fully_shown"][0], "shown_bytes": 1}],
+                    "partially_shown": [
+                        {"commitment": files["fully_shown"][0], "redactions": 0, "shown_bytes": 1}
+                    ],
                 },
             },
         ),
@@ -87,6 +90,22 @@ def test_check_change_files_ride_only_a_recorded_conclusion_and_stay_closed() ->
                 "check_change_files": {
                     **files,
                     "partially_shown": [{**files["partially_shown"][0], "shown_bytes": -1}],
+                },
+            },
+        ),
+        (
+            EventSchema("check_recorded", "1.3.0"),
+            {
+                **wire,
+                "check_change_files": {
+                    **files,
+                    "partially_shown": [
+                        {
+                            key: value
+                            for key, value in files["partially_shown"][0].items()
+                            if key != "redactions"
+                        }
+                    ],
                 },
             },
         ),

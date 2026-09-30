@@ -704,9 +704,9 @@ def _header(
         {
             "task_start": "Base: the commit HEAD named when this task started.",
             "first_check": (
-                f"Base: commit {base_id[:12]}, HEAD at this task's first check after the upgrade "
-                "(the commit at task start was not recorded). Work committed before that check "
-                "is not part of this change."
+                f"Base: {base_id[:12]}, the state at this task's first check (the commit at task "
+                "start was not recorded). Work committed before that check is not part of this "
+                "change."
             ),
             "head": (
                 "Base: HEAD when this check ran. The commit at task start was not recorded or "

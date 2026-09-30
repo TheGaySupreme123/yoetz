@@ -361,7 +361,7 @@ async def test_task_without_a_recorded_base_pins_its_first_check_and_discloses_i
     assert CHECK_TIME_CHANGE_BASE_UNAVAILABLE_GAP in waiting.case_content_gaps
     text = _change_text(privacy.candidates[0])
     assert "HEAD_BASE_MARKER" in text
-    assert "HEAD at this task's first check after the upgrade" in text
+    assert "the state at this task's first check (the commit at task start" in text
     assert await getattr(runtime.ledger, "load_task_change_base")() is not None
 
 
@@ -596,3 +596,60 @@ async def test_shown_files_that_cannot_be_committed_are_recorded_incomplete(
     # The review still proceeds; the record just never tolerates a check-time limit.
     assert waiting.status is SemanticStatus.AWAITING_HUMAN
     assert waiting.check_change_files == CheckChangeShownFiles((), (), complete=False)
+
+
+async def _files_for(runtime: TaskRuntime, repository: Path, suffix: str) -> CheckChangeShownFiles:
+    outcome = await capture_check_time_change(
+        runtime=runtime,
+        source=CheckWorkspaceSource(os.fspath(repository), _REPOSITORY),
+        route_repository_commitment=_REPOSITORY,
+        port=GitChangeCaptureAdapter(),
+        clock=FixedClock(),
+        request_id=f"req_00000000-0000-4000-8000-0000000008{suffix}",
+    )
+    assert outcome.change is not None
+    return await check_change_shown_files(
+        runtime,
+        outcome.change,
+        ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED),
+        _all_parts(outcome.change.capture),
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("before", "after", "covered"),
+    [
+        ("text", "binary", False),
+        ("binary", "binary", True),
+        ("text", "deleted", False),
+        ("text", "text", True),
+    ],
+)
+async def test_a_file_whose_change_kind_changed_never_matches_itself(
+    tmp_path: Path, before: str, after: str, covered: bool
+) -> None:
+    """A binary or deleted file shows no code; it must not stand in for a shown text diff."""
+
+    repository = _repository(tmp_path)
+    _, runtime = await _durable_semantic_case(memory_adapter(append_command()))
+    target = repository / "atomic-selectors.ts"
+
+    def change(kind: str, marker: bytes) -> None:
+        if kind == "deleted":
+            target.unlink()
+        elif kind == "binary":
+            target.write_bytes(b"\0binary " + marker)
+        else:
+            target.write_bytes(target.read_bytes() + b"export const marker = '" + marker + b"';\n")
+
+    change(before, b"one")
+    raised = await _files_for(runtime, repository, "01")
+    if after != "deleted":
+        change(after, b"two")
+    else:
+        change(after, b"")
+    repair = await _files_for(runtime, repository, "02")
+
+    assert raised.fully_shown  # the file was shown whole to the raising review
+    assert repair.covers(raised) is covered

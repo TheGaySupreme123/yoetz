@@ -346,21 +346,23 @@ def test_shown_files_follow_the_admitted_parts_and_redaction() -> None:
 
     shown_bytes = sum(len(chunk) for chunk in _check_time_change_chunks(text)[:admitted])
     whole_len = len(_section("whole.ts", 3))
-    redacted_start = len(header) + whole_len
-    cut_start = redacted_start + len(_section("redacted.ts", 2))
-    marker = text.index(b"[REDACTED]")
-    assert [(identity.decode(), whole, clean) for identity, whole, clean in files][:3] == [
-        ("diff --git a/whole.ts b/whole.ts", True, whole_len),
-        ("diff --git a/redacted.ts b/redacted.ts", False, marker - redacted_start),
-        ("diff --git a/cut.ts b/cut.ts", False, shown_bytes - cut_start),
+    redacted_len = len(_section("redacted.ts", 2))
+    cut_start = len(header) + whole_len + redacted_len
+    assert [(identity.decode(), whole, shown, spans) for identity, whole, shown, spans in files][
+        :3
+    ] == [
+        ("diff --git a/whole.ts b/whole.ts", True, whole_len, 0),
+        # Wholly admitted but redacted: everything shown counts, and so does the span.
+        ("diff --git a/redacted.ts b/redacted.ts", False, redacted_len, 1),
+        ("diff --git a/cut.ts b/cut.ts", False, shown_bytes - cut_start, 0),
     ]
-    assert all(b"never.ts" not in identity for identity, _, _ in files)
-    assert all(b"listed-only" not in identity for identity, _, _ in files)
+    assert all(b"never.ts" not in identity for identity, *_ in files)
+    assert all(b"listed-only" not in identity for identity, *_ in files)
     # With every part admitted the whole unredacted change is fully shown.
     everything = check_time_change_shown_files(
         change.capture, selection, len(_check_time_change_chunks(text))
     )
-    assert {identity: whole for identity, whole, _ in everything}[
+    assert {identity: whole for identity, whole, *_ in everything}[
         b"diff --git a/never.ts b/never.ts"
     ] is True
     assert check_time_change_shown_files(change.capture, selection, 0) == ()
@@ -378,7 +380,7 @@ def test_many_changed_files_record_only_the_few_the_packet_showed() -> None:
     files = check_time_change_shown_files(change.capture, selection, len(_change_items(case)))
 
     assert 0 < len(files) < 128
-    assert sum(whole for _, whole, _ in files) == len(files) - 1  # one straddles the edge
+    assert sum(whole for _, whole, *_ in files) == len(files) - 1  # one straddles the edge
 
 
 def _check_time_change_chunks(text: bytes) -> tuple[bytes, ...]:

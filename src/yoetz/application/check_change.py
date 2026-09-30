@@ -116,8 +116,9 @@ async def check_change_shown_files(
 
     Each file is committed with the task bundle's own object commitment key over its base and its
     ``diff --git`` line, so no path is recorded, the same file under the same base commits the
-    same way in every check of the task, and a file under a different base does not match. A
-    file the packet carried in part keeps the length of its clean prefix. Only shown files count
+    same way in every check of the task, and a file under a different base or of a different
+    change kind does not match. A file the packet carried in part keeps how many of its bytes and
+    redaction markers reached the packet. Only shown files count
     toward the record's bound; past it the first files in change order are kept and the record
     says it is incomplete. A recovered job derives the same commitments from its stored object.
     """
@@ -126,21 +127,21 @@ async def check_change_shown_files(
     complete = len(files) <= MAX_CHECK_CHANGE_SHOWN_FILES
     base = change.capture.base_commit.encode("ascii")
     fully: set[str] = set()
-    partially: dict[str, int] = {}
-    for identity, whole, clean_bytes in files[:MAX_CHECK_CHANGE_SHOWN_FILES]:
+    partially: dict[str, tuple[int, int]] = {}
+    for identity, whole, shown_bytes, redactions in files[:MAX_CHECK_CHANGE_SHOWN_FILES]:
         commitment = await runtime.objects.commitment_for(
             _SHOWN_FILE_DOMAIN + base + b"\x00" + identity, ObjectKind.CHANGE_CAPTURE
         )
         if whole:
             fully.add(commitment)
         else:
-            partially[commitment] = clean_bytes
+            partially[commitment] = (shown_bytes, redactions)
     for commitment in fully:
         partially.pop(commitment, None)
     return CheckChangeShownFiles(
         tuple(sorted(fully, key=str.encode)),
         tuple(
-            CheckChangePartialFile(commitment, partially[commitment])
+            CheckChangePartialFile(commitment, *partially[commitment])
             for commitment in sorted(partially, key=str.encode)
         ),
         complete=complete,

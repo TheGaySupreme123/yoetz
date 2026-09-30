@@ -1180,15 +1180,18 @@ _REPAIR_EVENT = evt(9)
 
 def _files(
     full: tuple[str, ...] = (),
-    partial: tuple[tuple[str, int], ...] = (),
+    partial: tuple[tuple[str, int] | tuple[str, int, int], ...] = (),
     *,
     complete: bool = True,
 ) -> CheckChangeShownFiles:
-    """A shown-files record; each partial entry is a commitment and its clean shown bytes."""
+    """A shown-files record; a partial entry is (commitment, shown bytes[, redacted spans])."""
 
     return CheckChangeShownFiles(
         full,
-        tuple(CheckChangePartialFile(commitment, shown) for commitment, shown in partial),
+        tuple(
+            CheckChangePartialFile(entry[0], entry[1], entry[2] if len(entry) > 2 else 0)
+            for entry in partial
+        ),
         complete=complete,
     )
 
@@ -1233,10 +1236,10 @@ def test_large_change_truncated_on_both_checks_resolves_when_the_file_was_shown_
     )
 
     record = findings[fnd(1)]
-    assert record.check_change_raising_check_event_id == _RAISING_EVENT
+    assert record.check_change_raising_check_event_ids == (_RAISING_EVENT,)
     assert record.check_change_raised_files == _files(full=(_FILE_A,), partial=((_FILE_B, 900),))
     assert record.resolved_by_check_event_id == _REPAIR_EVENT
-    assert record.resolution_depends_on_check_event_id == _RAISING_EVENT
+    assert record.resolution_depends_on_check_event_ids == (_RAISING_EVENT,)
 
 
 @pytest.mark.parametrize(
@@ -1353,7 +1356,7 @@ def test_repair_with_a_complete_change_needs_no_shown_file_proof() -> None:
 
     record = findings[fnd(1)]
     assert record.resolved_by_check_event_id == _REPAIR_EVENT
-    assert record.resolution_depends_on_check_event_id is None
+    assert record.resolution_depends_on_check_event_ids == ()
 
 
 def test_redacting_the_raising_check_reopens_a_resolution_that_depended_on_it() -> None:
@@ -1368,8 +1371,8 @@ def test_redacting_the_raising_check_reopens_a_resolution_that_depended_on_it() 
 
     record = findings[fnd(1)]
     assert record.resolved_by_check_event_id is None
-    assert record.resolution_depends_on_check_event_id is None
-    assert record.check_change_raising_check_event_id == _RAISING_EVENT
+    assert record.resolution_depends_on_check_event_ids == ()
+    assert record.check_change_raising_check_event_ids == (_RAISING_EVENT,)
     assert record.check_change_raised_files is None  # unknown from now on
     # A later truncated repair can no longer lean on the redacted check's files.
     again = replace(
@@ -1479,3 +1482,129 @@ def test_repair_that_saw_a_raising_partial_file_redacted_earlier_blocks() -> Non
     )
 
     assert findings[fnd(1)].resolved_by_check_event_id is None
+
+
+def _review(
+    tested: int,
+    attempt: int,
+    files: CheckChangeShownFiles | None,
+    *,
+    returned: tuple[object, ...] = (),
+    gaps: tuple[str, ...] = (CHECK_TIME_CHANGE_TRUNCATED_GAP,),
+    conclusion: str = "challenges_returned",
+) -> CheckRecordedPayload:
+    provenance = replace(
+        _provenance(), semantic_attempt_id=f"att_00000000-0000-4000-8000-{attempt:012x}"
+    )
+    return replace(
+        _check(
+            tested=tested,
+            returned=returned,
+            semantic=_SEMANTIC_OK,
+            coverage=_coverage(gaps=gaps, semantic=True),
+        ),
+        semantic_conclusion=conclusion,
+        semantic_provenance=provenance,
+        check_change_files=files,
+    )
+
+
+def _raise_reraise(
+    first: CheckChangeShownFiles, second: CheckChangeShownFiles
+) -> dict[FindingId, FindingProjectionRecord]:
+    """C1 raises the finding; C2, a later review, returns the same finding id again."""
+
+    findings = {fnd(1): finding_record(_finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED), 4)}
+    apply_check_resolution(findings, _review(3, 1, first, returned=(fnd(1),)), evt(5))
+    apply_check_resolution(findings, _review(6, 2, second, returned=(fnd(1),)), evt(7))
+    return findings
+
+
+def _repair_with(
+    findings: dict[FindingId, FindingProjectionRecord], files: CheckChangeShownFiles
+) -> FindingProjectionRecord:
+    repair = _review(8, 3, files, conclusion="no_material_discrepancy")
+    apply_check_resolution(findings, repair, evt(9), proof_state=_changed_state(repair))
+    return findings[fnd(1)]
+
+
+def test_a_re_raise_widens_what_the_repair_must_have_seen() -> None:
+    """Probe: C1 saw A, C2 re-raised after seeing B in part, C3 shows only A: not resolved."""
+
+    findings = _raise_reraise(
+        _files(full=(_FILE_A,)), _files(full=(_FILE_A,), partial=((_FILE_B, 900),))
+    )
+    record = findings[fnd(1)]
+    assert record.check_change_raising_check_event_ids == (evt(5), evt(7))
+    assert record.check_change_raised_files == _files(full=(_FILE_A,), partial=((_FILE_B, 900),))
+
+    assert _repair_with(dict(findings), _files(full=(_FILE_A,))).resolved_by_check_event_id is None
+    resolved = _repair_with(dict(findings), _files(full=(_FILE_A,), partial=((_FILE_B, 900),)))
+    assert resolved.resolved_by_check_event_id == evt(9)
+    assert resolved.resolution_depends_on_check_event_ids == (evt(5), evt(7))
+
+
+@pytest.mark.parametrize(
+    ("repair_entry", "resolved"),
+    [((_FILE_B, 900, 1), True), ((_FILE_B, 900, 2), False), ((_FILE_B, 899, 0), False)],
+)
+def test_merged_raising_views_keep_the_stronger_requirement_per_file(
+    repair_entry: tuple[str, int, int], resolved: bool
+) -> None:
+    findings = _raise_reraise(
+        _files(partial=((_FILE_B, 500, 2),)), _files(partial=((_FILE_B, 900, 1),))
+    )
+    assert findings[fnd(1)].check_change_raised_files == _files(partial=((_FILE_B, 900, 1),))
+
+    record = _repair_with(findings, _files(partial=(repair_entry,)))
+
+    assert (record.resolved_by_check_event_id == evt(9)) is resolved
+
+
+def test_a_file_one_raising_review_saw_whole_must_be_whole_in_the_repair() -> None:
+    findings = _raise_reraise(_files(partial=((_FILE_A, 100),)), _files(full=(_FILE_A,)))
+    assert findings[fnd(1)].check_change_raised_files == _files(full=(_FILE_A,))
+
+    assert (
+        _repair_with(findings, _files(partial=((_FILE_A, 9_000),))).resolved_by_check_event_id
+        is None
+    )
+
+
+def test_redacting_a_re_raising_check_makes_r_unknown_and_reopens() -> None:
+    findings = _raise_reraise(_files(full=(_FILE_A,)), _files(full=(_FILE_A,)))
+    record = _repair_with(findings, _files(full=(_FILE_A,)))
+    assert record.resolved_by_check_event_id == evt(9)
+
+    reopen_findings_resolved_by(findings, frozenset({evt(7)}))
+
+    assert findings[fnd(1)].resolved_by_check_event_id is None
+    assert findings[fnd(1)].check_change_raised_files is None
+
+
+def test_partial_file_needs_the_whole_shown_length_not_the_prefix_before_a_redaction() -> None:
+    """Probe: a fully admitted 3038 B section with one redacted span is n=3038, k=1, not n=67."""
+
+    raising = _files(partial=((_FILE_A, 3_038, 1),))
+    findings = _raise_reraise(raising, raising)
+
+    assert (
+        _repair_with(
+            dict(findings), _files(partial=((_FILE_A, 100, 1),))
+        ).resolved_by_check_event_id
+        is None
+    )
+    # The redaction persists and the repair saw at least as much: covered.
+    assert _repair_with(
+        dict(findings), _files(partial=((_FILE_A, 3_100, 1),))
+    ).resolved_by_check_event_id == evt(9)
+
+
+def test_a_redaction_new_in_the_repair_blocks() -> None:
+    findings = _raise_reraise(
+        _files(partial=((_FILE_A, 3_000, 0),)), _files(partial=((_FILE_A, 3_000, 0),))
+    )
+
+    record = _repair_with(findings, _files(partial=((_FILE_A, 5_000, 1),)))
+
+    assert record.resolved_by_check_event_id is None

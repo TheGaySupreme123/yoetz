@@ -2208,20 +2208,28 @@ MAX_CHECK_CHANGE_SHOWN_BYTES: Final = 262_144
 class CheckChangePartialFile:
     """One changed file a review saw only in part: its commitment and how much it saw.
 
-    ``shown_bytes`` counts the bytes of the file's diff section the packet carried before the
-    packet ended or the first redacted span began. It is a length, never content.
+    ``shown_bytes`` counts the bytes of the file's diff section that reached the packet,
+    redaction markers included; ``redactions`` counts the ``[REDACTED]`` markers inside them.
+    Both are counts, never content.
     """
 
     commitment: str
     shown_bytes: int
+    redactions: int
 
     def __post_init__(self) -> None:
         validate_commitment(self.commitment)
-        object.__setattr__(
-            self,
-            "shown_bytes",
-            _bounded_integer(self.shown_bytes, 0, MAX_CHECK_CHANGE_SHOWN_BYTES),
-        )
+        for name in ("shown_bytes", "redactions"):
+            object.__setattr__(
+                self,
+                name,
+                _bounded_integer(getattr(self, name), 0, MAX_CHECK_CHANGE_SHOWN_BYTES),
+            )
+
+    def covers(self, raised: CheckChangePartialFile) -> bool:
+        """At least as many bytes of the file reached this review, with no more redacted spans."""
+
+        return self.shown_bytes >= raised.shown_bytes and self.redactions <= raised.redactions
 
 
 @dataclass(frozen=True, slots=True)
@@ -2258,15 +2266,16 @@ class CheckChangeShownFiles:
         object.__setattr__(self, "fully_shown", full)
         object.__setattr__(self, "partially_shown", partial_files)
 
-    def partial_bytes(self) -> Mapping[str, int]:
-        return {item.commitment: item.shown_bytes for item in self.partially_shown}
+    def partial_files(self) -> Mapping[str, CheckChangePartialFile]:
+        return {item.commitment: item for item in self.partially_shown}
 
     def covers(self, raised: CheckChangeShownFiles) -> bool:
         """Whether this (repair) record proves it saw at least what *raised* saw (ADR-031).
 
-        Every file *raised* saw whole is whole here; every file it saw in part (n bytes) is whole
-        here or seen in part with at least n bytes. *raised* must be complete; this record may be
-        incomplete, because each entry it holds is still true.
+        Every file *raised* saw whole is whole here. Every file it saw in part (n bytes with k
+        redacted spans) is whole here, or seen in part with at least n bytes and at most k
+        redacted spans. *raised* must be complete; this record may be incomplete, because each
+        entry it holds is still true.
         """
 
         if not raised.complete:
@@ -2274,10 +2283,46 @@ class CheckChangeShownFiles:
         full = frozenset(self.fully_shown)
         if not frozenset(raised.fully_shown) <= full:
             return False
-        partial = self.partial_bytes()
-        return all(
-            item.commitment in full or partial.get(item.commitment, -1) >= item.shown_bytes
-            for item in raised.partially_shown
+        partial = self.partial_files()
+        for item in raised.partially_shown:
+            if item.commitment in full:
+                continue
+            seen = partial.get(item.commitment)
+            if seen is None or not seen.covers(item):
+                return False
+        return True
+
+    def merged(self, other: CheckChangeShownFiles) -> CheckChangeShownFiles | None:
+        """The requirement of two reviews that both raised an issue: what each of them saw.
+
+        Whole files are united; a file either saw whole needs to be seen whole. A file both saw
+        in part needs the larger length and the fewer redacted spans. ``None`` (unknown) when
+        either record is incomplete or the union outgrows one record.
+        """
+
+        if not self.complete or not other.complete:
+            return None
+        full = frozenset(self.fully_shown) | frozenset(other.fully_shown)
+        partial: dict[str, CheckChangePartialFile] = {}
+        for item in (*self.partially_shown, *other.partially_shown):
+            if item.commitment in full:
+                continue
+            prior = partial.get(item.commitment)
+            partial[item.commitment] = (
+                item
+                if prior is None
+                else CheckChangePartialFile(
+                    item.commitment,
+                    max(prior.shown_bytes, item.shown_bytes),
+                    min(prior.redactions, item.redactions),
+                )
+            )
+        if len(full) + len(partial) > MAX_CHECK_CHANGE_SHOWN_FILES:
+            return None
+        return CheckChangeShownFiles(
+            tuple(sorted(full, key=str.encode)),
+            tuple(partial[key] for key in sorted(partial, key=str.encode)),
+            complete=True,
         )
 
 
@@ -2288,7 +2333,11 @@ def check_change_files_to_json(value: CheckChangeShownFiles) -> dict[str, object
         "complete": value.complete,
         "fully_shown": value.fully_shown,
         "partially_shown": tuple(
-            {"commitment": item.commitment, "shown_bytes": item.shown_bytes}
+            {
+                "commitment": item.commitment,
+                "redactions": item.redactions,
+                "shown_bytes": item.shown_bytes,
+            }
             for item in value.partially_shown
         ),
     }
@@ -2300,12 +2349,17 @@ def check_change_files_from_json(value: object) -> CheckChangeShownFiles:
     )
     partial: list[CheckChangePartialFile] = []
     for raw in _array(_field(source, "partially_shown")):
-        item = _closed_object(raw, required=frozenset({"commitment", "shown_bytes"}))
+        item = _closed_object(raw, required=frozenset({"commitment", "redactions", "shown_bytes"}))
         commitment = _field(item, "commitment")
         shown_bytes = _field(item, "shown_bytes")
-        if type(commitment) is not str or type(shown_bytes) is not int:
+        redactions = _field(item, "redactions")
+        if (
+            type(commitment) is not str
+            or type(shown_bytes) is not int
+            or type(redactions) is not int
+        ):
             raise ProtocolValueError("invalid_event_value_type")
-        partial.append(CheckChangePartialFile(commitment, shown_bytes))
+        partial.append(CheckChangePartialFile(commitment, shown_bytes, redactions))
     complete = _field(source, "complete")
     if type(complete) is not bool:
         raise ProtocolValueError("invalid_event_value_type")

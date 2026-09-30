@@ -770,6 +770,35 @@ def _record_raised_files(record: FindingProjectionRecord) -> CheckChangeShownFil
     return record.check_change_raised_files
 
 
+def _with_raising_check(
+    record: FindingProjectionRecord, check: CheckRecordedPayload, check_event_id: EventId
+) -> FindingProjectionRecord:
+    """Add one raising review's view of the change to R (ADR-031).
+
+    The first contributor sets R; each later one merges into it. Unknown on either side stays
+    unknown. The contributing checks are kept so redacting any of them makes R unknown.
+    """
+
+    if check_event_id in record.check_change_raising_check_event_ids:
+        return record
+    seen = _raised_check_change_files(check)
+    prior = record.check_change_raised_files
+    if not record.check_change_raising_check_event_ids:
+        merged = seen
+    elif prior is None or seen is None:
+        merged = None
+    else:
+        merged = prior.merged(seen)
+    return replace(
+        record,
+        check_change_raising_check_event_ids=(
+            *record.check_change_raising_check_event_ids,
+            check_event_id,
+        ),
+        check_change_raised_files=merged,
+    )
+
+
 def apply_check_resolution(
     findings: dict[FindingId, FindingProjectionRecord],
     check: CheckRecordedPayload,
@@ -797,15 +826,14 @@ def apply_check_resolution(
             record = replace(
                 record,
                 resolved_by_check_event_id=None,
-                resolution_depends_on_check_event_id=None,
+                resolution_depends_on_check_event_ids=(),
             )
-        if _raised_by(check, payload):
-            # ADR-031: remember which check-time change files the raising review was shown.
-            record = replace(
-                record,
-                check_change_raising_check_event_id=check_event_id,
-                check_change_raised_files=_raised_check_change_files(check),
-            )
+        if payload.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED and (
+            check.semantic_conclusion is not None or _raised_by(check, payload)
+        ):
+            # ADR-031: every review that raised or re-raised the issue adds what it was shown;
+            # a repair must then have seen at least what each of them saw.
+            record = _with_raising_check(record, check, check_event_id)
         findings[returned_id] = record
     if not readable:
         return
@@ -826,18 +854,18 @@ def apply_check_resolution(
             proof_state=proof_state,
             check_change_raised_files=raised_files,
         ):
-            # A check-time limit on this check was tolerated only through the raising check's
-            # recorded files; redacting that check must reopen the finding.
+            # A check-time limit on this check was tolerated only through the raising checks'
+            # recorded files; redacting any of those checks must reopen the finding.
             depends_on = (
-                record.check_change_raising_check_event_id
+                record.check_change_raising_check_event_ids
                 if record.payload.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
                 and set(check.coverage.known_gaps) & CHECK_TIME_CHANGE_GAPS
-                else None
+                else ()
             )
             findings[current_id] = replace(
                 record,
                 resolved_by_check_event_id=check_event_id,
-                resolution_depends_on_check_event_id=depends_on,
+                resolution_depends_on_check_event_ids=depends_on,
             )
 
 
@@ -847,21 +875,20 @@ def reopen_findings_resolved_by(
 ) -> None:
     """Drop resolution whose proving check was redacted: unreadable proof is no proof.
 
-    A redacted raising check likewise leaves its check-time change files unknown (ADR-031), and a
+    A redacted raising check likewise leaves the check-time change files unknown (ADR-031), and a
     resolution that tolerated check-time limits only through those files is dropped with it.
     """
 
     for current_id, record in tuple(findings.items()):
-        if (
-            record.resolved_by_check_event_id in event_ids
-            or record.resolution_depends_on_check_event_id in event_ids
+        if record.resolved_by_check_event_id in event_ids or (
+            event_ids & set(record.resolution_depends_on_check_event_ids)
         ):
             record = replace(
                 record,
                 resolved_by_check_event_id=None,
-                resolution_depends_on_check_event_id=None,
+                resolution_depends_on_check_event_ids=(),
             )
-        if record.check_change_raising_check_event_id in event_ids:
+        if event_ids & set(record.check_change_raising_check_event_ids):
             record = replace(record, check_change_raised_files=None)
         findings[current_id] = record
 

@@ -553,5 +553,5 @@ def test_first_check_base_is_labelled_with_its_commit_and_round_trips(tmp_path: 
     text = _text(capture)
 
     assert capture.base == "first_check" and capture.base_commit == head.commit
-    assert f"Base: commit {head.commit[:12]}, HEAD at this task's first check" in text
+    assert f"Base: {head.commit[:12]}, the state at this task's first check" in text
     assert "export const pinned = 1;" in text  # committed after the pin, still in the change
