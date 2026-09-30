@@ -258,17 +258,20 @@ async def test_semantic_success_names_only_content_the_exact_prepared_packet_car
     omission row, or by a structural item beside its own omission, does not.
     """
 
+    from builders.policy_cases import act, evt, make_case, record, res
+    from yoetz.domain.events import ResultOutcome, ResultRecordedPayload
     from yoetz.protocol.canonical import JsonValue, canonical_encode
 
     shown = "evd_30000000-0000-4000-8000-000000000011"
     withheld = "evd_30000000-0000-4000-8000-000000000012"
     clipped = "evt_30000000-0000-4000-8000-000000000013"
+    recorded_by = str(evt(7))
     packet = canonical_encode(
         cast(
             JsonValue,
             {
                 "schema": "yoetz.review-packet-case/1",
-                "frontier_refs": sorted([shown, withheld, clipped]),
+                "frontier_refs": sorted([shown, withheld, clipped, recorded_by]),
                 "items": [
                     {
                         "item_id": "excerpt-a",
@@ -276,6 +279,12 @@ async def test_semantic_success_names_only_content_the_exact_prepared_packet_car
                         "linked_subject_refs": [withheld],
                     },
                     {"item_id": "history-b", "source_ref": clipped, "linked_subject_refs": []},
+                    {
+                        "item_id": "history-c",
+                        "source_ref": recorded_by,
+                        "category": "command_metadata",
+                        "linked_subject_refs": [recorded_by],
+                    },
                 ],
                 "review_packet": {
                     "omissions": [
@@ -289,15 +298,26 @@ async def test_semantic_success_names_only_content_the_exact_prepared_packet_car
     result, _audit, _gateway = await _dispatch(persist=True, prepared_bytes=packet)
 
     assert isinstance(result, SemanticEgressSuccess)
-    assert result.disclosed_content_refs == frozenset({shown})
+    assert result.disclosure is not None
+    assert result.disclosure.carried == frozenset({shown, recorded_by})
+    assert result.disclosure.withheld == frozenset({withheld, clipped})
+    assert result.disclosure.payload_events == frozenset({recorded_by})
     final = ready_composition._map_egress_to_final(  # pyright: ignore[reportPrivateUsage]
         result, ready_composition.IdPort()
     )
-    assert final.case_included_refs == frozenset({shown})
+    assert final.case_included_refs == frozenset({shown, recorded_by})
+    # With the frozen projection, the result that event recorded counts as sent too.
+    projection = make_case(
+        results={res(1): record(ResultRecordedPayload(res(1), act(1), ResultOutcome.SUCCESS, 0), 7)}
+    ).projection
+    expanded = ready_composition._map_egress_to_final(  # pyright: ignore[reportPrivateUsage]
+        result, ready_composition.IdPort(), projection=projection
+    )
+    assert expanded.case_included_refs == frozenset({shown, recorded_by, str(res(1))})
     # A document that is not a readable review packet proves nothing about what it carried.
     opaque, _audit, _gateway = await _dispatch(persist=True)
     assert isinstance(opaque, SemanticEgressSuccess)
-    assert opaque.disclosed_content_refs is None
+    assert opaque.disclosure is None
 
 
 @pytest.mark.anyio

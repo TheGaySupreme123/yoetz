@@ -14,6 +14,7 @@ from yoetz.application.egress import (
     SemanticEgressAttemptUnknown,
     SemanticEgressAwaitingHuman,
     SemanticEgressBlocked,
+    SemanticEgressSuccess,
 )
 from yoetz.domain.privacy import (
     AuthorizationScope,
@@ -359,3 +360,91 @@ async def test_consumed_attempt_recovery_is_terminal_unknown_without_dispatch() 
     assert isinstance(result, SemanticEgressAttemptUnknown)
     assert result.request_id == _REQUEST
     assert result.privacy_proposal_id == _PROPOSAL
+
+
+@pytest.mark.anyio
+async def test_approved_resume_names_what_the_approved_prepared_packet_carried() -> None:
+    """Issue #904: resume dispatches the stored prepared bytes, and records what they carried.
+
+    The resumed success reads the exact approved document, not a rebuilt case, so it names the
+    same sent references a first-pass dispatch of those bytes would.
+    """
+
+    from yoetz.adapters.providers.fake import scripted_success
+    from yoetz.domain.privacy import EgressAuthorization, EgressChannel
+    from yoetz.ports.semantic import SemanticJudgment
+    from yoetz.protocol.canonical import JsonValue, canonical_encode
+
+    shown = "evd_54000000-0000-4000-8000-000000000011"
+    withheld = "evd_54000000-0000-4000-8000-000000000012"
+    packet = canonical_encode(
+        cast(
+            JsonValue,
+            {
+                "schema": "yoetz.review-packet-case/1",
+                "frontier_refs": [shown, withheld],
+                "items": [{"item_id": "excerpt-a", "source_ref": shown}],
+                "review_packet": {
+                    "omissions": [
+                        {
+                            "subject_ref": withheld,
+                            "category": "evidence_excerpt",
+                            "reason": "withheld_by_policy",
+                        }
+                    ]
+                },
+            },
+        )
+    )
+    proposal = replace(_proposal(expires_at=_NOW + timedelta(minutes=5)), prepared_bytes=packet)
+    coordinator = _coordinator(
+        "approved", expires_at=_NOW + timedelta(minutes=5), proposal=proposal
+    )
+    from yoetz.protocol.ids import new_id
+
+    class _FreshIds:
+        def new(self, kind: IdKind) -> str:
+            return new_id(kind)
+
+    # This dispatch mints an outbound case identity; the matrix's ids never reached one.
+    coordinator._ids = cast(IdPort, _FreshIds())  # pyright: ignore[reportPrivateUsage]
+    audit = cast(_Audit, coordinator._audit)  # pyright: ignore[reportPrivateUsage]
+    gateway = cast(_Gateway, coordinator._gateway)  # pyright: ignore[reportPrivateUsage]
+    dispatched: list[bytes] = []
+
+    async def authorize(proposal_id: str, case_digest: str, now: datetime) -> EgressAuthorization:
+        return EgressAuthorization(
+            "aut_54000000-0000-4000-8000-000000000021",
+            proposal_id,
+            case_digest,
+            EgressChannel.LLM_INFERENCE,
+            _binding(),
+            "semantic-review",
+            _scope(),
+            proposal.policy_version,
+            proposal.policy_digest,
+            len(packet),
+            proposal.max_tokens,
+            ConsentSource.PER_REQUEST_LOCAL_HUMAN,
+            now,
+            now + timedelta(minutes=1),
+            1,
+        )
+
+    async def dispatch_external_semantic(
+        case: object, authorization: object, deadline: object
+    ) -> object:
+        del authorization, deadline
+        dispatched.append(cast(bytes, getattr(case, "payload")))
+        return scripted_success(SemanticJudgment("no_material_discrepancy", ())).result
+
+    setattr(audit, "authorize", authorize)
+    setattr(gateway, "dispatch_external_semantic", dispatch_external_semantic)
+
+    result = await coordinator.resume(_REQUEST, _CASE_DIGEST, _deadline())
+
+    assert dispatched == [packet]
+    assert isinstance(result, SemanticEgressSuccess), result
+    assert result.disclosure is not None
+    assert result.disclosure.carried == frozenset({shown})
+    assert result.disclosure.withheld == frozenset({withheld})

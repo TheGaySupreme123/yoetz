@@ -813,15 +813,24 @@ a bounded scope. Its effect on resolution is now decided (interim step, by maint
   but only when its packet provably carried the finding's material (next bullet). A finding raised
   by an unreduced review is still blocked by a newly reduced one.
 - **Relevance of a reduced packet.** A completed reduced review records, on `check_recorded`
-  1.3.0 as `semantic_included_refs`, the frontier references whose own content item survived in
-  the exact packet sent to the reviewer. The set is read from the prepared document after
-  envelope bounding and privacy minimization, and carried with the selected attempt's durable
-  response so recovery records the same set. A reference counts only as the `source_ref` of a
-  carried content item. A mention inside another item, a typed link, the citable-reference list,
-  or an omission row does not count. A reference that any omission row names (not selected,
-  withheld by policy, history content left out) is excluded even when a structural item for it
-  survived. The field appears only beside the recorded conclusion and the
-  `semantic_reference_scope_reduced` code, and holds at most 256 references, the case item bound.
+  1.3.0 as `semantic_included_refs`, the frontier references the exact packet sent to the reviewer
+  carried. The set is read from the prepared document after envelope bounding and privacy
+  minimization, and carried with the selected attempt's durable response so recovery and resume
+  record the same set. A reference counts in three ways:
+  - it is the `source_ref` of a carried content item;
+  - it is a part of a carried multi-part captured evidence excerpt (an `evd_` reference linked to
+    the lead excerpt whose bytes combine it), so any part may be cited;
+  - it is a result or evidence record whose recording event travelled as a history item with its
+    recorded payload, which is how records travel when recorded history is available.
+
+  A mention inside another item, any other typed link, the citable-reference list, or an omission
+  row does not count. A reference that any omission row names is excluded even when a structural
+  item for it survived. The third way does not apply when an omission row names the record itself
+  for any reason other than `not_recorded`. That reason means the ledger holds nothing more
+  readable for the record than its recorded payload, as for digest-only evidence. The field
+  appears only beside the recorded conclusion and the `semantic_reference_scope_reduced` code. It
+  holds at most 576 references: one source per case item (256), the combined captured parts (64),
+  and one record per carried history event.
   The unchanged baseline code is tolerated only when that record contains every subject of the
   finding, every repair reference the finding's latest response links (cited evidence, and the
   evidence of a cited result, or the result when it cites none), and at least one material change
@@ -829,13 +838,16 @@ a bounded scope. Its effect on resolution is now decided (interim step, by maint
   `coverage:semantic_reference_scope_reduced` stays and the explanation adds
   `finding_material_outside_reduced_review_scope`. That applies to a missing record, an unreadable
   response or linked row, and any relevant reference the packet only mentioned, linked, omitted or
-  withheld. When a completed reduced review's sent set cannot be recorded (an unreadable packet,
-  no frontier content item, over the bound, or a result recovered from a response written before
-  this record existed), the check carries `semantic_included_refs_not_recorded`. That code limits
-  the review only: local proof tolerates it, and it blocks AI-powered proof. One new check records
-  its own sent set; if it carries the code again, the finding stays current and is disclosed. The response event itself
-  is not required. An acknowledgement is not repair evidence, and the packet's recent history
-  window cannot promise to carry it. An item clipped to its size bound still counts as sent; that
+  withheld. A result that cites no evidence travels only through its recording event, and the
+  history window carries the most recent events, so in a long session citing the repair's evidence
+  (which rechecks select first) is what keeps it in view. When a completed reduced review's sent
+  set cannot be recorded (an unreadable packet, no frontier content item, over the bound, or a
+  result recovered from a response written before this record existed), the check carries
+  `semantic_included_refs_not_recorded`. That code limits the review only: local proof tolerates
+  it, and it blocks AI-powered proof. One new check records its own sent set; if it carries the
+  code again, the finding stays current and is disclosed. The response event itself is not
+  required. An acknowledgement is not repair evidence, and the packet's recent history window
+  cannot promise to carry it. An item clipped to its size bound still counts as sent; that
   clipping stays disclosed as `semantic_case_content_over_item_limit`, and a clipped payload stays
   `truncated_payload`, which blocks.
 - **Findings recorded before the stamp.** Resolution reads the raising check's recorded coverage.

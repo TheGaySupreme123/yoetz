@@ -27,6 +27,7 @@ from yoetz.application.egress import (
     SemanticEgressSuccess,
 )
 from yoetz.application.semantic_attempts import SemanticAttemptAccounting
+from yoetz.application.semantic_case import ReviewPacketDisclosure
 from yoetz.domain.findings import (
     SamplingParams,
     SemanticDispatchKind,
@@ -284,7 +285,9 @@ class _DisclosingPrivacy(_PairedPrivacy):
             case_digest="sha256:" + "5" * 64,
             privacy_receipt_id="egr_53000000-0000-4000-8000-000000000907",
             request_commitment="hmac-sha256:" + "6" * 64,
-            disclosed_content_refs=self.disclosed,
+            disclosure=ReviewPacketDisclosure(
+                carried=self.disclosed, withheld=frozenset(), payload_events=frozenset()
+            ),
         )
 
 

@@ -170,7 +170,10 @@ reads the whole record. An AI-powered finding raised under the same bounded revi
 once you repair it and a later AI-powered review completes without returning it. That review
 must have actually sent the reviewer the content of the finding's subject, of the repair evidence
 your response cites, and of the change you made. A mention, a link, or a note that the item was
-left out or withheld does not count. If it did not send them, the finding stays current and names
+left out or withheld does not count; a record shown through the event that recorded it, or any
+part of a multi-part captured excerpt, does. Cite your repair's evidence rather than only a result:
+a result without evidence stays in a bounded review only while it is recent, while cited evidence
+is selected first. If it did not send them, the finding stays current and names
 `finding_material_outside_reduced_review_scope`. If the check also shows
 `semantic_included_refs_not_recorded`, Yoetz could not record what that review sent. Make sure the
 repair evidence is recorded and cited in your response, then run one new check. If it shows the

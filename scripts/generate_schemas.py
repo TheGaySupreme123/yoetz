@@ -1299,7 +1299,7 @@ def _check_recorded_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
             ),
             "type": "string",
         },
-        "maxItems": 256,
+        "maxItems": 576,
         "minItems": 1,
         "type": "array",
         "uniqueItems": True,

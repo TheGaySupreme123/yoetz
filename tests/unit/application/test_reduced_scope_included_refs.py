@@ -9,6 +9,8 @@ prove.
 
 from __future__ import annotations
 
+from typing import cast
+
 from builders.policy_cases import (
     act,
     clm,
@@ -361,3 +363,43 @@ def test_only_a_readable_review_packet_yields_sent_references() -> None:
     document = semantic_case_to_prepared_payload(semantic, _offered(semantic))
     sent = review_packet_content_refs(document)
     assert sent is not None and sent <= semantic.frontier_refs
+
+
+def test_a_carried_multi_part_excerpt_carries_every_part_it_combines() -> None:
+    """A captured multi-part group is one excerpt keyed by its lead evidence (issue #904).
+
+    Its other parts are its ``evd_`` linked references and count as sent with it; a linked claim
+    or event does not, and nothing counts when the lead excerpt itself was left out.
+    """
+
+    from yoetz.application.semantic_case import review_packet_disclosure
+    from yoetz.protocol.canonical import JsonValue, canonical_encode
+
+    lead, part, claim, event = str(evd(1)), str(evd(2)), str(clm(1)), str(evt(3))
+
+    def carried(*omitted: str) -> frozenset[str]:
+        document = {
+            "schema": "yoetz.review-packet-case/1",
+            "frontier_refs": sorted([lead, part, claim, event]),
+            "items": [
+                {
+                    "item_id": "excerpt-lead",
+                    "section": "excerpt",
+                    "category": "evidence_excerpt",
+                    "source_ref": lead,
+                    "linked_subject_refs": sorted([lead, part, claim, event]),
+                }
+            ],
+            "review_packet": {
+                "omissions": [
+                    {"subject_ref": ref, "category": "evidence_excerpt", "reason": "not_selected"}
+                    for ref in omitted
+                ]
+            },
+        }
+        read = review_packet_disclosure(canonical_encode(cast(JsonValue, document)))
+        assert read is not None
+        return read.carried
+
+    assert carried() == frozenset({lead, part})
+    assert carried(lead) == frozenset()

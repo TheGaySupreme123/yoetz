@@ -6836,31 +6836,38 @@ keeps blocking until its source is settled. Coverage wording and every receipt g
 
 The baseline tolerates `semantic_reference_scope_reduced` for a semantic finding only when the
 later check shows that its reduced review sent the finding's material (PR930-F1). A completed
-reduced review records `semantic_included_refs` on the check. These are the frontier references
-whose own content item survived in the exact prepared packet sent to the reviewer, read after
-envelope bounding and privacy minimization. The selected attempt's durable response carries the
-same set, so a recovered selection records it too. A reference counts only as the `source_ref` of
-a carried content item. Mentions in other items, typed links, the citable-reference list and
-omission rows do not count. A reference named by any omission row (not selected, withheld by
-policy, history content left out) is excluded even when a structural item for it survived. The
-record holds typed ledger references only, ASCII-sorted, 1 to 256 of them (the case item bound).
-It appears only on `check_recorded` 1.3.0 beside `semantic_conclusion` and the
-`semantic_reference_scope_reduced` coverage code. The record must contain every finding subject and
-every repair reference linked by the finding's latest readable response. Cited evidence counts, and
-so does the evidence of a cited result, or the result itself when it cites no evidence. The record
-must also contain at least one material change after the finding, named by its logical row or by
-its source event. Otherwise the code stays a blocker and the explanation adds
-`finding_material_outside_reduced_review_scope`. An unreadable response or linked row cannot be
-shown to have been sent. When nothing changed materially, only `no_material_change_since_finding`
-is named. The response event itself is not required; an acknowledgement is not repair evidence.
+reduced review records `semantic_included_refs` on the check: the frontier references the exact
+prepared packet carried, read after envelope bounding and privacy minimization. The selected
+attempt's durable response carries the same set, so recovery and resume record it too. A reference
+counts when it is the `source_ref` of a carried content item, or a part of a carried multi-part
+captured evidence excerpt (an `evd_` reference linked to the lead excerpt that combines its bytes).
+A result or evidence record also counts when the history item of the event that recorded it was
+carried with its recorded payload, which is how records travel when recorded history is available.
+That does not apply when an omission row names the record for a reason other than `not_recorded`
+(the ledger holds nothing more readable than the payload, as for digest-only evidence). Mentions
+in other items, other typed links, the citable-reference list and omission rows do not count, and
+a reference named by any omission row is excluded even when a structural item for it survived. The
+record holds typed ledger references only, ASCII-sorted, 1 to 576 of them: one source per case item
+(256), the combined captured parts (64), and one record per carried history event. It appears only
+on `check_recorded` 1.3.0 beside `semantic_conclusion` and the `semantic_reference_scope_reduced`
+coverage code. The record must contain every finding subject and every repair reference linked by
+the finding's latest readable response. Cited evidence counts, and so does the evidence of a cited
+result, or the result itself when it cites no evidence. The record must also contain at least one
+material change after the finding, named by its logical row or by its source event. Otherwise the
+code stays a blocker and the explanation adds `finding_material_outside_reduced_review_scope`. An
+unreadable response or linked row cannot be shown to have been sent. When nothing changed
+materially, only `no_material_change_since_finding` is named. The response event itself is not
+required; an acknowledgement is not repair evidence. A result citing no evidence travels only
+through its recording event in the recent history window, so citing the repair's evidence, which
+rechecks select first, keeps a long session's repair in view.
 
 When a completed reduced review's sent set cannot be recorded, the check records no field and
 carries the coverage gap `semantic_included_refs_not_recorded`. Causes: the prepared document is
 not a readable review packet, the packet carried no frontier content item, the set exceeds the
 bound, or the selected result was recovered from a durable response written before this record
-existed. Because a case holds at most 256 items, the bound is not reached by the sent-content set
-itself. Status and every receipt rendering show the gap like any other. It limits the reduced
-review only: local proof tolerates it, and it blocks AI-powered proof. The continuation is bounded:
+existed. A valid sent set stays within the bound by construction. Status and every receipt
+rendering show the gap like any other. It limits the reduced review only: local proof tolerates
+it, and it blocks AI-powered proof. The continuation is bounded:
 make sure the repair evidence is recorded and cited by the response, then run one new check, whose
 new review attempt records what it sent. If that check carries the code again, stop rechecking,
 leave the finding current, and disclose the limitation in the receipt. ADR-006 (#904) holds the
@@ -6873,8 +6880,8 @@ Versions 1.0–1.2 keep their frozen payload shapes and read without a recorded 
 an explicitly assessable conclusion enables capture-baseline resolution. An unassessable
 conclusion blocks semantic absence proof even if a producer omitted its coverage-gap marker.
 Failed and local-only attempts retain their existing version. Version 1.3.0 also admits optional
-`semantic_included_refs` (#904): the frontier references whose content item the reduced review's
-sent packet carried, at most 256. It is present only with `semantic_conclusion` and the
+`semantic_included_refs` (#904): the frontier references the reduced review's sent packet carried,
+at most 576. It is present only with `semantic_conclusion` and the
 `semantic_reference_scope_reduced` coverage code. It is omitted on unreduced reviews, so their
 bytes are unchanged. The owning schema generator and
 `fixtures/canonical/check-conclusion-1.3.0.case.json` lock the new and legacy bytes.

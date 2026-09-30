@@ -260,11 +260,12 @@ MAX_REF_LIST: Final = 64
 MAX_CAUSAL_PARENTS: Final = 32
 MAX_REQUESTED_ITEMS: Final = 64
 MAX_ALTERNATIVES: Final = 16
-# The frontier references whose own content item a reduced AI-powered review packet carried,
-# recorded on its check (issue #904). A case holds at most 256 items, so the bound is the same. A
-# check whose set cannot be recorded carries SEMANTIC_INCLUDED_REFS_NOT_RECORDED_GAP instead, and
-# its reduced scope keeps blocking semantic resolution.
-MAX_SEMANTIC_INCLUDED_REFS: Final = 256
+# The frontier references a reduced AI-powered review packet carried, recorded on its check (issue
+# #904): one source per case item (at most 256), the combined parts of captured evidence excerpts
+# (at most 64), and the result or evidence record of each carried history event (at most one per
+# item). A valid sent set therefore never exceeds 576. A check whose set cannot be recorded carries
+# SEMANTIC_INCLUDED_REFS_NOT_RECORDED_GAP instead, and its reduced scope keeps blocking resolution.
+MAX_SEMANTIC_INCLUDED_REFS: Final = 576
 SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP: Final = "semantic_reference_scope_reduced"
 SEMANTIC_INCLUDED_REFS_NOT_RECORDED_GAP: Final = "semantic_included_refs_not_recorded"
 

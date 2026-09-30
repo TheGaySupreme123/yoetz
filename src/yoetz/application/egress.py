@@ -81,6 +81,7 @@ from yoetz.protocol.ids import IdKind
 
 if TYPE_CHECKING:
     from yoetz.application.privacy_policy import PrivacyPolicyApplication
+    from yoetz.application.semantic_case import ReviewPacketDisclosure
 
 __all__ = [
     "PrivacyCoordinator",
@@ -141,9 +142,9 @@ class SemanticEgressSuccess:
     case_digest: str
     privacy_receipt_id: str | None = None
     request_commitment: str | None = None
-    # Frontier references whose own content item the exact prepared (bounded, minimized) review
-    # packet carried; None when that document is not a readable review packet (issue #904).
-    disclosed_content_refs: frozenset[str] | None = None
+    # What the exact prepared (bounded, minimized) review packet carried; None when that document
+    # is not a readable review packet (issue #904).
+    disclosure: ReviewPacketDisclosure | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1566,7 +1567,7 @@ class PrivacyCoordinator:
             receipt_id = None
         request_commitment = getattr(result.provenance, "request_commitment", None)
         if type(result) is SemanticResultSuccess:
-            from yoetz.application.semantic_case import review_packet_content_refs
+            from yoetz.application.semantic_case import review_packet_disclosure
 
             return SemanticEgressSuccess(
                 request_id,
@@ -1579,8 +1580,8 @@ class PrivacyCoordinator:
                 request_commitment=request_commitment,
                 # What the provider actually received: the exact prepared bytes after envelope
                 # bounding and privacy minimization, never the pre-minimization case.
-                disclosed_content_refs=(
-                    None if prepared_bytes is None else review_packet_content_refs(prepared_bytes)
+                disclosure=(
+                    None if prepared_bytes is None else review_packet_disclosure(prepared_bytes)
                 ),
             )
         if type(result) in {
