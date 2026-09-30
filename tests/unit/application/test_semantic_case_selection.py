@@ -39,6 +39,7 @@ from yoetz.application.semantic_case import (
     CapturedContentScope,
     CapturedSemanticContent,
     build_semantic_case,
+    captured_edit_paths,
     semantic_case_to_prepared_payload,
 )
 from yoetz.cli import observe_hooks as observe_hooks_module
@@ -76,7 +77,7 @@ from yoetz.domain.values import (
     object_id,
     timestamp_from_string,
 )
-from yoetz.kernel.deterministic_checks import DeterministicCase
+from yoetz.kernel.deterministic_checks import DeterministicCase, FindingBasisRef
 from yoetz.kernel.projections import (
     EvidenceProjectionRecord,
     FindingProjectionRecord,
@@ -929,6 +930,70 @@ def test_next_packet_shows_the_prior_request_and_carries_the_item_supplied_since
     # The supplied run itself travels in the reserved room, marked as the latest of its command.
     assert rows[f"excerpt-{latest_run}"]["latest_for"] == "command"
     assert "prior-missing-for-assessment" in semantic.packet.timeline_item_ids
+
+
+@pytest.mark.parametrize("host", ["codex", "claude", "cursor"])
+def test_a_fresh_git_diff_of_a_captured_path_is_supplied_for_that_capture(host: Host) -> None:
+    """R940-01: a hook capture has no reference; the path its bytes record binds a fresh diff."""
+
+    ledger = _ledger(host, outputs=4, edits_per_path=1)
+    target = ledger.newest_edit_for_path[_PATHS[0]]
+    helper_paths = captured_edit_paths(ledger.case, ledger.captured, ledger.scope)
+    assert helper_paths[str(target)] == frozenset({_PATHS[0]})
+
+    def supplied_for(diff_path: str) -> list[str]:
+        action = ActionRecordedPayload(
+            act(95), ActionKind.COMMAND, "Show the diff", command=f"git diff -- ./{diff_path}"
+        )
+        output = EvidenceRecordedPayload(
+            evd(96),
+            EvidenceKind.COMMAND_OUTPUT,
+            EvidenceImmutability.METADATA_ONLY,
+            timestamp_from_string("2026-09-27T00:00:00.000Z"),
+            description="diff --git a/x b/x",
+        )
+        result = ResultRecordedPayload(
+            res(97), act(95), ResultOutcome.SUCCESS, evidence_refs=(evd(96),)
+        )
+        projection = ledger.case.projection
+        projection = replace(
+            projection,
+            actions={**projection.actions, act(95): record(action, 95)},
+            evidence={**projection.evidence, evd(96): evidence_record(output, 96)},
+            results={**projection.results, res(97): record(result, 97)},
+            pending_missing_for_assessment=PendingMissingForAssessment(
+                evt(90),
+                90,
+                (
+                    MissingForAssessmentItem(
+                        "current_diff_for_path", (str(target),), "agent_suppliable"
+                    ),
+                ),
+            ),
+        )
+        added = cast(tuple[FindingBasisRef, ...], (act(95), evd(96), res(97)))
+        case = replace(
+            ledger.case,
+            projection=projection,
+            allowed_ids=ledger.case.allowed_ids | frozenset(added),
+            coverage_by_ref={
+                **ledger.case.coverage_by_ref,
+                **{ref: ledger.case.coverage_by_ref[target] for ref in added},
+            },
+        )
+        rows = {
+            cast(str, row["item_id"]): row
+            for row in _prepared_items(_build(replace(ledger, case=case)))
+        }
+        body = strict_json_parse(
+            cast(str, rows["prior-missing-for-assessment"]["content"]).encode("utf-8")
+        )
+        assert isinstance(body, dict)
+        (item,) = cast(list[dict[str, JsonValue]], body["items"])
+        return cast(list[str], item["supplied_since"])
+
+    assert supplied_for(_PATHS[0]) == [str(evd(96))]
+    assert supplied_for(_PATHS[1]) == []
 
 
 def test_older_hunks_of_a_changed_path_are_not_starved_by_tool_output() -> None:

@@ -5,26 +5,30 @@ agent can supply each item: a kind the effective review selection or channel can
 target the owner redacted, is ``structurally_unavailable_on_this_host``; everything else is
 ``agent_suppliable``. A later review sees the earlier request beside what was recorded since, and
 an item re-requested after it was supplied is dropped unless the reviewer cites that new material.
-"Supplied" is judged per named target: only material the ledger's own refs tie to that target
-counts, so material for another path, run or claim never answers it.
+"Supplied" is judged per named target: only new material directly tied to that target counts
+(its run, exact command, file path, or a correction of it), so a record that relates only to
+another path, run or claim never answers it.
 
 Pure: reads only the frozen projection and the frozen review selection.
 """
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Final, Protocol
+from typing import Final, Protocol, cast
 
 from yoetz.domain.events import (
     ActionRecordedPayload,
+    ClaimRecordedPayload,
     ClaimRecordedPayloadV1_1,
     EvidenceDigestProvenance,
     EvidenceRecordedPayload,
     MissingForAssessmentItem,
     PlanPublishedPayload,
     PlanRevisedPayload,
+    ResponseRecordedPayload,
     ResultRecordedPayload,
 )
 from yoetz.domain.findings import Finding
@@ -36,7 +40,6 @@ from yoetz.domain.receipts import (
     SEMANTIC_MISSING_UNAVAILABLE_GAP,
 )
 from yoetz.domain.values import EventId
-from yoetz.domain.values import action_id as validate_action_id
 from yoetz.kernel.deterministic_checks import DeterministicCase
 from yoetz.kernel.projections import PendingMissingForAssessment, ProjectionState
 from yoetz.ports.semantic import SemanticJudgment
@@ -132,17 +135,21 @@ def supplied_since(
     pending: PendingMissingForAssessment,
     allowed: frozenset[str],
     observation_event_ids: frozenset[str] = frozenset(),
+    captured_edit_paths: Mapping[str, frozenset[str]] | None = None,
 ) -> tuple[tuple[str, ...], ...]:
     """For each pending item, the case refs of answering material recorded after the request.
 
-    A targeted item counts only material bound to one of its targets through recorded refs (see
-    ``_RecordedLinks``); an item with no target counts any answering material of its kind. Yoetz
-    cannot bind new material to reviewer prose, so the next reviewer reads these refs and
-    decides whether they answer the request.
+    A targeted item counts only new material directly tied to one of its targets (see ``_Links``;
+    ``captured_edit_paths`` maps a hook-captured edit's evidence refs to the workspace-relative
+    paths its authenticated bytes record, used only to compare); an item with no target counts
+    any answering material of its kind. Yoetz cannot bind new material to reviewer prose, so the
+    next reviewer reads these refs and decides whether they answer the request.
     """
 
     answered: list[tuple[str, ...]] = []
-    for per_target in _answers_by_target(projection, pending, allowed, observation_event_ids):
+    for per_target in _answers_by_target(
+        projection, pending, allowed, observation_event_ids, captured_edit_paths
+    ):
         newest = sorted(
             {entry for entries in per_target.values() for entry in entries},
             key=lambda entry: (-entry[0], entry[1].encode("ascii")),
@@ -158,6 +165,7 @@ def _answers_by_target(
     pending: PendingMissingForAssessment,
     allowed: frozenset[str],
     observation_event_ids: frozenset[str],
+    captured_edit_paths: Mapping[str, frozenset[str]] | None = None,
 ) -> tuple[dict[str | None, tuple[tuple[int, str], ...]], ...]:
     """Per pending item and target, the answering material recorded since, as ``(order, ref)``.
 
@@ -187,7 +195,7 @@ def _answers_by_target(
     for row in projection.responses.values():
         if row.source_frontier > after and row.payload is not None and not row.redacted:
             recorded["responses"].append((row.source_frontier, str(row.source_event_id)))
-    graph = _RecordedLinks.of(projection, after, observation_event_ids)
+    links = _Links.of(projection, after, observation_event_ids, captured_edit_paths or {})
     answers: list[dict[str | None, tuple[tuple[int, str], ...]]] = []
     for item in pending.items:
         candidates = tuple(
@@ -203,31 +211,67 @@ def _answers_by_target(
             {
                 target: tuple(entry for entry in candidates if entry[1] in bound)
                 for target in item.target_refs
-                for bound in (graph.bound_since(target),)
+                for bound in (links.answers(target),)
             }
         )
     return tuple(answers)
 
 
-@dataclass(frozen=True, slots=True)
-class _RecordedLinks:
-    """The recorded refs that tie agent material published after a request to its targets.
+type _RunKey = tuple[str, str]
 
-    Nodes are the agent-published, unredacted rows recorded after the request; each names the
-    refs its payload cites (a result its action and evidence, a claim its support, scope and the
-    claims it replaces or disputes, a response its finding and evidence, an action its
-    obligations). A target stands for itself and for what identifies the same subject: the
-    action behind a result or cited evidence, every recorded run of that action's exact command
-    (never a hook placeholder),
-    evidence at the same agent-recorded ``reference``, a claim's obligation scope, and a plan's
-    later versions. Material is bound to a target when a chain of those citations among newer
-    agent rows reaches it. A plan names every obligation, so it can be bound but never binds
-    anything else; older rows outside the target's identity never bridge two subjects.
+
+@dataclass(frozen=True, slots=True)
+class _Subject:
+    """What a target names: its runs (actions and exact-command keys) and its file paths."""
+
+    actions: frozenset[str]
+    keys: frozenset[_RunKey]
+    paths: frozenset[str]
+
+    def __or__(self, other: _Subject) -> _Subject:
+        return _Subject(
+            self.actions | other.actions, self.keys | other.keys, self.paths | other.paths
+        )
+
+    def __bool__(self) -> bool:
+        return bool(self.actions or self.keys or self.paths)
+
+
+_NO_SUBJECT: Final = _Subject(frozenset(), frozenset(), frozenset())
+
+
+@dataclass(frozen=True, slots=True)
+class _Links:
+    """Direct relations from a named target to agent material recorded after the request.
+
+    Only new, agent-published, unredacted material counts; citing the old target again is not
+    new material, and nothing spreads through other newer rows or shared obligations. For an
+    action, result or evidence target, the answer is: a result of the named action or of another
+    run of the same exact command (compared with whitespace collapsed; a hook run is identified by
+    its ``omitted:<digest>`` and matches only the same digest, never ``omitted:structural``), and
+    the new evidence such a result cites; a ``git diff`` run naming one of the target's paths and
+    the evidence its result cites; and new evidence whose ``reference`` is the target's own id or
+    one of its paths. A target's paths are its evidence ``reference`` when that is a file path,
+    the paths a hook-captured edit records (supplied by the caller from the authenticated
+    capture), and the paths of a ``git diff`` command behind it. Paths compare normalized but
+    exact (see ``_normal_path``). A claim is answered by material tied to what it cites; a
+    correction (``claim_recorded`` 1.1.0 superseding it, or any claim disputing it) answers it,
+    with the new material it cites when that is tied to the claim's support or the claim cited
+    nothing Yoetz can relate. A finding is answered by a response to it and what that cites, a
+    plan by the version that supersedes it, and an obligation by new actions, results, claims and
+    plans that name it.
     """
 
-    names: Mapping[str, frozenset[str]]
-    terminal: frozenset[str]
-    identity: Mapping[str, frozenset[str]]
+    projection: ProjectionState
+    after: int
+    captured: Mapping[str, frozenset[str]]
+    new_actions: Mapping[str, ActionRecordedPayload]
+    new_results: Mapping[str, ResultRecordedPayload]
+    new_evidence: Mapping[str, EvidenceRecordedPayload]
+    new_claims: Mapping[str, ClaimRecordedPayload | ClaimRecordedPayloadV1_1]
+    new_responses: Mapping[str, ResponseRecordedPayload]
+    new_plans: Mapping[str, PlanPublishedPayload | PlanRevisedPayload]
+    actions_by_key: Mapping[_RunKey, frozenset[str]]
 
     @classmethod
     def of(
@@ -235,10 +279,8 @@ class _RecordedLinks:
         projection: ProjectionState,
         after: int,
         observation_event_ids: frozenset[str],
-    ) -> _RecordedLinks:
-        names: dict[str, frozenset[str]] = {}
-        terminal: set[str] = set()
-
+        captured_edit_paths: Mapping[str, frozenset[str]],
+    ) -> _Links:
         def newer(row: _Row) -> bool:
             return (
                 row.source_frontier > after
@@ -248,82 +290,251 @@ class _RecordedLinks:
                 and not _hook_observed(row.payload)
             )
 
+        by_key: dict[_RunKey, set[str]] = {}
         for ref, row in projection.actions.items():
-            if newer(row) and row.payload is not None:
-                names[str(ref)] = frozenset(str(item) for item in row.payload.obligation_refs)
-        for ref, row in projection.results.items():
-            if newer(row) and row.payload is not None:
-                names[str(ref)] = frozenset(
-                    (str(row.payload.action_id), *(str(item) for item in row.payload.evidence_refs))
-                )
-        for ref, row in projection.evidence.items():
-            if newer(row):
-                names[str(ref)] = frozenset()
-        for ref, row in projection.obligations.items():
-            if newer(row):
-                names[str(ref)] = frozenset()
-        for ref, row in projection.claims.items():
-            if newer(row) and row.payload is not None:
-                claim = row.payload
-                names[str(ref)] = frozenset(
-                    str(item)
-                    for item in (
-                        *claim.supporting_refs,
-                        *claim.obligation_refs,
-                        *claim.disputes_refs,
-                        *(
-                            (*claim.limitation_refs, *claim.supersedes_claim_refs)
-                            if type(claim) is ClaimRecordedPayloadV1_1
-                            else ()
-                        ),
-                    )
-                )
-        for row in projection.responses.values():
-            if newer(row) and row.payload is not None:
-                names[str(row.source_event_id)] = frozenset(
-                    (
-                        str(row.payload.finding_id),
-                        *(str(item) for item in row.payload.evidence_refs),
-                    )
-                )
-        plan_events = {
-            version: str(row.source_event_id) for version, row in projection.plans.items()
+            key = _run_key(row.payload)
+            if key is not None:
+                by_key.setdefault(key, set()).add(str(ref))
+        captured = {
+            ref: frozenset(
+                path for raw in paths if (path := _normal_path(raw, known_path=True)) is not None
+            )
+            for ref, paths in captured_edit_paths.items()
         }
-        for row in projection.plans.values():
-            if newer(row) and row.payload is not None:
-                plan = row.payload
-                cited: set[str] = set()
-                if type(plan) is PlanPublishedPayload:
-                    cited.update(str(item) for item in plan.obligation_refs)
-                elif type(plan) is PlanRevisedPayload:
-                    prior = plan_events.get(plan.supersedes_plan_version)
-                    if prior is not None:
-                        cited.add(prior)
-                    for change in plan.obligation_changes:
-                        cited.add(str(change.obligation_id))
-                        cited.update(str(item) for item in change.replacement_obligation_ids)
-                names[str(row.source_event_id)] = frozenset(cited)
-                terminal.add(str(row.source_event_id))
-        return cls(names, frozenset(terminal), _target_identities(projection))
+        return cls(
+            projection=projection,
+            after=after,
+            captured=captured,
+            new_actions={
+                str(ref): row.payload
+                for ref, row in projection.actions.items()
+                if newer(row) and row.payload is not None
+            },
+            new_results={
+                str(ref): row.payload
+                for ref, row in projection.results.items()
+                if newer(row) and row.payload is not None
+            },
+            new_evidence={
+                str(ref): row.payload
+                for ref, row in projection.evidence.items()
+                if newer(row) and row.payload is not None
+            },
+            new_claims={
+                str(ref): row.payload
+                for ref, row in projection.claims.items()
+                if newer(row) and row.payload is not None
+            },
+            new_responses={
+                str(row.source_event_id): row.payload
+                for row in projection.responses.values()
+                if newer(row) and row.payload is not None
+            },
+            new_plans={
+                str(row.source_event_id): row.payload
+                for row in projection.plans.values()
+                if newer(row) and row.payload is not None
+            },
+            actions_by_key={key: frozenset(refs) for key, refs in by_key.items()},
+        )
 
-    def bound_since(self, target: str) -> frozenset[str]:
-        """Newer agent rows a chain of recorded citations ties to ``target``'s subject."""
+    def answers(self, target: str) -> frozenset[str]:
+        """The new material directly tied to ``target``."""
 
-        reached: set[str] = set(self.identity.get(target, frozenset({target})))
-        reached.add(target)
-        changed = True
-        while changed:
-            changed = False
-            for ref, cited in self.names.items():
-                if ref not in reached and cited & reached:
-                    reached.add(ref)
-                    changed = True
-                if ref in reached and ref not in self.terminal:
-                    onward = {item for item in cited if item in self.names} - reached
-                    if onward:
-                        reached.update(onward)
-                        changed = True
-        return frozenset(reached)
+        found: set[str] = {
+            ref for ref, evidence in self.new_evidence.items() if evidence.reference == target
+        }
+        projection = self.projection
+        claim = next((row for ref, row in projection.claims.items() if str(ref) == target), None)
+        if claim is not None:
+            return frozenset(found | self._claim_answers(target, claim.payload))
+        if any(str(ref) == target for ref in projection.findings):
+            for ref, response in self.new_responses.items():
+                if str(response.finding_id) == target:
+                    found.add(ref)
+                    found.update(self._new_cited(response.evidence_refs))
+            return frozenset(found)
+        if any(str(ref) == target for ref in projection.obligations):
+            return frozenset(found | self._obligation_answers(target))
+        plan_version = next(
+            (
+                version
+                for version, row in projection.plans.items()
+                if str(row.source_event_id) == target
+            ),
+            None,
+        )
+        if plan_version is not None:
+            found.update(
+                ref
+                for ref, plan in self.new_plans.items()
+                if type(plan) is PlanRevisedPayload and plan.supersedes_plan_version == plan_version
+            )
+            return frozenset(found)
+        return frozenset(found | self._material(self._subject(target)))
+
+    def _new_cited(self, refs: Iterable[object]) -> set[str]:
+        return {
+            str(ref)
+            for ref in refs
+            if str(ref) in self.new_evidence or str(ref) in self.new_results
+        }
+
+    def _evidence_paths(self, ref: str) -> frozenset[str]:
+        row = next(
+            (item for key, item in self.projection.evidence.items() if str(key) == ref), None
+        )
+        paths = set(self.captured.get(ref, frozenset()))
+        if row is not None and row.payload is not None and row.payload.reference is not None:
+            path = _normal_path(row.payload.reference)
+            if path is not None:
+                paths.add(path)
+        return frozenset(paths)
+
+    def _action_subject(self, ref: str) -> _Subject:
+        row = next((item for key, item in self.projection.actions.items() if str(key) == ref), None)
+        payload = None if row is None else row.payload
+        key = _run_key(payload)
+        paths: frozenset[str] = frozenset() if payload is None else _diff_paths(payload.command)
+        return _Subject(frozenset({ref}), frozenset() if key is None else frozenset({key}), paths)
+
+    def _subject(self, target: str) -> _Subject:
+        """The runs and paths an action, result or evidence target names (older rows only)."""
+
+        projection = self.projection
+        subject = _NO_SUBJECT
+        if any(str(ref) == target for ref in projection.actions):
+            subject = self._action_subject(target)
+            for row in projection.results.values():
+                if (
+                    row.payload is not None
+                    and row.source_frontier <= self.after
+                    and str(row.payload.action_id) == target
+                ):
+                    for evidence_ref in row.payload.evidence_refs:
+                        subject = subject | _Subject(
+                            frozenset(), frozenset(), self._evidence_paths(str(evidence_ref))
+                        )
+            return subject
+        result = next((row for ref, row in projection.results.items() if str(ref) == target), None)
+        if result is not None:
+            if result.payload is None:
+                return subject
+            subject = self._action_subject(str(result.payload.action_id))
+            for evidence_ref in result.payload.evidence_refs:
+                subject = subject | _Subject(
+                    frozenset(), frozenset(), self._evidence_paths(str(evidence_ref))
+                )
+            return subject
+        if any(str(ref) == target for ref in projection.evidence):
+            subject = _Subject(frozenset(), frozenset(), self._evidence_paths(target))
+            for row in projection.results.values():
+                if (
+                    row.payload is not None
+                    and row.source_frontier <= self.after
+                    and any(str(item) == target for item in row.payload.evidence_refs)
+                ):
+                    subject = subject | self._action_subject(str(row.payload.action_id))
+        return subject
+
+    def _material(self, subject: _Subject) -> set[str]:
+        """New actions, results and evidence tied to a subject's runs or paths."""
+
+        if not subject:
+            return set()
+        runs = set(subject.actions)
+        for key in subject.keys:
+            runs.update(self.actions_by_key.get(key, frozenset()))
+        runs.update(
+            ref
+            for ref, action in self.new_actions.items()
+            if _paths_meet(_diff_paths(action.command), subject.paths)
+        )
+        found = {ref for ref in self.new_actions if ref in runs}
+        by_path = {
+            ref
+            for ref, evidence in self.new_evidence.items()
+            if evidence.reference is not None
+            and (path := _normal_path(evidence.reference)) is not None
+            and _paths_meet(frozenset({path}), subject.paths)
+        }
+        found |= by_path
+        for ref, result in self.new_results.items():
+            cited = {str(item) for item in result.evidence_refs if str(item) in self.new_evidence}
+            if str(result.action_id) in runs:
+                found.add(ref)
+                found |= cited
+            elif cited & by_path:
+                found.add(ref)
+        return found
+
+    def _claim_answers(
+        self, target: str, claim: ClaimRecordedPayload | ClaimRecordedPayloadV1_1 | None
+    ) -> set[str]:
+        support: tuple[object, ...] = ()
+        if claim is not None:
+            support = (
+                *claim.supporting_refs,
+                *(claim.limitation_refs if type(claim) is ClaimRecordedPayloadV1_1 else ()),
+            )
+        subject = _NO_SUBJECT
+        for ref in support:
+            subject = subject | self._subject(str(ref))
+        found = self._material(subject)
+        for ref, correction in self.new_claims.items():
+            replaced = (
+                correction.supersedes_claim_refs
+                if type(correction) is ClaimRecordedPayloadV1_1
+                else ()
+            )
+            if not any(str(item) == target for item in (*replaced, *correction.disputes_refs)):
+                continue
+            found.add(ref)
+            cited = self._new_cited(
+                (
+                    *correction.supporting_refs,
+                    *(
+                        correction.limitation_refs
+                        if type(correction) is ClaimRecordedPayloadV1_1
+                        else ()
+                    ),
+                )
+            )
+            # A claim that cited nothing Yoetz can relate is answered by what its correction
+            # cites; otherwise only cited material tied to the claim's own support counts.
+            found |= cited if not subject else cited & found
+        return found
+
+    def _obligation_answers(self, target: str) -> set[str]:
+        found = {
+            ref
+            for ref, action in self.new_actions.items()
+            if any(str(item) == target for item in action.obligation_refs)
+        }
+        for ref, result in self.new_results.items():
+            if str(result.action_id) in found:
+                found.add(ref)
+                found |= {
+                    str(item) for item in result.evidence_refs if str(item) in self.new_evidence
+                }
+        found |= {
+            ref
+            for ref, claim in self.new_claims.items()
+            if any(str(item) == target for item in claim.obligation_refs)
+        }
+        for ref, plan in self.new_plans.items():
+            named = (
+                plan.obligation_refs
+                if type(plan) is PlanPublishedPayload
+                else tuple(
+                    item
+                    for change in cast(PlanRevisedPayload, plan).obligation_changes
+                    for item in (change.obligation_id, *change.replacement_obligation_ids)
+                )
+            )
+            if any(str(item) == target for item in named):
+                found.add(ref)
+        return found
 
 
 class _Row(Protocol):
@@ -337,58 +548,86 @@ class _Row(Protocol):
     def source_frontier(self) -> int: ...
 
 
-def _target_identities(projection: ProjectionState) -> dict[str, frozenset[str]]:
-    """What else identifies the subject a target names (see ``_RecordedLinks``)."""
+def _run_key(payload: ActionRecordedPayload | None) -> _RunKey | None:
+    """What makes two runs the same command: its text with whitespace collapsed.
 
-    by_command: dict[str, set[str]] = {}
-    for ref, row in projection.actions.items():
-        if (command := _command_identity(row.payload)) is not None:
-            by_command.setdefault(command, set()).add(str(ref))
-    by_reference: dict[str, set[str]] = {}
-    for ref, row in projection.evidence.items():
-        if row.payload is not None and row.payload.reference:
-            by_reference.setdefault(row.payload.reference, set()).add(str(ref))
-
-    def runs_of(action: str) -> set[str]:
-        row = projection.actions.get(validate_action_id(action))
-        command = None if row is None else _command_identity(row.payload)
-        return {action} if command is None else {action, *by_command[command]}
-
-    identity: dict[str, frozenset[str]] = {}
-    for ref, row in projection.actions.items():
-        identity[str(ref)] = frozenset(runs_of(str(ref)))
-    cited_by: dict[str, set[str]] = {}
-    for ref, row in projection.results.items():
-        if row.payload is not None:
-            runs = runs_of(str(row.payload.action_id))
-            identity[str(ref)] = frozenset({str(ref), *runs})
-            for evidence_ref in row.payload.evidence_refs:
-                cited_by.setdefault(str(evidence_ref), set()).update(runs)
-    for ref, row in projection.evidence.items():
-        same: set[str] = (
-            set()
-            if row.payload is None or not row.payload.reference
-            else by_reference[row.payload.reference]
-        )
-        identity[str(ref)] = frozenset({str(ref), *same, *cited_by.get(str(ref), ())})
-    for ref, row in projection.claims.items():
-        if row.payload is not None:
-            identity[str(ref)] = frozenset(
-                {str(ref), *(str(item) for item in row.payload.obligation_refs)}
-            )
-    return identity
-
-
-def _command_identity(payload: ActionRecordedPayload | None) -> str | None:
-    """The exact command text that makes two runs the same, or ``None`` when none is recorded.
-
-    Hook placeholders (``omitted:...``) stand in for text Yoetz did not keep, so two of them are
-    never treated as the same command.
+    A hook records ``omitted:<digest>`` instead of the text; the same digest is the same command
+    text, so it matches only that digest. ``omitted:structural`` identifies nothing.
     """
 
-    if payload is None or payload.command is None or payload.command.startswith("omitted:"):
+    if payload is None or payload.command is None:
         return None
-    return payload.command
+    command = " ".join(payload.command.split())
+    if command.startswith("omitted:"):
+        digest = command.removeprefix("omitted:")
+        return None if digest in {"", "structural"} else ("digest", digest)
+    return ("command", command) if command else None
+
+
+def _normal_path(text: str, *, known_path: bool = False) -> str | None:
+    """A file path, normalized but exact; ``None`` for anything that is not a path.
+
+    Surrounding whitespace, ``./`` and ``.`` segments, repeated and trailing slashes are dropped;
+    case and every other character are kept. A free-form evidence ``reference`` is a path only
+    when it contains a slash or a file extension, so a generic reference such as ``stdout`` or a
+    URL is never a path; ``known_path`` text (a captured edit's path, a ``git diff`` argument)
+    needs neither.
+    """
+
+    text = text.strip()
+    if not text or any(char.isspace() for char in text) or "://" in text:
+        return None
+    absolute = text.startswith("/")
+    parts = [part for part in text.split("/") if part not in {"", "."}]
+    if not parts or not (known_path or "/" in text or "." in parts[-1][1:]):
+        return None
+    return ("/" if absolute else "") + "/".join(parts)
+
+
+def _paths_meet(left: frozenset[str], right: frozenset[str]) -> bool:
+    """Whether two path sets share a path; an absolute path meets the relative path it ends with.
+
+    Yoetz does not know the workspace root here, so ``/work/repo/src/a.py`` meets ``src/a.py`` at
+    a path boundary and never ``a.py`` inside another name.
+    """
+
+    for one in left:
+        for other in right:
+            if one == other:
+                return True
+            if one.startswith("/") != other.startswith("/"):
+                absolute, relative = (one, other) if one.startswith("/") else (other, one)
+                if absolute.endswith("/" + relative):
+                    return True
+    return False
+
+
+def _diff_paths(command: str | None) -> frozenset[str]:
+    """The paths a ``git diff`` command names; empty for any other command."""
+
+    if command is None:
+        return frozenset()
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return frozenset()
+    paths: set[str] = set()
+    for index in range(len(tokens) - 1):
+        if tokens[index] != "git" or tokens[index + 1] != "diff":
+            continue
+        literal = False
+        for token in tokens[index + 2 :]:
+            if token in {"&&", "||", "|", ";"}:
+                break
+            if token == "--":
+                literal = True
+                continue
+            if not literal and token.startswith("-"):
+                continue
+            path = _normal_path(token, known_path=True)
+            if path is not None:
+                paths.add(path)
+    return frozenset(paths)
 
 
 def _carries_output(payload: ResultRecordedPayload) -> bool:
@@ -428,6 +667,7 @@ def review_missing_for_assessment(
     *,
     unsuppliable_kinds: frozenset[str],
     citable_refs: frozenset[str] | None = None,
+    captured_edit_paths: Mapping[str, frozenset[str]] | None = None,
 ) -> MissingItemsReview:
     """Fence what the reviewer named to the packet it was shown and classify who can supply it.
 
@@ -437,8 +677,10 @@ def review_missing_for_assessment(
     reviewer named nothing the packet held.
     An ``insufficient_packet`` that named no item at all discloses the same gap.
     An item the prior review already requested and the agent answered since, target by target,
-    is dropped unless the reviewer cites that newer material (``semantic_missing_already_supplied``),
-    so the same request cannot loop; material for another target never answers it. Every kept item is recorded with Yoetz's own availability class.
+    is dropped unless the reviewer cites that newer material
+    (``semantic_missing_already_supplied``), so the same request cannot loop; only new material
+    directly tied to a target answers it (see ``_Links``; ``captured_edit_paths`` as in
+    ``supplied_since``). Every kept item is recorded with Yoetz's own availability class.
     """
 
     if judgment.conclusion != "insufficient_packet":
@@ -453,7 +695,11 @@ def review_missing_for_assessment(
     projection = case.projection
     pending = projection.pending_missing_for_assessment
     observed = frozenset(str(item) for item in case.observation_event_ids)
-    answered = () if pending is None else _answers_by_target(projection, pending, allowed, observed)
+    answered = (
+        ()
+        if pending is None
+        else _answers_by_target(projection, pending, allowed, observed, captured_edit_paths)
+    )
     redacted = _redacted_refs(projection)
     shown = allowed if citable_refs is None else allowed & citable_refs
     gaps: set[str] = set()

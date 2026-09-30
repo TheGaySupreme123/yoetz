@@ -129,6 +129,7 @@ __all__ = [
     "SEMANTIC_REVIEW_PURPOSE",
     "assemble_filtered_review_packet",
     "build_semantic_case",
+    "captured_edit_paths",
     "review_selection_digest",
     "repair_evidence_refs",
     "SemanticPacketView",
@@ -1301,6 +1302,41 @@ def _captured_edit_paths(content: bytes) -> tuple[bool, tuple[str, ...]]:
     paths.discard("")
     ordered = tuple(sorted(paths, key=lambda value: value.encode("utf-8")))
     return failed, ordered[:_MAX_EDIT_PATHS]
+
+
+def _edit_paths_by_ref(groups: Mapping[str, _CapturedGroup]) -> dict[str, frozenset[str]]:
+    """Every evidence ref of an applied captured edit, mapped to the paths the capture records."""
+
+    by_ref: dict[str, frozenset[str]] = {}
+    for group in groups.values():
+        if group.source_kind != "diff":
+            continue
+        failed, paths = _captured_edit_paths(group.content)
+        if failed or not paths:
+            continue
+        for ref in group.evidence_refs:
+            by_ref[ref] = frozenset(paths)
+    return by_ref
+
+
+def captured_edit_paths(
+    frozen_case: DeterministicCase,
+    captured_content: Sequence[CapturedSemanticContent],
+    captured_content_scope: CapturedContentScope | None,
+) -> dict[str, frozenset[str]]:
+    """Map each hook-captured edit's evidence refs to the workspace-relative paths it records.
+
+    Issue #907: a later review compares these paths with the paths the agent names when it
+    publishes a fresh diff, so a repeated ``current_diff_for_path`` request for a captured edit
+    can converge. Only content the case builder would itself accept is read. The paths stay in
+    process for that comparison; they are never recorded, logged or sent.
+    """
+
+    allowed = frozenset(str(ref) for ref in frozen_case.allowed_ids)
+    groups, _gaps = _captured_content_groups(
+        frozen_case.projection, allowed, captured_content, captured_content_scope
+    )
+    return _edit_paths_by_ref(groups)
 
 
 # ``(identity, outcome, action ref, result ref)``: the result ref names one run, so an output and
@@ -2741,6 +2777,7 @@ def _build_semantic_case_once(
             pending_missing,
             frozenset(allowed),
             frozenset(str(item) for item in frozen_case.observation_event_ids),
+            _edit_paths_by_ref(captured_groups),
         )
         check_ref = str(pending_missing.source_check_event_id)
         prior_missing_item = _content_item(

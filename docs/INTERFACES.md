@@ -6877,22 +6877,35 @@ fence trims targets to the packet's `citable_refs`, as it trims a ruling's cited
 item left with none (`semantic_missing_items_rejected`), and drops an item whose earlier request was
 answered by material recorded since unless the reviewer cites that material
 (`semantic_missing_already_supplied`). "Answered" is judged per named target: a repeat is dropped
-only when the earlier request named every one of its targets and each has answering material that
-the ledger's own refs tie to it (a result of the named action or of a run of the same exact command,
-never a hook `omitted:` placeholder; evidence that result cites or recorded at the same `reference`;
-a claim correction that supersedes or disputes the named claim, or covers its obligations, and the
-material it cites; a response to the named finding; a later plan version), so material for another
-path, run or claim never answers it. Only an item with no target is matched by record family alone,
-and `supplied_since` lists refs on the same rule. Only agent-published material answers a request, never
-hook-captured tool output: authorship is the service-stamped envelope fact, carried on the frozen
-case as `observation_event_ids`, the observation-authored events recorded after the request, emitted
-only when non-empty so other cases keep their bytes; and a result answers `verification_output` only
-when it carries output (linked evidence or a summary). Yoetz classifies each kept item as
-`agent_suppliable` or `structurally_unavailable_on_this_host` (a kind the effective review selection
-or channel can never carry, or a redacted target), adding `semantic_missing_agent_suppliable` and
-`semantic_missing_structurally_unavailable`. These are check limitations, never findings, and weigh
-on finding resolution exactly like the `semantic_packet_insufficient` they ride beside: a local
-issue is still proven absent, and a `fixed` ruling (#905) still resolves its own finding.
+only when the earlier request named every one of its targets and each has new agent-published
+material directly tied to it. For an action, result or evidence target that is a result of the named
+action or of another run of the same command (text compared with whitespace collapsed; a hook run's
+`omitted:<digest>` matches only the same digest, `omitted:structural` nothing) and the new evidence
+that result cites; a `git diff` run naming one of the target's paths and the evidence its result
+cites; or new evidence whose `reference` is the target's id or one of its paths. A target's paths
+are its own `reference` when that is a file path (it contains `/` or a file extension, so `stdout`
+is not), the workspace-relative paths a hook-captured edit's authenticated bytes record (compared in
+process, never recorded or sent), and the paths of a `git diff` behind it; paths compare normalized
+but exact (`./`, `.` segments, repeated and trailing slashes dropped; case kept; an absolute path
+meets the workspace-relative path it ends with at a path boundary). Re-citing the old target, a
+shared obligation, or a record that only cites other new material ties nothing. A claim is answered
+by material tied to what it cites, and by a correction that supersedes or disputes it together with
+the new material the correction cites when that material is tied to the claim's support, or when the
+claim cited nothing Yoetz can relate (the request was for the claim itself). A finding is answered
+by a response to it and what that cites, a plan by the version superseding it, an obligation by new
+actions, results, claims and plans naming it. A record related to the target only through another
+path, run or claim therefore never answers it. Only an item with no target is matched by record
+family alone, and `supplied_since` lists refs on the same rule. Only agent-published material
+answers a request, never hook-captured tool output: authorship is the service-stamped envelope fact,
+carried on the frozen case as `observation_event_ids`, the observation-authored events recorded
+after the request, emitted only when non-empty so other cases keep their bytes; and a result answers
+`verification_output` only when it carries output (linked evidence or a summary). Yoetz classifies
+each kept item as `agent_suppliable` or `structurally_unavailable_on_this_host` (a kind the
+effective review selection or channel can never carry, or a redacted target), adding
+`semantic_missing_agent_suppliable` and `semantic_missing_structurally_unavailable`. These are check
+limitations, never findings, and weigh on finding resolution exactly like the
+`semantic_packet_insufficient` they ride beside: a local issue is still proven absent, and a `fixed`
+ruling (#905) still resolves its own finding.
 
 The unreleased `check_recorded` 1.3.0 is extended in place with the optional
 `missing_for_assessment` (kind, target refs, availability; no reviewer prose; 1–8 items, only beside

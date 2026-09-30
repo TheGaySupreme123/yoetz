@@ -1589,3 +1589,84 @@ async def test_hook_captured_output_since_the_request_is_not_an_answer_to_it() -
     checked = await execute_check_commit(app, _request("semantic_required"))
     assert [item.kind for item in checked.missing_for_assessment] == ["verification_output"]
     assert "semantic_missing_already_supplied" not in checked.coverage.known_gaps
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("diff_path", ["src/a.py", "src/b.py"])
+async def test_a_fresh_diff_answers_a_captured_edit_only_for_the_path_it_records(
+    diff_path: str,
+) -> None:
+    """R940-01: the composed review hands the check each capture's paths, compared in process."""
+
+    captured = EvidenceRecordedPayload(
+        evd(1),
+        EvidenceKind.OTHER,
+        EvidenceImmutability.IMMUTABLE_SNAPSHOT,
+        timestamp_from_string("2026-09-27T00:00:00.000Z"),
+        captured_object_id=object_id("obj_00000000-0000-4000-8000-000000000001"),
+        content_digest="sha256:" + "a" * 64,
+        description="Observation-captured tool_input bytes part=1/1",
+        digest_binding=EvidenceDigestBinding(
+            subject=EvidenceDigestSubject.BOUNDED_EXCERPT,
+            content_availability=EvidenceContentAvailability.CAPTURED,
+            byte_count=10,
+            provenance=EvidenceDigestProvenance.OBSERVATION_CAPTURED,
+        ),
+    )
+    diff = EvidenceRecordedPayload(
+        evd(61),
+        EvidenceKind.COMMAND_OUTPUT,
+        EvidenceImmutability.METADATA_ONLY,
+        timestamp_from_string("2026-09-27T00:00:00.000Z"),
+        description="diff --git a/x b/x",
+    )
+    case = make_case(
+        evidence={evd(1): evidence_record(captured, 10), evd(61): evidence_record(diff, 61)},
+        actions={
+            act(60): record(
+                ActionRecordedPayload(
+                    act(60), ActionKind.COMMAND, "Show the diff", command=f"git diff {diff_path}"
+                ),
+                60,
+            )
+        },
+        results={
+            res(62): record(
+                ResultRecordedPayload(
+                    res(62), act(60), ResultOutcome.SUCCESS, evidence_refs=(evd(61),)
+                ),
+                62,
+            )
+        },
+        extra_refs=(evd(1), evd(61), act(60), res(62)),
+    )
+    request = MissingForAssessmentItem("current_diff_for_path", (str(evd(1)),), "agent_suppliable")
+    case = replace(
+        case,
+        projection=replace(
+            case.projection,
+            pending_missing_for_assessment=PendingMissingForAssessment(evt(50), 50, (request,)),
+        ),
+    )
+    app = _App(semantic=True)
+    app.ledger.frozen = replace(app.ledger.frozen, case=case)
+    app.semantic_result = replace(
+        _succeeded(
+            SemanticJudgment(
+                "insufficient_packet",
+                (),
+                missing_for_assessment=(
+                    MissingForAssessment("current_diff_for_path", (str(evd(1)),), "still absent"),
+                ),
+            )
+        ),
+        case_captured_edit_paths={str(evd(1)): frozenset({"src/a.py"})},
+    )
+    checked = await execute_check_commit(app, _request("semantic_required"))
+    gaps = set(checked.coverage.known_gaps)
+    if diff_path == "src/a.py":
+        assert checked.missing_for_assessment == ()
+        assert "semantic_missing_already_supplied" in gaps
+    else:
+        assert [item.target_refs for item in checked.missing_for_assessment] == [(str(evd(1)),)]
+        assert "semantic_missing_already_supplied" not in gaps

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import replace
+from typing import cast
 
 from builders.policy_cases import (
     act,
@@ -13,6 +14,8 @@ from builders.policy_cases import (
     evidence_record,
     evt,
     make_case,
+    obl,
+    obligation_record,
     record,
     res,
 )
@@ -28,9 +31,15 @@ from yoetz.domain.events import (
     ClaimKind,
     ClaimRecordedPayload,
     ClaimRecordedPayloadV1_1,
+    EvidenceContentAvailability,
+    EvidenceDigestBinding,
+    EvidenceDigestProvenance,
+    EvidenceDigestSubject,
     EvidenceKind,
     EvidenceRecordedPayload,
     MissingForAssessmentItem,
+    ObligationPublishedPayload,
+    ObligationStatus,
     ResultOutcome,
     ResultRecordedPayload,
 )
@@ -40,9 +49,24 @@ from yoetz.domain.privacy import (
     ReviewContextProfile,
     ReviewSelectionPolicy,
 )
-from yoetz.domain.values import ResultId, timestamp_from_string
-from yoetz.kernel.deterministic_checks import DeterministicCase
-from yoetz.kernel.projections import PendingMissingForAssessment, ProjectionRecord
+from yoetz.domain.values import (
+    ActionId,
+    ClaimId,
+    EvidenceId,
+    ObligationId,
+    ResultId,
+    event_id,
+    object_id,
+    timestamp_from_string,
+)
+from yoetz.kernel.deterministic_checks import DeterministicCase, FindingBasisRef
+from yoetz.kernel.projections import (
+    ClaimProjectionRecord,
+    EvidenceProjectionRecord,
+    ObligationProjectionRecord,
+    PendingMissingForAssessment,
+    ProjectionRecord,
+)
 from yoetz.mcp.summaries import summary_for_check
 from yoetz.ports.semantic import (
     MissingForAssessment,
@@ -482,3 +506,279 @@ def test_hook_command_placeholders_never_make_two_runs_the_same_command() -> Non
         case, (), _repeat("verification_output", str(act(1))), unsuppliable_kinds=frozenset()
     )
     assert [item.target_refs for item in review.items] == [(str(act(1)),)]
+
+
+# --- R940-01 follow-up: binding is a direct relation, normalized but exact ------------------------
+
+
+def _dropped(
+    case: DeterministicCase,
+    kind: MissingForAssessmentKind,
+    target: str,
+    *,
+    observed: frozenset[str] = frozenset(),
+    captured_edit_paths: Mapping[str, frozenset[str]] | None = None,
+) -> bool:
+    """Whether a repeat of the pending request for ``target`` is dropped as already supplied."""
+
+    case = _pending(case, MissingForAssessmentItem(kind, (target,), "agent_suppliable"))
+    case = replace(case, observation_event_ids=frozenset(event_id(item) for item in observed))
+    review = (
+        review_missing_for_assessment(
+            case, (), _repeat(kind, target), unsuppliable_kinds=frozenset()
+        )
+        if captured_edit_paths is None
+        else review_missing_for_assessment(
+            case,
+            (),
+            _repeat(kind, target),
+            unsuppliable_kinds=frozenset(),
+            captured_edit_paths=captured_edit_paths,
+        )
+    )
+    if review.items == ():
+        assert "semantic_missing_already_supplied" in review.gaps
+        return True
+    assert [item.target_refs for item in review.items] == [(target,)]
+    assert "semantic_missing_already_supplied" not in review.gaps
+    return False
+
+
+def _refs(*mappings: Iterable[object]) -> tuple[FindingBasisRef, ...]:
+    return tuple(cast(FindingBasisRef, ref) for mapping in mappings for ref in mapping)
+
+
+def _cases(
+    *,
+    actions: Mapping[ActionId, ProjectionRecord[ActionRecordedPayload]] | None = None,
+    results: Mapping[ResultId, ProjectionRecord[ResultRecordedPayload]] | None = None,
+    evidence: Mapping[EvidenceId, EvidenceProjectionRecord] | None = None,
+    claims: Mapping[ClaimId, ClaimProjectionRecord] | None = None,
+    obligations: Mapping[ObligationId, ObligationProjectionRecord] | None = None,
+) -> DeterministicCase:
+    return make_case(
+        actions=actions,
+        results=results,
+        evidence=evidence,
+        claims=claims,
+        obligations=obligations,
+        extra_refs=_refs(*(item or {} for item in (actions, results, evidence, claims))),
+    )
+
+
+def test_reciting_the_old_target_beside_another_paths_diff_never_answers_it() -> None:
+    """Only new material tied to the target counts; citing the old target again is not new."""
+
+    diff_b = {act(70): record(_run(70, "git diff src/b.py"), 70)}
+    diffs = {
+        evd(1): evidence_record(_diff(1, "src/a.py"), 10),
+        evd(71): evidence_record(_diff(71, "src/b.py"), 71),
+    }
+    via_result = _cases(
+        actions=diff_b,
+        evidence=diffs,
+        results={
+            res(72): record(
+                ResultRecordedPayload(
+                    res(72), act(70), ResultOutcome.SUCCESS, evidence_refs=(evd(1), evd(71))
+                ),
+                72,
+            )
+        },
+    )
+    assert not _dropped(via_result, "current_diff_for_path", str(evd(1)))
+    via_claim = _cases(
+        evidence=diffs,
+        claims={
+            clm(72): record(
+                ClaimRecordedPayload(clm(72), ClaimKind.MATERIAL, "Both diffs", (evd(1), evd(71))),
+                72,
+            )
+        },
+    )
+    assert not _dropped(via_claim, "current_diff_for_path", str(evd(1)))
+
+
+def test_a_shared_obligation_never_ties_a_sibling_run_to_the_target() -> None:
+    obligation = ObligationPublishedPayload(obl(60), "Verify", "tests pass", ObligationStatus.OPEN)
+    case = _cases(
+        obligations={obl(60): obligation_record(obligation, 60)},
+        actions={
+            act(1): record(_run(1, "pytest tests/a"), 10),
+            act(61): record(
+                ActionRecordedPayload(
+                    act(61),
+                    ActionKind.COMMAND,
+                    "Rerun",
+                    "pytest tests/a",
+                    obligation_refs=(obl(60),),
+                ),
+                61,
+            ),
+            act(63): record(
+                ActionRecordedPayload(
+                    act(63),
+                    ActionKind.COMMAND,
+                    "Sibling",
+                    "pytest tests/b",
+                    obligation_refs=(obl(60),),
+                ),
+                63,
+            ),
+        },
+        results={
+            res(62): record(ResultRecordedPayload(res(62), act(61), ResultOutcome.SUCCESS), 62),
+            res(64): record(_output(64, 63), 64),
+        },
+    )
+    assert not _dropped(case, "verification_output", str(act(1)))
+
+
+def test_a_generic_shared_reference_is_not_the_same_subject() -> None:
+    case = _cases(
+        evidence={
+            evd(1): evidence_record(_diff(1, "stdout"), 10),
+            evd(70): evidence_record(_diff(70, "stdout"), 70),
+        }
+    )
+    assert not _dropped(case, "current_diff_for_path", str(evd(1)))
+    # Naming the target itself as the reference is an explicit tie.
+    tied = _cases(
+        evidence={
+            evd(1): evidence_record(_diff(1, "stdout"), 10),
+            evd(70): evidence_record(_diff(70, str(evd(1))), 70),
+        }
+    )
+    assert _dropped(tied, "current_diff_for_path", str(evd(1)))
+
+
+def test_a_claim_correction_answers_only_with_material_tied_to_the_claims_support() -> None:
+    supported = ClaimRecordedPayload(clm(1), ClaimKind.COMPLETION, "A passes", (res(2),))
+
+    def case_with(command: str) -> DeterministicCase:
+        return _cases(
+            actions={
+                act(2): record(_run(2, "pytest tests/a"), 8),
+                act(70): record(_run(70, command), 70),
+            },
+            results={res(2): record(_output(2, 2), 9), res(71): record(_output(71, 70), 71)},
+            claims={
+                clm(1): claim_record(supported, 10, superseded_by_claim_id=clm(72)),
+                clm(72): record(
+                    ClaimRecordedPayloadV1_1(
+                        clm(72),
+                        ClaimKind.COMPLETION,
+                        "A passes",
+                        (res(71),),
+                        supersedes_claim_refs=(clm(1),),
+                    ),
+                    72,
+                ),
+            },
+        )
+
+    assert not _dropped(case_with("pytest tests/b"), "verification_output", str(clm(1)))
+    assert _dropped(case_with("pytest tests/a"), "verification_output", str(clm(1)))
+
+
+def test_paths_and_commands_compare_normalized_but_exact() -> None:
+    for reference in ("./src//a.py", "src/./a.py", "/work/repo/src/a.py", "src/a.py/"):
+        case = _cases(
+            evidence={
+                evd(1): evidence_record(_diff(1, "src/a.py"), 10),
+                evd(70): evidence_record(_diff(70, reference), 70),
+            }
+        )
+        assert _dropped(case, "current_diff_for_path", str(evd(1))), reference
+    for reference in ("src/A.py", "src/a.pyc", "lib/src/a.py.bak"):
+        case = _cases(
+            evidence={
+                evd(1): evidence_record(_diff(1, "src/a.py"), 10),
+                evd(70): evidence_record(_diff(70, reference), 70),
+            }
+        )
+        assert not _dropped(case, "current_diff_for_path", str(evd(1))), reference
+    spaced = _cases(
+        actions={
+            act(1): record(_run(1, "pytest  tests/a"), 10),
+            act(70): record(_run(70, " pytest tests/a\t"), 70),
+        },
+        results={res(71): record(_output(71, 70), 71)},
+    )
+    assert _dropped(spaced, "verification_output", str(act(1)))
+
+
+def test_a_hook_rerun_with_the_same_command_digest_is_the_same_command() -> None:
+    def case_with(digest: str) -> tuple[DeterministicCase, frozenset[str]]:
+        case = _cases(
+            actions={
+                act(1): record(_run(1, "omitted:sha256:" + "a" * 64), 10),
+                act(70): record(_run(70, "omitted:sha256:" + digest * 64), 70),
+            },
+            results={res(71): record(_output(71, 70), 71)},
+        )
+        # The rerun itself is hook-observed; the agent published the result that carries output.
+        return case, frozenset({str(case.projection.actions[act(70)].source_event_id)})
+
+    same, observed = case_with("a")
+    assert _dropped(same, "verification_output", str(act(1)), observed=observed)
+    other, observed = case_with("b")
+    assert not _dropped(other, "verification_output", str(act(1)), observed=observed)
+
+
+def _captured(number: int) -> EvidenceRecordedPayload:
+    return EvidenceRecordedPayload(
+        evd(number),
+        EvidenceKind.OTHER,
+        EvidenceImmutability.IMMUTABLE_SNAPSHOT,
+        timestamp_from_string("2026-09-27T00:00:00.000Z"),
+        captured_object_id=object_id(f"obj_00000000-0000-4000-8000-{number:012x}"),
+        content_digest="sha256:" + "c" * 64,
+        description="Observation-captured tool_input bytes part=1/1",
+        digest_binding=EvidenceDigestBinding(
+            subject=EvidenceDigestSubject.BOUNDED_EXCERPT,
+            content_availability=EvidenceContentAvailability.CAPTURED,
+            byte_count=10,
+            provenance=EvidenceDigestProvenance.OBSERVATION_CAPTURED,
+        ),
+    )
+
+
+def test_a_fresh_git_diff_of_the_captured_path_answers_a_hook_captured_edit() -> None:
+    """Hook captures carry no reference; the path the capture records binds a fresh diff."""
+
+    def case_with(path: str) -> DeterministicCase:
+        return _cases(
+            evidence={
+                evd(1): evidence_record(_captured(1), 10),
+                evd(71): evidence_record(
+                    EvidenceRecordedPayload(
+                        evd(71),
+                        EvidenceKind.COMMAND_OUTPUT,
+                        EvidenceImmutability.METADATA_ONLY,
+                        timestamp_from_string("2026-09-27T00:00:00.000Z"),
+                        description="diff --git a/x b/x",
+                    ),
+                    71,
+                ),
+            },
+            actions={act(70): record(_run(70, f"git diff -- {path}"), 70)},
+            results={
+                res(72): record(
+                    ResultRecordedPayload(
+                        res(72), act(70), ResultOutcome.SUCCESS, evidence_refs=(evd(71),)
+                    ),
+                    72,
+                )
+            },
+        )
+
+    paths = {str(evd(1)): frozenset({"src/a.py"})}
+    assert _dropped(
+        case_with("src/a.py"), "current_diff_for_path", str(evd(1)), captured_edit_paths=paths
+    )
+    assert not _dropped(
+        case_with("src/b.py"), "current_diff_for_path", str(evd(1)), captured_edit_paths=paths
+    )
+    # Without the capture's paths (a recovered review), the request stays named.
+    assert not _dropped(case_with("src/a.py"), "current_diff_for_path", str(evd(1)))

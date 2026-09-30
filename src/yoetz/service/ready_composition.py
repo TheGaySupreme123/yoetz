@@ -148,6 +148,7 @@ from yoetz.application.semantic_case import (
     SemanticCaseTooLarge,
     SemanticPacketView,
     build_semantic_case,
+    captured_edit_paths,
     semantic_case_packet_view,
     semantic_case_to_candidate_context,
 )
@@ -4453,6 +4454,11 @@ def _privacy_gated_semantic_evaluator(
             packet_view = semantic_case_packet_view(semantic_case)
             packet_prior_refs = packet_view.prior_finding_refs
             packet_citable_refs = packet_view.citable_refs
+            # Issue #907: which paths each captured edit records, compared in process only so a
+            # repeated request for a captured edit can converge on a fresh diff of that path.
+            packet_edit_paths = captured_edit_paths(
+                frozen.case, captured_content, captured_content_scope
+            )
             trimmed_prior = set(_packet_view_gaps(packet_view))
             content_gaps = tuple(
                 sorted(
@@ -4528,6 +4534,7 @@ def _privacy_gated_semantic_evaluator(
                     unsuppliable_missing_kinds=unsuppliable,
                     case_prior_finding_refs=packet_prior_refs,
                     case_citable_refs=packet_citable_refs,
+                    case_captured_edit_paths=packet_edit_paths,
                 )
 
             # Build the packet before anything durable exists. A packet that cannot be built is a
@@ -4860,6 +4867,7 @@ def _privacy_gated_semantic_evaluator(
                     unsuppliable_missing_kinds=unsuppliable,
                     case_prior_finding_refs=packet_prior_refs,
                     case_citable_refs=packet_citable_refs,
+                    case_captured_edit_paths=packet_edit_paths,
                     continuation=continuation,
                 )
 
