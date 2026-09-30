@@ -26,8 +26,13 @@ from yoetz.adapters.providers.openai_responses import (
 )
 from yoetz.application.semantic_case import OVER_CASE_ITEM_LIMIT_REASON, REVIEW_PHASE_QUESTIONS
 from yoetz.domain.findings import EXTERNAL_SEMANTIC_FINDING_KINDS, FindingKind
+from yoetz.domain.observation import ObservationGapCode
 from yoetz.domain.privacy import ApprovedOutboundCase, DataCategory, ProviderBinding
 from yoetz.domain.receipts import (
+    COMPLETION_CLAIM_OUTSIDE_PLAN_GAP,
+    COMPLETION_PLAN_NOT_CLAIMED_GAP,
+    COMPLETION_SCOPE_DECLARED_NONE_GAP,
+    COMPLETION_SCOPE_UNDECLARED_GAP,
     SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
     SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
 )
@@ -136,11 +141,14 @@ def test_reviewer_is_told_it_is_the_requested_review_and_never_flags_process_sta
     assert "this running review is that review" in _TEXT
     assert (
         "Never raise as a problem a step or obligation whose only content is obtaining this "
-        "review, running a check, or recording a review's outcome." in _TEXT
+        "review, running a Yoetz check, or recording a review's outcome;" in _TEXT
     )
+    # "Check" alone would also cover a test, lint, or type check: those stay work.
+    assert "building, testing, linting, or type-checking the work is work, not process." in _TEXT
+    assert "running a check," not in _TEXT
     assert "Never raise Yoetz's own process state either:" in _TEXT
     for state in (
-        "that a check, review, or receipt is pending, running, or recorded",
+        "that a Yoetz check, review, or receipt is pending, running, or recorded",
         "that a finding is open, unanswered, or unresolved",
         "coverage levels",
         "gap codes",
@@ -159,7 +167,8 @@ def test_open_work_obligations_are_still_raised() -> None:
     assert FindingKind.COMPLETION_WITH_OPEN_OBLIGATIONS in EXTERNAL_SEMANTIC_FINDING_KINDS
     gloss = FINDING_KIND_GLOSSARY["completion_with_open_obligations"]
     assert gloss.startswith("work is presented as finished while work obligations")
-    assert "an obligation only to obtain this review or run a check is not one" in gloss
+    assert "an obligation only to obtain this review or run a Yoetz check is not one" in gloss
+    assert "but one to build, test, lint, or type-check the work is" in gloss
     # The substance of an agent's answer remains reviewable, so these kinds keep their meaning.
     assert "the substance of an agent's answer to a finding stays reviewable" in _TEXT
     assert "questionable_finding_rejection" in FINDING_KIND_GLOSSARY
@@ -283,5 +292,29 @@ def test_every_packet_gap_code_is_glossed_as_a_packet_limit() -> None:
         "withheld_by_policy",
         "redacted_never_send",
         OVER_CASE_ITEM_LIMIT_REASON,
+        # Every code the deterministic case builder stamps on the packet coverage.
+        "captured_object_unavailable",
+        "event_payload_unavailable",
+        "missing_ref",
+        "redacted_event",
+        "redacted_object",
+        "unknown_event",
+        "command_attempt_mismatch",
+        "command_attempt_uncorroborated",
+        COMPLETION_CLAIM_OUTSIDE_PLAN_GAP,
+        COMPLETION_PLAN_NOT_CLAIMED_GAP,
+        COMPLETION_SCOPE_DECLARED_NONE_GAP,
+        COMPLETION_SCOPE_UNDECLARED_GAP,
+        # Codes recorded events carry into the packet from publication and host observation.
+        "unknown_event_schema_preserved",
+        ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+        ObservationGapCode.CONTENT_REDACTED.value,
+        ObservationGapCode.CONTENT_UNSELECTED.value,
+        ObservationGapCode.OBSERVATION_INPUT_LOSS.value,
+        ObservationGapCode.PAYLOAD_CONTENT_OMITTED.value,
+        ObservationGapCode.ROUTINE_READ_SUMMARY_DETAIL_OMITTED.value,
+        ObservationGapCode.TRUNCATED_PAYLOAD.value,
+        ObservationGapCode.UNPAIRED_EVENT.value,
+        ObservationGapCode.UNSUPPORTED_EVENT.value,
     }
     assert required <= set(PACKET_GAP_GLOSSARY)

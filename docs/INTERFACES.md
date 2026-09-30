@@ -6834,11 +6834,12 @@ Failed and local-only attempts retain their existing version. The owning schema 
 `semantic_model_derived` finding whose `evidence_refs` cite no evidence or result recorded after
 the finding frontier. It writes nothing; the continuation is `input_correction_new_identity`.
 One structural exception applies (issue #906, a process finding): when every `subject_refs` entry of
-the finding is an event recorded as `check_recorded` or `finding_recorded` (never an agent's
-`response_recorded` answer), and a `check_recorded` event whose `semantic_status`/`semantic_reason`
-is `succeeded`/`semantic_completed` follows the finding's source event, that completed review is the
-resolution and `acknowledged` is accepted without a new attempt. A finding naming any obligation,
-claim or other record keeps the rejection. Acknowledgement still never resolves a finding.
+the finding is an event recorded as `check_recorded`, or as `finding_recorded` whose own finding's
+`subject_refs` transitively meet the same rule (never an agent's `response_recorded` answer), and a
+`check_recorded` event whose `semantic_status`/`semantic_reason` is `succeeded`/`semantic_completed`
+follows the finding's source event, that completed review is the resolution and `acknowledged` is
+accepted without a new attempt. A finding naming any obligation, claim or other record, or
+restating a finding about one, keeps the rejection. Acknowledgement still never resolves a finding.
 
 ### Observation latency and capacity (#887)
 

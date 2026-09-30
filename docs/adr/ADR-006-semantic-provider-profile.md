@@ -823,11 +823,12 @@ adds no provider, packet, check-result or stored field.
   same text followed only by its JSON-shape suffix. Prompt and instruction digests change with the
   text, as before.
 - **Role and self-reference.** The instruction states that the reviewer *is* the requested review.
-  An obligation or step whose only content is obtaining this review, running a check or recording a
-  review outcome, and Yoetz's own process state (check, review, receipt, finding and coverage state,
-  gap codes) are never defects in the work. A work obligation still open under an effective
-  completion claim remains `completion_with_open_obligations`. The substance of an agent's answer
-  to a finding stays reviewable. There is no post-filter on finding text.
+  An obligation or step whose only content is obtaining this review, running a Yoetz check or
+  recording a review outcome, and Yoetz's own process state (check, review, receipt, finding and
+  coverage state, gap codes) are never defects in the work; building, testing, linting or
+  type-checking the work is work. A work obligation still open under an effective completion claim
+  remains `completion_with_open_obligations`. The substance of an agent's answer to a finding stays
+  reviewable. There is no post-filter on finding text.
 - **Verification offloaded.** The reviewer judges a claim from the diff or excerpt and recorded
   output the packet carries, never asks for a re-run of verification whose readable output is
   present, and asks for more only by naming the exact missing artifact. It reports every distinct
@@ -849,19 +850,21 @@ adds no provider, packet, check-result or stored field.
   unchanged.
 - **Process findings and `respond`.** Open design question 3, narrowed to what structure can
   prove: `acknowledged` on an AI-powered finding needs no new resolution attempt when every subject
-  of the finding is a `check_recorded` or `finding_recorded` event (an agent's `response_recorded`
-  answer is agent content, not process state) and a check whose AI-powered review completed
-  (`succeeded` / `semantic_completed`) is recorded after the finding. The completed review is that
-  finding's resolution. A finding naming any obligation, claim, response or work record keeps
-  `resolution_attempt_required`: structure cannot tell an agent-authored review obligation from a
-  work obligation, so guidance now tells agents to track required review through
-  `mode=semantic_required` and the receipt, never as a plan obligation. Acknowledgement still never
-  resolves a finding.
+  of the finding is a `check_recorded` event, or a `finding_recorded` event whose own finding is
+  transitively about such records alone (an agent's `response_recorded` answer is agent content,
+  not process state), and a check whose AI-powered review completed (`succeeded` /
+  `semantic_completed`) is recorded after the finding. The completed review is that finding's
+  resolution. A restatement is about what it restates, so it is never easier to acknowledge than
+  the finding it cites. A finding naming any obligation, claim, response or work record, or
+  restating a finding about one, keeps `resolution_attempt_required`: structure cannot tell an
+  agent-authored review obligation from a work obligation, so guidance now tells agents to track
+  required review through `mode=semantic_required` and the receipt, never as a plan obligation.
+  Acknowledgement still never resolves a finding.
 - **Guidance.** Workflow, coverage guidance and every host skill say the check is the review and
-  must not be encoded as a plan obligation; a completed review that raised nothing about verification
-  whose readable output it carried needs no re-run; a reviewer request never authorizes an
-  environment change; and at least one re-review follows every repair. No check is capped or
-  discouraged.
+  must not be encoded as a plan obligation. Verification whose readable output a completed review
+  carried and did not challenge needs no re-run while the work it verified is unchanged; a reviewer
+  request never authorizes an environment change; and at least one re-review follows every repair.
+  No check is capped or discouraged.
 
 A semantic job created before this change and recovered after it rebuilds a case whose question set
 differs. The existing `semantic_execution_case_changed` guard then ends that review honestly as

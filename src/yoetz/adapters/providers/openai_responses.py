@@ -124,12 +124,31 @@ _HOSTNAME_PATTERN: Final = re.compile(
 )
 
 # One plain-language gloss per packet coverage gap code and omission reason a reviewer meets in a
-# review packet (issue #906). Every one names a limit on what this packet could carry, never a
-# defect in the agent's work: a bare code otherwise reads as something the agent must fix, and the
-# reviewer asked the agent to disclose or repair Yoetz's own coverage state.
+# review packet (issue #906): every omission reason, every code the deterministic and review case
+# builders stamp on a packet, and the host-observation codes materialization stamps on recorded
+# events. The instruction's lead sentence covers any other code a recorded event may carry. Every
+# one names a limit on what this packet could carry, never a defect in the agent's work: a bare
+# code otherwise reads as something the agent must fix, and the reviewer asked the agent to
+# disclose or repair Yoetz's own coverage state.
 PACKET_GAP_GLOSSARY: Final[Mapping[str, str]] = MappingProxyType(
     {
         "captured_object_unavailable": "a captured object could not be read back for this packet",
+        "command_attempt_mismatch": (
+            "a recorded command attempt differs from the command the host observed"
+        ),
+        "command_attempt_uncorroborated": (
+            "no host observation corroborates a recorded command attempt"
+        ),
+        "completion_claim_outside_plan": (
+            "a completion claim names scope the current plan does not list"
+        ),
+        "completion_plan_not_claimed": "the current plan lists scope no completion claim names",
+        "completion_scope_declared_none": (
+            "the plan declares that no obligations apply, so completion has no bound scope"
+        ),
+        "completion_scope_undeclared": (
+            "the plan declares no obligations and no reason, so completion has no bound scope"
+        ),
         "content_capture_unavailable": "host content capture was unavailable for that input",
         "content_redacted": "retained content was redacted before it could be sent",
         "content_unselected": "retained content was not selected into this packet",
@@ -140,12 +159,16 @@ PACKET_GAP_GLOSSARY: Final[Mapping[str, str]] = MappingProxyType(
             "an older digest record does not say which bytes were hashed"
         ),
         "host_outcome_unavailable": "the host did not report whether an observed call succeeded",
+        "missing_ref": "a referenced ledger event is absent from this ledger",
         "not_recorded": "the referenced record's content is not available to this packet",
         "not_selected": "the selection policy did not carry the item",
+        "observation_input_loss": "at least one host observation was lost before it was recorded",
         "over_case_item_limit": "the case admitted the item but could not carry it whole",
+        "payload_content_omitted": "a host event row kept its identity but not its content",
         "redacted_event": "a ledger event was redacted at its source",
         "redacted_never_send": "policy forbids sending the item",
         "redacted_object": "a stored object was redacted at its source",
+        "routine_read_detail_omitted": "routine reads were summarized without per-read detail",
         "semantic_case_content_over_item_limit": "an item was clipped to the per-item size limit",
         "semantic_case_finding_refs_over_limit": (
             "a finding cites more refs than the packet can carry"
@@ -154,7 +177,12 @@ PACKET_GAP_GLOSSARY: Final[Mapping[str, str]] = MappingProxyType(
             "references were left out to fit the packet's reference limit"
         ),
         "truncated_payload": "a payload was cut to a bounded prefix",
+        "unknown_event": "an event of a schema this version cannot read was kept unread",
+        "unknown_event_schema_preserved": (
+            "an event of an unrecognized schema was preserved without being read"
+        ),
         "unpaired_event": "a host tool event arrived without its matching start or end",
+        "unsupported_event": "a host event of an unmapped type kept only its metadata",
         "withheld_by_policy": "the privacy policy withheld the item",
     }
 )
@@ -173,9 +201,10 @@ SEMANTIC_REVIEW_INSTRUCTION: Final = (
     "You are the requested review: when the user, a policy, the plan, or an obligation asks for "
     "an AI-powered, semantic, or independent review, this running review is that review. Never "
     "raise as a problem a step or obligation whose only content is obtaining this review, "
-    "running a check, or recording a review's outcome. Never raise Yoetz's own process state "
-    "either: that a check, review, or receipt is pending, running, or recorded; that a finding "
-    "is open, unanswered, or unresolved; coverage levels; or gap codes. None of these is a "
+    "running a Yoetz check, or recording a review's outcome; building, testing, linting, or "
+    "type-checking the work is work, not process. Never raise Yoetz's own process state "
+    "either: that a Yoetz check, review, or receipt is pending, running, or recorded; that a "
+    "finding is open, unanswered, or unresolved; coverage levels; or gap codes. None of these is a "
     "defect in the work, though the substance of an agent's answer to a finding stays "
     "reviewable. A work obligation still open while completion is claimed remains a real "
     "discrepancy: raise it as completion_with_open_obligations. "
@@ -470,7 +499,8 @@ FINDING_KIND_GLOSSARY: Final[dict[str, str]] = {
     ),
     "completion_with_open_obligations": (
         "work is presented as finished while work obligations it was meant to satisfy remain "
-        "open; an obligation only to obtain this review or run a check is not one"
+        "open; an obligation only to obtain this review or run a Yoetz check is not one, but one "
+        "to build, test, lint, or type-check the work is"
     ),
     "contradictory_claims_unresolved": (
         "two claims in the packet cannot both be true and neither has been withdrawn or reconciled"

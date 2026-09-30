@@ -4938,6 +4938,75 @@ async def test_process_finding_is_answered_by_the_completed_review_but_work_find
         assert refused.value.code is PublicErrorCode.INVALID_REQUEST, refused.value.message
         assert refused.value.safe_details["reason_code"] == "resolution_attempt_required"
 
+    # Check 3: the reviewer restates earlier findings by citing only their finding_recorded rows.
+    # A restatement is about whatever the restated finding was about: restating the code defect
+    # keeps the gate, while restating the process finding stays a process finding.
+    restated = {
+        "defect": defect_finding.finding_id,
+        "process": process_finding.finding_id,
+    }
+
+    def restatements(frozen: FrozenCase) -> tuple[ReviewerChallenge, ...]:
+        def source(key: str) -> str:
+            record = frozen.case.projection.findings[finding_id(restated[key])]
+            return str(record.source_event_id)
+
+        return (
+            ReviewerChallenge(
+                FindingKind.DIFF_DOES_NOT_MATCH_ACCOUNT,
+                "The earlier collision defect still stands.",
+                (source("defect"),),
+                "The recorded collision finding is not repaired by any later change.",
+                "The rejection may rest on facts the packet does not carry.",
+                "Key dependency paths by identity and add a collision test.",
+                "act",
+                "The packet carries no later change to the dependency keys.",
+            ),
+            ReviewerChallenge(
+                FindingKind.LEDGER_STALE_OR_INCOMPLETE,
+                "The earlier finding about the prior check is still open.",
+                (source("process"),),
+                "The finding about the earlier check has no recorded outcome.",
+                "It may simply await this review.",
+                "Record the outcome of the earlier check.",
+                "provide_evidence",
+                "The packet does not show that finding resolved.",
+            ),
+        )
+
+    rounds.append(restatements)
+    third = await app.check(
+        CheckRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 40)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(accepted.result_frontier),
+                "mode": "semantic_if_configured",
+                "max_findings": "8",
+            }
+        )
+    )
+    assert type(third) is CheckCommitResult
+    assert rounds == []
+    third_round = {
+        item.summary: item
+        for item in third.findings
+        if item.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+    }
+    restated_defect = third_round["The earlier collision defect still stands."]
+    restated_process = third_round["The earlier finding about the prior check is still open."]
+    with pytest.raises(PublicOperationError) as refused:
+        await app.respond(
+            acknowledge(seed + 41, restated_defect, third.result_frontier, third.result_frontier)
+        )
+    assert refused.value.safe_details["reason_code"] == "resolution_attempt_required"
+    process_again = await app.respond(
+        acknowledge(seed + 42, restated_process, third.result_frontier, third.result_frontier)
+    )
+    assert process_again.response.disposition == "acknowledged"
+    assert process_again.response.evidence == ()
+
 
 def _scripted_semantic_evaluator(
     claim_ref: str,
