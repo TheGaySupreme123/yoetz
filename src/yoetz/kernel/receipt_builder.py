@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Final, Literal, cast
@@ -30,6 +30,7 @@ from yoetz.domain.findings import (
 )
 from yoetz.domain.receipts import (
     CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP,
+    CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP,
     COMPLETION_CLAIM_OUTSIDE_PLAN_GAP,
     COMPLETION_PLAN_NOT_CLAIMED_GAP,
     COMPLETION_SCOPE_DECLARED_NONE_GAP,
@@ -76,7 +77,10 @@ from yoetz.kernel.completion_scope import (
     completion_scope_differences,
 )
 from yoetz.kernel.deterministic_checks import CaseAvailabilityFacts, CaseGap
-from yoetz.kernel.finding_resolution import finding_resolution_explanation
+from yoetz.kernel.finding_resolution import (
+    finding_resolution_explanation,
+    unverified_resolution_finding_ids,
+)
 from yoetz.kernel.lineage import LineageEvaluation, LineageRollupState
 from yoetz.kernel.plan_scope import CurrentPlanScope, current_plan_scope
 from yoetz.kernel.projections import ObligationProjectionRecord, ProjectionRecord, ProjectionState
@@ -544,6 +548,29 @@ def _select_responses(
     return tuple(values)
 
 
+_UNVERIFIED_RESOLUTION_LISTED: Final = 16
+
+
+def _check_change_gap_text(context: ReceiptBuildContext, code: str) -> str | None:
+    """The fixed sentence for a check-time code; for the legacy-resolution disclosure (R945-02),
+    also the affected resolved findings, at most 16 by id and the rest as a count."""
+
+    sentence = check_time_change_gap_sentence(code)
+    if sentence is None or code != CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP:
+        return sentence
+    affected = unverified_resolution_finding_ids(
+        context.projection,
+        (state.finding_id for state in context.finding_states if state.resolved),
+    )
+    if not affected:
+        return sentence
+    listed = ", ".join(str(item) for item in affected[:_UNVERIFIED_RESOLUTION_LISTED])
+    remaining = len(affected) - _UNVERIFIED_RESOLUTION_LISTED
+    more = f", and {remaining} more" if remaining > 0 else ""
+    noun = "finding" if len(affected) == 1 else "findings"
+    return f"{sentence} {len(affected)} resolved AI-powered {noun} rely on it: {listed}{more}."
+
+
 def _select_gaps(context: ReceiptBuildContext) -> tuple[ReceiptGap, ...]:
     plan_scope = current_plan_scope(
         context.projection.plans,
@@ -588,7 +615,7 @@ def _select_gaps(context: ReceiptBuildContext) -> tuple[ReceiptGap, ...]:
                 plan_scope.no_obligations_reason.value
                 if gap.code == COMPLETION_SCOPE_DECLARED_NONE_GAP
                 and plan_scope.no_obligations_reason is not None
-                else scope_detail(gap.code) or check_time_change_gap_sentence(gap.code)
+                else scope_detail(gap.code) or _check_change_gap_text(context, gap.code)
             ),
         )
         for gap in sorted(
@@ -1113,8 +1140,10 @@ def _sections(
     check_suffix: CheckSuffixClass | None = None,
     engine_derived_suffix: str | None = None,
     host_observation_suffix: bool = False,
+    check_change_gap_texts: Mapping[str, str] | None = None,
 ) -> tuple[ReceiptSection, ...]:
     gap_codes = coverage.known_gaps
+    gap_texts = check_change_gap_texts or {}
     bodies: dict[ReceiptSectionKey, str] = {}
     items: dict[ReceiptSectionKey, tuple[str, ...]] = {}
     resolved_sentence = _resolved_history_sentence(len(resolved_finding_ids))
@@ -1311,7 +1340,7 @@ def _sections(
             )
         # Why the check-time change was unavailable (ADR-031): one fixed sentence per closed code.
         for code in gap_codes:
-            sentence = check_time_change_gap_sentence(code)
+            sentence = gap_texts.get(code)
             if sentence is not None:
                 gap_body += " " + sentence
         if "observation_input_loss" in gap_codes:
@@ -1420,6 +1449,11 @@ def build_receipt(
     )
     proof_state_cache: dict[tuple[int, int, str], ProjectionState | None] = {}
     sections = _sections(
+        check_change_gap_texts={
+            code: text
+            for code in context.coverage.known_gaps
+            if (text := _check_change_gap_text(context, code)) is not None
+        },
         include=include,
         conclusion=conclusion,
         frontier=context.subject_frontier,

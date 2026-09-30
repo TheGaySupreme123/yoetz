@@ -11,6 +11,7 @@ the finding exactly as it was.
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import cast
 
 import pytest
 
@@ -1815,3 +1816,103 @@ def test_receipt_discloses_a_resolution_through_a_legacy_raise() -> None:
     sentence = check_time_change_gap_sentence(CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP)
     assert sentence is not None and "only the lengths and counts" in sentence
     assert not _check_change_resolution_gaps(projection, (ReceiptFindingState(fnd(1), False),))
+
+
+def _legacy_resolved_projection(count: int) -> tuple[ProjectionState, tuple[object, ...]]:
+    from yoetz.domain.events import encode_payload
+    from yoetz.kernel.ranking import rank_key
+    from yoetz.kernel.receipt_builder import ReceiptFindingState
+    from yoetz.protocol.canonical import canonical_digest
+
+    legacy = _files(views=(_viewed(3_000, 1, True, 67, None),))
+    findings = _raise_reraise(legacy, legacy)
+    template = _repair_with(findings, _files(views=(_viewed(3_000, 1, True, 67, _VIEW_1),)))
+    assert template.payload is not None
+    many: dict[FindingId, FindingProjectionRecord] = {}
+    for index in range(1, count + 1):
+        identifier = fnd(index)
+        payload = replace(template.payload, finding_id=identifier, subject_refs=(obl(index),))
+        many[identifier] = replace(
+            template,
+            payload=payload,
+            payload_digest=canonical_digest(encode_payload(payload)),
+        )
+    projection = replace(empty_projection_state(), frontier=20, head_digest=_DIGEST, findings=many)
+    ordered = sorted(many.values(), key=lambda item: rank_key(cast(Finding, item.payload)))
+    states = tuple(
+        ReceiptFindingState(cast(Finding, item.payload).finding_id, True) for item in ordered
+    )
+    return projection, states
+
+
+def test_legacy_disclosure_is_one_task_wide_gap_however_many_findings_it_covers() -> None:
+    """65 affected findings still build a receipt: one gap row, never one per finding."""
+
+    from yoetz.application.receipt import (
+        _check_change_resolution_gaps,  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+    )
+    from yoetz.domain.receipts import CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP
+    from yoetz.kernel.finding_resolution import unverified_resolution_finding_ids
+    from yoetz.kernel.receipt_builder import ReceiptFindingState
+
+    projection, states = _legacy_resolved_projection(65)
+    typed_states = cast(tuple[ReceiptFindingState, ...], states)
+
+    gaps = _check_change_resolution_gaps(projection, typed_states)
+
+    assert [(gap.marker, gap.code) for gap in gaps] == [
+        (CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP, CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP)
+    ]
+    resolved = (state.finding_id for state in typed_states if state.resolved)
+    assert len(unverified_resolution_finding_ids(projection, resolved)) == 65
+
+
+def test_receipt_names_legacy_resolutions_boundedly_in_one_gap() -> None:
+    """A receipt section holds at most 64 findings; 20 show the bounded id list."""
+
+    from yoetz.domain.receipts import (
+        CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP,
+        render_receipt_human,
+    )
+    from yoetz.kernel.deterministic_checks import CaseAvailabilityFacts, CaseGap
+    from yoetz.kernel.receipt_builder import ReceiptBuildContext, ReceiptFindingState
+
+    projection, states = _legacy_resolved_projection(20)
+    from yoetz.protocol.coverage import weakest
+
+    coverage = _coverage(
+        gaps=(CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP, "check_not_recorded"),
+        freshness=projection.freshness,
+    )
+    for record in projection.findings.values():
+        assert record.payload is not None
+        coverage = weakest(coverage, record.payload.coverage)
+    context = ReceiptBuildContext(
+        projection=projection,
+        subject_frontier=Frontier(20, _DIGEST),
+        availability=CaseAvailabilityFacts(),
+        coverage=coverage,
+        gaps=(
+            CaseGap("check_not_recorded", "check_not_recorded", ()),
+            CaseGap(
+                CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP,
+                CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP,
+                (),
+            ),
+        ),
+        finding_states=cast(tuple[ReceiptFindingState, ...], states),
+        applicable_check=None,
+    )
+
+    from unit.kernel.test_receipt_builder import _build  # pyright: ignore[reportPrivateUsage]
+
+    receipt = _build(context)
+
+    (gap,) = [
+        item for item in receipt.gaps if item.code == CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP
+    ]
+    assert gap.detail is not None and "20 resolved AI-powered findings" in gap.detail
+    for markdown in (True, False):
+        text = render_receipt_human(receipt, markdown=markdown)
+        assert "20 resolved AI-powered findings" in text
+        assert str(fnd(1)) in text and "and 4 more" in text

@@ -16,7 +16,7 @@ projection checkpoint all read the same fact.
 
 from __future__ import annotations
 
-from collections.abc import MutableMapping
+from collections.abc import Iterable, MutableMapping
 from dataclasses import replace
 from typing import Final
 
@@ -61,6 +61,7 @@ __all__ = [
     "apply_check_resolution",
     "check_change_limits_tolerated",
     "check_change_resolution_unverified",
+    "unverified_resolution_finding_ids",
     "finding_is_resolved",
     "issue_key",
     "qualifying_check_resolves",
@@ -455,6 +456,19 @@ def check_change_resolution_unverified(record: FindingProjectionRecord) -> bool:
         and bool(record.resolution_depends_on_check_event_ids)
         and files is not None
         and files.has_unverified_views()
+    )
+
+
+def unverified_resolution_finding_ids(
+    projection: ProjectionState, resolved: Iterable[FindingId]
+) -> tuple[FindingId, ...]:
+    """The resolved findings among ``resolved`` whose resolution compared a legacy view."""
+
+    return tuple(
+        identifier
+        for identifier in resolved
+        if identifier in projection.findings
+        and check_change_resolution_unverified(projection.findings[identifier])
     )
 
 

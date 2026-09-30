@@ -48,8 +48,8 @@ from yoetz.domain.values import (
 )
 from yoetz.kernel.deterministic_checks import CaseGap, build_deterministic_case, case_coverage
 from yoetz.kernel.finding_resolution import (
-    check_change_resolution_unverified,
     finding_is_resolved,
+    unverified_resolution_finding_ids,
 )
 from yoetz.kernel.lineage import evaluate_recorded_lineage
 from yoetz.kernel.projections import ProjectionState
@@ -449,20 +449,24 @@ def _finding_states(projection: object) -> tuple[ReceiptFindingState, ...]:
 def _check_change_resolution_gaps(
     projection: ProjectionState, finding_states: tuple[ReceiptFindingState, ...]
 ) -> list[CaseGap]:
-    """Disclose each resolution that compared a legacy raising view by length only (R945-02).
+    """Disclose resolutions that compared a legacy raising view by length only (R945-02).
 
-    Such a resolution stands, but a receipt never presents it as content-verified.
+    Such a resolution stands, but a receipt never presents it as content-verified. One task-wide
+    marker carries the code however many findings it covers, so the disclosure can never exhaust
+    the receipt's 64-gap bound; the receipt builder names the affected findings, boundedly.
     """
 
+    affected = unverified_resolution_finding_ids(
+        projection, (state.finding_id for state in finding_states if state.resolved)
+    )
+    if not affected:
+        return []
     return [
         CaseGap(
-            f"check_change_resolution_unverified:{state.finding_id}",
+            CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP,
             CHECK_TIME_CHANGE_RESOLUTION_UNVERIFIED_GAP,
             (),
         )
-        for state in finding_states
-        if state.resolved
-        and check_change_resolution_unverified(projection.findings[state.finding_id])
     ]
 
 
