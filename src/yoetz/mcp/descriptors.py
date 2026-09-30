@@ -1357,9 +1357,9 @@ def _describe_presentation_schema(name: str, schema: dict[str, JsonValue]) -> No
         finding_frontier = properties.get("finding_frontier")
         if isinstance(finding_frontier, dict):
             finding_frontier["description"] = (
-                "The frontier that carries the finding's own record: the result frontier of the "
-                "check that returned it. Not the finding's subject_frontier, which names the "
-                "state that check tested and precedes the finding's record."
+                "Any frontier at or after the finding's own record: its status finding_frontier "
+                "when listed, or the current status frontier. Not the finding's subject_frontier, "
+                "which names the state the check tested and precedes that record."
             )
     elif name == "status-request":
         filter_property = properties.get("filter")
@@ -1860,8 +1860,9 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
     _descriptor(
         "respond",
         "Respond to a finding",
-        "Records an acknowledgement, provenance dispute, or rejection for one finding at the "
-        "result frontier of the check that returned it, not its subject_frontier. This appends one "
+        "Records an acknowledgement, provenance dispute, or rejection for one finding at any "
+        "frontier at or after its record, such as the current status frontier, not its "
+        "subject_frontier. This appends one "
         "finding-response record to the local Yoetz ledger; it does not publish to GitHub or run an "
         "AI-powered evaluation. It does not resolve other findings or establish that underlying work "
         "changed. A provenance_disputed response contests the finding's authorship or provenance "
@@ -1871,8 +1872,9 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "receipt_blocking_finding_count, erasing its historical record, or closing an independent "
         "coverage gap; only a later qualifying check of the repaired record resolves a finding. "
         "Disposition older findings before the final check. Call once per finding: a readable "
-        "response to a finding returned by that check needs no recheck; a response to an older "
-        "finding, a redacted or unreadable response or other material work does. Guidance: "
+        "response to a finding returned by that check, or acknowledging a non-actionable "
+        "observation-authored one, needs no recheck; another response to an older finding, a "
+        "redacted or unreadable response or other material work does. Guidance: "
         "yoetz://guidance/publication-policy.md.",
         read_only=False,
         idempotent=True,
@@ -1983,7 +1985,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
                 "start": "sha256:3a2186a2db53b91fcf7a8f3117cb8ff6a2b8bad6bc78e3e796e5e611e8598405",
                 "publish_work": "sha256:5b7e151a4583762f500803165aa48d3c49ec61172a36945a6af92064ffc171ff",
                 "check": "sha256:9befe13b257acf10535009c1dd69d9a933f3d94f5cd2aaac1655d4867596f89e",
-                "respond": "sha256:8b5dc94f431a411ef332021af01050a4b0c248a800e46d5b3bdb567f770d25a5",
+                "respond": "sha256:74bb3d69f067c14aeb161dea8d2b88338a77824c500869cb602c9dc33c67be68",
                 "status": "sha256:517eb05aa015834d98bd96ed59d4b647a95e6c42a13013803caf19b9b4b07875",
                 "receipt": "sha256:c7676e1ca9afd96d9d7e74503edd5b31a758a05d7e7e1cf0d62c763611ffcecb",
                 "read_guidance": "sha256:4198e5fd133f7b37cc25c0c1a63161657c5d4396a1718f1f4f1f3db7c302a13d",
@@ -1994,7 +1996,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
                 "start": "sha256:3a2186a2db53b91fcf7a8f3117cb8ff6a2b8bad6bc78e3e796e5e611e8598405",
                 "publish_work": "sha256:5b7e151a4583762f500803165aa48d3c49ec61172a36945a6af92064ffc171ff",
                 "check": "sha256:2bd9947abc7b60564474840a73d99a80bfa528b98af1a725d11fdfde5dac9795",
-                "respond": "sha256:8b5dc94f431a411ef332021af01050a4b0c248a800e46d5b3bdb567f770d25a5",
+                "respond": "sha256:74bb3d69f067c14aeb161dea8d2b88338a77824c500869cb602c9dc33c67be68",
                 "status": "sha256:517eb05aa015834d98bd96ed59d4b647a95e6c42a13013803caf19b9b4b07875",
                 "receipt": "sha256:c7676e1ca9afd96d9d7e74503edd5b31a758a05d7e7e1cf0d62c763611ffcecb",
                 "read_guidance": "sha256:4198e5fd133f7b37cc25c0c1a63161657c5d4396a1718f1f4f1f3db7c302a13d",
@@ -2004,8 +2006,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:9c103a3fa8fdb85a6c2c20608bdde6294651e94b24407bca719c7e32a8c50722",
-        "strict": "sha256:e272d0216684ffa792ad0b10b55cdd4c436f1a8877cc03033b2fa14126a737b0",
+        "policy": "sha256:751030d29330d27e8cfc03bbba3fc9ad71bd30dc4507c1716223fca7bb16c7bd",
+        "strict": "sha256:830771d74df67eff89a04a4db15580df3610ea926414053470557736dccf7746",
     }
 )
 

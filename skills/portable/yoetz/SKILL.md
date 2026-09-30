@@ -45,18 +45,22 @@ The normal sequence is:
    revision or exact next-version restatement includes it.
 4. Publish material transitions, evidence, and the completion claim without transcripts, secrets,
    broad source, or hidden reasoning.
-5. Resolve older response work before the final check. Select `semantic_required` for an explicit
-   user, policy, or acceptance requirement; omit `mode` when relying on the configured default; use
-   `semantic_if_configured` only when review is known optional; and reserve `deterministic_only` for
-   explicit local/structural work or a deliberate no-egress choice. Track required review through
-   `mode` and the receipt, never as a plan obligation: the check is the review.
-6. Respond to findings returned by the check at its result frontier, then read
+5. Answer each unanswered finding before the final check; the current status frontier is a valid
+   `finding_frontier`, and observation-authored non-actionable findings need no answer. Select
+   `semantic_required` for an explicit user, policy, or acceptance requirement; omit `mode` when
+   relying on the configured default; use `semantic_if_configured` only when review is known
+   optional; and reserve `deterministic_only` for explicit local/structural work or a deliberate
+   no-egress choice. Track required review through `mode` and the receipt, never as a plan
+   obligation: the check is the review.
+6. Respond only to findings the check returned that are still unanswered, then read
    `status view=findings` with `filter.include_resolved: true` and actual `resolved` state. “Not
-   returned” is not “resolved.” If an older
-   response or other material record follows the check, recheck before the receipt.
-7. Request a receipt last and report `unanswered_finding_count`, `receipt_blocking_finding_count`,
-   the checked frontier, AI-powered review status/reason, and coverage limits. Stop repeating an
-   unchanged check when proof still cannot qualify; disclose the blocker.
+   returned” is not “resolved.” Those responses and `work_closed` need no recheck; if a repair, a
+   response to another older finding, or other material record follows the check, recheck before
+   the receipt.
+7. Request a receipt, then publish `work_closed` when the work is complete, and report
+   `unanswered_finding_count`, `receipt_blocking_finding_count`, the checked frontier, AI-powered
+   review status/reason, and coverage limits. Stop repeating an unchanged check when proof still
+   cannot qualify; disclose the blocker.
 
 A portable plugin is a carrier only. Its presence, validation, installation, discovery, or host
 activation grants no privacy authority, provider authority, observation consent, AI-powered review

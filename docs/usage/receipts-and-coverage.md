@@ -155,6 +155,11 @@ and what evidence was attached; none clears the finding for receipt purposes. A 
 does clear the status surface's `unanswered_finding_count`, while the actionable finding remains in
 `receipt_blocking_finding_count`.
 
+Observation-authored, non-actionable findings (such as "Observation coverage is incomplete or
+stale") are disclosed coverage limitations: they never count in `unanswered_finding_count` and need
+no response, and they stay listed in status and on the receipt. Acknowledging one is optional, and
+it never resolves the finding.
+
 What does resolve a finding is proof: a later check that tested the repaired record and found the
 same issue absent. That check must cover the finding — the whole case, or a scope that names the
 finding's subject — with the owning policy pack run to completion, nothing suppressed, and its
@@ -182,21 +187,23 @@ unchanged state; request the bounded receipt and disclose the current finding an
 Neither case supports a clean completion receipt.
 
 Responding does not throw the check away. A recorded check still counts toward a later receipt when
-the only events between the two are responses to findings that check itself returned and/or a
-finding-free suffix made entirely of service-stamped observation records. The receipt folds the
+the only events between the two are responses to findings that check itself returned,
+acknowledgements of observation-authored non-actionable findings, and/or a finding-free suffix made entirely of service-stamped observation records. The receipt folds the
 check's coverage, including `semantic_model_derived`, and carries the gap
 `check_current_as_of_earlier_frontier` naming the subject frontier that was tested. The verdict is
 current as of that earlier frontier, not the receipt's, so the receipt is still coverage-incomplete.
-The limitations text says which kind of record followed the check: responses to its findings,
-finding-free host observations, or both. Observation records are retained but were not evaluated by
+The limitations text says which kind of record followed the check: responses to its findings (or
+to observation-authored coverage limitations), finding-free host observations, or both. Observation records are retained but were not evaluated by
 that check; a re-check evaluates them, and routine observation can move the ledger again afterwards.
 
 Any other material event after the check — published work, a new finding (including an
-observation-authored finding), a response to a finding the check did not return, or a response whose
-payload is redacted or unreadable (it cannot prove which finding it answered) — requires a re-check
-first. The receipt reports `check_not_applicable` and the check contributes nothing until it is
-re-run at the current frontier. `status` applies the same rule, so status and a receipt at the same
-frontier never disagree about what was checked.
+observation-authored finding), any other response to a finding the check did not return (a
+rejection of an observation-authored finding included), or a response whose payload is redacted or
+unreadable (it cannot prove which finding it answered) — requires a re-check first. The receipt
+reports `check_not_applicable` and the check contributes nothing until it is re-run at the current
+frontier. `status` applies the same rule, so status and a receipt at the same frontier never
+disagree about what was checked. Lifecycle records such as `work_closed` are not material and never
+require a re-check.
 
 The cheapest finding is the one that never fires. Before the first `check`, confirm that every
 requested item has an exact `attempted_items` entry on the `action_recorded` event that attempted

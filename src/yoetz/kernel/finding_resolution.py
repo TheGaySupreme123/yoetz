@@ -38,7 +38,13 @@ from yoetz.domain.receipts import (
 from yoetz.domain.values import EventId, FindingId, ResultId
 from yoetz.kernel.claims import effective_claim_items
 from yoetz.kernel.plan_scope import current_plan_scope
-from yoetz.kernel.projections import FindingProjectionRecord, ProjectionState
+from yoetz.kernel.projections import (
+    FindingProjectionRecord,
+    ProjectionState,
+    is_observation_limitation,
+    is_observation_limitation_kind,
+    observation_finding_event_ids,
+)
 from yoetz.protocol.coverage import LedgerFreshness
 from yoetz.protocol.models import SemanticReason, SemanticStatus
 
@@ -568,6 +574,13 @@ def _check_subject_sequence(
     return None
 
 
+_OBSERVATION_LIMITATION_NOTE: Final = (
+    " Observation-authored coverage limitation: it needs no response, is not counted as "
+    "unanswered, and acknowledging it does not supersede a recorded check. It stays disclosed "
+    "here and on the receipt; that does not resolve it."
+)
+
+
 def finding_resolution_explanation(
     state: ProjectionState,
     finding_id: FindingId,
@@ -575,8 +588,39 @@ def finding_resolution_explanation(
     *,
     proof_state_cache: ProofStateCache | None = None,
 ) -> str:
-    """A bounded presentation derived from the latest recorded candidate, never response prose."""
+    """A bounded presentation derived from the latest recorded candidate, never response prose.
 
+    A current observation-authored, non-actionable row (``is_observation_limitation``) also says
+    that it is a disclosed limitation rather than response work (issue #911); its resolution
+    requirements and ``resolved`` state are unchanged.
+    """
+
+    explanation = _finding_resolution_explanation(
+        state, finding_id, records, proof_state_cache=proof_state_cache
+    )
+    finding_record = state.findings.get(finding_id)
+    if (
+        finding_record is None
+        or finding_record.payload is None
+        or not is_observation_limitation_kind(finding_record.payload.kind)
+        or finding_is_resolved(state, finding_id)
+    ):
+        return explanation
+    source = next((row for row in records if row.event_id == finding_record.source_event_id), None)
+    if source is None or not is_observation_limitation(
+        finding_record, observation_finding_event_ids((source,))
+    ):
+        return explanation
+    return explanation + _OBSERVATION_LIMITATION_NOTE
+
+
+def _finding_resolution_explanation(
+    state: ProjectionState,
+    finding_id: FindingId,
+    records: tuple[LedgerRecord, ...],
+    *,
+    proof_state_cache: ProofStateCache | None,
+) -> str:
     finding_record = state.findings.get(finding_id)
     if finding_record is None or finding_record.payload is None:
         return "Resolution explanation unavailable: original finding is unreadable."

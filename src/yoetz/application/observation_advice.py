@@ -157,9 +157,13 @@ _ATTENTION_DETAILS: Final[Mapping[str, str]] = {
     "semantic-attention:runtime_update_required": "The last review attempt found the pinned evaluator runtime evidence expired; a newer Yoetz release is needed before reviews can run",
 }
 
+# Only lag, a drain backlog, an unavailable service, or a locked vault can recover within the
+# session; a standing host-profile gap such as `unpaired_event` never does. The clause therefore
+# never asks the agent to wait for, answer, or recheck a condition that cannot change (#911).
 _REFRESH_OBSERVATION_HOOK_NEXT: Final = (
-    "Run `yoetz observe status` from the host shell, wait for drain to recover, "
-    "then continue. If the gap remains at check time, disclose it."
+    "Run `yoetz observe status` from the host shell and wait only while it reports lag or a "
+    "drain backlog. A gap that remains is a standing limitation: it needs no response or "
+    "recheck and never blocks the receipt; disclose it there."
 )
 # Machine conditions are the user's to repair: the agent tells them now, offers a bounded
 # subagent fix, and leaves sign-in, consent, and approval steps to the user (#819).

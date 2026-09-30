@@ -832,6 +832,11 @@ edits stays `live` unless the same command is rerun.
 `rejected`, or `waived`.
 Waiver-only fields are forbidden on other dispositions. `finding_frontier` is always the full
 domain `Frontier`, even when the public request supplied only its canonical sequence string.
+`respond` accepts any in-chain `finding_frontier` at or after the frontier that first carries the
+finding's record: the check result frontier, a status finding item's `finding_frontier` when it
+carries one, or simply the current status frontier. Only a frontier before that record (such as the
+finding's `subject_frontier`) or outside the current chain is rejected (`finding_not_in_prefix`),
+so answering a finding never requires a historical frontier search (#911).
 
 `WaiverScope` has one v0.1 value, `finding_only`, and serializes with the exact finding ID/frontier
 already present on the response. The nominal enum is owned by `domain/findings.py`; broader
@@ -1236,15 +1241,28 @@ means material work was appended after the recorded check and superseded its ver
 the frontier merely advanced. A finding-free suffix made entirely of service-stamped observation
 records also keeps the check attributable: observation reports what the harness saw rather than
 publishing new cooperative work on the participant's behalf. An observation-authored
-`finding_recorded` still invalidates the older check. `check_current_as_of_earlier_frontier` is the
-qualified attribution in this family: when only check-answering responses and/or finding-free
-observation records follow the check, its coverage still contributes while the receipt names the
-subject frontier its verdict is current as of. The application also classifies that suffix
+`finding_recorded` still invalidates the older check. An `acknowledged` or `provenance_disputed`
+response to an observation-authored, non-actionable finding
+(`kernel/projections.is_observation_limitation`: the service-stamped observation coordinator
+authored its record, and its kind is in the explicit allowlist `OBSERVATION_LIMITATION_KINDS` and
+its closed `actionable` trait is false) also keeps the check attributable: no check returns such a
+disclosed limitation, no local pack scores those dispositions, and a recheck could not change the
+result (#911). A kind outside the allowlist stays response work even when it is not actionable. A
+rejection or waiver of that finding, which the local packs score, and every response to any other
+finding the check did not return, still revokes it.
+`check_current_as_of_earlier_frontier` is the qualified attribution in this family: when only
+check-answering responses, such limitation acknowledgements, and/or finding-free observation
+records follow the check, its coverage still contributes while the receipt names the subject
+frontier its verdict is current as of. The application also classifies that suffix
 (`kernel/receipt_builder.CheckSuffixClass`: responses only, observations only, or mixed) so the
 limitations sentence names what actually followed the check instead of assuming responses; the
-class is render context, not a wire field or gap code (#657). `kernel/reducers.invalidates_recorded_check`
+class is render context, not a wire field or gap code (#657). A response suffix that includes a
+limitation acknowledgement is named as responses "to the findings it returned or to
+observation-authored coverage limitations". `kernel/reducers.invalidates_recorded_check`
 is the single predicate deciding between the two, shared by the receipt and by compact status
-coverage.
+coverage; the reducer's projection freshness applies the same rule through the replay index's
+`observation_finding_event_ids`. Lineage and work-state events such as `work_closed` are not
+material and never revoke a check.
 
 ## 9. Kernel (`kernel/`)
 
@@ -1432,8 +1450,9 @@ coverage.
   subject refs keeps that finding's ID and is cited in `returned_finding_ids` without a duplicate
   `finding_recorded` event); an immaterial advance — `receipt_recorded`, `session_opened`,
   `session_resumed` — never revokes it; a readable `response_recorded` answering a finding the check
-  itself returned never revokes it; and a finding-free suffix consisting entirely of service-stamped
-  observation-authored records never revokes it. Those latter advances carry the
+  itself returned never revokes it; an `acknowledged` or `provenance_disputed` response to an
+  observation-authored, non-actionable finding never revokes it (#911); and a finding-free suffix
+  consisting entirely of service-stamped observation-authored records never revokes it. Those latter advances carry the
   `check_current_as_of_earlier_frontier` gap. An observation-authored `finding_recorded`, every
   other material-family event, a response to a finding the check did not return, and a response
   whose payload is unreadable all revoke it. Frontier equality is not the rule: a check necessarily
@@ -6130,7 +6149,16 @@ unanswered_finding_count, receipt_blocking_finding_count, declared_obligation_co
 no_obligations_reason, blocking_conditions)` beside `import_status`, on every view.
 `unanswered_finding_count` counts recorded findings with no recorded response, whatever a later
 response's disposition; a rejection, waiver, or provenance dispute answers the finding on the
-record and its own quality surfaces as a later finding. `receipt_blocking_finding_count` selects the
+record and its own quality surfaces as a later finding. An observation-authored, non-actionable
+finding of an allowlisted limitation kind (`is_observation_limitation`; for example the
+"Observation coverage is incomplete or stale" advisory, including rows
+recorded by earlier builds) is a disclosed coverage limitation, not response work: it never counts
+here or in the compact `unanswered_findings` preview, so it never sets `findings_unanswered`. It
+stays in `view=findings` with its own disposition and an explanation that names it a limitation,
+keeps its resolution requirements (it does not become resolvable), and stays on the receipt with
+its coverage; an optional acknowledgement is recorded like any response and carried there (#911).
+`kernel/projections.unanswered_finding_ids` is the single rule for the status counter, the compact
+preview, closure readiness, and the durable SQLite mirror. `receipt_blocking_finding_count` selects the
 newest readable finding per receipt issue key and counts the actionable ones that
 `finding_is_resolved` does not report resolved. It never decreases merely because a response was
 recorded; only a later qualifying check of the repaired record (the finding-view rule above)
@@ -6970,7 +6998,8 @@ The reducer supplies the same projection context to the qualification predicate 
 and receipts. No new event schema, persisted proof metadata, or command execution claim is added.
 Historical event bytes remain intact; rebuilding a projection applies this bounded derivation to
 its accepted history. A held old check is still invalidated by a later response to a finding that
-check did not return. Resolved history does not remove receipt coverage limitations.
+check did not return, except an unscored acknowledgement of an observation-authored, non-actionable
+finding (#911). Resolved history does not remove receipt coverage limitations.
 
 `semantic_packet_insufficient` is a coverage gap on a committed check whose valid provider
 judgment is `insufficient_packet`. It reports unassessable content without adding a defect
@@ -6997,7 +7026,8 @@ Failed and local-only attempts retain their existing version. The owning schema 
 
 `resolution_attempt_required` is the `respond` rejection for an `acknowledged` response to a
 `semantic_model_derived` finding whose `evidence_refs` cite no evidence or result recorded after
-the finding frontier. It writes nothing; the continuation is `input_correction_new_identity`.
+the finding's own record (not after whichever later in-chain `finding_frontier` the caller named,
+#911). It writes nothing; the continuation is `input_correction_new_identity`.
 One structural exception applies (issue #906, a process finding): when the finding's kind is the
 record-state kind `ledger_stale_or_incomplete`, every `subject_refs` entry is an event recorded as
 `check_recorded`, or as `finding_recorded` whose own finding is of that kind and transitively meets

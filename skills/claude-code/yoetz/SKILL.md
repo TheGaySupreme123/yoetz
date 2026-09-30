@@ -123,7 +123,9 @@ A no-cap request returns `capacity_no_cap_unsupported`; relay it with the larges
 alternative. See "Change local retention capacity" in [workflow.md](references/workflow.md).
 
 For closure, follow [coverage-and-receipts.md](references/coverage-and-receipts.md): ground status
-and evidence, publish the actual result, check, respond to returned findings at the result frontier,
-read findings including resolved history, recheck after material changes, and request `receipt` last.
-Report the closure counts and checked frontier, the check's AI-powered review status/reason, and
-the receipt's coverage limits.
+and evidence, publish the actual result, answer unanswered findings (the current status frontier is
+a valid `finding_frontier`), check, respond only to returned findings still unanswered, read
+findings including resolved history, recheck after a repair or other material change (not after
+those responses or `work_closed`), then request `receipt` and publish `work_closed`.
+Observation-authored non-actionable findings need no answer. Report the closure counts and checked
+frontier, the check's AI-powered review status/reason, and the receipt's coverage limits.

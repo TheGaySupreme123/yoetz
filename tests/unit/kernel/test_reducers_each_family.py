@@ -361,30 +361,39 @@ def test_replay_index_can_be_reused_after_full_or_extension_replay(fixture_name:
     assert extended_index == expected_index
 
 
-@pytest.mark.parametrize("mismatch", ("payload", "evidence", "redaction"))
+@pytest.mark.parametrize("mismatch", ("payload", "evidence", "redaction", "observation"))
 def test_replay_index_validation_rejects_same_frontier_with_wrong_maps(mismatch: str) -> None:
     records = _records("all-event-families")
     _projection, index = replay_with_index(records)
     payloads = dict(index.payload_event_by_object)
     evidence = dict(index.evidence_sources_by_object)
     roots = dict(index.redaction_root_by_object)
+    observation_findings = index.observation_finding_event_ids
     if mismatch == "payload":
         objects = tuple(payloads)
         payloads[objects[0]], payloads[objects[1]] = payloads[objects[1]], payloads[objects[0]]
     elif mismatch == "evidence":
         object_key = next(iter(evidence))
         evidence[object_key] = ()
-    else:
+    elif mismatch == "redaction":
         object_key = next(iter(roots))
         roots[object_key] = next(
             event.event_id for event in records if event.event_id != roots[object_key]
         )
+    else:
+        # A cooperative finding record claimed as observation-authored would let the fold keep a
+        # check attributable across a response it must treat as material (issue #911).
+        observation_findings = observation_findings | {
+            next(event.event_id for event in records if event.schema.name == "finding_recorded")
+        }
     corrupt = ReplayIndex(
         frontier=index.frontier,
         head_digest=index.head_digest,
         payload_event_by_object=payloads,
         evidence_sources_by_object=evidence,
         redaction_root_by_object=roots,
+        observation_finding_event_ids=observation_findings,
+        observed_event_ids=index.observed_event_ids,
     )
     with pytest.raises(ValueError, match="projection_corrupt"):
         validate_replay_index(corrupt, records)
@@ -491,6 +500,7 @@ def test_replay_index_is_frozen_and_nonplaintext() -> None:
         "payload_event_by_object",
         "evidence_sources_by_object",
         "redaction_root_by_object",
+        "observation_finding_event_ids",
         "observed_event_ids",
     )
     assert tuple(field.name for field in fields(EvidenceObjectSource)) == (
@@ -520,6 +530,8 @@ def test_missing_evidence_index_association_is_projection_corruption() -> None:
         payload_event_by_object=index.payload_event_by_object,
         evidence_sources_by_object={},
         redaction_root_by_object=index.redaction_root_by_object,
+        observation_finding_event_ids=index.observation_finding_event_ids,
+        observed_event_ids=index.observed_event_ids,
     )
     with pytest.raises(ValueError, match="projection_corrupt"):
         reduce_event(state, records[7], corrupt)

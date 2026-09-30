@@ -1311,6 +1311,26 @@ Only service-stamped, explicitly linked observations can support a match or mism
 CLI closure composer uses the same projected status inputs; it does not grant capture or egress.
 These shared regressions are synthetic contract evidence, not live-host certification.
 
+### Observation limitation findings and closure rechecks (issue #911)
+
+Cursor's paired ordinary profile can yield `unpaired_event`, lag, or drain gaps and deliver the
+advisory through `postToolUse` `additionalContext`; the post-only structural profile already
+resolves historical `unpaired_event`. Decision for this host: supported, same rule as every host.
+The rule is service-side and host-neutral: an observation-authored, non-actionable finding (the
+"Observation coverage is incomplete or stale" advisory, including rows written by earlier builds)
+never counts in `unanswered_finding_count` or `findings_unanswered`, and acknowledging it once is
+optional and never supersedes a recorded check. It stays in `status view=findings` and on the
+receipt as a disclosed limitation and does not become resolvable. The hook `refresh_observation`
+clause asks the agent to wait only while `yoetz observe status` reports lag or a drain backlog. The
+shared guidance and this host's skill give the closure order: answer unanswered findings before the
+final check (the current status frontier is a valid `finding_frontier`), answer only the findings
+that check returns that are still unanswered, then `receipt`, then `work_closed`; no recheck follows
+those answers, `work_closed`, or an `insufficient_packet` review without a new repair, while a
+recorded repair still gets its re-check. Which conditions raise the advisory, and how the sticky
+`unpaired_event` gap surfaces, are owned by issue #917. Verification: shared-path regressions cover
+the ledger rule on the memory and SQLite backends; a live Cursor dogfood transcript on macOS, Linux
+and WSL 2 is not yet recorded. That gap is owned by issue #911.
+
 ### Bounded workflow recovery examples (#613)
 
 These examples use the existing MCP operations on the pinned local Cursor IDE or Agent CLI cell.

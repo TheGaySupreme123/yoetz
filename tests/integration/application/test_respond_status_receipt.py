@@ -28,6 +28,7 @@ from yoetz.adapters.sqlite.migrations import initialize_bundle
 from yoetz.adapters.sqlite.repository import SqliteLedger
 from yoetz.application.check import FinalSemanticEvaluation
 from yoetz.application.egress import PrivacyCoordinator
+from yoetz.application.observation_advice import stable_advice_finding_id
 from yoetz.application.observation_materialize import (
     materialize_observation_envelope,
     observation_author,
@@ -94,6 +95,10 @@ from yoetz.domain.values import (
     timestamp_from_datetime,
 )
 from yoetz.domain.values import JsonObject as DomainJsonObject
+from yoetz.kernel.policies.observation_advice import (
+    OBSERVATION_ADVICE_POLICY_ID,
+    ObservationAdviceCandidate,
+)
 from yoetz.kernel.receipt_capacity import receipt_gap_codes
 from yoetz.kernel.reducers import replay
 from yoetz.mcp.summaries import summary_for_status
@@ -120,7 +125,7 @@ from yoetz.ports.objects import (
 from yoetz.ports.publish_response_catalog import PublishResponseCatalogPort
 from yoetz.ports.runtime import BundleProvisionCommand, BundleRuntimePort, RouteCommand, TaskRuntime
 from yoetz.ports.semantic import ReviewerChallenge, SamplingParams, SemanticJudgment
-from yoetz.protocol.canonical import JsonValue, canonical_encode
+from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 from yoetz.protocol.coverage import (
     ArtifactObservation,
     AuthorshipAssurance,
@@ -144,6 +149,7 @@ from yoetz.protocol.models import (
     SemanticStatus,
     StartRequest,
     StatusCandidateFindingsPageModel,
+    StatusCompactItemModel,
     StatusCompactPageModel,
     StatusEvidencePageModel,
     StatusFindingsPageModel,
@@ -6034,3 +6040,642 @@ async def test_pre_upgrade_digest_finding_resolves_as_history_without_a_replacem
     body = _limitations_body(receipt.document)
     assert body.count("caller-asserted digest") == 1
     assert "One cited evidence item carries a caller-asserted digest" in body
+
+
+# Issue #911: the observation advisory "Observation coverage is incomplete or stale" landed in
+# every Codex session of the 2026-09 DeepSWE run as the same ledger finding. These cases replay
+# that exported ledger shape: the observation coordinator's service-stamped `finding_recorded`
+# carrying the exact dda53ae2 payload (its id is derived by the production advice functions, not
+# special-cased anywhere), recorded long before the agent's check.
+_LEGACY_ADVISORY_ID = "fnd_8a9389b5-1e7c-49c5-b078-31ad9aeced8e"
+
+
+def _legacy_observation_advisory(subject_event_id: str, frontier: Frontier) -> Finding:
+    candidate = ObservationAdviceCandidate(
+        FindingKind.LEDGER_STALE_OR_INCOMPLETE,
+        "observation_gap_or_stale",
+        "refresh_observation",
+        ("hook:930755a9",),
+        FINDING_KIND_TRAITS[FindingKind.LEDGER_STALE_OR_INCOMPLETE][0],
+        "observation-gap",
+    )
+    # The exported ledger was written under observation-advice policy 0.1.5 (dda53ae2). Issue #909
+    # later moved the policy to 0.1.6, which gives a new condition a new id but never rewrites a
+    # recorded one, so derive the legacy id with the production digest shape at that version.
+    legacy_digest = canonical_digest(
+        {
+            "policy": f"{OBSERVATION_ADVICE_POLICY_ID}/0.1.5",
+            "kind": candidate.kind.value,
+            "rule_code": candidate.rule_code,
+            "detail_token": candidate.detail_token,
+        }
+    )
+    advisory_id = stable_advice_finding_id(
+        candidate.rule_code, candidate.detail_token, legacy_digest
+    )
+    assert advisory_id == _LEGACY_ADVISORY_ID
+    return Finding(
+        advisory_id,
+        FindingKind.LEDGER_STALE_OR_INCOMPLETE,
+        FindingOrigin.DETERMINISTIC,
+        3,
+        "Observation coverage is incomplete or stale",
+        "Source lag, mapping, or drain gaps prevent complete observation",
+        (event_id(subject_event_id),),
+        "work-integrity",
+        "0.1.0",
+        frontier,
+        Coverage(
+            publication_channels=(
+                PublicationChannel.ENGINE_DERIVED,
+                PublicationChannel.HOOK_OBSERVED,
+            ),
+            authorship_assurance=AuthorshipAssurance.HARNESS_OBSERVED,
+            artifact_observation=ArtifactObservation.HOOK_OBSERVED,
+            evidence_immutability=EvidenceImmutability.CONTENT_DIGEST,
+            ledger_freshness=LedgerFreshness.PARTIAL,
+            check_types=(CheckType.DETERMINISTIC,),
+            known_gaps=(
+                "advice_semantic_pending",
+                "observation_qualified_partial",
+                "unpaired_event",
+            ),
+        ),
+        None,
+    )
+
+
+async def _kombu_shape(
+    app: Application, runtime: _WorkflowRuntime, *, seed: int
+) -> tuple[StartInternalResult, Finding, CheckCommitResult]:
+    """Start, let observation record the legacy advisory, publish work, and check it."""
+
+    started = await app.start(start_request(seed, title="Observation advisory closure"))
+    ledger, _objects = next(iter(runtime.resources.values()))
+    opened = [record async for record in ledger.load_events(started.session_id)][0]
+    advisory = _legacy_observation_advisory(
+        opened.event_id,
+        Frontier(int(started.frontier.sequence), started.frontier.head_digest),
+    )
+    drained = await _drain_observation_record(
+        app,
+        runtime,
+        started,
+        seed=seed + 1,
+        expected_frontier=int(started.frontier.sequence),
+        finding=advisory,
+    )
+    # The Codex profile's standing host gaps ride on ordinary hook observation, so the check's
+    # own coverage carries them too; that is what left every exported row unresolvable.
+    drained = await _drain_host_observation_gaps(
+        app,
+        runtime,
+        started,
+        seed=seed + 5,
+        expected_frontier=int(drained.result_frontier.sequence),
+    )
+    obligation = protocol_id("obl_", seed + 10)
+    obligation_event = protocol_id("evt_", seed + 11)
+    published = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 12)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(drained.result_frontier),
+                "event_drafts": (
+                    {
+                        "event_id": obligation_event,
+                        "schema": {"name": "obligation_published", "version": "1.0.0"},
+                        "occurred_at": "2026-09-29T08:20:00.000Z",
+                        "causal_parents": (),
+                        "payload": {
+                            "obligation_id": obligation,
+                            "description": "Route rejected messages to the dead-letter queue.",
+                            "acceptance_criteria": "The dead-letter path is implemented.",
+                            "evidence_expectation": "A linked immutable result record.",
+                            "status": "open",
+                        },
+                        "artifact_refs": (),
+                        "evidence_refs": (),
+                    },
+                    {
+                        "event_id": protocol_id("evt_", seed + 13),
+                        "schema": {"name": "claim_recorded", "version": "1.0.0"},
+                        "occurred_at": "2026-09-29T08:21:00.000Z",
+                        "causal_parents": (obligation_event,),
+                        "payload": {
+                            "claim_id": protocol_id("clm_", seed + 14),
+                            "claim_kind": "completion",
+                            "statement": "Dead-lettering is implemented.",
+                            "supporting_refs": (obligation,),
+                            "obligation_refs": (obligation,),
+                        },
+                        "artifact_refs": (),
+                        "evidence_refs": (),
+                    },
+                ),
+            }
+        )
+    )
+    checked = await app.check(
+        CheckRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 15)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(published.result_frontier),
+                "mode": "deterministic_only",
+                "max_findings": "3",
+            }
+        )
+    )
+    assert type(checked) is CheckCommitResult, f"unexpected nonterminal check: {type(checked)}"
+    # The check judged the record but never returns observation advice.
+    assert _LEGACY_ADVISORY_ID not in {item.finding_id for item in checked.findings}
+    return started, advisory, checked
+
+
+async def _compact(app: Application, started: StartInternalResult, seed: int):
+    return await app.status(
+        StatusRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "view": "compact",
+                "limit": "10",
+            }
+        )
+    )
+
+
+def _assert_durable_mirror(runtime: _WorkflowRuntime, item: StatusCompactItemModel) -> None:
+    """The SQLite ``p1_projection_state`` mirror counts exactly what compact status counts."""
+
+    for db in runtime.sqlite_connections:
+        row = db.execute(
+            "SELECT unresolved_finding_count, freshness FROM p1_projection_state "
+            "WHERE projection_name='work'"
+        ).fetchone()
+        assert row is not None
+        assert (str(row[0]), row[1]) == (item.unanswered_finding_count, item.freshness)
+
+
+@pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))
+async def test_legacy_observation_advisory_is_a_disclosed_limitation_not_response_work(
+    ledger_backend: Literal["memory", "sqlite"],
+) -> None:
+    """Issue #911: the old advisory row renders as disclosed history, never as unanswered work.
+
+    It stays visible in view=findings and on the receipt, keeps its unmet resolution requirements
+    (it does not become resolvable), and leaves the unanswered counter, the compact preview, and
+    closure_readiness's findings_unanswered, on every backend and on the MCP text fallback.
+    """
+
+    seed = 9110
+    app, runtime, _ = _build_app(seed_offset=91, ledger_backend=ledger_backend)
+    started, _advisory, checked = await _kombu_shape(app, runtime, seed=seed)
+    returned_ids = {item.finding_id for item in checked.findings}
+
+    status = await _compact(app, started, seed + 30)
+    item = cast(StatusCompactPageModel, status.page).items[0]
+    assert item.unanswered_finding_count == str(len(returned_ids))
+    assert {row.finding_id for row in item.unanswered_findings} == returned_ids
+    assert status.closure_readiness.unanswered_finding_count == str(len(returned_ids))
+    _assert_durable_mirror(runtime, item)
+
+    # Answer the check's own findings at its result frontier (koota-pair shape): not material.
+    frontier = checked.result_frontier
+    for offset, returned in enumerate(checked.findings):
+        answered = await app.respond(
+            RespondRequest.model_validate(
+                {
+                    **_request_base(protocol_id("req_", seed + 40 + offset)),
+                    "session_id": started.session_id,
+                    "writer_id": started.writer_id,
+                    "expected_frontier": _frontier(frontier),
+                    "finding_id": returned.finding_id,
+                    "finding_frontier": _frontier(checked.result_frontier),
+                    "disposition": "acknowledged",
+                    "reason": "Accepted; the dead-letter path is tracked separately.",
+                }
+            )
+        )
+        frontier = answered.result_frontier
+
+    status = await _compact(app, started, seed + 50)
+    item = cast(StatusCompactPageModel, status.page).items[0]
+    assert item.unanswered_finding_count == "0"
+    assert item.unanswered_findings == ()
+    assert "findings_unanswered" not in status.closure_readiness.blocking_conditions
+    assert status.closure_readiness.unanswered_finding_count == "0"
+    assert item.freshness != LedgerFreshness.STALE_AFTER_MATERIAL_CHANGE.value
+    assert "unanswered findings: 0" in summary_for_status(status.as_json())
+    _assert_durable_mirror(runtime, item)
+
+    page = await _findings_view(app, started, seed + 51, include_resolved=True)
+    legacy = next(row for row in page.items if row.finding_id == _LEGACY_ADVISORY_ID)
+    assert legacy.disposition == "none"
+    assert legacy.resolved is False
+    assert legacy.priority == 3
+    assert isinstance(legacy.detail, str)
+    assert "Observation-authored coverage limitation: it needs no response" in legacy.detail
+    # Rendering and counting change; proof does not: its unmet requirements stay unmet.
+    assert "Resolution requirements not met" in legacy.detail, legacy.detail
+    assert "freshness_or_original_proof_unreadable" in legacy.detail, legacy.detail
+    assert "unpaired_event" in legacy.coverage.known_gaps
+
+    receipt = await app.receipt(
+        ReceiptRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 60)),
+                "task_id": started.task_id,
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(frontier),
+                "format": "text",
+                "include": "full",
+                "redaction_profile": "full_local",
+            }
+        )
+    )
+    assert "check_not_applicable" not in receipt.coverage.known_gaps
+    assert "unpaired_event" in receipt.coverage.known_gaps
+    assert receipt.human_text is not None
+    assert "recorded coverage-limitation finding" in receipt.human_text
+
+
+@pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))
+async def test_acknowledging_the_observation_advisory_after_the_check_needs_no_recheck(
+    ledger_backend: Literal["memory", "sqlite"],
+) -> None:
+    """Issue #911 kombu B replay: check, then acknowledge the observation advisory, then status.
+
+    The acknowledgement uses only the current status frontier (no historical frontier search)
+    and leaves the check attributable: status carries check_current_as_of_earlier_frontier at
+    most, never stale_after_material_change, and the receipt still folds the check.
+    """
+
+    seed = 9210
+    app, runtime, _ = _build_app(seed_offset=92, ledger_backend=ledger_backend)
+    started, advisory, checked = await _kombu_shape(app, runtime, seed=seed)
+
+    before = await _compact(app, started, seed + 30)
+    assert cast(StatusCompactPageModel, before.page).items[0].freshness != (
+        LedgerFreshness.STALE_AFTER_MATERIAL_CHANGE.value
+    )
+
+    # The finding's subject_frontier precedes its record and stays rejected, with a message that
+    # names the frontier to use instead of "the check that returned it" (this one never was).
+    with pytest.raises(PublicOperationError) as refused:
+        await app.respond(
+            RespondRequest.model_validate(
+                {
+                    **_request_base(protocol_id("req_", seed + 31)),
+                    "session_id": started.session_id,
+                    "writer_id": started.writer_id,
+                    "expected_frontier": _frontier(before.subject_frontier),
+                    "finding_id": advisory.finding_id,
+                    "finding_frontier": _frontier(advisory.subject_frontier),
+                    "disposition": "acknowledged",
+                }
+            )
+        )
+    assert refused.value.code is PublicErrorCode.INVALID_REQUEST
+    assert "at or after the finding's own record" in refused.value.message
+    assert "current status frontier" in refused.value.message
+    assert "No historical frontier search is needed" in refused.value.message
+    assert "the check that returned it" not in refused.value.message
+
+    head = before.subject_frontier
+    assert int(head.sequence) > int(advisory.subject_frontier.sequence) + 1
+    responded = await app.respond(
+        RespondRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 32)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(head),
+                "finding_id": advisory.finding_id,
+                "finding_frontier": _frontier(head),
+                "disposition": "acknowledged",
+                "reason": "Observation coverage limitation, not evidence against the change.",
+            }
+        )
+    )
+    assert responded.response.disposition == "acknowledged"
+
+    ledger, _objects = next(iter(runtime.resources.values()))
+    records = tuple([record async for record in ledger.load_events(started.session_id)])
+    projection = replay(records)
+    assert projection.freshness is not LedgerFreshness.STALE_AFTER_MATERIAL_CHANGE
+    capacity_gaps = receipt_gap_codes(projection, records)
+    assert "check_not_applicable" not in capacity_gaps
+    assert "check_current_as_of_earlier_frontier" in capacity_gaps
+
+    after = await _compact(app, started, seed + 40)
+    item = cast(StatusCompactPageModel, after.page).items[0]
+    assert item.freshness != LedgerFreshness.STALE_AFTER_MATERIAL_CHANGE.value
+    assert "check_current_as_of_earlier_frontier" in item.coverage.known_gaps
+    assert CheckType.DETERMINISTIC in item.coverage.check_types
+    assert item.unanswered_finding_count == str(len(checked.findings))
+
+    page = await _findings_view(app, started, seed + 41, include_resolved=True)
+    legacy = next(row for row in page.items if row.finding_id == _LEGACY_ADVISORY_ID)
+    assert legacy.disposition == "acknowledged"
+    # Acknowledged is done, not resolved: the limitation stays disclosed.
+    assert legacy.resolved is False
+
+    receipt = await app.receipt(
+        ReceiptRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 50)),
+                "task_id": started.task_id,
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(responded.result_frontier),
+                "format": "json",
+                "include": "standard",
+                "redaction_profile": "full_local",
+            }
+        )
+    )
+    assert "check_not_applicable" not in receipt.coverage.known_gaps
+    assert "check_current_as_of_earlier_frontier" in receipt.coverage.known_gaps
+    assert CheckType.DETERMINISTIC in receipt.coverage.check_types
+    assert "unpaired_event" in receipt.coverage.known_gaps
+    assert receipt.document is not None
+    limitations = _limitations_body(receipt.document)
+    assert (
+        "only responses to the findings it returned or to observation-authored coverage "
+        "limitations were published after it"
+    ) in limitations
+    document = cast(Mapping[str, JsonValue], receipt.document)
+    responses = cast(tuple[Mapping[str, JsonValue], ...], document["responses"])
+    assert any(
+        row["finding_id"] == _LEGACY_ADVISORY_ID and row["disposition"] == "acknowledged"
+        for row in responses
+    )
+
+
+async def test_rejecting_the_observation_advisory_after_the_check_stays_material() -> None:
+    """Issue #911 keeps productive rechecks: only an unscored acknowledgement is exempt.
+
+    A rejection can raise a later weak-response or questionable-rejection finding, so it still
+    supersedes the check exactly like any other response to a finding the check did not return.
+    The recheck it requires is productive: it scores the unsupported rejection, which the stale
+    check could not have reported (ADR-022, observation-authored limitation findings, item 2).
+    """
+
+    seed = 9310
+    app, runtime, _ = _build_app(seed_offset=93)
+    started, advisory, checked = await _kombu_shape(app, runtime, seed=seed)
+    head = (await _compact(app, started, seed + 30)).subject_frontier
+    rejected = await app.respond(
+        RespondRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 31)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(head),
+                "finding_id": advisory.finding_id,
+                "finding_frontier": _frontier(head),
+                "disposition": "rejected",
+                "reason": "Observation is healthy.",
+            }
+        )
+    )
+    after = await _compact(app, started, seed + 40)
+    item = cast(StatusCompactPageModel, after.page).items[0]
+    assert item.freshness == LedgerFreshness.STALE_AFTER_MATERIAL_CHANGE.value
+    ledger, _objects = next(iter(runtime.resources.values()))
+    records = tuple([record async for record in ledger.load_events(started.session_id)])
+    assert "check_not_applicable" in receipt_gap_codes(replay(records), records)
+
+    rechecked = await app.check(
+        CheckRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 50)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(rejected.result_frontier),
+                "mode": "deterministic_only",
+                "max_findings": "10",
+            }
+        )
+    )
+    assert type(rechecked) is CheckCommitResult, f"unexpected nonterminal check: {type(rechecked)}"
+    scored = FindingKind.QUESTIONABLE_FINDING_REJECTION
+    assert scored not in {item.kind for item in checked.findings}
+    assert scored in {item.kind for item in rechecked.findings}
+
+
+async def test_acknowledging_a_semantic_finding_at_the_current_frontier_counts_later_evidence() -> (
+    None
+):
+    """Issue #911: any in-chain frontier at or after the record names the finding.
+
+    Issue #885's attempt rule measures "after the finding" from the finding's own record, so
+    naming the finding by the current status frontier (the frontier status hands the agent) does
+    not hide the repair evidence recorded between the finding and that frontier, and evidence
+    recorded before the finding still does not count.
+    """
+
+    seed = 9410
+    app, _runtime, _ = _build_app(
+        seed_offset=94,
+        semantic="optional",
+        semantic_evaluator=_semantic_challenge_evaluator(protocol_id("clm_", seed + 5)),
+    )
+    started, checked, _obligation = await _bootstrap_finding(
+        app, seed=seed, mode="semantic_if_configured"
+    )
+    finding = next(
+        item for item in checked.findings if item.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+    )
+    evidence_ref = protocol_id("evd_", seed + 12)
+    published = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 13)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(checked.result_frontier),
+                "event_drafts": (
+                    {
+                        "event_id": protocol_id("evt_", seed + 14),
+                        "schema": {"name": "evidence_recorded", "version": "1.0.0"},
+                        "occurred_at": "2026-09-29T12:00:02.000Z",
+                        "causal_parents": (),
+                        "payload": {
+                            "evidence_id": evidence_ref,
+                            "evidence_kind": "artifact",
+                            "strength": "mutable_reference",
+                            "observed_at": "2026-09-29T12:00:02.000Z",
+                            "reference": "attempted-verification",
+                        },
+                        "artifact_refs": (),
+                        "evidence_refs": (),
+                    },
+                ),
+            }
+        )
+    )
+    head = published.result_frontier
+    accepted = await app.respond(
+        RespondRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 15)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(head),
+                "finding_id": finding.finding_id,
+                "finding_frontier": _frontier(head),
+                "disposition": "acknowledged",
+                "reason": "The limitation is accepted after the recorded attempt.",
+                "evidence_refs": (evidence_ref,),
+            }
+        )
+    )
+    assert accepted.response.disposition == "acknowledged"
+
+
+async def test_evidence_recorded_before_a_semantic_finding_never_counts_as_its_attempt() -> None:
+    """Issue #911 keeps #885 honest: evidence recorded before the finding is never its attempt.
+
+    Naming the finding by a later in-chain frontier (the current status frontier) or by the
+    check result frontier must not let pre-finding evidence satisfy the attempt requirement.
+    """
+
+    seed = 9510
+    app, _runtime, _ = _build_app(
+        seed_offset=95,
+        semantic="optional",
+        semantic_evaluator=_semantic_challenge_evaluator(protocol_id("clm_", seed + 5)),
+    )
+    started = await app.start(start_request(seed, title="Pre-finding evidence"))
+    obligation = protocol_id("obl_", seed + 1)
+    obligation_event = protocol_id("evt_", seed + 2)
+    early_evidence = protocol_id("evd_", seed + 7)
+    published = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 3)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(started.frontier),
+                "event_drafts": (
+                    {
+                        "event_id": obligation_event,
+                        "schema": {"name": "obligation_published", "version": "1.0.0"},
+                        "occurred_at": "2026-09-29T12:00:00.000Z",
+                        "causal_parents": (),
+                        "payload": {
+                            "obligation_id": obligation,
+                            "description": "Publish a result for the exercise.",
+                            "acceptance_criteria": "A result is recorded in the task ledger.",
+                            "evidence_expectation": "A linked immutable result record.",
+                            "status": "open",
+                        },
+                        "artifact_refs": (),
+                        "evidence_refs": (),
+                    },
+                    {
+                        "event_id": protocol_id("evt_", seed + 4),
+                        "schema": {"name": "claim_recorded", "version": "1.0.0"},
+                        "occurred_at": "2026-09-29T12:00:01.000Z",
+                        "causal_parents": (obligation_event,),
+                        "payload": {
+                            "claim_id": protocol_id("clm_", seed + 5),
+                            "claim_kind": "completion",
+                            "statement": "The exercise is complete.",
+                            "supporting_refs": (obligation,),
+                            "obligation_refs": (obligation,),
+                        },
+                        "artifact_refs": (),
+                        "evidence_refs": (),
+                    },
+                    {
+                        "event_id": protocol_id("evt_", seed + 6),
+                        "schema": {"name": "evidence_recorded", "version": "1.0.0"},
+                        "occurred_at": "2026-09-29T12:00:01.500Z",
+                        "causal_parents": (),
+                        "payload": {
+                            "evidence_id": early_evidence,
+                            "evidence_kind": "artifact",
+                            "strength": "mutable_reference",
+                            "observed_at": "2026-09-29T12:00:01.500Z",
+                            "reference": "pre-finding-verification",
+                        },
+                        "artifact_refs": (),
+                        "evidence_refs": (),
+                    },
+                ),
+            }
+        )
+    )
+    checked = await app.check(
+        CheckRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 8)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(published.result_frontier),
+                "mode": "semantic_if_configured",
+                "max_findings": "3",
+            }
+        )
+    )
+    assert type(checked) is CheckCommitResult
+    finding = next(
+        item for item in checked.findings if item.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+    )
+    later = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 11)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(checked.result_frontier),
+                "event_drafts": (
+                    {
+                        "event_id": protocol_id("evt_", seed + 12),
+                        "schema": {"name": "evidence_recorded", "version": "1.0.0"},
+                        "occurred_at": "2026-09-29T12:00:03.000Z",
+                        "causal_parents": (),
+                        "payload": {
+                            "evidence_id": protocol_id("evd_", seed + 13),
+                            "evidence_kind": "artifact",
+                            "strength": "mutable_reference",
+                            "observed_at": "2026-09-29T12:00:03.000Z",
+                            "reference": "unrelated-later-note",
+                        },
+                        "artifact_refs": (),
+                        "evidence_refs": (),
+                    },
+                ),
+            }
+        )
+    )
+    head = later.result_frontier
+    assert int(head.sequence) > int(checked.result_frontier.sequence)
+    for request_seed, finding_frontier in ((seed + 9, head), (seed + 10, checked.result_frontier)):
+        with pytest.raises(PublicOperationError) as refused:
+            await app.respond(
+                RespondRequest.model_validate(
+                    {
+                        **_request_base(protocol_id("req_", request_seed)),
+                        "session_id": started.session_id,
+                        "writer_id": started.writer_id,
+                        "expected_frontier": _frontier(head),
+                        "finding_id": finding.finding_id,
+                        "finding_frontier": _frontier(finding_frontier),
+                        "disposition": "acknowledged",
+                        "reason": "Limitation accepted.",
+                        "evidence_refs": (early_evidence,),
+                    }
+                )
+            )
+        assert refused.value.code is PublicErrorCode.INVALID_REQUEST
+        assert refused.value.safe_details["reason_code"] == "resolution_attempt_required"

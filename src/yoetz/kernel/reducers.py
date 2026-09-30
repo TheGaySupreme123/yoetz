@@ -42,7 +42,7 @@ from yoetz.domain.events import (
     is_observation_authored,
     obligation_meaning_field_diffs,
 )
-from yoetz.domain.findings import Finding
+from yoetz.domain.findings import Finding, ResponseDisposition
 from yoetz.domain.values import (
     ActionId,
     ClaimId,
@@ -86,6 +86,7 @@ from yoetz.kernel.projections import (
     ProjectionState,
     derive_projection_state,
     empty_projection_state,
+    is_observation_limitation,
 )
 from yoetz.protocol.canonical import canonical_digest
 from yoetz.protocol.coverage import LedgerFreshness
@@ -158,17 +159,30 @@ def is_material_event_family(name: str) -> bool:
     return name in _MATERIAL_FAMILIES
 
 
+# Dispositions no local policy pack scores (only ``rejected`` and ``waived`` responses can raise
+# ``weak_or_stale_response`` or ``questionable_finding_rejection``), so recording one cannot change
+# what a later check would conclude about the answered finding.
+_UNSCORED_RESPONSE_DISPOSITIONS: Final = frozenset(
+    {ResponseDisposition.ACKNOWLEDGED, ResponseDisposition.PROVENANCE_DISPUTED}
+)
+
+
 def supersedes_recorded_check(
     name: str,
     payload: object,
     returned_finding_ids: tuple[FindingId, ...],
+    limitation_finding_ids: frozenset[FindingId] = frozenset(),
 ) -> bool:
     """True when a record of *name* carrying *payload* supersedes a check returning those findings.
 
     Answering a finding the check itself returned reports on that check's own output rather than
     publishing untested work, so such a response leaves the check attributable to a later receipt.
-    Every other material-family record supersedes the check, including a response to a finding the
-    check did not return and a response whose payload is unreadable.
+    Acknowledging (or disputing the provenance of) an observation-authored, non-actionable finding
+    in *limitation_finding_ids* is likewise not new work: no check returns such a disclosed
+    limitation, no policy pack scores that disposition, and a recheck could not change its result
+    (issue #911). Every other material-family record supersedes the check, including any other
+    response to a finding the check did not return (a response can change what the next check
+    judges) and a response whose payload is unreadable.
     """
 
     if not is_material_event_family(name):
@@ -186,24 +200,36 @@ def supersedes_recorded_check(
         return True
     if type(payload) is not ResponseRecordedPayload:
         return True
-    return payload.finding_id not in returned_finding_ids
+    if payload.finding_id in returned_finding_ids:
+        return False
+    return not (
+        payload.finding_id in limitation_finding_ids
+        and payload.disposition in _UNSCORED_RESPONSE_DISPOSITIONS
+    )
 
 
 def invalidates_recorded_check(
     record: LedgerRecord,
     check_sequence: int,
     returned_finding_ids: tuple[FindingId, ...],
+    *,
+    limitation_finding_ids: frozenset[FindingId],
 ) -> bool:
-    """True when *record* supersedes the check recorded at *check_sequence*."""
+    """True when *record* supersedes the check recorded at *check_sequence*.
+
+    ``limitation_finding_ids`` is ``projections.observation_limitation_finding_ids`` over the same
+    projection and records, so every surface applies the reducer's issue #911 rule identically.
+    """
 
     if record.ledger.ingestion_sequence <= check_sequence:
         return False
-    return _record_supersedes_recorded_check(record, returned_finding_ids)
+    return _record_supersedes_recorded_check(record, returned_finding_ids, limitation_finding_ids)
 
 
 def _record_supersedes_recorded_check(
     record: LedgerRecord,
     returned_finding_ids: tuple[FindingId, ...],
+    limitation_finding_ids: frozenset[FindingId],
 ) -> bool:
     """Apply the shared authorship-aware supersession rule to a later record."""
 
@@ -212,7 +238,25 @@ def _record_supersedes_recorded_check(
         # work on the participant's behalf. Keep the check attributable across that motion unless
         # the observation suffix materialized a finding that the older check could not cover.
         return record.schema.name == "finding_recorded"
-    return supersedes_recorded_check(record.schema.name, record.payload, returned_finding_ids)
+    return supersedes_recorded_check(
+        record.schema.name, record.payload, returned_finding_ids, limitation_finding_ids
+    )
+
+
+def _answered_limitation_ids(
+    state: ProjectionState, event: AcceptedEvent, replay_index: ReplayIndex
+) -> frozenset[FindingId]:
+    """The answered finding's id when *event* responds to an observation-authored limitation."""
+
+    payload = event.payload
+    if event.schema.name != "response_recorded" or type(payload) is not ResponseRecordedPayload:
+        return frozenset()
+    answered = state.findings.get(payload.finding_id)
+    if answered is None or not is_observation_limitation(
+        answered, replay_index.observation_finding_event_ids
+    ):
+        return frozenset()
+    return frozenset({payload.finding_id})
 
 
 def _corrupt() -> ValueError:
@@ -265,6 +309,10 @@ class ReplayIndex:
     payload_event_by_object: Mapping[ObjectId, EventId]
     evidence_sources_by_object: Mapping[ObjectId, tuple[EvidenceObjectSource, ...]]
     redaction_root_by_object: Mapping[ObjectId, EventId]
+    # Service-stamped observation-authored ``finding_recorded`` events. Authorship is an envelope
+    # fact the projection does not retain; the fold needs it to keep a check attributable across
+    # an acknowledgement of an observation-authored limitation (issue #911).
+    observation_finding_event_ids: frozenset[EventId]
     # Service-stamped hook-observed action/result events. Authorship lives on the envelope, not
     # the projection, so the claim-revision invariant reads provenance here (#909).
     observed_event_ids: frozenset[EventId] = frozenset()
@@ -312,9 +360,30 @@ class ReplayIndex:
             self.observed_event_ids <= accepted_event_ids
         ):
             raise _corrupt()
+        observation_findings = self._copy_observation_findings(
+            self.observation_finding_event_ids,
+            None if prior is None else prior.observation_finding_event_ids,
+        )
+        if any(item not in accepted_event_ids for item in observation_findings):
+            raise _corrupt()
         object.__setattr__(self, "payload_event_by_object", MappingProxyType(payloads))
         object.__setattr__(self, "evidence_sources_by_object", MappingProxyType(evidence))
         object.__setattr__(self, "redaction_root_by_object", MappingProxyType(roots))
+        object.__setattr__(self, "observation_finding_event_ids", observation_findings)
+
+    @staticmethod
+    def _copy_observation_findings(
+        source: frozenset[EventId],
+        trusted: frozenset[EventId] | None,
+    ) -> frozenset[EventId]:
+        if trusted is not None and source is trusted:
+            return trusted
+        if type(cast(object, source)) is not frozenset:
+            raise _corrupt()
+        try:
+            return frozenset(event_id(item) for item in source)
+        except ValueError as exc:
+            raise _corrupt() from exc
 
     @staticmethod
     def _copy_payload_owners(
@@ -398,6 +467,7 @@ def empty_replay_index() -> ReplayIndex:
         payload_event_by_object={},
         evidence_sources_by_object={},
         redaction_root_by_object={},
+        observation_finding_event_ids=frozenset(),
     )
 
 
@@ -463,6 +533,10 @@ def extend_replay_index(index: ReplayIndex, event: LedgerRecord) -> ReplayIndex:
         if is_observed_run_record(event)
         else index.observed_event_ids
     )
+    observation_findings = index.observation_finding_event_ids
+    if _is_observation_finding_record(event):
+        observation_findings = observation_findings | {event.event_id}
+
     token = _TRUSTED_PRIOR_INDEX.set(index)
     try:
         return ReplayIndex(
@@ -472,9 +546,18 @@ def extend_replay_index(index: ReplayIndex, event: LedgerRecord) -> ReplayIndex:
             evidence_sources_by_object=evidence_sources,
             redaction_root_by_object=redaction_roots,
             observed_event_ids=observed,
+            observation_finding_event_ids=observation_findings,
         )
     finally:
         _TRUSTED_PRIOR_INDEX.reset(token)
+
+
+def _is_observation_finding_record(event: LedgerRecord) -> bool:
+    return (
+        type(event) is AcceptedEvent
+        and event.schema.name == "finding_recorded"
+        and is_observation_authored(event)
+    )
 
 
 def _projection_record[T](event: AcceptedEvent, payload: T) -> ProjectionRecord[T]:
@@ -1163,7 +1246,9 @@ def reduce_event(
         family = accepted.schema.name
         payload = accepted.payload
         if latest is not None and _record_supersedes_recorded_check(
-            event, latest.returned_finding_ids
+            event,
+            latest.returned_finding_ids,
+            _answered_limitation_ids(state, accepted, replay_index),
         ):
             stale = True
 
@@ -1460,6 +1545,7 @@ def build_replay_index(events: tuple[LedgerRecord, ...]) -> ReplayIndex:
     evidence_sources_by_object: dict[ObjectId, tuple[EvidenceObjectSource, ...]] = {}
     redaction_root_by_object: dict[ObjectId, EventId] = {}
     observed_event_ids: set[EventId] = set()
+    observation_finding_event_ids: set[EventId] = set()
     for event in events:
         _next_record(frontier, head_digest, event)
         if is_observed_run_record(event):
@@ -1513,6 +1599,9 @@ def build_replay_index(events: tuple[LedgerRecord, ...]) -> ReplayIndex:
             for target in targets:
                 redaction_root_by_object.setdefault(target, event.event_id)
 
+        if _is_observation_finding_record(event):
+            observation_finding_event_ids.add(event.event_id)
+
         frontier = event.ledger.ingestion_sequence
         head_digest = event.entry_digest
 
@@ -1523,6 +1612,7 @@ def build_replay_index(events: tuple[LedgerRecord, ...]) -> ReplayIndex:
         evidence_sources_by_object=evidence_sources_by_object,
         redaction_root_by_object=redaction_root_by_object,
         observed_event_ids=frozenset(observed_event_ids),
+        observation_finding_event_ids=frozenset(observation_finding_event_ids),
     )
 
 

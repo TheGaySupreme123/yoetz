@@ -516,10 +516,12 @@ If `scope` is present, send both arrays. Either may be empty; two empty arrays m
 
 ## `respond`
 
-Use `finding_frontier` = the result frontier of the `check` that returned the finding, which is the
-frontier that carries the finding's own record. The finding's `subject_frontier` names the state the
-check tested and precedes that record, so it is rejected. A response records a disposition; it never
-erases the finding.
+Use `finding_frontier` = any frontier at or after the finding's own record: the item's
+`finding_frontier` from `status view=findings` when it carries one, otherwise the current status
+frontier (the result frontier of the `check` that returned it also works). No historical frontier
+search is needed. Only a frontier before that record is rejected, including the finding's
+`subject_frontier`, which names the state the check tested. A response records a disposition; it
+never erases the finding. Observation-authored non-actionable findings need no response.
 
 ```json
 {

@@ -16,7 +16,7 @@ from yoetz.kernel.deterministic_checks import (
     healthy_storage_availability,
 )
 from yoetz.kernel.finding_resolution import finding_is_resolved, issue_key
-from yoetz.kernel.projections import ProjectionState
+from yoetz.kernel.projections import ProjectionState, observation_limitation_finding_ids
 from yoetz.kernel.reducers import (
     ReplayIndex,
     invalidates_recorded_check,
@@ -146,6 +146,7 @@ def _receipt_gap_codes(
             (record for record in records if record.event_id == latest.source_check_event_id),
             None,
         )
+    limitations = observation_limitation_finding_ids(projection, records)
     if latest is None:
         codes.add(_CHECK_NOT_RECORDED)
     elif check_record is not None and any(
@@ -153,6 +154,7 @@ def _receipt_gap_codes(
             record,
             check_record.ledger.ingestion_sequence,
             latest.returned_finding_ids,
+            limitation_finding_ids=limitations,
         )
         for record in records
     ):

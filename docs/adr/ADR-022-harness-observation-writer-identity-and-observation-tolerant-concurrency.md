@@ -27,7 +27,8 @@ profile only with their own host's rows); 2026-09-26 for the reopened issue #689
 contention: observable lock ownership, lock-free committed reads, host-window lock budgets,
 change-proportional critical sections, and non-overlapping sweep settlement, decision 23);
 2026-09-30 for issue #915 (no hook delivers a notice for observation-authored frontier motion,
-decision 11).
+decision 11); 2026-09-30 for issue #911 (observation-authored, non-actionable findings are
+disclosed limitations, not response work; see the section at the end).
 **Implemented by:** `src/yoetz/application/observation_materialize.py`,
 `src/yoetz/application/observation_coordinator.py`, `src/yoetz/cli/observe_hooks.py`,
 `src/yoetz/adapters/memory/ledger.py`,
@@ -722,3 +723,56 @@ value crosses the unreleased control-request `2.9.0` wire, materializes as the c
 short command is dictionary-guessable and is never an identity. Legacy envelopes without the field
 still clear through the edit rule. The same predicate names only service-stamped observations, so a
 cooperative publication of a copied commitment proves nothing.
+
+## Observation-authored limitation findings (2026-09-30, issue #911)
+
+**Context.** The observation advisory "Observation coverage is incomplete or stale" (rule
+`observation_gap_or_stale`, kind `ledger_stale_or_incomplete`, priority 3, not actionable) was
+materialized as the same condition-scoped finding in every Codex session of the 2026-09 DeepSWE run
+(decision 7 gives it one stable id per condition). No check returns such a finding and no agent
+action in the task can repair a standing host-profile gap, yet it counted in
+`unanswered_finding_count`, set `findings_unanswered`, and a response to it after a check superseded
+that check (a response to a finding the check did not return was always material), forcing an
+identical recheck.
+
+**Decision.** A finding is an *observation limitation* when its readable projection row was
+recorded by a service-stamped observation-authored `finding_recorded` (decision 2's four-fact
+authorship test) and its kind is deliberately classified as a limitation: it is in the explicit
+allowlist `kernel/projections.OBSERVATION_LIMITATION_KINDS` (only `ledger_stale_or_incomplete`) and
+its closed `actionable` trait is false (`kernel/projections.is_observation_limitation`). The
+decision is structural; no finding id is special-cased, and an unreadable row is conservatively not
+a limitation. The allowlist, not the generic trait, is the authority: a finding kind added or
+reclassified as non-actionable later stays response work, and keeps superseding a check when
+answered, until a change adds it to the allowlist with its own rationale.
+
+1. An observation limitation is never response work. `unanswered_finding_count`, the compact
+   `unanswered_findings` preview, `closure_readiness.findings_unanswered`, and the durable SQLite
+   mirror share one rule (`kernel/projections.unanswered_finding_ids`).
+2. An `acknowledged` or `provenance_disputed` response to an observation limitation does not
+   supersede a recorded check: neither disposition is scored by a local policy pack, so a recheck
+   cannot change the result. A `rejected` or `waived` response to it, and any response to another
+   finding the check did not return, remain material (issue #911 open question 1): the
+   work-integrity and research-evidence packs score those dispositions, so the recheck is
+   productive (an unsupported rejection of the advisory returns `questionable_finding_rejection`).
+   The reducer
+   applies this through `ReplayIndex.observation_finding_event_ids`; receipts, receipt capacity, and
+   compact status coverage apply the same predicate over the accepted records, so status and
+   receipts cannot disagree. The attributable suffix still carries
+   `check_current_as_of_earlier_frontier`, and the receipt names the acknowledgement.
+3. Nothing about proof changes. The row stays in `view=findings`, keeps its resolution requirements
+   and `resolved` state (it does not become resolvable), contributes its coverage gaps, and stays on
+   the receipt as a coverage-limitation finding with any recorded acknowledgement. Its detail adds a
+   bounded explanation naming it a disclosed limitation. The finding kind table, the finding and
+   response schemas, and `ResponseDisposition` are unchanged.
+4. Existing ledgers need no migration: replay applies the rule to their accepted history, so an
+   advisory row written by an earlier build renders as disclosed history rather than as unanswered
+   work after upgrade.
+5. The hook `refresh_observation` clause asks the agent to wait only while `yoetz observe status`
+   reports lag or a drain backlog, and says that a remaining gap is a standing limitation needing
+   no response or recheck. Which observation conditions raise the advisory, and how the sticky
+   `unpaired_event` surfaces, are decided in issue #917.
+
+**Consequences.** Acknowledging the advisory once is optional and final; a service restart or
+session reattach does not reopen it because its condition-scoped id is not re-recorded. A later
+distinct condition is a different finding. This applies to every host (Codex, Claude Code and
+Cursor) on macOS, Linux and WSL 2, because the rule is service-side.
