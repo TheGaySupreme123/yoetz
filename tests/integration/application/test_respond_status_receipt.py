@@ -134,6 +134,7 @@ from yoetz.protocol.models import (
     SemanticStatus,
     StartRequest,
     StatusCandidateFindingsPageModel,
+    StatusCompactItemModel,
     StatusCompactPageModel,
     StatusEvidencePageModel,
     StatusFindingsPageModel,
@@ -5122,6 +5123,18 @@ async def _compact(app: Application, started: StartInternalResult, seed: int):
     )
 
 
+def _assert_durable_mirror(runtime: _WorkflowRuntime, item: StatusCompactItemModel) -> None:
+    """The SQLite ``p1_projection_state`` mirror counts exactly what compact status counts."""
+
+    for db in runtime.sqlite_connections:
+        row = db.execute(
+            "SELECT unresolved_finding_count, freshness FROM p1_projection_state "
+            "WHERE projection_name='work'"
+        ).fetchone()
+        assert row is not None
+        assert (str(row[0]), row[1]) == (item.unanswered_finding_count, item.freshness)
+
+
 @pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))
 async def test_legacy_observation_advisory_is_a_disclosed_limitation_not_response_work(
     ledger_backend: Literal["memory", "sqlite"],
@@ -5143,6 +5156,7 @@ async def test_legacy_observation_advisory_is_a_disclosed_limitation_not_respons
     assert item.unanswered_finding_count == str(len(returned_ids))
     assert {row.finding_id for row in item.unanswered_findings} == returned_ids
     assert status.closure_readiness.unanswered_finding_count == str(len(returned_ids))
+    _assert_durable_mirror(runtime, item)
 
     # Answer the check's own findings at its result frontier (koota-pair shape): not material.
     frontier = checked.result_frontier
@@ -5171,6 +5185,7 @@ async def test_legacy_observation_advisory_is_a_disclosed_limitation_not_respons
     assert status.closure_readiness.unanswered_finding_count == "0"
     assert item.freshness != LedgerFreshness.STALE_AFTER_MATERIAL_CHANGE.value
     assert "unanswered findings: 0" in summary_for_status(status.as_json())
+    _assert_durable_mirror(runtime, item)
 
     page = await _findings_view(app, started, seed + 51, include_resolved=True)
     legacy = next(row for row in page.items if row.finding_id == _LEGACY_ADVISORY_ID)
@@ -5418,3 +5433,143 @@ async def test_acknowledging_a_semantic_finding_at_the_current_frontier_counts_l
         )
     )
     assert accepted.response.disposition == "acknowledged"
+
+
+async def test_evidence_recorded_before_a_semantic_finding_never_counts_as_its_attempt() -> None:
+    """Issue #911 keeps #885 honest: evidence recorded before the finding is never its attempt.
+
+    Naming the finding by a later in-chain frontier (the current status frontier) or by the
+    check result frontier must not let pre-finding evidence satisfy the attempt requirement.
+    """
+
+    seed = 9510
+    app, _runtime, _ = _build_app(
+        seed_offset=95,
+        semantic="optional",
+        semantic_evaluator=_semantic_challenge_evaluator(protocol_id("clm_", seed + 5)),
+    )
+    started = await app.start(start_request(seed, title="Pre-finding evidence"))
+    obligation = protocol_id("obl_", seed + 1)
+    obligation_event = protocol_id("evt_", seed + 2)
+    early_evidence = protocol_id("evd_", seed + 7)
+    published = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 3)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(started.frontier),
+                "event_drafts": (
+                    {
+                        "event_id": obligation_event,
+                        "schema": {"name": "obligation_published", "version": "1.0.0"},
+                        "occurred_at": "2026-09-29T12:00:00.000Z",
+                        "causal_parents": (),
+                        "payload": {
+                            "obligation_id": obligation,
+                            "description": "Publish a result for the exercise.",
+                            "acceptance_criteria": "A result is recorded in the task ledger.",
+                            "evidence_expectation": "A linked immutable result record.",
+                            "status": "open",
+                        },
+                        "artifact_refs": (),
+                        "evidence_refs": (),
+                    },
+                    {
+                        "event_id": protocol_id("evt_", seed + 4),
+                        "schema": {"name": "claim_recorded", "version": "1.0.0"},
+                        "occurred_at": "2026-09-29T12:00:01.000Z",
+                        "causal_parents": (obligation_event,),
+                        "payload": {
+                            "claim_id": protocol_id("clm_", seed + 5),
+                            "claim_kind": "completion",
+                            "statement": "The exercise is complete.",
+                            "supporting_refs": (obligation,),
+                            "obligation_refs": (obligation,),
+                        },
+                        "artifact_refs": (),
+                        "evidence_refs": (),
+                    },
+                    {
+                        "event_id": protocol_id("evt_", seed + 6),
+                        "schema": {"name": "evidence_recorded", "version": "1.0.0"},
+                        "occurred_at": "2026-09-29T12:00:01.500Z",
+                        "causal_parents": (),
+                        "payload": {
+                            "evidence_id": early_evidence,
+                            "evidence_kind": "artifact",
+                            "strength": "mutable_reference",
+                            "observed_at": "2026-09-29T12:00:01.500Z",
+                            "reference": "pre-finding-verification",
+                        },
+                        "artifact_refs": (),
+                        "evidence_refs": (),
+                    },
+                ),
+            }
+        )
+    )
+    checked = await app.check(
+        CheckRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 8)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(published.result_frontier),
+                "mode": "semantic_if_configured",
+                "max_findings": "3",
+            }
+        )
+    )
+    assert type(checked) is CheckCommitResult
+    finding = next(
+        item for item in checked.findings if item.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+    )
+    later = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 11)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(checked.result_frontier),
+                "event_drafts": (
+                    {
+                        "event_id": protocol_id("evt_", seed + 12),
+                        "schema": {"name": "evidence_recorded", "version": "1.0.0"},
+                        "occurred_at": "2026-09-29T12:00:03.000Z",
+                        "causal_parents": (),
+                        "payload": {
+                            "evidence_id": protocol_id("evd_", seed + 13),
+                            "evidence_kind": "artifact",
+                            "strength": "mutable_reference",
+                            "observed_at": "2026-09-29T12:00:03.000Z",
+                            "reference": "unrelated-later-note",
+                        },
+                        "artifact_refs": (),
+                        "evidence_refs": (),
+                    },
+                ),
+            }
+        )
+    )
+    head = later.result_frontier
+    assert int(head.sequence) > int(checked.result_frontier.sequence)
+    for request_seed, finding_frontier in ((seed + 9, head), (seed + 10, checked.result_frontier)):
+        with pytest.raises(PublicOperationError) as refused:
+            await app.respond(
+                RespondRequest.model_validate(
+                    {
+                        **_request_base(protocol_id("req_", request_seed)),
+                        "session_id": started.session_id,
+                        "writer_id": started.writer_id,
+                        "expected_frontier": _frontier(head),
+                        "finding_id": finding.finding_id,
+                        "finding_frontier": _frontier(finding_frontier),
+                        "disposition": "acknowledged",
+                        "reason": "Limitation accepted.",
+                        "evidence_refs": (early_evidence,),
+                    }
+                )
+            )
+        assert refused.value.code is PublicErrorCode.INVALID_REQUEST
+        assert refused.value.safe_details["reason_code"] == "resolution_attempt_required"

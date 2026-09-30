@@ -173,8 +173,8 @@ configured default. After it, answer only its findings and read `status view=fin
 a repair or other material record needs a recheck; those answers and `work_closed` do not. Then
 request `receipt` and publish `work_closed`; report its actual actionable unresolved count, checked
 frontier, AI-powered review status/reason, and coverage limits. Stop repeating an unchanged check
-when proof still cannot qualify, and disclose the blocker. Priority-3 observation findings need no
-answer.
+when proof still cannot qualify, and disclose the blocker. Non-actionable observation-authored
+findings need no answer.
 
 
 ### Repair missing review content

@@ -134,7 +134,8 @@ case-wide `captured_object_unavailable`, `content_unselected`, `host_outcome_una
 `unpaired_event` limits remain receipt gaps but do not veto clean structured-ledger proof; they
 never relax AI-powered review proof. A resolved finding stays visible as history. Recheck after any
 material edit, evidence change, or plan change. A readable response to a finding returned by the
-current check does not require a recheck; a redacted or unreadable response does.
+current check does not require a recheck, nor does acknowledging an observation-authored
+non-actionable finding or publishing `work_closed`; a redacted or unreadable response does.
 
 ### `status`
 Reads current state — use it after a resume, a compaction, a handoff, or any uncertainty about what
@@ -154,7 +155,8 @@ Before completion, read `declared_obligation_count`, `no_obligations_reason`, an
 `closure_readiness`. An empty readable plan without a typed reason is blocked by
 `no_obligations_declared`; a typed reason clears that readiness blocker but remains visible. If the
 plan scope is unreadable, readiness is unknown rather than zero. Read the finding counters
-separately: `unanswered_finding_count` is response work still to do, while
+separately: `unanswered_finding_count` is response work still to do (observation-authored,
+non-actionable findings never count there), while
 `receipt_blocking_finding_count` is the current actionable finding set that prevents a clean
 receipt even after every response; only a later qualifying check of the repaired record shrinks
 it. Accordingly, `findings_unanswered` is answered; `receipt_findings_unresolved` is repaired and
@@ -178,10 +180,11 @@ See [Receipts and coverage](receipts-and-coverage.md) for how to read one.
 4. `status` — after any resume or uncertainty.
 5. `publish_work` — the intended completion claim plus current evidence.
 6. `check` — with a deliberately chosen mode.
-7. `respond` — to each finding.
+7. `respond` — to each unanswered finding before the final check, then only to that check's
+   findings.
 8. `check` — again, after any material change.
-9. `receipt` — and keep the final answer no stronger than its weakest coverage, freshness,
-   unresolved findings, and limitations.
+9. `receipt` — then publish `work_closed` when the work is complete, and keep the final answer no
+   stronger than its weakest coverage, freshness, unresolved findings, and limitations.
 
 ## How often to call each one
 
@@ -190,8 +193,8 @@ See [Receipts and coverage](receipts-and-coverage.md) for how to read one.
 | `start` | Once per task, before substantive work. In a new session, read guidance and discover tool schemas first, then call `start` before other workflow operations. On failure, follow exact continuations and same-request recovery, including a named one-time repair; if startup remains blocked without an applicable recovery path, ask for intro and guidance. On resume, attach to the existing task instead of starting a second one. |
 | `publish_work` | One batch per material transition, roughly one to eight events. A normal session is a handful of batches, never one per file, tool call, or message. |
 | `status` | After resume, compaction, or delegate handoff, and before any completion claim. Not between routine tool calls. |
-| `check` | After publishing the completion claim and its evidence, and again after any material edit or new evidence. A readable response to a finding returned by that check needs no recheck; a redacted or unreadable response does. A check with no new events since the last one adds nothing. |
-| `respond` | Once per finding, at that finding's recorded frontier. |
+| `check` | After publishing the completion claim and its evidence, and again after any material edit or new evidence. A readable response to a finding returned by that check needs no recheck, nor does acknowledging an observation-authored non-actionable finding or publishing `work_closed`; a redacted or unreadable response does. A check with no new events since the last one adds nothing. |
+| `respond` | Once per finding; `finding_frontier` may be any frontier at or after the finding's record, such as the current status frontier. |
 | `receipt` | Once at the end, and again only if material state changed after the previous receipt. |
 
 Under-publishing hides the work; over-publishing buries it. Reading, searching, formatting,

@@ -129,7 +129,7 @@ def test_the_initialize_safety_floor_carries_the_closure_order() -> None:
     )
     assert "Only a repair or other material record needs a recheck; those answers and " in text
     assert "`work_closed` do not." in text
-    assert "Priority-3 observation findings need no answer." in text
+    assert "Non-actionable observation-authored findings need no answer." in text
 
 
 @pytest.mark.parametrize("path", _SKILLS, ids=lambda path: path.parent.parent.name)
