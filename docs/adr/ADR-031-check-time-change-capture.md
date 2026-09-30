@@ -52,8 +52,13 @@ content-returning read needed its own decision. This is that decision, for exact
    commit precedes it. An empty repository records the empty tree. The base is an encrypted
    `change_capture` object; the task bundle keeps its pointer in `bundle_meta` and inventories the
    object as a root. Attach and resume never record a base, because a later base would silently
-   hide the commits made in between. Without a resolvable base the change is shown against HEAD
-   and the check reports `check_time_change_base_unavailable`.
+   hide the commits made in between. A task without one (created before this decision, or whose
+   start base could not be recorded) gets it from its first check instead: that check records HEAD
+   through the same seam as a `first_check` base, and every later check of the task diffs from it,
+   so work committed between checks stays in the change and files keep matching across checks. The
+   header names that commit, and every such check still reports
+   `check_time_change_base_unavailable`, because work committed before that first check is not in
+   the change. Only when no base can be kept or resolved is the change shown against HEAD.
 4. **Read-only and bounded.** Git runs through the ADR-011 hardened runner: no shell, no global or
    system config, hooks, fsmonitor, external diff, textconv or credential helper, and every diff
    passes `--no-ext-diff --no-textconv`. Git transports are disabled and partial clones are
@@ -77,7 +82,10 @@ content-returning read needed its own decision. This is that decision, for exact
    deadline bounds the whole capture: each Git call, and the read of the global ignore setting, gets
    at most 10 seconds and never more than what is left. A deadline reached while the change is
    being read leaves the named files unshown and says so; one reached before the file list exists
-   makes the capture unavailable.
+   makes the capture unavailable. The effective-config check and the diffs are separate Git calls,
+   so a filter written into the repository config between them would run; only a process of the
+   same user can do that, and that user can already run code as itself, so this window is low
+   severity.
 5. **The same privacy path as every other excerpt.** The rendered text receives the capture-time
    redaction native observation content receives, with the same detector as the egress never-send
    scan, and is stored encrypted. Its parts are `repository_excerpt` case items, because this is
@@ -106,21 +114,28 @@ content-returning read needed its own decision. This is that decision, for exact
 9. **AI-powered finding resolution compares the files each review was shown.** A completed review
    whose packet carried the change records, on its `check_recorded` 1.3.0 event, keyed commitments
    to the changed files it carried: `fully_shown` (the file's whole diff, unredacted and
-   untruncated) and `partially_shown` (any of it). Each commitment is the task bundle's object
-   commitment key over the change's base commit and the file's `diff --git` line, so no path is
-   recorded, the same file under the same base commits the same way in every check of a task, and
-   a file behind a HEAD that has since moved does not match. At most 128 files are recorded; past
-   that the record says it is incomplete and holds none. Replay stamps the files of the review that
-   raised an AI-powered finding (R) onto the finding's projection row. A later repair review's
+   untruncated) and `partially_shown` (the rest it carried any of), each with `shown_bytes`, the
+   length of the clean prefix of the file's diff section it carried (up to the packet's end or the
+   first redacted span). Each commitment is the task bundle's object commitment key over the
+   change's base commit and the file's `diff --git` line, so no path is recorded and the same file
+   under the task's fixed base commits the same way in every check of the task. Only shown files
+   count toward the 128-file bound; past it the record keeps the first 128 in change order and
+   says it is incomplete. Replay stamps the complete record of the review that raised an
+   AI-powered finding (R) onto the finding's projection row. A later repair review's
    `check_time_change_truncated`, `_redacted`, `_base_unavailable` and `_unavailable` codes are
-   tolerated for that finding exactly when every file in R reached the repair review whole (R ⊆
-   its `fully_shown`). An empty R (a raising review that carried no change, including every review
-   from before this decision) is always tolerated. A raising review that carried parts without a
-   readable record of them (0.3 development builds) leaves R unknown, which never tolerates. None
-   of these codes is a capture baseline stamped on the finding. Redacting the raising check makes R
-   unknown and reopens a resolution that depended on it; redacting the resolving check reopens it
-   as before. The relation is a pure fold over recorded checks, so the memory and SQLite ledgers
-   replay it identically.
+   tolerated for that finding exactly when the repair saw at least what R saw: every file R saw
+   whole reached the repair whole, and every file R saw in part with n clean bytes reached the
+   repair whole or in part with at least n. The repair's record may be incomplete, since each entry
+   it holds is still true. An empty R (a raising review that carried no change, including every
+   review from before this decision) is always tolerated. R is unknown, which never tolerates, when
+   the raising record is incomplete or when the raising review carried parts without a readable
+   record (0.3 development builds). None of these codes is a capture baseline stamped on the
+   finding. Redacting the raising check makes R unknown and reopens a resolution that depended on
+   it; redacting the resolving check reopens it as before. The relation is a pure fold over
+   recorded checks, so the memory and SQLite ledgers replay it identically. Residual limit: the
+   byte rule compares prefix lengths, not content. If the repair's diff for a file moves the hunk
+   the finding was about past the m bytes the repair saw, a repair review that stays silent about
+   it could still clear the finding. Explicit `fixed` rulings (#905) are the long-term guard.
 
 ## Consequences
 

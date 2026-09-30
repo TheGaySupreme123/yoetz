@@ -1148,7 +1148,8 @@ when that recipe selected the change:
   it to. A check whose connection named no workspace has nothing to read and reports no
   check-time code;
 - `check_time_change_base_unavailable` — no resolvable task-start commit, so the change is shown
-  against HEAD and commits made during the task may be missing;
+  against the commit the task's first check pinned (or HEAD when no pin could be kept), and work
+  committed before it is missing;
 - `check_time_change_truncated` — a changed file (named in the change's header), a part of the
   change, or untracked names beyond the listing bound did not reach the reviewer;
 - `check_time_change_redacted` — credential-like spans were replaced before storage and review.
@@ -6834,13 +6835,15 @@ Semantic findings carry their review's closed capture limits in their own covera
 only after a readable material change recorded after the finding
 (`no_material_change_since_finding` otherwise). No ADR-031 check-time change code is a capture
 baseline. A semantic repair check's `check_time_change_*` codes are tolerated for a finding only by
-the shown-file rule (`check_change_limits_tolerated`): R, the raising review's shown files, must be
-a subset of the repair check's `check_change_files.fully_shown`; an empty R is always tolerated and
-an unknown R never. `FindingProjectionRecord` carries the replay-derived
-`check_change_raising_check_event_id`, `check_change_raised_files` (R; `None` while unknown) and
+the shown-file rule (`check_change_limits_tolerated`, `CheckChangeShownFiles.covers`): every file
+the raising review (R) saw whole is in the repair check's `fully_shown`, and every file R saw in
+part with `shown_bytes` n is in the repair's `fully_shown` or its `partially_shown` with at least
+n. The repair record may be incomplete; an empty R is always tolerated and an unknown R never.
+`FindingProjectionRecord` carries the replay-derived `check_change_raising_check_event_id`,
+`check_change_raised_files` (R as a complete `CheckChangeShownFiles`; `None` while unknown) and
 `resolution_depends_on_check_event_id` (set when a resolution needed that tolerance). The raising
 check is the check whose returned finding has the same subject frontier and AI-powered review
-attempt. A raising check with a complete record gives R = its shown files; one with an incomplete
+attempt. A raising check with a complete record gives R = that record; one with an incomplete
 record, or with carried-part codes but no record, gives an unknown R; any other gives an empty R.
 Redacting the raising check sets R unknown and reopens a resolution that depended on it; all three
 fields are emitted in projection snapshots only when set.
@@ -6853,9 +6856,10 @@ an explicitly assessable conclusion enables capture-baseline resolution. An unas
 conclusion blocks semantic absence proof even if a producer omitted its coverage-gap marker.
 Failed and local-only attempts retain their existing version. Version `1.3.0` (unreleased, so
 edited in place) also admits optional `check_change_files`,
-`{"complete": bool, "fully_shown": [commitment], "partially_shown": [commitment]}`, only beside a
-conclusion: disjoint sorted `hmac-sha256` commitments, at most 128 in all, and both lists empty
-when `complete` is false (ADR-031 decision 9). The owning schema generator and
+`{"complete": bool, "fully_shown": [commitment], "partially_shown": [{"commitment",
+"shown_bytes"}]}`, only beside a conclusion: disjoint `hmac-sha256` commitments sorted by
+commitment, `shown_bytes` in `0..262144`, at most 128 files in all; `complete` false means more
+files were shown and the record holds the first 128 in change order (ADR-031 decision 9). The owning schema generator and
 `fixtures/canonical/check-conclusion-1.3.0.case.json` lock the new and legacy bytes.
 
 `resolution_attempt_required` is the `respond` rejection for an `acknowledged` response to a
@@ -6968,7 +6972,9 @@ diagnostic and never as text.
   media type `application/vnd.yoetz.task-change-base+json`, schema `yoetz.task-change-base/1`. The
   optional ledger seam `record_task_change_base(ref) -> bool` keeps the first one only (pointer in
   `bundle_meta` key `task_change_base`, object inventoried as a root); `load_task_change_base()`
-  authenticates it. Attach and resume record nothing.
+  authenticates it. Attach and resume record nothing. A task with no base gets one from its first
+  check that captures a change: `TaskChangeBase(..., origin="first_check")`, HEAD at that check,
+  recorded through the same seam (a concurrent check that loses the race loads the kept one).
 - **Source.** `Application.check` binds `CheckWorkspaceSource(workspace, repository_commitment)`
   from its own `RepositoryPrivacyContext` for the duration of the check
   (`check_workspace_source_scope`). The semantic composition captures only when that commitment
@@ -6976,7 +6982,9 @@ diagnostic and never as text.
 - **Object.** `CheckChangeCapture(base, text, tracked_files, untracked_files, omitted_files,
   truncated, redacted)` is stored after capture-time redaction as one `change_capture` object of
   media type `application/vnd.yoetz.check-change+json`, schema `yoetz.check-change/1`. `base` is
-  `task_start`, `head` (no resolvable recorded base) or `empty` (no commit exists). The job's
+  `task_start`, `first_check` (the pinned first-check base; the header names its commit),
+  `head` (no base could be kept or resolved) or `empty` (no commit exists); `first_check` and
+  `head` report `check_time_change_base_unavailable`. The job's
   `yoetz.semantic-case/2` object gains an optional `check_change` member,
   `{"schema": "yoetz.check-change-binding/1", "object": pointer | null, "unavailable": bool}`;
   jobs without it rebuild without a change.

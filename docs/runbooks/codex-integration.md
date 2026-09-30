@@ -1697,19 +1697,20 @@ The directory is the one the check's own connection named: the Codex MCP bridge'
 or the working directory of `yoetz check`. The service reads that directory only when it resolves to
 the task's own repository, and never runs a shell, hook, filter, external diff, credential helper or
 network transport. The task-start commit is recorded when `start` creates the task. A task created
-before this version, or from a connection that named no workspace, has none; its checks show the
-change against HEAD and report `check_time_change_base_unavailable`, because commits made earlier in
-the task may be missing. Codex code mode, nested `tools.apply_patch` calls and `exec_command`
-rewrites need nothing extra: the change is read from the repository, not from any hook. The capture
-honours the review recipe and privacy policy like any other excerpt, as `repository_excerpt` items:
-a policy whose inference channel does not allow that category never sends them, and the check
-reports `semantic_review_context_withheld`. Credential-like spans are redacted first
-(`check_time_change_redacted`), every part still passes the never-send scan, files named like
-credentials (`.env`, `.env.*`, `.netrc`, `*.pem`, `*.key` and similar, a name heuristic) are listed
-by name only, and a change larger than the packet reports `check_time_change_truncated`. The whole
-capture has 20 seconds. It is `check_time_change_unavailable` for a linked Git worktree (its `.git`
-is a file), a group- or world-writable repository root, a repository whose effective Git config
-defines a filter or an include (for example a repository-local Git LFS or git-crypt setup), a
+before this version, or from a connection that named no workspace, has none; its first check pins
+HEAD as the task's base, later checks diff from that commit so work committed between checks stays
+in the change, and each such check reports `check_time_change_base_unavailable` because work
+committed before that first check is not in it. Codex code mode, nested `tools.apply_patch` calls
+and `exec_command` rewrites need nothing extra: the change is read from the repository, not from any
+hook. The capture honours the review recipe and privacy policy like any other excerpt, as
+`repository_excerpt` items: a policy whose inference channel does not allow that category never
+sends them, and the check reports `semantic_review_context_withheld`. Credential-like spans are
+redacted first (`check_time_change_redacted`), every part still passes the never-send scan, files
+named like credentials (`.env`, `.env.*`, `.netrc`, `*.pem`, `*.key` and similar, a name heuristic)
+are listed by name only, and a change larger than the packet reports `check_time_change_truncated`.
+The whole capture has 20 seconds. It is `check_time_change_unavailable` for a linked Git worktree
+(its `.git` is a file), a group- or world-writable repository root, a repository whose effective Git
+config defines a filter or an include (for example a repository-local Git LFS or git-crypt setup), a
 partial clone, or Git older than 2.26. A replayed or resumed check reviews the change captured when
 it first ran, not the tree as it is later. `yoetz service diagnostics` counts the parts that reached
 the packet as `semantic_check_change_parts_selected`.

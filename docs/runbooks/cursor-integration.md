@@ -1549,8 +1549,9 @@ selected (`workspace_roots`, then `CURSOR_PROJECT_DIR`), or the working director
 The service reads that directory only when it resolves to the task's own repository, and never runs
 a shell, hook, filter, external diff, credential helper or network transport. The task-start commit
 is recorded when `start` creates the task. A task created before this version, or from a connection
-that named no workspace, has none; its checks show the change against HEAD and report
-`check_time_change_base_unavailable`, because commits made earlier in the task may be missing.
+that named no workspace, has none; its first check pins HEAD as the task's base, later checks diff
+from that commit so work committed between checks stays in the change, and each such check reports
+`check_time_change_base_unavailable` because work committed before that first check is not in it.
 Because the ordinary profile does not subscribe `afterFileEdit`, this is how every Cursor edit
 reaches review; it needs no hook at all, so MCP-only Cursor on macOS gets it too. The capture
 honours the review recipe and privacy policy like any other excerpt, as `repository_excerpt` items:

@@ -71,7 +71,8 @@ Missing source never means “no code changed.” Yoetz does not browse the file
 semantic-review packet. The one repository read is the **check-time change** (ADR-031): when the
 review recipe selects diff excerpts, the service reads the task's own repository once per check,
 with Git's hooks, helpers, filters and network transports disabled, and renders the change from the
-commit the task started on to the working tree, including untracked files Git does not ignore.
+commit the task started on (for a task started before this version, the commit at its first check)
+to the working tree, including untracked files Git does not ignore.
 Because that base is a commit, uncommitted or untracked work that already existed when the task
 started is included too. Files named like credentials (`.env`, `.env.*`, `.netrc`, `*.pem`,
 `*.key` and similar) are listed by name only; that list is a name heuristic, not a detector. The

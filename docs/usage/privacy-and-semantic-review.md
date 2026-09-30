@@ -197,7 +197,8 @@ problem-local excerpts of evidence, tests, diffs, or source **already recorded i
 the **check-time change**.
 
 The check-time change is the one thing Yoetz reads from your repository for review. When the recipe
-includes diff excerpts, each check reads the change from the commit the task started on — committed
+includes diff excerpts, each check reads the change from the commit the task started on (for a task
+started before this version, the commit at its first check) — committed
 and uncommitted edits to tracked files, plus untracked files Git does not ignore — from the
 repository of the check's own connection, and shows it to the reviewer first, with a header naming
 every changed file. It covers edits made by scripts and commits that no hook captured. Because the
