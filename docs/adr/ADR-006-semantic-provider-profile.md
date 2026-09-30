@@ -177,8 +177,8 @@ and AI-powered review/privacy capability and conformance tests.
     `content_unselected`. These captures are not a Git snapshot. The one repository read is the
     check-time change of ADR-031: when the recipe selects diff excerpts, the service (never the
     case builder) captures the change from the task-start commit to the working tree once per
-    check and the packet reserves room for it ahead of other excerpts. A digest alone cannot supply
-    missing code.
+    check and the packet reserves room for it ahead of other excerpts, as `repository_excerpt`
+    items the inference channel must allow. A digest alone cannot supply missing code.
 13. **Reviewer output talks to the main agent through the existing workflow:** a successful model
     judgment may propose bounded `ReviewerChallenge` values. Each challenge names only case-bound
     refs, explains the discrepancy, states an alternative interpretation, addresses the main agent

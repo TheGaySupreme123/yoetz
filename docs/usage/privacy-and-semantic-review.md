@@ -197,12 +197,21 @@ problem-local excerpts of evidence, tests, diffs, or source **already recorded i
 the **check-time change**.
 
 The check-time change is the one thing Yoetz reads from your repository for review. When the recipe
-includes diff excerpts, each check reads the change since the task started — committed and
-uncommitted edits to tracked files, plus untracked files Git does not ignore — from the repository
-of the check's own connection, and shows it to the reviewer first, with a header naming every
-changed file. It covers edits made by scripts and commits that no hook captured. Git hooks, helpers
-and network access are off while it is read, credential-like text is redacted, and each part still
-passes the never-send check. A change larger than the packet is cut and says so.
+includes diff excerpts, each check reads the change from the commit the task started on — committed
+and uncommitted edits to tracked files, plus untracked files Git does not ignore — from the
+repository of the check's own connection, and shows it to the reviewer first, with a header naming
+every changed file. It covers edits made by scripts and commits that no hook captured. Because the
+starting point is a commit, uncommitted or untracked work that was already in your working tree
+when the task started is included too. Git hooks, helpers, filters and network access are off while
+it is read, credential-like text is redacted, and each part still passes the never-send check.
+Files named like credentials (`.env`, `.env.*`, `.netrc`, `*.pem`, `*.key` and similar) are listed
+by name only and their content is never shown; this is a check on file names, so a secret kept in
+an ordinarily named file relies on the redaction and never-send checks instead. A change larger
+than the packet is cut and says so.
+
+The change travels as **repository excerpts**. If your policy's AI-powered review channel does not
+allow repository excerpts, the change is never sent, and the check result says the review ran with
+part of its context withheld.
 
 Sensitive and confidential content is off. The never-send set remains absolute. The reviewer gets a
 packet, not a handle on your repository — composition passes bundled provider adapters no

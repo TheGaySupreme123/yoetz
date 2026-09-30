@@ -35,8 +35,10 @@ content-returning read needed its own decision. This is that decision, for exact
    unstaged changes to tracked files, plus untracked files Git does not ignore (`.gitignore`,
    `.git/info/exclude` and the owner's global Git ignore file). A short header names the base,
    the counts and every changed file with its line counts, and says which files are not shown and
-   why. This covers script edits, commits and missed hooks on every host at once. A recipe without
-   diff excerpts captures nothing and reports nothing, exactly as it declines any other excerpt.
+   why. This covers script edits, commits and missed hooks on every host at once. Because the base
+   is a commit, uncommitted or untracked work that already existed when the task started is part of
+   the change too, and the header says so. A recipe without diff excerpts captures nothing and
+   reports nothing, exactly as it declines any other excerpt.
 2. **Only the check's own repository.** The capture reads only the locator the check's
    authenticated control connection supplied at handshake. The service keeps that locator in
    memory beside the repository commitment it derived from it, for the life of the connection
@@ -51,19 +53,38 @@ content-returning read needed its own decision. This is that decision, for exact
    hide the commits made in between. Without a resolvable base the change is shown against HEAD
    and the check reports `check_time_change_base_unavailable`.
 4. **Read-only and bounded.** Git runs through the ADR-011 hardened runner: no shell, no global or
-   system config, hooks, fsmonitor, external diff, textconv or credential helper. Git transports
-   are disabled and partial clones are refused, so a capture never fetches. The ADR-011 root and
-   metadata fences apply (a real `.git` directory, no alternates, no `include` or `filter`
-   config). Untracked files are opened one path component at a time beneath the validated root
-   descriptor without following links; only regular files owned by the service user with a single
-   link, at most 64 KiB each and 500 in all, are read. The stored text is at most 256 KiB and leaves
-   an oversized file out whole rather than cutting it mid-hunk; the packet then splits that text on
-   line boundaries. Each Git call has 10 seconds and the whole capture 20.
+   system config, hooks, fsmonitor, external diff, textconv or credential helper, and every diff
+   passes `--no-ext-diff --no-textconv`. Git transports are disabled and partial clones are
+   refused, so a capture never fetches. The ADR-011 root and metadata fences apply (a real `.git`
+   directory, no alternates). Because a diff against the working tree runs any `clean` filter the
+   repository defines, the capture also asks Git for its whole effective configuration
+   (`git config --list --name-only --includes --show-scope`) and refuses any `filter.*`,
+   `include.*`, `includeIf.*` or partial-clone key, from whichever file or include it came. That
+   needs Git 2.26 or later; an older Git cannot answer, and the capture is unavailable rather than
+   taken without the check. Untracked files honour `.gitignore`, `.git/info/exclude`, a
+   repository-level `core.excludesFile` and the owner's global Git ignore file. They are opened one
+   path component at a time beneath the validated root descriptor without following links; only
+   regular files owned by the service user with a single link, at most 64 KiB each and 500 in all,
+   are read. Files whose names follow common credential conventions (`.env`, `.env.*`, `.netrc`,
+   `.npmrc`, `id_rsa`, `*.pem`, `*.key`, `*.tfvars` and similar), tracked or untracked, are listed
+   by name only and their content is never shown. That list is a name heuristic, not a detector:
+   it catches common conventions, and every shown line still passes redaction and the never-send
+   scan. The stored text is at most 256 KiB and leaves an oversized file out whole rather than
+   cutting it mid-hunk; the packet then splits that text on line boundaries. An untracked listing
+   over 8 MiB keeps the names that fit and says the untracked count is a lower bound. One 20-second
+   deadline bounds the whole capture: each Git call, and the read of the global ignore setting, gets
+   at most 10 seconds and never more than what is left. A deadline reached while the change is
+   being read leaves the named files unshown and says so; one reached before the file list exists
+   makes the capture unavailable.
 5. **The same privacy path as every other excerpt.** The rendered text receives the capture-time
    redaction native observation content receives, with the same detector as the egress never-send
-   scan, and is stored encrypted. Its parts are ordinary `evidence_excerpt` case items: the channel
-   categories, the privacy gateway and the never-send scan apply to each one. How a never-send
-   match affects the review is owned by #920.
+   scan, and is stored encrypted. Its parts are `repository_excerpt` case items, because this is
+   the service's own repository read and not recorded evidence: the channel categories, the privacy
+   gateway and the never-send scan apply to each one. A recipe that selects diff excerpts therefore
+   requires `repository_excerpt`; an inference channel that does not allow it never receives a
+   part, and the check reports `semantic_review_context_withheld`, as for any other category the
+   recipe selects and the channel withholds. How a never-send match affects the review is owned by
+   #920.
 6. **A reserved share of the packet, first.** The change is admitted before every other excerpt,
    up to half of the recipe's excerpt count (at least one) and half of its excerpt bytes. Room it
    does not use stays with the other excerpts; parts left over after all of them backfill whatever
@@ -77,8 +98,14 @@ content-returning read needed its own decision. This is that decision, for exact
 8. **Disclosed limits.** `check_time_change_unavailable` (selected but nothing carried),
    `check_time_change_base_unavailable`, `check_time_change_truncated` (a file or part not shown)
    and `check_time_change_redacted` join the packet and check coverage. They describe AI-powered
-   review input only, so they never weaken local absence proof, and they are capture-baseline
-   codes for semantic finding resolution.
+   review input only, so they never weaken local absence proof. For AI-powered finding resolution
+   only `check_time_change_unavailable` is a capture baseline: a repair review that also carried
+   no change had exactly the material every review had before this decision. Truncation, redaction
+   and a HEAD base hide part of a change that did arrive, and the same code on a later check does
+   not say whether the hidden part is the one the finding was about, so they keep blocking
+   AI-powered resolution (as the capture failures of #904 do) until a rule compares the files each
+   review was shown. A check whose connection named no workspace has nothing to read and reports
+   no check-time code; its review is the review of the time before this decision.
 
 ## Consequences
 
@@ -87,7 +114,9 @@ repository, not on how the edit was made. The reviewer sees the actual change an
 it came from, within the existing per-item, count and total caps; #907 owns lifting those caps.
 
 The capture is unavailable, and says so, for linked Git worktrees (whose `.git` is a file),
-group- or world-writable roots, repositories with `include` or `filter` config, and partial clones.
+group- or world-writable roots, repositories whose effective config defines a filter or an include
+(for example a repository-local Git LFS or git-crypt setup), partial clones, and Git older than
+2.26.
 Submodule changes appear as commit ids and binary files as a one-line description.
 
 This decision does not add an MCP tool, a repository browser or an `ArtifactInspectionPort`, and

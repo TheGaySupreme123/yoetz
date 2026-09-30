@@ -1141,14 +1141,16 @@ Four codes bound the ADR-031 check-time change, the service's one read of the ta
 for a check whose recipe selects diff excerpts. They appear on the packet and check coverage only
 when that recipe selected the change:
 
-- `check_time_change_unavailable` — no part reached the packet: no trusted workspace for this
-  check or one outside the task's repository, an unsupported Git state (linked worktree, unsafe
-  root, `include`/`filter` config, partial clone), a failed or timed-out capture, or no claim,
-  obligation or plan to link it to;
+- `check_time_change_unavailable` — the check named a workspace but no part reached the packet: a
+  workspace outside the task's repository, an unsupported Git state (linked worktree, unsafe root,
+  a filter or include in the effective config, partial clone, Git older than 2.26), a failed or
+  timed-out capture, a change withheld whole by redaction, or no claim, obligation or plan to link
+  it to. A check whose connection named no workspace has nothing to read and reports no
+  check-time code;
 - `check_time_change_base_unavailable` — no resolvable task-start commit, so the change is shown
   against HEAD and commits made during the task may be missing;
-- `check_time_change_truncated` — a changed file (named in the change's header) or a part of the
-  change did not reach the reviewer;
+- `check_time_change_truncated` — a changed file (named in the change's header), a part of the
+  change, or untracked names beyond the listing bound did not reach the reviewer;
 - `check_time_change_redacted` — credential-like spans were replaced before storage and review.
 
 Post-validation fences each challenge independently: a rejected challenge costs only itself, the
@@ -6830,7 +6832,10 @@ baseline is tolerated; it does not remove any receipt coverage gap. `insufficien
 resolve a prior semantic finding. Response disposition and limitation acceptance are not proofs.
 Semantic findings carry their review's closed capture limits in their own coverage, and resolve
 only after a readable material change recorded after the finding
-(`no_material_change_since_finding` otherwise).
+(`no_material_change_since_finding` otherwise). Of the ADR-031 check-time change codes only
+`check_time_change_unavailable` is a capture baseline; `check_time_change_truncated`,
+`check_time_change_redacted` and `check_time_change_base_unavailable` stay check-only and block
+semantic absence proof.
 
 
 `check_recorded` version `1.3.0` adds required `semantic_conclusion` on succeeded attempts. The
@@ -6925,8 +6930,21 @@ correctness. The record contains no content, paths, or content hashes.
 
 `ChangeCapturePort` (`yoetz.ports.change_capture`) has two blocking, read-only calls:
 `read_task_base(workspace) -> TaskChangeBase` and `capture(workspace, base | None) ->
-CheckChangeCapture`. `GitChangeCaptureAdapter` is the only implementation; the service runs it off
-the event loop. `ChangeCaptureUnavailable.reason` is one of `git_unavailable`, `not_git`,
+CheckChangeCapture`. `GitChangeCaptureAdapter` is the only implementation; the service runs it and
+every redaction pass off the event loop. One 20-second deadline bounds a capture: each Git call
+(including workspace discovery and the global `core.excludesFile` read) gets
+`min(10 s, time left)`. Past the deadline a file whose diff was not read is listed with
+`capture_limit` and untracked files are not listed; before the file list exists the capture is
+unavailable. Before any diff the adapter lists the effective config with
+`git config --list --name-only --includes --show-scope -z` and refuses any non-`command` scope key
+`filter.*`, `include.*`, `includeIf.*`, `extensions.partialClone`, `remote.*.promisor` or
+`remote.*.partialCloneFilter` (`unsupported_repository`); a Git that rejects `--show-scope` fails
+as `git_failed`. Tracked and untracked files whose base name is on the adapter's credential-name
+list are listed by name only (`credential_name`). The untracked listing uses
+`run_read_only_git(..., keep_prefix_on_limit=True)`: past 8 MiB the hardened runner raises
+`GitOutputTruncated` (still a `ValueError("git_output_limit")`) holding the whole names that fit,
+and the header says the untracked count is a lower bound. `discover_workspace_root` and
+`open_local_workspace` take an optional `timeout_seconds`. `ChangeCaptureUnavailable.reason` is one of `git_unavailable`, `not_git`,
 `unsafe_root`, `unsupported_repository`, `git_failed` (a Git call over its time bound included) or
 `redaction_incomplete` (credential-shaped spans still found after 64 redaction passes, so the change
 is withheld whole), recorded as a bounded
@@ -6952,10 +6970,15 @@ diagnostic and never as text.
   jobs without it rebuild without a change.
 - **Packet.** `build_semantic_case(check_time_change=CheckTimeChange(ref, capture) | None,
   check_time_change_unavailable=bool)` admits parts with ids `change-check-time-NNN`, section
-  `excerpt`, category `evidence_excerpt`, source kind `diff`, source ref `check-time-change`,
+  `excerpt`, category `repository_excerpt`, source kind `diff`, source ref `check-time-change`,
   linked to effective claims and obligations (else the latest plan), each prefixed
   `[Yoetz check-time change, part i of n]`. `_check_time_change_reservation(selection)` returns the
   share admitted before other excerpts (half the excerpt count, at least one, and half the total
   bytes); leftovers backfill after every other excerpt. The case digest binds the object identity,
   content digest, base, flags and admitted part count; a case without a selected change keeps its
   historical digest input.
+- **Consent.** `ReviewSelectionPolicy.carries_check_time_change` (targeted excerpts, a positive
+  excerpt count and the `diff` kind) is the one predicate for whether a recipe carries the change,
+  and `required_categories()` then includes `repository_excerpt`. An inference channel without that
+  category approves no check-time part, and `withheld_review_categories` names it, so the check
+  reports `semantic_review_context_withheld`.

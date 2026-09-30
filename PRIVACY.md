@@ -70,10 +70,15 @@ default and carries an explicit omission reason when content was not recorded, s
 Missing source never means “no code changed.” Yoetz does not browse the filesystem to fill a
 semantic-review packet. The one repository read is the **check-time change** (ADR-031): when the
 review recipe selects diff excerpts, the service reads the task's own repository once per check,
-with Git's hooks, helpers and network transports disabled, and renders the change since the task
-started, including untracked files Git does not ignore. It is redacted like captured content, stored
-encrypted, and offered to the privacy gateway as ordinary bounded diff excerpts under the same
-policy, categories and never-send scan. Everything else must already be captured or agent-published
+with Git's hooks, helpers, filters and network transports disabled, and renders the change from the
+commit the task started on to the working tree, including untracked files Git does not ignore.
+Because that base is a commit, uncommitted or untracked work that already existed when the task
+started is included too. Files named like credentials (`.env`, `.env.*`, `.netrc`, `*.pem`,
+`*.key` and similar) are listed by name only; that list is a name heuristic, not a detector. The
+change is redacted like captured content, stored encrypted, and offered to the privacy gateway as
+bounded `repository_excerpt` items under the same policy and never-send scan: a policy whose
+inference channel does not allow repository excerpts never sends it, and the check says the
+review's context was withheld. Everything else must already be captured or agent-published
 in the frozen case. The separate ADR-011 `yoetz state capture` support command may read one
 explicitly named local Git worktree and return only bounded structural state digests. It returns no
 source or path content. Neither it nor the check-time change gives MCP clients or review providers a

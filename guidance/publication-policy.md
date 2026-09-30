@@ -110,8 +110,8 @@ to 8,192 characters, so the field limit does not protect against excerpt truncat
 
 When the review recipe selects diff excerpts, Yoetz itself also reads the task's repository at
 check time and gives the reviewer that **check-time change** first: committed and uncommitted
-changes since the task started, plus untracked files Git does not ignore, including edits made by
-scripts or commits that no hook captured. Do not paste or digest the whole diff for the reviewer;
+changes from the commit the task started on, plus untracked files Git does not ignore, including
+edits made by scripts or commits that no hook captured. Do not paste or digest the whole diff for the reviewer;
 use `description` for the problem-local hunk or test slice the claim depends on. The
 `check_time_change_unavailable`, `check_time_change_base_unavailable`,
 `check_time_change_truncated` and `check_time_change_redacted` coverage gaps name what that change

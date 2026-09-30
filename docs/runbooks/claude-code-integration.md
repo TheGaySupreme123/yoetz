@@ -1392,27 +1392,33 @@ the `diff` kind), each check carries a **check-time change** (ADR-031): the Yoet
 task's repository once, when the check runs, and puts the result ahead of every other excerpt in the
 review packet. It covers committed and uncommitted changes to tracked files since the commit
 recorded when the task started, plus untracked files Git does not ignore (`.gitignore`,
-`.git/info/exclude` and your global Git ignore file). A header lists every changed file with its
-line counts and says which files were not shown. Script edits (`sed -i`, Python rewrites, `git apply
-<file>`), commits and hooks that never fired are therefore reviewed even though no capture exists
-for them.
+`.git/info/exclude`, a repository `core.excludesFile` and your global Git ignore file). Because the
+base is a commit, uncommitted or untracked work that was already there when the task started is
+included too. A header lists every changed file with its line counts and says which files were not
+shown. Script edits (`sed -i`, Python rewrites, `git apply <file>`), commits and hooks that never
+fired are therefore reviewed even though no capture exists for them.
 
 The directory is the one the check's own connection named: the project directory Claude Code started
 the Yoetz MCP bridge in, or the working directory of `yoetz check`. The service reads that directory
-only when it resolves to the task's own repository, and never runs a shell, hook, external diff,
-credential helper or network transport. The task-start commit is recorded when `start` creates the
-task. A task created before this version, or from a connection that named no workspace, has none;
-its checks show the change against HEAD and report `check_time_change_base_unavailable`, because
-commits made earlier in the task may be missing. It needs no content profile or hook: with only the
-structural profile, or with plugin-directory loading on macOS, the check still reads the change from
-the repository. The capture honours the review recipe and privacy policy like any other excerpt:
-credential-like spans are redacted first (`check_time_change_redacted`), every part still passes the
-never-send scan, and a change larger than the packet reports `check_time_change_truncated`. The
-capture is `check_time_change_unavailable` for a linked Git worktree (its `.git` is a file), a
-group- or world-writable repository root, a repository whose `.git/config` has `include` or `filter`
-sections, or a partial clone. A replayed or resumed check reviews the change captured when it first
-ran, not the tree as it is later. `yoetz service diagnostics` counts the parts that reached the
-packet as `semantic_check_change_parts_selected`.
+only when it resolves to the task's own repository, and never runs a shell, hook, filter, external
+diff, credential helper or network transport. The task-start commit is recorded when `start` creates
+the task. A task created before this version, or from a connection that named no workspace, has
+none; its checks show the change against HEAD and report `check_time_change_base_unavailable`,
+because commits made earlier in the task may be missing. It needs no content profile or hook: with
+only the structural profile, or with plugin-directory loading on macOS, the check still reads the
+change from the repository. The capture honours the review recipe and privacy policy like any other
+excerpt, as `repository_excerpt` items: a policy whose inference channel does not allow that
+category never sends them, and the check reports `semantic_review_context_withheld`. Credential-like
+spans are redacted first (`check_time_change_redacted`), every part still passes the never-send
+scan, files named like credentials (`.env`, `.env.*`, `.netrc`, `*.pem`, `*.key` and similar, a name
+heuristic) are listed by name only, and a change larger than the packet reports
+`check_time_change_truncated`. The whole capture has 20 seconds. It is
+`check_time_change_unavailable` for a linked Git worktree (its `.git` is a file), a group- or
+world-writable repository root, a repository whose effective Git config defines a filter or an
+include (for example a repository-local Git LFS or git-crypt setup), a partial clone, or Git older
+than 2.26. A replayed or resumed check reviews the change captured when it first ran, not the tree
+as it is later. `yoetz service diagnostics` counts the parts that reached the packet as
+`semantic_check_change_parts_selected`.
 
 ## Background semantic advice controls
 
