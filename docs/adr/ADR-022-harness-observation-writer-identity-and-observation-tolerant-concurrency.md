@@ -683,9 +683,13 @@ identical recheck.
 
 **Decision.** A finding is an *observation limitation* when its readable projection row was
 recorded by a service-stamped observation-authored `finding_recorded` (decision 2's four-fact
-authorship test) and its kind's closed `actionable` trait is false
-(`kernel/projections.is_observation_limitation`). The decision is structural; no finding id is
-special-cased, and an unreadable row is conservatively not a limitation.
+authorship test) and its kind is deliberately classified as a limitation: it is in the explicit
+allowlist `kernel/projections.OBSERVATION_LIMITATION_KINDS` (only `ledger_stale_or_incomplete`) and
+its closed `actionable` trait is false (`kernel/projections.is_observation_limitation`). The
+decision is structural; no finding id is special-cased, and an unreadable row is conservatively not
+a limitation. The allowlist, not the generic trait, is the authority: a finding kind added or
+reclassified as non-actionable later stays response work, and keeps superseding a check when
+answered, until a change adds it to the allowlist with its own rationale.
 
 1. An observation limitation is never response work. `unanswered_finding_count`, the compact
    `unanswered_findings` preview, `closure_readiness.findings_unanswered`, and the durable SQLite
@@ -693,7 +697,10 @@ special-cased, and an unreadable row is conservatively not a limitation.
 2. An `acknowledged` or `provenance_disputed` response to an observation limitation does not
    supersede a recorded check: neither disposition is scored by a local policy pack, so a recheck
    cannot change the result. A `rejected` or `waived` response to it, and any response to another
-   finding the check did not return, remain material (issue #911 open question 1). The reducer
+   finding the check did not return, remain material (issue #911 open question 1): the
+   work-integrity and research-evidence packs score those dispositions, so the recheck is
+   productive (an unsupported rejection of the advisory returns `questionable_finding_rejection`).
+   The reducer
    applies this through `ReplayIndex.observation_finding_event_ids`; receipts, receipt capacity, and
    compact status coverage apply the same predicate over the accepted records, so status and
    receipts cannot disagree. The attributable suffix still carries

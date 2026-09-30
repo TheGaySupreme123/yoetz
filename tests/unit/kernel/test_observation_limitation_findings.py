@@ -9,8 +9,11 @@ an unscored acknowledgement of such a row keeps a check attributable, and nothin
 
 from __future__ import annotations
 
+from types import MappingProxyType
+
 import pytest
 
+import yoetz.kernel.projections as projections
 from yoetz.domain.events import ResponseRecordedPayload
 from yoetz.domain.findings import (
     FINDING_KIND_TRAITS,
@@ -21,7 +24,11 @@ from yoetz.domain.findings import (
     WaiverScope,
 )
 from yoetz.domain.values import Frontier, event_id, finding_id, timestamp_from_string
-from yoetz.kernel.projections import FindingProjectionRecord, is_observation_limitation
+from yoetz.kernel.projections import (
+    OBSERVATION_LIMITATION_KINDS,
+    FindingProjectionRecord,
+    is_observation_limitation,
+)
 from yoetz.kernel.reducers import supersedes_recorded_check
 from yoetz.protocol.coverage import (
     ArtifactObservation,
@@ -38,6 +45,22 @@ _FINDING_ID = finding_id("fnd_00000000-0000-4000-8000-000000000911")
 _SOURCE_EVENT_ID = event_id("evt_00000000-0000-4000-8000-000000000911")
 
 
+_RESEARCH_EVIDENCE_KINDS = frozenset(
+    {
+        FindingKind.EVIDENCE_DOES_NOT_SUPPORT_CLAIM,
+        FindingKind.DIFF_DOES_NOT_MATCH_ACCOUNT,
+        FindingKind.MATERIAL_LIMITATION_OMITTED,
+        FindingKind.QUESTIONABLE_FINDING_REJECTION,
+    }
+)
+
+
+def _policy_id(kind: FindingKind) -> str:
+    if kind is FindingKind.COORDINATION_OVERLAP:
+        return "coordination"
+    return "research-evidence" if kind in _RESEARCH_EVIDENCE_KINDS else "work-integrity"
+
+
 def _finding(kind: FindingKind) -> Finding:
     return Finding(
         finding_id=_FINDING_ID,
@@ -47,7 +70,7 @@ def _finding(kind: FindingKind) -> Finding:
         summary="Observation coverage is incomplete or stale",
         detail="Source lag, mapping, or drain gaps prevent complete observation",
         subject_refs=(event_id("evt_00000000-0000-4000-8000-000000000001"),),
-        policy_id="work-integrity",
+        policy_id=_policy_id(kind),
         policy_version="0.1.0",
         subject_frontier=Frontier(1, _DIGEST),
         coverage=Coverage(
@@ -100,6 +123,41 @@ def test_only_a_readable_non_actionable_observation_authored_row_is_a_limitation
     assert not is_observation_limitation(
         _record(FindingKind.LEDGER_STALE_OR_INCOMPLETE, readable=False), observed
     )
+
+
+def test_the_limitation_kinds_are_an_explicit_non_actionable_allowlist() -> None:
+    """Only the kinds deliberately classified as disclosed limitations can ever qualify."""
+
+    assert OBSERVATION_LIMITATION_KINDS == frozenset({FindingKind.LEDGER_STALE_OR_INCOMPLETE})
+    assert all(not FINDING_KIND_TRAITS[kind][1] for kind in OBSERVATION_LIMITATION_KINDS)
+
+
+@pytest.mark.parametrize(
+    "kind", tuple(kind for kind in FindingKind if kind not in OBSERVATION_LIMITATION_KINDS)
+)
+def test_an_unclassified_non_actionable_observation_kind_stays_response_work(
+    kind: FindingKind, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A kind that later becomes non-actionable is response work until deliberately classified.
+
+    Being non-actionable is necessary but not sufficient: a future observation-origin kind could
+    still need an answer or a scored recheck, so the generic trait alone never admits it.
+    """
+
+    traits = dict(FINDING_KIND_TRAITS)
+    traits[kind] = (FINDING_KIND_TRAITS[kind][0], False)
+    monkeypatch.setattr(projections, "FINDING_KIND_TRAITS", MappingProxyType(traits))
+    assert not is_observation_limitation(_record(kind), frozenset({_SOURCE_EVENT_ID}))
+
+
+def test_a_classified_kind_that_becomes_actionable_stops_being_a_limitation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kind = FindingKind.LEDGER_STALE_OR_INCOMPLETE
+    traits = dict(FINDING_KIND_TRAITS)
+    traits[kind] = (FINDING_KIND_TRAITS[kind][0], True)
+    monkeypatch.setattr(projections, "FINDING_KIND_TRAITS", MappingProxyType(traits))
+    assert not is_observation_limitation(_record(kind), frozenset({_SOURCE_EVENT_ID}))
 
 
 @pytest.mark.parametrize(

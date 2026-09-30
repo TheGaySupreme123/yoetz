@@ -5337,13 +5337,15 @@ async def test_rejecting_the_observation_advisory_after_the_check_stays_material
 
     A rejection can raise a later weak-response or questionable-rejection finding, so it still
     supersedes the check exactly like any other response to a finding the check did not return.
+    The recheck it requires is productive: it scores the unsupported rejection, which the stale
+    check could not have reported (ADR-022, observation-authored limitation findings, item 2).
     """
 
     seed = 9310
     app, runtime, _ = _build_app(seed_offset=93)
-    started, advisory, _checked = await _kombu_shape(app, runtime, seed=seed)
+    started, advisory, checked = await _kombu_shape(app, runtime, seed=seed)
     head = (await _compact(app, started, seed + 30)).subject_frontier
-    await app.respond(
+    rejected = await app.respond(
         RespondRequest.model_validate(
             {
                 **_request_base(protocol_id("req_", seed + 31)),
@@ -5363,6 +5365,23 @@ async def test_rejecting_the_observation_advisory_after_the_check_stays_material
     ledger, _objects = next(iter(runtime.resources.values()))
     records = tuple([record async for record in ledger.load_events(started.session_id)])
     assert "check_not_applicable" in receipt_gap_codes(replay(records), records)
+
+    rechecked = await app.check(
+        CheckRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 50)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(rejected.result_frontier),
+                "mode": "deterministic_only",
+                "max_findings": "10",
+            }
+        )
+    )
+    assert type(rechecked) is CheckCommitResult, f"unexpected nonterminal check: {type(rechecked)}"
+    scored = FindingKind.QUESTIONABLE_FINDING_REJECTION
+    assert scored not in {item.kind for item in checked.findings}
+    assert scored in {item.kind for item in rechecked.findings}
 
 
 async def test_acknowledging_a_semantic_finding_at_the_current_frontier_counts_later_evidence() -> (

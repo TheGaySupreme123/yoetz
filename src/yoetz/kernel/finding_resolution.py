@@ -22,13 +22,7 @@ from typing import Final
 
 from yoetz.domain.coordination import CoordinationGapCode
 from yoetz.domain.events import CheckRecordedPayload, ClaimKind, LedgerRecord, RequestedItemKind
-from yoetz.domain.findings import (
-    FINDING_KIND_TRAITS,
-    Finding,
-    FindingKind,
-    FindingOrigin,
-    ResponseDisposition,
-)
+from yoetz.domain.findings import Finding, FindingKind, FindingOrigin, ResponseDisposition
 from yoetz.domain.receipts import (
     OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
     OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP,
@@ -48,6 +42,7 @@ from yoetz.kernel.projections import (
     FindingProjectionRecord,
     ProjectionState,
     is_observation_limitation,
+    is_observation_limitation_kind,
     observation_finding_event_ids,
 )
 from yoetz.protocol.coverage import LedgerFreshness
@@ -607,7 +602,7 @@ def finding_resolution_explanation(
     if (
         finding_record is None
         or finding_record.payload is None
-        or FINDING_KIND_TRAITS[finding_record.payload.kind][1]
+        or not is_observation_limitation_kind(finding_record.payload.kind)
         or finding_is_resolved(state, finding_id)
     ):
         return explanation

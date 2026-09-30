@@ -1194,10 +1194,12 @@ publishing new cooperative work on the participant's behalf. An observation-auth
 `finding_recorded` still invalidates the older check. An `acknowledged` or `provenance_disputed`
 response to an observation-authored, non-actionable finding
 (`kernel/projections.is_observation_limitation`: the service-stamped observation coordinator
-authored its record and its kind's closed `actionable` trait is false) also keeps the check
-attributable: no check returns such a disclosed limitation, no local pack scores those
-dispositions, and a recheck could not change the result (#911). A rejection or waiver of that
-finding, and every response to any other finding the check did not return, still revokes it.
+authored its record, and its kind is in the explicit allowlist `OBSERVATION_LIMITATION_KINDS` and
+its closed `actionable` trait is false) also keeps the check attributable: no check returns such a
+disclosed limitation, no local pack scores those dispositions, and a recheck could not change the
+result (#911). A kind outside the allowlist stays response work even when it is not actionable. A
+rejection or waiver of that finding, which the local packs score, and every response to any other
+finding the check did not return, still revokes it.
 `check_current_as_of_earlier_frontier` is the qualified attribution in this family: when only
 check-answering responses, such limitation acknowledgements, and/or finding-free observation
 records follow the check, its coverage still contributes while the receipt names the subject
@@ -6005,7 +6007,8 @@ no_obligations_reason, blocking_conditions)` beside `import_status`, on every vi
 `unanswered_finding_count` counts recorded findings with no recorded response, whatever a later
 response's disposition; a rejection, waiver, or provenance dispute answers the finding on the
 record and its own quality surfaces as a later finding. An observation-authored, non-actionable
-finding (for example the "Observation coverage is incomplete or stale" advisory, including rows
+finding of an allowlisted limitation kind (`is_observation_limitation`; for example the
+"Observation coverage is incomplete or stale" advisory, including rows
 recorded by earlier builds) is a disclosed coverage limitation, not response work: it never counts
 here or in the compact `unanswered_findings` preview, so it never sets `findings_unanswered`. It
 stays in `view=findings` with its own disposition and an explanation that names it a limitation,
