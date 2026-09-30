@@ -8,7 +8,14 @@ from typing import cast
 import pytest
 
 from yoetz.config.load import load_config
-from yoetz.config.models import ConfigError, ObservationConfig, YoetzConfig
+from yoetz.config.models import (
+    BackgroundAdviceSetting,
+    ConfigError,
+    ObservationConfig,
+    VerificationConfig,
+    YoetzConfig,
+    background_advice_setting,
+)
 from yoetz.config.write import (
     render_config_toml,
     write_config_toml,
@@ -129,3 +136,98 @@ def test_advice_interval_rejects_invalid_values(interval: object) -> None:
         ObservationConfig.model_validate(
             {"semantic_advice_min_interval_seconds": interval}, strict=True
         )
+
+
+# --- Background advice default (issue #888, maintainer decision 2026-09-30) -----------------
+
+
+@pytest.mark.parametrize("semantic", ["required", "optional"])
+def test_background_advice_is_on_by_default_where_ai_powered_review_is_configured(
+    semantic: str,
+) -> None:
+    config = YoetzConfig(verification=VerificationConfig(semantic=semantic))  # type: ignore[arg-type]
+
+    assert config.observation.semantic_advice_enabled is None
+    assert background_advice_setting(config) == BackgroundAdviceSetting(True, "default_enabled")
+
+
+@pytest.mark.parametrize(
+    ("chosen", "expected"),
+    [
+        (True, BackgroundAdviceSetting(True, "owner_enabled")),
+        (False, BackgroundAdviceSetting(False, "owner_disabled")),
+    ],
+)
+def test_an_explicit_owner_choice_always_wins(
+    chosen: bool, expected: BackgroundAdviceSetting
+) -> None:
+    config = YoetzConfig(observation=ObservationConfig(semantic_advice_enabled=chosen))
+
+    assert background_advice_setting(config) == expected
+
+
+def test_nothing_to_enable_when_review_or_observation_is_off() -> None:
+    no_review = YoetzConfig(
+        verification=VerificationConfig(semantic="disabled"),
+        observation=ObservationConfig(semantic_advice_enabled=True),
+    )
+    no_observation = YoetzConfig(
+        observation=ObservationConfig(enabled=False, semantic_advice_enabled=True)
+    )
+
+    assert background_advice_setting(no_review) == BackgroundAdviceSetting(
+        False, "semantic_review_disabled"
+    )
+    assert background_advice_setting(no_observation) == BackgroundAdviceSetting(
+        False, "observation_disabled"
+    )
+
+
+def test_unset_switch_is_never_persisted_and_turning_it_back_on_round_trips(
+    tmp_path: Path,
+) -> None:
+    """Writing a default config must not freeze today's default as an owner choice."""
+
+    rendered = render_config_toml(YoetzConfig())
+    assert "semantic_advice_enabled" not in rendered
+    assert tomllib.loads(rendered)["observation"] == {
+        "enabled": True,
+        "semantic_advice_min_interval_seconds": 180,
+    }
+    validate_schema_instance("yoetz-config", "1.3.0", cast(JsonValue, tomllib.loads(rendered)))
+
+    # The reverse state: the owner turns background advice back on, and it stays on.
+    enabled = YoetzConfig(observation=ObservationConfig(semantic_advice_enabled=True))
+    path = write_config_toml(enabled, path=tmp_path / "config.toml")
+    assert "semantic_advice_enabled = true" in path.read_text(encoding="utf-8")
+    loaded = load_config({}, {}, path)
+    assert loaded == enabled
+    assert background_advice_setting(loaded) == BackgroundAdviceSetting(True, "owner_enabled")
+
+
+@pytest.mark.parametrize("semantic", ["required", "optional"])
+def test_upgraded_config_without_the_switch_keeps_advice_on_and_an_explicit_false_turns_it_off(
+    tmp_path: Path, semantic: str
+) -> None:
+    """Upgrade shape (#888): a stored config that never named the switch resolves to the default.
+
+    Both ``optional`` and ``required`` resolve on (maintainer decision, 2026-09-30), so an
+    upgraded installation keeps background advice; an owner's explicit ``false`` turns it off and
+    stays off.
+    """
+
+    config = YoetzConfig(verification=VerificationConfig(semantic=semantic))  # type: ignore[arg-type]
+    unset = write_config_toml(config, path=tmp_path / "unset.toml")
+    assert "semantic_advice_enabled" not in unset.read_text(encoding="utf-8")
+    assert background_advice_setting(load_config({}, {}, unset)) == BackgroundAdviceSetting(
+        True, "default_enabled"
+    )
+
+    off = write_config_toml(
+        config.model_copy(update={"observation": ObservationConfig(semantic_advice_enabled=False)}),
+        path=tmp_path / "off.toml",
+    )
+    assert "semantic_advice_enabled = false" in off.read_text(encoding="utf-8")
+    assert background_advice_setting(load_config({}, {}, off)) == BackgroundAdviceSetting(
+        False, "owner_disabled"
+    )

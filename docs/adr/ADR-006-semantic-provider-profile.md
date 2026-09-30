@@ -786,6 +786,43 @@ retained usage and a usage-unknown count in status or diagnostics would need a b
 wire change and remain open on #923. The same service behavior applies to Codex, Claude Code and
 Cursor on macOS, Linux and Windows through WSL 2.
 
+### Background advice default and owner switch (2026-09-30, issue #888)
+
+Decision (maintainer, 2026-09-30): background advice is **on by default** wherever AI-powered
+review is configured, for both `verification.semantic` `optional` and `required`. This settles
+the default #923 left to #888: its option B off-by-default proposal is declined, and `optional`
+and `required` resolve the same way. A dedicated advice purpose and prompt (#923 option A)
+remains open.
+
+`observation.semantic_advice_enabled` is tri-state: unset means the product default (on), and an
+explicit `true` or `false` always wins, so `false` is the owner's way to turn background advice
+off. `background_advice_setting` resolves the effective switch and one closed reason:
+`owner_enabled`, `default_enabled`, `owner_disabled`, `semantic_review_disabled` or
+`observation_disabled`; only `owner_enabled` and `default_enabled` accompany an enabled switch.
+The service composes the background scheduler and dispatch only when it is enabled, and provider
+readiness (issue #923) still gates every build and dispatch. The config writer persists the
+setting only when the owner set it, so a written default never turns into an apparent owner
+choice and a configuration without the line, including one upgraded from 0.2.5, keeps advice on.
+`yoetz provider status` (`background_advice`), `yoetz setup status --next`
+(`facts.background_advice`) and the terminal interface status layer show the effective state and
+reason with fixed text. The default-on text names `false` as the way to turn it off; only the
+owner-disabled text names `true` (or removing the line) as the way back.
+
+The setup wizard reports `semantic_advice_ready` only when the provider is ready and background
+advice is on, and its human summary renders the same fixed text for `background_advice_off:<reason>`
+otherwise. While the provider is not ready the note is the configuration-incomplete case whatever
+the advice fact says. Only once it is ready, a status whose advice fact is absent or malformed,
+carries a reason this client does not recognize, or carries a reason that contradicts `enabled` is
+`background_advice_unreadable` and renders as not demonstrated because the setting could not be
+read. The summary renders every readiness note in fixed words and never prints a note token.
+
+While the switch resolves off, the service still wires a closing dispatch: startup rediscovery
+closes a row an earlier service left `pending` as `cancelled` / `cancelled` with no provider
+identity and no route, authority or provider work, so it neither stays pending nor is replayed if
+the owner later turns advice back on. This supersedes the #888 statement that re-enabling lets
+such work drain. The same resolution applies to Codex, Claude Code and Cursor on macOS, Linux and
+Windows through WSL 2.
+
 ### Unassessable content and repair-first feedback (issue #885)
 
 The existing `insufficient_packet` judgment is the nonblocking outcome when missing content

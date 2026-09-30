@@ -140,9 +140,10 @@ Approved-check policy trusted       Deeper-review evaluator composed
                                     Deeper review ready
                                     Codex agent route permits deeper review
                                     Host auto-review admits the AI-powered check
+                                    Background AI-powered advice
 ```
 
-The last four are deliberately separate lines, because each can be true while the others are not:
+The last five are deliberately separate lines, because each can be true while the others are not:
 
 - **Privacy permits external review** — the effective privacy policy for this repository allows
   external LLM inference. Unknown when the policy could not be read; its detail line carries the
@@ -158,6 +159,10 @@ The last four are deliberately separate lines, because each can be true while th
 - **Host auto-review admits the AI-powered check** — whether at least one host's automatic reviewer
   has been admitted for this repository; the detail names each host as present or absent, and a
   stale admission that outlives its grant or route is called out for revocation.
+- **Background AI-powered advice** — whether AI-powered advice between checks is switched on, and
+  why. It is on by default wherever AI-powered review is configured; the detail names the
+  `[observation]` setting that turns it off, or turns it back on after you switched it off. When
+  on it is still shown as unproven, because it runs only while a provider is usable.
 
 "Connected" is never a substitute for any of these. If the privacy policy could not be read,
 `/status` says so rather than claiming nothing is leaving your computer.

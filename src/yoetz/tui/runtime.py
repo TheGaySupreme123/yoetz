@@ -112,6 +112,13 @@ def _host_admission_detail(provider: ProviderPosture) -> str:
     return summary
 
 
+def _background_advice_detail(provider: ProviderPosture) -> str:
+    from yoetz.cli.provider_status import background_advice_human_line
+
+    line = background_advice_human_line({"reason": provider.background_advice_reason})
+    return "the configured setting could not be read" if line is None else line
+
+
 def _mapping(value: object) -> Mapping[str, object]:
     """Narrow an untyped service payload to a string-keyed mapping, or nothing.
 
@@ -1315,9 +1322,18 @@ class YoetzRuntime:
             for host in ("claude", "codex", "cursor")
             if host in admission_map
         )
+        advice_map = _mapping(report.get("background_advice"))
+        raw_advice_enabled = advice_map.get("enabled")
+        raw_advice_reason = advice_map.get("reason")
         return ProviderPosture(
             agent_route_semantic_ready=(
                 raw_agent_ready if isinstance(raw_agent_ready, bool) else None
+            ),
+            background_advice_enabled=(
+                raw_advice_enabled if isinstance(raw_advice_enabled, bool) else None
+            ),
+            background_advice_reason=(
+                raw_advice_reason if isinstance(raw_advice_reason, str) else None
             ),
             registered_route_profile=cast(str | None, route_map.get("registered_profile")),
             route_drift_since_install=route_map.get("drift_since_install") is True,
@@ -1715,6 +1731,20 @@ class YoetzRuntime:
                 "Host auto-review admits the AI-powered check",
                 _host_admission_layer_state(provider),
                 detail=_host_admission_detail(provider),
+            ),
+            # The owner's background-advice switch (issue #888). Even when on it is only
+            # unproven: the service schedules advice only while a provider is usable (#923).
+            ReadinessLayer(
+                "background_advice",
+                "Background AI-powered advice",
+                LayerState.UNKNOWN
+                if provider.background_advice_enabled is None
+                else (
+                    LayerState.UNPROVEN
+                    if provider.background_advice_enabled
+                    else LayerState.NOT_CONFIGURED
+                ),
+                detail=_background_advice_detail(provider),
             ),
         )
 

@@ -31,7 +31,7 @@ from yoetz.adapters.sqlite.migrations import (
     initialize_catalog,
 )
 from yoetz.application.service import ClientProjectionContext, ControlProjectionBinding
-from yoetz.config.models import VerificationConfig, YoetzConfig
+from yoetz.config.models import ObservationConfig, VerificationConfig, YoetzConfig
 from yoetz.config.write import fireworks_provider
 from yoetz.domain.host_lineage import host_lineage_from_payload
 from yoetz.domain.observation import (
@@ -3003,11 +3003,13 @@ async def test_background_advice_is_admitted_only_while_a_provider_is_usable(
     initialize = memory.capture(SecretPurpose.VAULT_INITIALIZE, bytearray(b"correct horse battery"))
     await vault.initialize_passphrase(initialize, "sha256:" + "f" * 64)
     provider = fireworks_provider(model="accounts/fireworks/models/minimax-m3")
-    # The benchmark's arm B: review required by default, nothing bound, local-only policy.
+    # The benchmark's arm B: review required by default, nothing bound, local-only policy. The
+    # owner's explicit ``true`` keeps background advice on whatever the default (#888).
     config = YoetzConfig(
         profile="local-openai" if provider_bound else "strict-local",
         provider=provider if provider_bound else None,
         verification=VerificationConfig(semantic="required"),
+        observation=ObservationConfig(semantic_advice_enabled=True),
     )
     factory = build_ready_application_factory(
         lifecycle=lifecycle,
@@ -3417,6 +3419,130 @@ async def test_background_advice_readiness_follows_the_primary_only_dispatch(
         )
     finally:
         db.close()
+        if app is not None:
+            await app.close()
+        await vault.close()
+        memory.close()
+        await lifecycle.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("semantic", "chosen", "scheduled"),
+    [
+        ("required", None, True),
+        ("optional", None, True),
+        ("required", True, True),
+        ("required", False, False),
+        ("optional", False, False),
+    ],
+)
+async def test_background_advice_is_on_by_default_and_an_owner_false_turns_it_off(
+    tmp_path: Path,
+    semantic: str,
+    chosen: bool | None,
+    scheduled: bool,
+) -> None:
+    """Issue #888 (maintainer decision 2026-09-30): background advice is on by default.
+
+    Without an owner choice the composed service wires the background scheduler wherever
+    AI-powered review is configured; an explicit ``false`` wires neither the scheduler nor its
+    dispatch, even with a bound provider, and closes rows an earlier service left pending.
+    """
+
+    tmp_path.chmod(0o700)
+    clock = _Clock()
+    memory = LocalSecretMemory()
+    lifecycle = ServiceLifecycle(
+        clock,
+        generation_store=_GenerationStore(),
+        process_start_identity_commitment="sha256:" + "d" * 64,
+        instance_id=_INSTANCE_ID,
+    )
+    await lifecycle.acquire_singleton()
+    await lifecycle.transition(ServiceState.LOCKED)
+    vault = VaultService(
+        installation_id=_INSTALLATION_ID,
+        service_generation=1,
+        mode=VaultMode.UNINITIALIZED,
+        secret_memory=memory,
+        clock=clock,
+        vault_store_factory=lambda: EncryptedVaultStore(tmp_path / "vault"),
+        pristine_state_digest="sha256:" + "e" * 64,
+    )
+    initialize = memory.capture(SecretPurpose.VAULT_INITIALIZE, bytearray(b"correct horse battery"))
+    await vault.initialize_passphrase(initialize, "sha256:" + "f" * 64)
+    config = YoetzConfig(
+        profile="local-openai",
+        provider=fireworks_provider(model="accounts/fireworks/models/minimax-m3"),
+        verification=VerificationConfig(semantic=cast(Any, semantic)),
+        observation=ObservationConfig(semantic_advice_enabled=chosen),
+    )
+    factory = build_ready_application_factory(
+        lifecycle=lifecycle,
+        vault=vault,
+        config=config,
+        paths=_Paths(tmp_path),
+        clock=clock,
+        secret_memory=memory,
+        diagnostics=_Diagnostics(),
+    )
+    app = None
+    try:
+        context = await factory.context_provider(1, vault.generation)
+        assert context.rediscover_pending_verification is not None
+        coordinator: object = getattr(context.rediscover_pending_verification, "__self__")
+        scheduler = getattr(coordinator, "advice_context_builder").semantic_scheduler
+        dispatch = getattr(coordinator, "advice_semantic_dispatch")
+        app = await factory.open(context)
+        assert (scheduler is not None) is scheduled
+        if scheduled:
+            return
+        # Advice is off: a row an earlier service left pending is closed at startup drain as
+        # cancelled with no provider identity (nothing sent), never held for later replay.
+        from yoetz.adapters.sqlite.migrations import initialize_bundle
+        from yoetz.adapters.sqlite.observation_advice_semantic import (
+            SqliteObservationAdviceSemanticRepository,
+        )
+        from yoetz.application.observation_advice_semantic import (
+            ObservationAdviceSemanticWorker,
+        )
+
+        db = apsw.Connection(":memory:")
+        try:
+            initialize_bundle(db, {"task_id": "tsk_advice", "owner_generation": "1"})
+            repository = SqliteObservationAdviceSemanticRepository(db)
+            repository.schedule(
+                workspace="hmac-sha256:" + "a" * 64,
+                yoetz_session_id="ses_00000000-0000-4000-8000-000000000888",
+                basis_digest="queued-by-an-older-service",
+                subject_digest="sha256:" + "c" * 64,
+                coverage_gaps=(),
+                packet_json=b"{}",
+                enqueued_at="2026-07-21T17:00:00.000Z",
+                max_pending=16,
+            )
+            worker = ObservationAdviceSemanticWorker(
+                repository=repository,
+                dispatch=dispatch,
+                service_generation=1,
+                lease_owner="svc-1",
+                now=lambda: "2026-07-21T18:00:00.000Z",
+                lease_expires_at=lambda: "2026-07-21T18:02:00.000Z",
+            )
+            closed = await worker.run_once()
+            assert closed is not None
+            row = repository.lookup(
+                yoetz_session_id="ses_00000000-0000-4000-8000-000000000888",
+                basis_digest="queued-by-an-older-service",
+            )
+            assert row is not None
+            assert (row.status, row.failure_reason) == ("cancelled", "cancelled")
+            assert (row.provider_identity, row.attempt_receipt) == (None, None)
+            assert repository.list_pending_workspaces() == ()
+        finally:
+            db.close()
+    finally:
         if app is not None:
             await app.close()
         await vault.close()

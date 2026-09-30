@@ -262,3 +262,49 @@ def test_module_continuation_preserves_venv_interpreter_spelling(
         "setup",
         "vault",
     ]
+
+
+@pytest.mark.parametrize("json_output", [True, False])
+def test_setup_status_next_names_the_background_advice_setting(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    json_output: bool,
+) -> None:
+    """Issue #888: setup status shows the effective background-advice state and its reason."""
+
+    from yoetz.config import load as config_load
+    from yoetz.config.models import YoetzConfig
+
+    async def ready(_project: Path, _operation: str) -> dict[str, JsonValue]:
+        return {"service": {"reachable": True, "state": "ready", "vault_mode": "passphrase"}}
+
+    monkeypatch.setattr(module, "installation_readiness", ready)
+    monkeypatch.setattr(module, "isolated_root", lambda: None)
+
+    def _load(*_args: object) -> YoetzConfig:
+        return YoetzConfig()
+
+    monkeypatch.setattr(config_load, "load_config", _load)
+    module.setup_next(
+        operation="review",
+        host=None,
+        executable=None,
+        config_root=None,
+        project=tmp_path,
+        route="policy",
+        json_output=json_output,
+    )
+    output = capsys.readouterr().out
+    if json_output:
+        report = json.loads(output)
+        validate_schema_instance("setup-readiness", "1.0.0", report)
+        assert report["facts"]["background_advice"] == {
+            "enabled": True,
+            "reason": "default_enabled",
+        }
+    else:
+        assert "Background AI-powered advice: on by default" in output
+        # The reverse switch is named; the turn-on hint belongs only to an owner's ``false``.
+        assert "semantic_advice_enabled = false" in output
+        assert "= true" not in output

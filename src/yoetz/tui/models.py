@@ -397,6 +397,10 @@ class ProviderPosture:
     # reviewer (issue #467): ``absent|present|partial|foreign|unknown`` per host. Host tool-call
     # authorization only; never a claim that a check dispatched.
     host_admission: tuple[tuple[str, str], ...] = ()
+    # The effective ``[observation] semantic_advice_enabled`` switch and its closed reason
+    # (issue #888). ``None`` means the report did not carry it, never that advice is on.
+    background_advice_enabled: bool | None = None
+    background_advice_reason: str | None = None
 
 
 class CheckMode(Enum):

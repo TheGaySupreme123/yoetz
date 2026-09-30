@@ -159,6 +159,7 @@ from yoetz.config.models import (
     ExternalRuntimeProfileConfig,
     ProviderProfileConfig,
     YoetzConfig,
+    background_advice_setting,
     fallback_external_endpoint,
     primary_external_endpoint,
 )
@@ -5702,14 +5703,23 @@ async def provide_service_ready_context(
     advice_semantic_supervisor = ObservationAdviceSemanticSupervisor(
         service_generation=service_generation
     )
-    # The owner's switches decide whether background advice exists at all; provider readiness is
-    # re-read per build and per dispatch (#923). A credential or channel change takes effect on
-    # the next observation; a binding change recomposes the service, never the host session.
-    advice_semantic_enabled = (
-        semantic_configured
-        and config.observation.enabled
-        and config.observation.semantic_advice_enabled
-    )
+    # The owner's switches decide whether background advice exists at all: on by default where
+    # AI-powered review is configured, an explicit setting always wins (#888). Provider readiness
+    # is re-read per build and per dispatch (#923). A credential or channel change takes effect
+    # on the next observation; a binding change recomposes the service, never the host session.
+    advice_semantic_enabled = background_advice_setting(config).enabled
+
+    async def _close_disabled_observation_advice_semantic(
+        _attempt: ObservationAdviceSemanticAttempt,
+    ) -> ObservationAdviceSemanticOutcome:
+        """Close a row an earlier service queued while background advice is now off (#888).
+
+        Startup rediscovery drains such rows here with no route, authority or provider work.
+        ``cancelled`` with no provider identity records that nothing was sent, and re-enabling
+        advice later never replays a packet queued under the old setting.
+        """
+
+        return ObservationAdviceSemanticOutcome(status="cancelled", failure_reason="cancelled")
 
     async def _advice_semantic_route_ready(yoetz_session_id: str) -> bool:
         """The route leg of background advice admission (#923).
@@ -6284,7 +6294,9 @@ async def provide_service_ready_context(
         verification_supervisor=verification_supervisor,
         advice_semantic_supervisor=advice_semantic_supervisor,
         advice_semantic_dispatch=(
-            _dispatch_observation_advice_semantic if advice_semantic_enabled else None
+            _dispatch_observation_advice_semantic
+            if advice_semantic_enabled
+            else _close_disabled_observation_advice_semantic
         ),
         advice_semantic_cancellation_reconciler=_reconcile_cancelled_observation_advice_semantic,
         observation_enabled=config.observation.enabled,

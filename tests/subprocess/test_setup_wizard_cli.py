@@ -434,6 +434,8 @@ def _wire_composed_provider_setup(
             "llm_inference_enabled": True,
             "repository_grant_state": "granted",
             "blockers": blockers,
+            # The owner turned background advice on; the default-off case is unit-tested (#888).
+            "background_advice": {"enabled": True, "reason": "owner_enabled"},
         }
 
     async def set_credential(

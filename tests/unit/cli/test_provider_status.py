@@ -1217,3 +1217,56 @@ async def test_applied_route_foreign_never_reports_drift(
     assert route["observed"] is True
     assert route["applied_profile"] == "policy"
     assert route["drift_since_install"] is False
+
+
+@pytest.mark.parametrize(
+    ("semantic", "chosen", "enabled", "reason"),
+    [
+        ("required", None, True, "default_enabled"),
+        ("optional", None, True, "default_enabled"),
+        ("required", True, True, "owner_enabled"),
+        ("optional", False, False, "owner_disabled"),
+        ("disabled", True, False, "semantic_review_disabled"),
+    ],
+)
+async def test_background_advice_reports_the_effective_switch_and_its_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    semantic: str,
+    chosen: bool | None,
+    enabled: bool,
+    reason: str,
+) -> None:
+    """Issue #888: status names whether background advice is on and why, in fixed words."""
+
+    from yoetz.config.models import ObservationConfig
+
+    _install(monkeypatch, tmp_path, semantic=semantic, provider=_provider())
+    config = YoetzConfig(
+        profile="local-openai",
+        provider=_provider(),
+        verification=VerificationConfig(semantic=cast(Any, semantic)),
+        observation=ObservationConfig(semantic_advice_enabled=chosen),
+    )
+
+    def _load(*_args: object) -> YoetzConfig:
+        return config
+
+    monkeypatch.setattr(module, "load_config", _load)
+
+    report = await module.provider_status_report()
+
+    assert report["background_advice"] == {"enabled": enabled, "reason": reason}
+    line = module.background_advice_human_line(report["background_advice"])
+    assert line is not None
+    assert line.startswith("on" if enabled else "off")
+    if reason == "default_enabled":
+        # On by default, and the way to turn it off is named.
+        assert "semantic_advice_enabled = false" in line
+    if reason == "owner_disabled":
+        # The way back is named only where the owner turned it off.
+        assert "set it to true" in line
+    else:
+        assert "true" not in line
+    # Only fixed text renders; an unknown token renders nothing.
+    assert module.background_advice_human_line({"reason": "owner-authored text"}) is None

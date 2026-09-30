@@ -19,10 +19,12 @@ from typing import Final, Literal, cast
 
 from yoetz.config.load import load_config
 from yoetz.config.models import (
+    BackgroundAdviceSetting,
     ConfigError,
     ExternalRuntimeProfileConfig,
     ProviderProfileConfig,
     YoetzConfig,
+    background_advice_setting,
     fallback_external_endpoint,
     primary_external_endpoint,
 )
@@ -35,6 +37,9 @@ from yoetz.service.client import connect_service
 
 __all__ = [
     "MachineScopeError",
+    "BACKGROUND_ADVICE_ON_REASONS",
+    "background_advice_facts",
+    "background_advice_human_line",
     "credential_human_display",
     "host_admission_observation",
     "machine_scope_request",
@@ -91,6 +96,9 @@ def _emit(value: Mapping[str, JsonValue], *, json_output: bool) -> None:
     print(f"repository_grant: {value.get('repository_grant_state')}")
     print(f"repository_migration: {value.get('repository_migration_state')}")
     print(f"semantic_ready: {value.get('semantic_ready')}")
+    advice_line = background_advice_human_line(value.get("background_advice"))
+    if advice_line is not None:
+        print(f"background_advice: {advice_line}")
     route = value.get("mcp_route")
     if isinstance(route, Mapping):
         print(
@@ -163,6 +171,43 @@ def review_budget_human_line(endpoint: object) -> str | None:
             f"output_limit={facts.get('output_limit')} tokens"
         )
     return "; ".join(parts)
+
+
+# Closed reason token -> plain explanation. Only these fixed strings are ever rendered (#888).
+_BACKGROUND_ADVICE_TEXT: Final[Mapping[str, str]] = {
+    "owner_enabled": "on (set in [observation] semantic_advice_enabled); runs only while a "
+    "provider is usable",
+    "default_enabled": "on by default where AI-powered review is configured; runs only while a "
+    "provider is usable; set [observation] semantic_advice_enabled = false to turn it off",
+    "owner_disabled": "off (set to false in [observation] semantic_advice_enabled); set it to "
+    "true, or remove the line, to turn it on",
+    "semantic_review_disabled": "off because [verification] semantic is disabled",
+    "observation_disabled": "off because observation is disabled",
+}
+
+
+# The closed reasons that accompany an enabled switch; every other known reason means off.
+BACKGROUND_ADVICE_ON_REASONS: Final[frozenset[str]] = frozenset(
+    {"owner_enabled", "default_enabled"}
+)
+
+
+def background_advice_facts(config: YoetzConfig) -> dict[str, JsonValue]:
+    """The effective background-advice switch and its closed reason, for status surfaces."""
+
+    setting: BackgroundAdviceSetting = background_advice_setting(config)
+    return {"enabled": setting.enabled, "reason": setting.reason}
+
+
+def background_advice_human_line(value: object) -> str | None:
+    """Render a ``background_advice`` fact with fixed text only; unknown shapes render nothing."""
+
+    if not isinstance(value, Mapping):
+        return None
+    reason = cast(Mapping[str, object], value).get("reason")
+    if type(reason) is not str:
+        return None
+    return _BACKGROUND_ADVICE_TEXT.get(reason)
 
 
 def _admission_state(value: object) -> str:
@@ -983,6 +1028,7 @@ async def provider_status_report(
         "service_state_reason": service_state_reason,
         "readiness_determinable": readiness_determinable,
         "semantic_ready": semantic_ready,
+        "background_advice": background_advice_facts(config),
         "mcp_route": mcp_route,
         "host_admission": host_admission,
         "agent_route_semantic_ready": (
@@ -995,6 +1041,8 @@ async def provider_status_report(
         "next_commands": next_commands,
         "notes": (
             "semantic_ready is structural readiness only; it does not prove live provider dispatch.",
+            "background_advice is the effective [observation] semantic_advice_enabled switch; "
+            "when on, the service still schedules it only while a provider is usable.",
             "credential_connected reports the configured provider's credential, not any provider.",
             "For external_runtime_oauth, READY credential presence is the exact binding, digest, "
             "and dedicated home; ChatGPT login and model availability are proven inside evaluate() "

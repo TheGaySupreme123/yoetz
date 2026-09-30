@@ -79,6 +79,15 @@ reverse-chronological released versions.
   in `structuredContent.text`. Claude Code and the generic host are unchanged. Codex dogfood
   acceptance is pending (#918).
 
+- Background AI-powered observation advice stays on by default wherever AI-powered review is
+  configured (`[verification] semantic` is `required` or `optional`), so upgrading does not change
+  it. `[observation] semantic_advice_enabled` is now an explicit owner choice: `false` turns
+  background advice off and `true` keeps it on whatever the default. Yoetz writes the line only
+  when you set it, so a config without it follows the default. `yoetz provider status`,
+  `yoetz setup status --next` and the terminal interface `/status` show whether it is on and why.
+  While you have it off, rows queued before you switched it off are closed at service start
+  without being sent, so turning it back on never sends old work (#888).
+
 ### Fixed
 
 - A cached 100-row `status` page no longer costs ~2 s. Every page was schema-validated about eleven

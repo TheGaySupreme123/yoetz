@@ -366,6 +366,74 @@ def _append_next_step(next_steps: list[JsonValue], step: str) -> None:
         next_steps.append(step)
 
 
+_ADVICE_UNREADABLE_NOTE: Final = "background_advice_unreadable"
+_ADVICE_READY_NOTE: Final = "configured_and_composed; live_provider_dispatch_not_tested"
+_ADVICE_OFF_PREFIX: Final = "background_advice_off:"
+_ADVICE_NOT_DEMONSTRATED: Final = "not demonstrated"
+# Closed readiness note -> the fixed words the setup summary shows after "not demonstrated".
+# A note absent from this map renders "not demonstrated" alone, never itself (#888).
+_ADVICE_NOTE_REASON_TEXT: Final[Mapping[str, str]] = {
+    "semantic_configuration_incomplete": "the AI-powered review provider is not ready",
+    "deterministic_only_until_provider_ready": (
+        "local checks only until an AI-powered review provider is ready"
+    ),
+    _ADVICE_UNREADABLE_NOTE: "the background-advice setting could not be read",
+}
+
+
+def _background_advice_off_text(reason: str) -> str | None:
+    """Fixed text for a reason that says background advice is off; any other reason is ``None``."""
+
+    from yoetz.cli.provider_status import (
+        BACKGROUND_ADVICE_ON_REASONS,
+        background_advice_human_line,
+    )
+
+    # A reason for an on switch contradicts itself under "off".
+    if reason in BACKGROUND_ADVICE_ON_REASONS:
+        return None
+    return background_advice_human_line({"reason": reason})
+
+
+def _semantic_advice_readiness(status: Mapping[str, object]) -> tuple[bool, str]:
+    """Background-advice readiness and its closed note from a provider status report.
+
+    Background advice is its own switch, on by default where AI-powered review is configured and
+    off when the owner sets it false (#888): a ready provider alone is not ready background
+    advice. A provider that is not ready is the configuration-incomplete case whatever the advice
+    fact says. Once it is ready, an absent, malformed or unrecognized advice fact, or a reason
+    that contradicts ``enabled``, is unreadable, never a raw reason token.
+    """
+
+    from yoetz.cli.provider_status import BACKGROUND_ADVICE_ON_REASONS
+
+    if status.get("semantic_ready") is not True:
+        return False, "semantic_configuration_incomplete"
+    advice = status.get("background_advice")
+    facts: Mapping[str, object] = (
+        cast(Mapping[str, object], advice) if isinstance(advice, Mapping) else {}
+    )
+    enabled = facts.get("enabled")
+    reason = facts.get("reason")
+    if enabled is True and reason in BACKGROUND_ADVICE_ON_REASONS:
+        return True, _ADVICE_READY_NOTE
+    if enabled is False and type(reason) is str and _background_advice_off_text(reason):
+        return False, _ADVICE_OFF_PREFIX + reason
+    return False, _ADVICE_UNREADABLE_NOTE
+
+
+def _advice_readiness_text(note: object) -> str:
+    """Fixed words for a not-ready advice note; no note token ever renders raw (#888)."""
+
+    if type(note) is str and note.startswith(_ADVICE_OFF_PREFIX):
+        off_text = _background_advice_off_text(note.removeprefix(_ADVICE_OFF_PREFIX))
+        if off_text is not None:
+            return off_text
+        note = _ADVICE_UNREADABLE_NOTE
+    reason = _ADVICE_NOTE_REASON_TEXT.get(note) if type(note) is str else None
+    return _ADVICE_NOT_DEMONSTRATED if reason is None else f"{_ADVICE_NOT_DEMONSTRATED} ({reason})"
+
+
 def _semantic_status_next_steps(status: Mapping[str, object]) -> tuple[str, ...]:
     """Translate authoritative provider-status blockers into wizard recovery guidance."""
 
@@ -2882,13 +2950,9 @@ async def run_setup_wizard(
         codex_home=selected_codex_home,
     )
     if semantic_status is not None:
-        semantic_ready = semantic_status.get("semantic_ready") is True
-        readiness["semantic_advice_ready"] = semantic_ready
-        readiness["semantic_advice_note"] = (
-            "configured_and_composed; live_provider_dispatch_not_tested"
-            if semantic_ready
-            else "semantic_configuration_incomplete"
-        )
+        advice_ready, advice_note = _semantic_advice_readiness(semantic_status)
+        readiness["semantic_advice_ready"] = advice_ready
+        readiness["semantic_advice_note"] = advice_note
     recommendations = await _refresh_setup_recommendations(
         binary=chosen,
         codex_home=selected_codex_home,
@@ -3032,7 +3096,7 @@ def _emit_human_report(report: dict[str, JsonValue]) -> None:
             + (
                 "ready"
                 if readiness.get("semantic_advice_ready")
-                else str(readiness.get("semantic_advice_note") or "not demonstrated")
+                else _advice_readiness_text(readiness.get("semantic_advice_note"))
             )
         )
     if isinstance(provider, dict):

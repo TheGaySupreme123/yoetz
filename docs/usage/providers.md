@@ -568,6 +568,12 @@ yoetz version --json      # installed package and runtime identity
 
 ## Background review frequency
 
+Background AI-powered advice is **on by default** whenever AI-powered review is `optional` or
+`required`. It reviews rule and coverage-gap codes between explicit checks. You can turn it off
+below; your choice always wins over the default. To see whether it is on and why, run
+`yoetz provider status` (the `background_advice` line), `yoetz setup status --next --operation
+review`, or `/status` in the terminal interface (run `yoetz` at a terminal).
+
 Background AI-powered advice uses the routine review budget. With Codex, it uses your configured
 routine effort, or `low` when none is set; API-key providers keep their normal (effort-free)
 request, which is already capped at 2,048 output tokens. A review is reused while the set of
@@ -589,15 +595,19 @@ longer say AI-powered advice is pending. Signing in or enabling the channel take
 next observation; connecting or disconnecting a provider takes effect when Yoetz restarts its
 service, which setup does for you. Your coding session keeps running either way.
 
-To change background advice, edit the existing `[observation]` table in your Yoetz configuration:
+To turn background advice off, add `semantic_advice_enabled = false` to the existing
+`[observation]` table in your Yoetz configuration:
 
 ```toml
 [observation]
-semantic_advice_enabled = true
+semantic_advice_enabled = false
 semantic_advice_min_interval_seconds = 180
 ```
 
-Set `semantic_advice_enabled = false` to stop background reviews while keeping deterministic
-advice and explicit AI-powered checks available. Set it back to `true` to resume. Restart the
-Yoetz service after changing these settings. The interval accepts 1–86400 seconds. The same
+This stops background reviews while keeping deterministic advice and explicit AI-powered checks
+available. Set it to `true`, or remove the line to return to the default, to turn it back on.
+Yoetz writes this line only when you choose it, so a later default change still reaches you
+when you have not. Background reviews that were queued before advice was switched off are
+discarded when the service starts, without being sent, so turning advice back on never sends old
+work. Restart the Yoetz service after changing these settings. The interval accepts 1–86400 seconds. The same
 settings work with Codex, Claude Code and Cursor on macOS, Linux and Windows through WSL 2.

@@ -4214,7 +4214,14 @@ Shared closed types:
   carry `advice_semantic_text_truncated` so the clipping is explicit. A host/tool
   `result_status=completed` outcome is not an authored completion claim; completion advice requires
   an explicit `claim_kind` value such as `completion`, `done`, or `finished`. Observation AI-powered
-  advice is asynchronous (issue #619): the advice build never calls a provider.
+  advice is asynchronous (issue #619): the advice build never calls a provider. The service
+  composes it only when `config.models.background_advice_setting` resolves enabled: an unset
+  `[observation] semantic_advice_enabled` is on wherever AI-powered review is configured, and an
+  explicit value always wins (ADR-006 issue #888; closed reasons `owner_enabled`,
+  `default_enabled`, `owner_disabled`, `semantic_review_disabled`, `observation_disabled`,
+  shown as `background_advice` by `yoetz provider status` and `yoetz setup status --next`).
+  While it resolves off, startup rediscovery closes rows an earlier service left `pending` as
+  `cancelled` / `cancelled` with no provider identity and no provider work.
   `application/observation_advice_semantic.ObservationAdviceSemanticScheduler` looks up or enqueues
   one durable attempt row in `observation_advice_semantic_attempts` (migration 0012), keyed by
   (workspace commitment, Yoetz session, advice-candidate identity; retries of a terminal

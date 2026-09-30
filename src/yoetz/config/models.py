@@ -27,6 +27,8 @@ __all__ = [
     "OWNER_DECLARED_ENDPOINT_PROFILE_ID",
     "OWNER_DECLARED_PROVIDER_ID",
     "PROFILE_CAPABILITIES",
+    "BackgroundAdviceReason",
+    "BackgroundAdviceSetting",
     "ConfigError",
     "ExternalRuntimeProfileConfig",
     "LocalModelProfileConfig",
@@ -44,6 +46,7 @@ __all__ = [
     "StorageConfig",
     "VerificationConfig",
     "YoetzConfig",
+    "background_advice_setting",
     "fallback_external_endpoint",
     "parse_https_origin",
     "primary_external_endpoint",
@@ -332,7 +335,9 @@ class VerificationConfig(StrictConfigModel):
 
 class ObservationConfig(StrictConfigModel):
     enabled: bool = True
-    semantic_advice_enabled: bool = True
+    # ``None`` means the owner has not chosen: the effective default applies (see
+    # ``background_advice_setting``). An explicit ``true`` or ``false`` always wins (#888).
+    semantic_advice_enabled: bool | None = None
     semantic_advice_min_interval_seconds: int = Field(default=180, ge=1, le=86_400)
 
     @model_validator(mode="before")
@@ -816,3 +821,45 @@ def fallback_external_endpoint(config: YoetzConfig) -> ExternalEndpointConfig | 
     if config.semantic_fallback.primary == "codex_subscription":
         return config.provider
     return config.external_runtime
+
+
+type BackgroundAdviceReason = Literal[
+    "owner_enabled",
+    "owner_disabled",
+    "default_enabled",
+    "semantic_review_disabled",
+    "observation_disabled",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class BackgroundAdviceSetting:
+    """Whether background AI-powered observation advice may be scheduled, and why (#888)."""
+
+    enabled: bool
+    reason: BackgroundAdviceReason
+
+
+def background_advice_setting(config: YoetzConfig) -> BackgroundAdviceSetting:
+    """Resolve the effective background-advice switch from the owner's configuration.
+
+    Unless the owner sets ``[observation] semantic_advice_enabled``, background advice is on
+    wherever AI-powered review is configured (``verification.semantic`` ``required`` or
+    ``optional``); this is the maintainer's recorded decision on issue #888 (2026-09-30). An
+    explicit value always wins, so ``false`` turns it off; observation or AI-powered review being
+    off leaves nothing to enable. Provider readiness is a separate, live fact read by the service
+    on every build (#923).
+    """
+
+    if type(config) is not YoetzConfig:
+        raise TypeError("config_wrong_type")
+    if not config.observation.enabled:
+        return BackgroundAdviceSetting(False, "observation_disabled")
+    if config.verification.semantic == "disabled":
+        return BackgroundAdviceSetting(False, "semantic_review_disabled")
+    chosen = config.observation.semantic_advice_enabled
+    if chosen is True:
+        return BackgroundAdviceSetting(True, "owner_enabled")
+    if chosen is False:
+        return BackgroundAdviceSetting(False, "owner_disabled")
+    return BackgroundAdviceSetting(True, "default_enabled")
