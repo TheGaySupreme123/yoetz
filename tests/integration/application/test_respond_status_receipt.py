@@ -4759,11 +4759,12 @@ async def test_process_finding_is_answered_by_the_completed_review_but_work_find
 
     Check 1 (kea check 1): the reviewer reports two distinct problems in one round, an open work
     obligation under a completion claim and a code defect; both land as findings. The agent rejects
-    the defect. Check 2: the reviewer cites only an earlier ``check_recorded`` row (Yoetz process
-    state). ``acknowledged`` on that process finding needs no filler publish, because the completed
-    review recorded after it is its resolution. The work-obligation finding, a finding that mixes a
-    process row with the claim, and a finding about the agent's own response keep the
-    ``resolution_attempt_required`` gate.
+    the defect. Check 2: a record-state finding cites only an earlier ``check_recorded`` row (Yoetz
+    process state). ``acknowledged`` on it needs no filler publish, because the completed review
+    recorded after it is its resolution. The work-obligation finding, a finding that mixes a process
+    row with the claim, and a work-kind finding that cites only the check row while challenging what
+    it established keep the ``resolution_attempt_required`` gate. Checks 3 and 4: restatements are
+    about what they restate, and a finding about the agent's own response keeps the gate.
     """
 
     seed = 5600
@@ -4800,22 +4801,7 @@ async def test_process_finding_is_answered_by_the_completed_review_but_work_find
             for item in frozen.case.history
             if item.schema_name == "check_recorded"
         )
-        agent_answer = next(
-            str(item.event_id)
-            for item in frozen.case.history
-            if item.schema_name == "response_recorded"
-        )
         return (
-            ReviewerChallenge(
-                FindingKind.WEAK_OR_STALE_RESPONSE,
-                "The rejection of the collision finding gives no grounds.",
-                (agent_answer,),
-                "The response rejects the finding without citing a test or the change.",
-                "The agent may hold unrecorded grounds for the rejection.",
-                "Cite the test or change that shows distinct keys cannot collide.",
-                "dispute_with_evidence",
-                "The packet carries no evidence for the rejection.",
-            ),
             ReviewerChallenge(
                 FindingKind.LEDGER_STALE_OR_INCOMPLETE,
                 "The earlier check left its findings unsettled.",
@@ -4835,6 +4821,18 @@ async def test_process_finding_is_answered_by_the_completed_review_but_work_find
                 "Record the result that supports the claim.",
                 "provide_evidence",
                 "No result content is in the packet.",
+            ),
+            # Cites only the earlier check row, but challenges what that check established about
+            # the work: a work kind keeps the gate even with a process-only subject set.
+            ReviewerChallenge(
+                FindingKind.STALE_EVIDENCE_FOR_CHANGED_STATE,
+                "The earlier check verified code the collision change has since replaced.",
+                (prior_check,),
+                "The earlier check ran before the dependency-key change it is cited for.",
+                "The change may not affect what the earlier check exercised.",
+                "Re-verify the dependency-key change and record the result.",
+                "act",
+                "No verification after the dependency-key change is in the packet.",
             ),
         )
 
@@ -4895,9 +4893,10 @@ async def test_process_finding_is_answered_by_the_completed_review_but_work_find
         for item in rechecked.findings
         if item.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
     }
+    assert rechecked.suppressed_count == 0
     process_finding = second_round[FindingKind.LEDGER_STALE_OR_INCOMPLETE]
     mixed_finding = second_round[FindingKind.EVIDENCE_DOES_NOT_SUPPORT_CLAIM]
-    response_finding = second_round[FindingKind.WEAK_OR_STALE_RESPONSE]
+    check_cited_work_finding = second_round[FindingKind.STALE_EVIDENCE_FOR_CHANGED_STATE]
 
     def acknowledge(
         request_seed: int,
@@ -4928,8 +4927,8 @@ async def test_process_finding_is_answered_by_the_completed_review_but_work_find
 
     for request_seed, finding, finding_frontier in (
         (seed + 31, mixed_finding, rechecked.result_frontier),
-        (seed + 32, response_finding, rechecked.result_frontier),
         (seed + 33, work_finding, checked.result_frontier),
+        (seed + 34, check_cited_work_finding, rechecked.result_frontier),
     ):
         with pytest.raises(PublicOperationError) as refused:
             await app.respond(
@@ -4940,10 +4939,12 @@ async def test_process_finding_is_answered_by_the_completed_review_but_work_find
 
     # Check 3: the reviewer restates earlier findings by citing only their finding_recorded rows.
     # A restatement is about whatever the restated finding was about: restating the code defect
-    # keeps the gate, while restating the process finding stays a process finding.
+    # keeps the gate, while restating the process finding stays a process finding. A finding about
+    # the agent's own response keeps the gate too.
     restated = {
         "defect": defect_finding.finding_id,
         "process": process_finding.finding_id,
+        "check_cited_work": check_cited_work_finding.finding_id,
     }
 
     def restatements(frozen: FrozenCase) -> tuple[ReviewerChallenge, ...]:
@@ -4972,9 +4973,43 @@ async def test_process_finding_is_answered_by_the_completed_review_but_work_find
                 "provide_evidence",
                 "The packet does not show that finding resolved.",
             ),
+            # An agent's answer is the agent's own content, never process state.
+            ReviewerChallenge(
+                FindingKind.WEAK_OR_STALE_RESPONSE,
+                "The rejection of the collision finding gives no grounds.",
+                (agent_answer(frozen),),
+                "The response rejects the finding without citing a test or the change.",
+                "The agent may hold unrecorded grounds for the rejection.",
+                "Cite the test or change that shows distinct keys cannot collide.",
+                "dispute_with_evidence",
+                "The packet carries no evidence for the rejection.",
+            ),
         )
 
-    rounds.append(restatements)
+    def agent_answer(frozen: FrozenCase) -> str:
+        return next(
+            str(item.event_id)
+            for item in frozen.case.history
+            if item.schema_name == "response_recorded"
+        )
+
+    def work_restatement(frozen: FrozenCase) -> tuple[ReviewerChallenge, ...]:
+        record = frozen.case.projection.findings[finding_id(restated["check_cited_work"])]
+        # A record-state restatement of a work finding is still about the work.
+        return (
+            ReviewerChallenge(
+                FindingKind.LEDGER_STALE_OR_INCOMPLETE,
+                "The stale-verification finding has no recorded outcome.",
+                (str(record.source_event_id),),
+                "The finding about verification of the replaced code is still open.",
+                "It may simply await this review.",
+                "Record the outcome of that finding.",
+                "provide_evidence",
+                "The packet does not show that finding resolved.",
+            ),
+        )
+
+    rounds.extend((restatements, work_restatement))
     third = await app.check(
         CheckRequest.model_validate(
             {
@@ -4988,7 +5023,7 @@ async def test_process_finding_is_answered_by_the_completed_review_but_work_find
         )
     )
     assert type(third) is CheckCommitResult
-    assert rounds == []
+    assert third.suppressed_count == 0
     third_round = {
         item.summary: item
         for item in third.findings
@@ -4996,16 +5031,46 @@ async def test_process_finding_is_answered_by_the_completed_review_but_work_find
     }
     restated_defect = third_round["The earlier collision defect still stands."]
     restated_process = third_round["The earlier finding about the prior check is still open."]
-    with pytest.raises(PublicOperationError) as refused:
-        await app.respond(
-            acknowledge(seed + 41, restated_defect, third.result_frontier, third.result_frontier)
-        )
-    assert refused.value.safe_details["reason_code"] == "resolution_attempt_required"
+    response_finding = third_round["The rejection of the collision finding gives no grounds."]
+    for request_seed, finding in ((seed + 41, restated_defect), (seed + 43, response_finding)):
+        with pytest.raises(PublicOperationError) as refused:
+            await app.respond(
+                acknowledge(request_seed, finding, third.result_frontier, third.result_frontier)
+            )
+        assert refused.value.safe_details["reason_code"] == "resolution_attempt_required"
     process_again = await app.respond(
         acknowledge(seed + 42, restated_process, third.result_frontier, third.result_frontier)
     )
     assert process_again.response.disposition == "acknowledged"
     assert process_again.response.evidence == ()
+
+    # Check 4: a record-state restatement of the check-citing work finding keeps the gate.
+    fourth = await app.check(
+        CheckRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 50)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(process_again.result_frontier),
+                "mode": "semantic_if_configured",
+                "max_findings": "8",
+            }
+        )
+    )
+    assert type(fourth) is CheckCommitResult
+    assert fourth.suppressed_count == 0
+    assert rounds == []
+    restated_work = next(
+        item
+        for item in fourth.findings
+        if item.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+        and item.summary == "The stale-verification finding has no recorded outcome."
+    )
+    with pytest.raises(PublicOperationError) as refused:
+        await app.respond(
+            acknowledge(seed + 51, restated_work, fourth.result_frontier, fourth.result_frontier)
+        )
+    assert refused.value.safe_details["reason_code"] == "resolution_attempt_required"
 
 
 def _scripted_semantic_evaluator(

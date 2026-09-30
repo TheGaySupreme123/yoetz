@@ -226,9 +226,11 @@ The reviewer works as a verifying reviewer: it checks the change against the tas
 verification against the change. It judges recorded test and command output itself instead of
 asking the agent to run it again, reports every distinct problem it finds (up to three per review),
 and names the exact missing item when it needs more. It knows it is the review that was asked for,
-so it does not report its own review, Yoetz checks, findings, or coverage codes as problems in the
-work, and it never asks the agent to install tools or change the environment. Work left open while
-completion is claimed is still reported. Every provider — the Codex subscription, OpenAI, and
+so it does not report its own review, Yoetz checks, findings, or limits on what its packet could
+carry as problems in the work, and it never asks the agent to install tools or change the
+environment. Work left open while completion is claimed is still reported, and so is a real
+discrepancy in the agent's own record, such as a completion claim beyond the plan or a recorded
+command that differs from the one observed. Every provider — the Codex subscription, OpenAI, and
 OpenAI-compatible endpoints — gets the same instructions. Track a required review by choosing
 `semantic_required` for each check, not as a plan item.
 

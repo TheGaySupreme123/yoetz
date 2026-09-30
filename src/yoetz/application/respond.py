@@ -17,7 +17,13 @@ from yoetz.domain.events import (
     encode_payload,
     media_type_for,
 )
-from yoetz.domain.findings import Finding, FindingOrigin, ResponseDisposition, WaiverScope
+from yoetz.domain.findings import (
+    Finding,
+    FindingKind,
+    FindingOrigin,
+    ResponseDisposition,
+    WaiverScope,
+)
 from yoetz.domain.values import (
     Actor,
     ActorType,
@@ -261,6 +267,11 @@ async def _preflight(
 # ``response_recorded`` is deliberately absent: an agent's answer to a finding is the agent's own
 # content, and a finding about its substance keeps the resolution-attempt gate.
 _PROCESS_RECORD_SCHEMAS: Final = frozenset({"check_recorded", "finding_recorded"})
+# The only finding kind that describes the state of the record rather than the work, and the only
+# one that never blocks a receipt (``FINDING_KIND_TRAITS`` marks it non-actionable). A reviewer can
+# cite an earlier check row while challenging what that check established about the work, so the
+# cited rows alone never make a finding process-only: the kind has to say so too.
+_PROCESS_FINDING_KINDS: Final = frozenset({FindingKind.LEDGER_STALE_OR_INCOMPLETE})
 
 
 def _process_finding_answered_by_completed_review(
@@ -271,17 +282,20 @@ def _process_finding_answered_by_completed_review(
     A finding that asks for the review that already ran, or that is about check or finding
     records, has nothing to repair: requiring a fresh resolution attempt before
     ``acknowledged`` only produced a filler publish round (issue #906). The exception is structural
-    and deliberately narrow. Every subject must be an event whose recorded schema is a Yoetz process
-    record, and an AI-powered review that completed must be recorded after the finding. A cited
-    finding record counts only when that earlier finding is itself, transitively, about process
-    records alone: a restatement of a finding about the work is about the work, so it can never be
-    easier to acknowledge than the finding it restates. A finding naming any obligation, claim, or
-    work record keeps the ``resolution_attempt_required`` gate, because structure alone cannot
-    tell an obligation to obtain a review from a work obligation.
+    and deliberately narrow. The finding's kind must describe record state
+    (``_PROCESS_FINDING_KINDS``), every subject must be an event whose recorded schema is a Yoetz
+    process record, and an AI-powered review that completed must be recorded after the finding.
+    Citing a check row is not enough on its own: a work kind such as ``diff_does_not_match_account``
+    that cites only a check still challenges the work. A cited finding record counts only when that
+    earlier finding is itself, transitively, of a process kind and about process records alone: a
+    restatement of a finding about the work is about the work, so it can never be easier to
+    acknowledge than the finding it restates. A finding naming any obligation, claim, or work
+    record keeps the ``resolution_attempt_required`` gate, because structure alone cannot tell an
+    obligation to obtain a review from a work obligation.
     """
 
     payload = finding.payload
-    if payload is None or not payload.subject_refs:
+    if payload is None or payload.kind not in _PROCESS_FINDING_KINDS or not payload.subject_refs:
         return False
     by_event = {str(record.event_id): record for record in records}
     pending = [str(ref) for ref in payload.subject_refs]
@@ -297,7 +311,11 @@ def _process_finding_answered_by_completed_review(
         if subject.schema.name == "finding_recorded":
             # An unreadable, redacted or unknown-version finding record cannot prove its subject.
             cited = subject.payload
-            if type(cited) is not Finding or not cited.subject_refs:
+            if (
+                type(cited) is not Finding
+                or cited.kind not in _PROCESS_FINDING_KINDS
+                or not cited.subject_refs
+            ):
                 return False
             pending.extend(str(item) for item in cited.subject_refs)
     return any(

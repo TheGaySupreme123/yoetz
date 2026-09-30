@@ -3605,8 +3605,12 @@ for the agent's next step. The question set was already bound into `case_digest`
 unchanged. `SEMANTIC_REVIEW_INSTRUCTION` (`yoetz.adapters.providers.openai_responses`) is the one
 reviewer instruction: the Responses request and the Codex app-server `baseInstructions` send it
 verbatim, and `CHAT_COMPLETIONS_INSTRUCTION` is that text plus `CHAT_COMPLETIONS_JSON_SHAPE_SUFFIX`.
-Its `PACKET_GAP_GLOSSARY` glosses each packet coverage gap code and omission reason as a packet
-limit, never an agent defect.
+Its `PACKET_GAP_GLOSSARY` glosses each packet limit code (capture, selection, redaction, storage)
+and omission reason as a packet limit, never an agent defect. `ACCOUNT_GAP_GLOSSARY` glosses the
+deterministic codes about the agent's own record (`command_attempt_mismatch`,
+`command_attempt_uncorroborated`, `completion_claim_outside_plan`, `completion_plan_not_claimed`,
+`completion_scope_declared_none`, `completion_scope_undeclared`) as possible real discrepancies: the
+reviewer does not restate the code alone but may challenge what readable material shows.
 
 `semantic_required` means AI-powered review success is required for a complete verdict, not required
 for returning already-computed local truth. Missing approved external/local capability, privacy
@@ -6833,13 +6837,15 @@ Failed and local-only attempts retain their existing version. The owning schema 
 `resolution_attempt_required` is the `respond` rejection for an `acknowledged` response to a
 `semantic_model_derived` finding whose `evidence_refs` cite no evidence or result recorded after
 the finding frontier. It writes nothing; the continuation is `input_correction_new_identity`.
-One structural exception applies (issue #906, a process finding): when every `subject_refs` entry of
-the finding is an event recorded as `check_recorded`, or as `finding_recorded` whose own finding's
-`subject_refs` transitively meet the same rule (never an agent's `response_recorded` answer), and a
-`check_recorded` event whose `semantic_status`/`semantic_reason` is `succeeded`/`semantic_completed`
-follows the finding's source event, that completed review is the resolution and `acknowledged` is
-accepted without a new attempt. A finding naming any obligation, claim or other record, or
-restating a finding about one, keeps the rejection. Acknowledgement still never resolves a finding.
+One structural exception applies (issue #906, a process finding): when the finding's kind is the
+record-state kind `ledger_stale_or_incomplete`, every `subject_refs` entry is an event recorded as
+`check_recorded`, or as `finding_recorded` whose own finding is of that kind and transitively meets
+the same rule (never an agent's `response_recorded` answer), and a `check_recorded` event whose
+`semantic_status`/`semantic_reason` is `succeeded`/`semantic_completed` follows the finding's source
+event, that completed review is the resolution and `acknowledged` is accepted without a new
+attempt. Citing a check row is not enough on its own: any other kind, a finding naming any
+obligation, claim or other record, or a restatement of a finding about one keeps the rejection.
+Acknowledgement still never resolves a finding.
 
 ### Observation latency and capacity (#887)
 

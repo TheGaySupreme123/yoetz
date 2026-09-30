@@ -825,7 +825,7 @@ adds no provider, packet, check-result or stored field.
 - **Role and self-reference.** The instruction states that the reviewer *is* the requested review.
   An obligation or step whose only content is obtaining this review, running a Yoetz check or
   recording a review outcome, and Yoetz's own process state (check, review, receipt, finding and
-  coverage state, gap codes) are never defects in the work; building, testing, linting or
+  coverage state, packet limit codes) are never defects in the work; building, testing, linting or
   type-checking the work is work. A work obligation still open under an effective completion claim
   remains `completion_with_open_obligations`. The substance of an agent's answer to a finding stays
   reviewable. There is no post-filter on finding text.
@@ -844,22 +844,28 @@ adds no provider, packet, check-result or stored field.
   questions do not presuppose a defect or ask for a next step. The question set is already bound
   into `case_digest`; its shape is unchanged. A packet without a phase (background observation
   advice) is routine.
-- **Gap glossary.** The instruction carries a one-line gloss for each packet coverage gap code and
-  omission reason, each stated as a packet limit and not a defect in the agent's work. "Do not claim
-  stronger coverage than the packet" and the `insufficient_packet` rules of issue #885 are
-  unchanged.
+- **Gap glossary.** The instruction carries a one-line gloss for each packet limit code (capture,
+  selection, redaction, storage) and omission reason, each stated as a packet limit and not a
+  defect in the agent's work. The deterministic codes about the agent's own record (command attempt
+  mismatch or uncorroborated, completion claim outside plan, plan not claimed, scope declared none
+  or undeclared) are glossed apart as possible real discrepancies: the reviewer does not restate the
+  code alone but may challenge what readable material shows. "Do not claim stronger coverage than
+  the packet" and the `insufficient_packet` rules of issue #885 are unchanged.
 - **Process findings and `respond`.** Open design question 3, narrowed to what structure can
-  prove: `acknowledged` on an AI-powered finding needs no new resolution attempt when every subject
-  of the finding is a `check_recorded` event, or a `finding_recorded` event whose own finding is
+  prove: `acknowledged` on an AI-powered finding needs no new resolution attempt when its kind is
+  the record-state kind `ledger_stale_or_incomplete` (the only non-actionable kind), every subject
+  is a `check_recorded` event or a `finding_recorded` event whose own finding is of that kind and
   transitively about such records alone (an agent's `response_recorded` answer is agent content,
   not process state), and a check whose AI-powered review completed (`succeeded` /
   `semantic_completed`) is recorded after the finding. The completed review is that finding's
-  resolution. A restatement is about what it restates, so it is never easier to acknowledge than
-  the finding it cites. A finding naming any obligation, claim, response or work record, or
-  restating a finding about one, keeps `resolution_attempt_required`: structure cannot tell an
-  agent-authored review obligation from a work obligation, so guidance now tells agents to track
-  required review through `mode=semantic_required` and the receipt, never as a plan obligation.
-  Acknowledgement still never resolves a finding.
+  resolution. Citing a check row is not enough on its own: a work kind that cites only a check
+  still challenges what the check established. A restatement is about what it restates, so it is
+  never easier to acknowledge than the finding it cites. A finding of any other kind, naming any
+  obligation, claim, response or work record, or restating a finding about one, keeps
+  `resolution_attempt_required`: structure cannot tell an agent-authored review obligation from a
+  work obligation, so guidance now tells agents to track required review through
+  `mode=semantic_required` and the receipt, never as a plan obligation. Acknowledgement still never
+  resolves a finding.
 - **Guidance.** Workflow, coverage guidance and every host skill say the check is the review and
   must not be encoded as a plan obligation. Verification whose readable output a completed review
   carried and did not challenge needs no re-run while the work it verified is unchanged; a reviewer

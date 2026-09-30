@@ -59,6 +59,7 @@ from yoetz.protocol.models import (
 )
 
 __all__ = [
+    "ACCOUNT_GAP_GLOSSARY",
     "CHALLENGE_FIELD_GLOSSARY",
     "FINDING_KIND_GLOSSARY",
     "JUDGMENT_JSON_SCHEMA",
@@ -123,32 +124,17 @@ _HOSTNAME_PATTERN: Final = re.compile(
     re.ASCII,
 )
 
-# One plain-language gloss per packet coverage gap code and omission reason a reviewer meets in a
-# review packet (issue #906): every omission reason, every code the deterministic and review case
-# builders stamp on a packet, and the host-observation codes materialization stamps on recorded
-# events. The instruction's lead sentence covers any other code a recorded event may carry. Every
-# one names a limit on what this packet could carry, never a defect in the agent's work: a bare
-# code otherwise reads as something the agent must fix, and the reviewer asked the agent to
-# disclose or repair Yoetz's own coverage state.
+# One plain-language gloss per packet limit code and omission reason a reviewer meets in a review
+# packet (issue #906): every omission reason, the capture, selection, redaction and storage codes the
+# deterministic and review case builders stamp on a packet, and the host-observation codes
+# materialization stamps on recorded events. Each names a limit on what this packet could carry,
+# never a defect in the agent's work: a bare code otherwise reads as something the agent must fix,
+# and the reviewer asked the agent to disclose or repair Yoetz's own coverage state. Codes that can
+# point at a real discrepancy in the agent's own record are glossed apart, in
+# ``ACCOUNT_GAP_GLOSSARY``, so the reviewer is never told to dismiss them.
 PACKET_GAP_GLOSSARY: Final[Mapping[str, str]] = MappingProxyType(
     {
         "captured_object_unavailable": "a captured object could not be read back for this packet",
-        "command_attempt_mismatch": (
-            "a recorded command attempt differs from the command the host observed"
-        ),
-        "command_attempt_uncorroborated": (
-            "no host observation corroborates a recorded command attempt"
-        ),
-        "completion_claim_outside_plan": (
-            "a completion claim names scope the current plan does not list"
-        ),
-        "completion_plan_not_claimed": "the current plan lists scope no completion claim names",
-        "completion_scope_declared_none": (
-            "the plan declares that no obligations apply, so completion has no bound scope"
-        ),
-        "completion_scope_undeclared": (
-            "the plan declares no obligations and no reason, so completion has no bound scope"
-        ),
         "content_capture_unavailable": "host content capture was unavailable for that input",
         "content_redacted": "retained content was redacted before it could be sent",
         "content_unselected": "retained content was not selected into this packet",
@@ -187,6 +173,31 @@ PACKET_GAP_GLOSSARY: Final[Mapping[str, str]] = MappingProxyType(
     }
 )
 
+# Coverage codes the deterministic case builder stamps from checks of the agent's own record. They
+# are not packet limits: each can point at a real discrepancy (a recorded command that differs from
+# the observed one, a completion claim beyond the plan), so the reviewer may challenge what readable
+# material shows, while the code itself stays a deterministic coverage gap it does not restate.
+ACCOUNT_GAP_GLOSSARY: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "command_attempt_mismatch": (
+            "a recorded command attempt differs from the command the host observed"
+        ),
+        "command_attempt_uncorroborated": (
+            "no host observation corroborates a recorded command attempt"
+        ),
+        "completion_claim_outside_plan": (
+            "a completion claim names scope the current plan does not list"
+        ),
+        "completion_plan_not_claimed": "the current plan lists scope no completion claim names",
+        "completion_scope_declared_none": (
+            "the plan declares that no obligations apply, so completion has no bound scope"
+        ),
+        "completion_scope_undeclared": (
+            "the plan declares no obligations and no reason, so completion has no bound scope"
+        ),
+    }
+)
+
 # The reviewer's standing instruction and its single source: the Responses request below, the Chat
 # Completions request (which appends only its JSON-shape suffix), and the Codex app-server
 # ``baseInstructions`` all send these exact bytes. Each rule keeps its own lines so a later
@@ -204,8 +215,8 @@ SEMANTIC_REVIEW_INSTRUCTION: Final = (
     "running a Yoetz check, or recording a review's outcome; building, testing, linting, or "
     "type-checking the work is work, not process. Never raise Yoetz's own process state "
     "either: that a Yoetz check, review, or receipt is pending, running, or recorded; that a "
-    "finding is open, unanswered, or unresolved; coverage levels; or gap codes. None of these is a "
-    "defect in the work, though the substance of an agent's answer to a finding stays "
+    "finding is open, unanswered, or unresolved; coverage levels; or a packet limit code. None of "
+    "these is a defect in the work, though the substance of an agent's answer to a finding stays "
     "reviewable. A work obligation still open while completion is claimed remains a real "
     "discrepancy: raise it as completion_with_open_obligations. "
     # Phase (issue #906): the budget selector's routine/final profile, named in the packet.
@@ -254,11 +265,15 @@ SEMANTIC_REVIEW_INSTRUCTION: Final = (
     "authority or environment blocker. Do not offer accepting a limitation as an equivalent "
     "alternative to performing available verification. Disclosure does not repair a defect or "
     "prove completion. "
-    # Packet gap glossary (issue #906).
-    "Coverage gap codes and omission reasons name limits of this packet, never defects in the "
-    "agent's work; an item they hide is not assessable. "
+    # Gap glossaries (issue #906): packet limits apart from codes about the agent's own record.
+    "Packet limit codes and omission reasons name limits of what this packet could carry, never "
+    "defects in the agent's work; an item they hide is not assessable. "
     + "; ".join(f"{code}: {gloss}" for code, gloss in sorted(PACKET_GAP_GLOSSARY.items()))
-    + "."
+    + ". Account codes come from Yoetz's deterministic checks of the agent's own record, are not "
+    "packet limits, and may point at a real discrepancy. "
+    + "; ".join(f"{code}: {gloss}" for code, gloss in sorted(ACCOUNT_GAP_GLOSSARY.items()))
+    + ". Do not restate an account code alone as a finding; challenge the discrepancy it points to "
+    "when readable material shows it in the work or the claim."
 )
 _SYSTEM_INSTRUCTION: Final = SEMANTIC_REVIEW_INSTRUCTION
 
@@ -516,7 +531,7 @@ FINDING_KIND_GLOSSARY: Final[dict[str, str]] = {
     ),
     "ledger_stale_or_incomplete": (
         "the record of the work is behind or missing entries, so the packet cannot settle the "
-        "question; Yoetz coverage levels and gap codes are packet limits, not this"
+        "question; Yoetz coverage levels and packet limit codes are not this"
     ),
     "material_limitation_omitted": (
         "a limitation that changes how the result should be read was not disclosed"

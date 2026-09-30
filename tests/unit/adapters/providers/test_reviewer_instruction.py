@@ -18,6 +18,7 @@ from yoetz.adapters.providers.openai_chat_completions import (
     ChatCompletionsProfile,
 )
 from yoetz.adapters.providers.openai_responses import (
+    ACCOUNT_GAP_GLOSSARY,
     CHALLENGE_FIELD_GLOSSARY,
     FINDING_KIND_GLOSSARY,
     PACKET_GAP_GLOSSARY,
@@ -151,9 +152,11 @@ def test_reviewer_is_told_it_is_the_requested_review_and_never_flags_process_sta
         "that a Yoetz check, review, or receipt is pending, running, or recorded",
         "that a finding is open, unanswered, or unresolved",
         "coverage levels",
-        "gap codes",
+        "a packet limit code",
     ):
         assert state in _TEXT, state
+    # Only packet limits are dismissed wholesale; codes about the agent's own record are not.
+    assert "coverage levels; or gap codes" not in _TEXT
     assert "never spend a challenge on process state" in _TEXT
 
 
@@ -266,11 +269,11 @@ def test_honesty_rules_are_unchanged() -> None:
 
 
 def test_every_packet_gap_code_is_glossed_as_a_packet_limit() -> None:
-    """yjs (Example 3): a bare gap code must not read as the agent's defect."""
+    """yjs (Example 3): a bare packet limit code must not read as the agent's defect."""
 
     assert (
-        "Coverage gap codes and omission reasons name limits of this packet, never defects in "
-        "the agent's work; an item they hide is not assessable." in _TEXT
+        "Packet limit codes and omission reasons name limits of what this packet could carry, "
+        "never defects in the agent's work; an item they hide is not assessable." in _TEXT
     )
     for code, gloss in PACKET_GAP_GLOSSARY.items():
         assert f"{code}: {gloss}" in _TEXT, code
@@ -292,19 +295,13 @@ def test_every_packet_gap_code_is_glossed_as_a_packet_limit() -> None:
         "withheld_by_policy",
         "redacted_never_send",
         OVER_CASE_ITEM_LIMIT_REASON,
-        # Every code the deterministic case builder stamps on the packet coverage.
+        # Capture, redaction and storage codes the deterministic case builder stamps.
         "captured_object_unavailable",
         "event_payload_unavailable",
         "missing_ref",
         "redacted_event",
         "redacted_object",
         "unknown_event",
-        "command_attempt_mismatch",
-        "command_attempt_uncorroborated",
-        COMPLETION_CLAIM_OUTSIDE_PLAN_GAP,
-        COMPLETION_PLAN_NOT_CLAIMED_GAP,
-        COMPLETION_SCOPE_DECLARED_NONE_GAP,
-        COMPLETION_SCOPE_UNDECLARED_GAP,
         # Codes recorded events carry into the packet from publication and host observation.
         "unknown_event_schema_preserved",
         ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
@@ -318,3 +315,33 @@ def test_every_packet_gap_code_is_glossed_as_a_packet_limit() -> None:
         ObservationGapCode.UNSUPPORTED_EVENT.value,
     }
     assert required <= set(PACKET_GAP_GLOSSARY)
+
+
+def test_account_codes_are_not_dismissed_as_packet_limits() -> None:
+    """A command mismatch or a claim beyond the plan can be a real discrepancy in the work."""
+
+    account = {
+        "command_attempt_mismatch",
+        "command_attempt_uncorroborated",
+        COMPLETION_CLAIM_OUTSIDE_PLAN_GAP,
+        COMPLETION_PLAN_NOT_CLAIMED_GAP,
+        COMPLETION_SCOPE_DECLARED_NONE_GAP,
+        COMPLETION_SCOPE_UNDECLARED_GAP,
+    }
+    assert set(ACCOUNT_GAP_GLOSSARY) == account
+    assert not account & set(PACKET_GAP_GLOSSARY)
+    assert (
+        "Account codes come from Yoetz's deterministic checks of the agent's own record, are not "
+        "packet limits, and may point at a real discrepancy." in _TEXT
+    )
+    packet_start = _TEXT.index("Packet limit codes and omission reasons")
+    account_start = _TEXT.index("Account codes come from")
+    for code, gloss in ACCOUNT_GAP_GLOSSARY.items():
+        position = _TEXT.index(f"{code}: {gloss}")
+        # Glossed after the account lead, never inside the packet-limit list.
+        assert position > account_start > packet_start, code
+    assert (
+        "Do not restate an account code alone as a finding; challenge the discrepancy it points "
+        "to when readable material shows it in the work or the claim." in _TEXT
+    )
+    assert "packet limit codes are not this" in FINDING_KIND_GLOSSARY["ledger_stale_or_incomplete"]

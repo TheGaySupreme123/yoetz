@@ -520,8 +520,9 @@ The reviewer verifies from what its packet carries. When a completed review othe
 do not re-run or re-publish it while the work it verified is unchanged; answer a finding by
 repairing the defect or supplying the exact artifact it names. A reviewer request never authorizes
 installing or downloading a toolchain or package, network access, or another environment change:
-record the unavailable runtime or package as the blocker. A finding whose only subjects are Yoetz
-check records, or earlier findings that were themselves only about such records, is answered by
-the completed review recorded after it, so `acknowledged` needs no new attempt; a finding naming
-any obligation, claim, response, or work record, or restating a finding about the work, still
-does. After repairing a finding, run at least one re-review in the same mode before the receipt.
+record the unavailable runtime or package as the blocker. A `ledger_stale_or_incomplete` finding
+whose only subjects are Yoetz check records, or earlier findings of that kind only about such
+records, is answered by the completed review recorded after it, so `acknowledged` needs no new
+attempt; any other kind, even one citing only a check, and a finding naming any obligation, claim,
+response, or work record, or restating a finding about the work, still does. After repairing a
+finding, run at least one re-review in the same mode before the receipt.
