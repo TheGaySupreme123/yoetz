@@ -54,9 +54,9 @@ _OTHER_INSTALLATION_KEY = b"j" * 32
         (["/bin/bash", "-lc", "npm run test-type"], "npm run test-type"),
         (("bash", "-lc", "pytest -q tests/x.py"), "pytest -q tests/x.py"),
         (["pytest", "-q", "tests/x.py"], "pytest -q tests/x.py"),
-        ('echo "a  b"', "echo 'a  b'"),
+        ('echo "a  b"   c', 'echo "a  b" c'),
         (["echo", "a  b"], "echo 'a  b'"),
-        ("unterminated 'quote   here", "unterminated 'quote here"),
+        ("unterminated 'quote   here", "unterminated 'quote   here"),
     ],
 )
 def test_normalization_strips_host_shell_wrappers_and_collapses_whitespace(
@@ -68,6 +68,29 @@ def test_normalization_strips_host_shell_wrappers_and_collapses_whitespace(
 @pytest.mark.parametrize("argument", ["", "   ", [], [1, 2], "a\x00b", None, 7, "x" * 16_385])
 def test_normalization_refuses_arguments_it_cannot_commit_to(argument: object) -> None:
     assert normalize_observed_command(argument) is None
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        ('echo "$HOME"', "echo '$HOME'"),
+        ('grep "a b" f', "grep a b f"),
+        ("printf 'x\\ty'", "printf x\\ty"),
+        ('bash -lc "echo $HOME"', "echo $HOME"),
+        ('bash -lc "echo $HOME"', "bash -lc 'echo $HOME'"),
+        ("pytest -q a\npytest -q b", "pytest -q a pytest -q b"),
+    ],
+)
+def test_normalization_never_merges_commands_with_different_shell_meaning(
+    first: str, second: str
+) -> None:
+    """Quoting, expansion and separators change what a command does; they keep distinct identities.
+
+    A missed equivalence only over-discloses a failure; a false one lets a different command's
+    success retire it.
+    """
+
+    assert normalize_observed_command(first) != normalize_observed_command(second)
 
 
 def test_the_linux_and_wsl2_wrapper_forms_commit_to_one_identity() -> None:

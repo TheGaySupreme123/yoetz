@@ -10,8 +10,9 @@ failure history instead of an omission:
   materialization stores as ``omitted:<commitment>`` in the action's ``command`` field; the raw
   command text never reaches the ledger. Any other command, and any unkeyed or structural
   placeholder, supersedes nothing.
-* **State scope.** A later hook-observed workspace edit completed (an edit action whose result did
-  not report failure). The failure described a workspace state that no longer exists. Legacy rows
+* **State scope.** A later hook-observed workspace edit completed (an edit action whose result
+  states success; a partial or outcome-less edit proves nothing). The failure described a
+  workspace state that no longer exists. Legacy rows
   without a command identity (``omitted:structural``) reach this rule and never fall back to
   "every failure is live".
 
@@ -90,8 +91,9 @@ class ObservedRun:
     """One hook-observed tool result, reduced to the facts the supersession rule reads.
 
     ``position`` orders runs (ledger ingestion sequence, or envelope order for advice). ``edit``
-    marks an edit tool call; it counts as a workspace change only when its own outcome is not a
-    failure, because a failed or denied edit changed nothing.
+    marks an edit tool call; it counts as a workspace change only when the host stated its
+    success. A failed or denied edit changed nothing, and a partial or outcome-less edit is no
+    proof the workspace changed as intended, so retiring a failure on it could hide the failure.
     """
 
     ref: str
@@ -132,7 +134,7 @@ def classify_observed_runs(runs: Iterable[ObservedRun]) -> Mapping[str, Observed
     One backward pass. Only the latest run of a command identity can be live: a failure is
     ``SUPERSEDED`` when a later run with the same identity succeeded, else ``RERUN`` when a later
     run with the same identity has any other outcome (that later run is the one judged), else
-    ``HISTORICAL`` when a later edit completed, else ``LIVE``. A later failure of the same
+    ``HISTORICAL`` when a later edit with a stated success followed, else ``LIVE``. A later failure of the same
     identity is a new failure in its own right; it never revives an earlier superseded one. A run
     without an identity is retired only by a later edit. The caller bounds ``runs`` to what
     precedes the point being judged.
@@ -155,7 +157,7 @@ def classify_observed_runs(runs: Iterable[ObservedRun]) -> Mapping[str, Observed
                 states[run.ref] = ObservedFailureState.HISTORICAL
             else:
                 states[run.ref] = ObservedFailureState.LIVE
-        if run.edit and run.outcome is not ResultOutcome.FAILURE:
+        if run.edit and run.outcome is ResultOutcome.SUCCESS:
             edited_after = True
         if run.identity is not None:
             ran_after.add(run.identity)

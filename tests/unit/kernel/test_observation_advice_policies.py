@@ -1164,3 +1164,17 @@ def test_cursor_ordinary_shell_failures_reach_the_rule_and_clear_on_rerun() -> N
         ("hook:cursor-1:1",)
     ]
     assert not _unresolved(shell(1, "cursor-1", 1), shell(2, "cursor-2", 0))
+
+
+def test_an_edit_post_event_without_a_stated_success_does_not_retire_a_failure() -> None:
+    unknown_edit = _envelope(
+        "PostToolUse",
+        pos=2,
+        identity="hook:cursor-edit:2",
+        payload={
+            "tool_name": "cursor_file_edit",
+            "changed_paths_digest": "hmac-sha256:" + "c" * 64,
+        },
+    )
+    unresolved = _unresolved(_bash(1, "toolu-1", success=False, commitment=_PYTEST_X), unknown_edit)
+    assert [item.evidence_refs for item in unresolved] == [("hook:toolu-1:1",)]

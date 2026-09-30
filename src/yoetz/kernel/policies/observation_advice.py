@@ -440,10 +440,10 @@ def _failed_commands(envelopes: Sequence[ObservationEnvelope]) -> list[Observati
     A failure clears when the same host call later reports success (its correlation key), when a
     later run of the same command identity follows it with any outcome (the keyed
     ``command_commitment`` the hook computed, never command text; only the latest run of a
-    command is judged), or when a completed edit post-event follows it. This is the shared
+    command is judged), or when an edit post-event with a stated success follows it. This is the shared
     supersession rule the local packs and the claim-revision invariant apply, so the advice
     cannot keep a failure the packs already treat as history. An envelope without a commitment
-    (every legacy envelope) is still cleared by a later completed edit, never kept forever.
+    (every legacy envelope) is still cleared by a later successful edit, never kept forever.
     """
 
     results: list[ObservationAdviceCandidate] = []
@@ -476,20 +476,13 @@ def _failed_commands(envelopes: Sequence[ObservationEnvelope]) -> list[Observati
         elif (
             envelope.event_kind in _POST_TOOL_EVENT_KINDS
             and _is_edit_envelope(envelope, tool)
-            and not failed
+            and passed
             and not _denied(envelope)
         ):
-            # Only a post-event is a completed edit, exactly as only a post-event materializes
-            # the ledger result the packs read; a permission request or decision for an edit
-            # tool has not changed the workspace and may still be denied.
-            runs.append(
-                ObservedRun(
-                    ref,
-                    position,
-                    ResultOutcome.SUCCESS if passed else ResultOutcome.UNKNOWN,
-                    edit=True,
-                )
-            )
+            # Only a post-event with a stated success is a completed edit, exactly as the packs
+            # read the ledger result; a permission request, a denied or failed edit, and an edit
+            # whose outcome the host did not state are no proof the workspace changed.
+            runs.append(ObservedRun(ref, position, ResultOutcome.SUCCESS, edit=True))
     states = classify_observed_runs(runs)
     for key, (ref, envelope) in unresolved.items():
         if states.get(ref) is not ObservedFailureState.LIVE:

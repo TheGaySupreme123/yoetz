@@ -575,16 +575,17 @@ output behavior, and automatic Stop follow-up messages remain disabled. Hook suc
 substitutes for an explicit command/test exit fact.
 
 **Failure supersession (#909).** On the ordinary profile a later `Shell` run of the same command
-(only the latest run is judged; a `postToolUse` with `exitCode: 0` clears it), or a later completed
-edit tool call, retires an earlier failed run before a completion claim; the receipt names it once
-as history. `Shell` failures also reach `failed_command_unresolved` advice. The hook
-computes an installation-keyed `command_commitment` from `tool_input.command` on `preToolUse`,
-`postToolUse`, and `postToolUseFailure`, then discards the text. Decision: supported on the
-ordinary profile. **Gap:** a shell `postToolUse` without `exitCode` stays `unknown` and neither
-fails nor supersedes; an oversized body whose content is omitted carries no identity; the default
-structural artifact observes no shell calls (owner: #910 for Cursor shell outcomes).
-Native dogfood acceptance of this path on macOS, Linux and WSL 2 is not yet recorded
-(owner: #909).
+(only the latest run is judged; a `postToolUse` with `exitCode: 0` clears it), or a later edit tool
+call that reported success (an outcome-less edit does not), retires an earlier failed run before a
+completion claim; the receipt names it once as history. `Shell` failures also reach
+`failed_command_unresolved` advice. The hook computes an installation-keyed `command_commitment`
+from `tool_input.command` on `preToolUse`, `postToolUse`, and `postToolUseFailure`, then discards
+the text. Decision: supported on the ordinary profile. **Gap:** a shell `postToolUse` without
+`exitCode` stays `unknown` and neither fails nor supersedes; an oversized body whose content is
+omitted carries no identity; the default structural artifact observes no shell calls (owner: #910
+for Cursor shell outcomes). Native dogfood acceptance of this path on macOS, Linux and WSL 2 is not
+yet recorded (owner: #909).
+
 Stale-verification advice is scoped to the logical tool call rather than the observed phase, so a
 `preToolUse`/`postToolUse` pair carrying one call identity reports one
 `edit_after_successful_check` finding with both phases as evidence. The reviewed post-only
