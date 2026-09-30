@@ -714,23 +714,39 @@ def _outside_plan(
     ]
 
 
+# Observation conditions that still raise the ``refresh_observation`` advisory.
+# Source lag, a stale cursor, an unavailable service and a locked vault recover
+# while the session continues (reconcile, drain, restart, unlock), and the
+# advisory clears when they do. Unsupported rollout records keep their earlier
+# treatment and do not clear in session.
+_ADVISED_OBSERVATION_GAPS: Final = frozenset(
+    {
+        ObservationGapCode.SOURCE_LAG.value,
+        ObservationGapCode.CURSOR_STALE.value,
+        ObservationGapCode.SERVICE_UNAVAILABLE.value,
+        ObservationGapCode.VAULT_LOCKED.value,
+        ObservationGapCode.UNSUPPORTED_EVENT.value,
+        ObservationGapCode.UNSUPPORTED_FORMAT.value,
+    }
+)
+
+
 def _observation_gaps(
     lifecycle: ObservationLifecycle,
     gaps: Sequence[str],
     envelopes: Sequence[ObservationEnvelope],
 ) -> list[ObservationAdviceCandidate]:
-    interesting = {
-        ObservationGapCode.SOURCE_LAG.value,
-        ObservationGapCode.CURSOR_STALE.value,
-        ObservationGapCode.SERVICE_UNAVAILABLE.value,
-        ObservationGapCode.VAULT_LOCKED.value,
-        ObservationGapCode.UNPAIRED_EVENT.value,
-        ObservationGapCode.UNSUPPORTED_EVENT.value,
-        ObservationGapCode.UNSUPPORTED_FORMAT.value,
-    }
-    present = [gap for gap in gaps if gap in interesting]
+    # ``unpaired_event`` is a standing record, not a stale feed (#917): a lost
+    # pairing stays disclosed on status, check coverage and the receipt for the
+    # rest of the session, and no drain or wait can clear it. It is announced
+    # once per new orphan scope instead, so it never raises this advisory.
+    present = sorted({gap for gap in gaps if gap in _ADVISED_OBSERVATION_GAPS}, key=str.encode)
     if lifecycle in {ObservationLifecycle.STALE, ObservationLifecycle.DEGRADED} or present:
-        refs = [_envelope_ref(item) for item in envelopes[-3:]] or ("observation:gap",)
+        # Name the live cause. Refs are sorted, and ``cause:`` sorts before every
+        # observation source identity, so the hook's single evidence reference
+        # names it rather than a rolling envelope.
+        causes = [f"cause:{gap}" for gap in present] or [f"cause:lifecycle_{lifecycle.value}"]
+        refs = [*causes, *(_envelope_ref(item) for item in envelopes[-3:])]
         return [
             _candidate(
                 FindingKind.LEDGER_STALE_OR_INCOMPLETE,

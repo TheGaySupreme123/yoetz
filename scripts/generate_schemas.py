@@ -2832,6 +2832,7 @@ def _status_result_v1_4_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     _add_status_semantic_progress(definitions)
     _add_status_operation_admission(definitions)
     _add_status_observed_run(definitions)
+    _add_status_finding_frontier(definitions)
     document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
     document["title"] = f"Yoetz status result {entry.schema_version}"
     return document
@@ -2954,6 +2955,16 @@ def _add_status_observed_run(definitions: dict[str, JsonValue]) -> None:
             "then": {"properties": {"payload_available": {"const": True}}},
         }
     )
+
+
+def _add_status_finding_frontier(definitions: dict[str, JsonValue]) -> None:
+    """Add the optional record frontier every finding item carries (issue #917)."""
+
+    finding_item = cast(dict[str, JsonValue], definitions["finding_item"])
+    finding_properties = cast(dict[str, JsonValue], finding_item["properties"])
+    finding_properties["finding_frontier"] = {
+        "$ref": SCHEMA_NAMESPACE + "common/frontier-1.0.0.schema.json"
+    }
 
 
 def _add_status_operation_admission(definitions: dict[str, JsonValue]) -> None:

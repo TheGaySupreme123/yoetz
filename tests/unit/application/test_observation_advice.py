@@ -868,9 +868,10 @@ def test_delivery_identity_ignores_evidence_refs_that_are_a_rolling_window() -> 
     later = _gap_snapshot(9)
 
     assert first.ranked_items[0].evidence_refs != later.ranked_items[0].evidence_refs
-    assert hook_advice_context(first) != hook_advice_context(later), (
-        "the delivered text must still carry its (moved) evidence reference"
-    )
+    # The delivered text cites the live cause, which leads the sorted refs (#917);
+    # the rolling envelope window still travels with the item.
+    assert first.ranked_items[0].evidence_refs[0] == "cause:source_lag"
+    assert "Evidence: cause:source_lag." in hook_advice_context(later)
     assert advice_delivery_identity(first) == advice_delivery_identity(later), (
         "the dedup key moved with a rolling evidence window; the advice will storm"
     )

@@ -1435,3 +1435,14 @@ and `writer_id` (`safe_details.state` is the probed state), or replay the unchan
 under that same request ID. Never mint a replacement write ID to recover an unknown outcome.
 A lost first `start` still uses exact same-body replay because session/writer IDs may be absent.
 This behavior is identical on macOS, Linux and Windows via WSL 2. CLI callers may set `--deadline-ms`.
+
+### Tool-call records and orphan notices (#917)
+
+The default structural Claude Code profiles are post-only: their ledger records are byte-identical
+after #917 (pinned by a replay of real `PostToolUse` payloads), and a post never diagnoses a missing
+pre. The opt-in ordinary profile (`claude-code-ordinary-observation-v1`) is on the conservative
+paired contract, so it receives the same fixes as Codex: an individually delivered `PreToolUse` and
+its post share one action (described as observed via Claude Code hook), and a post with no open pre
+keeps the standing `unpaired_event` record and triggers one "Yoetz notice (no response needed)"
+per new orphan scope instead of a recurring stale-observation advisory. Claude Code has no
+code-mode cell, so the stream wrapper rule does not apply.

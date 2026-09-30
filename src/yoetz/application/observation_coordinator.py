@@ -54,8 +54,10 @@ from yoetz.application.observation_drain import ObservationCaptureRecoveryOutcom
 from yoetz.application.observation_materialize import (
     MATERIALIZATION_LEGACY_MAPPING_VERSIONS,
     MATERIALIZATION_MAPPING_VERSION,
+    PAIRED_ACTION_ROLE,
     SESSION_BOUND_MAPPING_VERSIONS,
     MaterializedObservationBatch,
+    PairedActionLink,
     approved_check_author,
     canonical_logical_identity,
     materialize_observation_envelope,
@@ -68,6 +70,8 @@ from yoetz.application.observation_materialize import (
     observation_content_identity,
     observation_operation_digest,
     observation_writer_id,
+    paired_action_link,
+    paired_action_linked_roles,
     stable_observation_id,
     stream_event_is_completed_tool,
 )
@@ -548,6 +552,25 @@ def _observation_writer_routes(
                 )
             )
     return tuple(dict.fromkeys(candidates)), history_truncated
+
+
+@dataclass(frozen=True, slots=True)
+class _ActionLinkPlan:
+    """Which phase of a paired host call appends its single action (#917)."""
+
+    link: PairedActionLink | None
+    batch: MaterializedObservationBatch
+    skip: bool
+    role_sets: tuple[tuple[str, ...], ...]
+
+    def same_content_roles(self, resolved: tuple[str, ...], current: tuple[str, ...]) -> bool:
+        """Whether a committed role set differs from this batch only by the linked action."""
+
+        if resolved == current:
+            return True
+        return self.link is not None and paired_action_linked_roles(
+            resolved
+        ) == paired_action_linked_roles(current)
 
 
 def _load_logical_identity_claim(
@@ -3068,6 +3091,20 @@ class ObservationCoordinator:
                                 and legacy_replay_roles not in replay_role_sets
                             ):
                                 replay_role_sets.append(legacy_replay_roles)
+                    # One logical action per paired host call (#917). The pre and
+                    # the post (and their hook/stream copies) name the same
+                    # action; the phase appended first records it and the other
+                    # links its result and evidence to it. Both committed shapes
+                    # stay lookup candidates so a replay finds its own operation.
+                    stage = "action_link"
+                    action_plan = await self._plan_action_link(
+                        runtime,
+                        envelope=envelope,
+                        batch=batch,
+                        replay_role_sets=tuple(replay_role_sets),
+                    )
+                    batch = action_plan.batch
+                    replay_role_sets.extend(action_plan.role_sets)
                     replay_claims: list[
                         tuple[ObservationLogicalIdentityClaim, tuple[str, ...]]
                     ] = []
@@ -3101,7 +3138,11 @@ class ObservationCoordinator:
                         result.disposition is ObservationIngestDisposition.DUPLICATE
                         or bool(replay_claims)
                     )
-                    if captured_content:
+                    if action_plan.skip:
+                        # The call's action is already recorded by its other
+                        # phase and this phase carries nothing else to append.
+                        claim = None
+                    elif captured_content:
                         claim = await self._append_materialized(
                             runtime,
                             envelope,
@@ -3137,7 +3178,9 @@ class ObservationCoordinator:
                             resolved_draft_roles,
                         ) = claim
                         current_draft_roles = tuple(item.role for item in batch.drafts)
-                        if resolved_draft_roles != current_draft_roles:
+                        if not action_plan.same_content_roles(
+                            resolved_draft_roles, current_draft_roles
+                        ):
                             await self._local(
                                 partial(
                                     self.local.note_coverage_gap,
@@ -4097,6 +4140,48 @@ class ObservationCoordinator:
                 lineage_frontier=lineage_frontier,
             )
         )
+
+    async def _plan_action_link(
+        self,
+        runtime: TaskRuntime,
+        *,
+        envelope: ObservationEnvelope,
+        batch: MaterializedObservationBatch,
+        replay_role_sets: tuple[tuple[str, ...], ...],
+    ) -> _ActionLinkPlan:
+        """Choose which phase of one paired host call records its single action (#917).
+
+        The plan carries the batch to append (``skip`` when nothing is left) and
+        every role set either committed shape of this phase could hold, so the
+        append step still finds a replay of its own operation first. The action
+        draft is dropped only when the task ledger already projects this exact
+        action event; otherwise the full batch is appended, as the pre-#917
+        mapping did for the same phase.
+        """
+
+        link = paired_action_link(envelope, batch, task_id=runtime.task_id)
+        if link is None:
+            return _ActionLinkPlan(None, batch, False, ())
+        own_role_sets = tuple(
+            dict.fromkeys((tuple(item.role for item in batch.drafts), *replay_role_sets))
+        )
+        linked_role_sets = tuple(
+            dict.fromkeys(
+                linked
+                for roles in own_role_sets
+                if PAIRED_ACTION_ROLE in roles and (linked := paired_action_linked_roles(roles))
+            )
+        )
+        variants = tuple(dict.fromkeys((*own_role_sets, *linked_role_sets)))
+        # Test doubles and older in-process ledgers may lack the read seam; without
+        # it the action cannot be proven to exist, so this phase records it.
+        lookup = getattr(getattr(runtime, "ledger", None), "projected_action_event", None)
+        if not callable(lookup):
+            return _ActionLinkPlan(link, batch, False, variants)
+        committed = await cast(Callable[[str], Awaitable[str | None]], lookup)(link.action_id)
+        if committed != link.action_event_id:
+            return _ActionLinkPlan(link, batch, False, variants)
+        return _ActionLinkPlan(link, link.linked, not link.linked.drafts, variants)
 
     async def _append_materialized(
         self,

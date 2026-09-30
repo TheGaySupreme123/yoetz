@@ -85,6 +85,8 @@ __all__ = [
     "SESSION_BOUND_MAPPING_VERSIONS",
     "MaterializedObservationBatch",
     "MaterializedObservationDraft",
+    "PAIRED_ACTION_ROLE",
+    "PairedActionLink",
     "materialize_routine_read_summary",
     "STREAM_COMPLETED_EVENT_KINDS",
     "canonical_logical_identity",
@@ -93,6 +95,8 @@ __all__ = [
     "materialize_observation_inspection_snapshot",
     "materialize_observation_outcome_correction",
     "observation_claim_identity",
+    "paired_action_link",
+    "paired_action_linked_roles",
     "observation_content_identity",
     "observation_writer_id",
     "stable_observation_id",
@@ -950,18 +954,33 @@ def materialize_observation_envelope(
     if kind == "PreToolUse":
         # A selected routine pre normally reaches the ledger only through its
         # completed summary.  When the admission buffer has to flush an
-        # incomplete attempt (deadline, boundary, or session close), this
-        # envelope is delivered individually.  Preserve its native identity as
-        # a pending action so the missing post remains visible as an
-        # action-without-result condition; do not synthesize an outcome.
+        # incomplete attempt (deadline, boundary, or session close), or the
+        # call is not routine, this envelope is delivered individually.
+        # Preserve it as a pending action so a missing post remains visible as
+        # an action-without-result condition; do not synthesize an outcome.
         if correlation is None:
             return MaterializedObservationBatch(
                 (), coverage, channel, gaps, "missing_tool_identity"
             )
+        # A paired profile keys the pending action on the host call itself,
+        # exactly as its post keys the action it links a result to, so the
+        # two phases of one call name one action (#917).  Only the service's
+        # append step decides which phase records it; see
+        # ``paired_action_link``.  Other profiles keep the historical
+        # per-envelope identity unchanged.
         action_source = (
-            f"pre-event:{_logical_source_lane(envelope.source)}:"
-            f"{envelope.session_commitment}:{envelope.cursor.source_generation}:"
-            f"{envelope.source_identity}"
+            _materialization_call_source(
+                envelope,
+                phase="pre",
+                correlation=correlation,
+                family=_action_kind(tool).value,
+            )
+            if pairing_mode == "paired"
+            else (
+                f"pre-event:{_logical_source_lane(envelope.source)}:"
+                f"{envelope.session_commitment}:{envelope.cursor.source_generation}:"
+                f"{envelope.source_identity}"
+            )
         )
         action = stable_observation_id(
             kind=IdKind.ACTION,
@@ -978,8 +997,13 @@ def materialize_observation_envelope(
             role="action_event",
         )
         action_kind = _action_kind(tool)
+        # The pending action is now the call's one action, so a paired
+        # Claude/Cursor ordinary profile names its own host (#917).
+        host = (
+            _observation_host_label(envelope.source) if pairing_mode == "paired" else "Codex hook"
+        )
         description = observed_action_description(
-            f"Observed pending {action_kind.value} via Codex hook", tool
+            f"Observed pending {action_kind.value} via {host}", tool
         )
         command = None
         if action_kind is ActionKind.COMMAND:
@@ -1689,6 +1713,87 @@ def observation_claim_identity(
             *draft_roles,
         )
     )
+
+
+PAIRED_ACTION_ROLE: Final = "action"
+
+
+@dataclass(frozen=True, slots=True)
+class PairedActionLink:
+    """The one canonical action of a paired host call carried by a batch (#917).
+
+    The pre and the post of one paired call both key their action on the host
+    call (lane, session, generation, correlation, family), so they name the same
+    action and action event.  Whichever phase is appended first records it; the
+    later phase appends ``linked``: the same batch without that action draft,
+    whose result and captured evidence still reference the committed action.
+    """
+
+    action_id: str
+    action_event_id: str
+    linked: MaterializedObservationBatch
+
+
+def paired_action_link(
+    envelope: ObservationEnvelope,
+    batch: MaterializedObservationBatch,
+    *,
+    task_id: str,
+) -> PairedActionLink | None:
+    """Return the canonical paired-call action a current-mapping batch carries, if any.
+
+    Only a paired profile's ``PreToolUse`` pending action or linked ``PostToolUse``
+    action qualifies.  Post-only profiles (the installed Claude Code and Cursor
+    carriers), unpaired evidence, and every other role set return ``None`` and
+    keep their materialization byte for byte.
+    """
+
+    if type(envelope) is not ObservationEnvelope or type(batch) is not MaterializedObservationBatch:
+        return None
+    if batch.skip_reason is not None or not batch.drafts:
+        return None
+    structural = cast(Mapping[str, JsonValue], envelope.structural_payload)
+    pairing_mode, correlation_kind = _pairing_contract(envelope, structural)
+    if pairing_mode != "paired":
+        return None
+    correlation = _correlation(structural, correlation_kind=correlation_kind)
+    if correlation is None:
+        return None
+    source = _materialization_call_source(
+        envelope,
+        phase="pre",
+        correlation=correlation,
+        family=_action_kind(_tool_name(structural)).value,
+    )
+    action = stable_observation_id(
+        kind=IdKind.ACTION,
+        task_id=task_id,
+        source_identity=source,
+        mapping_version=MATERIALIZATION_MAPPING_VERSION,
+        role="action",
+    )
+    action_event = stable_observation_id(
+        kind=IdKind.EVENT,
+        task_id=task_id,
+        source_identity=source,
+        mapping_version=MATERIALIZATION_MAPPING_VERSION,
+        role="action_event",
+    )
+    matches = tuple(
+        item
+        for item in batch.drafts
+        if item.role == PAIRED_ACTION_ROLE and str(item.draft.event_id) == action_event
+    )
+    if len(matches) != 1:
+        return None
+    remaining = tuple(item for item in batch.drafts if item is not matches[0])
+    return PairedActionLink(action, action_event, replace(batch, drafts=remaining))
+
+
+def paired_action_linked_roles(draft_roles: tuple[str, ...]) -> tuple[str, ...]:
+    """Return the role set a batch has once its canonical paired action is linked."""
+
+    return tuple(role for role in draft_roles if role != PAIRED_ACTION_ROLE)
 
 
 def _logical_identity_digest(components: tuple[str, ...]) -> str:

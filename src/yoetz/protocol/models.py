@@ -3056,6 +3056,8 @@ class StatusEvidencePageModel(_ClosedModel):
 
 
 class StatusFindingItemModel(_ClosedModel):
+    optional_non_null_fields = frozenset({"finding_frontier"})
+
     finding_id: FindingIdWire
     kind: FindingKindWire
     origin: Literal["deterministic", "semantic_model_derived"]
@@ -3074,6 +3076,10 @@ class StatusFindingItemModel(_ClosedModel):
     reason: String1To8192 | OmittedContentModel | None
     waiver_scope: Literal["finding_only"] | None
     waiver_expiry: TimestampWire | None
+    # Issue #917: the frontier of the ledger event that carries this finding's record
+    # (sequence plus that event's head digest), for every origin. ``respond`` accepts it
+    # as ``finding_frontier`` as-is, so no historical frontier has to be reconstructed.
+    finding_frontier: FrontierModel | None = None
 
     @model_validator(mode="after")
     def _validate_finding_item(self) -> StatusFindingItemModel:
@@ -4706,6 +4712,7 @@ _STATUS_FINDINGS_STRUCTURAL_POINTERS: Final = (
     )
     + _prefix_leaf_patterns("/page/items/*/coverage", _COVERAGE_LEAVES)
     + _prefix_leaf_patterns("/page/items/*/subject_frontier", FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/page/items/*/finding_frontier", FRONTIER_LEAVES)
     + _prefix_leaf_patterns("/page/items/*/provenance", _SEMANTIC_PROVENANCE_LEAVES)
     + _prefix_leaf_patterns("/page/items/*/detail", _OMITTED_CONTENT_LEAVES)
     + _prefix_leaf_patterns("/page/items/*/reason", _OMITTED_CONTENT_LEAVES)
@@ -5231,7 +5238,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 1174:
+    if len(result) != 1176:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 

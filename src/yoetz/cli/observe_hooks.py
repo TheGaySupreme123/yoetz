@@ -43,6 +43,7 @@ from yoetz.adapters.integrations.observation_local import (
     ObservationOutboxRow,
     ObservationStoreLockEvent,
     ObservationStoreLockTimeout,
+    UnpairedScopeNotice,
     observation_store_lock_deadline,
     observation_store_lock_scope,
     self_observation_deliverable,
@@ -2108,6 +2109,18 @@ def _cached_recommendation_context(*, _state: Path | None) -> str:
             "start a fresh session afterwards. Fully restart the host only if activation requires it."
         )
     return text[:_MAX_ADVICE_CONTEXT]
+
+
+def _unpaired_notice_context(notice: UnpairedScopeNotice) -> str:
+    """Name one new orphan scope once, as a standing limitation that needs nothing (#917)."""
+
+    return (
+        "Yoetz notice (no response needed): pairing was lost for at least one tool call "
+        f"in this session (source {notice.source}, generation {notice.source_generation}). "
+        "It stays disclosed as the standing unpaired_event coverage limitation on status, "
+        "check coverage and the receipt. It is not a finding; do not respond, recheck or "
+        "wait for it to clear."
+    )
 
 
 def _frontier_motion_context(notice: FrontierMotionNotice) -> str:
@@ -4931,6 +4944,7 @@ def handle_observe(
         # Commit remains after emit, so a failed write never suppresses a later delivery.
         pending_delivery: AdviceDelivery | None = None
         pending_frontier_notice: FrontierMotionNotice | None = None
+        pending_unpaired_notice: UnpairedScopeNotice | None = None
         delivery_session_id: str | None = None
         # stop_hook_active is the host loop guard: a prior Stop already
         # continued this turn. Blocking again would loop; leave advice for a
@@ -4981,6 +4995,19 @@ def handle_observe(
                         :_MAX_ADVICE_CONTEXT
                     ]
                     pending_delivery = delivery
+                if resolved_event == "PostToolUse":
+                    # One informational notice per new orphan scope; it waits for
+                    # a pass with room rather than being truncated (#917).
+                    unpaired_notice = store.peek_unpaired_notice(
+                        workspace_commitment, session_commitment
+                    )
+                    if unpaired_notice is not None:
+                        notice_text = _unpaired_notice_context(unpaired_notice)
+                        if len(additional) + 1 + len(notice_text) <= _MAX_ADVICE_CONTEXT:
+                            additional = " ".join(
+                                part for part in (additional, notice_text) if part
+                            )
+                            pending_unpaired_notice = unpaired_notice
 
             # Release recommendations are read from one bounded local cache only.
             # Existing task/receipt advice keeps its place first on this shared context
@@ -5042,6 +5069,11 @@ def handle_observe(
                         pending_delivery.delivery_identity,
                         yoetz_session_id=delivery_session_id,
                         session_commitment=session_commitment,
+                    )
+            if emitted and host_consumable and pending_unpaired_notice is not None:
+                with contextlib.suppress(BaseException):
+                    store.commit_unpaired_notice_delivery(
+                        workspace_commitment, pending_unpaired_notice.lane
                     )
             if emitted and host_consumable and pending_frontier_notice is not None:
                 with contextlib.suppress(BaseException):

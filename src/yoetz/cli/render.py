@@ -373,6 +373,12 @@ def render_human_status(result: StatusSuccessModel) -> str:
                 f"{finding.finding_id} resolved={finding.resolved}: "
                 + _projected_text(finding.detail)
             )
+            if finding.finding_frontier is not None:
+                # The frontier respond accepts as finding_frontier, as-is (#917).
+                lines.append(
+                    f"  finding_frontier: {finding.finding_frontier.sequence} "
+                    f"({finding.finding_frontier.head_digest})"
+                )
     if isinstance(result.page, StatusResultsPageModel):
         lines.extend(_render_result_items(result.page))
     if isinstance(result.page, StatusObligationsPageModel):

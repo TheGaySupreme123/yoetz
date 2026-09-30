@@ -1710,6 +1710,32 @@ performs this repair. The shared service behavior applies on macOS, Linux and Wi
 source tests do not establish native host/platform acceptance.
 
 
+### One action per tool call and the standing orphan record (#917)
+
+Each Codex tool call is one ledger action. An individually delivered `PreToolUse` becomes a
+pending action keyed on the call's `tool_use_id`; its `PostToolUse` links the result and captured
+output to that same action instead of recording a second one. A post whose pre never reached the
+ledger (a Yoetz `start`/`publish_work`/`check`/`respond` call, whose pre stays local, or a lost pre)
+still records its own action. In code mode the outer `exec` cell is kept in the local store and not
+delivered once this session's tool hooks (`PreToolUse`/`PostToolUse`) have fired; its nested
+`exec_command`, `apply_patch` and MCP calls are the ledger record. A session whose tool hooks never
+fired keeps delivering its cells. A cell whose only nested tool is unhooked, in a session where
+other tools are hooked, is not recorded, and a retained wrapper counts in `observed_count` without
+an accounting bucket. A replay of the #917 code-mode example holds one action and one
+result per nested call and at most four hook-observed events per shell command, down from about
+7.9. Sessions that started before the upgrade keep their historical second action per call.
+
+A post with no open pre (`unpaired_event`) stays disclosed on `status`, check coverage and the
+receipt for the rest of the session, including after resume and restart. It no longer produces the
+"Observation coverage is incomplete or stale" advisory. The advisory names its cause as
+`cause:<gap>` and clears when source lag, a stale cursor, drain backlog, an unavailable service or
+a locked vault recovers. Unsupported rollout records (`unsupported_event`, `unsupported_format`)
+still raise it and do not clear in session; that classification is a follow-up. Instead the agent sees one "Yoetz notice (no response
+needed)" in hook `PostToolUse` context the first time a new source/session/generation scope has an
+orphan. It is not a finding: do not respond to it, recheck for it, or wait for it to clear. The
+same applies on macOS, Linux and Windows through WSL 2; native-host dogfood evidence for this
+change is tracked on #917.
+
 ### Reviewable native edits
 
 Codex `apply_patch` calls (including code-mode nested calls) enter the shared encrypted capture

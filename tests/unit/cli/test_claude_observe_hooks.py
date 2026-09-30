@@ -702,10 +702,12 @@ def test_claude_failure_advice_preserves_raw_event_and_commits_after_output(
     )
     emitted = cast(Mapping[str, JsonValue], strict_json_parse(stdout.getvalue()))
     specific = cast(Mapping[str, JsonValue], emitted["hookSpecificOutput"])
-    assert specific == {
-        "hookEventName": "PostToolUseFailure",
-        "additionalContext": "Review the failed Yoetz operation before continuing.",
-    }
+    assert specific["hookEventName"] == "PostToolUseFailure"
+    context = cast(str, specific["additionalContext"])
+    assert context.startswith("Review the failed Yoetz operation before continuing.")
+    # The paired ordinary profile saw no pre for this call, so the one-time
+    # standing-limitation notice for its new orphan scope follows the advice (#917).
+    assert context.count("Yoetz notice (no response needed)") == 1
     assert commits == ["failure-advice-1"]
     envelope = store.list_envelopes(commitment)[0]
     assert envelope.structural_payload["hook_name"] == "PostToolUse"

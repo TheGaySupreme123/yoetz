@@ -1580,3 +1580,12 @@ and `writer_id` (`safe_details.state` is the probed state), or replay the unchan
 under that same request ID. Never mint a replacement write ID to recover an unknown outcome.
 A lost first `start` still uses exact same-body replay because session/writer IDs may be absent.
 This behavior is identical on macOS, Linux and Windows via WSL 2. CLI callers may set `--deadline-ms`.
+
+### Tool-call records and orphan notices (#917)
+
+Cursor's installed profiles are post-only: `postToolUse` and `afterMCPExecution` records are
+byte-identical after #917 (pinned by a replay of real payloads), and generation-only posts stay
+metadata evidence without `unpaired_event`. The opt-in ordinary profile
+(`cursor-ordinary-observation-v1`) is on the conservative paired contract, so a paired pre and post
+share one action and an orphan scope yields one informational notice rather than a recurring
+advisory. Cursor has no code-mode cell, so the stream wrapper rule does not apply.

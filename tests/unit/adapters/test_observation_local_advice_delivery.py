@@ -687,7 +687,9 @@ def test_unmapped_task_does_not_receive_prior_task_failed_command(
 
     later = _run(tmp_path, "PostToolUse", "task-b", tool_name="shell", exit_status=0)
     assert "resolve_failed_command" not in later
-    assert later == ""
+    # Task B's post has no correlation id, so it opens a new orphan scope and may
+    # carry only the one-time standing-limitation notice (#917), no task A advice.
+    assert later.split("Yoetz notice (no response needed)")[0].strip() == ""
 
 
 def test_same_session_failed_command_stays_deliverable(tmp_path: Path) -> None:

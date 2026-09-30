@@ -44,6 +44,16 @@ reverse-chronological released versions.
   Codex `exec_command` and `local_shell` calls. Until #917 pairs hook and rollout copies, a
   command seen on both can appear as two results (#910).
 
+- Codex observation records each tool call once. A tool call's pre-event and its result now share
+  one ledger action instead of two, and a code-mode `exec` cell no longer adds its own action next
+  to the nested calls its hooks already recorded, so a shell command costs at most four
+  observation records instead of about eight. Earlier sessions keep their recorded history. A lost
+  pre/post pairing (`unpaired_event`) stays disclosed on status, check coverage and the receipt,
+  but it no longer raises the "Observation coverage is incomplete or stale" advisory that no wait
+  could clear; the agent gets one no-response notice per new orphan scope. The advisory now names
+  its live cause and clears when source lag, drain, service or vault conditions recover;
+  unsupported-record gaps still keep it and do not clear in session. `status view=findings` items
+  carry the `finding_frontier` that `respond` accepts as-is (#917).
 - With the Codex subscription evaluator bound, the service no longer re-hashes the retained Codex
   runtime (about 359 MB on Linux) on the event loop for every observation advice cycle. Structural
   readiness is memoized by binding and file fingerprints and re-checked off the event loop only
