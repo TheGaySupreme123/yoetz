@@ -10,7 +10,7 @@ case builder, composed local packs and receipt builder over that prefix.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from yoetz.application.check import CheckScope, run_deterministic_policies
 from yoetz.application.observation_materialize import observation_author
@@ -135,7 +135,14 @@ class ObservedLedger:
     records: list[LedgerRecord] = field(default_factory=lambda: [])
     runs: int = 0
 
-    def _append(self, schema: EventSchema, payload: EventPayload, *, observed: bool) -> EventId:
+    def _append(
+        self,
+        schema: EventSchema,
+        payload: EventPayload,
+        *,
+        observed: bool,
+        known_gaps: tuple[str, ...] = (),
+    ) -> EventId:
         sequence = len(self.records) + 1
         previous = "genesis" if not self.records else self.records[-1].entry_digest
         encoded = canonical_encode(encode_payload(payload))
@@ -145,6 +152,8 @@ class ObservedLedger:
         author = observation_author() if observed else _AGENT
         channel = PublicationChannel.HOOK_OBSERVED if observed else PublicationChannel.LOCAL_CLI
         coverage = coverage_for_channel(channel)
+        if known_gaps:
+            coverage = replace(coverage, known_gaps=known_gaps)
         media = media_type_for(schema.name)
         preimage = {
             "protocol": "yoetz.event",
@@ -272,6 +281,12 @@ class ObservedLedger:
                 summary=f"Observed result status={outcome.value}",
             ),
             observed=observed,
+            # The coordinator marks an outcome-less observed result with the one standing gap.
+            known_gaps=(
+                ("host_outcome_unavailable",)
+                if observed and outcome is ResultOutcome.UNKNOWN and exit_status is None
+                else ()
+            ),
         )
         return result
 

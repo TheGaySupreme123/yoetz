@@ -673,9 +673,11 @@ A rerun is a new host tool call, so keying "resolved" on the call id left every 
 unresolved. Observation-advice policy `0.1.6` makes `failed_command_unresolved` read the same
 kernel predicate the local packs and the ADR-025 claim invariant read
 (`kernel/observed_failures.py`): a failed command envelope is still reported only while no later
-post-event of the same *command identity* succeeded, no later completed edit envelope (an edit tool
-whose post-event did not fail or get denied) followed it, and the same host call did not later
-succeed. A later failure of the same identity is a new condition; it never revives an earlier one.
+post-event of the same *command identity* followed it (only the latest run of a command is
+judged), no later completed edit post-event (an edit tool whose post-event did not fail or get
+denied; a permission request or decision is not an edit) followed it, and the same host call did
+not later succeed. A later failure of the same identity is a new condition; it never revives an
+earlier one. Cursor's ordinary shell tool `Shell` is a command tool for this rule.
 
 The command identity is a new structural envelope field, `command_commitment`: an
 installation-keyed `hmac-sha256:` value (domain `yoetz/observation-command-commitment/v1`, the

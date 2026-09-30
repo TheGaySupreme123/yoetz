@@ -70,7 +70,8 @@ def test_classification_is_one_backward_pass_over_identity_and_edits() -> None:
             _run(6, ResultOutcome.FAILURE, _A),
         )
     )
-    assert edited["r1"] is ObservedFailureState.HISTORICAL
+    # r6 reruns r1's command, so r1 is judged through that later run, not the edit.
+    assert edited["r1"] is ObservedFailureState.RERUN
     assert edited["r2"] is ObservedFailureState.HISTORICAL
     assert edited["r4"] is ObservedFailureState.HISTORICAL
     assert edited["r6"] is ObservedFailureState.LIVE
@@ -380,3 +381,61 @@ def test_results_view_names_tool_occurrence_commitment_and_exit_status() -> None
         "exit_status": 2,
     }
     assert "pytest" not in str(red_wire)
+
+
+# --- only the latest run of a command identity can be live (#909 review) ----------------------
+
+
+def test_repeated_red_runs_raise_one_finding_for_the_latest_and_name_the_earlier_as_history() -> (
+    None
+):
+    ledger = ObservedLedger()
+    earlier = ledger.fail("pytest -q tests/x.py")
+    latest = ledger.fail("pytest -q tests/x.py")
+    ledger.claim()
+    assert omitted_results(ledger) == (latest,)
+    detail = omissions(ledger)[0].candidate.detail
+    assert "is the latest" not in detail
+    assert f"Observed run: result {latest}" in detail
+    limitations = receipt_limitations(ledger)
+    assert "1 was rerun later by the same command" in limitations
+    assert limitations.count(earlier) == 1 and latest not in limitations
+    # A v1.1 claim must name only the latest red run.
+    versioned = ObservedLedger()
+    versioned.fail("pytest -q tests/x.py")
+    last = versioned.fail("pytest -q tests/x.py")
+    versioned.claim(limitations=(last,))
+    assert omissions(versioned) == ()
+
+
+def test_repeated_red_runs_then_green_are_clean() -> None:
+    ledger = ObservedLedger()
+    ledger.fail("pytest -q tests/x.py")
+    ledger.fail("pytest -q tests/x.py")
+    ledger.passes("pytest -q tests/x.py")
+    ledger.claim(versioned=True)
+    assert omissions(ledger) == ()
+    assert "2 were later passed by the same command" in receipt_limitations(ledger)
+
+
+def test_a_later_rerun_without_a_stated_outcome_is_the_run_that_is_judged() -> None:
+    ledger = ObservedLedger()
+    failed = ledger.fail("pytest -q tests/x.py")
+    ledger.run("pytest -q tests/x.py", ResultOutcome.UNKNOWN)
+    ledger.claim(versioned=True)
+    assert omissions(ledger) == ()
+    assert limitations_name_once(receipt_limitations(ledger), failed)
+
+
+def limitations_name_once(limitations: str, ref: str) -> bool:
+    return limitations.count(ref) == 1 and "rerun later by the same command" in limitations
+
+
+def test_a_failure_without_command_identity_never_promises_a_rerun_clears_it() -> None:
+    ledger = ObservedLedger()
+    ledger.fail(None)
+    ledger.claim()
+    (finding,) = omissions(ledger)
+    detail = finding.candidate.detail
+    assert "a run without a command commitment is retired only by the edit" in detail
+    assert "until it passes" not in detail and "is the latest" not in detail

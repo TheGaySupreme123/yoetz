@@ -783,10 +783,12 @@ Key payload fields (minimum; full shapes in `src/yoetz/domain/events.py`):
 the claim-revision replay invariant (`limitation_refs_complete`), work-integrity
 `failed_work_omitted`, research-evidence `material_limitation_omitted`, observation-advice
 `failed_command_unresolved`, and the receipt builder all read. `ObservedFailureState` is exactly
-`live`, `superseded`, or `historical`. `classify_observed_runs(runs)` takes `ObservedRun(ref,
-position, outcome, identity, edit)` values and, for each failed or partial run, returns
-`superseded` when a later run with the same identity succeeded, else `historical` when a later
-edit whose own outcome is not `failure` followed, else `live`.
+`live`, `superseded`, `rerun`, or `historical`. `classify_observed_runs(runs)` takes
+`ObservedRun(ref, position, outcome, identity, edit)` values and, for each failed or partial run,
+returns `superseded` when a later run with the same identity succeeded, else `rerun` when a later
+run with the same identity has any other outcome (only the latest run of a command identity can
+be `live`), else `historical` when a later edit whose own outcome is not `failure` followed, else
+`live`. A run without an identity is retired only by a later edit.
 `observed_failure_states(projection, observed_event_ids, through=frontier)` applies it to the
 readable results recorded no later than `through` whose source events are service-stamped
 hook observations (`is_observed_run_record`: observation-coordinator authorship on the
@@ -799,8 +801,11 @@ provenance into replay. A `live` observed failure's `failed_work_omitted` adds t
 `observed_failure_live` fact naming its result and action and a sentence pointing at `status
 view=results`; research-evidence's copy of the same (claim, result) omission is dropped when
 work integrity reported it (`_collapse_failed_work_overlap`), so one omitted failure is one
-finding. The receipt's limitations section names superseded, historical, and
-`limitation_refs`-disclosed observed failures once, bounded to ten ids per clause.
+finding. The receipt's limitations section names superseded, rerun, historical, and
+`limitation_refs`-disclosed observed failures once, bounded to ten ids per clause. Known limit:
+an edit the harness sees only as a shell command (a heredoc written through `exec_command` or
+`Bash`) is a command, not an observed edit, so a failure followed only by such edits stays `live`
+unless the same command is rerun.
 
 `reason` MAY be omitted for `acknowledged` and MUST be non-empty for `provenance_disputed`,
 `rejected`, or `waived`.

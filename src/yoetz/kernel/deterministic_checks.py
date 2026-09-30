@@ -556,11 +556,14 @@ def render_deterministic_finding_text(
             run_actions = ", ".join(ref for ref in run if ref.startswith("act_"))
             named = f"result {run_results}" + (f" of action {run_actions}" if run_actions else "")
             detail = (
-                f"{detail} Observed run: {named} is the latest hook-observed run of its command, "
-                "and no completed observed workspace edit followed it before the claim. "
-                "status view=results lists its tool, occurrence, command commitment and exit "
-                "status; command text is never recorded. Either disclose it as above, or re-run "
-                "the same command until it passes and publish a replacement claim."
+                f"{detail} Observed run: {named} failed, and before the claim no later "
+                "hook-observed run of the same command identity followed it and no completed "
+                "observed workspace edit followed it. status view=results lists its tool, "
+                "occurrence, command commitment (when recorded) and exit status; command text is "
+                "never recorded. Either disclose it as above, or fix it and publish a replacement "
+                "claim once a later observed run of the same command passes or a completed "
+                "observed edit follows it (a run without a command commitment is retired only "
+                "by the edit)."
             )
     if kind is FindingKind.CONTRADICTORY_CLAIMS_UNRESOLVED:
         claim_refs = tuple(ref for ref in refs if ref.startswith("clm_"))

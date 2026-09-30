@@ -116,7 +116,8 @@ _VERIFICATION_TOOLS: Final = frozenset(
 )
 # Generic host shells.  A successful envelope here proves only that the host
 # tool returned; it never proves that a verification check ran.
-_SHELL_TOOLS: Final = frozenset({"shell", "Bash", "bash"})
+# Cursor's ordinary profile reports its shell tool as ``Shell`` (#909).
+_SHELL_TOOLS: Final = frozenset({"shell", "Shell", "Bash", "bash"})
 # Tools whose envelopes carry command outcomes at all, used by the failed and
 # unresolved-command rules, which reason about outcomes rather than checks.
 _COMMAND_TOOLS: Final = _VERIFICATION_TOOLS | _SHELL_TOOLS
@@ -255,6 +256,8 @@ _FIELD_ACTION: Final = "action"
 _FIELD_ATTEMPT: Final = "attempt"
 _FIELD_DENIED: Final = "denied"
 _FIELD_COMMAND_COMMITMENT: Final = "command_commitment"
+# The post-phase event kinds that report a completed tool call (Cursor's is mapped to the first).
+_POST_TOOL_EVENT_KINDS: Final = frozenset({"PostToolUse", "postToolUse"})
 # Read only as correlation keys.
 _FIELD_CORRELATION_ID: Final = "correlation_id"
 _FIELD_TOOL_CALL_ID: Final = "tool_call_id"
@@ -431,8 +434,9 @@ def _failed_commands(envelopes: Sequence[ObservationEnvelope]) -> list[Observati
     """Report a failed command only while it is still live (#909).
 
     A failure clears when the same host call later reports success (its correlation key), when a
-    later run of the same command identity succeeds (the keyed ``command_commitment`` the hook
-    computed, never command text), or when a completed edit follows it. This is the shared
+    later run of the same command identity follows it with any outcome (the keyed
+    ``command_commitment`` the hook computed, never command text; only the latest run of a
+    command is judged), or when a completed edit post-event follows it. This is the shared
     supersession rule the local packs and the claim-revision invariant apply, so the advice
     cannot keep a failure the packs already treat as history. An envelope without a commitment
     (every legacy envelope) is still cleared by a later completed edit, never kept forever.
@@ -461,7 +465,19 @@ def _failed_commands(envelopes: Sequence[ObservationEnvelope]) -> list[Observati
             elif passed:
                 unresolved.pop(key, None)
                 runs.append(ObservedRun(ref, position, ResultOutcome.SUCCESS, identity))
-        elif _is_edit_envelope(envelope, tool) and not failed and not _denied(envelope):
+            elif identity is not None and envelope.event_kind in _POST_TOOL_EVENT_KINDS:
+                # A later run of the same command without a stated outcome still replaces the
+                # earlier failure as the run that is judged; only the latest run can be live.
+                runs.append(ObservedRun(ref, position, ResultOutcome.UNKNOWN, identity))
+        elif (
+            envelope.event_kind in _POST_TOOL_EVENT_KINDS
+            and _is_edit_envelope(envelope, tool)
+            and not failed
+            and not _denied(envelope)
+        ):
+            # Only a post-event is a completed edit, exactly as only a post-event materializes
+            # the ledger result the packs read; a permission request or decision for an edit
+            # tool has not changed the workspace and may still be denied.
             runs.append(
                 ObservedRun(
                     ref,

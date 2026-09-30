@@ -1074,3 +1074,64 @@ def test_a_new_failure_after_the_pass_is_live_again() -> None:
         _bash(3, "toolu-3", success=False, commitment=_PYTEST_X),
     )
     assert [item.evidence_refs for item in unresolved] == [("hook:toolu-3:3",)]
+
+
+def test_a_permission_request_for_an_edit_tool_is_not_a_completed_edit() -> None:
+    """Claude's PermissionRequest names the edit tool before it runs and may still be denied.
+
+    Only a post-event materializes the ledger result the local packs read, so the advice must not
+    retire a failure on a request the packs never see as an edit.
+    """
+
+    requested = _envelope(
+        "PermissionRequest",
+        pos=2,
+        identity="hook:permission:2",
+        payload={
+            "tool_name": "Edit",
+            "action": "claude_permission_request",
+            "permission_decision": "requested",
+        },
+    )
+    unresolved = _unresolved(_bash(1, "toolu-1", success=False, commitment=_PYTEST_X), requested)
+    assert [item.evidence_refs for item in unresolved] == [("hook:toolu-1:1",)]
+
+
+def test_only_the_latest_run_of_a_command_can_stay_unresolved() -> None:
+    unresolved = _unresolved(
+        _bash(1, "toolu-1", success=False, commitment=_PYTEST_X),
+        _bash(2, "toolu-2", success=False, commitment=_PYTEST_X),
+    )
+    assert [item.evidence_refs for item in unresolved] == [("hook:toolu-2:2",)]
+    rerun_without_outcome = _envelope(
+        "PostToolUse",
+        pos=2,
+        identity="hook:toolu-2:2",
+        payload={"tool_name": "Bash", "tool_call_id": "toolu-2", "command_commitment": _PYTEST_X},
+    )
+    assert not _unresolved(
+        _bash(1, "toolu-1", success=False, commitment=_PYTEST_X), rerun_without_outcome
+    )
+
+
+def test_cursor_ordinary_shell_failures_reach_the_rule_and_clear_on_rerun() -> None:
+    """Cursor's ordinary profile names its shell tool ``Shell``; its exit code is structural."""
+
+    def shell(pos: int, call: str, exit_status: int) -> ObservationEnvelope:
+        return _envelope(
+            "PostToolUse",
+            pos=pos,
+            identity=f"hook:{call}:{pos}",
+            payload={
+                "tool_name": "Shell",
+                "tool_call_id": call,
+                "exit_status": exit_status,
+                "action": "cursor_tool_failure" if exit_status else "cursor_tool_success",
+                "command_commitment": _PYTEST_X,
+            },
+        )
+
+    assert [item.evidence_refs for item in _unresolved(shell(1, "cursor-1", 1))] == [
+        ("hook:cursor-1:1",)
+    ]
+    assert not _unresolved(shell(1, "cursor-1", 1), shell(2, "cursor-2", 0))

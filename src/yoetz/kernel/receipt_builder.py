@@ -919,6 +919,7 @@ def _observed_failure_history_sentence(context: ReceiptBuildContext) -> str:
     if not observed:
         return ""
     superseded: set[ResultId] = set()
+    rerun: set[ResultId] = set()
     historical: set[ResultId] = set()
     disclosed: set[ResultId] = set()
     for _claim_id, claim_record in effective_claim_items(context.projection):
@@ -935,13 +936,15 @@ def _observed_failure_history_sentence(context: ReceiptBuildContext) -> str:
                 disclosed.add(ref)
             elif state is ObservedFailureState.SUPERSEDED:
                 superseded.add(ref)
+            elif state is ObservedFailureState.RERUN:
+                rerun.add(ref)
             elif state is ObservedFailureState.HISTORICAL:
                 historical.add(ref)
-    historical -= superseded
     superseded -= disclosed
-    historical -= disclosed
+    rerun -= disclosed | superseded
+    historical -= disclosed | superseded | rerun
     parts: list[str] = []
-    if superseded or historical:
+    if superseded or rerun or historical:
         clauses: list[str] = []
         if superseded:
             verb = "was" if len(superseded) == 1 else "were"
@@ -949,16 +952,23 @@ def _observed_failure_history_sentence(context: ReceiptBuildContext) -> str:
                 f"{len(superseded)} {verb} later passed by the same command "
                 f"({_listed_refs(superseded)})"
             )
+        if rerun:
+            verb = "was" if len(rerun) == 1 else "were"
+            clauses.append(
+                f"{len(rerun)} {verb} rerun later by the same command, whose latest run is "
+                f"judged instead ({_listed_refs(rerun)})"
+            )
         if historical:
             clauses.append(
                 f"{len(historical)} preceded a later observed workspace edit "
                 f"({_listed_refs(historical)})"
             )
-        total = len(superseded) + len(historical)
+        total = len(superseded) + len(rerun) + len(historical)
         noun = "run" if total == 1 else "runs"
         parts.append(
             f"Observed failure history: of the hook-observed failing {noun} before the "
-            f"completion claim, {' and '.join(clauses)}. "
+            f"completion claim, {', '.join(clauses[:-1]) + ' and ' if len(clauses) > 1 else ''}"
+            f"{clauses[-1]}. "
             f"{'It is' if total == 1 else 'They are'} recorded history, not findings."
         )
     if disclosed:

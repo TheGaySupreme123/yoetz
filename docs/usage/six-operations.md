@@ -68,8 +68,9 @@ to be disclosed; naming it there does not call it a partial or a failure. Read
 the original claim remains immutable history.
 
 A failed run that Yoetz observed through a host hook stops needing disclosure once a later observed
-run of the same command passes, or a later observed edit completes, before the claim. The receipt's
-limitations still name it once as history. For every observed run, `status view=results` shows the
+run of the same command passes, or a later observed edit completes, before the claim. Only the
+latest run of a command is judged, so an earlier failure of a command you ran again is history too.
+The receipt's limitations still name it once. For every observed run, `status view=results` shows the
 tool, its occurrence number, a keyed identity of the command, and its exit status, so you can find
 a run that is still red and name its result in `limitation_refs`. The command text itself is never
 stored or shown.
