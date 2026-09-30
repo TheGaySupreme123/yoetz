@@ -6958,6 +6958,11 @@ plan. Names and contracts:
   digest in `control-hello` (`manifest_mismatch`, superseded through `yoetz service restart`), and a
   released 0.2.5 boundary's closed start-request 1.0.0 schema refuses the field rather than
   dropping it.
+- Golden vectors: `fixtures/canonical/task-statement.case.json` (TSK-001, owned by
+  `scripts/generate_task_statement_fixture.py` through the resource ripple) pins every
+  statement-bearing event version beside its frozen predecessor, the statement-free start request
+  digest (equal to the digest before the field existed) and the privacy-policy 1.1.0 and 1.2.0
+  wires of one approval.
 - `TASK_STATEMENT_REVIEW_INSTRUCTION` (appended to the Responses and Chat Completions system
   instructions): the task statement is the specification and wins over the plan; an omitted or
   contradicted stated requirement is a discrepancy citing the statement's source ref; never request
