@@ -3234,7 +3234,7 @@ async def test_background_advice_readiness_follows_the_primary_only_dispatch(
         ObservationAdviceSemanticAttempt,
         ObservationAdviceSemanticOutcome,
     )
-    from yoetz.config.models import SemanticFallbackConfig
+    from yoetz.config.models import ObservationConfig, SemanticFallbackConfig
     from yoetz.config.write import codex_subscription_runtime
 
     tmp_path.chmod(0o700)
@@ -3283,6 +3283,8 @@ async def test_background_advice_readiness_follows_the_primary_only_dispatch(
         external_runtime=runtime,
         semantic_fallback=SemanticFallbackConfig(primary="codex_subscription"),
         verification=VerificationConfig(semantic="required"),
+        # Explicit owner choice, so the test isolates readiness from the default switch.
+        observation=ObservationConfig(semantic_advice_enabled=True),
     )
     factory = build_ready_application_factory(
         lifecycle=lifecycle,
