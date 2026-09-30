@@ -769,8 +769,9 @@ async def test_concurrent_pre_and_post_deliveries_record_one_action(
     """The action-link read and its append are one step under the coordinator lock (#917).
 
     The pre and the post of one call are delivered concurrently. The first
-    delivery yields inside its existence read; the second must still observe
-    the action the first appended, never an empty read beside it.
+    delivery pauses after its existence read and before its append; the second
+    must still observe the action the first appended, never an empty read
+    beside it.
     """
 
     replay.append(
@@ -829,12 +830,14 @@ async def test_concurrent_pre_and_post_deliveries_record_one_action(
 
     async def _racing_lookup(action_id: str) -> str | None:
         entered.append(action_id)
+        found = await original(action_id)
+        lookups.append(found)
         if len(entered) > 1:
             second_lookup.set()
         else:
-            # Hold the first existence read open until the other delivery has
-            # either reached its own read (a check-then-append race) or is
-            # waiting on the coordinator lock.
+            # Hold the first delivery between its existence read and its append
+            # until the other delivery has either made its own read (the
+            # check-then-append race) or is waiting on the coordinator lock.
             waiters = [
                 asyncio.ensure_future(lock.contended.wait()),
                 asyncio.ensure_future(second_lookup.wait()),
@@ -845,8 +848,6 @@ async def test_concurrent_pre_and_post_deliveries_record_one_action(
             for waiter in pending:
                 waiter.cancel()
             assert done, "the second delivery never reached the action-link window"
-        found = await original(action_id)
-        lookups.append(found)
         return found
 
     monkeypatch.setattr(replay.ledger, "projected_action_event", _racing_lookup)

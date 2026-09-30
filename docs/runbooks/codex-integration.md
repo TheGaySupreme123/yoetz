@@ -1648,16 +1648,19 @@ output to that same action instead of recording a second one. A post whose pre n
 ledger (a Yoetz `start`/`publish_work`/`check`/`respond` call, whose pre stays local, or a lost pre)
 still records its own action. In code mode the outer `exec` cell is decided per cell: its call is
 always kept in the local store, and its output stays local only when one of this session's tool
-hooks (`PreToolUse`/`PostToolUse`) was ingested after Yoetz read the call, so its nested
-`exec_command`, `apply_patch` and MCP calls are the ledger record. This holds when
-`yoetz observe reconcile` reads the call before its nested hook, and for a long-idle session the
-bounded hook map forgot. A cell whose tools fire no hook (only `tools.update_plan`, for example)
-delivers its output and is recorded, in any session. Limits: a cell mixing hooked and unhooked
-tools stays local, so its unhooked tool is not recorded; a hooked cell whose call is read only after
-all its nested hooks, or whose entry the bounded maps forget before its output, keeps its own
-action beside its nested calls, and a hook landing while an unhooked cell runs can keep that cell
-local; an interrupted cell whose output never reaches the rollout adds no record of its own; a
-retained wrapper counts in `observed_count` without an accounting bucket. A replay of the #917 code-mode example holds one action and one
+hooks (`PreToolUse`/`PostToolUse`) was ingested after Yoetz read the call and its own triggered
+reconcile completed before the output was read, so the hook fired while the cell ran and its nested
+`exec_command`, `apply_patch` and MCP calls are the ledger record. A hook of the next cell never
+counts for the previous one. This holds when `yoetz observe reconcile` reads the call before its
+nested hook, and for a long-idle session the bounded hook map forgot. A cell whose tools fire no
+hook (only `tools.update_plan`, for example) delivers its output and is recorded, in any session.
+Limits: a cell mixing hooked and unhooked tools stays local, so its unhooked tool is not recorded;
+a hooked cell whose call is read only after all its nested hooks, whose hooks' reconciles did not
+complete before its output was read, whose hooks fired before an upgrade from the earlier cell
+format, or whose entry the bounded maps forget before its output keeps its own action beside its
+nested calls, and a hook landing while an unhooked cell runs can keep that cell local; an
+interrupted cell whose output never reaches the rollout adds no record of its own; a retained
+wrapper counts in `observed_count` without an accounting bucket. A replay of the #917 code-mode example holds one action and one
 result per nested call and at most four hook-observed events per shell command, down from about
 7.9. Sessions that started before the upgrade keep their historical second action per call.
 

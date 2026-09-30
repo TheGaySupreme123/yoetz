@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -66,55 +67,83 @@ def _cell_row(call_id: str, *, output: bool = False) -> dict[str, Any]:
     return response_item(payload)
 
 
+class _Stream:
+    """One Codex session whose tool hooks each trigger a reconcile, as the hook path does."""
+
+    def __init__(self, tmp_path: Path, session_id: str = "019f9b27-c1de-7a61-9c5e-5d0b8975941a"):
+        self.home = tmp_path / "codex-home"
+        (self.home / "sessions").mkdir(parents=True)
+        self.home.chmod(0o700)
+        self.session_id = session_id
+        self.rollout = self.home / "sessions" / f"rollout-{session_id}.jsonl"
+        self.rollout.write_bytes(encode_lines(session_meta(session_id=session_id)))
+        self.state = tmp_path / "state"
+        self.state.mkdir(mode=0o700)
+        self.store, self.workspace = _store(self.state)
+        self.session = self.store.session_commitment(session_id)
+        self.store.bind_session(self.workspace, self.session)
+
+    def reopen(self) -> None:
+        self.store = LocalObservationStore(_state=self.state)
+
+    def append(self, *rows: dict[str, Any]) -> None:
+        with self.rollout.open("ab") as handle:
+            handle.write(encode_lines(*rows))
+
+    def reconcile(self) -> None:
+        reconcile_session_stream(
+            self.store,
+            workspace_commitment=self.workspace,
+            session_commitment=self.session,
+            codex_session_id=self.session_id,
+            locator=CodexSessionStreamLocator(self.home),
+        )
+
+    def hook(self, call: str, kind: str = "PreToolUse") -> None:
+        self.store.ingest(_tool_hook(self.session, call, kind), workspace_commitment=self.workspace)
+        self.reconcile()
+
+    def delivered_cell_rows(self) -> list[tuple[str, str]]:
+        return [
+            (
+                str(row.envelope.structural_payload.get("action")),
+                str(row.envelope.structural_payload.get("tool_call_id")),
+            )
+            for row in self.store.list_pending_outbox_rows(self.workspace)
+            if row.envelope.source is ObservationSource.CODEX_SESSION_STREAM
+            and row.envelope.structural_payload.get("tool_name") == "exec"
+        ]
+
+
+def _settle(store: LocalObservationStore, workspace: str, session: str) -> None:
+    """One complete stream pass that read no new cell row, as each tool hook triggers."""
+
+    store.settle_code_mode_pass(
+        workspace, session, store.code_mode_pass_snapshot(workspace, session)
+    )
+
+
 def test_a_new_session_past_the_tracking_bound_keeps_hooked_cells_local(tmp_path: Path) -> None:
     """A full tool-hook map forgets the least recently active session, never the new one."""
 
-    home = tmp_path / "codex-home"
-    sessions = home / "sessions"
-    sessions.mkdir(parents=True)
-    home.chmod(0o700)
-    session_id = "019f9b27-c1de-7a61-9c5e-5d0b89759418"
-    rollout = sessions / f"rollout-{session_id}.jsonl"
-    state = tmp_path / "state"
-    state.mkdir(mode=0o700)
-    store, workspace = _store(state)
-    with store.batched(workspace):
+    stream = _Stream(tmp_path)
+    with stream.store.batched(stream.workspace):
         for index in range(1, 257):
-            store.ingest(_tool_hook(_session(index), "call-1"), workspace_commitment=workspace)
-    session = store.session_commitment(session_id)
-    store.bind_session(workspace, session)
+            stream.store.ingest(
+                _tool_hook(_session(index), "call-1"), workspace_commitment=stream.workspace
+            )
+    # The nested tool's hooks fire around the cell, each triggering its own read.
+    stream.append(_cell_row("call_cell"))
+    stream.hook("call_nested")
+    stream.hook("call_nested", "PostToolUse")
+    stream.append(_cell_row("call_cell", output=True))
+    stream.reconcile()
 
-    def reconcile() -> None:
-        reconcile_session_stream(
-            store,
-            workspace_commitment=workspace,
-            session_commitment=session,
-            codex_session_id=session_id,
-            locator=CodexSessionStreamLocator(home),
-        )
-
-    # The nested tool's hooks fire around the cell, as the hook-triggered reads see them.
-    rollout.write_bytes(encode_lines(session_meta(session_id=session_id), _cell_row("call_cell")))
-    store.ingest(_tool_hook(session, "call_nested"), workspace_commitment=workspace)
-    reconcile()
-    store.ingest(_tool_hook(session, "call_nested", "PostToolUse"), workspace_commitment=workspace)
-    with rollout.open("ab") as handle:
-        handle.write(encode_lines(_cell_row("call_cell", output=True)))
-    reconcile()
-
-    wrappers = [
-        row.envelope
-        for row in store.list_pending_outbox_rows(workspace)
-        if row.envelope.source is ObservationSource.CODEX_SESSION_STREAM
-        and row.envelope.structural_payload.get("action")
-        in {"custom_tool_call", "custom_tool_call_output"}
-    ]
-    assert wrappers == []
-    assert store.codex_tool_hook_count(workspace, session) == 2
-    # The least recently active session is the one forgotten; its later cells
-    # would simply be delivered.
-    assert store.codex_tool_hook_count(workspace, _session(1)) == 0
-    assert store.codex_tool_hook_count(workspace, _session(2)) == 1
+    assert stream.delivered_cell_rows() == []
+    assert stream.store.codex_tool_hook_count(stream.workspace, stream.session) == 2
+    # The least recently active session is the one forgotten.
+    assert stream.store.codex_tool_hook_count(stream.workspace, _session(1)) == 0
+    assert stream.store.codex_tool_hook_count(stream.workspace, _session(2)) == 1
 
 
 def test_an_evicted_session_reconciled_before_its_nested_hook_keeps_the_cell_local(
@@ -122,55 +151,29 @@ def test_an_evicted_session_reconciled_before_its_nested_hook_keeps_the_cell_loc
 ) -> None:
     """A forgotten hook session never turns its next cell into a second record (#917).
 
-    Session A was hooked, then 256 other sessions' tool hooks evicted it from the
-    bounded map. A manual reconcile reads A's next ``exec`` cell before its nested
-    hook is admitted; the nested hook then arrives and the output is reconciled.
+    The session was hooked, then 256 other sessions' tool hooks evicted it from the
+    bounded map. A manual reconcile reads its next ``exec`` cell before the nested
+    hook is admitted; the nested hooks then arrive and the output is reconciled.
     The nested hook rows are the cell's record, so neither wrapper row is delivered.
     """
 
-    home = tmp_path / "codex-home"
-    sessions = home / "sessions"
-    sessions.mkdir(parents=True)
-    home.chmod(0o700)
-    session_id = "019f9b27-c1de-7a61-9c5e-5d0b89759418"
-    rollout = sessions / f"rollout-{session_id}.jsonl"
-    state = tmp_path / "state"
-    state.mkdir(mode=0o700)
-    store, workspace = _store(state)
-    session = store.session_commitment(session_id)
-    store.bind_session(workspace, session)
-    store.ingest(_tool_hook(session, "call_earlier"), workspace_commitment=workspace)
-    with store.batched(workspace):
+    stream = _Stream(tmp_path)
+    stream.hook("call_earlier")
+    with stream.store.batched(stream.workspace):
         for index in range(1, 257):
-            store.ingest(_tool_hook(_session(index), "call-1"), workspace_commitment=workspace)
-    assert store.codex_tool_hook_count(workspace, session) == 0
-
-    def reconcile() -> None:
-        reconcile_session_stream(
-            store,
-            workspace_commitment=workspace,
-            session_commitment=session,
-            codex_session_id=session_id,
-            locator=CodexSessionStreamLocator(home),
-        )
+            stream.store.ingest(
+                _tool_hook(_session(index), "call-1"), workspace_commitment=stream.workspace
+            )
+    assert stream.store.codex_tool_hook_count(stream.workspace, stream.session) == 0
 
     # ``yoetz observe reconcile`` reads the cell's call before its nested hook fires.
-    rollout.write_bytes(encode_lines(session_meta(session_id=session_id), _cell_row("call_cell")))
-    reconcile()
-    store.ingest(_tool_hook(session, "call_nested"), workspace_commitment=workspace)
-    store.ingest(_tool_hook(session, "call_nested", "PostToolUse"), workspace_commitment=workspace)
-    with rollout.open("ab") as handle:
-        handle.write(encode_lines(_cell_row("call_cell", output=True)))
-    reconcile()
-
-    wrappers = [
-        row.envelope
-        for row in store.list_pending_outbox_rows(workspace)
-        if row.envelope.source is ObservationSource.CODEX_SESSION_STREAM
-        and row.envelope.structural_payload.get("action")
-        in {"custom_tool_call", "custom_tool_call_output"}
-    ]
-    assert wrappers == []
+    stream.append(_cell_row("call_cell"))
+    stream.reconcile()
+    stream.hook("call_nested")
+    stream.hook("call_nested", "PostToolUse")
+    stream.append(_cell_row("call_cell", output=True))
+    stream.reconcile()
+    assert stream.delivered_cell_rows() == []
 
 
 def test_a_cell_read_before_the_sessions_first_tool_hook_follows_its_own_hooks(
@@ -182,24 +185,31 @@ def test_a_cell_read_before_the_sessions_first_tool_hook_follows_its_own_hooks(
     session = _session(11)
     store.begin_code_mode_cell(workspace, session, "call_first")
     store.ingest(_tool_hook(session, "call-a"), workspace_commitment=workspace)
+    _settle(store, workspace, session)
     assert store.finish_code_mode_cell(workspace, session, "call_first") is True
+    # A hook no complete pass has settled may be a later cell's: the output is delivered.
+    store.begin_code_mode_cell(workspace, session, "call_second")
+    store.ingest(_tool_hook(session, "call-b"), workspace_commitment=workspace)
+    assert store.finish_code_mode_cell(workspace, session, "call_second") is False
 
 
 def test_a_session_forgotten_and_rehooked_while_its_cell_is_open_keeps_the_cell_local(
     tmp_path: Path,
 ) -> None:
-    """Eviction resets a session's hook count; a later nested hook still counts for the cell."""
+    """Eviction resets a session's hook stamps; a later nested hook still counts for the cell."""
 
     store, workspace = _store(tmp_path)
     session = _session(12)
     for call in ("call-a", "call-b", "call-c"):
         store.ingest(_tool_hook(session, call), workspace_commitment=workspace)
+    _settle(store, workspace, session)
     store.begin_code_mode_cell(workspace, session, "call_open")
     with store.batched(workspace):
         for index in range(1_000, 1_256):
             store.ingest(_tool_hook(_session(index), "call-1"), workspace_commitment=workspace)
     assert store.codex_tool_hook_count(workspace, session) == 0
     store.ingest(_tool_hook(session, "call-nested"), workspace_commitment=workspace)
+    _settle(store, workspace, session)
     assert store.finish_code_mode_cell(workspace, session, "call_open") is True
 
 
@@ -213,8 +223,10 @@ def test_a_cell_is_local_only_when_its_own_nested_tool_hooks_fired(tmp_path: Pat
 
     # A hooked cell: the call is held and the output stays local.
     store.ingest(_tool_hook(session, "call-a"), workspace_commitment=workspace)
+    _settle(store, workspace, session)
     assert store.begin_code_mode_cell(workspace, session, "call_hooked") is True
     store.ingest(_tool_hook(session, "call-a", "PostToolUse"), workspace_commitment=workspace)
+    _settle(store, workspace, session)
     assert store.finish_code_mode_cell(workspace, session, "call_hooked") is True
 
     # A later cell whose tools fire no hook is still recorded through its output.
@@ -226,6 +238,58 @@ def test_a_cell_is_local_only_when_its_own_nested_tool_hooks_fired(tmp_path: Pat
     assert reopened.finish_code_mode_cell(workspace, session, "call_plan") is False
     # An output whose start was never seen stays deliverable.
     assert reopened.finish_code_mode_cell(workspace, session, "call_unknown") is False
+
+
+def test_an_unhooked_cell_read_early_keeps_its_record_when_the_next_cell_is_hooked(
+    tmp_path: Path,
+) -> None:
+    """A later cell's nested hook never counts as the earlier cell's record (#917).
+
+    In a session with no tool hook yet, a manual reconcile reads unhooked cell A's
+    call while A runs. A finishes, the next cell B starts and B's nested hook is
+    ingested; the reconcile that hook triggers reads A's output. That hook belongs
+    to B, so A's output is delivered and A keeps its record.
+    """
+
+    stream = _Stream(tmp_path)
+    stream.append(_cell_row("call_cellA"))
+    stream.reconcile()
+    stream.append(_cell_row("call_cellA", output=True), _cell_row("call_cellB"))
+    stream.hook("call_nestedB")
+
+    assert ("custom_tool_call_output", "call_cellA") in stream.delivered_cell_rows()
+    # B's own nested hooks then keep B local.
+    stream.hook("call_nestedB", "PostToolUse")
+    stream.append(_cell_row("call_cellB", output=True))
+    stream.reconcile()
+    assert [row for row in stream.delivered_cell_rows() if row[1] == "call_cellB"] == []
+
+
+def test_an_open_cell_stored_before_the_clock_format_is_migrated_not_dropped(
+    tmp_path: Path,
+) -> None:
+    """A held cell persisted in the earlier count format still finishes without a duplicate."""
+
+    stream = _Stream(tmp_path)
+    stream.append(_cell_row("call_cellA"))
+    stream.hook("call_nestedA")
+    path = next((stream.state / "observation" / "workspaces").glob("*.json"))
+    document = json.loads(path.read_text(encoding="utf-8"))
+    cells = document["code_mode_cells"]
+    assert len(cells) == 1
+    for entry in cells.values():
+        touched = entry["touched"]
+        entry.clear()
+        entry.update(
+            {"hooks_at_start": 1, "pre_withheld": True, "output_local": None, "touched": touched}
+        )
+    path.write_text(json.dumps(document), encoding="utf-8")
+    stream.reopen()
+
+    stream.hook("call_nestedA", "PostToolUse")
+    stream.append(_cell_row("call_cellA", output=True))
+    stream.reconcile()
+    assert stream.delivered_cell_rows() == []
 
 
 def test_delivered_notices_do_not_exhaust_new_scope_notices(tmp_path: Path) -> None:
@@ -264,8 +328,15 @@ def test_delivered_notices_do_not_exhaust_new_scope_notices(tmp_path: Path) -> N
     assert store.peek_unpaired_notice(workspace, session) is None
 
 
-def test_a_forgotten_delivered_scope_is_announced_at_most_once_more(tmp_path: Path) -> None:
-    """The notice map's bound is the documented one: beyond it a scope repeats once."""
+def test_a_delivered_scope_repeats_only_after_leaving_the_retained_window(
+    tmp_path: Path,
+) -> None:
+    """The notice map's bound is the documented one.
+
+    A delivered scope is not announced again while the 256-scope map retains it.
+    Once newer scopes push it out, its next orphan announces it again, after which
+    it is retained again; further churn can push it out, and repeat it, again.
+    """
 
     store, workspace = _store(tmp_path)
     session = _session(4)
@@ -290,7 +361,7 @@ def test_a_forgotten_delivered_scope_is_announced_at_most_once_more(tmp_path: Pa
     repeated = store.peek_unpaired_notice(workspace, session)
     assert repeated is not None and repeated.source_generation == 1
     store.commit_unpaired_notice_delivery(workspace, repeated.lane)
-    # Retained again, it is not announced a third time.
+    # Retained again, it is not announced again until newer scopes push it out.
     orphan(1, "third")
     assert store.peek_unpaired_notice(workspace, session) is None
     # The aggregate gap stays disclosed throughout.
