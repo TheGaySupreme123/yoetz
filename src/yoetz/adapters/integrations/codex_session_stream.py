@@ -1846,8 +1846,8 @@ def _hooked_tool_item(envelope: ObservationEnvelope) -> bool:
     """True for a rollout ``item_completed`` command, MCP or patch record (#910).
 
     The same host call fires its own ``PostToolUse`` hook, and since #910 that hook row carries
-    the call's exit status itself; the rollout item is a second copy under a different id
-    (``exec-<uuid>``) that no pairing can join to the hook row.
+    the call's exit status itself; the rollout item is normally a second copy under a different
+    id (``exec-<uuid>``) that no pairing can join to the hook row.
     """
 
     return (
@@ -1856,66 +1856,144 @@ def _hooked_tool_item(envelope: ObservationEnvelope) -> bool:
     )
 
 
-def _outcome_less_hook_calls(
-    store: LocalObservationStore, workspace_commitment: str, session_commitment: str
-) -> frozenset[str]:
-    """This session's Codex hook calls whose latest ``PostToolUse`` states no outcome (#910).
+def _hook_post_stated(structural: Mapping[str, JsonValue]) -> bool:
+    return (
+        type(structural.get("exit_status")) is int
+        or type(structural.get("success")) is bool
+        or structural.get("denied") is True
+    )
 
-    Each is named by its call id and by its keyed ``command_commitment``. A rollout item for one
-    of them is the only carrier of that call's exit, for example a process still running when its
-    hook fired, so it is delivered rather than held: with the same id ADR-022 decision 15 appends
-    the correction; with the same command it records the run's exit as its own result. A later
-    outcome-bearing hook post of the same call or command removes the name.
+
+def _rollout_item_carries_unstated_outcome(
+    envelopes: tuple[ObservationEnvelope, ...],
+    session_commitment: str,
+    target_identity: str,
+) -> bool:
+    """Whether one rollout tool item is the only carrier of a hooked call's outcome (#910).
+
+    The session's stored rows are replayed in arrival order, so every earlier item is decided
+    with exactly the hook rows that preceded it, as it was when it arrived. Per call:
+
+    * an item whose id is an outcome-less hook call is that call's outcome (ADR-022 decision 15
+      then corrects the hook's ``unknown`` row);
+    * a command item whose exit equals an unpaired stated exit of a hook post for the same
+      command commitment is that post's copy and pairs with it;
+    * otherwise a command item pairs with an outcome-less hook call of the same commitment,
+      counted per call, so one call's stated outcome never withholds another call's only exit.
+
+    Any other item is a copy of a hooked call whose outcome its hook row already states. The
+    replay is bounded by the local envelope ring and forgets what it evicts.
     """
 
-    lister = getattr(store, "list_envelopes", None)
-    if not callable(lister):
-        return frozenset()
-    try:
-        envelopes = cast(tuple[ObservationEnvelope, ...], lister(workspace_commitment))
-    except AttributeError, OSError, ProtocolValueError, TypeError, ValueError:
-        return frozenset()
-    names: set[str] = set()
+    unstated_calls: dict[str, str | None] = {}
+    owed: dict[str, int] = {}
+    stated_exits: dict[str, list[int | None]] = {}
     for envelope in envelopes:
-        if (
-            envelope.source is not ObservationSource.CODEX_HOOK
-            or envelope.session_commitment != session_commitment
-            or envelope.event_kind != "PostToolUse"
-        ):
+        if envelope.session_commitment != session_commitment:
             continue
         structural = envelope.structural_payload
-        stated = (
-            type(structural.get("exit_status")) is int
-            or type(structural.get("success")) is bool
-            or structural.get("denied") is True
-        )
-        for token in (
-            _token(structural.get("tool_call_id")),
-            _token(structural.get("command_commitment")),
-        ):
-            if token is None:
+        call_id = _token(structural.get("tool_call_id"))
+        commitment = _token(structural.get("command_commitment"))
+        if envelope.source is ObservationSource.CODEX_HOOK and envelope.event_kind == "PostToolUse":
+            if not _hook_post_stated(structural):
+                if call_id is not None:
+                    unstated_calls[call_id] = commitment
+                if commitment is not None:
+                    owed[commitment] = owed.get(commitment, 0) + 1
                 continue
-            if stated:
-                names.discard(token)
-            else:
-                names.add(token)
-    return frozenset(names)
+            if call_id is not None and call_id in unstated_calls:
+                # A later stated post of the same call settles it.
+                earlier = unstated_calls.pop(call_id)
+                if earlier is not None and owed.get(earlier, 0) > 0:
+                    owed[earlier] -= 1
+            if commitment is not None:
+                exit_status = structural.get("exit_status")
+                stated_exits.setdefault(commitment, []).append(
+                    exit_status if type(exit_status) is int else None
+                )
+            continue
+        if envelope.source is not ObservationSource.CODEX_SESSION_STREAM or not _hooked_tool_item(
+            envelope
+        ):
+            continue
+        exit_status = structural.get("exit_status")
+        item_exit = exit_status if type(exit_status) is int else None
+        carrier = False
+        if call_id is not None and call_id in unstated_calls:
+            carrier = True
+            earlier = unstated_calls.pop(call_id)
+            if earlier is not None and owed.get(earlier, 0) > 0:
+                owed[earlier] -= 1
+        elif commitment is not None and item_exit in stated_exits.get(commitment, []):
+            stated_exits[commitment].remove(item_exit)
+        elif commitment is not None and owed.get(commitment, 0) > 0:
+            carrier = True
+            owed[commitment] -= 1
+        if envelope.source_identity == target_identity:
+            return carrier
+    return False
 
 
-def _codex_hook_observes_session(
-    store: LocalObservationStore, workspace_commitment: str, session_commitment: str
+def _hooked_tool_item_held(
+    store: LocalObservationStore,
+    workspace_commitment: str,
+    session_commitment: str,
+    envelope: ObservationEnvelope,
 ) -> bool:
-    """Whether Codex tool hooks have admitted input for this host session.
+    """Whether a rollout tool item stays in the local store only (#910, beside #917's cells).
 
-    A store without the read seam, or an unreadable one, answers ``False`` so
-    stream-only reconciliation keeps delivering every row as before.
+    It is held only while Codex tool hooks fire in the session and the item is not the only
+    carrier of a hooked call's outcome. A session without tool hooks, a store without the seams,
+    or an unreadable one answers ``False`` so the item is delivered with its outcome.
     """
 
-    reader = getattr(store, "codex_hook_observes_session", None)
-    if not callable(reader):
+    if not _hooked_tool_item(envelope):
+        return False
+    counter = getattr(store, "codex_tool_hook_count", None)
+    lister = getattr(store, "list_envelopes", None)
+    if not callable(counter) or not callable(lister):
         return False
     try:
-        return reader(workspace_commitment, session_commitment) is True
+        if counter(workspace_commitment, session_commitment) <= 0:
+            return False
+        envelopes = cast(tuple[ObservationEnvelope, ...], lister(workspace_commitment))
+    except AttributeError, OSError, ProtocolValueError, TypeError, ValueError:
+        return False
+    return not _rollout_item_carries_unstated_outcome(
+        envelopes, session_commitment, envelope.source_identity
+    )
+
+
+def _code_mode_cell_held(
+    store: LocalObservationStore,
+    workspace_commitment: str,
+    session_commitment: str,
+    structural: Mapping[str, JsonValue],
+) -> bool:
+    """Whether one code-mode ``exec`` cell row stays in the local store only (#917).
+
+    The decision is per cell: its call is held once Codex tool hooks fire in the
+    session, and its output stays local only when tool hooks fired after the
+    call was read, so a cell whose tools fire no hook keeps its record. A store
+    without the seams, an unreadable one, or a row without a call id answers
+    ``False`` so the row is delivered as before.
+    """
+
+    if not _code_mode_cell_wrapper(structural):
+        return False
+    call_id = _token(structural.get("tool_call_id"))
+    if call_id is None:
+        return False
+    name = (
+        "begin_code_mode_cell"
+        if structural.get("action") == "custom_tool_call"
+        else "finish_code_mode_cell"
+    )
+    decide = getattr(store, name, None)
+    if not callable(decide):
+        return False
+    try:
+        return decide(workspace_commitment, session_commitment, call_id) is True
     except AttributeError, OSError, ProtocolValueError, TypeError, ValueError:
         return False
 
@@ -2222,9 +2300,6 @@ def _reconcile_session_stream_path(
             delivery_blocked = True
 
     advance_classifications = advance.classifications
-    hook_observed = _codex_hook_observes_session(store, workspace_commitment, session_commitment)
-    # Read lazily, once per pass, and only when a completed tool item appears in a hooked session.
-    outcome_less_calls: frozenset[str] | None = None
     for index, unpaired_envelope in enumerate(advance.envelopes):
         if delivery_blocked:
             break
@@ -2364,31 +2439,16 @@ def _reconcile_session_stream_path(
                 )
 
         # A code-mode ``exec`` cell is a container: Codex fires no hook for it, and
-        # every host action inside it is a nested tool call that fires its own
-        # hooks. While Codex tool hooks fire for this session, the nested
-        # hook rows are the ledger's record of the cell, so the wrapper stays in
-        # the local store only instead of adding an independent action (#917).
-        # A completed command, MCP or patch item is the same rule's sibling (#910): while tool hooks
-        # fire for this session, the hook row already records that call and its exit status, so
-        # the rollout copy stays local instead of doubling the call. A session whose tool hooks
-        # never fired delivers the item, with its outcome, as the only record of the call.
-        # The hook row is the record only while it states the call's outcome: an item for a call
-        # or command whose latest hook post is outcome-less is delivered (delay, not drop).
-        cell_wrapper = hook_observed and _code_mode_cell_wrapper(envelope.structural_payload)
-        if hook_observed and not cell_wrapper and _hooked_tool_item(envelope):
-            if outcome_less_calls is None:
-                outcome_less_calls = _outcome_less_hook_calls(
-                    store, workspace_commitment, session_commitment
-                )
-            item_names = {
-                name
-                for name in (
-                    _token(envelope.structural_payload.get("tool_call_id")),
-                    _token(envelope.structural_payload.get("command_commitment")),
-                )
-                if name is not None
-            }
-            cell_wrapper = outcome_less_calls.isdisjoint(item_names)
+        # a host action inside it is a nested tool call that may fire its own
+        # hooks. When the cell's nested calls are hook-observed, those hook rows
+        # are the ledger's record of the cell, so the wrapper stays in the local
+        # store only instead of adding an independent action; a cell whose tools
+        # fire no hook keeps its own record (#917). A completed command, MCP or
+        # patch item follows the same rule unless it is the only carrier of a
+        # hooked call's outcome (#910).
+        cell_wrapper = _code_mode_cell_held(
+            store, workspace_commitment, session_commitment, envelope.structural_payload
+        ) or _hooked_tool_item_held(store, workspace_commitment, session_commitment, envelope)
         deliverable = not cell_wrapper and self_observation_deliverable(
             _stream_phase(envelope.structural_payload), envelope.structural_payload
         )

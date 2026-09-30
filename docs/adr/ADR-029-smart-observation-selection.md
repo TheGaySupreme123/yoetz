@@ -463,14 +463,20 @@ unchanged, so a pre committed before the upgrade replays its committed operation
 the upgrade keeps its historical second action, never a third, and no history is rewritten.
 
 A Codex code-mode `exec` cell fires no hook of its own; each nested `tools.*` call fires its hooks.
-Once Codex tool hooks (`PreToolUse`/`PostToolUse`; lifecycle hooks do not count) have admitted
-input for the host session, the session-stream reader keeps the cell's call and output rows in the
-local store and does not deliver them. The nested hook rows are the ledger's record of the cell.
-A session whose tool hooks never fired keeps delivering its cells. The option of recording the
-cell as the explicit parent of its nested actions was not taken: nested hook payloads carry no cell
-identity to link. Residual limits: a cell whose only nested tool is unhooked, in a session where
-other tools are hooked, is not recorded; a retained wrapper counts in `observed_count` without an
-accounting bucket.
+The session-stream reader decides per cell. It keeps the cell's call row in the local store once
+Codex tool hooks (`PreToolUse`/`PostToolUse`; lifecycle hooks do not count) have fired for the host
+session, and keeps the output local too only when a further tool hook fired after it read the
+call; the nested hook rows are then the ledger's record of the cell. Otherwise the output is
+delivered and records the cell, so a cell whose tools fire no hook keeps its record in a session
+where other cells were hooked. The decision is durable per cell; the tool-hook counts and cell
+decisions are bounded maps that forget the least recently active entry, which can only make a
+later cell deliverable. The option of recording the cell as the explicit parent of its nested
+actions was not taken: nested hook payloads carry no cell identity to link. Residual limits: a cell
+mixing hooked and unhooked tools stays local, so its unhooked tool is not recorded; the decision
+follows the order in which the reader sees rows relative to hook ingestion, so a hooked cell read
+outside its hooks' window keeps its own action (a second record, not a loss) and a hook landing
+while an unhooked cell runs can keep that cell local; a retained wrapper counts in `observed_count`
+without an accounting bucket.
 
 ### The standing `unpaired_event` record (decisions for the set)
 
@@ -484,8 +490,10 @@ accounting bucket.
   `host_outcome_unavailable` is a ledger coverage code that never fed the advisory; it stays
   disclosed either way.
 - **B2.** A distinct new gap is a new `(source, session, source generation)` orphan scope. The first
-  orphan in it queues one local notice, delivered once in hook `PostToolUse` context and never
-  repeated, across restart. It is informational, not a ledger record or finding: it never counts
+  orphan in it queues one local notice, delivered once in hook `PostToolUse` context and not
+  repeated, across restart. The notice map holds 256 scopes and makes room for a new scope by
+  forgetting its oldest delivered notice, so new scopes keep getting notices; only a scope older
+  than 256 newer announced scopes could be announced again. It is informational, not a ledger record or finding: it never counts
   as unanswered, never adds `findings_unanswered`, and cannot be answered or supersede a check.
   Count growth inside a scope is not re-announced.
 - **B3.** The optional one-time acknowledgement depends on #905's `acknowledged_not_done`

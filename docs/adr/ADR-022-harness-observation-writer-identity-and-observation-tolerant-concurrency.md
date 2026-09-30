@@ -716,11 +716,13 @@ result instead of an opaque row, and `exit_code: null` states no outcome. Where 
 equals the rollout item id, decision 15's correction path applies unchanged. The item's id
 (`exec-<uuid>`) normally does not join the hook's call, so it follows #917's code-mode wrapper gate:
 once Codex tool hooks have admitted input for the session, the item stays in the local store with
-the wrapper's accounting, but only while the latest hook post of the same call id or command
-commitment states an outcome. An item for an outcome-less hook post (a process still running when
-its hook fired) is delivered, so decision 15 corrects the hook's `unknown` row when the ids join,
-and otherwise the exit is recorded as a second action for that run, which #909 judges as the later
-run. A session without tool hooks delivers every item, with its outcome, as the only record of the
+the wrapper's accounting unless it is the only carrier of a hooked call's outcome. Items pair with
+hook posts per call, in arrival order: an item whose id is an outcome-less hook call (a process
+still running when its hook fired) is delivered and decision 15 corrects the hook's `unknown` row;
+a command item whose exit matches an unpaired stated post of the same command commitment is that
+post's copy; otherwise, while an outcome-less call of that commitment is unpaired, the item is
+delivered as that call's exit, a second action for that run which #909 judges as the later run.
+Counting per call means one call's stated outcome never withholds another call's only exit. A session without tool hooks delivers every item, with its outcome, as the only record of the
 call. An `McpToolCall` item that names an `error` or a result `isError: true` fails whatever its
 `status`, and a `FileChange` item belongs to the edit family. The Codex outcome reader reads only
 Codex's own shell tools (`Bash`, `shell`, `exec_command`, `local_shell`), never a code-mode `exec`

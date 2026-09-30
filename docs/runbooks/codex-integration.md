@@ -990,13 +990,17 @@ result and never rewrites it (ADR-022 decision 15).
 The rollout item is normally a second copy of a hooked call under a different id (`exec-<uuid>`),
 so it follows the same rule as a code-mode `exec` cell (#917). Once this session's tool hooks
 (`PreToolUse`/`PostToolUse`) have fired, the reader keeps a completed command, MCP or patch item in
-the local store and does not deliver it, provided the hook row already states that call's outcome.
-The reader checks this against the latest hook post of the same call id or the same command
-commitment. When that hook post states no outcome, for example a process still running when its
-hook fired, the item is the only carrier of the exit and is delivered. With the same id, ADR-022
-decision 15 appends the correction to the hook's `unknown` result. With a different id but the
-same command, the item records the exit as its own result. That run is then two actions, a
-disclosed trade-off, and #909 judges the later one. A session whose tool hooks never fired
+the local store and does not deliver it, unless the item is the only carrier of a hooked call's
+outcome. The reader pairs items with hook posts per call, in arrival order. An item whose id is an
+outcome-less hook call, for example a process still running when its hook fired, is that call's
+exit: ADR-022 decision 15 appends the correction to the hook's `unknown` result. A command item
+whose exit matches an unpaired stated hook post of the same command commitment is that post's copy
+and stays local. Otherwise, while an outcome-less hook call of the same commitment is unpaired,
+the item records that call's exit as its own result. That run is then two actions, a disclosed
+trade-off, and #909 judges the later one. Because pairing is counted per call, a later call's
+stated outcome never withholds an earlier same-command call's only exit. A rollout item read
+before its own hook post was stored (parallel calls in one cell) pairs with whatever the reader
+has seen by then. A session whose tool hooks never fired
 delivers every item with its outcome, as the only record of those calls. One hooked command with
 a stated outcome is therefore one action and one result, and a red-latest claim names it once. Like
 a retained cell, a retained item counts in `observed_count` without an admitted, summarized or
@@ -1742,13 +1746,17 @@ Each Codex tool call is one ledger action. An individually delivered `PreToolUse
 pending action keyed on the call's `tool_use_id`; its `PostToolUse` links the result and captured
 output to that same action instead of recording a second one. A post whose pre never reached the
 ledger (a Yoetz `start`/`publish_work`/`check`/`respond` call, whose pre stays local, or a lost pre)
-still records its own action. In code mode the outer `exec` cell is kept in the local store and not
-delivered once this session's tool hooks (`PreToolUse`/`PostToolUse`) have fired; its nested
-`exec_command`, `apply_patch` and MCP calls are the ledger record. A session whose tool hooks never
-fired keeps delivering its cells. A cell whose only nested tool is unhooked, in a session where
-other tools are hooked, is not recorded, and a retained wrapper counts in `observed_count` without
-an accounting bucket. The rollout's completed command, MCP and patch items follow the same rule
-(#910, see [Tool outcomes](#tool-outcomes-issue-910)). A replay of the #917 code-mode example holds one action and one
+still records its own action. In code mode the outer `exec` cell is decided per cell: its call is
+kept in the local store once this session's tool hooks (`PreToolUse`/`PostToolUse`) have fired, and
+its output stays local only when a tool hook fired after Yoetz read the call, so its nested
+`exec_command`, `apply_patch` and MCP calls are the ledger record. A cell whose tools fire no hook
+(only `tools.update_plan`, for example) delivers its output and is recorded, before or after hooked
+cells. Limits: a cell mixing hooked and unhooked tools stays local, so its unhooked tool is not
+recorded; a hooked cell read outside its hooks' window keeps its own action beside its nested calls,
+and a hook landing while an unhooked cell runs can keep that cell local; a retained wrapper counts
+in `observed_count` without an accounting bucket. The rollout's completed command, MCP and patch
+items follow the same session rule (#910, see [Tool outcomes](#tool-outcomes-issue-910)). A replay
+of the #917 code-mode example holds one action and one
 result per nested call and at most four hook-observed events per shell command, down from about
 7.9. Sessions that started before the upgrade keep their historical second action per call.
 

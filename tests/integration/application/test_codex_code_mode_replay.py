@@ -51,6 +51,7 @@ from yoetz.domain.events import (
 )
 from yoetz.domain.observation import (
     ObservationEnvelope,
+    ObservationGapCode,
     ObservationIngestRequest,
     ObservationIngestResult,
     ObservationSource,
@@ -556,7 +557,7 @@ async def test_code_mode_replay_records_one_action_per_host_call(replay: _Replay
     # Nested tool hooks fired for this session, so the code-mode cell wrappers
     # stay in the local store: retained, not dropped. So do the rollout's
     # completed command items (#910): each hook row states the same exit status.
-    assert replay.store.codex_hook_observes_session(replay.commitment, replay.session)
+    assert replay.store.codex_tool_hook_count(replay.commitment, replay.session) > 0
     wrappers = [
         envelope
         for envelope in replay.store.list_envelopes(replay.commitment)
@@ -627,7 +628,7 @@ async def test_cell_without_tool_hooks_is_still_recorded(replay: _Replay) -> Non
         _exec_cell_output("call_cellPlan", '{"ok":true}', "2026-09-29T17:54:11.000Z"),
     )
     replay.hook("Stop", last_assistant_message="Plan updated.", stop_hook_active=False)
-    assert not replay.store.codex_hook_observes_session(replay.commitment, replay.session)
+    assert replay.store.codex_tool_hook_count(replay.commitment, replay.session) == 0
 
     recorder = _Recorder(_coordinator(replay))
     sweeper = ObservationOutboxSweeper(replay.store, recorder)
@@ -649,6 +650,77 @@ async def test_cell_without_tool_hooks_is_still_recorded(replay: _Replay) -> Non
     accounting = replay.store.selection_accounting(replay.commitment)
     assert accounting["intentionally_omitted_input_count"] == 0
     assert accounting["observed_count"] == accounting["admitted_input_count"]
+
+
+@pytest.mark.anyio
+async def test_unhooked_cell_after_hooked_cells_is_still_recorded(replay: _Replay) -> None:
+    """A cell whose tools fire no hook keeps its record even after other cells were hooked."""
+
+    replay.append(
+        _rollout_row(
+            "session_meta",
+            {
+                "cli_version": "0.157.1",
+                "cwd": str(replay.workspace),
+                "history_mode": "legacy",
+                "id": HOST,
+                "originator": "codex_exec",
+            },
+            "2026-09-29T17:54:00.000Z",
+        )
+    )
+    replay.hook("SessionStart", source="startup")
+    replay.append(
+        _exec_cell(
+            "call_cellHooked",
+            'const r=await tools.exec_command({cmd:"npm run test-type"});text(r)\n',
+            "2026-09-29T17:57:47.000Z",
+        )
+    )
+    command = {"command": "npm run test-type"}
+    replay.hook("PreToolUse", tool_name="Bash", tool_use_id="call_nHooked", tool_input=command)
+    replay.hook(
+        "PostToolUse",
+        tool_name="Bash",
+        tool_use_id="call_nHooked",
+        tool_input=command,
+        tool_response=json.dumps({"chunk_id": "a1", "exit_code": 0, "output": "ok"}),
+    )
+    replay.append(
+        _exec_cell_output("call_cellHooked", '{"exit_code":0}', "2026-09-29T17:58:12.000Z"),
+        _exec_cell(
+            "call_cellPlan",
+            'await tools.update_plan({plan:[{step:"public",status:"completed"}]});\n',
+            "2026-09-29T17:58:20.000Z",
+        ),
+        _exec_cell_output("call_cellPlan", '{"ok":true}', "2026-09-29T17:58:21.000Z"),
+    )
+    replay.hook("Stop", last_assistant_message="Plan updated.", stop_hook_active=False)
+
+    recorder = _Recorder(_coordinator(replay))
+    sweeper = ObservationOutboxSweeper(replay.store, recorder)
+    try:
+        for _ in range(8):
+            if (await sweeper.sweep()).attempted == 0:
+                break
+    finally:
+        sweeper.close()
+    delivered_cells = {
+        cast(str, envelope.structural_payload.get("tool_call_id"))
+        for envelope in recorder.delivered
+        if envelope.structural_payload.get("tool_name") == "exec"
+    }
+    # The hooked cell stays local; the unhooked cell reaches the ledger.
+    assert delivered_cells == {"call_cellPlan"}
+    actions = [cast(ActionRecordedPayload, row.payload) for row in replay.rows("action_recorded")]
+    results = [cast(ResultRecordedPayload, row.payload) for row in replay.rows("result_recorded")]
+    assert len(actions) == 2 and len(results) == 2
+    assert {item.action_id for item in results} == {item.action_id for item in actions}
+    # The held call still pairs the delivered output locally: no orphan is disclosed.
+    assert not any(
+        ObservationGapCode.UNPAIRED_EVENT.value in envelope.gap_codes
+        for envelope in recorder.delivered
+    )
 
 
 async def _sweep_all(cell: _Replay) -> _Recorder:
@@ -765,7 +837,7 @@ async def test_stream_only_command_items_are_recorded_with_outcomes(replay: _Rep
         _command_execution("exec-910-b", "npm run  test-type", 0, "2026-09-29T17:59:10.000Z"),
     )
     replay.hook("Stop", last_assistant_message="Done.", stop_hook_active=False)
-    assert not replay.store.codex_hook_observes_session(replay.commitment, replay.session)
+    assert replay.store.codex_tool_hook_count(replay.commitment, replay.session) == 0
     await _sweep_all(replay)
     actions = [cast(ActionRecordedPayload, row.payload) for row in replay.rows("action_recorded")]
     results = [cast(ResultRecordedPayload, row.payload) for row in replay.rows("result_recorded")]
@@ -864,7 +936,7 @@ async def test_stream_only_patch_item_is_an_edit_that_retires_a_failure(replay: 
         ),
     )
     replay.hook("Stop", last_assistant_message="Fixed.", stop_hook_active=False)
-    assert not replay.store.codex_hook_observes_session(replay.commitment, replay.session)
+    assert replay.store.codex_tool_hook_count(replay.commitment, replay.session) == 0
     await _sweep_all(replay)
     kinds = [
         cast(ActionRecordedPayload, row.payload).action_kind
