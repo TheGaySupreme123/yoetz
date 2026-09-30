@@ -83,6 +83,12 @@ CONTROL_PROTOCOL_VERSION: Final = "1.0"
 MAX_CONTROL_FRAME_BYTES: Final = 6_291_456
 MAX_ORDINARY_CONTROL_FRAME_BYTES: Final = 1_048_576
 MAX_ACTIVE_REQUESTS_PER_SESSION: Final = 32
+# The largest single ``ControlStream.receive`` a frame reader requests. The authenticated Unix
+# stream refuses a larger request (``receive_size_invalid``), so a frame above it is read in
+# bounded chunks. Asking for the whole remaining frame at once made every frame over 64 KiB
+# unreadable: the refusal surfaced as ``frame_invalid``, and a privacy receipt page of about 45
+# receipts reached the operator as a caller's ``invalid_request`` (issue #921).
+MAX_CONTROL_RECEIVE_CHUNK_BYTES: Final = 65_536
 
 _CONTROL_SCHEMA_VERSION: Final = "2.9.0"
 # The 0.2.3 line split request/result (2.6.1) from hello (2.6.0); the 0.3 line carries
@@ -506,7 +512,7 @@ async def _read_exact(
     remaining = byte_count
     while remaining:
         try:
-            chunk = await stream.receive(remaining)
+            chunk = await stream.receive(min(remaining, MAX_CONTROL_RECEIVE_CHUNK_BYTES))
         except BaseException as exc:
             if isinstance(exc, asyncio.CancelledError):
                 raise

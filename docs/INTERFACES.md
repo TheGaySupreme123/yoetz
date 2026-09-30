@@ -517,6 +517,10 @@ free text from input. CLI exit classes (0/2/10/11/20/30/40/70/130) map from code
   `MAX_ORDINARY_CONTROL_FRAME_BYTES = 1_048_576` for every frame except the exact closed
   `import_codex_jsonl` call. That one branch may exceed the ordinary cap only when its canonical
   base64 decodes to at most `MAX_IMPORT_SOURCE_BYTES`; no other method inherits the larger bound.
+  Both peers read a frame in chunks of at most `MAX_CONTROL_RECEIVE_CHUNK_BYTES = 65_536`, the
+  authenticated Unix stream's per-`receive` ceiling; the stream refuses a larger single receive.
+  Asking for a whole frame at once made every frame over 64 KiB unreadable as `frame_invalid`,
+  which a privacy receipt page of about 45 receipts reached (issue #921).
 - Host hook ingress (`cli/hook_io.py`): `MAX_HOOK_STDIN_BYTES = 262_144` (256 KiB) is the trusted
   full-parse cap for every host's hook stdin body and is shared by `cli/hooks.py`. A body at or
   under that cap is parsed in full. Codex, Claude Code, and Cursor's pure
