@@ -616,3 +616,24 @@ def test_observe_status_reports_pass_timing_in_json_and_text(
     assert "percentiles are histogram bucket bounds" in timing_line
     diagnostics_line = next(line for line in lines if line.startswith("hook_diagnostics: "))
     assert "pass_timings" not in diagnostics_line
+
+
+def test_claude_pass_whose_fault_escapes_is_counted_as_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(**_kwargs: object) -> int:
+        raise RuntimeError("private detail")
+
+    monkeypatch.setattr(observe_hooks, "_handle_claude_observe", broken)
+    with pytest.raises(RuntimeError):
+        observe_hooks.handle_claude_observe(
+            event_name="PostToolUse",
+            stdin_bytes=b"{}",
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+
+    entry = _entries(tmp_path)[("claude", "PostToolUse", "structural")]
+    assert cast(Mapping[str, int], entry["outcomes"])["failed"] == 1

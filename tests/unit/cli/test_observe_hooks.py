@@ -5847,7 +5847,7 @@ def test_legacy_spool_diagnostics_identify_the_path_and_hard_breach(tmp_path: Pa
         "count": 1,
         "recent_count": 1,
         "recent_p95_ms": 501,
-        "p95_target_ms": 250,
+        "p95_target_ms": None,
         "hard_cap_ms": 500,
         "recent_hard_cap_breach_count": 1,
     }

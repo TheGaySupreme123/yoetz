@@ -21,6 +21,7 @@ from yoetz.cli.hook_timing import (
     hook_pass_timing_text,
     record_hook_pass_timing,
 )
+from yoetz.config.paths import PathSafetyError
 
 _NOW = datetime(2026, 9, 29, 16, 52, 45, 737000, tzinfo=UTC)
 
@@ -394,3 +395,15 @@ def test_text_rendering_names_the_measurement_and_its_bounds(tmp_path: Path) -> 
         "percentiles are histogram bucket bounds; codex PostToolUse observe: n=3 "
         "p50<=700ms p95<=800ms max=800ms (recent n=3 p50<=700ms p95<=800ms)"
     )
+
+
+def test_an_unresolvable_state_directory_is_a_lost_sample_not_a_fault(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def invalid_root() -> Path:
+        raise PathSafetyError("isolation_root_invalid")
+
+    monkeypatch.setattr(hook_timing, "state_dir", invalid_root)
+
+    assert not record_hook_pass_timing("codex", "PostToolUse", "observe", "ingested", ms=5)
+    assert hook_pass_timing_summary()["status"] == "unreadable"

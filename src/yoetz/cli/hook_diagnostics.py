@@ -258,7 +258,6 @@ _STORE_LOCK_SUMMARY_ROWS: Final = 16
 # with the moment it was observed, so a reader can date what it is looking at.
 _RECENT_WINDOW_SECONDS: Final = 3_600
 _SYNC_FALLBACK_PATH: Final = "sync_fallback_spool"
-_SYNC_FALLBACK_P95_TARGET_MS: Final = 250
 _SYNC_FALLBACK_HARD_CAP_MS: Final = 500
 _thread_lock = Lock()
 
@@ -690,9 +689,10 @@ class _Timings:
                                 "count": item.count,
                                 "recent_count": item.recent,
                                 "recent_p95_ms": item._recent_p95_ms(),
-                                "p95_target_ms": _SYNC_FALLBACK_P95_TARGET_MS
-                                if path == _SYNC_FALLBACK_PATH
-                                else None,
+                                # Spool rows are hard-cap breaches only since #915, so a p95
+                                # over them is no reading of the 250 ms target; that target is
+                                # read against every pass in ``pass_timings``.
+                                "p95_target_ms": None,
                                 "hard_cap_ms": _SYNC_FALLBACK_HARD_CAP_MS
                                 if path == _SYNC_FALLBACK_PATH
                                 else None,

@@ -7,9 +7,11 @@ aggregate per ``(host, event, path)``: exact count, sum and maximum, a fixed-buc
 same histogram for the current and previous clock hour. Nothing grows with the number of passes,
 and nothing here is ever written to ``hook-diagnostics.jsonl``.
 
-A sample is the in-process time from the console entry (sampled before any Yoetz module loads) to
-the end of the pass, after the host's stdout was written. Interpreter start and process exit are
-outside it, as they are for the existing timing rows. Percentiles are read from the histogram, so
+A sample is the in-process time from the console entry (sampled when ``yoetz.cli.entry`` loads,
+before the hook handler's imports; a hook reached through the typer fallback starts at its host
+entry function instead) to the end of the pass, after the host's stdout was written. Interpreter
+start, folding the sample into this aggregate and process exit are outside it, as they are for the
+existing timing rows. Percentiles are read from the histogram, so
 they are reported as the bucket bound a nearest-rank percentile falls at or below, never as an
 interpolated value.
 """
@@ -309,7 +311,8 @@ def _read_descriptor(descriptor: int) -> dict[str, object] | None:
 def _read_document(directory: Path) -> tuple[str, dict[str, object] | None]:
     """Return ``absent``, ``unreadable`` or ``retained`` plus the validated document.
 
-    Readers share the writers' lock, so a summary never observes a half-written update.
+    Readers share the writers' lock, so a locked summary never observes a half-written update;
+    when the lock cannot be taken the read is unlocked, and a torn document fails validation.
     """
 
     try:
@@ -377,9 +380,11 @@ def record_hook_pass_timing(
     event_token = event if event in _EVENTS else _UNKNOWN_EVENT
     sample = max(0, min(int(ms), _MAX_MS))
     now_ms = _now_ms(_now)
-    root = state_dir() if _state is None else _state
-    directory = root / "observation"
     try:
+        # An invalid isolation root makes ``state_dir()`` raise; that is a lost sample, not a
+        # hook fault.
+        root = state_dir() if _state is None else _state
+        directory = root / "observation"
         ensure_owner_only_dir(directory)
         with _thread_lock:
             lock_descriptor = os.open(directory / _LOCK_NAME, _open_flags(write=True), 0o600)
@@ -580,10 +585,10 @@ def hook_pass_timing_summary(
 ) -> JsonObject:
     """Return the retained per-``(host, event, path)`` totals in a stable order."""
 
-    root = state_dir() if _state is None else _state
     status = "unreadable"
     document: dict[str, object] | None = None
     try:
+        root = state_dir() if _state is None else _state
         directory = root / "observation"
         ensure_owner_only_dir(directory)
         status, document = _read_document(directory)

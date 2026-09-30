@@ -5500,6 +5500,9 @@ def handle_claude_observe(
             _entry_monotonic=_entry_monotonic,
             _pass_timing=timing,
         )
+    except BaseException:
+        timing.outcome = "failed"
+        raise
     finally:
         _finish_hook_pass(timing, monotonic=_monotonic, _state=_state)
 
