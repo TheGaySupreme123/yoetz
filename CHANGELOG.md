@@ -21,14 +21,19 @@ reverse-chronological released versions.
   cue, not the grant explanation. Shipped guidance keeps grant claims conditional and host approval
   separate. Live acceptance and the remaining cross-host work stay tracked in #857.
 
-- `yoetz observe status` now reports what observation hooks cost on every pass, not only over-budget
-  ones: `hook_diagnostics.pass_timings` in `--json` and a `hook_pass_timing` line in text give,
+- `yoetz observe status` now reports what the observation ingress hooks cost on every pass they
+  run, not only over-budget ones: `hook_diagnostics.pass_timings` in `--json` and a `hook_pass_timing` line in text give,
   per host, raw hook event and path (Codex `observe` or legacy spool, Claude Code and Cursor
   `structural` or `ordinary` profile), the pass count, mean, p50 and p95 as histogram bucket
   bounds, the maximum, an outcome tally and the last one to two clock hours. The aggregate is
   fixed-size and kept apart from the 64 KiB failure-reason history, which routine passes, including
   every legacy synchronous spool pass, no longer evict. Samples exclude interpreter start and exit.
-  Codex `PostToolUse` registration is unchanged until these numbers confirm its cost (#915).
+  Codex `hooks session-start`, `hooks user-prompt-submit` and the `start`-scoped
+  `hooks post-tool-use`, and the Claude Code and Cursor `hooks startup-gate` and
+  `hooks startup-context` commands are not measured, so the aggregate is not a complete hook cost
+  profile for any host. Reading it never creates state, and a read racing an update sees the last
+  complete aggregate. Codex `PostToolUse` registration is unchanged until these numbers confirm its
+  cost (#915).
 
 ### Fixed
 

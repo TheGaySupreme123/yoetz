@@ -919,12 +919,18 @@ before quoting a number:
   150 ms is an exact bucket edge, so the share of passes within the per-call goal is exact: sum
   `bucket_counts` through the 150 ms edge (`bucket_upper_bounds_ms`).
 - `hooks session-start` (resume/compact re-ground), the `start`-scoped `hooks post-tool-use`, and
-  `hooks user-prompt-submit` are not in the aggregate; none of them runs per tool call.
+  `hooks user-prompt-submit` are not in the aggregate. None of them runs per ordinary tool call,
+  but each is a synchronous host-visible process (per resume or compact, per `start` call, per
+  prompt), so the aggregate is the cost of the observation hooks, not of every Codex hook. Do not
+  use it alone to claim Codex hook overhead is understood or to decide the async split.
+- An entry's cost is host-visible only when Codex runs that hook synchronously: `PreToolUse` is
+  registered async from `0.148.0-alpha.6` on, so its entry measures work the host does not wait on.
 - The aggregate spans every pass since `since`; a fresh test instance starts empty. It is local
   diagnostics: owner-only, fixed-size, and not fsynced, so a crash can restart it (`since` moves).
 - A hook waits at most 100 ms for the aggregate's lock. A pass that cannot take it is not in the
   counts; it is tallied in `dropped_sample_count` instead, so a nonzero value means the counts
-  undercount that many passes.
+  undercount that many passes. `observe status` takes no lock and creates no state; it reads the
+  last complete aggregate.
 
 Registration decision on Codex (issue #915, recorded 2026-09-30): the `PostToolUse` observe
 handler stays synchronous for now. The DeepSWE v2 run inferred about 0.6–0.9 s per nested

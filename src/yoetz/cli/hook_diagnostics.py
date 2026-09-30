@@ -12,7 +12,12 @@ from threading import Lock
 from typing import Final, cast
 
 from yoetz.cli.hook_timing import hook_pass_timing_summary
-from yoetz.config.paths import PathSafetyError, ensure_owner_only_dir, state_dir
+from yoetz.config.paths import (
+    PathSafetyError,
+    ensure_owner_only_dir,
+    existing_owner_only_dir,
+    state_dir,
+)
 from yoetz.domain.observation import (
     ObservationEnvelope,
     ObservationGapCode,
@@ -726,7 +731,9 @@ def _read_rows(
     attempts: list[JsonObject] = []
     locks: list[JsonObject] = []
     try:
-        ensure_owner_only_dir(directory)
+        # A status read never creates the observation directory it reports on.
+        if not existing_owner_only_dir(directory):
+            return [], [], [], []
         for path in (
             directory / f"{_FILE_NAME}.1",
             directory / _FILE_NAME,

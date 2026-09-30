@@ -4653,25 +4653,31 @@ interruption, so subsequent writers can proceed. Hook timing rows attribute queu
 wall-time difference as `unattributed`; nested store sub-stages are reported separately from the
 end-to-end partition (issues #310 and #311). Timing rows stay reserved for over-budget passes,
 session boundaries and legacy-spool hard-cap breaches, so routine passes never evict the
-failure-reason window. The cost of every hook pass lives in a separate fixed-size aggregate
-(issue #915): each host ingress entry (`hooks observe` and `hooks spool` for Codex,
+failure-reason window. The cost of every observation-ingress hook pass lives in a separate
+fixed-size aggregate (issue #915): each host ingress entry (`hooks observe` and `hooks spool` for Codex,
 `hooks claude-observe`, `hooks cursor-observe`) folds exactly one sample per process into the
 owner-only `observation/hook-pass-timing.json`, keyed by host (`codex`, `claude`, `cursor`), raw
 host event name, and path (`observe`, `sync_fallback_spool`, `structural`, `ordinary`,
 `invalid_profile`), with an outcome tally (`ingested`, `followup_deferred`, `not_ingested`,
-`failed`). A sample is in-process time from the console entry to the end of the pass, after the
+`failed`). Hook commands outside those ingress entries (Codex `hooks session-start`,
+`hooks user-prompt-submit` and the `start`-scoped `hooks post-tool-use`; `hooks startup-gate` and
+`hooks startup-context`) contribute no sample, so the aggregate is not a complete per-host hook
+cost profile. A sample is in-process time from the console entry to the end of the pass, after the
 host output was written; interpreter start and process exit are excluded. Each entry keeps the exact
 count, sum, mean and maximum, a fixed-bucket histogram whose edges include 150 ms, 250 ms, 500 ms and
 the 3, 5 and 10 s host timeouts, and the same histogram for the current and previous clock hour
 (`recent`, dated by `since`). `p50_ms_at_most` and `p95_ms_at_most` are the bucket bound that the
 nearest-rank percentile falls at or below, never an interpolation. The document holds at most 48
-entries (evictions are counted) and 64 KiB, is rewritten in place under an exclusive lock that
-readers share, and is not fsynced; a document that fails validation, including a timestamp past
-year 9999, reads as `unreadable` and restarts with a new `since`. Every acquisition of that lock is
+entries (evictions are counted) and 64 KiB. Writers serialize on an exclusive lock, stage the
+next document beside the aggregate and rename it into place, and do not fsync; the aggregate path
+therefore only ever names a complete document, and a write that fails part-way leaves the previous
+one. A document that fails validation, including a timestamp past year 9999, reads as `unreadable`
+and restarts with a new `since`. Readers take no lock and create nothing: a status read on a state
+directory without the aggregate reports `absent` and leaves no directory, lock or file behind, and
+a read racing an update sees the last complete document. Every writer acquisition of the lock is
 bounded to 100 ms, so a stalled holder cannot keep a hook past its host timeout: a writer that
 cannot take it drops its sample and appends one byte to a lock-free drop counter, reported as
-`dropped_sample_count` (a lower bound for the period `since` names), and a reader falls back to an
-unlocked read. Nested calls and the service's legacy-spool replay run the observe pass without a
+`dropped_sample_count` (a lower bound for the period `since` names). Nested calls and the service's legacy-spool replay run the observe pass without a
 host entry and contribute no sample. `observe status --json` reports the aggregate as
 `hook_diagnostics.pass_timings`; the text form prints it on a `hook_pass_timing` line. The legacy
 spool judges its 500 ms hard cap and feeds the aggregate from one measurement taken after the

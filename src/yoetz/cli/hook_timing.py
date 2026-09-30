@@ -29,7 +29,12 @@ from pathlib import Path
 from threading import Lock
 from typing import Final, cast
 
-from yoetz.config.paths import PathSafetyError, ensure_owner_only_dir, state_dir
+from yoetz.config.paths import (
+    PathSafetyError,
+    ensure_owner_only_dir,
+    existing_owner_only_dir,
+    state_dir,
+)
 from yoetz.domain.values import JsonObject, JsonValue
 
 try:
@@ -46,14 +51,17 @@ __all__ = [
 ]
 
 _FILE_NAME: Final = "hook-pass-timing.json"
+# Writers build the next document here and rename it over the aggregate, so the aggregate path
+# only ever names a complete document and a reader needs neither the lock nor a retry.
+_STAGING_NAME: Final = ".hook-pass-timing.json.next"
 _LOCK_NAME: Final = ".hook-pass-timing.lock"
 # One byte per sample dropped under lock contention, appended without the lock (an O_APPEND write is
 # atomic), so counting a drop never waits on the holder it is reporting.
 _DROP_NAME: Final = ".hook-pass-timing.dropped"
 _MAX_DROP_BYTES: Final = 64 * 1024
-# A holder keeps the lock for one small in-place rewrite. One that stalls (suspended, or on a hung
-# filesystem) must not hold a hook past its 3, 5 or 10 s host timeout, so every acquisition is
-# bounded and a sample that cannot take the lock in time is dropped and counted instead.
+# A writer keeps the lock for one small staged rewrite and rename. One that stalls (suspended, or on
+# a hung filesystem) must not hold a hook past its 3, 5 or 10 s host timeout, so every acquisition
+# is bounded and a sample that cannot take the lock in time is dropped and counted instead.
 _LOCK_WAIT_SECONDS: Final = 0.1
 _LOCK_POLL_SECONDS: Final = 0.002
 _FORMAT: Final = "yoetz.hook-pass-timing/1"
@@ -412,9 +420,10 @@ def _dropped_sample_count(directory: Path) -> int:
 def _read_document(directory: Path) -> tuple[str, dict[str, object] | None]:
     """Return ``absent``, ``unreadable`` or ``retained`` plus the validated document.
 
-    Readers share the writers' lock, so a locked summary never observes a half-written update.
-    The shared lock is bounded like the writers'; when it cannot be taken in time the read is
-    unlocked, and a torn document fails validation.
+    Writers never modify the aggregate in place: they rename a complete staged document over it.
+    An open descriptor therefore pins one complete document, and a single read of it is a
+    consistent snapshot without taking (or creating) the writers' lock, so a status read neither
+    waits on a writer nor makes one drop its sample.
     """
 
     try:
@@ -424,21 +433,7 @@ def _read_document(directory: Path) -> tuple[str, dict[str, object] | None]:
     except OSError:
         return "unreadable", None
     try:
-        lock_descriptor: int | None = None
-        try:
-            lock_descriptor = os.open(directory / _LOCK_NAME, _open_flags(write=True), 0o600)
-            locked = _acquire(lock_descriptor, fcntl.LOCK_SH) if fcntl is not None else True
-        except OSError:
-            locked = False
-        if not locked and lock_descriptor is not None:
-            # Unlocked is still safe to read: a torn update fails validation as unreadable.
-            os.close(lock_descriptor)
-            lock_descriptor = None
-        try:
-            document = _read_descriptor(descriptor)
-        finally:
-            if lock_descriptor is not None:
-                os.close(lock_descriptor)
+        document = _read_descriptor(descriptor)
     except OSError:
         return "unreadable", None
     finally:
@@ -500,18 +495,15 @@ def record_hook_pass_timing(
                 if fcntl is not None and not _acquire(lock_descriptor, fcntl.LOCK_EX):
                     _count_dropped_sample(directory)
                     return False
-                # O_NOFOLLOW refuses a symlinked aggregate outright; a file another user owns is
-                # never rewritten.
-                descriptor = os.open(directory / _FILE_NAME, _open_flags(write=True), 0o600)
-                try:
-                    if os.fstat(descriptor).st_uid != os.geteuid():
-                        return False
-                    os.fchmod(descriptor, 0o600)
-                    restarted = _update(
-                        descriptor, host, event_token, path, outcome, sample, now_ms
-                    )
-                finally:
-                    os.close(descriptor)
+                replaceable, current = _current_document(directory)
+                if not replaceable:
+                    return False
+                encoded, restarted = _updated_document(
+                    current, host, event_token, path, outcome, sample, now_ms
+                )
+                if encoded is None:
+                    return False
+                _replace_document(directory, encoded)
                 if restarted:
                     # Drops are counted for the period ``since`` names; a restart starts both.
                     _reset_dropped_samples(directory)
@@ -524,22 +516,22 @@ def record_hook_pass_timing(
     return True
 
 
-def _update(
-    descriptor: int,
+def _updated_document(
+    document: dict[str, object] | None,
     host: str,
     event_token: str,
     path: str,
     outcome: str,
     sample: int,
     now_ms: int,
-) -> bool:
-    """Fold one sample into the document behind *descriptor*; the caller holds the lock.
+) -> tuple[bytes | None, bool]:
+    """Fold one sample into *document* and encode it; the caller holds the lock.
 
-    Returns whether the aggregate restarted, so the caller can restart the drop count with it.
+    Returns the encoded document (None when it would exceed the size cap) and whether the
+    aggregate restarted, so the caller can restart the drop count with it.
     """
 
     hour = now_ms // _HOUR_MS
-    document = _read_descriptor(descriptor)
     restarted = document is None
     if document is None:
         fresh_entries: list[dict[str, object]] = []
@@ -598,16 +590,73 @@ def _update(
     entry["slots"] = sorted(slots, key=lambda slot: cast(int, slot["hour"]))
     encoded = json.dumps(document, separators=(",", ":"), sort_keys=True).encode()
     if len(encoded) > _MAX_FILE_BYTES:
-        return False
-    # Best-effort diagnostics: rewritten in place under the exclusive lock (readers take it
-    # shared) and not fsynced, because a create-and-rename per pass would itself be a measurable
-    # hook cost. A crash inside the write can at worst lose the aggregate: the next pass finds an
-    # invalid document and restarts it with a new ``since`` instead of trusting it.
-    written = 0
-    while written < len(encoded):
-        written += os.pwrite(descriptor, encoded[written:], written)
-    os.ftruncate(descriptor, len(encoded))
-    return restarted
+        return None, restarted
+    return encoded, restarted
+
+
+def _current_document(directory: Path) -> tuple[bool, dict[str, object] | None]:
+    """Return whether the aggregate may be replaced, and its document (None restarts it).
+
+    The caller holds the lock. ``O_NOFOLLOW`` refuses a symlinked aggregate outright, and a file
+    another user owns is never replaced. An owner-only mode is restored before reading, so a
+    widened mode alone does not restart the totals.
+    """
+
+    try:
+        descriptor = os.open(directory / _FILE_NAME, _open_flags(write=False))
+    except FileNotFoundError:
+        return True, None
+    except OSError:
+        return False, None
+    try:
+        facts = os.fstat(descriptor)
+        if not stat.S_ISREG(facts.st_mode) or facts.st_uid != os.geteuid():
+            return False, None
+        os.fchmod(descriptor, 0o600)
+        return True, _read_descriptor(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _replace_document(directory: Path, encoded: bytes) -> None:
+    """Stage *encoded* beside the aggregate and rename it into place; the caller holds the lock.
+
+    Best-effort diagnostics, so nothing is fsynced: a crash can at worst lose the aggregate, and
+    the next pass finds it missing or invalid and restarts it with a new ``since``. A write that
+    fails part-way leaves the previous complete document in place and removes the staged bytes.
+    """
+
+    staging = directory / _STAGING_NAME
+    # Only a writer holding the lock touches the staging name, so anything there is a leftover
+    # from a writer that died mid-update. Unlinking removes a planted symlink, never its target.
+    try:
+        os.unlink(staging)
+    except FileNotFoundError:
+        pass
+    descriptor = os.open(
+        staging,
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        try:
+            os.fchmod(descriptor, 0o600)
+            written = 0
+            while written < len(encoded):
+                written += os.write(descriptor, encoded[written:])
+        finally:
+            os.close(descriptor)
+        os.replace(staging, directory / _FILE_NAME)
+    except BaseException:
+        try:
+            os.unlink(staging)
+        except OSError:
+            pass
+        raise
 
 
 def _quantile_at_most(histogram: Mapping[str, object], numerator: int) -> int | None:
@@ -711,9 +760,12 @@ def hook_pass_timing_summary(
     try:
         root = state_dir() if _state is None else _state
         directory = root / "observation"
-        ensure_owner_only_dir(directory)
-        status, document = _read_document(directory)
-        dropped = _dropped_sample_count(directory)
+        # A status read never creates the directory, the lock or the aggregate it reports on.
+        if existing_owner_only_dir(directory):
+            status, document = _read_document(directory)
+            dropped = _dropped_sample_count(directory)
+        else:
+            status = "absent"
     except OSError, PathSafetyError:
         status, document = "unreadable", None
     hour = _now_ms(_now) // _HOUR_MS

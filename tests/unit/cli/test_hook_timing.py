@@ -25,6 +25,7 @@ from yoetz.cli.hook_timing import (
     record_hook_pass_timing,
 )
 from yoetz.config.paths import PathSafetyError
+from yoetz.domain.values import JsonObject
 
 _NOW = datetime(2026, 9, 29, 16, 52, 45, 737000, tzinfo=UTC)
 
@@ -481,3 +482,117 @@ def test_an_unrenderable_timestamp_reads_as_unreadable_not_a_fault(
 
     assert summary["status"] == "unreadable"
     assert summary["entries"] == ()
+
+
+def _tree(root: Path) -> list[str]:
+    return sorted(str(path.relative_to(root)) for path in root.rglob("*"))
+
+
+def test_status_reads_on_a_fresh_state_directory_create_nothing(tmp_path: Path) -> None:
+    """A status read is a read: no directory, lock or aggregate appears (#915 review 932-RISK-1)."""
+
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+
+    assert hook_pass_timing_summary(_state=state, _now=_NOW)["status"] == "absent"
+    diagnostics = hook_diagnostic_summary(_state=state, _now=_NOW)
+    assert cast(Mapping[str, object], diagnostics["pass_timings"])["status"] == "absent"
+    assert _tree(state) == []
+
+
+def test_reading_a_retained_aggregate_never_creates_its_lock(tmp_path: Path) -> None:
+    assert record_hook_pass_timing(
+        "codex", "PostToolUse", "observe", "ingested", ms=10, _state=tmp_path, _now=_NOW
+    )
+    directory = tmp_path / "observation"
+    (directory / ".hook-pass-timing.lock").unlink()
+    before = _tree(tmp_path)
+
+    summary = hook_pass_timing_summary(_state=tmp_path, _now=_NOW)
+    hook_diagnostic_summary(_state=tmp_path, _now=_NOW)
+
+    assert summary["status"] == "retained"
+    assert [entry["count"] for entry in _entries(tmp_path)] == [1]
+    assert _tree(tmp_path) == before
+
+
+def test_a_status_read_during_an_update_sees_the_last_complete_aggregate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reader landing mid-update never surfaces a torn document (#915 review 932-RISK-1)."""
+
+    assert record_hook_pass_timing(
+        "codex", "PostToolUse", "observe", "ingested", ms=10, _state=tmp_path, _now=_NOW
+    )
+    seen: list[JsonObject] = []
+    real_write = os.write
+    real_pwrite = os.pwrite
+
+    def read_mid_update() -> None:
+        if not seen:
+            seen.append(hook_pass_timing_summary(_state=tmp_path, _now=_NOW))
+
+    def write_then_read(descriptor: int, data: bytes) -> int:
+        if seen or len(data) < 2:
+            return real_write(descriptor, data)
+        written = real_write(descriptor, data[: len(data) // 2])
+        read_mid_update()
+        return written
+
+    def pwrite_then_read(descriptor: int, data: bytes, offset: int) -> int:
+        if seen or len(data) < 2:
+            return real_pwrite(descriptor, data, offset)
+        written = real_pwrite(descriptor, data[: len(data) // 2], offset)
+        read_mid_update()
+        return written
+
+    monkeypatch.setattr(os, "write", write_then_read)
+    monkeypatch.setattr(os, "pwrite", pwrite_then_read)
+    assert record_hook_pass_timing(
+        "codex", "PostToolUse", "observe", "ingested", ms=20, _state=tmp_path, _now=_NOW
+    )
+    monkeypatch.undo()
+
+    (mid_update,) = seen
+    assert mid_update["status"] == "retained"
+    (entry,) = cast(tuple[Mapping[str, object], ...], mid_update["entries"])
+    assert entry["count"] == 1
+    assert [entry["count"] for entry in _entries(tmp_path)] == [2]
+
+
+def test_an_update_interrupted_mid_write_leaves_the_last_complete_aggregate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert record_hook_pass_timing(
+        "codex", "PostToolUse", "observe", "ingested", ms=10, _state=tmp_path, _now=_NOW
+    )
+    real_write = os.write
+    real_pwrite = os.pwrite
+
+    def torn_write(descriptor: int, data: bytes) -> int:
+        real_write(descriptor, data[: len(data) // 2])
+        raise OSError("disk full")
+
+    def torn_pwrite(descriptor: int, data: bytes, offset: int) -> int:
+        real_pwrite(descriptor, data[: len(data) // 2], offset)
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "write", torn_write)
+    monkeypatch.setattr(os, "pwrite", torn_pwrite)
+    assert not record_hook_pass_timing(
+        "codex", "PostToolUse", "observe", "ingested", ms=20, _state=tmp_path, _now=_NOW
+    )
+    monkeypatch.undo()
+
+    summary = hook_pass_timing_summary(_state=tmp_path, _now=_NOW)
+    assert summary["status"] == "retained"
+    assert [entry["count"] for entry in _entries(tmp_path)] == [1]
+    # No partial update is left beside the aggregate, and the next pass folds in normally.
+    assert sorted(path.name for path in (tmp_path / "observation").iterdir()) == [
+        ".hook-pass-timing.lock",
+        "hook-pass-timing.json",
+    ]
+    assert record_hook_pass_timing(
+        "codex", "PostToolUse", "observe", "ingested", ms=30, _state=tmp_path, _now=_NOW
+    )
+    assert [entry["count"] for entry in _entries(tmp_path)] == [2]

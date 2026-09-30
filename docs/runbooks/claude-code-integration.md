@@ -803,7 +803,10 @@ an `outcomes` tally and a `recent` view. A sample runs from the console entry to
 pass; Python interpreter start and process exit are excluded, so add that term, measured on the same
 machine, before comparing with host-visible latency. A structural `PostToolUse` for a generic tool
 is filtered at ingress and counts as `not_ingested`; it still cost a process. The
-`hooks startup-gate` and `hooks startup-context` commands are not in the aggregate.
+`hooks startup-gate` and `hooks startup-context` commands are not in the aggregate, although each
+is its own synchronous process: `startup-context` on every `SessionStart`, and in required startup
+mode `startup-gate` on session, prompt and every tool event. The aggregate is therefore the cost of
+the observation hook only, not of every Yoetz hook Claude Code runs.
 
 Registration decision on Claude Code (issue #915, recorded 2026-09-30): unchanged, and no latency
 improvement is claimed. Claude Code runs every hook as a synchronous command (5 s for tool events,

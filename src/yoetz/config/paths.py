@@ -28,6 +28,7 @@ __all__ = [
     "catalog_path",
     "config_file_path",
     "ensure_owner_only_dir",
+    "existing_owner_only_dir",
     "isolated_root",
     "isolation_binding",
     "log_dir",
@@ -657,6 +658,28 @@ def ensure_owner_only_dir(path: Path) -> None:
         raise
     except OSError as exc:
         raise PathSafetyError("permissions_too_broad") from exc
+    _check_private_dir(facts)
+
+
+def existing_owner_only_dir(path: Path) -> bool:
+    """Verify an owner-only directory without creating anything; False when it is absent.
+
+    The read-side twin of ``ensure_owner_only_dir``: a status read must not create the state it
+    reports on, but an existing directory still has to pass the same symlink, owner and mode checks.
+    """
+
+    _reject_symlink_components(path)
+    try:
+        facts = path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise PathSafetyError("permissions_too_broad") from exc
+    _check_private_dir(facts)
+    return True
+
+
+def _check_private_dir(facts: os.stat_result) -> None:
     if stat.S_ISLNK(facts.st_mode) or not stat.S_ISDIR(facts.st_mode):
         raise PathSafetyError("path_contains_symlink")
     effective_uid = os.geteuid() if hasattr(os, "geteuid") else os.getuid()

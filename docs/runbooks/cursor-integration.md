@@ -668,7 +668,10 @@ rendered profile path (`structural` or `ordinary`), with `count`, `p50_ms_at_mos
 `preToolUse` sample includes the neutral permission write. A sample runs from the console entry to
 the end of the pass; Python interpreter start and process exit are excluded, so add that term,
 measured on the same machine, before comparing with host-visible latency. The `hooks startup-gate`
-and `hooks startup-context` commands are not in the aggregate.
+and `hooks startup-context` commands are not in the aggregate, although each is its own
+synchronous process: `startup-context` on every `sessionStart`, and in required startup mode
+`startup-gate` on session, prompt, `preToolUse` and MCP events. The aggregate is therefore the cost
+of the observation hook only, not of every Yoetz hook Cursor runs.
 
 Registration decision on Cursor (issue #915, recorded 2026-09-30): unchanged, and no latency
 improvement is claimed. Cursor hooks are synchronous by host design (5 s for tool events). The
