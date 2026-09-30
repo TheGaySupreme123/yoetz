@@ -8,13 +8,20 @@ yoetz closure-schema
 ```
 
 The first command reads all pages at one frontier. The second describes the selection file accepted
-by `closure-prepare --input selection.json`.
+by `closure-prepare --input selection.json`. Choose a phase: `attempt`, `respond`, `resolve`,
+`claim`, or `receipt`. Select existing IDs from the inventory; fresh request, event, action and claim
+IDs are generated for you. An attempt selects exact requested-item indexes on one obligation and
+requires a description. A command attempt requires the actual command. A response requires a
+finding, explicit disposition and reason. Resolve only after assessing acceptance, selecting actual
+evidence or results. A claim requires your statement and explicitly selected obligations/evidence/
+results; non-success results are placed in limitations.
 
 The inventory can be large. Add `--output <path>` to save the complete result to a file instead of
-printing it:
+printing it. Choose a path outside the repository you are working in, so the saved inventory is
+never committed or picked up as a change to your work:
 
 ```text
-yoetz closure-prepare --session-id <session> --writer-id <writer> --output closure.json
+yoetz closure-prepare --session-id <session> --writer-id <writer> --output ~/yoetz-closure.json
 ```
 
 The file holds exactly what the command would otherwise print. It is readable only by you and is
@@ -22,13 +29,7 @@ replaced whole each time you prepare again, so it never holds a mix of two front
 prints a short summary instead: the file's absolute path, size and SHA-256 digest, the frontier, and
 the row count of each inventory view. Read fields from the saved file rather than preparing again;
 prepare again only after a committed write moves the frontier. If the file cannot be written,
-`closure_output_unwritable` says so and nothing is saved. Choose a phase: `attempt`, `respond`, `resolve`,
-`claim`, or `receipt`. Select existing IDs from the inventory; fresh request, event, action and claim
-IDs are generated for you. An attempt selects exact requested-item indexes on one obligation and
-requires a description. A command attempt requires the actual command. A response requires a
-finding, explicit disposition and reason. Resolve only after assessing acceptance, selecting actual
-evidence or results. A claim requires your statement and explicitly selected obligations/evidence/
-results; non-success results are placed in limitations.
+`closure_output_unwritable` says so and nothing is saved.
 
 Review the emitted request. Submit a publication as a dry run first, then replay that request ID
 with `dry_run=false` after a successful preview. Submit responses through `respond` and receipts

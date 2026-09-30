@@ -50,7 +50,7 @@ from builders.status_render_cost import (
     CodexStatusLedger,
     build_codex_status_ledger,
 )
-from yoetz.cli.closure import Selection, prepare_closure, write_prepared_output
+from yoetz.cli.closure import Selection, prepare_closure
 from yoetz.mcp.server import result_from_public_model
 from yoetz.ports.control import ControlMethod, ControlResult
 from yoetz.protocol import models as models_module
@@ -504,6 +504,9 @@ async def test_closure_inventory_reads_each_view_once_per_page(
         "history": ledger.head.sequence,
     }
     # ``--output`` saves exactly the bytes the command prints, which are the pre-#916 inventory.
+    # Imported here so the golden test still runs against a pre-#916 source tree (runbook).
+    from yoetz.cli.closure import write_prepared_output
+
     summary = write_prepared_output(inventory, tmp_path / "closure.json")
     saved = (tmp_path / "closure.json").read_bytes()
     golden = json.loads(_GOLDEN.read_text(encoding="utf-8"))["closure_inventory"]["digest"]

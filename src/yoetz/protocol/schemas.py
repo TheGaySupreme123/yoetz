@@ -1158,10 +1158,7 @@ def validate_schema_instance(name: str, version: str, value: JsonValue) -> None:
     # Encoding enforces the canonical profile exactly as ``ensure_canonical_value`` does, and its
     # bytes identify the instance for the checker's verdict memory.
     digest = hashlib.sha256(canonical_encode(value)).digest()
-    try:
-        instance, spliced = _plain_validation_instance(value)
-    except BaseException:
-        raise SchemaInstanceInvalid() from None
+    instance, spliced = _plain_validation_instance(value)
     checker = _validity_checker()
     if checker is not None and checker.is_valid(
         document.schema_id, instance, None if spliced else digest

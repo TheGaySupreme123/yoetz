@@ -91,20 +91,12 @@ def _matching_rules(
         and (rule.status_view is None or rule.status_view == status_view)
         and (rule.event_selector is None or rule.event_selector == event_selector)
     ]
-    exact = [
-        rule
-        for rule in contextual
-        if "*" not in rule.segments and shape_matches(rule, shape)
-    ]
+    exact = [rule for rule in contextual if "*" not in rule.segments and shape_matches(rule, shape)]
     if len(exact) > 1:
         return "ambiguous"
     if exact:
         return "covered"
-    wildcard = [
-        rule
-        for rule in contextual
-        if "*" in rule.segments and shape_matches(rule, shape)
-    ]
+    wildcard = [rule for rule in contextual if "*" in rule.segments and shape_matches(rule, shape)]
     if len(wildcard) == 1:
         return "covered"
     return "uncovered" if not wildcard else "ambiguous"

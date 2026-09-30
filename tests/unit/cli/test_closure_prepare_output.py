@@ -147,3 +147,19 @@ def test_unwritable_output_names_the_remediation_and_leaves_nothing_behind(
     if where == "directory_target":
         assert list(target.iterdir()) == []
     assert prepared == [True]
+
+
+def test_an_interrupted_save_leaves_neither_a_partial_file_nor_a_temporary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "closure.json"
+    target.write_bytes(b"previous inventory")
+
+    def interrupted(*_args: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(closure.os, "replace", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        closure.write_prepared_output(_RESULT, target)
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["closure.json"]
+    assert target.read_bytes() == b"previous inventory"

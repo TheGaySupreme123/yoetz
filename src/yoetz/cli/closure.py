@@ -92,9 +92,12 @@ def write_prepared_output(result: Mapping[str, JsonValue], path: Path) -> dict[s
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, target)
-    except OSError as error:
+    except BaseException as error:
+        # Never leave a stray temporary beside the target, even on an interrupt.
         temporary.unlink(missing_ok=True)
-        raise ValueError("closure_output_unwritable") from error
+        if isinstance(error, OSError):
+            raise ValueError("closure_output_unwritable") from error
+        raise
     inventory = result.get("inventory")
     rows: dict[str, JsonValue] = (
         {

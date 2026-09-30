@@ -240,8 +240,9 @@ Never create a sibling for an ambiguous write, to hide an old receipt, or withou
 the full decision table is in `yoetz://guidance/coverage-and-receipts.md`.
 
 The optional CLI `yoetz closure-prepare --session-id <returned-session> --writer-id <returned-writer>`
-reads the complete closure inventory without publishing. Add `--output <file>` to save the result
-and read fields from that file instead of preparing again. `yoetz closure-schema` describes explicit
+reads the complete closure inventory without publishing. Add `--output <file>` with a path outside
+the working repository to save the result, and read fields from that file instead of preparing
+again. `yoetz closure-schema` describes explicit
 selection inputs; `--input <selection.json>` prepares one operation with fresh lowercase UUID-v4
 IDs, a dry-run publication where applicable, and a same-request recovery query. Review and submit
 explicitly. It never invents attempts, evidence, finding dispositions, or obligation satisfaction.

@@ -245,3 +245,36 @@ def test_verdict_memory_is_bounded_and_never_holds_rejections() -> None:
     digest = hashlib.sha256(canonical_encode(invalid)).digest()
     assert checker.is_valid(schema_id, invalid, digest) is False
     assert not checker.verdicts.seen((schema_id, digest))
+
+
+async def test_a_checker_that_cannot_read_resolver_state_falls_back_to_stock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A jsonschema/referencing upgrade that renames the private resolver state the checker reads
+    (``_resolver``, ``_base_uri``) costs speed only: every verdict still comes from the stock
+    validator."""
+
+    def unreadable(*_args: object) -> object:
+        def keyword(*_keyword_args: object) -> Iterator[ProtocolValueError]:
+            raise AttributeError("_base_uri")
+            yield ProtocolValueError("unreachable")
+
+        return keyword
+
+    monkeypatch.setattr(schemas, "_ref_resolved_once", unreadable)
+    monkeypatch.setattr(schemas, "_validity_checker_slot", [])
+    by_id = {document.schema_id: document for document in schemas.load_schema_catalog().documents}
+    checked = 0
+    for label, schema_id, document in await _documents():
+        checker = schemas._validity_checker()
+        assert checker is not None
+        # The broken ``$ref`` keyword is reached, so the checker cannot tell ...
+        assert checker.is_valid(schema_id, document, None) is False, label
+        # ... and the stock validator still accepts the valid result and rejects its mutation.
+        identity = by_id[schema_id]
+        schemas.validate_schema_instance(identity.schema_name, identity.schema_version, document)
+        mutated = next(m for m in _mutations(document) if not _stock_accepts(schema_id, m))
+        with pytest.raises(schemas.SchemaInstanceInvalid):
+            schemas.validate_schema_instance(identity.schema_name, identity.schema_version, mutated)
+        checked += 1
+    assert checked > 5
