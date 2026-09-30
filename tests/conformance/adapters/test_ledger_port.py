@@ -1587,7 +1587,7 @@ async def test_check_change_shown_files_replay_to_the_same_raise_facts_in_both_l
 
     files = CheckChangeShownFiles(
         ("hmac-sha256:" + "1" * 64, "hmac-sha256:" + "2" * 64),
-        (CheckChangePartialFile("hmac-sha256:" + "3" * 64, 2_048, 1),),
+        (CheckChangePartialFile("hmac-sha256:" + "3" * 64, 2_048, 1, True, 67),),
         complete=True,
     )
     command = ledger_command()

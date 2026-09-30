@@ -74,6 +74,7 @@ from yoetz.protocol.coverage import (
 )
 
 __all__ = [
+    "MAX_CHECK_CHANGE_RAISING_CHECKS",
     "PROJECTION_GENERATION",
     "PROJECTION_VERSION",
     "ContradictionKey",
@@ -96,6 +97,8 @@ __all__ = [
 
 PROJECTION_VERSION: Final = "yoetz/0.1.0"
 PROJECTION_GENERATION: Final = 1
+# At most this many checks contribute to one finding's check-time requirement (ADR-031).
+MAX_CHECK_CHANGE_RAISING_CHECKS: Final = 64
 
 _MAX_SAFE_INTEGER: Final = 2**53 - 1
 _MAX_SQLITE_SIGNED_INTEGER: Final = 2**63 - 1
@@ -364,7 +367,7 @@ class FindingProjectionRecord(ProjectionRecord[Finding]):
                 ids = tuple(event_id(item) for item in cast(tuple[object, ...], value))
             except ValueError as exc:
                 raise _invalid() from exc
-            if len(set(ids)) != len(ids):
+            if len(set(ids)) != len(ids) or len(ids) > MAX_CHECK_CHANGE_RAISING_CHECKS:
                 raise _invalid()
             object.__setattr__(self, name, ids)
         files = self.check_change_raised_files

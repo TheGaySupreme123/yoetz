@@ -348,13 +348,36 @@ def test_shown_files_follow_the_admitted_parts_and_redaction() -> None:
     whole_len = len(_section("whole.ts", 3))
     redacted_len = len(_section("redacted.ts", 2))
     cut_start = len(header) + whole_len + redacted_len
-    assert [(identity.decode(), whole, shown, spans) for identity, whole, shown, spans in files][
-        :3
-    ] == [
-        ("diff --git a/whole.ts b/whole.ts", True, whole_len, 0),
+    redacted_marker = text.index(b"[REDACTED]") - (len(header) + whole_len)
+    assert [
+        (
+            file.identity.decode(),
+            file.whole,
+            file.shown_bytes,
+            file.redactions,
+            file.section_admitted,
+            file.clean_bytes,
+        )
+        for file in files
+    ][:3] == [
+        ("diff --git a/whole.ts b/whole.ts", True, whole_len, 0, True, whole_len),
         # Wholly admitted but redacted: everything shown counts, and so does the span.
-        ("diff --git a/redacted.ts b/redacted.ts", False, redacted_len, 1),
-        ("diff --git a/cut.ts b/cut.ts", False, shown_bytes - cut_start, 0),
+        (
+            "diff --git a/redacted.ts b/redacted.ts",
+            False,
+            redacted_len,
+            1,
+            True,
+            redacted_marker,
+        ),
+        (
+            "diff --git a/cut.ts b/cut.ts",
+            False,
+            shown_bytes - cut_start,
+            0,
+            False,
+            shown_bytes - cut_start,
+        ),
     ]
     assert all(b"never.ts" not in identity for identity, *_ in files)
     assert all(b"listed-only" not in identity for identity, *_ in files)

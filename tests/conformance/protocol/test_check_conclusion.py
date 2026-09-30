@@ -61,10 +61,20 @@ def test_check_change_files_ride_only_a_recorded_conclusion_and_stay_closed() ->
         wire["check_change_files"]["fully_shown"]
     )
     assert {
-        item.commitment: (item.shown_bytes, item.redactions)
+        item.commitment: (
+            item.shown_bytes,
+            item.redactions,
+            item.section_admitted,
+            item.clean_bytes,
+        )
         for item in payload.check_change_files.partially_shown
     } == {
-        item["commitment"]: (item["shown_bytes"], item["redactions"])
+        item["commitment"]: (
+            item["shown_bytes"],
+            item["redactions"],
+            item["section_admitted"],
+            item["clean_bytes"],
+        )
         for item in wire["check_change_files"]["partially_shown"]
     }
     files = wire["check_change_files"]
@@ -78,7 +88,13 @@ def test_check_change_files_ride_only_a_recorded_conclusion_and_stay_closed() ->
                 "check_change_files": {
                     **files,
                     "partially_shown": [
-                        {"commitment": files["fully_shown"][0], "redactions": 0, "shown_bytes": 1}
+                        {
+                            "clean_bytes": 1,
+                            "commitment": files["fully_shown"][0],
+                            "redactions": 0,
+                            "section_admitted": False,
+                            "shown_bytes": 1,
+                        }
                     ],
                 },
             },
@@ -90,6 +106,17 @@ def test_check_change_files_ride_only_a_recorded_conclusion_and_stay_closed() ->
                 "check_change_files": {
                     **files,
                     "partially_shown": [{**files["partially_shown"][0], "shown_bytes": -1}],
+                },
+            },
+        ),
+        (
+            EventSchema("check_recorded", "1.3.0"),
+            {
+                **wire,
+                "check_change_files": {
+                    **files,
+                    # A clean prefix longer than what was shown.
+                    "partially_shown": [{**files["partially_shown"][0], "clean_bytes": 2_000}],
                 },
             },
         ),

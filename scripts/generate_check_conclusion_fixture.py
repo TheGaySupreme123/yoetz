@@ -56,7 +56,13 @@ def document(root: Path) -> dict[str, Any]:
         "complete": True,
         "fully_shown": ["hmac-sha256:" + "1" * 64, "hmac-sha256:" + "2" * 64],
         "partially_shown": [
-            {"commitment": "hmac-sha256:" + "3" * 64, "redactions": 1, "shown_bytes": 1024}
+            {
+                "clean_bytes": 67,
+                "commitment": "hmac-sha256:" + "3" * 64,
+                "redactions": 1,
+                "section_admitted": True,
+                "shown_bytes": 1024,
+            }
         ],
     }
     for conclusion, files in [

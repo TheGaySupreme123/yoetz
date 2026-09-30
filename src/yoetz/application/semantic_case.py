@@ -14,7 +14,7 @@ import hashlib
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import Final, Literal, cast
+from typing import Final, Literal, NamedTuple, cast
 
 from yoetz.application.check import (
     CheckScope,
@@ -113,6 +113,7 @@ from yoetz.protocol.models import (
 
 __all__ = [
     "CHECK_TIME_CHANGE_ITEM_PREFIX",
+    "CheckTimeChangeShownFile",
     "check_time_change_shown_files",
     "CapturedContentScope",
     "CapturedSemanticContent",
@@ -444,19 +445,31 @@ _CHECK_TIME_CHANGE_DELETED: Final = re.compile(rb"^deleted file mode ", re.MULTI
 _REDACTION_MARKER: Final = b"[REDACTED]"
 
 
+class CheckTimeChangeShownFile(NamedTuple):
+    """One changed file whose diff reached a review packet (ADR-031); counts, never content."""
+
+    identity: bytes
+    whole: bool
+    shown_bytes: int
+    redactions: int
+    section_admitted: bool
+    clean_bytes: int
+
+
 def check_time_change_shown_files(
     capture: CheckChangeCapture,
     selection: ReviewSelectionPolicy,
     admitted_parts: int,
-) -> tuple[tuple[bytes, bool, int, int], ...]:
+) -> tuple[CheckTimeChangeShownFile, ...]:
     """Each changed file whose diff reached the packet, and how much of it (ADR-031).
 
     A file is its ``diff --git`` section of the stored change. Its identity is that section's
     first line plus its change kind (a binary or a deleted file), so a file whose kind changed
     between two checks never matches itself. It was shown when any of its bytes lie in the
     ``admitted_parts`` parts the packet carried, and fully shown when the whole section did and it
-    holds no redaction marker. The third and fourth values are the section bytes that reached the
-    packet (markers included) and the ``[REDACTED]`` markers among them. Files the change lists
+    holds no redaction marker. Each also carries the section bytes that reached the packet
+    (markers included), the ``[REDACTED]`` markers among them, whether the whole section reached
+    it, and where the first shown marker starts (the shown length without one). Files the change lists
     only in its header (not shown) are not returned. The answer is a pure function of the stored
     object, the selection and the admitted part count, so a recovered job derives the same files.
     """
@@ -469,7 +482,7 @@ def check_time_change_shown_files(
     shown_bytes = sum(len(chunk) for chunk in chunks[:admitted_parts])
     text = capture.text
     starts = [match.start() for match in _CHECK_TIME_CHANGE_FILE_START.finditer(text)]
-    files: list[tuple[bytes, bool, int, int]] = []
+    files: list[CheckTimeChangeShownFile] = []
     for index, start in enumerate(starts):
         if start >= shown_bytes:
             break
@@ -483,11 +496,20 @@ def check_time_change_shown_files(
             identity += b"\x00deleted"
         visible_end = min(end, shown_bytes)
         # A marker the packet edge cut still counts: part of a redacted span was shown.
-        redactions = text.count(
-            _REDACTION_MARKER, start, min(end, visible_end + len(_REDACTION_MARKER) - 1)
+        marker_limit = min(end, visible_end + len(_REDACTION_MARKER) - 1)
+        redactions = text.count(_REDACTION_MARKER, start, marker_limit)
+        first_marker = text.find(_REDACTION_MARKER, start, marker_limit)
+        section_admitted = end <= shown_bytes
+        files.append(
+            CheckTimeChangeShownFile(
+                identity=identity,
+                whole=section_admitted and _REDACTION_MARKER not in section,
+                shown_bytes=visible_end - start,
+                redactions=redactions,
+                section_admitted=section_admitted,
+                clean_bytes=visible_end - start if first_marker < 0 else first_marker - start,
+            )
         )
-        whole = end <= shown_bytes and _REDACTION_MARKER not in section
-        files.append((identity, whole, visible_end - start, redactions))
     return tuple(files)
 
 

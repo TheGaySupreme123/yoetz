@@ -49,6 +49,7 @@ from yoetz.kernel.finding_resolution import (
     resolved_finding_ids,
 )
 from yoetz.kernel.projections import (
+    MAX_CHECK_CHANGE_RAISING_CHECKS,
     FindingProjectionRecord,
     ProjectionState,
     empty_projection_state,
@@ -1178,20 +1179,33 @@ _RAISING_EVENT = evt(5)
 _REPAIR_EVENT = evt(9)
 
 
+def _partial(
+    commitment: str,
+    shown: int,
+    redactions: int = 0,
+    admitted: bool = False,
+    clean: int | None = None,
+) -> CheckChangePartialFile:
+    """A partial view; without markers the whole shown length is clean, with them none is."""
+
+    if clean is None:
+        clean = shown if redactions == 0 else 0
+    return CheckChangePartialFile(commitment, shown, redactions, admitted, clean)
+
+
 def _files(
     full: tuple[str, ...] = (),
     partial: tuple[tuple[str, int] | tuple[str, int, int], ...] = (),
     *,
     complete: bool = True,
+    views: tuple[CheckChangePartialFile, ...] = (),
 ) -> CheckChangeShownFiles:
     """A shown-files record; a partial entry is (commitment, shown bytes[, redacted spans])."""
 
     return CheckChangeShownFiles(
         full,
-        tuple(
-            CheckChangePartialFile(entry[0], entry[1], entry[2] if len(entry) > 2 else 0)
-            for entry in partial
-        ),
+        tuple(_partial(entry[0], entry[1], entry[2] if len(entry) > 2 else 0) for entry in partial)
+        + views,
         complete=complete,
     )
 
@@ -1608,3 +1622,83 @@ def test_a_redaction_new_in_the_repair_blocks() -> None:
     record = _repair_with(findings, _files(partial=((_FILE_A, 5_000, 1),)))
 
     assert record.resolved_by_check_event_id is None
+
+
+def test_edge_cut_raise_is_covered_by_a_longer_repair_whose_first_n_bytes_are_clean() -> None:
+    """L1: the raising view stopped before a marker the repair later showed."""
+
+    findings = _raise_reraise(
+        _files(views=(_partial(_FILE_A, 995),)), _files(views=(_partial(_FILE_A, 995),))
+    )
+
+    record = _repair_with(findings, _files(views=(_partial(_FILE_A, 4_322, 1, False, 2_100),)))
+
+    assert record.resolved_by_check_event_id == evt(9)
+
+
+def test_whole_section_raise_is_covered_by_a_shrunk_whole_repair_with_the_same_markers() -> None:
+    """L2: the fix shortened the diff; the persistent redaction stays at one span."""
+
+    raised = _partial(_FILE_A, 3_000, 1, True, 67)
+    findings = _raise_reraise(_files(views=(raised,)), _files(views=(raised,)))
+
+    record = _repair_with(findings, _files(views=(_partial(_FILE_A, 2_400, 1, True, 67),)))
+
+    assert record.resolved_by_check_event_id == evt(9)
+
+
+@pytest.mark.parametrize(
+    "repair",
+    [
+        _partial(_FILE_A, 2_400, 2, True, 50),  # whole, but more hidden and not clean for n
+        _partial(_FILE_A, 2_400, 1, False, 67),  # shorter and not the whole section
+    ],
+    ids=("more_redactions", "shorter_cut"),
+)
+def test_whole_or_shorter_repair_views_that_hide_more_still_block(
+    repair: CheckChangePartialFile,
+) -> None:
+    raised = _partial(_FILE_A, 3_000, 1, True, 67)
+    findings = _raise_reraise(_files(views=(raised,)), _files(views=(raised,)))
+
+    assert _repair_with(findings, _files(views=(repair,))).resolved_by_check_event_id is None
+
+
+def test_contributors_past_the_bound_make_r_unknown() -> None:
+    findings = {fnd(1): finding_record(_finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED), 4)}
+    files = _files(full=(_FILE_A,))
+    for index in range(MAX_CHECK_CHANGE_RAISING_CHECKS):
+        apply_check_resolution(
+            findings, _review(3, index + 1, files, returned=(fnd(1),)), evt(100 + index)
+        )
+    assert len(findings[fnd(1)].check_change_raising_check_event_ids) == 64
+    assert findings[fnd(1)].check_change_raised_files == files
+
+    apply_check_resolution(findings, _review(3, 999, files, returned=(fnd(1),)), evt(999))
+
+    record = findings[fnd(1)]
+    assert len(record.check_change_raising_check_event_ids) == 64
+    assert record.check_change_raised_files is None
+
+
+def test_merged_requirement_may_outgrow_one_event_row_up_to_its_own_bound() -> None:
+    def record(offset: int, count: int) -> CheckChangeShownFiles:
+        return _files(full=tuple(f"hmac-sha256:{offset + index:064x}" for index in range(count)))
+
+    merged = record(0, 128)
+    for batch in range(1, 8):
+        step = merged.merged(record(batch * 128, 128))
+        assert step is not None
+        merged = step
+    assert len(merged.fully_shown) == 1_024
+    assert merged.merged(record(10_000, 1)) is None
+    # The same wide requirement survives the projection snapshot.
+    findings = {
+        fnd(1): replace(
+            finding_record(_finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED), 4),
+            check_change_raising_check_event_ids=(evt(5),),
+            check_change_raised_files=merged,
+        )
+    }
+    state = replace(empty_projection_state(), frontier=9, head_digest=_DIGEST, findings=findings)
+    assert projection_from_snapshot(projection_snapshot(state)) == state

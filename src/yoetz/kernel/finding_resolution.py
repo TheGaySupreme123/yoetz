@@ -46,7 +46,11 @@ from yoetz.domain.receipts import (
 from yoetz.domain.values import EventId, FindingId, ResultId
 from yoetz.kernel.claims import effective_claim_items
 from yoetz.kernel.plan_scope import current_plan_scope
-from yoetz.kernel.projections import FindingProjectionRecord, ProjectionState
+from yoetz.kernel.projections import (
+    MAX_CHECK_CHANGE_RAISING_CHECKS,
+    FindingProjectionRecord,
+    ProjectionState,
+)
 from yoetz.protocol.coverage import LedgerFreshness
 from yoetz.protocol.models import SemanticReason, SemanticStatus
 
@@ -781,6 +785,10 @@ def _with_raising_check(
 
     if check_event_id in record.check_change_raising_check_event_ids:
         return record
+    if len(record.check_change_raising_check_event_ids) >= MAX_CHECK_CHANGE_RAISING_CHECKS:
+        # Past the contributor bound R becomes unknown and stays so; the ids already kept still
+        # reopen what depended on them.
+        return replace(record, check_change_raised_files=None)
     seen = _raised_check_change_files(check)
     prior = record.check_change_raised_files
     if not record.check_change_raising_check_event_ids:

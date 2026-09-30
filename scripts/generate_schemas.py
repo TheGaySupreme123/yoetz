@@ -1300,11 +1300,19 @@ def _check_recorded_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         "items": {
             "additionalProperties": False,
             "properties": {
+                "clean_bytes": {"maximum": 262144, "minimum": 0, "type": "integer"},
                 "commitment": {"pattern": "^hmac-sha256:[0-9a-f]{64}$", "type": "string"},
                 "redactions": {"maximum": 262144, "minimum": 0, "type": "integer"},
+                "section_admitted": {"type": "boolean"},
                 "shown_bytes": {"maximum": 262144, "minimum": 0, "type": "integer"},
             },
-            "required": ["commitment", "redactions", "shown_bytes"],
+            "required": [
+                "clean_bytes",
+                "commitment",
+                "redactions",
+                "section_admitted",
+                "shown_bytes",
+            ],
             "type": "object",
         },
         "maxItems": 128,
