@@ -79,7 +79,12 @@ names what the receipt will disclose.
    classifies the code as standing even under a `required` policy: the remedy is the owner's
    (serve the policy route), and asking the agent for an impossible check would recreate the
    unchanged-state recheck loop. Status callers without a route (CLI, terminal interface, closure
-   preparation) check on the policy route and keep the policy-derived rule.
+   preparation) check on the policy route and keep the policy-derived rule. The same session can
+   therefore read `ready_with_limitations` to an agent on a strict MCP connection and
+   `action_required` in the CLI or terminal interface. That is coherent, not a contradiction:
+   readiness answers "what can *this* caller still do", and the CLI can run the required review on
+   the policy route while the strict process cannot. The ledger, `known_gaps`, the verdict and the
+   receipt are identical on both.
 
 5. **Derived per request; no verdict changes.** Readiness is derived from the compact projection and
    the recorded prefix at the requested frontier on every read, never cached across frontiers and

@@ -6049,8 +6049,13 @@ conditions other than `receipt_findings_unresolved` appear in `agent_actionable`
 appear in `blocking_conditions`. `semantic_review_not_requested` is agent-actionable only when the
 effective verification policy is `required`, the status read is not served by a strict MCP route
 (which never dispatches AI-powered review, ADR-018), and no check whose AI-powered review succeeded
-has been recorded without a later material change; on a strict route it is a standing limitation. The inputs the compact row cannot carry travel on the
-internal compact `ProjectionPage.readiness_facts` (`ClosureReadinessFacts`: check applicability,
+has been recorded without a later material change; on a strict route it is a standing limitation.
+Status reads without a route (CLI, terminal interface, closure preparation) use the policy-route
+rule, so one session can read `ready_with_limitations` to a strict MCP client and
+`action_required` in the CLI or terminal interface: readiness is per caller, and the CLI can run
+the required review on the policy route. Coverage, `known_gaps`, verdicts and receipts do not
+differ. The inputs the compact row cannot carry travel on the internal compact
+`ProjectionPage.readiness_facts` (`ClosureReadinessFacts`: check applicability,
 AI-powered review currency, receipt-blocking and acknowledged finding ids, acknowledged obligation
 ids), derived per request from the projection and record prefix at the requested frontier and
 never cached across frontiers. A compact page without those facts yields `readiness_unknown`, never

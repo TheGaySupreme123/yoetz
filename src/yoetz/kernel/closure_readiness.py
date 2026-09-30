@@ -11,8 +11,10 @@ only through this table. Each code the product can emit is assigned exactly once
   deliberate selection or a capture failure — and is disclosed on the receipt; it is never an
   instruction.
 * ``route_dependent`` — only ``semantic_review_not_requested``: standing on a route where
-  AI-powered review is optional or off, and actionable only on a route that requires it when no
-  AI-powered review has completed since the last material change (remedy: run it).
+  AI-powered review is optional or off, and on a strict MCP route, which never dispatches
+  AI-powered review (ADR-018) whatever the repository policy says. It is actionable only on a
+  route that requires AI-powered review and can dispatch it, when none has completed since the
+  last material change (remedy: run it).
 
 The table is a closed, versioned vocabulary rather than a heuristic. A conformance test
 (``tests/conformance/honesty/test_gap_classification_completeness.py``) enumerates every gap-code
@@ -286,8 +288,9 @@ def classify_gap(
     """Resolve one gap to ``agent_actionable`` or ``standing_limitation``; ``None`` if unknown.
 
     ``semantic_review_required`` is true only on a route whose verification policy requires
-    AI-powered review and which can dispatch it (never a strict MCP route, ADR-018). ``semantic_review_current`` is true when an AI-powered review completed
-    and no material change has been recorded since. Neither flag affects any other code.
+    AI-powered review and which can dispatch it (never a strict MCP route, ADR-018).
+    ``semantic_review_current`` is true when an AI-powered review completed and no material
+    change has been recorded since. Neither flag affects any other code.
     """
 
     assigned = GAP_CLASSIFICATION.get(gap_base_code(marker))

@@ -144,12 +144,7 @@ class _Session:
         self.frontier = result.result_frontier
         return result
 
-    async def status(
-        self,
-        view: str = "compact",
-        *,
-        route_profile: Literal["policy", "strict"] | None = None,
-    ) -> StatusInternalResult:
+    def status_request(self, view: str = "compact") -> StatusRequest:
         request: dict[str, JsonValue] = {
             **workflow._request_base(self.next("req_")),  # pyright: ignore[reportPrivateUsage]
             "session_id": self.started.session_id,
@@ -159,9 +154,15 @@ class _Session:
         }
         if view == "findings":
             request["filter"] = {"include_resolved": True}
-        return await self.app.status(
-            StatusRequest.model_validate(request), route_profile=route_profile
-        )
+        return StatusRequest.model_validate(request)
+
+    async def status(
+        self,
+        view: str = "compact",
+        *,
+        route_profile: Literal["policy", "strict"] | None = None,
+    ) -> StatusInternalResult:
+        return await self.app.status(self.status_request(view), route_profile=route_profile)
 
     async def receipt(self) -> str:
         receipt = await self.app.receipt(
@@ -320,8 +321,8 @@ async def _bandit_b(
     return session, checked
 
 
-def _wire(status: StatusInternalResult) -> StatusSuccessModel:
-    """Project the internal result to the public model the CLI and TUI render."""
+def public_status(status: StatusInternalResult) -> StatusResultModel:
+    """Project the internal result to the public result a control client receives."""
 
     body: dict[str, JsonValue] = {
         **status.as_json(),
@@ -337,7 +338,13 @@ def _wire(status: StatusInternalResult) -> StatusSuccessModel:
             "projection_commitment": "hmac-sha256:" + "b" * 64,
         },
     }
-    parsed = StatusResultModel.model_validate(body).root
+    return StatusResultModel.model_validate(body)
+
+
+def _wire(status: StatusInternalResult) -> StatusSuccessModel:
+    """Project the internal result to the public model the CLI and TUI render."""
+
+    parsed = public_status(status).root
     assert type(parsed) is StatusSuccessModel
     return parsed
 
