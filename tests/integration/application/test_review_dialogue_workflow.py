@@ -15,7 +15,13 @@ from typing import Any, cast
 
 import pytest
 
-from builders.projection_workflow import build_projection_application, frontier_json, request_base
+from builders.projection_workflow import (
+    ProjectionCase,
+    build_projection_application,
+    frontier_json,
+    project_case,
+    request_base,
+)
 from builders.start_application import protocol_id, start_request
 from yoetz.application.check import FinalSemanticEvaluation, check_internal_json
 from yoetz.application.semantic_case import build_semantic_case, semantic_case_packet_view
@@ -35,6 +41,7 @@ from yoetz.kernel.projections import ProjectionState, projection_snapshot
 from yoetz.kernel.receipt_capacity import receipt_blocking_finding_count
 from yoetz.kernel.reducers import replay
 from yoetz.mcp.summaries import summary_for_check
+from yoetz.ports.control import ControlMethod
 from yoetz.ports.ledger import CheckCommitResult, FrozenCase
 from yoetz.ports.semantic import (
     PriorFindingVerdict,
@@ -590,6 +597,134 @@ async def test_a_withdrawn_reasoned_rejection_latches_rejection_accepted() -> No
     json_receipt = await _receipt(session, after, seed + 50, "json")
     document = cast(Mapping[str, JsonValue], json_receipt.document)
     assert document["rejection_accepted_finding_ids"] == [raised.finding_id]
+    assert projection_snapshot(replay(_records(session.app))) == projection_snapshot(
+        _live_projection(session.app)
+    )
+
+
+def _withdraw_first_finding_assessably(frozen: FrozenCase) -> SemanticJudgment:
+    projection = frozen.case.projection
+    finding = next(
+        key
+        for key, row in projection.findings.items()
+        if row.payload is not None and row.payload.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+    )
+    # An assessable review that does not return the issue, over changed state: on its own the
+    # ordinary absence proof would resolve it. The explicit ``withdrawn`` must still win.
+    return SemanticJudgment(
+        "no_material_discrepancy", (), (PriorFindingVerdict(str(finding), "withdrawn", ()),)
+    )
+
+
+async def test_an_assessable_withdrawn_ruling_on_a_rejection_reads_rejection_accepted() -> None:
+    """PR #943 review P1: the reviewer's explicit ``withdrawn`` outranks the silent absence proof.
+
+    Raise, reject with a reason, change material state, then an assessable review that does not
+    return the issue and rules it ``withdrawn``. The same check would prove it absent, but the
+    item's one final state is ``rejection_accepted`` on every surface: projection, status
+    findings view and CLI text, the check's checklist and MCP text, and every receipt format.
+    """
+
+    from yoetz.cli.render import render_human_check, render_human_status
+    from yoetz.mcp.summaries import summary_for_status
+    from yoetz.protocol.models import (
+        CheckFindingChecklistModel,
+        CheckSuccessModel,
+        CoverageModel,
+        StatusResultModel,
+        StatusSuccessModel,
+    )
+
+    seed = 3600
+    reviewer = _Reviewer([_challenge_obligation, _withdraw_first_finding_assessably])
+    session, frontier = await _session(reviewer, seed)
+    first = await _check(session, frontier, seed + 10)
+    raised = _semantic(first)
+    at = frontier_json(first.result_frontier)
+    rejected = await session.app.respond(
+        RespondRequest.model_validate(
+            _respond_wire(
+                session, at, at, raised, seed + 20, "rejected", "The task statement excludes it."
+            )
+        )
+    )
+    _result, repaired = await _repair(session, frontier_json(rejected.result_frontier), seed + 30)
+    second = await _check(session, repaired, seed + 50)
+
+    live = _live_projection(session.app)
+    check_row = [row for row in _records(session.app) if row.schema.name == "check_recorded"][-1]
+    recorded = cast(CheckRecordedPayload, check_row.payload)
+    assert recorded.semantic_conclusion == "no_material_discrepancy"
+    assert [item.verdict for item in recorded.prior_finding_verdicts] == ["withdrawn"]
+    assert raised.finding_id not in recorded.returned_finding_ids
+    record = live.findings[raised.finding_id]
+    assert record.rejection_accepted_by_check_event_id == check_row.event_id
+    assert record.resolved_by_check_event_id is None
+    assert finding_todo_state(live, raised.finding_id) is FindingTodoState.REJECTION_ACCEPTED
+    assert "Rejection accepted" in finding_resolution_explanation(
+        live, raised.finding_id, _records(session.app)
+    )
+    assert receipt_blocking_finding_count(live) == 0
+
+    # The check's own checklist and its MCP text agree.
+    checklist = second.finding_checklist
+    assert checklist is not None
+    row = next(item for item in checklist.items if item.finding_id == raised.finding_id)
+    assert row.todo_state == "rejection_accepted"
+    assert (checklist.counts.rejection_accepted, checklist.counts.verified_resolved) == (1, 0)
+    wire = check_internal_json(second)
+    assert "verified 0, not done 0, rejection accepted 1" in summary_for_check(wire)
+    # CLI text of the same checklist wire (the rest of the check is not under test here).
+    checked = CheckSuccessModel.model_construct(
+        verdict="no_issue_detected",
+        semantic_status="succeeded",
+        semantic_reason="semantic_completed",
+        semantic_provenance=None,
+        findings=(),
+        suppressed_count="0",
+        finding_checklist=CheckFindingChecklistModel.model_validate(wire["finding_checklist"]),
+        children=None,
+        advisory_notes=(),
+        coverage=CoverageModel.model_construct(known_gaps=()),
+    )
+    assert f"[-] F-1 {raised.finding_id} rejection_accepted" in render_human_check(checked)
+
+    # Status findings view and its CLI/TUI text.
+    status_body: dict[str, JsonValue] = {
+        **request_base(protocol_id("req_", seed + 60)),
+        "session_id": session.session_id,
+        "writer_id": session.writer_id,
+        "view": "findings",
+        "limit": "100",
+    }
+    status = await session.app.status(StatusRequest.model_validate(status_body))
+    assert isinstance(status.page, StatusFindingsPageModel)
+    status_row = next(item for item in status.page.items if item.finding_id == raised.finding_id)
+    assert status_row.todo_state == "rejection_accepted"
+    assert status_row.resolved is False
+    # The client-projected wire the CLI and the terminal interface both render.
+    projected = await project_case(
+        session.app,
+        ProjectionCase("status/findings-terminal", ControlMethod.STATUS, status_body, status),
+        seed + 65,
+    )
+    success = StatusResultModel.model_validate(projected).root
+    assert isinstance(success, StatusSuccessModel)
+    text = render_human_status(success)
+    assert f"[-] F-1 {raised.finding_id} rejection_accepted" in text
+    assert "verified_resolved" not in text
+    assert "rejection accepted 1" in summary_for_status(projected)
+
+    # Every receipt format names it as a rejection accepted, never as resolved.
+    after = frontier_json(second.result_frontier)
+    json_receipt = await _receipt(session, after, seed + 70, "json")
+    document = cast(Mapping[str, JsonValue], json_receipt.document)
+    assert document["rejection_accepted_finding_ids"] == [raised.finding_id]
+    for fmt in ("markdown", "text"):
+        rendered = await _receipt(session, after, seed + 71 + len(fmt), fmt)
+        human = cast(str, rendered.human_text)
+        assert "Rejection accepted" in human
+        assert raised.finding_id in human
     assert projection_snapshot(replay(_records(session.app))) == projection_snapshot(
         _live_projection(session.app)
     )

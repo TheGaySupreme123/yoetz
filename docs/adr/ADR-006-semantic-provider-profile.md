@@ -876,8 +876,9 @@ A `fixed` ruling lets that finding resolve on that check even when the packet as
 block a finding the reviewer judged on newer material. Every other rule still applies: completed
 review, the finding inside the tested frontier, no suppression, scope, readable freshness, the
 capture baseline, a material change after the finding, and the issue not returned again.
-`withdrawn` keeps the earlier rules, under which a reasoned rejection an assessable review does not
-re-raise resolves over changed state, and never lifts the whole-packet veto. `still_present`,
+`withdrawn` keeps the earlier absence rules and never lifts the whole-packet veto; on a finding
+whose latest readable response is a reasoned `rejected`, the check that rules it `withdrawn` records
+`rejection_accepted` rather than resolution (below). `still_present`,
 `answered_not_fixed` and `unassessable` block only their own finding by name
 (`reviewer_verdict_<verdict>`). Without a ruling the earlier rules are unchanged; silence is never
 read as `fixed`. Silence also proves nothing when the finding may never have been assessed: on a
@@ -895,7 +896,12 @@ kept as data): `open`, or one of three terminal states. `verified_resolved` is t
 proof-based resolution. `acknowledged_not_done` is a new `respond` disposition, defined here for
 the whole issue set: the agent states that it will not do what the finding asks, with a required
 non-empty reason. `rejection_accepted` latches when a later review rules `withdrawn` on an
-AI-powered finding whose latest readable response is a reasoned `rejected`. The optional
+AI-powered finding whose latest readable response is a reasoned `rejected`. When that same review
+would also prove the finding absent (assessable, over changed state, not returned again), the
+explicit ruling takes precedence over the implicit not-returned inference: the reviewer accepted
+the agent's reason, it did not observe a repair, so the item is `rejection_accepted` and that
+check's absence mark is dropped. A finding an earlier check already proved absent stays
+`verified_resolved`. The optional
 `superseded` state is not introduced: a successor row (#458) already starts `open` beside the
 resolved row it follows.
 

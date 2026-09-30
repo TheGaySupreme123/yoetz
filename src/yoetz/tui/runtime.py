@@ -1757,9 +1757,17 @@ class YoetzRuntime:
         return self._work_detail(title, session, compact)
 
     async def task_status(
-        self, title: str, view: Literal["lineage", "project"], *, cursor: str | None = None
+        self,
+        title: str,
+        view: Literal["lineage", "project", "findings"],
+        *,
+        cursor: str | None = None,
     ) -> TaskStatusPage:
-        """Render the same service projection used by MCP and the CLI."""
+        """Render the same service projection used by MCP and the CLI.
+
+        The ``findings`` view is the task's to-do list (issue #905): every item with its one
+        state, verified rows included, rendered by the CLI's own checklist lines.
+        """
 
         from yoetz.cli.render import render_human_status
         from yoetz.protocol.models import StatusRequestModel
@@ -1775,6 +1783,7 @@ class YoetzRuntime:
                 "view": view,
                 "limit": "50",
                 "cursor": cursor,
+                **({"filter": {"include_resolved": True}} if view == "findings" else {}),
             }
         )
         async with self._client() as client:

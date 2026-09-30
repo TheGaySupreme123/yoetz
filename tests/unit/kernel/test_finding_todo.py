@@ -260,6 +260,53 @@ def test_withdrawn_latches_only_after_a_readable_rejection() -> None:
     assert todo_counts(state, (fnd(1), fnd(2))).rejection_accepted == 1
 
 
+def test_an_explicit_withdrawn_outranks_the_same_checks_absence_proof() -> None:
+    """PR #943 review P1: one check, two terminal outcomes; the reviewer's explicit ruling wins.
+
+    ``apply_check_resolution`` runs first and may mark a rejected AI-powered finding resolved by
+    the very check that rules it ``withdrawn``. The ruling fold then records the reasoned
+    rejection as accepted and drops that same-check absence mark, so the item has exactly one
+    final state. An item an *earlier* check already proved absent stays verified: done is done.
+    """
+
+    rejected = {
+        fnd(1): _response(1, ResponseDisposition.REJECTED),
+        fnd(2): _response(2, ResponseDisposition.REJECTED),
+        fnd(3): _response(3, ResponseDisposition.ACKNOWLEDGED),
+    }
+    findings = {
+        # As ``apply_check_resolution`` leaves them for check evt(9).
+        fnd(1): finding_record(_semantic(1), 4, resolved_by_check_event_id=evt(9)),
+        fnd(2): finding_record(_semantic(2), 4, resolved_by_check_event_id=evt(8)),
+        fnd(3): finding_record(_semantic(3), 4, resolved_by_check_event_id=evt(9)),
+    }
+    check = _check(rulings=((1, "withdrawn"), (2, "withdrawn"), (3, "withdrawn")))
+    apply_check_rulings(findings, rejected, check, evt(9))
+
+    assert findings[fnd(1)].rejection_accepted_by_check_event_id == evt(9)
+    assert findings[fnd(1)].resolved_by_check_event_id is None
+    assert findings[fnd(1)].review_rounds == 0
+    # Proven absent by an earlier check: final, the later ruling changes nothing.
+    assert findings[fnd(2)].resolved_by_check_event_id == evt(8)
+    assert findings[fnd(2)].rejection_accepted_by_check_event_id is None
+    # No reasoned rejection to accept: the absence proof stands.
+    assert findings[fnd(3)].resolved_by_check_event_id == evt(9)
+    assert findings[fnd(3)].rejection_accepted_by_check_event_id is None
+
+    state = _state(dict(findings), dict(rejected))
+    assert finding_todo_state(state, fnd(1)) is FindingTodoState.REJECTION_ACCEPTED
+    assert finding_is_resolved(state, fnd(1)) is False
+    assert finding_blocks_receipt(state, fnd(1)) is False
+    assert finding_todo_state(state, fnd(2)) is FindingTodoState.VERIFIED_RESOLVED
+    assert finding_todo_state(state, fnd(3)) is FindingTodoState.VERIFIED_RESOLVED
+    counts = todo_counts(state, (fnd(1), fnd(2), fnd(3)))
+    assert (counts.rejection_accepted, counts.verified_resolved) == (1, 2)
+    # Redacting the withdrawing check drops the latch and leaves the item open, never resolved.
+    reopen_findings_resolved_by(findings, frozenset({evt(9)}))
+    reopened = _state(dict(findings), dict(rejected))
+    assert finding_todo_state(reopened, fnd(1)) is FindingTodoState.OPEN
+
+
 def test_rejection_accepted_never_upgrades_and_redaction_drops_the_latch() -> None:
     latched = replace(finding_record(_finding(1), 4), rejection_accepted_by_check_event_id=evt(9))
     findings = {fnd(1): latched}

@@ -8,7 +8,9 @@ only, so status, check, receipts and ``respond`` all agree:
 - ``acknowledged_not_done``: the agent answered, with a required reason, that it will not do it.
   It is never re-reviewed and never reads as clean.
 - ``rejection_accepted``: the agent rejected an AI-powered finding with a reason and a later
-  review withdrew it. It no longer blocks a receipt but stays disclosed.
+  review withdrew it. It no longer blocks a receipt but stays disclosed. When the withdrawing
+  review would also have proved the item absent, the explicit ruling wins: the item is
+  ``rejection_accepted``, not ``verified_resolved``.
 
 The last three are terminal: no transition leaves them, and ``respond`` refuses to record anything
 further on a terminal item. New evidence about the same problem becomes a new finding. The

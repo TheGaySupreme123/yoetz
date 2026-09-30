@@ -410,8 +410,10 @@ def _prior_verdict_effect(
     whole-packet ``insufficient_packet`` (and its coverage marker) no longer vetoes it; every
     other rule still applies, including freshness, material change and the issue not being
     returned again. ``withdrawn`` (the reviewer accepting the agent's rejection) keeps the
-    ordinary rules, under which an assessable review that does not re-raise a rejected finding
-    over changed state resolves it; it never lifts the ``insufficient_packet`` veto. Any other
+    ordinary rules here, under which an assessable review that does not re-raise a finding over
+    changed state proves it absent; it never lifts the ``insufficient_packet`` veto. When the
+    finding's latest response is a readable ``rejected``, ``apply_check_rulings`` then records
+    that same check's outcome as ``rejection_accepted`` rather than resolved. Any other
     ruling blocks this finding by name and speaks for no other finding. Without a ruling nothing
     changes (silence is never read as ``fixed``), except that a check whose packet left prior
     findings out or dropped a ruling blocks every unruled AI-powered finding
@@ -847,6 +849,15 @@ def apply_check_rulings(
     latches ``rejection_accepted``; the reviewer accepted the agent's reasoned rejection. Final
     rows (resolved, ``rejection_accepted``, ``acknowledged_not_done``) never change, and nothing
     here resolves or reopens a finding.
+
+    One check can reach two terminal outcomes for the same rejected finding: an assessable review
+    over changed state that does not return it satisfies the absence proof, so
+    ``apply_check_resolution`` has just marked it resolved by *this* check, and the same review
+    rules it ``withdrawn``. The explicit ruling wins over the implicit not-returned inference: the
+    reviewer said it accepts the agent's reasoned rejection, not that a repair proved the issue
+    gone. The same-check absence mark is dropped and ``rejection_accepted`` is latched, so the item
+    has exactly one final state. A finding an *earlier* check already proved absent is final and
+    stays ``verified_resolved``.
     """
 
     rulings = {item.finding_id: item.verdict for item in check.prior_finding_verdicts}
@@ -854,6 +865,21 @@ def apply_check_rulings(
     for current_id in sorted(touched, key=str.encode):
         record = findings.get(current_id)
         latest = responses.get(current_id)
+        if (
+            record is not None
+            and record.payload is not None
+            and record.payload.origin is not FindingOrigin.DETERMINISTIC
+            and record.resolved_by_check_event_id == check_event_id
+            and record.rejection_accepted_by_check_event_id is None
+            and rulings.get(current_id) == "withdrawn"
+            and _readable_rejection(latest)
+        ):
+            findings[current_id] = replace(
+                record,
+                resolved_by_check_event_id=None,
+                rejection_accepted_by_check_event_id=check_event_id,
+            )
+            continue
         if (
             record is None
             or record.payload is None
@@ -880,16 +906,20 @@ def apply_check_rulings(
             continue
         if verdict in OPEN_REVIEW_VERDICTS:
             findings[current_id] = replace(record, review_rounds=record.review_rounds + 1)
-        elif verdict == "withdrawn":
-            response = responses.get(current_id)
-            if (
-                response is not None
-                and response.payload is not None
-                and response.payload.disposition is ResponseDisposition.REJECTED
-            ):
-                findings[current_id] = replace(
-                    record, rejection_accepted_by_check_event_id=check_event_id
-                )
+        elif verdict == "withdrawn" and _readable_rejection(latest):
+            findings[current_id] = replace(
+                record, rejection_accepted_by_check_event_id=check_event_id
+            )
+
+
+def _readable_rejection(response: ProjectionRecord[ResponseRecordedPayload] | None) -> bool:
+    """Whether the finding's latest response is a readable, reasoned ``rejected``."""
+
+    return (
+        response is not None
+        and response.payload is not None
+        and response.payload.disposition is ResponseDisposition.REJECTED
+    )
 
 
 def reopen_findings_resolved_by(

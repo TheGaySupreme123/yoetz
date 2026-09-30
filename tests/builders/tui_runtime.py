@@ -155,6 +155,7 @@ class FakeRuntime:
     checks: list[tuple[str, CheckMode]] = field(default_factory=lambda: [])
     opened: list[str] = field(default_factory=lambda: [])
     progress_reads: list[str] = field(default_factory=lambda: [])
+    task_views: list[tuple[str, str]] = field(default_factory=lambda: [])
 
     def project_root(self) -> Path:
         return Path("/tmp/project")
@@ -492,6 +493,22 @@ class FakeRuntime:
                 "Operation: req_00000000-0000-4000-8000-000000000571 (pending)",
                 "Semantic review phase: provider_sampling (attempt 1, active)",
                 "Semantic review elapsed: 42s; remaining 858s; deadline 2026-09-22T12:15:00.000Z",
+                "Gaps: none",
+            ),
+            None,
+        )
+
+    async def task_status(
+        self, title: str, view: str, *, cursor: str | None = None
+    ) -> TaskStatusPage:
+        del cursor
+        self.task_views.append((title, view))
+        return TaskStatusPage(
+            (
+                "[ ] F-1 fnd_00000000-0000-4000-8000-000000000001 open (2/5)",
+                "[x] F-2 fnd_00000000-0000-4000-8000-000000000002 verified_resolved",
+                "[~] F-3 fnd_00000000-0000-4000-8000-000000000003 acknowledged_not_done",
+                "[-] F-4 fnd_00000000-0000-4000-8000-000000000004 rejection_accepted",
                 "Gaps: none",
             ),
             None,

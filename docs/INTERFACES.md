@@ -6973,8 +6973,10 @@ also adds `semantic_prior_findings_over_limit`) or its ruling may have been drop
 never resolves by silence on that check. For a
 `semantic_model_derived` row, a recorded `fixed` ruling on that row lifts the
 `insufficient_packet` veto and tolerates `semantic_packet_insufficient` for that row only;
-`withdrawn` keeps the ordinary rules (an assessable review that does not re-raise a rejected finding
-over changed state resolves it) and never lifts the veto; `still_present`, `answered_not_fixed` and
+`withdrawn` keeps the ordinary rules (an assessable review that does not re-raise a finding over
+changed state proves it absent) and never lifts the veto, but on a finding whose latest readable
+response is `rejected` that check records `rejection_accepted`, not resolution (below);
+`still_present`, `answered_not_fixed` and
 `unassessable` add the blocker `reviewer_verdict_<verdict>`. The resolution explanation names a
 resolution that came from a `fixed` ruling.
 
@@ -6997,7 +6999,11 @@ Every recorded finding has one to-do state (`kernel/finding_todo.py`): `open`,
 `verified_resolved` (the shared `finding_is_resolved` rule), `acknowledged_not_done` (latest
 readable response has that disposition; never reads as resolved), or `rejection_accepted` (a later
 check recorded a `withdrawn` ruling on an AI-powered finding whose latest readable response was
-`rejected`; the projection records the check as `rejection_accepted_by_check_event_id`). The last
+`rejected`; the projection records the check as `rejection_accepted_by_check_event_id`). When the
+same check also satisfies the absence proof for that row, the explicit ruling wins:
+`apply_check_rulings` clears that check's `resolved_by_check_event_id` and latches
+`rejection_accepted`, so the row has one final state. A row an earlier check resolved stays
+`verified_resolved`. The last
 three are terminal: `respond` on a terminal finding appends nothing and fails with
 `INVALID_REQUEST`, reason code `finding_terminal`, field `/finding_id` (no continuation: there is
 nothing to do); a latched row is never resolved later; redacting the latching check clears the
@@ -7064,4 +7070,6 @@ Wire (all additive, unreleased versions changed in place):
   `[ ] F-1 fnd_… open (2/5)`, `[x]` verified, `[~]` not done, `[-]` rejection accepted, and one
   closed "Next:" sentence, plus a `Counts:` line from the check's whole-list counts and `Not
   listed: K` when the list leaves items out. The status findings summary counts actionable rows
-  on the page only. The TUI keeps its counts and does not render per-item states yet.
+  on the page only. The TUI `/findings` command reads the open task's `findings` status view
+  with `include_resolved` and renders it through the same CLI lines, so every item shows its one
+  state there too.

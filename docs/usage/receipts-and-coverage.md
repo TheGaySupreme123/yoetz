@@ -178,17 +178,18 @@ that are still current and from any coverage limitations. One exception is fixed
 status wire: a finding whose latest response is `provenance_disputed` stays current even after such
 a check.
 
-Findings are a to-do list that ends. Each one is `open` or in a final state:
-`verified_resolved` (proved absent as above), `acknowledged_not_done` (the agent said, with a
-required reason, that it will not do it), or `rejection_accepted` (the agent rejected an AI-powered
-finding with a reason and a later review withdrew it). A final item never changes again and is not
-reviewed again; a later `respond` to it records nothing and answers `finding_terminal`. New
-evidence about the same problem comes back as a new finding. `acknowledged_not_done` is an honest
-"not done": it keeps the receipt from reading clean and appears in its own "Acknowledged, not done"
-section. `rejection_accepted` no longer blocks the receipt's conclusion but is listed in its own
-"Rejection accepted" section. Both sections name finding ids only. A review that restates a
-recorded AI-powered finding without anything recorded since does not add a second item: it is seen
-again and suppressed, and the check discloses `semantic_restatements_suppressed`.
+Findings are a to-do list that ends. Each one is `open` or in a final state: `verified_resolved`
+(proved absent as above), `acknowledged_not_done` (the agent said, with a required reason, that it
+will not do it), or `rejection_accepted` (the agent rejected an AI-powered finding with a reason and
+a later review withdrew it; a withdrawal wins over the same review not raising it again, so such an
+item never reads as proved absent). A final item never changes again and is not reviewed again; a
+later `respond` to it records nothing and answers `finding_terminal`. New evidence about the same
+problem comes back as a new finding. `acknowledged_not_done` is an honest "not done": it keeps the
+receipt from reading clean and appears in its own "Acknowledged, not done" section.
+`rejection_accepted` no longer blocks the receipt's conclusion but is listed in its own "Rejection
+accepted" section. Both sections name finding ids only. A review that restates a recorded AI-powered
+finding without anything recorded since does not add a second item: it is seen again and suppressed,
+and the check discloses `semantic_restatements_suppressed`.
 
 The check result's `finding_checklist` and `status` with the `findings` view show each item's state
 and how many later reviews left it open, against the owner's budget
