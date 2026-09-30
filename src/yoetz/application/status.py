@@ -1257,6 +1257,31 @@ async def _closure_readiness(
     )
 
 
+async def _task_coverage(
+    runtime: TaskRuntime,
+    frontier: Frontier,
+    raw_page: ProjectionPage,
+) -> tuple[ProjectionPage | None, Coverage, tuple[str, ...]]:
+    """Return the compact page and its task coverage for a non-compact projection view.
+
+    A compact page that cannot be read leaves the view's own page coverage in place, but never
+    lets it read cleaner than unknown freshness: the task fold was not available to bound it.
+    """
+
+    try:
+        compact = await runtime.ledger.query_projection(
+            ProjectionQuery(runtime.session_id, "compact", None, frontier, 1, None, None)
+        )
+        return compact, compact.coverage, compact.gaps
+    except PublicOperationError:
+        # Lagging, rebuilding or temporarily unreadable, exactly as closure readiness treats it.
+        return (
+            None,
+            replace(raw_page.coverage, ledger_freshness=LedgerFreshness.UNKNOWN),
+            raw_page.gaps,
+        )
+
+
 async def _lineage_readiness_gaps(
     app: Application, runtime: TaskRuntime, frontier: Frontier, request_id: str
 ) -> tuple[str, ...]:
@@ -1662,6 +1687,13 @@ async def execute_status(
                 )
             coverage = raw_page.coverage
             gaps = raw_page.gaps
+            if compact_page is None:
+                # One coverage definition on every view (issue #913): the envelope reports the
+                # task's coverage — the compact fold of the applicable check over the newest
+                # record — not the newest record's own envelope, which routinely read
+                # `service_authenticated / current / 0 gaps` beside a partial task. The compact
+                # page is the one closure readiness reads, so it is fetched once for both.
+                compact_page, coverage, gaps = await _task_coverage(runtime, frontier, raw_page)
             head = raw_page.head_frontier
             effective = raw_page.effective_frontier
             lag = raw_page.lag

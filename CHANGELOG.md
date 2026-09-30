@@ -18,6 +18,9 @@ reverse-chronological released versions.
   fails on any unclassified code. Verdicts, receipt conclusions and coverage are unchanged: a
   local-only check with limitations is still `insufficient_coverage`, and every gap is still
   disclosed (#913).
+- Every `status` view now reports the same task coverage and gaps as the compact view at that
+  frontier. A results, history or evidence view no longer shows the newest record's own
+  `current / 0 gaps` beside a partial task (#913).
 
 - Codex, Claude Code and Cursor session-start context can show a fresh repository-grant snapshot
   and name the owner's missing admission command. The notice leaves route and host approval

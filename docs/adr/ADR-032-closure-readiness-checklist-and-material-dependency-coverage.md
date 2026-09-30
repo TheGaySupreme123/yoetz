@@ -4,8 +4,9 @@
 maintainer acknowledged the design-gated scope on 2026-09-30 and adopted option 2 of the issue (the
 agent-actionable / standing / acknowledged split with `ready_with_limitations`); option 3 (a scoped
 "clean local rules" outcome) stays a documented option only and is not decided here. Decisions 1–5
-are implemented. Decisions 6 and 7 are recorded here as the direction the issue recommends; their
-implementation status is tracked on the issue.
+are implemented. Decisions 6 and 7 are recorded here as the direction the issue recommends; the
+single status coverage definition of decision 7 is implemented, and the rest of 6 and 7 is tracked
+on the issue.
 **Implemented by:** `src/yoetz/kernel/closure_readiness.py`, `src/yoetz/application/status.py`,
 `src/yoetz/adapters/memory/ledger.py`, `src/yoetz/protocol/models.py`,
 `src/yoetz/protocol/readiness_text.py`, `src/yoetz/mcp/summaries.py`, `src/yoetz/cli/render.py`,
@@ -104,7 +105,11 @@ names what the receipt will disclose.
    evidence it backs, never caller-declared strength. `ledger_freshness` derives from real
    freshness facts (lag, staleness after a material change, redaction, unknown events), not from
    the presence of a gap, and every gap stays in `known_gaps`. Page-level and task-level coverage
-   are either unified or named distinctly.
+   are either unified or named distinctly. *Implemented part:* status reports one definition —
+every projection view's envelope `coverage` and `gaps` are the compact task coverage, so a results
+or history view can no longer read `service_authenticated / current / 0 gaps` beside a partial
+task. The closure fold, capture-raised strength and fact-derived freshness remain open on the
+issue.
 
 ## Consequences
 

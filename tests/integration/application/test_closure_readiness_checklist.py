@@ -359,10 +359,16 @@ async def test_bandit_b_reads_ready_with_limitations_and_keeps_its_verdict(
     assert sentence in rendered
     assert any(line.startswith("Standing limitations: ") for line in rendered)
 
-    # Every view carries the same checklist, so no view can read cleaner than another.
-    for view in ("findings", "results", "evidence", "history"):
+    # One coverage definition (Example 1): every view at one frontier reports the task coverage
+    # and gaps the compact view reports, and the same checklist, so none reads cleaner.
+    for view in ("findings", "results", "evidence", "history", "obligations"):
         other = await session.status(view)
         assert other.closure_readiness == readiness
+        assert other.coverage == status.coverage
+        assert other.gaps == status.gaps
+        other_summary = summary_for_status(other.as_json())
+        assert f"freshness: {status.coverage.ledger_freshness.value};" in other_summary
+        assert f"reported gaps: {len(status.gaps)}." in other_summary
 
     # Honesty: the receipt conclusion is unchanged.
     assert await session.receipt() == "insufficient_coverage"

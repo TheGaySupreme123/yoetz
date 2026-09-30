@@ -6013,6 +6013,14 @@ Pending child annotations do not block. These current advisory facts never refre
 open a child bundle, change a recorded check, or strengthen a receipt. Reading readiness records
 nothing, creates no verdict or IDs, and never strengthens coverage.
 
+Every projection view reports one coverage definition in the status envelope (ADR-032, issue
+#913): `coverage` and `gaps` are the task coverage the compact view reports — the applicable
+check folded over the newest record, plus projection and completion-scope gaps — not the newest
+record's own envelope coverage. A non-compact view reads the compact page once and shares it with
+closure readiness; if that page cannot be read, the view reports its own page coverage with
+`ledger_freshness=unknown` rather than a cleaner value. Advice, candidate-finding, lineage and
+project views keep their own documented coverage.
+
 `closure_readiness` is also a checklist (ADR-032, issue #913). This build emits it on every
 status success; on the unreleased status-result 1.4.0 wire the six checklist fields are optional
 as a whole (absent for a result shaped by an earlier 0.3 build, never partial or null). Beside the
