@@ -3112,24 +3112,54 @@ async def test_background_advice_is_admitted_only_while_a_provider_is_usable(
         )
         await vault.store_provider_credential("set", credential_binding, credential, proof, 2.0)
 
+        # The session has no task route yet, so nothing could reach a provider (route leg).
         gaps = await build(9)
+        assert ADVICE_SEMANTIC_PENDING_GAP not in gaps
+        assert ADVICE_SEMANTIC_UNAVAILABLE_GAP in gaps
+        assert rows() == []
         if not provider_bound:
             # Channel and credential alone never make an unbound install reach a provider.
-            assert ADVICE_SEMANTIC_PENDING_GAP not in gaps
-            assert rows() == []
             return
+
+        # An ACTIVE route whose repository authority is not granted still reaches nothing.
+        commitment = "hmac-sha256:" + "b" * 64
+        route = replace(
+            _runtime_route(), session_id=session, repository_privacy_commitment=commitment
+        )
+        grant = "missing"
+
+        async def resolve_route(_catalog: object, session_id: str) -> TaskRoute | None:
+            return route if session_id == session else None
+
+        async def repository_authority(_store: object, requested: AuthorizationScope) -> object:
+            assert requested.kind is AuthorizationScopeKind.TASK
+            assert requested.workspace_ref_commitment == commitment
+            return SimpleNamespace(
+                grant_state=grant, effective=SimpleNamespace(policy=current_policy)
+            )
+
+        monkeypatch.setattr(type(app.start_catalog), "resolve_route", resolve_route)
+        monkeypatch.setattr(
+            type(policy_app.policy_store), "repository_authority", repository_authority
+        )
+        gaps = await build(10)
+        assert ADVICE_SEMANTIC_PENDING_GAP not in gaps
+        assert rows() == []
+
+        grant = "granted"
+        gaps = await build(11)
         assert ADVICE_SEMANTIC_PENDING_GAP in gaps
         assert ADVICE_SEMANTIC_UNAVAILABLE_GAP not in gaps
         assert rows() == [("pending", None)]
 
         # Disabling the channel stops admission at once; so does a discarded credential.
         current_policy = replace(local_only_policy(), effective_scope=scope)
-        gaps = await build(10)
+        gaps = await build(12)
         assert ADVICE_SEMANTIC_PENDING_GAP not in gaps
         assert ADVICE_SEMANTIC_UNAVAILABLE_GAP in gaps
         current_policy = replace(minimal_external_policy(), effective_scope=scope)
         await vault.discard_provider_credential(credential_binding)
-        gaps = await build(11)
+        gaps = await build(13)
         assert ADVICE_SEMANTIC_PENDING_GAP not in gaps
         assert rows() == [("pending", None)]
     finally:

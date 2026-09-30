@@ -359,6 +359,15 @@ _ZERO_DIGEST = "sha256:" + "0" * 64
 _LEGACY_HOOK_SPOOL_BATCH_LIMIT: Final = DEFAULT_HOOK_SPOOL_CLAIM_LIMIT
 
 
+def _admits_llm_inference(policy: PrivacyPolicy) -> bool:
+    """Whether a privacy policy permits network egress on the LLM-inference channel."""
+
+    return policy.network_egress_permitted and any(
+        channel.channel is EgressChannel.LLM_INFERENCE and channel.enabled
+        for channel in policy.channel_policies
+    )
+
+
 class _Lifecycle(Protocol):
     @property
     def instance(self) -> object: ...
@@ -5320,11 +5329,7 @@ async def provide_service_ready_context(
             review_intended = (
                 semantic_configured
                 and provider_endpoint_bound
-                and effective.policy.network_egress_permitted
-                and any(
-                    channel.channel is EgressChannel.LLM_INFERENCE and channel.enabled
-                    for channel in effective.policy.channel_policies
-                )
+                and _admits_llm_inference(effective.policy)
             )
             # provider_factory_ids is provider-id grain while factories are
             # keyed by full binding; the id test is exact today because the
@@ -5689,13 +5694,36 @@ async def provide_service_ready_context(
     )
 
     async def _advice_semantic_route_ready(yoetz_session_id: str) -> bool:
-        # The same predicate the dispatch uses; lets an ``authorization_missing`` row retry
-        # as soon as the route is active instead of waiting out its backoff (#888).
+        """The route leg of background advice admission (#923).
+
+        The dispatch needs an ACTIVE route and a granted repository authority that admits
+        LLM-inference egress. Read both without the privacy admission lock (a foreground check can
+        hold it for its whole provider call), so a route that cannot reach a provider writes no
+        advice row at all instead of queuing one that ends ``authorization_missing``.
+        """
+
         route = await catalog.resolve_route(yoetz_session_id)
-        return (
-            route is not None
-            and route.state is TaskRouteState.ACTIVE
-            and route.repository_privacy_commitment is not None
+        if (
+            route is None
+            or route.state is not TaskRouteState.ACTIVE
+            or route.repository_privacy_commitment is None
+            or privacy_application is None
+        ):
+            return False
+        try:
+            authority = await privacy_application.policy_store.repository_authority(
+                AuthorizationScope(
+                    AuthorizationScopeKind.TASK,
+                    installation_id,
+                    route.repository_privacy_commitment,
+                    route.task_id,
+                )
+            )
+        except Exception:
+            # No readable repository authority is no repository authority.
+            return False
+        return authority.grant_state == "granted" and _admits_llm_inference(
+            authority.effective.policy
         )
 
     advice_semantic_scheduler = ObservationAdviceSemanticScheduler(
