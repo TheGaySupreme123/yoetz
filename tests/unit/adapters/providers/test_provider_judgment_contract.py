@@ -788,3 +788,20 @@ def test_a_malformed_or_surplus_ruling_is_dropped_and_counted_not_fatal() -> Non
     )
     assert len(surplus.prior_finding_verdicts) == 8
     assert surplus.prior_finding_verdicts_dropped == 1
+
+
+@pytest.mark.parametrize("value", [None, "fixed", {"finding_id": "fnd_866db2dd"}])
+def test_a_present_non_array_rulings_value_is_counted_not_read_as_the_1_0_0_shape(
+    value: JsonValue,
+) -> None:
+    """Only an absent key is the older shape; ``null`` or a non-array is a malformed reply."""
+
+    judgment = normalize_judgment(
+        cast(
+            JsonValue,
+            {**_judgment("challenges_returned", [_challenge()]), "prior_finding_verdicts": value},
+        )
+    )
+    assert len(judgment.challenges) == 1
+    assert judgment.prior_finding_verdicts == ()
+    assert judgment.prior_finding_verdicts_dropped == 1

@@ -146,6 +146,7 @@ from yoetz.application.semantic_case import (
     MAX_CAPTURED_SEMANTIC_INPUT_BYTES,
     LineageSemanticCapacityExceeded,
     SemanticCaseTooLarge,
+    SemanticPacketView,
     build_semantic_case,
     semantic_case_packet_view,
     semantic_case_to_candidate_context,
@@ -3445,6 +3446,17 @@ async def _publish_semantic_case_object(
     return await runtime.objects.finalize(staged)
 
 
+def _packet_view_gaps(view: SemanticPacketView) -> frozenset[str]:
+    """Gaps the packet the reviewer was shown adds to the check (issue #905).
+
+    Prior-finding rows envelope bounding removed are disclosed like any other cut.
+    """
+
+    if view.prior_findings_trimmed:
+        return frozenset({SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP})
+    return frozenset()
+
+
 def _judgment_to_response_json(judgment: object) -> dict[str, CanonicalJsonValue]:
     """Encode a SemanticJudgment into the durable SEMANTIC_RESPONSE wire object."""
 
@@ -4441,11 +4453,7 @@ def _privacy_gated_semantic_evaluator(
             packet_view = semantic_case_packet_view(semantic_case)
             packet_prior_refs = packet_view.prior_finding_refs
             packet_citable_refs = packet_view.citable_refs
-            trimmed_prior = (
-                {SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP}
-                if packet_view.prior_findings_trimmed
-                else set[str]()
-            )
+            trimmed_prior = set(_packet_view_gaps(packet_view))
             content_gaps = tuple(
                 sorted(
                     trimmed_prior

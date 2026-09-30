@@ -12,6 +12,8 @@ from collections.abc import Mapping
 from dataclasses import replace
 from typing import cast
 
+import pytest
+
 from builders.policy_cases import (
     BASE_COVERAGE,
     FRONTIER,
@@ -362,3 +364,86 @@ def test_envelope_pressure_removes_the_oldest_prior_findings_before_any_work_con
     coverage = cast(Mapping[str, JsonValue], packet["coverage"])
     assert coverage["known_gaps"] == [SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP]
     assert len(canonical_encode(cast(JsonValue, envelope))) <= MAX_EGRESS_ENVELOPE_BYTES
+
+
+_REDUCTION_KEYS = (
+    "assessment_links_stripped_count",
+    "catalog_dropped_count",
+    "change_observations_dropped_count",
+    "deterministic_assessments_dropped_count",
+    "omissions_dropped_count",
+    "targeted_excerpts_dropped_count",
+)
+
+
+def test_bounded_case_envelope_drops_prior_findings_first_and_accounts_for_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bounding entry point, not only the helper, yields the dialogue section first."""
+
+    from yoetz.application import semantic_case as module
+    from yoetz.domain.privacy import MAX_EGRESS_ENVELOPE_BYTES
+    from yoetz.protocol.canonical import canonical_encode
+
+    older, newer = str(fnd(1)), str(fnd(2))
+
+    def row(item_id: str, section: str, source: str) -> dict[str, JsonValue]:
+        return {"item_id": item_id, "section": section, "source_ref": source}
+
+    def oversized(_case: object) -> dict[str, JsonValue]:
+        envelope: dict[str, JsonValue] = {
+            "item_catalog": [
+                row(f"prior-finding-{older}", "prior_finding", older),
+                row(f"prior-finding-{newer}", "prior_finding", newer),
+                row("excerpt-evd", "excerpt", str(evd(1))),
+            ],
+            "review_packet": {
+                "coverage": {"known_gaps": []},
+                "prior_finding_item_ids": [f"prior-finding-{older}", f"prior-finding-{newer}"],
+            },
+            "filler": "",
+        }
+        probe = dict(envelope)
+        module._set_selection_accounting(  # pyright: ignore[reportPrivateUsage]
+            probe, dict.fromkeys(_REDUCTION_KEYS, 0)
+        )
+        # Over the limit by a few bytes: one prior-finding row must go, the excerpt must stay.
+        envelope["filler"] = "x" * (
+            MAX_EGRESS_ENVELOPE_BYTES - len(canonical_encode(cast(JsonValue, probe))) + 20
+        )
+        return envelope
+
+    monkeypatch.setattr(module, "_case_envelope_json", oversized)
+    bounded = cast(
+        Mapping[str, JsonValue],
+        strict_json_parse(module.bounded_case_envelope(_build(_numba_case()))),
+    )
+    kept = [
+        cast(Mapping[str, JsonValue], item)["item_id"]
+        for item in cast(list[JsonValue], bounded["item_catalog"])
+    ]
+    assert kept == [f"prior-finding-{newer}", "excerpt-evd"]
+    accounting = cast(Mapping[str, JsonValue], bounded["selection_accounting"])
+    assert accounting["catalog_dropped_count"] == "1"
+    packet = cast(Mapping[str, JsonValue], bounded["review_packet"])
+    coverage = cast(Mapping[str, JsonValue], packet["coverage"])
+    assert SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP in cast(list[JsonValue], coverage["known_gaps"])
+
+
+def test_the_packet_view_reports_prior_rows_bounding_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yoetz.application import semantic_case as module
+    from yoetz.protocol.canonical import canonical_encode
+
+    case = _build(_numba_case())
+    assert any(item.section == "prior_finding" for item in case.items)
+    assert module.semantic_case_packet_view(case).prior_findings_trimmed is False
+
+    def emptied(_case: SemanticCase) -> bytes:
+        return canonical_encode({"item_catalog": []})
+
+    monkeypatch.setattr(module, "bounded_case_envelope", emptied)
+    view = module.semantic_case_packet_view(case)
+    assert view.prior_findings_trimmed is True
+    assert view.prior_finding_refs == frozenset()

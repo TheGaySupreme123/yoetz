@@ -1011,10 +1011,12 @@ def _separate_prior_verdicts(body: JsonValue) -> tuple[list[JsonValue], int]:
 
     if type(body) is not dict:
         return [], 0
-    raw = cast(dict[str, JsonValue], body).get("prior_finding_verdicts")
-    if raw is None:
+    source = cast(dict[str, JsonValue], body)
+    if "prior_finding_verdicts" not in source:
         return [], 0
+    raw = source["prior_finding_verdicts"]
     if type(raw) is not list:
+        # A present ``null`` or non-array value is a malformed reply, not the older shape.
         return [], 1
     kept: list[JsonValue] = []
     dropped = 0

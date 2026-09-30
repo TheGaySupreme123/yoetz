@@ -532,8 +532,8 @@ def test_withdrawn_needs_a_rejection_not_an_acknowledgement() -> None:
 
 
 def test_rulings_are_fenced_to_the_packet_the_reviewer_was_shown() -> None:
-    """A finding the prior-findings section never carried cannot be ruled on, and a ref the
-    packet did not offer as citable cannot carry a ruling."""
+    """A ruling on a finding the prior-findings section never carried stays unassessable (never
+    silence), and a ref the packet did not offer as citable cannot carry a ruling."""
 
     judgment = SemanticJudgment(
         "no_material_discrepancy",
@@ -547,7 +547,10 @@ def test_rulings_are_fenced_to_the_packet_the_reviewer_was_shown() -> None:
     )
 
     # fnd(2) was not carried; res(2) was not citable, so fnd(1)'s fixed has nothing left.
-    assert _rulings(review) == [(str(fnd(1)), "unassessable", ())]
+    assert _rulings(review) == [
+        (str(fnd(1)), "unassessable", ()),
+        (str(fnd(2)), "unassessable", (str(obl(2)),)),
+    ]
     assert review.verdicts_unsupported == 2
 
 
