@@ -737,8 +737,20 @@ endpoint is bound, the current machine privacy policy admits network egress on t
 that decide standing `provider_not_ready` advice; they are read on every advice build and every
 background dispatch, never from the READY snapshot. Admission also requires the route leg: the
 session's task route is ACTIVE and its repository authority, read from the privacy policy store
-without the coordinator admission lock, is granted and admits `llm_inference`. The owner switches
-above still decide whether background advice exists at all.
+without the coordinator admission lock, is granted and passes the same static policy leg the egress
+pipeline applies before dispatch (`semantic_policy_refusal`): `llm_inference` open to the
+destination, the configured primary binding among the channel's exactly authorized bindings, the
+`semantic-review` purpose allowed, and the task scope within the channel ceiling. A granted
+authority that names a different binding or omits the purpose would be refused at dispatch, so it
+admits nothing here either (PR #938 review). The owner switches above still decide whether
+background advice exists at all.
+
+Background advice dispatches only to the primary binding; it never engages a declared fallback
+endpoint (fallback endpoint amendment, #582), whose closed engagement rule and two-endpoint
+provenance belong to the explicit check's semantic job. Readiness therefore reads only the primary:
+an unusable primary with a usable fallback admits no background advice, matching what dispatch
+would do. Extending background advice to the fallback would be a new egress path and needs its own
+decision.
 
 Without a usable provider the scheduler writes no attempt row, contacts no provider and schedules
 no revisit. The advice snapshot carries `advice_semantic_unavailable` once and semantic state

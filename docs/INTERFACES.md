@@ -4065,8 +4065,11 @@ Shared closed types:
   adds `advice_semantic_deferred` (semantic state `unavailable`). The scheduler first reads live
   provider readiness (review not disabled, an endpoint bound, the machine policy admitting
   `llm_inference` egress, the configured credential present) and route readiness (an ACTIVE task
-  route whose repository authority is granted and admits `llm_inference`, read from the policy
-  store without the privacy admission lock; ADR-006 issue #923): without both no row
+  route whose repository authority is granted and passes the egress pipeline's static policy leg,
+  `semantic_policy_refusal`, for the configured primary binding, the `semantic-review` purpose and
+  task scope, read from the policy store without the privacy admission lock; background advice never
+  engages a declared fallback endpoint, so readiness reads only the primary; ADR-006 issue #923):
+  without both no row
   is written, no provider is contacted, and the snapshot adds `advice_semantic_unavailable` once
   with semantic state `disabled`, never `advice_semantic_pending`; only a completed review of the
   same identity is still reused. Only a `succeeded` row with validated finding ids adds

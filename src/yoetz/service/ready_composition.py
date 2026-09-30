@@ -83,6 +83,7 @@ from yoetz.application.egress import (
     SemanticEgressBlocked,
     SemanticEgressProviderOutcome,
     SemanticEgressSuccess,
+    semantic_policy_refusal,
 )
 from yoetz.application.lineage import (
     LineageConfig,
@@ -357,6 +358,8 @@ _CATALOG_NAME = "catalog.sqlite3"
 _LEDGER_NAME = "ledger.sqlite3"
 _ZERO_DIGEST = "sha256:" + "0" * 64
 _LEGACY_HOOK_SPOOL_BATCH_LIMIT: Final = DEFAULT_HOOK_SPOOL_CLAIM_LIMIT
+# The egress purpose every background advice dispatch carries; admission judges the same one.
+_ADVICE_SEMANTIC_PURPOSE: Final = "semantic-review"
 
 
 def _admits_llm_inference(policy: PrivacyPolicy) -> bool:
@@ -5618,7 +5621,7 @@ async def provide_service_ready_context(
             request_id=ids.new(IdKind.REQUEST),
             channel=EgressChannel.LLM_INFERENCE,
             local_sink=None,
-            purpose="semantic-review",
+            purpose=_ADVICE_SEMANTIC_PURPOSE,
             scope=repository_scope,
             subject_digest=attempt.subject_digest,
             provider_binding=binding,
@@ -5722,8 +5725,19 @@ async def provide_service_ready_context(
         except Exception:
             # No readable repository authority is no repository authority.
             return False
-        return authority.grant_state == "granted" and _admits_llm_inference(
-            authority.effective.policy
+        # The exact binding, purpose and scope the dispatch below sends, judged by the egress
+        # pipeline's own static policy leg (938-R1): a granted authority that does not name this
+        # binding or purpose would be refused at dispatch, so it admits nothing here either.
+        return (
+            authority.grant_state == "granted"
+            and candidate_binding is not None
+            and semantic_policy_refusal(
+                authority.effective.policy,
+                candidate_binding,
+                _ADVICE_SEMANTIC_PURPOSE,
+                AuthorizationScopeKind.TASK,
+            )
+            is None
         )
 
     advice_semantic_scheduler = ObservationAdviceSemanticScheduler(

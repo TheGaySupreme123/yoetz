@@ -44,7 +44,12 @@ from yoetz.domain.observation import (
     ObservationStatusQuery,
     observation_ingest_request_to_json,
 )
-from yoetz.domain.privacy import AuthorizationScope, AuthorizationScopeKind
+from yoetz.domain.privacy import (
+    AuthorizationScope,
+    AuthorizationScopeKind,
+    EgressChannel,
+    PrivacyPolicy,
+)
 from yoetz.domain.values import (
     Frontier,
     JsonObject,
@@ -3131,11 +3136,14 @@ async def test_background_advice_is_admitted_only_while_a_provider_is_usable(
         async def resolve_route(_catalog: object, session_id: str) -> TaskRoute | None:
             return route if session_id == session else None
 
+        repository_policy: PrivacyPolicy | None = None
+
         async def repository_authority(_store: object, requested: AuthorizationScope) -> object:
             assert requested.kind is AuthorizationScopeKind.TASK
             assert requested.workspace_ref_commitment == commitment
             return SimpleNamespace(
-                grant_state=grant, effective=SimpleNamespace(policy=current_policy)
+                grant_state=grant,
+                effective=SimpleNamespace(policy=repository_policy or current_policy),
             )
 
         monkeypatch.setattr(type(app.start_catalog), "resolve_route", resolve_route)
@@ -3147,6 +3155,33 @@ async def test_background_advice_is_admitted_only_while_a_provider_is_usable(
         assert rows() == []
 
         grant = "granted"
+        # A granted repository authority whose LLM channel is open but does not name this exact
+        # provider binding, or does not allow the semantic-review purpose, would be refused by
+        # the egress gateway at dispatch; admission must refuse it too (#923 review 938-R1).
+        granted_llm = next(
+            item
+            for item in current_policy.channel_policies
+            if item.channel is EgressChannel.LLM_INFERENCE
+        )
+        assert granted_llm.provider_binding is not None
+        foreign_binding = replace(granted_llm.provider_binding, model_id="another-model")
+        for narrowed in (
+            replace(granted_llm, provider_binding=foreign_binding),
+            replace(granted_llm, allowed_purposes=("package-update-check",)),
+        ):
+            repository_policy = replace(
+                current_policy,
+                channel_policies=tuple(
+                    narrowed if item.channel is EgressChannel.LLM_INFERENCE else item
+                    for item in current_policy.channel_policies
+                ),
+            )
+            gaps = await build(21 if narrowed.provider_binding == foreign_binding else 22)
+            assert ADVICE_SEMANTIC_PENDING_GAP not in gaps
+            assert ADVICE_SEMANTIC_UNAVAILABLE_GAP in gaps
+            assert rows() == []
+        repository_policy = None
+
         gaps = await build(11)
         assert ADVICE_SEMANTIC_PENDING_GAP in gaps
         assert ADVICE_SEMANTIC_UNAVAILABLE_GAP not in gaps
@@ -3162,6 +3197,222 @@ async def test_background_advice_is_admitted_only_while_a_provider_is_usable(
         gaps = await build(13)
         assert ADVICE_SEMANTIC_PENDING_GAP not in gaps
         assert rows() == [("pending", None)]
+    finally:
+        db.close()
+        if app is not None:
+            await app.close()
+        await vault.close()
+        memory.close()
+        await lifecycle.close()
+
+
+@pytest.mark.anyio
+async def test_background_advice_readiness_follows_the_primary_only_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Background advice dispatches only to the primary binding, so admission reads only it.
+
+    Review 938-R2 of #923: with a declared fallback pairing (#582), an unusable primary and a
+    credentialed, authorized fallback, the explicit check may engage the fallback, but the
+    background dispatch never does. Admission must agree with that dispatch: no row, the
+    unavailable gap, and a queued row closing ``provider_unavailable`` with no provider work.
+    """
+
+    from yoetz.adapters.providers.codex_app_server import codex_binding_from_config
+    from yoetz.adapters.providers.openai_responses_factory import provider_binding_from_config
+    from yoetz.adapters.sqlite.migrations import initialize_bundle
+    from yoetz.adapters.sqlite.observation_advice_semantic import (
+        SqliteObservationAdviceSemanticRepository,
+    )
+    from yoetz.application.observation_advice import (
+        ADVICE_SEMANTIC_PENDING_GAP,
+        ADVICE_SEMANTIC_UNAVAILABLE_GAP,
+        ObservationAdviceContextBuilder,
+    )
+    from yoetz.application.observation_advice_semantic import (
+        ObservationAdviceSemanticAttempt,
+        ObservationAdviceSemanticOutcome,
+    )
+    from yoetz.config.models import SemanticFallbackConfig
+    from yoetz.config.write import codex_subscription_runtime
+
+    tmp_path.chmod(0o700)
+    clock = _Clock()
+    memory = LocalSecretMemory()
+    lifecycle = ServiceLifecycle(
+        clock,
+        generation_store=_GenerationStore(),
+        process_start_identity_commitment="sha256:" + "d" * 64,
+        instance_id=_INSTANCE_ID,
+    )
+    await lifecycle.acquire_singleton()
+    await lifecycle.transition(ServiceState.LOCKED)
+    vault = VaultService(
+        installation_id=_INSTALLATION_ID,
+        service_generation=1,
+        mode=VaultMode.UNINITIALIZED,
+        secret_memory=memory,
+        clock=clock,
+        vault_store_factory=lambda: EncryptedVaultStore(tmp_path / "vault"),
+        pristine_state_digest="sha256:" + "e" * 64,
+    )
+    initialize = memory.capture(SecretPurpose.VAULT_INITIALIZE, bytearray(b"correct horse battery"))
+    await vault.initialize_passphrase(initialize, "sha256:" + "f" * 64)
+    digest = "sha256:" + "a" * 64
+    # The Codex subscription primary is structurally unusable here: its runtime home and
+    # executable do not exist, so no process or login is ever probed.
+    runtime = codex_subscription_runtime(
+        executable_path=str(tmp_path / "absent" / "codex"),
+        executable_sha256=digest,
+        runtime_version="0.150.1",
+        source_identity="openai-codex-npm-darwin-arm64-0.150.1",
+        app_server_schema_sha256=digest,
+        capability_cell_sha256=digest,
+        isolated_config_sha256=digest,
+        capability_profile="codex-evaluator/0.150.1/v1",
+        capability_evidence_expires_at="2026-11-30T00:00:00Z",
+        codex_home=str(tmp_path / "absent" / "codex-home"),
+        model="gpt-5.6-sol",
+        reasoning_effort="high",
+    )
+    provider = fireworks_provider(model="accounts/fireworks/models/minimax-m3")
+    config = YoetzConfig(
+        profile="codex-subscription",
+        provider=provider,
+        external_runtime=runtime,
+        semantic_fallback=SemanticFallbackConfig(primary="codex_subscription"),
+        verification=VerificationConfig(semantic="required"),
+    )
+    factory = build_ready_application_factory(
+        lifecycle=lifecycle,
+        vault=vault,
+        config=config,
+        paths=_Paths(tmp_path),
+        clock=clock,
+        secret_memory=memory,
+        diagnostics=_Diagnostics(),
+    )
+    db = apsw.Connection(":memory:")
+    initialize_bundle(db, {"task_id": "tsk_advice", "owner_generation": "1"})
+    repository = SqliteObservationAdviceSemanticRepository(db)
+    workspace = "hmac-sha256:" + "a" * 64
+    session = "ses_00000000-0000-4000-8000-000000000924"
+    store = _AdviceStore(repository, workspace)
+
+    def rows() -> list[tuple[str, str | None]]:
+        return [
+            (str(row[0]), None if row[1] is None else str(row[1]))
+            for row in db.execute(
+                "SELECT status, failure_reason FROM observation_advice_semantic_attempts "
+                "ORDER BY state_token"
+            )
+        ]
+
+    app = None
+    try:
+        context = await factory.context_provider(1, vault.generation)
+        assert context.rediscover_pending_verification is not None
+        coordinator: object = getattr(context.rediscover_pending_verification, "__self__")
+        scheduler = getattr(coordinator, "advice_context_builder").semantic_scheduler
+        dispatch = cast(
+            Callable[
+                [ObservationAdviceSemanticAttempt], Awaitable[ObservationAdviceSemanticOutcome]
+            ],
+            getattr(coordinator, "advice_semantic_dispatch"),
+        )
+        builder = ObservationAdviceContextBuilder(semantic_scheduler=scheduler)
+        app = await factory.open(context)
+
+        # Everything the fallback needs is in place: the machine and repository policies
+        # authorize the exact pairing for semantic review, and the fallback credential is stored.
+        policy_app = app.privacy.policy_application
+        assert policy_app is not None
+        scope = AuthorizationScope(AuthorizationScopeKind.MACHINE, _INSTALLATION_ID)
+        base = replace(minimal_external_policy(), effective_scope=scope)
+        llm = next(
+            item for item in base.channel_policies if item.channel is EgressChannel.LLM_INFERENCE
+        )
+        fallback_binding = provider_binding_from_config(provider)
+        paired = replace(
+            llm,
+            provider_binding=codex_binding_from_config(runtime),
+            fallback_provider_binding=fallback_binding,
+        )
+        policy = replace(
+            base,
+            channel_policies=tuple(
+                paired if item.channel is EgressChannel.LLM_INFERENCE else item
+                for item in base.channel_policies
+            ),
+        )
+
+        async def effective_policy(
+            policy_store: object, requested: AuthorizationScope
+        ) -> EffectivePrivacyPolicy:
+            assert requested == scope
+            return EffectivePrivacyPolicy(policy, 2, policy.policy_digest)
+
+        commitment = "hmac-sha256:" + "b" * 64
+        route = replace(
+            _runtime_route(), session_id=session, repository_privacy_commitment=commitment
+        )
+
+        async def resolve_route(_catalog: object, session_id: str) -> TaskRoute | None:
+            return route if session_id == session else None
+
+        async def repository_authority(_store: object, requested: AuthorizationScope) -> object:
+            return SimpleNamespace(grant_state="granted", effective=SimpleNamespace(policy=policy))
+
+        monkeypatch.setattr(type(policy_app.policy_store), "effective_policy", effective_policy)
+        monkeypatch.setattr(type(app.start_catalog), "resolve_route", resolve_route)
+        monkeypatch.setattr(
+            type(policy_app.policy_store), "repository_authority", repository_authority
+        )
+        credential_binding = provider_credential_profile_binding(
+            provider.provider_id,
+            provider.model,
+            provider.endpoint_profile_id,
+            provider.endpoint_profile_version,
+        )
+        proof = HumanAuthorizationProof(
+            "provider-proof-advice-fallback",
+            "provider_credential_set",
+            credential_binding.target_digest("set"),
+            1,
+            vault.generation,
+            None,
+            1.0,
+            60.0,
+        )
+        credential = memory.capture(
+            SecretPurpose.PROVIDER_CREDENTIAL, bytearray(b"test-provider-token-fallback")
+        )
+        await vault.store_provider_credential("set", credential_binding, credential, proof, 2.0)
+        assert await vault.has_provider_credential(credential_binding)
+
+        store.failures = 3
+        snapshot = await builder.build(workspace, store, yoetz_session_id=session)  # type: ignore[arg-type]
+        assert snapshot is not None
+        gaps = snapshot.confidence_coverage.known_gaps
+        assert ADVICE_SEMANTIC_PENDING_GAP not in gaps
+        assert gaps.count(ADVICE_SEMANTIC_UNAVAILABLE_GAP) == 1
+        assert rows() == []
+
+        queued = repository.schedule(
+            workspace=workspace,
+            yoetz_session_id=session,
+            basis_digest="queued-identity",
+            subject_digest="sha256:" + "c" * 64,
+            coverage_gaps=(),
+            packet_json=b"{}",
+            enqueued_at="2026-07-21T17:00:00.000Z",
+            max_pending=16,
+        )
+        assert type(queued) is ObservationAdviceSemanticAttempt
+        assert await dispatch(queued) == ObservationAdviceSemanticOutcome(
+            status="unavailable", failure_reason="provider_unavailable"
+        )
     finally:
         db.close()
         if app is not None:

@@ -1395,7 +1395,10 @@ explicit checks and deterministic advice retain their independent behavior.
 
 Background review is also admitted only while a provider is usable: an endpoint bound, the machine
 policy admitting `llm_inference`, the configured credential present, and an ACTIVE task route
-whose repository authority is granted and admits `llm_inference` (issue #923). Without them
+whose repository authority is granted and authorizes the configured primary endpoint for the
+`semantic-review` purpose, judged by the same policy checks dispatch applies (issue #923).
+Background review never engages a declared fallback endpoint, so its readiness reads only the
+primary. Without them
 the service writes no advice rows and reports `advice_semantic_unavailable`, not
 `advice_semantic_pending`; rows queued earlier close as `provider_unavailable` without provider
 work. A foreground-cancelled call that may have started names its provider on the `cancelled` row
