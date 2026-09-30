@@ -4,7 +4,8 @@ A completion claim must disclose failed work that is still *live* when it is mad
 the harness observed (a hook-observed tool call), two later observed facts make an earlier
 failure history instead of an omission:
 
-* **Supersession.** A later hook-observed run of the *same command identity* succeeded. The
+* **Supersession.** A later hook-observed run of the *same command identity* succeeded, or ran
+  again with any other outcome: only the latest run of a command identity is judged. The
   identity is the installation-keyed ``hmac-sha256:`` command commitment the hook computes and
   materialization stores as ``omitted:<commitment>`` in the action's ``command`` field; the raw
   command text never reaches the ledger. Any other command, and any unkeyed or structural
@@ -80,6 +81,7 @@ class ObservedFailureState(str, Enum):  # noqa: UP042 - stable closed token
 
     LIVE = "live"
     SUPERSEDED = "superseded"
+    RERUN = "rerun"
     HISTORICAL = "historical"
 
 
@@ -127,10 +129,13 @@ def command_identity(command: object) -> str | None:
 def classify_observed_runs(runs: Iterable[ObservedRun]) -> Mapping[str, ObservedFailureState]:
     """Classify every failed or partial run against the runs that follow it.
 
-    One backward pass: a failure is ``SUPERSEDED`` when a later run with the same identity
-    succeeded, else ``HISTORICAL`` when a later edit completed, else ``LIVE``. A later failure of
-    the same identity is a new live failure in its own right; it never revives an earlier
-    superseded one. The caller bounds ``runs`` to what precedes the point being judged.
+    One backward pass. Only the latest run of a command identity can be live: a failure is
+    ``SUPERSEDED`` when a later run with the same identity succeeded, else ``RERUN`` when a later
+    run with the same identity has any other outcome (that later run is the one judged), else
+    ``HISTORICAL`` when a later edit completed, else ``LIVE``. A later failure of the same
+    identity is a new failure in its own right; it never revives an earlier superseded one. A run
+    without an identity is retired only by a later edit. The caller bounds ``runs`` to what
+    precedes the point being judged.
     """
 
     ordered = sorted(runs, key=lambda run: run.position, reverse=True)
@@ -138,19 +143,24 @@ def classify_observed_runs(runs: Iterable[ObservedRun]) -> Mapping[str, Observed
         raise ValueError("observed_run_invalid")
     edited_after = False
     passed_after: set[str] = set()
+    ran_after: set[str] = set()
     states: dict[str, ObservedFailureState] = {}
     for run in ordered:
         if run.outcome in _FAILED_OUTCOMES:
             if run.identity is not None and run.identity in passed_after:
                 states[run.ref] = ObservedFailureState.SUPERSEDED
+            elif run.identity is not None and run.identity in ran_after:
+                states[run.ref] = ObservedFailureState.RERUN
             elif edited_after:
                 states[run.ref] = ObservedFailureState.HISTORICAL
             else:
                 states[run.ref] = ObservedFailureState.LIVE
         if run.edit and run.outcome is not ResultOutcome.FAILURE:
             edited_after = True
-        if run.outcome is ResultOutcome.SUCCESS and run.identity is not None:
-            passed_after.add(run.identity)
+        if run.identity is not None:
+            ran_after.add(run.identity)
+            if run.outcome is ResultOutcome.SUCCESS:
+                passed_after.add(run.identity)
     return MappingProxyType(states)
 
 

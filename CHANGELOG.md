@@ -23,16 +23,16 @@ reverse-chronological released versions.
 
 ### Fixed
 
-- A later passing run of the same command, or a later observed edit, now retires an earlier
-  hook-observed failure before a completion claim. Such a failure no longer raises
-  `failed_work_omitted`, `material_limitation_omitted` or `failed_command_unresolved` advice, and a
-  `claim_recorded/1.1.0` claim no longer has to list it in `limitation_refs`. The receipt's
+- A later run of the same command (only its latest run is judged), or a later observed edit, now
+  retires an earlier hook-observed failure before a completion claim. Such a failure no longer
+  raises `failed_work_omitted`, `material_limitation_omitted` or `failed_command_unresolved` advice,
+  and a `claim_recorded/1.1.0` claim no longer has to list it in `limitation_refs`. The receipt's
   limitations still name each such failure once as history. A claim made while the latest observed
   run is red and undisclosed gets exactly one finding that names the run by its result and action.
-  Hooks commit to the command with an installation-keyed `hmac-sha256:` value and discard the
-  text, so no command text is stored, shown or sent. `status view=results` adds each observed
-  run's tool, occurrence, command commitment and exit status. Older ledgers without a command
-  identity use the observed-edit rule only. Cooperative results keep their disclosure duty (#909).
+  Hooks commit to the command with an installation-keyed `hmac-sha256:` value and discard the text,
+  so no command text is stored, shown or sent. `status view=results` adds each observed run's tool,
+  occurrence, command commitment and exit status. Older ledgers without a command identity use the
+  observed-edit rule only. Cooperative results keep their disclosure duty (#909).
 
 - Codex shell, exec, `apply_patch` and MCP results now record the outcome Codex states instead of
   `unknown`: the exit code nested in the hook's tool result, the `Exit code: N` or

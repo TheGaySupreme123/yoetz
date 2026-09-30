@@ -574,9 +574,10 @@ intent close before the bounded service drain; advice-bearing events remain sync
 output behavior, and automatic Stop follow-up messages remain disabled. Hook success never
 substitutes for an explicit command/test exit fact.
 
-**Failure supersession (#909).** On the ordinary profile a later passing `Shell` run of the same
-command (a `postToolUse` with `exitCode: 0`), or a later completed edit tool call, retires an
-earlier failed run before a completion claim; the receipt names it once as history. The hook
+**Failure supersession (#909).** On the ordinary profile a later `Shell` run of the same command
+(only the latest run is judged; a `postToolUse` with `exitCode: 0` clears it), or a later completed
+edit tool call, retires an earlier failed run before a completion claim; the receipt names it once
+as history. `Shell` failures also reach `failed_command_unresolved` advice. The hook
 computes an installation-keyed `command_commitment` from `tool_input.command` on `preToolUse`,
 `postToolUse`, and `postToolUseFailure`, then discards the text. Decision: supported on the
 ordinary profile. **Gap:** a shell `postToolUse` without `exitCode` stays `unknown` and neither

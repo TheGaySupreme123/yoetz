@@ -547,22 +547,23 @@ described in [Tool outcomes](#tool-outcomes-issue-910) below. Before issue #910 
 had a recorded outcome, so this advice never fired on Codex. A call whose outcome Codex did not
 state is `unknown`: it neither opens nor resolves a failed command.
 
-**Failure supersession (#909).** A later passing run of the same command, or a completed observed
-edit (for example a successful `apply_patch`), retires an earlier observed failure before a
-completion claim: no `failed_work_omitted`, no `material_limitation_omitted`, no
-`failed_command_unresolved`, and a v1.1 claim need not list it in `limitation_refs`. The receipt
-still names it once as history. The hook commits to the command inside the hook process
-(`tool_input.cmd` for `exec_command`, the `command` argv for `shell`, with `/bin/bash -lc` and
-`bash -lc` wrappers stripped) using the installation key and forwards only the `hmac-sha256:`
-`command_commitment`; the command text is never stored or sent. `apply_patch` carries none.
-Decision: supported on the hook and stream paths. With #910 the Codex hook records each shell
-outcome, and a rollout `CommandExecution` item commits to its `command` argv with the same
-normalization and key, so a passing rerun seen on either path retires a failure seen on either
-path. A command observed on both paths is still two results until #917 pairs them; a red-latest
-run observed on both is then named twice. `status
-view=results` shows each observed run's tool, occurrence, commitment, and exit status.
-Native dogfood acceptance of this path on macOS, Linux and WSL 2 is not yet recorded
-(owner: #909).
+**Failure supersession (#909).** A later run of the same command (only the latest run of a command
+is judged; a pass clears it), or a completed observed edit (for example a successful `apply_patch`),
+retires an earlier observed failure before a completion claim: no `failed_work_omitted`, no
+`material_limitation_omitted`, no `failed_command_unresolved`, and a v1.1 claim need not list it in
+`limitation_refs`. The receipt still names it once as history. The hook commits to the command
+inside the hook process (`tool_input.cmd` for `exec_command`, the `command` argv for `shell`, with
+`/bin/bash -lc` and `bash -lc` wrappers stripped) using the installation key and forwards only the
+`hmac-sha256:` `command_commitment`; the command text is never stored or sent. `apply_patch` carries
+none. Decision: supported on the hook and stream paths. With #910 the Codex hook records each
+shell outcome, and a rollout `CommandExecution` item commits to its `command` argv with the same
+normalization and key, so a later run seen on either path judges a failure seen on either path.
+Edits written
+through shell commands (for example heredocs in `exec_command`) are commands, not observed edits, so
+a failure followed only by such edits stays live unless the command is rerun; the DeepSWE
+dynamodb-toolbox B attempt edited mostly this way (owner: #909 follow-up). `status view=results`
+shows each observed run's tool, occurrence, commitment, and exit status. Native dogfood acceptance
+of this path on macOS, Linux and WSL 2 is not yet recorded (owner: #909).
 
 Native child tool callbacks can carry the parent's host session ID together with a child
 `agent_id`. A successful delegated `start` preserves the parent mapping: its task result names the
