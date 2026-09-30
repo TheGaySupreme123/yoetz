@@ -64,6 +64,7 @@ from yoetz.domain.values import (
     object_id,
     result_id,
 )
+from yoetz.kernel.observed_failures import observed_action_description
 from yoetz.ports.integrations import observation_pairing_contract
 from yoetz.protocol.canonical import request_digest
 from yoetz.protocol.coverage import (
@@ -338,6 +339,21 @@ def _post_outcome(payload: Mapping[str, JsonValue]) -> ResultOutcome:
     if exit_status == 0 or payload.get("success") is True or lowered in _RESULT_STATUS_SUCCESS:
         return ResultOutcome.SUCCESS
     return ResultOutcome.UNKNOWN
+
+
+def _omitted_command(structural: Mapping[str, JsonValue]) -> str:
+    """The command field of an observed command action: never command text.
+
+    The hook's installation-keyed ``command_commitment`` (#909) is the command identity the
+    failure-supersession rule compares. Plain digests keep their historical form, and a row with
+    neither stays ``omitted:structural`` exactly as every pre-commitment ledger recorded it.
+    """
+
+    for key in ("command_commitment", "command_digest", "argv_digest"):
+        digest = structural.get(key)
+        if type(digest) is str:
+            return f"omitted:{digest}"
+    return "omitted:structural"
 
 
 def _action_kind(tool: str | None) -> ActionKind:
@@ -962,12 +978,13 @@ def materialize_observation_envelope(
             role="action_event",
         )
         action_kind = _action_kind(tool)
-        description = f"Observed pending {action_kind.value} via Codex hook"
+        description = observed_action_description(
+            f"Observed pending {action_kind.value} via Codex hook", tool
+        )
         command = None
         if action_kind is ActionKind.COMMAND:
-            # Command text omitted/encrypted; placeholder digest-only description.
-            digest = structural.get("command_digest") or structural.get("argv_digest")
-            command = f"omitted:{digest}" if type(digest) is str else "omitted:structural"
+            # Command text is never recorded; the keyed identity or a placeholder stands in.
+            command = _omitted_command(structural)
         drafts.append(
             _draft(
                 event=event,
@@ -1106,8 +1123,7 @@ def materialize_observation_envelope(
         action_kind = _action_kind(tool)
         command = None
         if action_kind is ActionKind.COMMAND:
-            digest = structural.get("command_digest") or structural.get("argv_digest")
-            command = f"omitted:{digest}" if type(digest) is str else "omitted:structural"
+            command = _omitted_command(structural)
         drafts.append(
             _draft(
                 event=action_event,
@@ -1116,10 +1132,14 @@ def materialize_observation_envelope(
                 payload=ActionRecordedPayload(
                     action_id(action),
                     action_kind,
-                    (
-                        f"Observed {action_kind.value} via post-only hook"
-                        if pairing_mode == "post_only"
-                        else f"Observed {action_kind.value} via {_observation_host_label(envelope.source)}"
+                    observed_action_description(
+                        (
+                            f"Observed {action_kind.value} via post-only hook"
+                            if pairing_mode == "post_only"
+                            else f"Observed {action_kind.value} via "
+                            f"{_observation_host_label(envelope.source)}"
+                        ),
+                        tool,
                     ),
                     command=command,
                 ),

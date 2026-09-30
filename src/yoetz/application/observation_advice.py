@@ -132,7 +132,10 @@ _RULE_SUMMARIES: Final[Mapping[str, str]] = {
 }
 
 _RULE_DETAILS: Final[Mapping[str, str]] = {
-    "failed_command_unresolved": "A tool result failed and was not followed by a successful retry",
+    "failed_command_unresolved": (
+        "A tool result failed and neither a later passing run of the same command "
+        "nor a completed edit followed it"
+    ),
     "edit_after_successful_check": "A check that predates a later edit is no longer current verification",
     "completion_without_verification": "A completion claim lacks current admissible verification evidence",
     "static_test_for_live_claim": "Only static verification was observed for a live or wire claim",

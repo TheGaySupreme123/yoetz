@@ -546,6 +546,22 @@ described in [Tool outcomes](#tool-outcomes-issue-910) below. Before issue #910 
 had a recorded outcome, so this advice never fired on Codex. A call whose outcome Codex did not
 state is `unknown`: it neither opens nor resolves a failed command.
 
+**Failure supersession (#909).** A later passing run of the same command, or a completed observed
+edit (for example a successful `apply_patch`), retires an earlier observed failure before a
+completion claim: no `failed_work_omitted`, no `material_limitation_omitted`, no
+`failed_command_unresolved`, and a v1.1 claim need not list it in `limitation_refs`. The receipt
+still names it once as history. The hook commits to the command inside the hook process
+(`tool_input.cmd` for `exec_command`, the `command` argv for `shell`, with `/bin/bash -lc` and
+`bash -lc` wrappers stripped) using the installation key and forwards only the `hmac-sha256:`
+`command_commitment`; the command text is never stored or sent. `apply_patch` carries none.
+Decision: supported on the hook path. **Gap:** until #910 records Codex shell outcomes, Codex
+results stay `unknown`, so the rule has nothing to retire on Codex yet; the session-stream
+`CommandExecution` path computes no commitment, so a call that reaches the ledger only through the
+stream keeps `omitted:structural` and relies on the edit rule (owner: #910/#917). `status
+view=results` shows each observed run's tool, occurrence, commitment, and exit status.
+Native dogfood acceptance of this path on macOS, Linux and WSL 2 is not yet recorded
+(owner: #909).
+
 Native child tool callbacks can carry the parent's host session ID together with a child
 `agent_id`. A successful delegated `start` preserves the parent mapping: its task result names the
 reserved child, but its session and writer still belong to `parent_task_id`. A successful child

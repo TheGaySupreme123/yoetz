@@ -667,6 +667,30 @@ consent, manifests, objects, and ledger provenance. Evicted, redacted, revoked, 
 captures remain coverage gaps. Already-pruned envelopes cannot be repaired by upgrading. This
 shared SQLite behavior applies to Codex, Claude Code and Cursor on macOS, Linux and WSL 2.
 
+### Failed-command supersession and the keyed command identity (2026-09-30, #909)
+
+A rerun is a new host tool call, so keying "resolved" on the call id left every red -> green cycle
+unresolved. Observation-advice policy `0.1.6` makes `failed_command_unresolved` read the same
+kernel predicate the local packs and the ADR-025 claim invariant read
+(`kernel/observed_failures.py`): a failed command envelope is still reported only while no later
+post-event of the same *command identity* succeeded, no later completed edit envelope (an edit tool
+whose post-event did not fail or get denied) followed it, and the same host call did not later
+succeed. A later failure of the same identity is a new condition; it never revives an earlier one.
+
+The command identity is a new structural envelope field, `command_commitment`: an
+installation-keyed `hmac-sha256:` value (domain `yoetz/observation-command-commitment/v1`, the
+local observation store's key material) over the host command argument (`tool_input.cmd`,
+`command`, or `argv`) of a shell/exec tool after light normalization: a host shell wrapper
+(`/bin/bash -lc`, `bash -lc` including the WSL 2 form, `sh -c`) is stripped and the command is
+re-joined from its shell words. The hook process computes it and discards the text; the text is
+never persisted, displayed, or sent, with or without content consent. Edit tools (for example
+`apply_patch`, whose `command` argument is a patch) never carry one. The value crosses the
+unreleased control-request `2.9.0` wire, materializes as the command action's
+`omitted:<commitment>`, and the hook spool carries it for legacy replays. A plain `sha256` of a
+short command is dictionary-guessable and is never an identity. Legacy envelopes without the field
+still clear through the edit rule. The same predicate names only service-stamped observations,
+so a cooperative publication of a copied commitment proves nothing.
+
 ### Codex tool outcomes read where Codex states them (2026-09-30, #910)
 
 Decision 12 consumes host-stated outcome facts, but on Codex the only reader was the

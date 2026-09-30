@@ -85,8 +85,10 @@ from yoetz.domain.observation import (
     ObservationIngestResult,
     ObservationSource,
     hook_source_commitment,
+    normalize_observed_command,
     observation_ingest_request_to_json,
     observation_ingest_result_from_json,
+    observed_command_commitment,
 )
 from yoetz.domain.observation_budget import ModeLimits, ObservationMode, mode_limits
 from yoetz.domain.observation_profiles import (
@@ -716,6 +718,73 @@ def _routine_read_action(payload: Mapping[str, JsonValue]) -> bool:
     return is_routine_read_candidate(payload)
 
 
+_COMMAND_ARGUMENT_KEYS: Final = ("cmd", "command", "argv")
+_COMMAND_COMMITMENT_RE: Final = re.compile(r"^hmac-sha256:[0-9a-f]{64}$", re.ASCII)
+
+
+def _is_command_tool(tool_name: object) -> bool:
+    """A host shell/exec tool whose ``tool_input`` names a command, never an edit tool."""
+
+    token = _token_or_none(tool_name)
+    if token is None or is_edit_tool_name(token):
+        return False
+    lowered = token.casefold()
+    return lowered in _SHELL_TOOLS or any(hint in lowered for hint in ("shell", "exec", "terminal"))
+
+
+def command_commitment_for_payload(
+    payload: Mapping[str, JsonValue], key_material: bytes
+) -> str | None:
+    """Commit to a host command argument inside the hook process, then drop the text (#909).
+
+    Reads ``tool_input.cmd``, ``tool_input.command`` or ``tool_input.argv`` for a shell/exec
+    tool, applies the shared light normalization, and returns the installation-keyed
+    ``hmac-sha256:`` commitment. The command text is never returned, stored, or logged here; a
+    payload without a usable command argument yields ``None``.
+    """
+
+    if not _is_command_tool(payload.get("tool_name")):
+        return None
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, Mapping):
+        return None
+    nested = cast(Mapping[str, JsonValue], tool_input)
+    for key in _COMMAND_ARGUMENT_KEYS:
+        value = nested.get(key)
+        if value is None:
+            continue
+        normalized = normalize_observed_command(value)
+        if normalized is None:
+            return None
+        return observed_command_commitment(key_material, normalized)
+    return None
+
+
+def _attach_command_commitment(
+    structural: dict[str, JsonValue],
+    payload: Mapping[str, JsonValue],
+    *,
+    _state: Path | None,
+) -> None:
+    """Add the keyed command identity to a host-normalized structural row (Claude, Cursor).
+
+    Those normalizers forward only their structural dict to the common path, so the raw
+    ``tool_input`` never leaves this process. Failing to read the installation key only omits the
+    identity: the failure then falls back to the state-scoped supersession rule.
+    """
+
+    if not _is_command_tool(payload.get("tool_name")):
+        return
+    try:
+        commitment = command_commitment_for_payload(
+            payload, LocalObservationStore(_state=_state).key_material()
+        )
+    except Exception:
+        return
+    if commitment is not None:
+        structural["command_commitment"] = commitment
+
+
 def _extract_structural(
     payload: Mapping[str, JsonValue],
     event_name: str,
@@ -738,6 +807,11 @@ def _extract_structural(
     tool_name = _token_or_none(payload.get("tool_name"))
     if tool_name is not None:
         fields["tool_name"] = tool_name
+    # A host normalizer (Claude Code, Cursor) or the legacy spool already committed to the command
+    # in the hook process; only the keyed value crosses this boundary, never command text.
+    supplied_commitment = payload.get("command_commitment")
+    if type(supplied_commitment) is str and _COMMAND_COMMITMENT_RE.fullmatch(supplied_commitment):
+        fields["command_commitment"] = supplied_commitment
     for key in (
         "correlation_id",
         "parent_tool_call_id",
@@ -1336,6 +1410,9 @@ def map_hook_payload_to_envelope(
     )
     if "event_ordinal" not in structural:
         structural = JsonObject({**structural, "event_ordinal": event_ordinal})
+    command_commitment = command_commitment_for_payload(payload, key_material)
+    if command_commitment is not None:
+        structural = JsonObject({**structural, "command_commitment": command_commitment})
     identity = _source_identity(event_name, payload, structural, event_ordinal=event_ordinal)
     commitment = hook_source_commitment(key_material, identity)
     return ObservationEnvelope(
@@ -5961,6 +6038,8 @@ def handle_claude_observe(
                 # applies to a successful callback carrying child-only transcript metadata: a
                 # success bit does not authorize parent attribution.
                 child_attribution_gap = True
+        if ordinary_profile and raw_event in {"PreToolUse", "PostToolUse", "PostToolUseFailure"}:
+            _attach_command_commitment(structural, payload, _state=_state)
         result = handle_observe(
             event_name=event_map[raw_event],
             stdin_bytes=canonical_encode(structural),
@@ -6367,6 +6446,8 @@ def _handle_cursor_observe(
                 structural["action"] = "routine_read"
         elif ordinary_profile and raw_event == "preToolUse":
             structural["action"] = "cursor_tool_pending"
+        if ordinary_profile and raw_event in {"preToolUse", "postToolUse", "postToolUseFailure"}:
+            _attach_command_commitment(structural, payload, _state=_state)
         path_value = payload.get("file_path") if raw_event == "afterFileEdit" else None
         if (
             content_omitted
@@ -6477,6 +6558,8 @@ def handle_spool(
             # Keep the safe classification, never the host command/input prose.
             if _routine_read_action(payload):
                 spool_payload["action"] = "routine_read"
+            # The spool keeps no tool input, so commit to the command now (#909).
+            _attach_command_commitment(spool_payload, payload, _state=_state)
             HookSpool(_state=_state).append(
                 workspace=workspace_locator,
                 event_name=event_name,

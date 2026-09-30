@@ -409,6 +409,17 @@ A background Bash launch
 is recorded as partial until the host supplies completion evidence. These decisions do not add
 filesystem or batch observation.
 
+**Failure supersession (#909).** Because the ordinary profile already records `PostToolUseFailure`
+as a failure, a red -> green cycle used to leave an unclearable finding. Now a later passing `Bash`
+run of the same command, or a later successful `Edit`/`Write`/`MultiEdit`, retires the earlier
+failure before a completion claim; the receipt names it once as history. The hook computes an
+installation-keyed `command_commitment` from `tool_input.command` on `PreToolUse`, `PostToolUse`,
+and `PostToolUseFailure`, then discards the text. Decision: supported on the ordinary profile; the
+default structural profile observes no generic `Bash` calls, so it records no command identity.
+A failure whose payload omits `tool_input` has no identity and relies on the edit rule.
+Native dogfood acceptance of this path on macOS, Linux and WSL 2 is not yet recorded
+(owner: #909).
+
 **Shell outcome contract (issue #910).** On the ordinary profile a `Bash` `PostToolUse` is recorded
 as `success`. Claude's Bash result (`stdout`, `stderr`, `interrupted`, `isImage`) has no exit field,
 so the result has no `exit_status`. A `Bash` `PostToolUseFailure` is recorded as `failure`, with

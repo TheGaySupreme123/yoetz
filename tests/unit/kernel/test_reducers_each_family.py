@@ -491,6 +491,7 @@ def test_replay_index_is_frozen_and_nonplaintext() -> None:
         "payload_event_by_object",
         "evidence_sources_by_object",
         "redaction_root_by_object",
+        "observed_event_ids",
     )
     assert tuple(field.name for field in fields(EvidenceObjectSource)) == (
         "evidence_id",
@@ -498,6 +499,8 @@ def test_replay_index_is_frozen_and_nonplaintext() -> None:
     )
     index = empty_replay_index()
     assert type(index.payload_event_by_object).__name__ == "mappingproxy"
+    # Provenance ids only: which accepted events are hook-observed actions or results (#909).
+    assert index.observed_event_ids == frozenset()
     with pytest.raises(TypeError):
         cast(dict[object, object], index.payload_event_by_object)[
             object_id("obj_00000000-0000-4000-8000-000000000099")

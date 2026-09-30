@@ -28,6 +28,7 @@ from yoetz.kernel.claims import (
     result_is_relevant_to_claim,
 )
 from yoetz.kernel.deterministic_checks import (
+    OBSERVED_FAILURE_LIVE_FACT,
     DeterministicAssessment,
     DeterministicCase,
     FindingBasisRef,
@@ -37,6 +38,11 @@ from yoetz.kernel.deterministic_checks import (
     build_policy_assessment,
     policy_public_root,
     policy_source_availability,
+)
+from yoetz.kernel.observed_failures import (
+    ObservedFailureState,
+    observed_event_ids_from_coverage,
+    observed_failure_states,
 )
 from yoetz.kernel.plan_scope import current_plan_scope
 from yoetz.kernel.policies.response_support import (
@@ -67,6 +73,7 @@ WORK_INTEGRITY_FACT_CODES: Final = frozenset(
         "requested_item_present",
         "linked_attempt_absent",
         "failed_result_present",
+        OBSERVED_FAILURE_LIVE_FACT,
         "failure_disclosure_absent",
         "claim_present",
         "admissible_evidence_absent",
@@ -271,10 +278,16 @@ def _requested_item_findings(case: DeterministicCase) -> list[DeterministicAsses
 
 def _failed_work_findings(case: DeterministicCase) -> list[DeterministicAssessment]:
     output: list[DeterministicAssessment] = []
+    observed = observed_event_ids_from_coverage(case.coverage_by_ref)
     for claim_id, claim_record in effective_claim_items(case.projection):
         claim = claim_record.payload
         if claim is None or claim.claim_kind is not ClaimKind.COMPLETION:
             continue
+        # One shared reading (#909): a hook-observed failure later passed by the same command, or
+        # followed by a completed observed edit, is history the receipt counts, not an omission.
+        states = observed_failure_states(
+            case.projection, observed, through=claim_record.source_frontier
+        )
         for result_id, record in case.projection.results.items():
             if (
                 record.payload is None
@@ -283,13 +296,25 @@ def _failed_work_findings(case: DeterministicCase) -> list[DeterministicAssessme
                 or claim_discloses_result(claim, result_id)
             ):
                 continue
+            state = states.get(result_id)
+            if state is not None and state is not ObservedFailureState.LIVE:
+                continue
+            observed_facts = [_fact("failed_result_present", result_id)]
+            if state is ObservedFailureState.LIVE:
+                # Name the observed run structurally (its action and result ids) so the agent can
+                # find its tool, order, command commitment and exit status in status results.
+                run_refs: list[FindingBasisRef] = [result_id]
+                action_ref = record.payload.action_id
+                if action_ref in case.allowed_ids:
+                    run_refs.append(action_ref)
+                observed_facts.append(_fact(OBSERVED_FAILURE_LIVE_FACT, *run_refs))
             output.append(
                 build_policy_assessment(
                     case,
                     WORK_INTEGRITY_POLICY_PACK,
                     FindingKind.FAILED_WORK_OMITTED,
                     _refs((claim_id, policy_public_root(case, result_id))),
-                    (_fact("failed_result_present", result_id),),
+                    tuple(observed_facts),
                     (_fact("failure_disclosure_absent", claim_id, result_id),),
                     source_availability=policy_source_availability(case, (result_id,)),
                 )

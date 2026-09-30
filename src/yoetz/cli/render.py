@@ -22,6 +22,7 @@ from yoetz.protocol.models import (
     StatusObligationsPageModel,
     StatusOperationPageModel,
     StatusProjectPageModel,
+    StatusResultsPageModel,
     StatusSemanticProgressModel,
     StatusSuccessModel,
 )
@@ -372,6 +373,8 @@ def render_human_status(result: StatusSuccessModel) -> str:
                 f"{finding.finding_id} resolved={finding.resolved}: "
                 + _projected_text(finding.detail)
             )
+    if isinstance(result.page, StatusResultsPageModel):
+        lines.extend(_render_result_items(result.page))
     if isinstance(result.page, StatusObligationsPageModel):
         for obligation in result.page.items:
             for attempt in obligation.command_attempts[:3]:
@@ -386,6 +389,30 @@ def render_human_status(result: StatusSuccessModel) -> str:
     gaps = tuple(result.gaps) + tuple(result.coverage.known_gaps)
     lines.append("Gaps: " + (", ".join(dict.fromkeys(gaps)) if gaps else "none"))
     return "\n".join(lines)
+
+
+def _render_result_items(page: StatusResultsPageModel) -> list[str]:
+    """One structural line per result; observed runs name tool, order, identity and exit (#909)."""
+
+    lines = ["Results:"]
+    if not page.items:
+        lines.append("- none in this page")
+    for item in page.items:
+        line = f"- {item.result_id}: {_token(item.outcome) if item.outcome else 'unavailable'}"
+        run = item.observed_run
+        if run is not None:
+            details = [f"observed run {run.occurrence}"]
+            if run.tool_name is not None:
+                details.append(f"tool {run.tool_name}")
+            if run.exit_status is not None:
+                details.append(f"exit {run.exit_status}")
+            if run.command_commitment is not None:
+                details.append(f"command {run.command_commitment}")
+            line += " (" + "; ".join(details) + ")"
+        lines.append(line)
+    if page.next_cursor is not None:
+        lines.append(f"Next page: {page.next_cursor}")
+    return lines
 
 
 def _render_lineage(page: StatusLineagePageModel) -> list[str]:

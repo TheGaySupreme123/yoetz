@@ -95,6 +95,10 @@ from yoetz.kernel.finding_resolution import (
     finding_is_resolved,
     finding_resolution_explanation,
 )
+from yoetz.kernel.observed_failures import (
+    observed_event_ids_from_records,
+    observed_run_facts,
+)
 from yoetz.kernel.plan_scope import current_plan_scope
 from yoetz.kernel.projections import (
     PROJECTION_VERSION,
@@ -207,6 +211,7 @@ from yoetz.protocol.models import (
     StatusFindingItemModel,
     StatusHistoryItemModel,
     StatusObligationItemModel,
+    StatusObservedRunModel,
     StatusResultItemModel,
     StatusStructuralSubjectStateModel,
     StatusVersionSliceModel,
@@ -1266,19 +1271,33 @@ def _projection_items(
             if record.payload is not None
         )
     if view is ProjectionView.RESULTS:
-        return tuple(
-            StatusResultItemModel(
-                result_id=result,
-                source_event_id=record.source_event_id,
-                payload_available=record.payload is not None,
-                outcome=None if record.payload is None else record.payload.outcome.value,
-                action_id=None if record.payload is None else record.payload.action_id,
-                evidence_refs=() if record.payload is None else record.payload.evidence_refs,
-            )
-            for result, record in sorted(
-                projection.results.items(), key=lambda item: item[0].encode()
-            )
-        )
+        # Structural run facts let an agent name the right observed result in limitation_refs
+        # without any command text (#909); cooperative results carry none.
+        observed_runs = observed_run_facts(projection, observed_event_ids_from_records(records))
+        result_items: list[ProjectionItem] = []
+        for result_ref, record in sorted(
+            projection.results.items(), key=lambda item: item[0].encode()
+        ):
+            fields: dict[str, object] = {
+                "result_id": result_ref,
+                "source_event_id": record.source_event_id,
+                "payload_available": record.payload is not None,
+                "outcome": None if record.payload is None else record.payload.outcome.value,
+                "action_id": None if record.payload is None else record.payload.action_id,
+                "evidence_refs": () if record.payload is None else record.payload.evidence_refs,
+            }
+            run = observed_runs.get(result_ref)
+            if run is not None:
+                run_fields: dict[str, object] = {"occurrence": str(run.occurrence)}
+                if run.tool_name is not None:
+                    run_fields["tool_name"] = run.tool_name
+                if run.command_commitment is not None:
+                    run_fields["command_commitment"] = run.command_commitment
+                if run.exit_status is not None:
+                    run_fields["exit_status"] = run.exit_status
+                fields["observed_run"] = StatusObservedRunModel.model_validate(run_fields)
+            result_items.append(StatusResultItemModel.model_validate(fields))
+        return tuple(result_items)
     if view is ProjectionView.EVIDENCE:
         evidence_items: list[ProjectionItem] = []
         for evidence, record in sorted(

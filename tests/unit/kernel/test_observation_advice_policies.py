@@ -962,3 +962,115 @@ def test_check_fact_binds_edit_staleness() -> None:
         )
     )
     assert "edit_after_successful_check" in rules
+
+
+# --- #909: the advice reads the shared supersession rule -----------------------------------------
+
+_PYTEST_X = "hmac-sha256:" + "1" * 64
+_PYTEST_Y = "hmac-sha256:" + "2" * 64
+
+
+def _bash(
+    pos: int,
+    call: str,
+    *,
+    success: bool,
+    commitment: str | None,
+    event_kind: str = "PostToolUse",
+) -> ObservationEnvelope:
+    """A Claude Code ordinary-profile Bash result as the hook normalizer records it."""
+
+    payload: dict[str, object] = {
+        "tool_name": "Bash",
+        "tool_call_id": call,
+        "success": success,
+        "action": "claude_tool_success" if success else "claude_tool_failure",
+    }
+    if commitment is not None:
+        payload["command_commitment"] = commitment
+    return _envelope(event_kind, pos=pos, identity=f"hook:{call}:{pos}", payload=payload)
+
+
+def _unresolved(*envelopes: ObservationEnvelope) -> list[ObservationAdviceCandidate]:
+    return [
+        item
+        for item in observation_advice_findings(
+            ObservationAdviceContext(
+                envelopes=envelopes, lifecycle=ObservationLifecycle.ACTIVE, gaps=()
+            )
+        )
+        if item.rule_code == "failed_command_unresolved"
+    ]
+
+
+def test_rerun_of_the_same_command_under_a_new_call_id_clears_the_failure() -> None:
+    """A rerun is a new host call; the keyed command identity, not the call id, links it."""
+
+    assert not _unresolved(
+        _bash(1, "toolu-1", success=False, commitment=_PYTEST_X),
+        _bash(2, "toolu-2", success=True, commitment=_PYTEST_X),
+    )
+
+
+def test_passing_run_of_a_different_command_keeps_the_failure_unresolved() -> None:
+    unresolved = _unresolved(
+        _bash(1, "toolu-1", success=False, commitment=_PYTEST_X),
+        _bash(2, "toolu-2", success=True, commitment=_PYTEST_Y),
+    )
+    assert [item.evidence_refs for item in unresolved] == [("hook:toolu-1:1",)]
+
+
+def test_completed_edit_after_a_failure_makes_it_history() -> None:
+    edit = _envelope(
+        "PostToolUse",
+        pos=2,
+        identity="hook:toolu-edit:2",
+        payload={"tool_name": "Edit", "tool_call_id": "toolu-edit", "success": True},
+    )
+    assert not _unresolved(_bash(1, "toolu-1", success=False, commitment=_PYTEST_X), edit)
+    denied_edit = _envelope(
+        "PostToolUse",
+        pos=2,
+        identity="hook:toolu-edit:2",
+        payload={
+            "tool_name": "Edit",
+            "tool_call_id": "toolu-edit",
+            "success": False,
+            "denied": True,
+        },
+    )
+    assert _unresolved(_bash(1, "toolu-1", success=False, commitment=_PYTEST_X), denied_edit)
+    pending_edit = _envelope(
+        "PreToolUse",
+        pos=2,
+        identity="hook:toolu-edit:2",
+        payload={"tool_name": "Edit", "tool_call_id": "toolu-edit"},
+    )
+    assert _unresolved(_bash(1, "toolu-1", success=False, commitment=_PYTEST_X), pending_edit)
+
+
+def test_legacy_envelopes_without_identity_fall_back_to_the_edit_rule() -> None:
+    assert _unresolved(
+        _bash(1, "toolu-1", success=False, commitment=None),
+        _bash(2, "toolu-2", success=True, commitment=None),
+    )
+    edit = _envelope(
+        "PostToolUse",
+        pos=3,
+        identity="hook:toolu-edit:3",
+        payload={"tool_name": "Write", "tool_call_id": "toolu-edit", "success": True},
+    )
+    assert not _unresolved(
+        _bash(1, "toolu-1", success=False, commitment=None),
+        _bash(2, "toolu-2", success=True, commitment=None),
+        edit,
+    )
+
+
+def test_a_new_failure_after_the_pass_is_live_again() -> None:
+    unresolved = _unresolved(
+        _bash(1, "toolu-1", success=False, commitment=_PYTEST_X),
+        _bash(2, "toolu-2", success=True, commitment=_PYTEST_X),
+        _bash(3, "toolu-3", success=False, commitment=_PYTEST_X),
+    )
+    assert [item.evidence_refs for item in unresolved] == [("hook:toolu-3:3",)]
