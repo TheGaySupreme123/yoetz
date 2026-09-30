@@ -17,12 +17,18 @@ projection checkpoint all read the same fact.
 
 from __future__ import annotations
 
-from collections.abc import MutableMapping
+from collections.abc import Iterator, MutableMapping
 from dataclasses import replace
-from typing import Final
+from typing import Final, cast
 
 from yoetz.domain.coordination import CoordinationGapCode
-from yoetz.domain.events import CheckRecordedPayload, ClaimKind, LedgerRecord, RequestedItemKind
+from yoetz.domain.events import (
+    SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP,
+    CheckRecordedPayload,
+    ClaimKind,
+    LedgerRecord,
+    RequestedItemKind,
+)
 from yoetz.domain.findings import Finding, FindingKind, FindingOrigin, ResponseDisposition
 from yoetz.domain.receipts import (
     OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
@@ -36,7 +42,7 @@ from yoetz.domain.receipts import (
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
     SEMANTIC_REVIEW_NOT_REQUESTED_GAP,
 )
-from yoetz.domain.values import EventId, FindingId, ResultId
+from yoetz.domain.values import EventId, EvidenceId, FindingId, ResultId
 from yoetz.kernel.claims import effective_claim_items
 from yoetz.kernel.plan_scope import current_plan_scope
 from yoetz.kernel.projections import FindingProjectionRecord, ProjectionState
@@ -59,10 +65,11 @@ __all__ = [
 
 IssueKey = tuple[object, ...]
 
-# The AI-powered review packet carried the bounded dependency closure of what it selected rather
-# than every reference at the frozen frontier (ADR-006, #675). The ledger outgrows the packet in any
-# real session, so this is the normal case, not an exception.
-SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP: Final = "semantic_reference_scope_reduced"
+# ``SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP``: the AI-powered review packet carried the bounded
+# dependency closure of what it selected rather than every reference at the frozen frontier
+# (ADR-006, #675). The ledger outgrows the packet in any real session, so this is the normal case,
+# not an exception. The check records the references the reduced packet included, and an AI-powered
+# finding may use the unchanged scope as a baseline only when its relevant material was among them.
 # Selection versus capture failure (issue #904). A *selection* code records a deliberate, bounded
 # choice of what material to show; a *capture-failure* code records material that was clipped,
 # redacted, or lost. Selection codes keep bounding every coverage they are folded into, and the
@@ -352,6 +359,44 @@ def _semantic_freshness_proven(
     )
 
 
+def _material_changes(
+    finding: Finding,
+    finding_source_frontier: int,
+    check: CheckRecordedPayload,
+    state: ProjectionState,
+) -> Iterator[tuple[str, str]]:
+    """Yield ``(logical ref, source event ref)`` for each material row counted as a change."""
+
+    low = finding_source_frontier
+    high = check.subject_frontier.sequence
+
+    def changed(row: object) -> bool:
+        # An unreadable (redacted) record cannot show what changed, so it proves nothing.
+        source = getattr(row, "source_frontier", 0)
+        readable = getattr(row, "payload", None) is not None
+        return readable and type(source) is int and low < source <= high
+
+    for rows in (state.actions, state.results, state.evidence):
+        for key, row in rows.items():
+            if changed(row):
+                yield str(key), str(row.source_event_id)
+    subjects = frozenset(str(ref) for ref in finding.subject_refs)
+    for key, row in state.obligations.items():
+        if (str(key) in subjects or str(row.source_event_id) in subjects) and changed(row):
+            yield str(key), str(row.source_event_id)
+    for key, row in state.claims.items():
+        if not changed(row):
+            continue
+        payload = row.payload
+        supersedes = getattr(payload, "supersedes_claim_refs", ()) if payload is not None else ()
+        if (
+            str(key) in subjects
+            or str(row.source_event_id) in subjects
+            or any(str(ref) in subjects for ref in supersedes)
+        ):
+            yield str(key), str(row.source_event_id)
+
+
 def _semantic_subject_changed(
     finding: Finding,
     finding_source_frontier: int,
@@ -370,34 +415,71 @@ def _semantic_subject_changed(
 
     if state is None or state.frontier < check.subject_frontier.sequence:
         return False
-    low = finding_source_frontier
-    high = check.subject_frontier.sequence
+    return any(True for _ in _material_changes(finding, finding_source_frontier, check, state))
 
-    def changed(row: object) -> bool:
-        # An unreadable (redacted) record cannot show what changed, so it proves nothing.
-        source = getattr(row, "source_frontier", 0)
-        readable = getattr(row, "payload", None) is not None
-        return readable and type(source) is int and low < source <= high
 
-    for rows in (state.actions, state.results, state.evidence):
-        if any(changed(row) for row in rows.values()):
-            return True
-    subjects = frozenset(str(ref) for ref in finding.subject_refs)
-    for key, row in state.obligations.items():
-        if (str(key) in subjects or str(row.source_event_id) in subjects) and changed(row):
-            return True
-    for key, row in state.claims.items():
-        if not changed(row):
+def _response_repair_refs(finding: Finding, state: ProjectionState) -> frozenset[str] | None:
+    """The repair material the finding's latest response links, or None when it is unreadable.
+
+    This is the #898 repair-evidence relation: evidence cited directly, and the evidence of a
+    cited result (the result itself when it cites none). No response links nothing. A redacted or
+    unknown response, result or evidence row cannot be shown to have been in view, so it is None.
+    """
+
+    response = state.responses.get(finding.finding_id)
+    if response is None:
+        return frozenset()
+    if response.payload is None or response.redacted:
+        return None
+    refs: set[str] = set()
+    for cited in response.payload.evidence_refs:
+        value = str(cited)
+        evidence = state.evidence.get(cast(EvidenceId, value))
+        if evidence is not None:
+            if evidence.payload is None or evidence.redacted:
+                return None
+            refs.add(value)
             continue
-        payload = row.payload
-        supersedes = getattr(payload, "supersedes_claim_refs", ()) if payload is not None else ()
-        if (
-            str(key) in subjects
-            or str(row.source_event_id) in subjects
-            or any(str(ref) in subjects for ref in supersedes)
-        ):
-            return True
-    return False
+        result = state.results.get(cast(ResultId, value))
+        if result is None or result.payload is None or result.redacted:
+            return None
+        linked = tuple(str(ref) for ref in result.payload.evidence_refs)
+        for ref in linked:
+            row = state.evidence.get(cast(EvidenceId, ref))
+            if row is None or row.payload is None or row.redacted:
+                return None
+        refs.update(linked or (value,))
+    return frozenset(refs)
+
+
+def _reduced_scope_repair_in_view(
+    finding: Finding,
+    finding_source_frontier: int,
+    check: CheckRecordedPayload,
+    state: ProjectionState | None,
+) -> bool:
+    """Whether a reduced review packet provably included the material this finding depends on.
+
+    The check must record the packet's included frontier references (issue #904). Every subject of
+    the finding and every repair reference its response links must be among them, and so must at
+    least one material change made after the finding: the repair the later review is credited with
+    judging. A missing record, an unreadable response or linked row, or any omitted relevant
+    reference is no proof, so the reduced scope keeps blocking.
+    """
+
+    included_refs = check.semantic_included_refs
+    if included_refs is None or state is None or state.frontier < check.subject_frontier.sequence:
+        return False
+    included = frozenset(included_refs)
+    if any(str(ref) not in included for ref in finding.subject_refs):
+        return False
+    linked = _response_repair_refs(finding, state)
+    if linked is None or not linked <= included:
+        return False
+    return any(
+        key in included or source in included
+        for key, source in _material_changes(finding, finding_source_frontier, check, state)
+    )
 
 
 def qualifying_check_resolves(
@@ -502,9 +584,23 @@ def resolution_blockers(
             # The later review still must complete and not return the issue. Its unchanged
             # capture limitations remain on the receipt; a response alone changes nothing.
             tolerated |= original_gaps & _SEMANTIC_BASELINE_CAPTURE_GAPS
+        changed = _semantic_subject_changed(finding, finding_source_frontier, check, proof_state)
+        if (
+            changed
+            and SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP in gaps & tolerated
+            and not _reduced_scope_repair_in_view(
+                finding, finding_source_frontier, check, proof_state
+            )
+        ):
+            # An unchanged reduced scope is a baseline only for a later review whose packet
+            # provably carried this finding's subjects, its linked repair material and the change
+            # itself (issue #904, PR930-F1). Otherwise the same code says nothing about whether
+            # the repair was in view, so it keeps blocking.
+            tolerated -= {SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP}
+            reasons.append("finding_material_outside_reduced_review_scope")
         if not _semantic_freshness_proven(check.coverage.ledger_freshness, gaps, tolerated):
             reasons.append("freshness_unproven")
-        if not _semantic_subject_changed(finding, finding_source_frontier, check, proof_state):
+        if not changed:
             # A stochastic reviewer that merely does not repeat an issue proves nothing; the
             # issue may only close over state that changed materially after it was raised.
             reasons.append("no_material_change_since_finding")

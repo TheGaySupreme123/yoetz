@@ -3491,9 +3491,10 @@ and receipt coverage as partial; selection grants no additional content/disclosu
 Captured prose is not scanned to invent structural dependencies. The complete local-check case and
 its integrity checks remain unchanged. The code is disclosure, not a proof limitation of the local
 case (#904): it never blocks resolution of a local finding. For an AI-powered finding it joins the
-capture baseline, so it blocks only when it is new since the review that raised the finding.
-Until the relevance rule on #904 lands, that interim does not ask whether the omitted references
-included the finding's own material.
+capture baseline, so it blocks when it is new since the review that raised the finding, and also
+when the later packet's recorded included references (`semantic_included_refs` on
+`check_recorded`) do not show the finding's subjects, its response-linked repair material and a
+change made after it (see the #904 resolution paragraph below).
 
 Recorded parent lineage enters the case as structural items only: identities, lifecycle, freshness,
 coverage tokens, and finding identities. A document that fits in one 16 KiB item stays
@@ -6833,13 +6834,32 @@ those gaps; while one is present it keeps blocking. Resolution classifies select
 `redacted_object`), which neither proof class tolerates and no baseline absorbs. `truncated_payload`
 keeps blocking until its source is settled. Coverage wording and every receipt gap are unchanged.
 
+The baseline tolerates `semantic_reference_scope_reduced` for a semantic finding only when the
+later check proves its reduced packet carried the finding's material (PR930-F1). A completed
+reduced review records its packet's included frontier references on the check as
+`semantic_included_refs`. The record contains typed ledger references only, ASCII-sorted, 1 to
+2,048 of them. It appears only on `check_recorded` 1.3.0 beside `semantic_conclusion` and the
+`semantic_reference_scope_reduced` coverage code. An empty or larger selection records none. The
+record must contain every finding subject and every repair reference linked by the finding's latest
+readable response. Cited evidence counts, and so does the evidence of a cited result, or the result
+itself when it cites no evidence. The record must also contain at least one material change after
+the finding, named by its logical row or by its source event. Otherwise the code stays a blocker and
+the explanation adds `finding_material_outside_reduced_review_scope`. A check without the record is
+treated as omitting everything. An unreadable response or linked row cannot be shown in view. When
+nothing changed materially, only `no_material_change_since_finding` is named. The response event
+itself is not required; an acknowledgement is not repair evidence. ADR-006 (#904) holds the truth
+table.
+
 
 `check_recorded` version `1.3.0` adds required `semantic_conclusion` on succeeded attempts. The
 closed values are `no_material_discrepancy`, `challenges_returned`, and `insufficient_packet`.
 Versions 1.0–1.2 keep their frozen payload shapes and read without a recorded conclusion. Only
 an explicitly assessable conclusion enables capture-baseline resolution. An unassessable
 conclusion blocks semantic absence proof even if a producer omitted its coverage-gap marker.
-Failed and local-only attempts retain their existing version. The owning schema generator and
+Failed and local-only attempts retain their existing version. Version 1.3.0 also admits optional
+`semantic_included_refs` (#904): the reduced packet's included frontier references. It is present
+only with `semantic_conclusion` and the `semantic_reference_scope_reduced` coverage code. It is
+omitted on unreduced reviews, so their bytes are unchanged. The owning schema generator and
 `fixtures/canonical/check-conclusion-1.3.0.case.json` lock the new and legacy bytes.
 
 `resolution_attempt_required` is the `respond` rejection for an `acknowledged` response to a

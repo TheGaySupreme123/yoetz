@@ -1289,6 +1289,21 @@ def _check_recorded_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     }
     cast(list[JsonValue], document["required"]).append("semantic_conclusion")
     properties["semantic_status"] = {"const": "succeeded", "type": "string"}
+    # Issue #904: the reduced review packet's included frontier references. The runtime also
+    # requires the reduced-scope coverage code beside it and ASCII-sorted order.
+    properties["semantic_included_refs"] = {
+        "items": {
+            "pattern": (
+                "^(act|clm|evd|evt|fnd|obl|res)_"
+                "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            ),
+            "type": "string",
+        },
+        "maxItems": 2048,
+        "minItems": 1,
+        "type": "array",
+        "uniqueItems": True,
+    }
     return document
 
 

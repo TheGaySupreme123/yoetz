@@ -1891,6 +1891,7 @@ class LedgerPort(Protocol):
         *,
         scope: CheckScopeModel | None = None,
         semantic_conclusion: str | None = None,
+        semantic_included_refs: tuple[str, ...] | None = None,
     ) -> CheckCommitResult: ...
 
     async def fail_check_if_current(

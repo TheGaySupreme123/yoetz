@@ -251,6 +251,7 @@ class _Ledger:
         *,
         scope: CheckScopeModel | None = None,
         semantic_conclusion: str | None = None,
+        semantic_included_refs: tuple[str, ...] | None = None,
     ) -> CheckCommitResult:
         assert frozen == self.frozen
         if self.commit_failure is not None:

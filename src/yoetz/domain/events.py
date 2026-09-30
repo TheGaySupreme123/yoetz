@@ -121,12 +121,14 @@ __all__ = [
     "MAX_REASON_BYTES",
     "MAX_REF_LIST",
     "MAX_REQUESTED_ITEMS",
+    "MAX_SEMANTIC_INCLUDED_REFS",
     "MAX_TEXT_BYTES",
     "OBSERVATION_COORDINATOR_ACTOR_ID",
     "PAYLOAD_TYPES",
     "CLAIM_SCHEMA_VERSION",
     "COORDINATION_EVENT_SCHEMA_VERSION",
     "SCHEMA_VERSION",
+    "SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP",
     "EVIDENCE_SCHEMA_VERSION",
     "EVIDENCE_SCHEMA_VERSIONS",
     "EVIDENCE_TYPED_SCHEMA_VERSION",
@@ -257,6 +259,11 @@ MAX_REF_LIST: Final = 64
 MAX_CAUSAL_PARENTS: Final = 32
 MAX_REQUESTED_ITEMS: Final = 64
 MAX_ALTERNATIVES: Final = 16
+# The reduced AI-powered review packet's included frontier references recorded on its check
+# (issue #904). A packet whose dependency closure is larger records none, so no absence proof can
+# rely on it and its reduced scope keeps blocking semantic resolution.
+MAX_SEMANTIC_INCLUDED_REFS: Final = 2_048
+SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP: Final = "semantic_reference_scope_reduced"
 
 _MAX_SAFE_INTEGER: Final = 9_007_199_254_740_991
 _MAX_SQLITE_INTEGER: Final = 9_223_372_036_854_775_807
@@ -508,6 +515,30 @@ def _text_tuple(
     if unique and len(result) != len(set(result)):
         raise ProtocolValueError("duplicate_set_member")
     return result
+
+
+_INCLUDED_REF_CONSTRUCTORS: Final[Mapping[str, Callable[[object], str]]] = MappingProxyType(
+    {
+        "act_": action_id,
+        "clm_": claim_id,
+        "evd_": evidence_id,
+        "evt_": event_id,
+        "fnd_": finding_id,
+        "obl_": obligation_id,
+        "res_": result_id,
+    }
+)
+
+
+def _included_ref(value: object) -> str:
+    """One typed ledger reference a review packet can carry; never free text."""
+
+    if type(value) is not str:
+        raise ProtocolValueError("invalid_event_value_type")
+    constructor = _INCLUDED_REF_CONSTRUCTORS.get(value[:4])
+    if constructor is None:
+        raise ProtocolValueError("invalid_event_value_type")
+    return constructor(value)
 
 
 def _evidence_result_ref(value: object) -> EvidenceId | ResultId:
@@ -2209,6 +2240,10 @@ class CheckRecordedPayload:
     projection_version: str
     semantic_provenance: SemanticProvenance | None = None
     semantic_conclusion: str | None = None
+    # The frontier references a reduced AI-powered review packet included (its selected dependency
+    # closure, issue #904). Present only on a completed review whose coverage records the reduced
+    # scope; resolution tests a finding's relevant material against it.
+    semantic_included_refs: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "mode", _exact_enum(self.mode, CheckMode))
@@ -2279,6 +2314,23 @@ class CheckRecordedPayload:
             or status is not SemanticStatus.SUCCEEDED
         ):
             raise ProtocolValueError("invalid_event_value_type")
+        if self.semantic_included_refs is not None:
+            if (
+                self.semantic_conclusion is None
+                or SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP not in self.coverage.known_gaps
+            ):
+                raise ProtocolValueError("invalid_event_value_type")
+            object.__setattr__(
+                self,
+                "semantic_included_refs",
+                _id_tuple(
+                    self.semantic_included_refs,
+                    _included_ref,
+                    minimum=1,
+                    maximum=MAX_SEMANTIC_INCLUDED_REFS,
+                    field="semantic_included_refs",
+                ),
+            )
         if type(self.engine_version) is not str or self.engine_version != "0.1.0":
             raise ProtocolValueError("invalid_event_value_type")
         if type(self.projection_version) is not str or self.projection_version != "yoetz/0.1.0":
@@ -2999,7 +3051,7 @@ _PAYLOAD_SHAPES: Final[Mapping[str, tuple[frozenset[str], frozenset[str]]]] = Ma
                     "projection_version",
                 }
             ),
-            frozenset({"semantic_provenance", "semantic_conclusion"}),
+            frozenset({"semantic_provenance", "semantic_conclusion", "semantic_included_refs"}),
         ),
         "receipt_recorded": (
             frozenset(
@@ -3455,6 +3507,11 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
             engine_version=cast(str, _field(source, "engine_version")),
             projection_version=cast(str, _field(source, "projection_version")),
             semantic_conclusion=cast(str | None, _optional(source, "semantic_conclusion")),
+            semantic_included_refs=(
+                None
+                if (included := _optional(source, "semantic_included_refs")) is None
+                else cast(tuple[str, ...], tuple(_array(included)))
+            ),
             semantic_provenance=(
                 None
                 if provenance_value is None
@@ -3941,6 +3998,7 @@ def encode_payload(payload: EventPayload) -> JsonValue:
             else semantic_provenance_to_json(value.semantic_provenance),
         )
         _optional_value(result, "semantic_conclusion", value.semantic_conclusion)
+        _optional_value(result, "semantic_included_refs", value.semantic_included_refs)
         return _json_object(result)
     if payload_type is ReceiptRecordedPayload:
         value = cast(ReceiptRecordedPayload, payload)

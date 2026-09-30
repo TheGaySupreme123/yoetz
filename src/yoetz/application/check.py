@@ -10,7 +10,7 @@ from typing import Final, Literal, Protocol, cast
 
 from yoetz.application.ledger_snapshot import projection_for_records
 from yoetz.domain.coordination import CoordinationError, CoordinationErrorCode
-from yoetz.domain.events import LedgerRecord
+from yoetz.domain.events import MAX_SEMANTIC_INCLUDED_REFS, LedgerRecord
 from yoetz.domain.findings import (
     FINDING_KIND_TRAITS,
     CandidateFinding,
@@ -968,6 +968,8 @@ class FinalSemanticEvaluation:
     # rather than let the shortening pass as material the author chose not to send.
     case_content_over_item_limit: bool = False
     case_reference_scope_reduced: bool = False
+    # The frontier references a reduced packet included (issue #904); None when not reduced.
+    case_included_refs: frozenset[str] | None = None
     case_content_gaps: tuple[str, ...] = ()
     # Set only on the nonterminal awaiting_human branch: what the caller must do to resume this
     # exact request. Every terminal outcome leaves it None. A one-use disclosure wait keeps its
@@ -979,6 +981,12 @@ class FinalSemanticEvaluation:
             type(self.case_content_gaps) is not tuple
             or self.case_content_gaps != tuple(sorted(set(self.case_content_gaps)))
             or not set(self.case_content_gaps) <= SEMANTIC_CASE_CONTENT_GAPS
+        ):
+            raise _invalid("semantic_judgment_invalid")
+        if self.case_included_refs is not None and (
+            type(self.case_included_refs) is not frozenset
+            or not self.case_reference_scope_reduced
+            or any(type(ref) is not str for ref in self.case_included_refs)
         ):
             raise _invalid("semantic_judgment_invalid")
         validate_semantic_outcome(self.status, self.reason)
@@ -1827,6 +1835,26 @@ def semantic_capture_baseline_gaps(result: FinalSemanticEvaluation) -> frozenset
     return frozenset(gaps)
 
 
+def semantic_included_refs(result: FinalSemanticEvaluation) -> tuple[str, ...] | None:
+    """The check record of a completed reduced review's included references (issue #904).
+
+    Only a completed review that reached a conclusion and ran over a reduced reference scope
+    records them. An empty or oversized selection records none, so no finding resolution can rely
+    on it and the reduced scope keeps blocking AI-powered absence proof.
+    """
+
+    refs = result.case_included_refs
+    if (
+        refs is None
+        or not result.case_reference_scope_reduced
+        or result.status is not SemanticStatus.SUCCEEDED
+        or result.judgment is None
+        or not 1 <= len(refs) <= MAX_SEMANTIC_INCLUDED_REFS
+    ):
+        return None
+    return tuple(sorted(refs, key=str.encode))
+
+
 def validate_semantic_judgment(
     case: DeterministicCase,
     deterministic: tuple[Finding, ...],
@@ -2099,6 +2127,7 @@ def _judgment_rejected_evaluation(
         # The rejection restates the outcome, not the case: a truncated case stays truncated.
         case_content_over_item_limit=result.case_content_over_item_limit,
         case_reference_scope_reduced=result.case_reference_scope_reduced,
+        case_included_refs=result.case_included_refs,
         case_content_gaps=result.case_content_gaps,
     )
 
@@ -2502,6 +2531,7 @@ async def execute_check_commit(
                 and semantic_result.judgment is not None
                 else None
             ),
+            semantic_included_refs=semantic_included_refs(semantic_result),
         )
         preview = _lineage_preview(lineage_evaluation, frozen.case.frontier)
         projected = committed if preview is None else replace(committed, children=preview)

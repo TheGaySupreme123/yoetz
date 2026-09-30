@@ -167,9 +167,12 @@ In a long session the AI-powered review sees a bounded part of the record, and c
 with `semantic_reference_scope_reduced`. That limitation stays on every check, status view, and
 receipt. It does not stop a repaired local finding from resolving, because the local check still
 reads the whole record. An AI-powered finding raised under the same bounded review can resolve
-once you repair it and a later AI-powered review completes without returning it. A review whose
-scope became bounded only after the finding was raised, or a clipped payload
-(`truncated_payload`), still leaves the finding current.
+once you repair it and a later AI-powered review completes without returning it, provided that
+review's bounded selection included the finding's subject, the repair evidence your response
+cites, and the change you made. If it did not, the finding stays current and names
+`finding_material_outside_reduced_review_scope`; check again after the repair is recorded and cited
+in your response. A review whose scope became bounded only after the finding was raised, or a
+clipped payload (`truncated_payload`), still leaves the finding current.
 
 A resolved finding is not erased. Status still lists it (`resolved: true`, shown when
 `include_resolved` is requested), the receipt still carries it as history, and the receipt wording

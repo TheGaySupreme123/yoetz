@@ -92,6 +92,7 @@ from yoetz.ports.ledger import (
     AppendCommand,
     AppendEntry,
     CheckCommitResult,
+    FrozenCase,
     LedgerPort,
     OperationKind,
     ProjectionView,
@@ -4742,11 +4743,14 @@ def _scripted_semantic_evaluator(
     case_gaps: tuple[str, ...],
     over_item_limit: bool,
     scope_reduced: list[bool] | None = None,
+    omitted_refs: list[tuple[str, ...]] | None = None,
 ) -> Callable[..., Awaitable[object]]:
     """Answer each check with the next scripted conclusion under the same capture limits.
 
     ``scope_reduced`` scripts, per check, whether the review packet carried a reduced reference
-    scope; omitted, no packet is reduced.
+    scope; omitted, no packet is reduced. ``omitted_refs`` scripts, per reduced check, which
+    frozen references its packet left out; every other one is recorded as included. Omitted, a
+    reduced packet records no included references at all.
     """
 
     async def evaluate(
@@ -4765,12 +4769,18 @@ def _scripted_semantic_evaluator(
             if conclusion == "challenges_returned"
             else SemanticJudgment("no_material_discrepancy", ())
         )
+        reduced = bool(scope_reduced and scope_reduced.pop(0))
+        included: frozenset[str] | None = None
+        if reduced and omitted_refs:
+            allowed = cast(FrozenCase, frozen).case.allowed_ids
+            included = frozenset(str(ref) for ref in allowed) - set(omitted_refs.pop(0))
         return replace(
             raised,
             judgment=judgment,
             case_content_gaps=case_gaps,
             case_content_over_item_limit=over_item_limit,
-            case_reference_scope_reduced=bool(scope_reduced and scope_reduced.pop(0)),
+            case_reference_scope_reduced=reduced,
+            case_included_refs=included,
         )
 
     return evaluate
@@ -5099,6 +5109,8 @@ async def test_semantic_finding_resolves_under_its_recorded_reduced_reference_sc
             case_gaps=("content_unselected",),
             over_item_limit=False,
             scope_reduced=[True, True, True],
+            # Each packet leaves out the unrelated obligation event and carries everything else.
+            omitted_refs=[(protocol_id("evt_", seed + 2),)] * 3,
         ),
     )
     started, checked, _obligation = await _bootstrap_finding(
@@ -5135,6 +5147,131 @@ async def test_semantic_finding_resolves_under_its_recorded_reduced_reference_sc
     assert stored is not None and stored.state == rebuilt
 
     await _assert_reduced_scope_disclosed(app, started, seed + 50, repaired.result_frontier)
+
+
+@pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))
+async def test_a_reduced_review_that_omitted_the_repair_leaves_the_semantic_finding_open(
+    ledger_backend: Literal["memory", "sqlite"],
+) -> None:
+    """PR930-F1 through the real check, replay, status and receipt path.
+
+    The finding was raised under a reduced reference scope, the agent published repair evidence
+    and answered the finding with it, and a later completed review under the same bound did not
+    return the issue. That review's packet omitted the repair evidence, so it proves nothing about
+    the repair: the finding stays current and every surface keeps disclosing the bounded scope. A
+    check that records no included references proves nothing either. The next review whose packet
+    carried the repair resolves it.
+    """
+
+    seed = 5900
+    repair_evidence = protocol_id("evd_", seed + 30)
+    repair_event = protocol_id("evt_", seed + 32)
+    conclusions = [
+        "challenges_returned",
+        "no_material_discrepancy",
+        "no_material_discrepancy",
+        "no_material_discrepancy",
+    ]
+    omitted = [
+        (protocol_id("evt_", seed + 2),),
+        (repair_evidence, repair_event),
+        (protocol_id("evt_", seed + 2),),
+    ]
+    reduced = [True, True, True, True]
+    app, runtime, _ = _build_app(
+        seed_offset=59,
+        semantic="optional",
+        ledger_backend=ledger_backend,
+        semantic_evaluator=_scripted_semantic_evaluator(
+            protocol_id("clm_", seed + 5),
+            conclusions,
+            case_gaps=("content_unselected",),
+            over_item_limit=False,
+            scope_reduced=reduced,
+            omitted_refs=omitted,
+        ),
+    )
+    started, checked, _obligation = await _bootstrap_finding(
+        app, seed=seed, mode="semantic_if_configured"
+    )
+    finding = next(
+        item for item in checked.findings if item.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+    )
+    assert _SCOPE_REDUCED in finding.coverage.known_gaps
+
+    published = await _publish_repair_evidence(app, started, seed + 30, checked.result_frontier)
+    answered = await app.respond(
+        RespondRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 35)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(published.result_frontier),
+                "finding_id": finding.finding_id,
+                "finding_frontier": _frontier(checked.result_frontier),
+                "disposition": "acknowledged",
+                "reason": "Recorded the result that supports the claim.",
+                "evidence_refs": (repair_evidence,),
+            }
+        )
+    )
+    frontier: Frontier | FrontierModel = answered.result_frontier
+
+    async def recheck_leaves_open(request_seed: int, reason: str) -> CheckCommitResult:
+        repaired = await _semantic_recheck(app, started, request_seed, frontier)
+        assert finding.finding_id not in {item.finding_id for item in repaired.findings}
+        assert _SCOPE_REDUCED in repaired.coverage.known_gaps
+        view = await _findings_view(app, started, request_seed + 1, include_resolved=True)
+        row = next(item for item in view.items if item.finding_id == finding.finding_id)
+        assert row.resolved is False
+        assert reason in str(row.detail)
+        assert "coverage:" + _SCOPE_REDUCED in str(row.detail)
+        return repaired
+
+    omitted_repair = await recheck_leaves_open(
+        seed + 40, "finding_material_outside_reduced_review_scope"
+    )
+    frontier = omitted_repair.result_frontier
+    # A reduced review that records no included references is no proof either.
+    omitted.clear()
+    unrecorded = await recheck_leaves_open(
+        seed + 44, "finding_material_outside_reduced_review_scope"
+    )
+    await _assert_reduced_scope_disclosed(app, started, seed + 50, unrecorded.result_frontier)
+
+    ledger, _objects = next(iter(runtime.resources.values()))
+    records = tuple([item async for item in ledger.load_events(started.session_id)])
+    rebuilt = replay(records)
+    assert not finding_is_resolved(rebuilt, finding.finding_id)
+    stored = await ledger.load_projection(started.session_id, ProjectionView.CANDIDATE_FINDINGS)
+    assert stored is not None and stored.state == rebuilt
+    included = [
+        row.payload.semantic_included_refs
+        for row in records
+        if isinstance(row.payload, CheckRecordedPayload)
+    ]
+    assert included[0] is not None and repair_evidence not in included[0]
+    assert included[1] is not None and repair_evidence not in included[1]
+    assert included[2] is None
+
+    # The next review whose packet carried the repair evidence resolves the finding.
+    omitted.append((protocol_id("evt_", seed + 2),))
+    status = await app.status(
+        StatusRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 60)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "view": "compact",
+                "limit": "10",
+            }
+        )
+    )
+    in_view = await _semantic_recheck(app, started, seed + 61, status.result_frontier)
+    assert finding.finding_id not in {item.finding_id for item in in_view.findings}
+    view = await _findings_view(app, started, seed + 62, include_resolved=True)
+    assert next(item for item in view.items if item.finding_id == finding.finding_id).resolved
+    assert conclusions == [] and reduced == []
 
 
 async def _resolve_pre_upgrade_finding(
@@ -5175,6 +5312,7 @@ async def _resolve_pre_upgrade_finding(
             case_gaps=("content_unselected",),
             over_item_limit=False,
             scope_reduced=[True, True],
+            omitted_refs=[(protocol_id("evt_", seed + 2),)] * 2,
         ),
     )
     monkeypatch.setattr(check_module, "semantic_capture_baseline_gaps", pre_upgrade_stamp)

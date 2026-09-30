@@ -3986,6 +3986,7 @@ def _privacy_gated_semantic_evaluator(
         withheld: tuple[str, ...] = ()
         over_item_limit = False
         reference_scope_reduced = False
+        included_refs: frozenset[str] | None = None
         content_gaps: tuple[str, ...] = ()
 
         def _on_lease_renewed(renewed: object) -> None:
@@ -4324,6 +4325,9 @@ def _privacy_gated_semantic_evaluator(
             # The builder folds the gap into the packet coverage the reviewer sees; the check
             # result is a separate coverage fold, so carry the fact rather than re-deriving it.
             reference_scope_reduced = semantic_case.omitted_reference_count > 0
+            # The reduced packet's included frontier references go onto the check record so
+            # finding resolution can ask whether a finding's material was in view (issue #904).
+            included_refs = semantic_case.frontier_refs if reference_scope_reduced else None
             content_gaps = tuple(
                 sorted(
                     set(semantic_case.packet.coverage.known_gaps)
@@ -4392,6 +4396,7 @@ def _privacy_gated_semantic_evaluator(
                     _map_egress_to_final(result, ids),
                     case_content_over_item_limit=over_item_limit,
                     case_reference_scope_reduced=reference_scope_reduced,
+                    case_included_refs=included_refs,
                     case_content_gaps=content_gaps,
                 )
 
@@ -4420,6 +4425,7 @@ def _privacy_gated_semantic_evaluator(
                     withheld_review_categories=withheld,
                     case_content_over_item_limit=over_item_limit,
                     case_reference_scope_reduced=reference_scope_reduced,
+                    case_included_refs=included_refs,
                     case_content_gaps=content_gaps,
                 )
 
@@ -4707,6 +4713,7 @@ def _privacy_gated_semantic_evaluator(
                         withheld_review_categories=withheld,
                         case_content_over_item_limit=over_item_limit,
                         case_reference_scope_reduced=reference_scope_reduced,
+                        case_included_refs=included_refs,
                         case_content_gaps=content_gaps,
                     )
                 return FinalSemanticEvaluation(
@@ -4719,6 +4726,7 @@ def _privacy_gated_semantic_evaluator(
                     withheld_review_categories=withheld,
                     case_content_over_item_limit=over_item_limit,
                     case_reference_scope_reduced=reference_scope_reduced,
+                    case_included_refs=included_refs,
                     case_content_gaps=content_gaps,
                     continuation=continuation,
                 )
@@ -4764,6 +4772,7 @@ def _privacy_gated_semantic_evaluator(
                 withheld_review_categories=withheld,
                 case_content_over_item_limit=over_item_limit,
                 case_reference_scope_reduced=reference_scope_reduced,
+                case_included_refs=included_refs,
                 case_content_gaps=content_gaps,
             )
 
