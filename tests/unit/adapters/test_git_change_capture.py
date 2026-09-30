@@ -873,21 +873,25 @@ def test_core_worktree_written_after_discovery_never_redirects_the_diff(
     assert "export const mine = 1;" in text
 
 
-def test_pack_hard_linked_from_another_repository_is_refused(tmp_path: Path) -> None:
+def test_pack_hard_linked_from_another_repository_is_shown_once_every_blob_verifies(
+    tmp_path: Path,
+) -> None:
+    """A second name is not a leak: the blob hashes to the name the task base gives it."""
+
     repository = _repository(tmp_path)
     outside = tmp_path / "outside-repo"
     outside.mkdir(mode=0o700)
     _git(outside, "init", "--quiet")
-    (outside / "secret.txt").write_text("PACKED OUTSIDE SECRET\n", encoding="utf-8")
-    oid = _git(outside, "hash-object", "-w", "--", "secret.txt").strip()
-    _git(outside, "add", "--", "secret.txt")
+    (outside / "shared.txt").write_text("shared packed content\n", encoding="utf-8")
+    oid = _git(outside, "hash-object", "-w", "--", "shared.txt").strip()
+    _git(outside, "add", "--", "shared.txt")
     _commit(outside, "outside")
     _git(outside, "repack", "-a", "-d", "--quiet")
     pack_directory = outside / ".git" / "objects" / "pack"
     for entry in pack_directory.iterdir():
         os.link(entry, repository / ".git" / "objects" / "pack" / entry.name)
-    # The task base names the foreign blob, which the repository reaches only through that pack.
-    _git(repository, "update-index", "--add", "--cacheinfo", f"100644,{oid},leak.txt")
+    # The task base names the blob, which the repository reaches only through that pack.
+    _git(repository, "update-index", "--add", "--cacheinfo", f"100644,{oid},shared.txt")
     _git(
         repository,
         "-c",
@@ -897,17 +901,34 @@ def test_pack_hard_linked_from_another_repository_is_refused(tmp_path: Path) -> 
         "commit",
         "--quiet",
         "-m",
-        "reference a foreign blob",
+        "reference the shared blob",
     )
     base = GitChangeCaptureAdapter().read_task_base(os.fspath(repository))
-    (repository / "leak.txt").write_text("replaced\n", encoding="utf-8")
+    (repository / "shared.txt").write_text("replaced\n", encoding="utf-8")
 
-    try:
-        capture = GitChangeCaptureAdapter().capture(os.fspath(repository), base)
-    except ChangeCaptureUnavailable as exc:
-        assert exc.reason in {"unsafe_root", "unsupported_repository"}
-        return
-    assert "PACKED OUTSIDE SECRET" not in _text(capture)
+    capture = GitChangeCaptureAdapter().capture(os.fspath(repository), base)
+    text = _text(capture)
+
+    assert "-shared packed content" in text and "+replaced" in text
+    assert "  M shared.txt (+1 -1)" in text
+    assert capture.omitted_files == 0 and not capture.truncated
+
+
+def test_local_clone_with_hard_linked_loose_objects_captures_normally(tmp_path: Path) -> None:
+    source = _repository(tmp_path)
+    _git(tmp_path, "clone", "--quiet", "--local", os.fspath(source), "clone")
+    clone = tmp_path / "clone"
+    clone.chmod(0o700)
+    oid = _git(clone, "rev-parse", "HEAD:selectors.ts").strip()
+    assert _loose_object_path(clone, oid).stat().st_nlink > 1  # the clone shares its objects
+    base = GitChangeCaptureAdapter().read_task_base(os.fspath(clone))
+    (clone / "selectors.ts").write_text("export const cloned = 1;\n", encoding="utf-8")
+
+    capture = GitChangeCaptureAdapter().capture(os.fspath(clone), base)
+    text = _text(capture)
+
+    assert "-  return String(value);" in text and "+export const cloned = 1;" in text
+    assert capture.omitted_files == 0 and not capture.truncated
 
 
 def test_loose_object_swapped_only_during_the_diff_is_never_shown(
@@ -985,3 +1006,40 @@ def test_hard_link_swapped_in_only_while_counting_never_reaches_the_header(
     assert swaps
     assert "(+7 " not in text and "x6" not in text
     assert "  M tracked.txt (+1 -1)" in text
+
+
+def test_alternates_are_unsafe_root_whether_static_or_written_during_the_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = _repository(tmp_path)
+    (repository / "selectors.ts").write_text("export const shown = 7;\n", encoding="utf-8")
+    alternates = repository / ".git" / "objects" / "info" / "alternates"
+    alternates.parent.mkdir(exist_ok=True)
+    alternates.write_text(os.fspath(tmp_path / "elsewhere") + "\n", encoding="utf-8")
+
+    with pytest.raises(ChangeCaptureUnavailable) as static:
+        GitChangeCaptureAdapter().capture(os.fspath(repository), None)
+    alternates.unlink()
+
+    def mutate(_: int) -> None:
+        alternates.write_text(os.fspath(tmp_path / "elsewhere") + "\n", encoding="utf-8")
+
+    _mutate_on(monkeypatch, "--raw", mutate, times=1)
+    with pytest.raises(ChangeCaptureUnavailable) as written:
+        GitChangeCaptureAdapter().capture(os.fspath(repository), None)
+
+    assert static.value.reason == written.value.reason == "unsafe_root"
+
+
+def test_submodule_checkout_opened_as_the_root_is_unsafe_root(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    checkout = tmp_path / "checkout"
+    checkout.mkdir(mode=0o700)
+    (checkout / ".git").write_text(
+        "gitdir: " + os.fspath(repository / ".git") + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ChangeCaptureUnavailable) as raised:
+        GitChangeCaptureAdapter().capture(os.fspath(checkout), None)
+
+    assert raised.value.reason == "unsafe_root"

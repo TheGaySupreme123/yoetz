@@ -581,10 +581,13 @@ class GitChangeCaptureAdapter:
         """Refuse an object store Git would reach through a link or another repository.
 
         Git follows links inside ``.git`` and trusts every object file it opens, so an object
-        store, a pack or an index that is a link, a second name for another repository's file,
-        or a ``commondir`` or ``alternates`` naming another repository's store could hand the diff
-        bytes from outside the workspace. Every pack-directory entry must be a regular file of
-        the service user, not group- or world-writable, with a single link. Returns a snapshot the
+        store, a pack or an index that is a link, or a ``commondir`` or ``alternates`` naming
+        another repository's store, could hand the diff bytes from outside the workspace. Every
+        pack-directory entry must be a regular file of the service user, not group- or
+        world-writable. A second name (a local ``git clone`` hard-links its source's objects) is
+        accepted: what makes a blob this repository's is that it hashes to the name the base tree
+        or index gives it, which ``_verify_object`` proves for every blob a shown diff reads,
+        whatever the file's link count. Returns a snapshot the
         closing stability check compares: the identity of every pack-directory entry and of the
         object directories themselves (``objects``, ``info``, ``pack`` and each fan-out
         directory), whose modification and change times move whenever an object file is created,
@@ -602,10 +605,12 @@ class GitChangeCaptureAdapter:
             raise ChangeCaptureUnavailable("unsafe_root") from None
         if not stat.S_ISDIR(objects.st_mode) or objects.st_uid != expected_uid:
             raise ChangeCaptureUnavailable("unsafe_root")
-        for name in (
-            ".git/commondir",
-            ".git/objects/info/alternates",
-            ".git/objects/info/http-alternates",
+        # Alternates are refused as ``unsafe_root`` exactly as the ADR-011 open fence refuses
+        # them; a ``commondir`` (a borrowed store the open fence does not see) is unsupported.
+        for name, reason in (
+            (".git/objects/info/alternates", "unsafe_root"),
+            (".git/objects/info/http-alternates", "unsafe_root"),
+            (".git/commondir", "unsupported_repository"),
         ):
             try:
                 os.stat(name, dir_fd=descriptor, follow_symlinks=False)
@@ -613,7 +618,7 @@ class GitChangeCaptureAdapter:
                 continue
             except OSError:
                 raise ChangeCaptureUnavailable("unsafe_root") from None
-            raise ChangeCaptureUnavailable("unsupported_repository")
+            raise ChangeCaptureUnavailable(reason)
         for name in (".git/objects/info", ".git/objects/pack"):
             try:
                 facts = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
@@ -650,10 +655,8 @@ class GitChangeCaptureAdapter:
                     facts = entry.stat(follow_symlinks=False)
                     if not stat.S_ISREG(facts.st_mode):
                         raise ChangeCaptureUnavailable("unsafe_root")
-                    if not _owned_single_link(facts):
-                        # Shared with another repository (``git clone`` of a local path hard
-                        # links its packs): its objects are not provably this repository's.
-                        raise ChangeCaptureUnavailable("unsupported_repository")
+                    if not _owner_only(_identity(facts)):
+                        raise ChangeCaptureUnavailable("unsafe_root")
                     snapshot.append(
                         (b".git/objects/pack/" + os.fsencode(entry.name), _identity(facts))
                     )
@@ -851,8 +854,9 @@ class GitChangeCaptureAdapter:
     ) -> _OmitReason | None:
         """Prove one blob a shown diff read is the object its name commits to.
 
-        A loose object must be a regular file of the service user with a single link, reached
-        without a link, still the file whose identity was taken before the diff read it; it is
+        A loose object must be a regular file of the service user, not group- or world-writable,
+        reached without a link, still the file whose identity was taken before the diff read it
+        (a hard-linked one, as a local clone makes, is fine: its bytes must still hash); it is
         inflated and hashed from that same open descriptor. The object is also read the way the
         diff read it (``git cat-file``, packs first) and hashed. Packs are fenced and pinned by
         ``_refuse_unsafe_object_store``.
@@ -863,7 +867,7 @@ class GitChangeCaptureAdapter:
         if fan_out_facts is not None and not stat.S_ISDIR(fan_out_facts[0]):
             return "object_unverified"
         if fan_out_facts is not None and loose_facts is not None:
-            if not stat.S_ISREG(loose_facts[0]) or not _identity_owned_single_link(loose_facts):
+            if not stat.S_ISREG(loose_facts[0]) or not _owner_only(loose_facts):
                 return "object_unverified"
             reason = _verify_loose_object(pinned.descriptor, loose, loose_facts, object_format, oid)
             if reason is not None:
@@ -1313,16 +1317,12 @@ def _loose_paths(oid: str) -> tuple[bytes, bytes]:
     return fan_out, fan_out + b"/" + oid[2:].encode("ascii")
 
 
-def _owned_single_link(facts: os.stat_result) -> bool:
-    return _identity_owned_single_link(_identity(facts))
-
-
-def _identity_owned_single_link(identity: _Identity) -> bool:
-    """A file of the service user, not group- or world-writable, with exactly one name."""
+def _owner_only(identity: _Identity) -> bool:
+    """A file of the service user that no other user may write."""
 
     expected_uid = os.geteuid() if hasattr(os, "geteuid") else os.getuid()
-    mode, _, _, _, _, _, links, owner = identity
-    return owner == expected_uid and links == 1 and not stat.S_IMODE(mode) & 0o022
+    mode, _, _, _, _, _, _, owner = identity
+    return owner == expected_uid and not stat.S_IMODE(mode) & 0o022
 
 
 def _verify_loose_object(
