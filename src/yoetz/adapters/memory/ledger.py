@@ -11,8 +11,6 @@ from enum import StrEnum
 from typing import Final, Literal, cast
 
 from yoetz.domain.events import (
-    CHECK_EVENT_SCHEMA_VERSION,
-    SEMANTIC_EVENT_SCHEMA_VERSION,
     AcceptedEvent,
     ActionRecordedPayload,
     AssignmentRecordedPayload,
@@ -44,6 +42,7 @@ from yoetz.domain.events import (
     SessionOpenedPayload,
     UnknownEvent,
     WriterChain,
+    check_event_schema,
     encode_payload,
     finding_event_schema,
     is_observation_authored,
@@ -54,6 +53,7 @@ from yoetz.domain.events import (
     public_error_for_obligation_resolution_mismatch,
 )
 from yoetz.domain.findings import (
+    PriorFindingVerdictRecord,
     RankedFindings,
     RuntimeTokenUsage,
     SemanticProvenance,
@@ -3295,6 +3295,7 @@ class MemoryLedgerAdapter:
         *,
         scope: CheckScopeModel | None = None,
         semantic_conclusion: str | None = None,
+        prior_finding_verdicts: tuple[PriorFindingVerdictRecord, ...] = (),
     ) -> CheckCommitResult:
         key = (frozen.lease.writer_id, frozen.lease.operation_id)
         async with self._lock:
@@ -3403,6 +3404,7 @@ class MemoryLedgerAdapter:
             projection_version=PROJECTION_VERSION,
             semantic_provenance=semantic_provenance,
             semantic_conclusion=semantic_conclusion,
+            prior_finding_verdicts=prior_finding_verdicts,
         )
         event_payloads.append((event_id(self._ids.new(IdKind.EVENT)), check_payload))
         accepted_at = _now(self._clock)
@@ -3433,9 +3435,7 @@ class MemoryLedgerAdapter:
                 if type(payload) is FindingRecordedPayload
                 else EventSchema(
                     "check_recorded",
-                    CHECK_EVENT_SCHEMA_VERSION
-                    if semantic_conclusion is not None
-                    else SEMANTIC_EVENT_SCHEMA_VERSION,
+                    check_event_schema(semantic_conclusion, prior_finding_verdicts),
                 )
             )
             entries.append(

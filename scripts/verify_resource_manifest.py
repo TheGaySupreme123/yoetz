@@ -608,6 +608,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
+        "schemas/events/check-recorded-1.4.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
         "schemas/events/claim-recorded-1.0.0.schema.json",
         "json_schema",
         "application/schema+json",
@@ -793,6 +799,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     (
         "schemas/findings/provider-judgment-1.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/findings/provider-judgment-1.1.0.schema.json",
         "json_schema",
         "application/schema+json",
         True,

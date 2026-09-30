@@ -1233,6 +1233,7 @@ def test_protocol_models_public_exports_are_closed() -> None:
         ProviderJudgmentEnvelopeModel
         ProviderJudgmentInsufficientModel ProviderJudgmentModel
         ProviderJudgmentNoDiscrepancyModel
+        MAX_PRIOR_FINDING_VERDICTS PriorFindingVerdictWire ProviderPriorFindingVerdictModel
         ReceiptFormat ReceiptInclude ReceiptRedactionProfile
         ReceiptRequest ReceiptRequestModel ReceiptResult ReceiptResultModel
         REGISTERED_GUIDANCE_URIS ReadGuidanceRequest ReadGuidanceRequestModel
@@ -2399,7 +2400,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert derived_counts == _EXPECTED_RESULT_PATTERN_COUNTS
 
     assert type(rules) is tuple
-    assert len(rules) == 1171
+    assert len(rules) == 1172
     assert rules == tuple(sorted(rules, key=_test_rule_sort_key))
 
     rule_keys = {
@@ -2420,7 +2421,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
         for rule in rules
         if rule.method == "publish_work" and rule.segments == publish_summary_segments
     )
-    assert len(publish_summary_rules) == 27
+    assert len(publish_summary_rules) == 28
     assert all(rule.status_view is None for rule in publish_summary_rules)
 
     expected_publish = _expected_publish_summary_rules(models)
@@ -2887,6 +2888,7 @@ def _expected_publish_summary_rules(models: Any) -> dict[object, object]:
         ("check_recorded", "1.1.0"): "public_structural",
         ("check_recorded", "1.2.0"): "public_structural",
         ("check_recorded", "1.3.0"): "public_structural",
+        ("check_recorded", "1.4.0"): "public_structural",
         ("coordination_context_recorded", "1.0.0"): "public_structural",
         ("coordination_obligation_declared", "1.0.0"): "public_structural",
         ("coordination_disposition_recorded", "1.0.0"): "public_structural",
@@ -2997,7 +2999,7 @@ def test_schema_catalog_reports_complete_registry() -> None:
     assert SCHEMA_NAMESPACE == "https://schemas.yoetz.dev/0.1/"
     assert SCHEMA_MANIFEST_SCHEMA == "yoetz.schema-manifest/1.0.0"
     assert SCHEMA_MANIFEST_VERSION == "1.0.0"
-    assert SCHEMA_MEMBER_COUNT == 209
+    assert SCHEMA_MEMBER_COUNT == 211
     assert len(catalog.documents) == SCHEMA_MEMBER_COUNT
 
     paths = tuple(document.relative_path for document in catalog.documents)
@@ -3081,7 +3083,7 @@ def test_schema_catalog_record_shape_and_indexes_are_exact() -> None:
     root = resources.files("yoetz").joinpath("resources", "schemas")
     manifest_bytes = root.joinpath("manifest.json").read_bytes()
     assert catalog.manifest_digest == f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
-    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 6_953
+    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 7_005
 
 
 def test_schema_name_derivation_and_version_maps_are_exact() -> None:
@@ -3104,10 +3106,10 @@ def test_schema_name_derivation_and_version_maps_are_exact() -> None:
         "7.0.0",
         "1.4.0",
     }
-    assert set(event_versions.values()) == {"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0"}
+    assert set(event_versions.values()) == {"1.0.0", "1.1.0", "1.2.0", "1.4.0"}
     assert event_versions["action_recorded"] == "1.0.0"
     assert event_versions["evidence_recorded"] == "1.2.0"
-    assert event_versions["check_recorded"] == "1.3.0"
+    assert event_versions["check_recorded"] == "1.4.0"
     assert event_versions["claim_recorded"] == "1.1.0"
     assert event_versions["finding_recorded"] == "1.4.0"
     assert event_versions["session_opened"] == "1.2.0"

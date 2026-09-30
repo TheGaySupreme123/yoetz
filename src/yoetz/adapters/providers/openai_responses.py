@@ -30,6 +30,7 @@ from yoetz.ports.clock import ClockPort
 from yoetz.ports.secret_memory import ProviderAttemptAuthBinding, ProviderCredentialHandle
 from yoetz.ports.semantic import (
     Deadline,
+    PriorFindingVerdict,
     ProviderAttemptProvenance,
     ReviewerChallenge,
     SemanticJudgment,
@@ -54,6 +55,7 @@ from yoetz.protocol.models import (
     ProviderJudgmentInsufficientModel,
     ProviderJudgmentModel,
     ProviderJudgmentNoDiscrepancyModel,
+    ProviderPriorFindingVerdictModel,
     SemanticStatus,
 )
 
@@ -69,6 +71,7 @@ __all__ = [
     "OPENAI_MAX_OUTPUT_TOKENS",
     "OPENAI_MAX_RESPONSE_BODY_BYTES",
     "SEMANTIC_REVIEW_INSTRUCTION",
+    "VERDICT_FIELD_GLOSSARY",
     "JudgmentValidationError",
     "JudgmentValidationStage",
     "OneAttemptCredentialTransport",
@@ -155,7 +158,13 @@ SEMANTIC_REVIEW_INSTRUCTION: Final = (
     "The packet records earlier findings and the main agent's responses to them. Do not raise "
     "again a finding the main agent has answered, or request an action the packet shows was "
     "already done, unless material newer than that response shows the problem remains; then cite "
-    "that newer material and the earlier finding's fnd_ id from citable_refs."
+    "that newer material and the earlier finding's fnd_ id from citable_refs. "
+    "For each earlier finding in review_packet.prior_finding_item_ids, return one "
+    "prior_finding_verdicts entry whatever the conclusion: fixed only when evidence or results "
+    "recorded after the finding show the problem is gone, citing them; still_present or "
+    "answered_not_fixed citing the material that shows it remains; withdrawn when the main "
+    "agent's reasoned rejection holds; unassessable when the packet cannot settle it. A verdict "
+    "speaks only for its own finding."
 )
 _SYSTEM_INSTRUCTION: Final = SEMANTIC_REVIEW_INSTRUCTION
 
@@ -465,6 +474,25 @@ CHALLENGE_FIELD_GLOSSARY: Final[dict[str, str]] = {
 }
 
 
+VERDICT_FIELD_GLOSSARY: Final[dict[str, str]] = {
+    "finding_id": (
+        "The earlier finding this ruling is about: one finding_ref from the packet's "
+        "prior-finding rows (review_packet.prior_finding_item_ids)."
+    ),
+    "verdict": (
+        "Your ruling on that finding alone. fixed: cited material recorded after the finding "
+        "shows the problem is gone; still_present: newer material shows it remains; "
+        "answered_not_fixed: the main agent answered but the problem remains; withdrawn: you "
+        "accept the main agent's rejection; unassessable: the packet cannot settle it."
+    ),
+    "cited_refs": (
+        "The refs the ruling rests on, from citable_refs. fixed must cite evidence or a result "
+        "recorded after the finding, or it is treated as unassessable."
+    ),
+    "note": "One short sentence saying why, addressed to the main agent.",
+}
+
+
 def _apply_reviewer_glossary(schema: dict[str, JsonValue]) -> dict[str, JsonValue]:
     """Attach the curated reviewer definitions to the stripped schema.
 
@@ -493,8 +521,23 @@ def _apply_reviewer_glossary(schema: dict[str, JsonValue]) -> dict[str, JsonValu
         FINDING_KIND_GLOSSARY
     ):
         raise RuntimeError("provider_judgment_schema_invalid")
-    for name, gloss in CHALLENGE_FIELD_GLOSSARY.items():
-        target = challenge_properties[name]
+    verdict = definitions.get("ProviderPriorFindingVerdict")
+    verdict_properties = (
+        cast(dict[str, JsonValue], verdict).get("properties") if type(verdict) is dict else None
+    )
+    if type(verdict_properties) is not dict or set(
+        cast(dict[str, JsonValue], verdict_properties)
+    ) != set(VERDICT_FIELD_GLOSSARY):
+        raise RuntimeError("provider_judgment_schema_invalid")
+    glossed = (
+        *((challenge_properties, name, gloss) for name, gloss in CHALLENGE_FIELD_GLOSSARY.items()),
+        *(
+            (cast(dict[str, JsonValue], verdict_properties), name, gloss)
+            for name, gloss in VERDICT_FIELD_GLOSSARY.items()
+        ),
+    )
+    for owner, name, gloss in glossed:
+        target = owner[name]
         if type(target) is not dict:
             raise RuntimeError("provider_judgment_schema_invalid")
         source = cast(dict[str, JsonValue], target)
@@ -511,7 +554,7 @@ def _apply_reviewer_glossary(schema: dict[str, JsonValue]) -> dict[str, JsonValu
                 JsonValue, {**cast(dict[str, JsonValue], referenced), "description": gloss}
             )
             continue
-        challenge_properties[name] = cast(JsonValue, {**source, "description": gloss})
+        owner[name] = cast(JsonValue, {**source, "description": gloss})
     return schema
 
 
@@ -796,6 +839,10 @@ def _provenance(
     )
 
 
+def _verdict_from_model(verdict: ProviderPriorFindingVerdictModel) -> PriorFindingVerdict:
+    return PriorFindingVerdict(verdict.finding_id, verdict.verdict, verdict.cited_refs)
+
+
 def _challenge_from_model(challenge: ProviderChallengeModel) -> ReviewerChallenge:
     return ReviewerChallenge(
         FindingKind(challenge.finding_kind),
@@ -835,7 +882,8 @@ def normalize_judgment(parsed: JsonValue) -> SemanticJudgment:
         except ValidationError as exc:
             raise JudgmentValidationError(_classify_rejected_judgment(source)) from exc
     challenges = tuple(_challenge_from_model(item) for item in model.reviewer_challenges)
-    return SemanticJudgment(model.conclusion, challenges)
+    verdicts = tuple(_verdict_from_model(item) for item in model.prior_finding_verdicts)
+    return SemanticJudgment(model.conclusion, challenges, verdicts)
 
 
 def normalize_response(

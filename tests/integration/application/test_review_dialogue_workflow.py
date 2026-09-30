@@ -20,7 +20,7 @@ from builders.start_application import protocol_id, start_request
 from yoetz.application.check import FinalSemanticEvaluation
 from yoetz.application.semantic_case import build_semantic_case
 from yoetz.application.service import Application
-from yoetz.domain.events import EventSchema, LedgerRecord
+from yoetz.domain.events import CheckRecordedPayload, EventSchema, LedgerRecord
 from yoetz.domain.findings import (
     Finding,
     FindingKind,
@@ -29,10 +29,17 @@ from yoetz.domain.findings import (
     SemanticProvenance,
 )
 from yoetz.domain.privacy import ReviewContextProfile, ReviewSelectionPolicy
+from yoetz.kernel.finding_resolution import finding_resolution_explanation
 from yoetz.kernel.projections import ProjectionState, projection_snapshot
 from yoetz.kernel.reducers import replay
 from yoetz.ports.ledger import CheckCommitResult, FrozenCase
-from yoetz.ports.semantic import ReviewerChallenge, SamplingParams, SemanticCase, SemanticJudgment
+from yoetz.ports.semantic import (
+    PriorFindingVerdict,
+    ReviewerChallenge,
+    SamplingParams,
+    SemanticCase,
+    SemanticJudgment,
+)
 from yoetz.protocol.canonical import JsonValue, strict_json_parse
 from yoetz.protocol.models import (
     CheckRequest,
@@ -275,3 +282,112 @@ async def test_challenge_fields_are_recorded_and_carried_into_the_next_review() 
     assert projection_snapshot(replay(_records(session.app))) == projection_snapshot(
         _live_projection(session.app)
     )
+
+
+async def _repair(session: _Session, frontier: JsonValue, seed: int) -> tuple[str, JsonValue]:
+    """Publish the repair and its regression result, as the kea agent did after check 2."""
+
+    action_id = protocol_id("act_", seed)
+    result_id = protocol_id("res_", seed + 1)
+    action_event = protocol_id("evt_", seed + 2)
+    published = await session.app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **request_base(protocol_id("req_", seed + 3)),
+                "session_id": session.session_id,
+                "writer_id": session.writer_id,
+                "expected_frontier": frontier,
+                "event_drafts": [
+                    {
+                        "event_id": action_event,
+                        "schema": {"name": "action_recorded", "version": "1.0.0"},
+                        "occurred_at": "2026-09-28T12:05:00.000Z",
+                        "causal_parents": [],
+                        "payload": {
+                            "action_id": action_id,
+                            "action_kind": "edit",
+                            "description": "Encode Map keys with their type before joining.",
+                        },
+                        "artifact_refs": [],
+                        "evidence_refs": [],
+                    },
+                    {
+                        "event_id": protocol_id("evt_", seed + 4),
+                        "schema": {"name": "result_recorded", "version": "1.0.0"},
+                        "occurred_at": "2026-09-28T12:05:01.000Z",
+                        "causal_parents": [action_event],
+                        "payload": {
+                            "result_id": result_id,
+                            "action_id": action_id,
+                            "outcome": "success",
+                            "summary": "Map keys 1 and '1' now have distinct dependency strings.",
+                        },
+                        "artifact_refs": [],
+                        "evidence_refs": [],
+                    },
+                ],
+            }
+        )
+    )
+    return result_id, frontier_json(published.result_frontier)
+
+
+def _rule_first_finding(
+    verdict: str, *, cite_repair: bool
+) -> Callable[[FrozenCase], SemanticJudgment]:
+    def answer(frozen: FrozenCase) -> SemanticJudgment:
+        projection = frozen.case.projection
+        finding = next(
+            key
+            for key, row in projection.findings.items()
+            if row.payload is not None
+            and row.payload.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+        )
+        newest = max(projection.results.items(), key=lambda pair: pair[1].source_frontier)[0]
+        refs = (str(newest),) if cite_repair else ()
+        return SemanticJudgment(
+            "insufficient_packet",
+            (),
+            (PriorFindingVerdict(str(finding), verdict, refs),),  # type: ignore[arg-type]
+        )
+
+    return answer
+
+
+@pytest.mark.parametrize("cite_repair", [True, False])
+async def test_a_cited_fixed_ruling_closes_a_repaired_finding_under_an_insufficient_packet(
+    cite_repair: bool,
+) -> None:
+    """kea fnd_866db2dd end to end: raised, repaired with a regression, then ruled fixed.
+
+    The recheck's packet as a whole is ``insufficient_packet``. With the repair cited the finding
+    resolves on that check and says why; a ``fixed`` citing nothing newer is only
+    ``unassessable``, leaves the finding open, and is disclosed on the check.
+    """
+
+    seed = 2800 + (0 if cite_repair else 100)
+    reviewer = _Reviewer(
+        [_challenge_obligation, _rule_first_finding("fixed", cite_repair=cite_repair)]
+    )
+    session, frontier = await _session(reviewer, seed)
+    first = await _check(session, frontier, seed + 10)
+    raised = _semantic(first)
+    _result, repaired = await _repair(session, frontier_json(first.result_frontier), seed + 20)
+    second = await _check(session, repaired, seed + 40)
+
+    assert "semantic_packet_insufficient" in second.coverage.known_gaps
+    check_rows = [row for row in _records(session.app) if row.schema.name == "check_recorded"]
+    recorded = cast(CheckRecordedPayload, check_rows[-1].payload)
+    live = _live_projection(session.app)
+    resolved_by = live.findings[raised.finding_id].resolved_by_check_event_id
+    if cite_repair:
+        assert check_rows[-1].schema == EventSchema("check_recorded", "1.4.0")
+        assert [item.verdict for item in recorded.prior_finding_verdicts] == ["fixed"]
+        assert resolved_by == check_rows[-1].event_id
+        explanation = finding_resolution_explanation(live, raised.finding_id, _records(session.app))
+        assert "ruled it fixed" in explanation
+    else:
+        assert [item.verdict for item in recorded.prior_finding_verdicts] == ["unassessable"]
+        assert "semantic_prior_verdicts_unsupported" in second.coverage.known_gaps
+        assert resolved_by is None
+    assert projection_snapshot(replay(_records(session.app))) == projection_snapshot(live)

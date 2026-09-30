@@ -1428,7 +1428,82 @@ def _finding_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
 # Event pairs the converging review dialogue adds (issue #905). The event-draft and opaque
 # fallback schemas admit exactly these, so a known dialogue event never also matches the
 # opaque branch.
-_REVIEW_DIALOGUE_EVENT_PAIRS: Final[tuple[tuple[str, str], ...]] = (("finding_recorded", "1.4.0"),)
+_REVIEW_DIALOGUE_EVENT_PAIRS: Final[tuple[tuple[str, str], ...]] = (
+    ("check_recorded", "1.4.0"),
+    ("finding_recorded", "1.4.0"),
+)
+
+
+def _provider_judgment_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Freeze the exact constrained-output schema every provider cell sends (issue #905).
+
+    The runtime request schema is the owning source: it renames the provider kind alias to the
+    frozen ``FindingKindWire`` anchor and carries the curated reviewer glossary. Version 1.1.0
+    adds the required per-finding ``prior_finding_verdicts`` array to every conclusion branch.
+    """
+
+    from yoetz.adapters.providers.openai_responses import build_judgment_json_schema
+
+    document = cast(dict[str, JsonValue], dict(build_judgment_json_schema()))
+    ordered: dict[str, JsonValue] = {
+        "$id": SCHEMA_NAMESPACE + entry.relative_path,
+        "$schema": _DRAFT_2020_12,
+    }
+    ordered.update(document)
+    ordered["title"] = entry.schema_name
+    return ordered
+
+
+def _check_recorded_v1_4_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Record the reviewer's admitted per-finding rulings on a succeeded check (issue #905).
+
+    Written only when at least one ruling was admitted; every other check keeps its earlier
+    version. ``fixed`` is admitted only with cited material recorded after the finding.
+    """
+
+    from yoetz.domain.findings import MAX_RECORDED_VERDICTS, PRIOR_FINDING_VERDICTS
+
+    document = _load_versioned_template(entry, "events/check-recorded-1.3.0.schema.json")
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+    properties = cast(dict[str, JsonValue], document["properties"])
+    returned = cast(dict[str, JsonValue], properties["returned_finding_ids"])
+    finding_ref = cast(dict[str, JsonValue], returned["items"])
+    definitions["prior_finding_verdict"] = cast(
+        JsonValue,
+        {
+            "additionalProperties": False,
+            "properties": {
+                "cited_refs": {
+                    "items": {
+                        "pattern": (
+                            "^(act|clm|evd|evt|fnd|obl|res)_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}"
+                            "-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                        ),
+                        "type": "string",
+                    },
+                    "maxItems": 16,
+                    "type": "array",
+                    "uniqueItems": True,
+                },
+                "finding_id": dict(finding_ref),
+                "verdict": {
+                    "enum": sorted(PRIOR_FINDING_VERDICTS, key=str.encode),
+                    "type": "string",
+                },
+            },
+            "required": ["cited_refs", "finding_id", "verdict"],
+            "type": "object",
+        },
+    )
+    properties["prior_finding_verdicts"] = {
+        "items": {"$ref": "#/$defs/prior_finding_verdict"},
+        "maxItems": MAX_RECORDED_VERDICTS,
+        "minItems": 1,
+        "type": "array",
+    }
+    cast(list[JsonValue], document["required"]).append("prior_finding_verdicts")
+    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    return document
 
 
 def _finding_recorded_v1_4_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
@@ -5694,6 +5769,18 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         ),
     ),
     _RegistryEntry(
+        "events/check-recorded-1.4.0.schema.json",
+        "check-recorded",
+        "1.4.0",
+        "event",
+        "event-payload",
+        lambda: (
+            __import__(
+                "yoetz.domain.events", fromlist=["CheckRecordedPayload"]
+            ).CheckRecordedPayload
+        ),
+    ),
+    _RegistryEntry(
         "events/claim-recorded-1.0.0.schema.json",
         "claim-recorded",
         "1.0.0",
@@ -6153,6 +6240,18 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "findings/provider-judgment-1.0.0.schema.json",
         "provider-judgment",
         "1.0.0",
+        "request_result",
+        "provider-judgment",
+        lambda: (
+            __import__(
+                "yoetz.protocol.models", fromlist=["ProviderJudgmentEnvelopeModel"]
+            ).ProviderJudgmentEnvelopeModel
+        ),
+    ),
+    _RegistryEntry(
+        "findings/provider-judgment-1.1.0.schema.json",
+        "provider-judgment",
+        "1.1.0",
         "request_result",
         "provider-judgment",
         lambda: (
@@ -7083,6 +7182,8 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
 _BUILDER_OWNED_SCHEMA_PATHS: Final[frozenset[str]] = frozenset(
     {
         "events/check-recorded-1.3.0.schema.json",
+        "events/check-recorded-1.4.0.schema.json",
+        "findings/provider-judgment-1.1.0.schema.json",
         "consent/status-7.0.0.schema.json",
         "consent/review-result-7.0.0.schema.json",
         "consent/prepare-result-7.0.0.schema.json",
@@ -7375,6 +7476,10 @@ def build_schema_documents(
             normalized = _check_recorded_v1_1_schema(entry)
         elif entry.relative_path == "events/check-recorded-1.3.0.schema.json":
             normalized = _check_recorded_v1_3_schema(entry)
+        elif entry.relative_path == "events/check-recorded-1.4.0.schema.json":
+            normalized = _check_recorded_v1_4_schema(entry)
+        elif entry.relative_path == "findings/provider-judgment-1.1.0.schema.json":
+            normalized = _provider_judgment_v1_1_schema(entry)
         elif entry.relative_path == "events/check-recorded-1.2.0.schema.json":
             normalized = _simple_versioned_schema(
                 entry,

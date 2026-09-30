@@ -91,6 +91,7 @@ __all__ = [
     "SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP",
     "SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP",
     "SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP",
+    "SEMANTIC_PRIOR_VERDICTS_UNSUPPORTED_GAP",
     "SEMANTIC_CHALLENGES_REJECTED_GAP",
     "SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP",
     "SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP",
@@ -157,6 +158,11 @@ SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP: Final = "semantic_case_finding_refs_o
 # agent's answers (issue #905). More than fit are named as `not_selected` omissions and this gap
 # discloses the truncation instead of letting the reviewer's view read as the whole dialogue.
 SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP: Final = "semantic_prior_findings_over_limit"
+# The reviewer ruled on an earlier finding in a way the fence could not admit as given: a `fixed`
+# citing nothing recorded after the finding, a ruling without cited material, a `withdrawn` with
+# no rejection to accept, or a finding outside the fence (issue #905). The ruling counts for
+# nothing beyond `unassessable`; this gap discloses it.
+SEMANTIC_PRIOR_VERDICTS_UNSUPPORTED_GAP: Final = "semantic_prior_verdicts_unsupported"
 OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP: Final = "optional_semantic_review_blocked_by_policy"
 # The strict route ceiling blocked this process, but the durable applied-route record says the
 # last install applied the policy route (issue #537). The disagreement is the whole claim: a

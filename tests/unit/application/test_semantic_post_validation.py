@@ -7,11 +7,14 @@ import pytest
 from builders.policy_cases import (
     BASE_COVERAGE,
     FRONTIER,
+    act,
     clm,
     finding_record,
     fnd,
     make_case,
     obl,
+    record,
+    res,
 )
 from yoetz.application.check import (
     SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM,
@@ -21,6 +24,12 @@ from yoetz.application.check import (
     SemanticJudgmentReview,
     validate_semantic_judgment,
 )
+from yoetz.domain.events import (
+    ResponseDisposition,
+    ResponseRecordedPayload,
+    ResultOutcome,
+    ResultRecordedPayload,
+)
 from yoetz.domain.findings import (
     Finding,
     FindingKind,
@@ -29,7 +38,8 @@ from yoetz.domain.findings import (
     SemanticDispatchKind,
     SemanticProvenance,
 )
-from yoetz.ports.semantic import ReviewerChallenge, SemanticJudgment
+from yoetz.kernel.deterministic_checks import DeterministicCase
+from yoetz.ports.semantic import PriorFindingVerdict, ReviewerChallenge, SemanticJudgment
 from yoetz.protocol.models import SemanticReason, SemanticStatus
 
 _DIGEST = "sha256:" + "a" * 64
@@ -343,3 +353,96 @@ def test_challenge_whose_resolved_subjects_exceed_the_finding_bound_is_counted_n
 
     assert [candidate.summary for candidate in review.candidates] == ["Kept"]
     assert review.rejected_by_reason == ((SEMANTIC_REJECTED_SUBJECTS_OVER_LIMIT, 1),)
+
+
+def _verdict(number: int, kind: str, *refs: str) -> PriorFindingVerdict:
+    return PriorFindingVerdict(str(fnd(number)), kind, tuple(sorted(refs)))  # type: ignore[arg-type]
+
+
+def _dialogue_case() -> DeterministicCase:
+    """kea shape: a real defect raised at 5, repaired with a regression result recorded at 9."""
+
+    older = record(
+        ResultRecordedPayload(res(1), act(1), ResultOutcome.SUCCESS, summary="before"), 3
+    )
+    repair = record(
+        ResultRecordedPayload(res(2), act(2), ResultOutcome.SUCCESS, summary="regression"), 9
+    )
+    rejected = ResponseRecordedPayload(
+        finding_id=fnd(3),
+        finding_frontier=FRONTIER,
+        disposition=ResponseDisposition.REJECTED,
+        reason="The task requires plain text without a tail under Ascii.",
+    )
+    return make_case(
+        results={res(1): older, res(2): repair},
+        findings={
+            fnd(1): finding_record(_recorded_semantic_finding(1, str(obl(1))), 5),
+            fnd(2): finding_record(_recorded_semantic_finding(2, str(obl(2))), 6),
+            fnd(3): finding_record(_recorded_semantic_finding(3, str(obl(3))), 7),
+            fnd(4): finding_record(
+                replace(
+                    _recorded_semantic_finding(4, str(obl(4))),
+                    origin=FindingOrigin.DETERMINISTIC,
+                    provenance=None,
+                ),
+                8,
+            ),
+        },
+        responses={fnd(3): record(rejected, 8)},
+        extra_refs=(obl(1), obl(2), obl(3), obl(4)),
+    )
+
+
+def test_prior_finding_rulings_are_admitted_only_with_their_own_support() -> None:
+    """A hallucinated ``fixed`` must not close a real defect (issue #905)."""
+
+    case = _dialogue_case()
+    judgment = SemanticJudgment(
+        "insufficient_packet",
+        (),
+        (
+            _verdict(1, "fixed", str(res(2))),  # cites the repair recorded after the finding
+            _verdict(2, "fixed", str(res(1))),  # cites only material older than the finding
+            _verdict(3, "withdrawn"),  # accepts a readable rejected response
+            _verdict(4, "still_present", str(obl(4))),  # a local finding is not the reviewer's
+        ),
+    )
+
+    review = validate_semantic_judgment(
+        case, (), judgment, _provenance(), expected_frontier=case.frontier
+    )
+
+    assert [(str(item.finding_id), item.verdict) for item in review.verdicts] == [
+        (str(fnd(1)), "fixed"),
+        (str(fnd(2)), "unassessable"),
+        (str(fnd(3)), "withdrawn"),
+    ]
+    assert review.verdicts_unsupported == 2
+    assert review.candidates == ()
+
+
+def test_rulings_without_cited_material_or_a_rejection_to_accept_are_unassessable() -> None:
+    case = _dialogue_case()
+    judgment = SemanticJudgment(
+        "no_material_discrepancy",
+        (),
+        (
+            _verdict(1, "still_present"),
+            _verdict(2, "withdrawn"),
+            _verdict(3, "unassessable"),
+            _verdict(9, "fixed", str(res(2))),
+        ),
+    )
+
+    review = validate_semantic_judgment(
+        case, (), judgment, _provenance(), expected_frontier=case.frontier
+    )
+
+    assert [(str(item.finding_id), item.verdict) for item in review.verdicts] == [
+        (str(fnd(1)), "unassessable"),
+        (str(fnd(2)), "unassessable"),
+        (str(fnd(3)), "unassessable"),
+    ]
+    # Two reduced, one outside the fence; an honest unassessable is not counted.
+    assert review.verdicts_unsupported == 3

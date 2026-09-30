@@ -102,7 +102,7 @@ _RESOURCE_LIMIT: Final = 4_194_304
 # One independently reviewed cardinality tripwire guards the generated resource manifest. All
 # per-kind counts are derived from the manifest entries so adding a resource has exactly one
 # hand-authored count to review and the owning resource-ripple command can regenerate the rest.
-REVIEWED_RESOURCE_COUNT: Final = 274
+REVIEWED_RESOURCE_COUNT: Final = 276
 _RESOURCE_KINDS: Final = frozenset(
     {
         "canonical_vector",
@@ -140,7 +140,7 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("pending-agent", "7.0.0"),
     ("prepare-result", "7.0.0"),
     ("privacy-policy", "1.1.0"),
-    ("provider-judgment", "1.0.0"),
+    ("provider-judgment", "1.1.0"),
     ("public-error", "1.0.0"),
     ("publish-work-request", "1.2.0"),
     ("publish-work-result", "1.0.0"),
@@ -786,9 +786,7 @@ def build_version_manifest(*, include_optional_probes: bool = False) -> VersionM
             (
                 name,
                 "1.4.0"
-                if name == "finding_recorded"
-                else "1.3.0"
-                if name == "check_recorded"
+                if name in {"finding_recorded", "check_recorded"}
                 else "1.2.0"
                 if name in {"evidence_recorded", "session_opened"}
                 else "1.1.0"

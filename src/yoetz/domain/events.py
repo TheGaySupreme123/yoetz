@@ -24,10 +24,12 @@ from yoetz.domain.coordination import (
 )
 from yoetz.domain.findings import (
     FINDING_KIND_TRAITS,
+    MAX_RECORDED_VERDICTS,
     CheckVerdict,
     Finding,
     FindingKind,
     FindingOrigin,
+    PriorFindingVerdictRecord,
     ResponseDisposition,
     SemanticDispatchKind,
     SemanticProvenance,
@@ -84,7 +86,7 @@ from yoetz.domain.values import (
     writer_id,
 )
 from yoetz.protocol.canonical import JsonValue as CanonicalJsonValue
-from yoetz.protocol.canonical import canonical_digest
+from yoetz.protocol.canonical import canonical_digest, ensure_canonical_set
 from yoetz.protocol.canonical import entry_digest as compute_entry_digest
 from yoetz.protocol.coverage import (
     ArtifactObservation,
@@ -168,6 +170,7 @@ __all__ = [
     "EvidenceRecordedPayload",
     "FindingRecordedPayload",
     "FINDING_DIALOGUE_EVENT_SCHEMA_VERSION",
+    "CHECK_DIALOGUE_EVENT_SCHEMA_VERSION",
     "IntegrationKind",
     "LedgerChain",
     "LedgerRecord",
@@ -217,6 +220,7 @@ __all__ = [
     "accepted_record_digest_preimage",
     "accepted_record_to_json",
     "decode_payload",
+    "check_event_schema",
     "encode_payload",
     "finding_event_schema",
     "media_type_for",
@@ -235,6 +239,9 @@ EVIDENCE_SCHEMA_VERSIONS: Final = (
 )
 CLAIM_SCHEMA_VERSION: Final = "1.1.0"
 CHECK_EVENT_SCHEMA_VERSION: Final = "1.3.0"
+# Additive per-finding reviewer verdicts (issue #905): written only when a succeeded review
+# returned at least one admitted verdict; every other check keeps its earlier version and bytes.
+CHECK_DIALOGUE_EVENT_SCHEMA_VERSION: Final = "1.4.0"
 SEMANTIC_EVENT_SCHEMA_VERSION: Final = "1.2.0"
 SEMANTIC_EVENT_SCHEMA_VERSIONS: Final = ("1.1.0", SEMANTIC_EVENT_SCHEMA_VERSION)
 FINDING_EVENT_SCHEMA_VERSION: Final = "1.3.0"
@@ -785,7 +792,9 @@ def _locator_key_kind(schema: EventSchema) -> str:
             and (
                 schema.version in SEMANTIC_EVENT_SCHEMA_VERSIONS
                 or (
-                    schema.name == "check_recorded" and schema.version == CHECK_EVENT_SCHEMA_VERSION
+                    schema.name == "check_recorded"
+                    and schema.version
+                    in {CHECK_EVENT_SCHEMA_VERSION, CHECK_DIALOGUE_EVENT_SCHEMA_VERSION}
                 )
                 or (
                     schema.name == "finding_recorded"
@@ -2217,6 +2226,8 @@ class CheckRecordedPayload:
     projection_version: str
     semantic_provenance: SemanticProvenance | None = None
     semantic_conclusion: str | None = None
+    # Admitted reviewer rulings on earlier AI-powered findings, ASCII-ascending by finding id.
+    prior_finding_verdicts: tuple[PriorFindingVerdictRecord, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "mode", _exact_enum(self.mode, CheckMode))
@@ -2291,6 +2302,15 @@ class CheckRecordedPayload:
             raise ProtocolValueError("invalid_event_value_type")
         if type(self.projection_version) is not str or self.projection_version != "yoetz/0.1.0":
             raise ProtocolValueError("invalid_event_value_type")
+        verdicts = self.prior_finding_verdicts
+        if (
+            type(verdicts) is not tuple
+            or len(verdicts) > MAX_RECORDED_VERDICTS
+            or any(type(item) is not PriorFindingVerdictRecord for item in verdicts)
+            or (verdicts and self.semantic_conclusion is None)
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+        ensure_canonical_set(tuple(str(item.finding_id) for item in verdicts))
 
 
 @dataclass(frozen=True, slots=True)
@@ -2384,6 +2404,7 @@ PAYLOAD_TYPES: Final[Mapping[EventSchema, type[EventPayload]]] = MappingProxyTyp
         EventSchema("redaction_recorded", SCHEMA_VERSION): RedactionRecordedPayload,
         EventSchema("check_recorded", SCHEMA_VERSION): CheckRecordedPayload,
         EventSchema("check_recorded", CHECK_EVENT_SCHEMA_VERSION): CheckRecordedPayload,
+        EventSchema("check_recorded", CHECK_DIALOGUE_EVENT_SCHEMA_VERSION): CheckRecordedPayload,
         **{
             EventSchema("check_recorded", version): CheckRecordedPayload
             for version in SEMANTIC_EVENT_SCHEMA_VERSIONS
@@ -3008,7 +3029,7 @@ _PAYLOAD_SHAPES: Final[Mapping[str, tuple[frozenset[str], frozenset[str]]]] = Ma
                     "projection_version",
                 }
             ),
-            frozenset({"semantic_provenance", "semantic_conclusion"}),
+            frozenset({"semantic_provenance", "semantic_conclusion", "prior_finding_verdicts"}),
         ),
         "receipt_recorded": (
             frozenset(
@@ -3114,6 +3135,41 @@ _PAYLOAD_SHAPES: Final[Mapping[str, tuple[frozenset[str], frozenset[str]]]] = Ma
         ),
     }
 )
+
+
+def _decode_prior_verdicts(value: JsonValue | None) -> tuple[PriorFindingVerdictRecord, ...]:
+    if value is None:
+        return ()
+    rows = _array(value)
+    if not rows:
+        raise ProtocolValueError("invalid_event_value_type")
+    verdicts: list[PriorFindingVerdictRecord] = []
+    for row in rows:
+        source = _closed_object(
+            row,
+            required=frozenset({"cited_refs", "finding_id", "verdict"}),
+            optional=frozenset(),
+        )
+        verdicts.append(
+            PriorFindingVerdictRecord(
+                finding_id=finding_id(_field(source, "finding_id")),
+                verdict=cast(str, _field(source, "verdict")),
+                cited_refs=cast(tuple[str, ...], tuple(_array(_field(source, "cited_refs")))),
+            )
+        )
+    return tuple(verdicts)
+
+
+def check_event_schema(semantic_conclusion: str | None, verdicts: tuple[object, ...]) -> str:
+    """The one ``check_recorded`` version a new check is written under."""
+
+    if verdicts:
+        return CHECK_DIALOGUE_EVENT_SCHEMA_VERSION
+    return (
+        CHECK_EVENT_SCHEMA_VERSION
+        if semantic_conclusion is not None
+        else SEMANTIC_EVENT_SCHEMA_VERSION
+    )
 
 
 def finding_event_schema(finding: Finding) -> EventSchema:
@@ -3475,6 +3531,9 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
             engine_version=cast(str, _field(source, "engine_version")),
             projection_version=cast(str, _field(source, "projection_version")),
             semantic_conclusion=cast(str | None, _optional(source, "semantic_conclusion")),
+            prior_finding_verdicts=_decode_prior_verdicts(
+                _optional(source, "prior_finding_verdicts")
+            ),
             semantic_provenance=(
                 None
                 if provenance_value is None
@@ -3961,6 +4020,18 @@ def encode_payload(payload: EventPayload) -> JsonValue:
             else semantic_provenance_to_json(value.semantic_provenance),
         )
         _optional_value(result, "semantic_conclusion", value.semantic_conclusion)
+        _optional_tuple(
+            result,
+            "prior_finding_verdicts",
+            tuple(
+                {
+                    "cited_refs": item.cited_refs,
+                    "finding_id": item.finding_id,
+                    "verdict": item.verdict,
+                }
+                for item in value.prior_finding_verdicts
+            ),
+        )
         return _json_object(result)
     if payload_type is ReceiptRecordedPayload:
         value = cast(ReceiptRecordedPayload, payload)
@@ -4013,9 +4084,14 @@ def _validate_event_schema_payload(
             raise ProtocolValueError("invalid_event_schema")
     if type(payload) is CheckRecordedPayload:
         if (payload.semantic_conclusion is not None) != (
-            schema.version == CHECK_EVENT_SCHEMA_VERSION
+            schema.version in {CHECK_EVENT_SCHEMA_VERSION, CHECK_DIALOGUE_EVENT_SCHEMA_VERSION}
         ):
             raise ProtocolValueError("invalid_event_schema")
+    if type(payload) is CheckRecordedPayload and (
+        bool(payload.prior_finding_verdicts)
+        != (schema.version == CHECK_DIALOGUE_EVENT_SCHEMA_VERSION)
+    ):
+        raise ProtocolValueError("invalid_event_schema")
     if type(payload) is Finding and schema.name == "finding_recorded":
         if finding_has_dialogue_fields(payload) != (
             schema.version == FINDING_DIALOGUE_EVENT_SCHEMA_VERSION

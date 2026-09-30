@@ -72,6 +72,9 @@ __all__ = [
     "MAX_PRIOR_FINDING_ITEMS",
     "MAX_SEMANTIC_CASE_ITEMS",
     "MAX_SEMANTIC_ITEM_SUBJECT_REFS",
+    "PRIOR_FINDING_VERDICT_KINDS",
+    "PriorFindingVerdict",
+    "PriorFindingVerdictKind",
     "ChangeObservation",
     "Deadline",
     "ExcerptDigestProvenance",
@@ -1243,10 +1246,51 @@ class ReviewerChallenge:
             raise _invalid_judgment()
 
 
+type PriorFindingVerdictKind = Literal[
+    "fixed", "still_present", "answered_not_fixed", "unassessable", "withdrawn"
+]
+PRIOR_FINDING_VERDICT_KINDS: Final = frozenset(
+    {"fixed", "still_present", "answered_not_fixed", "unassessable", "withdrawn"}
+)
+_MAX_PRIOR_FINDING_VERDICTS: Final = 8
+
+
+@dataclass(frozen=True, slots=True)
+class PriorFindingVerdict:
+    """The reviewer's ruling on one earlier finding (issue #905), before post-validation.
+
+    The reviewer's free-text note is advisory reasoning for this turn only; it is never recorded.
+    """
+
+    finding_id: str
+    verdict: PriorFindingVerdictKind
+    cited_refs: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "finding_id", _snapshot_finding_id(self.finding_id, error=_invalid_judgment())
+        )
+        if type(self.verdict) is not str or self.verdict not in PRIOR_FINDING_VERDICT_KINDS:
+            raise _invalid_judgment()
+        object.__setattr__(
+            self,
+            "cited_refs",
+            _validated_ref_tuple(
+                self.cited_refs,
+                minimum=0,
+                maximum=_MAX_SUBJECT_REFS,
+                public_only=False,
+                error=_invalid_judgment(),
+                canonicalize=True,
+            ),
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class SemanticJudgment:
     conclusion: SemanticConclusion
     challenges: tuple[ReviewerChallenge, ...]
+    prior_finding_verdicts: tuple[PriorFindingVerdict, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.conclusion) is not str or self.conclusion not in _CONCLUSIONS:
@@ -1259,6 +1303,13 @@ class SemanticJudgment:
             if not self.challenges:
                 raise _invalid_judgment()
         elif self.challenges:
+            raise _invalid_judgment()
+        verdicts = self.prior_finding_verdicts
+        if (
+            type(verdicts) is not tuple
+            or len(verdicts) > _MAX_PRIOR_FINDING_VERDICTS
+            or any(type(item) is not PriorFindingVerdict for item in verdicts)
+        ):
             raise _invalid_judgment()
 
 

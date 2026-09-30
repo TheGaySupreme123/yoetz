@@ -848,3 +848,24 @@ leftover case capacity only); what does not fit is named as `not_selected` omiss
 `semantic_prior_findings_over_limit`, a gap that stays on the receipt but does not veto absence
 proof. Findings recorded before 1.4.0 degrade to summary and message with a `not_recorded`
 omission. No new data category leaves the machine.
+
+**Per-finding rulings.** `provider-judgment/1.1.0` adds a required `prior_finding_verdicts`
+array (at most 8) to every conclusion branch: `{finding_id, verdict, cited_refs, note}` with
+`verdict` one of `fixed`, `still_present`, `answered_not_fixed`, `unassessable`, `withdrawn`.
+The note is turn-local reasoning and is never recorded. Post-validation admits a ruling only for a
+readable, unresolved AI-powered finding inside the frozen fence, once per finding, citing only refs
+inside it. What a ruling may claim is bounded by what it cites: `fixed` must cite evidence or a
+result recorded after the finding (a hallucinated `fixed` must not close a real defect);
+`still_present` and `answered_not_fixed` must cite material; `withdrawn` accepts only a readable
+`rejected` response. A ruling that fails its claim is kept as `unassessable` for that finding
+alone, and every dropped or reduced ruling adds `semantic_prior_verdicts_unsupported` (disclosed,
+not a veto on other findings). Admitted rulings are recorded on the check
+(`check_recorded/1.4.0`, written only when at least one ruling was admitted).
+
+A `fixed` ruling lets that finding resolve on that check even when the packet as a whole concluded
+`insufficient_packet`: the whole-packet veto and its `semantic_packet_insufficient` marker no longer
+block a finding the reviewer judged on newer material. Every other rule still applies: completed
+review, the finding inside the tested frontier, no suppression, scope, readable freshness, the
+capture baseline, a material change after the finding, and the issue not returned again. Any other
+ruling blocks only its own finding by name (`reviewer_verdict_<verdict>`). Without a ruling the
+earlier rules are unchanged; silence is never read as `fixed`.

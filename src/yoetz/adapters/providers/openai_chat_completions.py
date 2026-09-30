@@ -87,7 +87,9 @@ _SYSTEM_INSTRUCTION: Final = (
     '"no_material_discrepancy" | "challenges_returned" | "insufficient_packet", '
     '"reviewer_challenges": array of objects with "finding_kind", "summary", "cited_refs", '
     '"discrepancy", "alternative_interpretation", "message_to_main_agent", '
-    '"requested_next_step", "uncertainty"}.'
+    '"requested_next_step", "uncertainty"; "prior_finding_verdicts": array of objects with '
+    '"finding_id", "verdict" (one of "fixed" | "still_present" | "answered_not_fixed" | '
+    '"unassessable" | "withdrawn"), "cited_refs", "note"}.'
 )
 
 _PROMPT_DIGEST: Final = "sha256:" + hashlib.sha256(_SYSTEM_INSTRUCTION.encode("utf-8")).hexdigest()

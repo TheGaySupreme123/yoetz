@@ -18,7 +18,9 @@ from yoetz.domain.findings import (
     FindingChallenge,
     FindingKind,
     FindingOrigin,
+    PriorFindingVerdictRecord,
     RankedFindings,
+    ResponseDisposition,
     SemanticProvenance,
     finding_from_json,
     finding_to_json,
@@ -34,6 +36,7 @@ from yoetz.domain.receipts import (
     SEMANTIC_CHALLENGES_REJECTED_GAP,
     SEMANTIC_PACKET_INSUFFICIENT_GAP,
     SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP,
+    SEMANTIC_PRIOR_VERDICTS_UNSUPPORTED_GAP,
     SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
     SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP,
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
@@ -49,9 +52,11 @@ from yoetz.domain.values import (
     SemanticContinuation,
     claim_id,
     event_id,
+    evidence_id,
     finding_id,
     freeze_json,
     obligation_id,
+    result_id,
 )
 from yoetz.kernel.deterministic_checks import (
     DETERMINISTIC_TEXT_CONTRACT_DIGEST,
@@ -213,6 +218,10 @@ class SemanticJudgmentReview:
     candidates: tuple[CandidateFinding, ...]
     challenges_returned: int
     rejected_by_reason: tuple[tuple[str, int], ...]
+    # Admitted per-finding rulings on earlier AI-powered findings (issue #905), and how many the
+    # reviewer returned that the fence dropped or reduced to ``unassessable``.
+    verdicts: tuple[PriorFindingVerdictRecord, ...] = ()
+    verdicts_unsupported: int = 0
 
     def __post_init__(self) -> None:
         if (
@@ -1861,6 +1870,80 @@ def _claims_unchanged_over_hidden_source(
     )
 
 
+def _admit_prior_verdicts(
+    case: DeterministicCase, judgment: SemanticJudgment
+) -> tuple[tuple[PriorFindingVerdictRecord, ...], int]:
+    """Fence the reviewer's per-finding rulings (issue #905).
+
+    A ruling is kept only for a readable, unresolved AI-powered finding inside the frozen fence,
+    once per finding, citing only refs inside the fence. What it may claim is bounded by what it
+    cites: ``fixed`` must cite evidence or a result recorded after the finding (a hallucinated
+    ``fixed`` must not close a real defect), ``still_present`` and ``answered_not_fixed`` must
+    cite something, and ``withdrawn`` answers only a readable ``rejected`` response. A ruling
+    that fails its own claim is kept as ``unassessable`` for that finding alone. Every dropped
+    or reduced ruling is counted so the check can disclose it.
+    """
+
+    admitted: dict[str, PriorFindingVerdictRecord] = {}
+    unsupported = 0
+    projection = case.projection
+    for verdict in judgment.prior_finding_verdicts:
+        record = projection.findings.get(finding_id(verdict.finding_id))
+        if (
+            verdict.finding_id in admitted
+            or verdict.finding_id not in case.allowed_ids
+            or record is None
+            or record.payload is None
+            or record.redacted
+            or record.resolved_by_check_event_id is not None
+            or record.payload.origin is not FindingOrigin.SEMANTIC_MODEL_DERIVED
+            or any(ref not in case.allowed_ids for ref in verdict.cited_refs)
+        ):
+            unsupported += 1
+            continue
+        kind: str = verdict.verdict
+        if kind == "fixed":
+            newer = False
+            for ref in verdict.cited_refs:
+                row = (
+                    projection.evidence.get(evidence_id(ref))
+                    if ref.startswith("evd_")
+                    else projection.results.get(result_id(ref))
+                    if ref.startswith("res_")
+                    else None
+                )
+                if (
+                    row is not None
+                    and row.payload is not None
+                    and not row.redacted
+                    and row.source_frontier > record.source_frontier
+                ):
+                    newer = True
+                    break
+            supported = newer
+        elif kind in {"still_present", "answered_not_fixed"}:
+            supported = bool(verdict.cited_refs)
+        elif kind == "withdrawn":
+            response = projection.responses.get(record.payload.finding_id)
+            supported = (
+                response is not None
+                and response.payload is not None
+                and response.payload.disposition is ResponseDisposition.REJECTED
+            )
+        else:
+            supported = True
+        if not supported:
+            unsupported += 1
+            kind = "unassessable"
+        admitted[verdict.finding_id] = PriorFindingVerdictRecord(
+            finding_id(verdict.finding_id), kind, verdict.cited_refs
+        )
+    return (
+        tuple(admitted[key] for key in sorted(admitted, key=str.encode)),
+        unsupported,
+    )
+
+
 def semantic_capture_baseline_gaps(result: FinalSemanticEvaluation) -> frozenset[str]:
     """The closed native capture limits a completed review ran under (issue #884).
 
@@ -1912,8 +1995,9 @@ def validate_semantic_judgment(
         or provenance.reason is not SemanticReason.SEMANTIC_COMPLETED
     ):
         raise _rejected("semantic_judgment_invalid")
+    verdicts, verdicts_unsupported = _admit_prior_verdicts(case, judgment)
     if judgment.conclusion != "challenges_returned":
-        return SemanticJudgmentReview((), 0, ())
+        return SemanticJudgmentReview((), 0, (), verdicts, verdicts_unsupported)
     coverage = case_coverage(case, semantic=True)
     if not capture_baseline_gaps <= SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS:
         raise _rejected("semantic_judgment_invalid")
@@ -1986,6 +2070,8 @@ def validate_semantic_judgment(
         tuple(candidates),
         len(judgment.challenges),
         tuple(sorted(rejections.items(), key=lambda item: item[0].encode("ascii"))),
+        verdicts,
+        verdicts_unsupported,
     )
 
 
@@ -2492,6 +2578,9 @@ async def execute_check_commit(
         # carry. Saying so is what keeps a dropped challenge from reading as one never made.
         if review.challenges_rejected:
             declared_gaps.add(SEMANTIC_CHALLENGES_REJECTED_GAP)
+        # A per-finding ruling the fence dropped or reduced: disclosed, never read as agreement.
+        if review.verdicts_unsupported:
+            declared_gaps.add(SEMANTIC_PRIOR_VERDICTS_UNSUPPORTED_GAP)
         # Recorded prose the case could not carry whole. The reviewer answered on a fragment, and
         # the author has no other signal that the text they published never arrived (issue #177).
         declared_gaps.update(semantic_result.case_content_gaps)
@@ -2564,6 +2653,9 @@ async def execute_check_commit(
                 if semantic_result.status is SemanticStatus.SUCCEEDED
                 and semantic_result.judgment is not None
                 else None
+            ),
+            prior_finding_verdicts=(
+                review.verdicts if semantic_result.status is SemanticStatus.SUCCEEDED else ()
             ),
         )
         preview = _lineage_preview(lineage_evaluation, frozen.case.frontier)

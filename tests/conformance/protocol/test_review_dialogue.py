@@ -8,7 +8,14 @@ from typing import Any
 
 import pytest
 
-from yoetz.domain.events import EventSchema, decode_payload, encode_payload, finding_event_schema
+from yoetz.domain.events import (
+    CheckRecordedPayload,
+    EventSchema,
+    check_event_schema,
+    decode_payload,
+    encode_payload,
+    finding_event_schema,
+)
 from yoetz.domain.findings import Finding, FindingChallenge, finding_to_json
 from yoetz.domain.values import freeze_json
 from yoetz.protocol.canonical import canonical_digest, canonical_encode
@@ -28,8 +35,53 @@ def _schema_rejects(version: str, wire: dict[str, Any]) -> None:
         validate_schema_instance("finding-recorded", version, wire)
 
 
+def _findings() -> list[dict[str, Any]]:
+    return [vector for vector in _vectors() if vector["family"] == "finding_recorded"]
+
+
+def _checks() -> list[dict[str, Any]]:
+    return [vector for vector in _vectors() if vector["family"] == "check_recorded"]
+
+
+def test_golden_checks_round_trip_and_rulings_need_their_version() -> None:
+    legacy, ruled = _checks()
+    for vector in (legacy, ruled):
+        version, wire = vector["schema_version"], vector["payload"]
+        validate_schema_instance("check-recorded", version, wire)
+        payload = decode_payload(EventSchema("check_recorded", version), freeze_json(wire))
+        assert type(payload) is CheckRecordedPayload
+        encoded = encode_payload(payload)
+        assert canonical_encode(encoded).hex() == vector["canonical_hex"]
+        assert canonical_digest(encoded) == vector["digest"]
+        expected = "1.4.0" if payload.prior_finding_verdicts else "1.3.0"
+        assert check_event_schema(payload.semantic_conclusion, payload.prior_finding_verdicts) == (
+            expected
+        )
+    decoded = decode_payload(EventSchema("check_recorded", "1.4.0"), freeze_json(ruled["payload"]))
+    assert type(decoded) is CheckRecordedPayload
+    assert [item.verdict for item in decoded.prior_finding_verdicts] == ["unassessable", "fixed"]
+    with pytest.raises(ProtocolValueError):
+        decode_payload(EventSchema("check_recorded", "1.3.0"), freeze_json(ruled["payload"]))
+    with pytest.raises(ProtocolValueError):
+        decode_payload(EventSchema("check_recorded", "1.4.0"), freeze_json(legacy["payload"]))
+    unknown = {
+        **ruled["payload"],
+        "prior_finding_verdicts": [
+            {**ruled["payload"]["prior_finding_verdicts"][0], "verdict": "resolved"}
+        ],
+    }
+    with pytest.raises(ProtocolValueError):
+        decode_payload(EventSchema("check_recorded", "1.4.0"), freeze_json(unknown))
+    unsorted = {
+        **ruled["payload"],
+        "prior_finding_verdicts": list(reversed(ruled["payload"]["prior_finding_verdicts"])),
+    }
+    with pytest.raises(ProtocolValueError):
+        decode_payload(EventSchema("check_recorded", "1.4.0"), freeze_json(unsorted))
+
+
 def test_golden_findings_round_trip_through_schema_and_domain() -> None:
-    for vector in _vectors():
+    for vector in _findings():
         version, wire = vector["schema_version"], vector["payload"]
         validate_schema_instance("finding-recorded", version, wire)
         payload = decode_payload(EventSchema("finding_recorded", version), freeze_json(wire))
@@ -46,7 +98,7 @@ def test_golden_findings_round_trip_through_schema_and_domain() -> None:
 
 
 def test_dialogue_fields_are_admitted_only_on_their_version() -> None:
-    legacy, restated, _link_only = _vectors()
+    legacy, restated, _link_only = _findings()
     with pytest.raises(ProtocolValueError):
         decode_payload(EventSchema("finding_recorded", "1.3.0"), freeze_json(restated["payload"]))
     _schema_rejects("1.3.0", restated["payload"])
@@ -57,7 +109,7 @@ def test_dialogue_fields_are_admitted_only_on_their_version() -> None:
 
 
 def test_local_findings_and_malformed_dialogue_fields_are_refused() -> None:
-    restated = _vectors()[1]["payload"]
+    restated = _findings()[1]["payload"]
     local = {**restated, "origin": "deterministic"}
     local.pop("provenance")
     with pytest.raises(ProtocolValueError):

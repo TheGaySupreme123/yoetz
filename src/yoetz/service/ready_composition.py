@@ -3440,10 +3440,21 @@ def _judgment_to_response_json(judgment: object) -> dict[str, CanonicalJsonValue
                 "uncertainty": item.uncertainty,
             }
         )
-    return {
+    result: dict[str, CanonicalJsonValue] = {
         "conclusion": judgment.conclusion,
         "reviewer_challenges": challenges,
     }
+    # Emitted only when present, so a judgment without verdicts keeps its earlier stored bytes.
+    if judgment.prior_finding_verdicts:
+        result["prior_finding_verdicts"] = [
+            {
+                "cited_refs": list(item.cited_refs),
+                "finding_id": item.finding_id,
+                "verdict": item.verdict,
+            }
+            for item in judgment.prior_finding_verdicts
+        ]
+    return result
 
 
 def _judgment_from_response_json(value: object) -> object:
@@ -3451,6 +3462,8 @@ def _judgment_from_response_json(value: object) -> object:
 
     from yoetz.domain.findings import FindingKind
     from yoetz.ports.semantic import (
+        PriorFindingVerdict,
+        PriorFindingVerdictKind,
         ReviewerChallenge,
         ReviewerNextStep,
         SemanticConclusion,
@@ -3500,7 +3513,33 @@ def _judgment_from_response_json(value: object) -> object:
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("semantic_response_judgment_invalid") from exc
-    return SemanticJudgment(cast(SemanticConclusion, conclusion_raw), tuple(challenges))
+    raw_verdicts = source.get("prior_finding_verdicts", [])
+    if type(raw_verdicts) is not list:
+        raise ValueError("semantic_response_judgment_invalid")
+    verdicts: list[PriorFindingVerdict] = []
+    for item in cast(list[object], raw_verdicts):
+        if type(item) is not dict:
+            raise ValueError("semantic_response_judgment_invalid")
+        row = cast(dict[str, object], item)
+        cited = row.get("cited_refs")
+        if type(cited) is not list:
+            raise ValueError("semantic_response_judgment_invalid")
+        try:
+            verdicts.append(
+                PriorFindingVerdict(
+                    cast(str, row["finding_id"]),
+                    cast(PriorFindingVerdictKind, row["verdict"]),
+                    tuple(cast(list[str], cited)),
+                )
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("semantic_response_judgment_invalid") from exc
+    try:
+        return SemanticJudgment(
+            cast(SemanticConclusion, conclusion_raw), tuple(challenges), tuple(verdicts)
+        )
+    except ValueError as exc:
+        raise ValueError("semantic_response_judgment_invalid") from exc
 
 
 async def _publish_semantic_response_object(

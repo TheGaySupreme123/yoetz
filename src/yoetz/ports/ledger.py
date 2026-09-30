@@ -21,6 +21,7 @@ from yoetz.domain.events import EventDraft, LedgerRecord
 from yoetz.domain.findings import (
     CheckVerdict,
     Finding,
+    PriorFindingVerdictRecord,
     RankedFindings,
     RuntimeTokenUsage,
     SemanticProvenance,
@@ -1891,6 +1892,7 @@ class LedgerPort(Protocol):
         *,
         scope: CheckScopeModel | None = None,
         semantic_conclusion: str | None = None,
+        prior_finding_verdicts: tuple[PriorFindingVerdictRecord, ...] = (),
     ) -> CheckCommitResult: ...
 
     async def fail_check_if_current(

@@ -22,6 +22,7 @@ from yoetz.adapters.providers.openai_responses import (
     CHALLENGE_FIELD_GLOSSARY,
     FINDING_KIND_GLOSSARY,
     JUDGMENT_JSON_SCHEMA,
+    VERDICT_FIELD_GLOSSARY,
     JudgmentValidationError,
     OpenAIProfile,
     build_judgment_json_schema,
@@ -54,7 +55,7 @@ from yoetz.protocol.models import (
 _NOW = datetime(2026, 7, 28, tzinfo=UTC)
 _DIGEST = "sha256:" + "c" * 64
 _REPO = Path(__file__).resolve().parents[4]
-_FROZEN_SCHEMA = _REPO / "schemas" / "findings" / "provider-judgment-1.0.0.schema.json"
+_FROZEN_SCHEMA = _REPO / "schemas" / "findings" / "provider-judgment-1.1.0.schema.json"
 
 _REF_A = "clm_20000000-0000-4000-8000-000000000001"
 _REF_B = "act_10000000-0000-4000-8000-000000000001"
@@ -86,6 +87,7 @@ def _judgment(
     return {
         "conclusion": conclusion,
         "reviewer_challenges": cast(list[JsonValue], [] if challenges is None else challenges),
+        "prior_finding_verdicts": [],
     }
 
 
@@ -172,7 +174,7 @@ def test_generated_schema_matches_owning_model_and_frozen_artifact() -> None:
     frozen_doc = cast(dict[str, Any], frozen)
     # Frozen catalog adds $id/$schema/root title; after dropping catalog chrome and nested titles,
     # the constrained-output body matches the runtime request schema byte-for-byte.
-    assert frozen_doc["$id"].endswith("provider-judgment-1.0.0.schema.json")
+    assert frozen_doc["$id"].endswith("provider-judgment-1.1.0.schema.json")
 
     def _strip_titles(node: object) -> object:
         # The catalog artifact keeps title/description chrome for human readers; the request
@@ -265,7 +267,7 @@ def test_request_schema_carries_no_docstring_commentary() -> None:
 
     assert _annotations(JUDGMENT_JSON_SCHEMA, "title") == []
 
-    curated = set(CHALLENGE_FIELD_GLOSSARY.values())
+    curated = set(CHALLENGE_FIELD_GLOSSARY.values()) | set(VERDICT_FIELD_GLOSSARY.values())
     descriptions = _annotations(JUDGMENT_JSON_SCHEMA, "description")
     assert descriptions
     assert set(descriptions) <= curated
@@ -428,7 +430,7 @@ def test_provider_model_and_normalize_share_rejection_surface() -> None:
         ("", SemanticFailureClass.RESPONSE_SCHEMA),
         ("```json\n{}\n```", SemanticFailureClass.RESPONSE_SCHEMA),
         (
-            'prefix {"conclusion":"no_material_discrepancy","reviewer_challenges":[]}',
+            'prefix {"conclusion":"no_material_discrepancy","reviewer_challenges":[],"prior_finding_verdicts":[]}',
             SemanticFailureClass.RESPONSE_SCHEMA,
         ),
         (

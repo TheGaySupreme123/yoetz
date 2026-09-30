@@ -6931,3 +6931,17 @@ are `not_selected` omissions and add `semantic_prior_findings_over_limit` to cov
 is a disclosure of the section's own bound: it stays on the receipt and is tolerated by both
 finding-resolution proof classes, because a partial dialogue view is no weaker than the review
 before the section existed.
+
+The provider judgment is `provider-judgment` `1.1.0`: every conclusion branch requires
+`prior_finding_verdicts` (0–8 of `{finding_id, verdict, cited_refs, note}`; `verdict` ∈
+`fixed|still_present|answered_not_fixed|unassessable|withdrawn`), for the Codex app-server,
+Responses and Chat Completions cells alike (the prompt-only Chat Completions shape names it too).
+Post-validation admits and bounds each ruling as ADR-006 describes; admitted rulings are recorded as
+`check_recorded` `1.4.0` `prior_finding_verdicts` (`{finding_id, verdict, cited_refs}`, ASCII-sorted
+by finding id, never the note), written only when at least one ruling was admitted.
+`semantic_prior_verdicts_unsupported` discloses dropped or reduced rulings and, like
+`semantic_prior_findings_over_limit`, is tolerated by both proof classes. For a
+`semantic_model_derived` row, a recorded `fixed` ruling on that row lifts the
+`insufficient_packet` veto and tolerates `semantic_packet_insufficient` for that row only; any other
+recorded ruling adds the blocker `reviewer_verdict_<verdict>`. The resolution explanation names a
+resolution that came from a `fixed` ruling.

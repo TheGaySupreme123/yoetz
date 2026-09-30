@@ -50,6 +50,42 @@ def _finding(
     }
 
 
+def _check(root: Path) -> dict[str, Any]:
+    source = json.loads((root / "fixtures/receipts/semantic-advisory.case.json").read_bytes())
+    shared = source["input"]["shared_current_check"]
+    provenance = source["expected"]["variants"]["success_after_durable_receipt"][
+        "semantic_provenance"
+    ]
+    coverage = dict(shared["coverage"])
+    coverage["check_types"] = ["deterministic", "semantic_model_derived"]
+    coverage["ledger_freshness"] = "partial"
+    coverage["known_gaps"] = ["semantic_packet_insufficient"]
+    return {
+        "mode": "semantic_required",
+        "policies": [{"policy_id": "work-integrity", "policy_version": "0.1.0"}],
+        "scope": {"claim_ids": [], "obligation_ids": []},
+        "policy_executions": [
+            {
+                "policy_id": "work-integrity",
+                "policy_version": "0.1.0",
+                "outcome": "run",
+                "reason": "completed",
+            }
+        ],
+        "subject_frontier": shared["frontier"],
+        "verdict": "insufficient_coverage",
+        "returned_finding_ids": [],
+        "suppressed_count": 0,
+        "coverage": coverage,
+        "semantic_status": "succeeded",
+        "semantic_reason": "semantic_completed",
+        "engine_version": "0.1.0",
+        "projection_version": "yoetz/0.1.0",
+        "semantic_provenance": provenance,
+        "semantic_conclusion": "no_material_discrepancy",
+    }
+
+
 def document(root: Path) -> dict[str, Any]:
     # numba-stencil-boundary-modes (DeepSWE v2): one environment-blocked obligation raised, then
     # restated under a new id. The legacy row keeps 1.3.0; the restatement records the challenge
@@ -77,13 +113,33 @@ def document(root: Path) -> dict[str, Any]:
     restated["relates_to"] = [_FIRST]
     link_only = dict(restated)
     link_only.pop("challenge")
+    # kea-atomic-signal-selectors: the recheck after the repair rules the repaired finding fixed
+    # (citing the regression result recorded after it) even though the packet as a whole was
+    # insufficient, and cannot assess a sibling. A check without rulings keeps 1.3.0.
+    check = _check(root)
+    ruled = dict(check)
+    ruled["semantic_conclusion"] = "insufficient_packet"
+    ruled["prior_finding_verdicts"] = [
+        {"cited_refs": [], "finding_id": _RESTATED, "verdict": "unassessable"},
+        {
+            "cited_refs": ["res_866db2dd-0000-4000-8000-000000000003"],
+            "finding_id": _FIRST,
+            "verdict": "fixed",
+        },
+    ]
     vectors: list[dict[str, Any]] = []
-    for version, wire in (("1.3.0", legacy), ("1.4.0", restated), ("1.4.0", link_only)):
-        payload = decode_payload(EventSchema("finding_recorded", version), freeze_json(wire))
+    for family, version, wire in (
+        ("finding_recorded", "1.3.0", legacy),
+        ("finding_recorded", "1.4.0", restated),
+        ("finding_recorded", "1.4.0", link_only),
+        ("check_recorded", "1.3.0", check),
+        ("check_recorded", "1.4.0", ruled),
+    ):
+        payload = decode_payload(EventSchema(family, version), freeze_json(wire))
         encoded = encode_payload(payload)
         vectors.append(
             {
-                "family": "finding_recorded",
+                "family": family,
                 "schema_version": version,
                 "payload": wire,
                 "canonical_hex": canonical_encode(encoded).hex(),

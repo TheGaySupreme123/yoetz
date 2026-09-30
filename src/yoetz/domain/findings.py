@@ -52,7 +52,9 @@ __all__ = [
     "EXTERNAL_SEMANTIC_FINDING_KINDS",
     "FALLBACK_ORIGIN_REASONS",
     "FINDING_KIND_TRAITS",
+    "MAX_RECORDED_VERDICTS",
     "MAX_RELATED_FINDING_IDS",
+    "PRIOR_FINDING_VERDICTS",
     "REVIEWER_NEXT_STEPS",
     "CandidateFinding",
     "CheckVerdict",
@@ -62,6 +64,7 @@ __all__ = [
     "FindingChallenge",
     "FindingKind",
     "FindingOrigin",
+    "PriorFindingVerdictRecord",
     "RankedFindings",
     "ResponseDisposition",
     "RUNTIME_FAILURE_STAGES",
@@ -932,6 +935,47 @@ class Finding:
                 own_id=self.finding_id,
             ),
         )
+
+
+# The reviewer's closed per-finding rulings (issue #905). ``fixed`` proves nothing on its own:
+# post-validation admits it only with cited material recorded after the finding, and finding
+# resolution still applies the freshness and material-change rules.
+PRIOR_FINDING_VERDICTS: Final = frozenset(
+    {"fixed", "still_present", "answered_not_fixed", "unassessable", "withdrawn"}
+)
+MAX_RECORDED_VERDICTS: Final = 8
+
+
+@dataclass(frozen=True, slots=True)
+class PriorFindingVerdictRecord:
+    """One post-validated reviewer ruling on an earlier AI-powered finding, as recorded."""
+
+    finding_id: FindingId
+    verdict: str
+    cited_refs: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "finding_id", finding_id(self.finding_id))
+        if type(self.verdict) is not str or self.verdict not in PRIOR_FINDING_VERDICTS:
+            raise ProtocolValueError("finding_json_shape_invalid")
+        if type(self.cited_refs) is not tuple or len(self.cited_refs) > 16:
+            raise ProtocolValueError("finding_json_shape_invalid")
+        ensure_canonical_set(cast(tuple[str, ...], self.cited_refs))
+        for ref in self.cited_refs:
+            validate_id(_REF_KINDS.get(ref[:4], IdKind.EVENT), ref)
+
+
+_REF_KINDS: Final[Mapping[str, IdKind]] = MappingProxyType(
+    {
+        "act_": IdKind.ACTION,
+        "clm_": IdKind.CLAIM,
+        "evd_": IdKind.EVIDENCE,
+        "evt_": IdKind.EVENT,
+        "fnd_": IdKind.FINDING,
+        "obl_": IdKind.OBLIGATION,
+        "res_": IdKind.RESULT,
+    }
+)
 
 
 def finding_has_dialogue_fields(finding: Finding) -> bool:

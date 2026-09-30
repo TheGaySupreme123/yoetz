@@ -31,6 +31,7 @@ from yoetz.domain.receipts import (
     SEMANTIC_CHALLENGES_REJECTED_GAP,
     SEMANTIC_PACKET_INSUFFICIENT_GAP,
     SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP,
+    SEMANTIC_PRIOR_VERDICTS_UNSUPPORTED_GAP,
     SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
     SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP,
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
@@ -49,6 +50,7 @@ __all__ = [
     "apply_check_resolution",
     "finding_is_resolved",
     "issue_key",
+    "prior_finding_verdict",
     "qualifying_check_resolves",
     "reopen_findings_resolved_by",
     "resolved_finding_ids",
@@ -110,7 +112,9 @@ _HOST_OBSERVATION_GAPS: Final = frozenset(
 # The prior-findings section's own bound (issue #905). A section that could not carry every
 # earlier finding is no weaker than the review before that section existed, so the gap stays on
 # the receipt as a disclosure and proves nothing about any finding's absence either way.
-_REVIEW_DIALOGUE_DISCLOSURE_GAPS: Final = frozenset({SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP})
+_REVIEW_DIALOGUE_DISCLOSURE_GAPS: Final = frozenset(
+    {SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP, SEMANTIC_PRIOR_VERDICTS_UNSUPPORTED_GAP}
+)
 _BASE_DETERMINISTIC_PROOF_TOLERATED_GAPS: Final = (
     _SEMANTIC_ONLY_GAPS | _EVIDENCE_STRENGTH_GAPS | _REVIEW_DIALOGUE_DISCLOSURE_GAPS
 )
@@ -369,6 +373,35 @@ def _semantic_subject_changed(
     return False
 
 
+def prior_finding_verdict(check: CheckRecordedPayload, finding: Finding) -> str | None:
+    """The admitted reviewer ruling this check recorded for *finding*, if any (issue #905)."""
+
+    for item in check.prior_finding_verdicts:
+        if item.finding_id == finding.finding_id:
+            return item.verdict
+    return None
+
+
+def _prior_verdict_effect(
+    finding: Finding, check: CheckRecordedPayload
+) -> tuple[bool, tuple[str, ...], frozenset[str]]:
+    """How an explicit per-finding ruling bears on this finding's absence proof (issue #905).
+
+    ``fixed`` is the reviewer judging this finding on material recorded after it, so a
+    whole-packet ``insufficient_packet`` (and its coverage marker) no longer vetoes it; every
+    other rule still applies, including freshness, material change and the issue not being
+    returned again. Any other ruling blocks this finding by name and speaks for no other finding.
+    Without a ruling nothing changes: silence is never read as ``fixed``.
+    """
+
+    verdict = prior_finding_verdict(check, finding)
+    if verdict is None:
+        return False, (), frozenset()
+    if verdict == "fixed":
+        return True, (), frozenset({SEMANTIC_PACKET_INSUFFICIENT_GAP})
+    return False, (f"reviewer_verdict_{verdict}",), frozenset()
+
+
 def qualifying_check_resolves(
     finding: Finding,
     finding_source_frontier: int,
@@ -418,7 +451,10 @@ def resolution_blockers(
     gaps = frozenset(check.coverage.known_gaps)
     if finding.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED:
         tolerated = _SEMANTIC_PROOF_TOLERATED_GAPS
-        if check.semantic_conclusion == "insufficient_packet":
+        ruled_fixed, verdict_reasons, verdict_tolerated = _prior_verdict_effect(finding, check)
+        reasons.extend(verdict_reasons)
+        tolerated |= verdict_tolerated
+        if check.semantic_conclusion == "insufficient_packet" and not ruled_fixed:
             reasons.append("semantic_packet_insufficient")
         original_gaps = frozenset(finding.coverage.known_gaps)
         baseline_tolerated = _SEMANTIC_PROOF_TOLERATED_GAPS | _SEMANTIC_BASELINE_CAPTURE_GAPS
@@ -427,8 +463,8 @@ def resolution_blockers(
         )
         if (
             check.semantic_conclusion in {"no_material_discrepancy", "challenges_returned"}
-            and baseline_readable
-        ):
+            or ruled_fixed
+        ) and baseline_readable:
             # Absence proof is no weaker than the readable review that raised this issue.
             # The later review still must complete and not return the issue. Its unchanged
             # capture limitations remain on the receipt; a response alone changes nothing.
@@ -564,6 +600,17 @@ def _superseded_coordination_context(
     return None
 
 
+def _check_payload(
+    records: tuple[LedgerRecord, ...], check_event_id: EventId | None
+) -> CheckRecordedPayload | None:
+    if check_event_id is None:
+        return None
+    for row in records:
+        if row.event_id == check_event_id and isinstance(row.payload, CheckRecordedPayload):
+            return row.payload
+    return None
+
+
 def _check_subject_sequence(
     records: tuple[LedgerRecord, ...], check_event_id: EventId | None
 ) -> int | None:
@@ -600,6 +647,15 @@ def finding_resolution_explanation(
                 f"Resolved by qualifying check {resolving} after project coordination generation "
                 f"{superseded[0]} was superseded; the context is retained as history, not as a "
                 "current coordination obligation."
+            )
+        resolving_check = _check_payload(records, resolving)
+        if (
+            resolving_check is not None
+            and prior_finding_verdict(resolving_check, finding_record.payload) == "fixed"
+        ):
+            return (
+                f"Resolved by qualifying check {resolving}: the reviewer ruled it fixed on "
+                "material recorded after the finding; retained as history."
             )
         return f"Resolved by qualifying check {resolving}; retained as history."
     candidate = next(
