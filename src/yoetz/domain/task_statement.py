@@ -53,10 +53,9 @@ __all__ = [
 TASK_STATEMENT_SECTION: Final = "task_statement"
 
 # The reviewer received no task statement at all. Always paired with exactly one reason below.
+# A task title standing in is not this gap: its ``task_title_only`` source label discloses it.
 TASK_STATEMENT_UNAVAILABLE_GAP: Final = "task_statement_unavailable"
-# No agent-supplied statement is recorded for the task. With an authorized policy the reviewer
-# still receives the task title (``task_title_only``), so this code can appear without the
-# ``unavailable`` code: the reviewer had a title, not the user's request.
+# Neither an agent-supplied statement nor a readable task title is recorded for the task.
 TASK_STATEMENT_NOT_SUPPLIED_GAP: Final = "task_statement_not_supplied"
 # The approved privacy policy does not list the ``task_statement`` review section, so nothing is
 # sent even when a statement is recorded. An approval that predates the section never covers it.
@@ -74,8 +73,8 @@ _GAP_DETAILS: Final = {
         "the work with what the user asked for."
     ),
     TASK_STATEMENT_NOT_SUPPLIED_GAP: (
-        "No task statement was supplied for this task; pass the user's request verbatim in "
-        "start.task_statement. The reviewer had at most the task title."
+        "No task statement or readable task title is recorded for this task; pass the user's "
+        "request verbatim in start.task_statement."
     ),
     TASK_STATEMENT_NOT_AUTHORIZED_GAP: (
         "The approved privacy policy does not list the task_statement review section, so the "

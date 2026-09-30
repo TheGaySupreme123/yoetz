@@ -52,6 +52,7 @@ from yoetz.domain.privacy import (
 )
 from yoetz.domain.receipts import SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP
 from yoetz.domain.task_statement import (
+    TASK_STATEMENT_GAPS,
     TASK_STATEMENT_NOT_AUTHORIZED_GAP,
     TASK_STATEMENT_NOT_SUPPLIED_GAP,
     TASK_STATEMENT_UNAVAILABLE_GAP,
@@ -311,6 +312,13 @@ def test_structural_never_sends_the_statement() -> None:
     assert {TASK_STATEMENT_UNAVAILABLE_GAP, TASK_STATEMENT_NOT_AUTHORIZED_GAP} <= set(
         semantic.packet.coverage.known_gaps
     )
+    # A withheld section is the one reason, whether or not a statement was recorded.
+    unrecorded = _build(_case(statement=None), ReviewContextProfile.STRUCTURAL)
+    assert unrecorded.packet.task_statement_item_ids == ()
+    assert set(unrecorded.packet.coverage.known_gaps) & TASK_STATEMENT_GAPS == {
+        TASK_STATEMENT_UNAVAILABLE_GAP,
+        TASK_STATEMENT_NOT_AUTHORIZED_GAP,
+    }
 
 
 def test_title_is_the_labelled_fallback_and_absence_is_an_explicit_gap() -> None:
@@ -318,15 +326,15 @@ def test_title_is_the_labelled_fallback_and_absence_is_an_explicit_gap() -> None
     content = _statement_content(titled)
     assert content["source"] == "task_title_only"
     assert content["statement"] == "koota entity snapshot rollback"
-    titled_gaps = set(titled.packet.coverage.known_gaps)
-    assert TASK_STATEMENT_NOT_SUPPLIED_GAP in titled_gaps
-    assert TASK_STATEMENT_UNAVAILABLE_GAP not in titled_gaps
+    # The source label discloses the stand-in; no coverage gap is added for it.
+    assert not set(titled.packet.coverage.known_gaps) & TASK_STATEMENT_GAPS
 
     bare = _build(_case(statement=None, title=None))
     assert bare.packet.task_statement_item_ids == ()
-    assert {TASK_STATEMENT_UNAVAILABLE_GAP, TASK_STATEMENT_NOT_SUPPLIED_GAP} <= set(
-        bare.packet.coverage.known_gaps
-    )
+    assert set(bare.packet.coverage.known_gaps) & TASK_STATEMENT_GAPS == {
+        TASK_STATEMENT_UNAVAILABLE_GAP,
+        TASK_STATEMENT_NOT_SUPPLIED_GAP,
+    }
 
 
 @pytest.mark.parametrize("filler", ["x", "é", '"'])

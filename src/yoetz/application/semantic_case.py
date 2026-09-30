@@ -1278,10 +1278,10 @@ def build_semantic_case(
     # Source order: the agent-supplied statement, then the task title. The host-captured prompt
     # is a reserved third source that no path records yet, so captured prompt text never enters
     # this section. Nothing is built unless the approved policy names the section: an approval
-    # given before the section existed never covers the user's words (issue #908).
+    # given before the section existed never covers the user's words (issue #908). A title that
+    # stands in carries its own ``task_title_only`` source label, which is the disclosure; the
+    # coverage gaps name only a withheld section or a task with neither statement nor title.
     recorded_statement = frozen_case.task_statement
-    if recorded_statement is None:
-        task_statement_gaps.add(TASK_STATEMENT_NOT_SUPPLIED_GAP)
     if TASK_STATEMENT_SECTION not in sections:
         task_statement_gaps.update(
             {TASK_STATEMENT_UNAVAILABLE_GAP, TASK_STATEMENT_NOT_AUTHORIZED_GAP}
@@ -1312,7 +1312,7 @@ def build_semantic_case(
         if elided:
             over_limit.add(item.item_id)
     else:
-        task_statement_gaps.add(TASK_STATEMENT_UNAVAILABLE_GAP)
+        task_statement_gaps.update({TASK_STATEMENT_UNAVAILABLE_GAP, TASK_STATEMENT_NOT_SUPPLIED_GAP})
 
     # --- Agent plan (latest plan summary; the agent's own account, not the user's request) ---
     if projection.plans:

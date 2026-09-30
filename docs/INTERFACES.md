@@ -6937,10 +6937,15 @@ plan. Names and contracts:
 - Source order: agent statement, then task title (`task_title_only`), else no item. The item is
   built only when the effective review selection names `task_statement`.
 - Gaps (packet, check, finding baseline and receipt coverage): `task_statement_unavailable`
-  (nothing carried), `task_statement_not_supplied` (no agent statement recorded; with an
-  authorized policy the title stands in), `task_statement_not_authorized` (the selection lacks
-  the section). Receipts add fixed prose for each. They are semantic-only for deterministic
-  absence proof and join `SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS` for semantic findings.
+  (nothing carried) always travels with exactly one reason: `task_statement_not_authorized` (the
+  selection lacks the section, whether or not a statement is recorded) or
+  `task_statement_not_supplied` (the section is selected but neither a statement nor a readable
+  title is recorded). A title standing in adds no gap; its `task_title_only` source label is the
+  disclosure. Receipts add fixed prose for each code. They are semantic-only for deterministic
+  absence proof and join `SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS` for semantic findings. A
+  finding that carries none of them and was raised before the ledger's first statement-capable
+  event (`ReplayIndex.first_task_statement_sequence`, by envelope schema version) tolerates them
+  on a later check, so an AI-powered finding recorded before the upgrade can still clear.
 - Privacy: review section `task_statement` in privacy-policy 1.2.0. `ReviewSelectionPolicy
   .for_profile(profile, preset_version="1.1.0"|"1.2.0")`; the 1.2.0 goal-aware, Assisted and
   Expanded presets include the section, Structural never does, Custom only when listed.

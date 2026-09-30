@@ -821,10 +821,13 @@ a requirement both plan and diff omitted.
   label: `agent_transcribed`, or `task_title_only` when only the title exists. The plan item is
   labelled `agent plan (the agent's own summary)` and never carries the statement; nor do timeline
   rows. `host_captured_user_prompt` is reserved and unused.
-- Absence is never silent: `task_statement_unavailable` with `task_statement_not_supplied` or
-  `task_statement_not_authorized` travels on the packet, check, finding baseline and receipt
-  coverage. These codes do not weaken deterministic absence proof, and they tolerate semantic
-  absence proof only when the finding was raised under the same limit.
+- Absence is never silent: `task_statement_unavailable` with `task_statement_not_authorized` (the
+  policy withholds the section) or `task_statement_not_supplied` (neither statement nor readable
+  title) travels on the packet, check, finding baseline and receipt coverage. The source order is
+  followed literally: a title standing in is disclosed by its `task_title_only` label, not by a
+  gap. These codes do not weaken deterministic absence proof, and they tolerate semantic absence
+  proof only when the finding was raised under the same limit, or was raised before the ledger's
+  first statement-capable event and carries none of them.
 - `TASK_STATEMENT_REVIEW_INSTRUCTION` is appended to the system instruction: the task statement is
   the specification and wins over the plan; a plan or diff that omits a stated requirement is a
   discrepancy citing the statement; never request behaviour the statement excludes; weigh
