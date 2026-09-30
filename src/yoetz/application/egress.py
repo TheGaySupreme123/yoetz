@@ -490,7 +490,9 @@ class PrivacyCoordinator:
         owns the exact request identity it minted. ``None`` means no durable disclosure
         reservation reached the consume CAS for that request, so no authority was spent. A
         consumed reservation is terminally unknown: this never resumes, redispatches, mints an
-        authorization, or converts the attempt into a success.
+        authorization, or converts the attempt into a success. An audit that cannot be read
+        raises instead of answering ``None``: it cannot establish that no authority was spent,
+        so the caller keeps the call's usage unknown (#923).
         """
 
         if type(request_id) is not str:
@@ -542,21 +544,23 @@ class PrivacyCoordinator:
     async def _load_started_disclosure_attempt(self, request_id: str) -> PrivacyAuditState | None:
         loader = getattr(self._audit, "load_started_disclosure_attempt", None)
         if not callable(loader):
-            return None
+            raise RuntimeError("privacy_audit_started_lookup_unavailable")
         typed_loader = cast(
             Callable[[str], Awaitable[PrivacyAuditState | None]],
             loader,
         )
         try:
             return await typed_loader(request_id)
-        except Exception as exc:  # noqa: BLE001 - an unreadable row is not a spent authorization
+        except Exception as exc:
+            # Unreadable is not "never consumed": record it and let the caller keep the
+            # attempt's usage unknown rather than reading this as proof nothing was sent (#923).
             record_unexpected_exception_without_raising(
                 exc,
                 component="privacy_egress",
                 operation="audit_started_attempt_lookup_failed",
                 request_id=request_id,
             )
-            return None
+            raise
 
     async def _load_disclosure_attempt(
         self, request_id: str, case_digest: str
