@@ -6013,8 +6013,10 @@ Pending child annotations do not block. These current advisory facts never refre
 open a child bundle, change a recorded check, or strengthen a receipt. Reading readiness records
 nothing, creates no verdict or IDs, and never strengthens coverage.
 
-`closure_readiness` is also a checklist (ADR-032, issue #913). Beside the unchanged
-`blocking_conditions` it carries `state` (`action_required|ready|ready_with_limitations|unknown`),
+`closure_readiness` is also a checklist (ADR-032, issue #913). This build emits it on every
+status success; on the unreleased status-result 1.4.0 wire the six checklist fields are optional
+as a whole (absent for a result shaped by an earlier 0.3 build, never partial or null). Beside the
+unchanged `blocking_conditions` it carries `state` (`action_required|ready|ready_with_limitations|unknown`),
 `gap_classification_version` (`"1"`), and three groups. `agent_actionable` lists, in order, the
 agent conditions present (`obligations_open`, `findings_unanswered`, `receipt_findings_unresolved`
 unless every receipt-blocking finding's latest response is `acknowledged_not_done`,

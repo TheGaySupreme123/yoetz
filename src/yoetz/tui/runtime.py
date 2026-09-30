@@ -1786,7 +1786,7 @@ class YoetzRuntime:
         except Exception:  # noqa: BLE001 - a secondary read; the panel says unknown instead
             return unknown
         success = getattr(result, "root", None)
-        if type(success) is not StatusSuccessModel:
+        if type(success) is not StatusSuccessModel or success.closure_readiness.state is None:
             return unknown
         return {
             "closure": render_closure_readiness_lines(success.closure_readiness),

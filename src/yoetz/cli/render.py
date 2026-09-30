@@ -287,6 +287,14 @@ def render_closure_readiness_lines(readiness: StatusClosureReadinessModel) -> tu
 
     if type(readiness) is not StatusClosureReadinessModel:
         raise TypeError("status_closure_readiness_invalid")
+    if (
+        readiness.state is None
+        or readiness.agent_actionable is None
+        or readiness.standing_limitations is None
+        or readiness.acknowledged_not_done is None
+        or readiness.acknowledged_not_done_count is None
+    ):
+        return ()  # A result shaped by an earlier build carries no checklist.
     lines = [
         f"Closure: {readiness.state}",
         readiness_directive(

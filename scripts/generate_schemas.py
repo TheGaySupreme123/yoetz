@@ -2842,7 +2842,6 @@ def _add_status_closure_checklist(definitions: dict[str, JsonValue]) -> None:
 
     readiness = cast(dict[str, JsonValue], definitions["closure_readiness"])
     properties = cast(dict[str, JsonValue], readiness["properties"])
-    required = cast(list[JsonValue], readiness["required"])
     properties.update(
         {
             "acknowledged_not_done": {
@@ -2880,19 +2879,23 @@ def _add_status_closure_checklist(definitions: dict[str, JsonValue]) -> None:
             },
         }
     )
-    for name in (
-        "state",
-        "gap_classification_version",
-        "agent_actionable",
-        "standing_limitations",
+    # Optional on this unreleased version so a result shaped by an earlier 0.3 build still
+    # validates; when present the checklist is complete.
+    checklist: list[JsonValue] = [
         "acknowledged_not_done",
         "acknowledged_not_done_count",
-    ):
-        if name not in required:
-            required.append(name)
+        "agent_actionable",
+        "gap_classification_version",
+        "standing_limitations",
+        "state",
+    ]
     rules = cast(list[JsonValue], readiness.setdefault("allOf", []))
     rules.extend(
         [
+            {
+                "if": {"anyOf": [{"required": [name]} for name in checklist]},
+                "then": {"required": checklist},
+            },
             {
                 "if": {
                     "properties": {"state": {"const": "action_required"}},

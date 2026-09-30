@@ -3384,3 +3384,40 @@ def test_capacity_failure_forbids_attempt_provenance() -> None:
         models.CheckResultModel.model_validate(value)
     with pytest.raises(ProtocolValueError):
         validate_schema_instance("check-result", "1.1.0", value)
+
+
+def test_closure_checklist_is_absent_as_a_whole_or_complete() -> None:
+    """Issue #913: 1.4.0 is unreleased, so earlier 0.3 readiness shapes stay valid."""
+
+    models = _models_module()
+    legacy: dict[str, JsonValue] = {
+        "declared_obligation_count": "0",
+        "no_obligations_reason": None,
+        "open_obligation_count": "0",
+        "unanswered_finding_count": "0",
+        "receipt_blocking_finding_count": "0",
+        "blocking_conditions": ["no_obligations_declared"],
+    }
+    parsed = models.StatusClosureReadinessModel.model_validate(legacy)
+    assert parsed.state is None
+    result = _status_result_wire()
+    result["closure_readiness"] = legacy
+    validate_schema_instance("status-result", "1.4.0", result)
+    complete = with_checklist(legacy)
+    assert complete["state"] == "action_required"
+    assert complete["agent_actionable"] == ["no_obligations_declared"]
+    models.StatusClosureReadinessModel.model_validate(complete)
+    partial = {**legacy, "state": "action_required"}
+    with pytest.raises(ValidationError):
+        models.StatusClosureReadinessModel.model_validate(partial)
+    result["closure_readiness"] = partial
+    with pytest.raises(ProtocolValueError):
+        validate_schema_instance("status-result", "1.4.0", result)
+    for mismatch in (
+        {**complete, "state": "ready_with_limitations"},
+        {**complete, "agent_actionable": []},
+        {**complete, "standing_limitations": ["no_obligations_declared"]},
+        {**complete, "acknowledged_not_done_count": "1"},
+    ):
+        with pytest.raises(ValidationError):
+            models.StatusClosureReadinessModel.model_validate(mismatch)

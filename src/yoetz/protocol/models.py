@@ -3257,12 +3257,26 @@ class StatusClosureReadinessModel(_ClosedModel):
         ],
         ...,
     ]
-    state: Literal["action_required", "ready", "ready_with_limitations", "unknown"]
-    gap_classification_version: Literal["1"]
-    agent_actionable: tuple[ReadinessItemWire, ...]
-    standing_limitations: tuple[CodeWire, ...]
-    acknowledged_not_done: tuple[AcknowledgedItemIdWire, ...]
-    acknowledged_not_done_count: CanonicalUInt64Wire
+    # The checklist (issue #913) is emitted on every status success by this build. It is optional
+    # on the unreleased 1.4.0 wire so a result shaped by an earlier 0.3 build still validates; it
+    # is then absent as a whole, never partially present and never null.
+    state: Literal["action_required", "ready", "ready_with_limitations", "unknown"] | None = None
+    gap_classification_version: Literal["1"] | None = None
+    agent_actionable: tuple[ReadinessItemWire, ...] | None = None
+    standing_limitations: tuple[CodeWire, ...] | None = None
+    acknowledged_not_done: tuple[AcknowledgedItemIdWire, ...] | None = None
+    acknowledged_not_done_count: CanonicalUInt64Wire | None = None
+
+    optional_non_null_fields = frozenset(
+        {
+            "state",
+            "gap_classification_version",
+            "agent_actionable",
+            "standing_limitations",
+            "acknowledged_not_done",
+            "acknowledged_not_done_count",
+        }
+    )
 
     @model_validator(mode="after")
     def _validate_closure_readiness(self) -> StatusClosureReadinessModel:
@@ -3316,33 +3330,49 @@ class StatusClosureReadinessModel(_ClosedModel):
         return self
 
     def _validate_checklist(self) -> None:
-        _require_unique(self.agent_actionable, limit=128)
-        _require_unique(self.standing_limitations, limit=128)
-        _require_unique(self.acknowledged_not_done, limit=64)
-        acknowledged = int(self.acknowledged_not_done_count)
-        if len(self.acknowledged_not_done) != min(acknowledged, 64):
+        checklist = (
+            self.state,
+            self.gap_classification_version,
+            self.agent_actionable,
+            self.standing_limitations,
+            self.acknowledged_not_done,
+            self.acknowledged_not_done_count,
+        )
+        if all(value is None for value in checklist):
+            return
+        if any(value is None for value in checklist):
+            raise ValueError("closure_readiness_checklist_partial")
+        state = cast(str, self.state)
+        actionable = cast(tuple[str, ...], self.agent_actionable)
+        standing = cast(tuple[str, ...], self.standing_limitations)
+        acknowledged_ids = cast(tuple[str, ...], self.acknowledged_not_done)
+        _require_unique(actionable, limit=128)
+        _require_unique(standing, limit=128)
+        _require_unique(acknowledged_ids, limit=64)
+        acknowledged = int(cast(str, self.acknowledged_not_done_count))
+        if len(acknowledged_ids) != min(acknowledged, 64):
             raise ValueError("closure_readiness_acknowledged_count_mismatch")
-        if set(self.agent_actionable) & set(self.standing_limitations):
+        if set(actionable) & set(standing):
             raise ValueError("closure_readiness_group_overlap")
         if "readiness_unknown" in self.blocking_conditions:
             if (
-                self.state != "unknown"
-                or self.agent_actionable != ("readiness_unknown",)
-                or self.standing_limitations
+                state != "unknown"
+                or actionable != ("readiness_unknown",)
+                or standing
                 or acknowledged
             ):
                 raise ValueError("closure_readiness_unknown_checklist_mismatch")
             return
-        if self.state == "unknown" or "readiness_unknown" in self.agent_actionable:
+        if state == "unknown" or "readiness_unknown" in actionable:
             raise ValueError("closure_readiness_unknown_checklist_mismatch")
         expected = (
             "action_required"
-            if self.agent_actionable
+            if actionable
             else "ready_with_limitations"
-            if self.standing_limitations or acknowledged
+            if standing or acknowledged
             else "ready"
         )
-        if self.state != expected:
+        if state != expected:
             raise ValueError("closure_readiness_state_mismatch")
         # These conditions are always the agent's to clear; none can be classified away.
         for condition in (
@@ -3352,14 +3382,14 @@ class StatusClosureReadinessModel(_ClosedModel):
             "no_obligations_declared",
             "projection_stale",
         ):
-            if (condition in self.blocking_conditions) != (condition in self.agent_actionable):
+            if (condition in self.blocking_conditions) != (condition in actionable):
                 raise ValueError("closure_readiness_actionable_condition_mismatch")
         receipt_condition = "receipt_findings_unresolved"
-        if receipt_condition in self.agent_actionable:
+        if receipt_condition in actionable:
             if receipt_condition not in self.blocking_conditions:
                 raise ValueError("closure_readiness_actionable_condition_mismatch")
         elif receipt_condition in self.blocking_conditions and not any(
-            item.startswith("fnd_") for item in self.acknowledged_not_done
+            item.startswith("fnd_") for item in acknowledged_ids
         ):
             # Only an acknowledgement moves a receipt-blocking finding off the agent's list.
             raise ValueError("closure_readiness_receipt_acknowledgement_mismatch")

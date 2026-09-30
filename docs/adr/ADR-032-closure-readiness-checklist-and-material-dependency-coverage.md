@@ -112,8 +112,10 @@ names what the receipt will disclose.
   receipt and stops; the receipt still says `insufficient_coverage` and lists every gap.
 - A new gap code cannot ship unclassified, and an unknown code keeps the task actionable rather than
   hiding behind a stop state.
-- The status-result 1.4.0 schema gains the checklist fields; they are required on every status
-  success. Guidance, every host skill and the status tool description name the stop signal.
+- The unreleased status-result 1.4.0 schema is edited in place: the checklist fields are optional
+  on the wire, so a result shaped by an earlier 0.3 build still validates, but when present they
+  are complete, and this build emits them on every status success. Guidance, every host skill and
+  the status tool description name the stop signal.
 - A standing set differs per host; each host runbook records its own.
 
 ## Alternatives rejected
