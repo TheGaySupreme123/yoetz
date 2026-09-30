@@ -152,6 +152,7 @@ from yoetz.application.semantic_case import (
     LineageSemanticCapacityExceeded,
     SemanticCaseTooLarge,
     build_semantic_case,
+    check_time_change_parts_carried,
     semantic_case_to_candidate_context,
 )
 from yoetz.application.semantic_content import (
@@ -4398,16 +4399,17 @@ def _privacy_gated_semantic_evaluator(
             )
             if check_change.change is not None and runtime is not None:
                 # Which changed files this packet carried, as keyed commitments: AI-powered
-                # finding resolution compares them across checks (ADR-031). A record that cannot
-                # be computed says it is incomplete, which never tolerates a check-time limit.
+                # finding resolution compares them across checks (ADR-031). They are counted from
+                # the bounded provider envelope, after minimization and the channel's withheld
+                # categories, never from the case before them. A record that cannot be computed
+                # says it is incomplete, which never tolerates a check-time limit.
                 try:
                     check_change_files = await check_change_shown_files(
                         runtime,
                         check_change.change,
                         review_selection,
-                        sum(
-                            item.excerpt_item_id.startswith(CHECK_TIME_CHANGE_ITEM_PREFIX)
-                            for item in semantic_case.packet.targeted_excerpts
+                        check_time_change_parts_carried(
+                            semantic_case, withheld_categories=withheld
                         ),
                     )
                 except Exception as exc:

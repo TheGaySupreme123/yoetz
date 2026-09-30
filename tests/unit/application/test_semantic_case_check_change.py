@@ -28,6 +28,7 @@ from yoetz.application.semantic_case import (
     CapturedSemanticContent,
     CheckTimeChange,
     build_semantic_case,
+    check_time_change_parts_carried,
     check_time_change_shown_files,
     semantic_case_to_prepared_payload,
 )
@@ -413,3 +414,97 @@ def _check_time_change_chunks(text: bytes) -> tuple[bytes, ...]:
     chunks = getattr(module, "_check_time_change_chunks")
     limit = getattr(module, "_check_time_change_part_limit")(selection)
     return cast(tuple[bytes, ...], chunks(text, limit))
+
+
+def _tight_custom_selection() -> ReviewSelectionPolicy:
+    """A legal custom recipe whose half-byte share (3000) is smaller than one 4 KiB part."""
+
+    expanded = ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED)
+    return replace(expanded, max_excerpts=4, max_excerpt_bytes=4_096, max_total_excerpt_bytes=6_000)
+
+
+@pytest.mark.parametrize("parts", (1, 3))
+def test_reservation_admits_one_whole_part_even_when_half_the_bytes_is_smaller(
+    parts: int,
+) -> None:
+    # R945-01: the reserved share must hold at least one part, or an ordinary excerpt consumes
+    # the budget first and a captured change is reported unavailable.
+    line = b"+" + b"z" * 99 + b"\n"
+    text = line * (39 * parts)
+    case, captured, scope = _captured_case_values(b"competing-output " + b"q" * 3_880)
+    selection = _tight_custom_selection()
+
+    semantic = _build(
+        case,
+        ReviewContextProfile.CUSTOM,
+        change=_change(text),
+        selection=selection,
+        captured=(captured,),
+        scope=scope,
+    )
+
+    change_ids = _change_items(semantic)
+    assert change_ids, "a captured change that fits the recipe must reach the packet"
+    assert semantic.packet.targeted_excerpts[0].excerpt_item_id == change_ids[0]
+    gaps = set(semantic.packet.coverage.known_gaps)
+    assert CHECK_TIME_CHANGE_UNAVAILABLE_GAP not in gaps
+    assert (CHECK_TIME_CHANGE_TRUNCATED_GAP in gaps) is (parts > 1)
+    used = sum(item.content_bytes for item in semantic.packet.targeted_excerpts)
+    assert used <= selection.max_total_excerpt_bytes
+
+
+def test_parts_never_exceed_a_total_excerpt_budget_smaller_than_one_excerpt() -> None:
+    expanded = ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED)
+    selection = replace(
+        expanded, max_excerpts=4, max_excerpt_bytes=16_384, max_total_excerpt_bytes=1_500
+    )
+
+    semantic = _build(
+        _case_with_material(),
+        ReviewContextProfile.CUSTOM,
+        change=_change(_large_change(1)),
+        selection=selection,
+    )
+
+    change_ids = _change_items(semantic)
+    assert change_ids
+    assert CHECK_TIME_CHANGE_UNAVAILABLE_GAP not in semantic.packet.coverage.known_gaps
+    used = sum(item.content_bytes for item in semantic.packet.targeted_excerpts)
+    assert used <= selection.max_total_excerpt_bytes
+
+
+def test_parts_carried_are_counted_from_the_bounded_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # R945-06: the shown-file record must describe what the provider-facing envelope carries,
+    # not the case before envelope minimization dropped catalog rows.
+    import yoetz.application.semantic_case as semantic_case_module
+
+    semantic = _build(_case_with_material(), change=_change(_large_change(12)))
+    admitted = len(_change_items(semantic))
+    assert admitted == 12
+    assert check_time_change_parts_carried(semantic) == admitted
+    assert check_time_change_parts_carried(semantic, withheld_categories=("claim_text",)) == 12
+
+    monkeypatch.setattr(semantic_case_module, "MAX_EGRESS_ENVELOPE_BYTES", 8_000)
+    carried = check_time_change_parts_carried(semantic)
+    assert 0 < carried < admitted
+    envelope = strict_json_parse(semantic_case_module.bounded_case_envelope(semantic))
+    assert isinstance(envelope, dict)
+    catalog = {
+        cast(dict[str, object], row)["item_id"]
+        for row in cast(list[object], envelope["item_catalog"])
+    }
+    assert {f"{CHECK_TIME_CHANGE_ITEM_PREFIX}{index:03d}" for index in range(1, carried + 1)} <= (
+        catalog
+    )
+    assert f"{CHECK_TIME_CHANGE_ITEM_PREFIX}{carried + 1:03d}" not in catalog
+
+
+def test_parts_carried_is_zero_when_the_channel_withholds_repository_excerpts() -> None:
+    semantic = _build(_case_with_material(), change=_change())
+
+    assert check_time_change_parts_carried(semantic) == 1
+    assert (
+        check_time_change_parts_carried(semantic, withheld_categories=("repository_excerpt",)) == 0
+    )

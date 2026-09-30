@@ -114,6 +114,7 @@ from yoetz.protocol.models import (
 __all__ = [
     "CHECK_TIME_CHANGE_ITEM_PREFIX",
     "CheckTimeChangeShownFile",
+    "check_time_change_parts_carried",
     "check_time_change_shown_files",
     "CapturedContentScope",
     "CapturedSemanticContent",
@@ -390,19 +391,33 @@ _CHECK_TIME_CHANGE_MARKER: Final = "[Yoetz check-time change, part {index} of {c
 _CHECK_TIME_CHANGE_MIN_CHUNK: Final = 256
 
 
-def _check_time_change_reservation(selection: ReviewSelectionPolicy) -> tuple[int, int]:
+def _check_time_change_reservation(
+    selection: ReviewSelectionPolicy, first_part_bytes: int
+) -> tuple[int, int]:
     """Excerpt slots and bytes held for the check-time change before any other excerpt (#883).
 
     Half of the recipe's excerpt count and total bytes, and never less than one slot, are offered
-    to the service-captured change first. Room it does not use stays with the other excerpts; its
-    parts left over after every other excerpt backfill whatever the recipe still has free.
+    to the service-captured change first. The byte share is rounded up to the change's first part,
+    so a recipe whose total budget carries one part always admits it ahead of every other excerpt
+    (a part is never larger than that total, see ``_check_time_change_part_limit``). Room it does
+    not use stays with the other excerpts; its parts left over after every other excerpt backfill
+    whatever the recipe still has free.
     """
 
-    return max(1, selection.max_excerpts // 2), selection.max_total_excerpt_bytes // 2
+    return (
+        max(1, selection.max_excerpts // 2),
+        max(selection.max_total_excerpt_bytes // 2, first_part_bytes),
+    )
 
 
 def _check_time_change_part_limit(selection: ReviewSelectionPolicy) -> int:
-    return min(selection.max_excerpt_bytes, MAX_REVIEW_TEXT_BYTES, MAX_SEMANTIC_ITEM_BYTES)
+    # A part never exceeds the recipe's whole excerpt budget, so one part always fits it.
+    return min(
+        selection.max_excerpt_bytes,
+        selection.max_total_excerpt_bytes,
+        MAX_REVIEW_TEXT_BYTES,
+        MAX_SEMANTIC_ITEM_BYTES,
+    )
 
 
 def _check_time_change_parts(text: bytes, part_limit: int) -> tuple[str, ...]:
@@ -1921,7 +1936,12 @@ def build_semantic_case(
     if "targeted_excerpts" in sections and selection.max_excerpts > 0:
         # The service-captured change takes its reserved share first; see
         # ``_check_time_change_reservation`` for how the rest of the budget is shared.
-        admit_check_time_change(*_check_time_change_reservation(selection))
+        admit_check_time_change(
+            *_check_time_change_reservation(
+                selection,
+                len(check_change_parts[0].encode("utf-8")) if check_change_parts else 0,
+            )
+        )
         repair_refs = repair_evidence_refs(projection, frozenset(allowed))
         linked_subjects: set[str] = set(repair_refs)
         for finding in findings:
@@ -3393,6 +3413,38 @@ def bounded_case_envelope(case: SemanticCase) -> bytes:
         if len(encoded) <= MAX_EGRESS_ENVELOPE_BYTES:
             return encoded
     raise SemanticCaseTooLarge("semantic_case_envelope_too_large")
+
+
+def check_time_change_parts_carried(
+    case: SemanticCase, *, withheld_categories: Sequence[str] = ()
+) -> int:
+    """How many leading check-time change parts the provider-facing envelope carries (ADR-031).
+
+    The shown-file record must describe what the reviewer could read, not the case before
+    ``bounded_case_envelope`` minimized it: a part whose catalog row bounding dropped is never
+    offered for authorization, and a channel that withholds ``repository_excerpt`` receives no
+    part at all. Parts are admitted and dropped in order, so only the unbroken run from the
+    first part counts. The answer is a pure function of the frozen case and the policy's
+    withheld categories, so a recovered job derives the same count.
+    """
+
+    if type(case) is not SemanticCase:
+        raise TypeError("semantic_case_invalid")
+    if DataCategory.REPOSITORY_EXCERPT.value in withheld_categories:
+        return 0
+    admitted = sum(
+        item.excerpt_item_id.startswith(CHECK_TIME_CHANGE_ITEM_PREFIX)
+        for item in case.packet.targeted_excerpts
+    )
+    if not admitted:
+        return 0
+    catalogued = _catalog_item_ids(
+        cast(Mapping[str, JsonValue], strict_json_parse(bounded_case_envelope(case)))
+    )
+    carried = 0
+    while carried < admitted and f"{CHECK_TIME_CHANGE_ITEM_PREFIX}{carried + 1:03d}" in catalogued:
+        carried += 1
+    return carried
 
 
 def semantic_case_to_candidate_context(

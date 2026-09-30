@@ -513,6 +513,8 @@ async def test_channel_denying_repository_excerpts_never_sends_the_change_and_sa
     # Disclosed: the recipe selects the change, the channel withholds its category.
     assert effective.policy.withheld_review_categories == (DataCategory.REPOSITORY_EXCERPT,)
     assert waiting.withheld_review_categories == ("repository_excerpt",)
+    # R945-06: a review whose channel withholds the change is never recorded as having seen it.
+    assert waiting.check_change_files == CheckChangeShownFiles((), (), complete=True)
     candidate = privacy.candidates[0]
     change_items = [
         item for item in candidate.items if item.item_id.startswith(CHECK_TIME_CHANGE_ITEM_PREFIX)
