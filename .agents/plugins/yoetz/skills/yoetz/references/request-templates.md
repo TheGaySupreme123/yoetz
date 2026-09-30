@@ -48,8 +48,9 @@ your plan, only when the approved privacy policy lists the `task_statement` sect
 check and receipt say `task_statement_not_authorized`. When the user amends the request, call
 `start` again with a fresh `request_id`, `mode=attach`, the `session_id` you hold, and the whole
 amended request in `task_statement` (a CLI publisher may instead carry it in a `plan_revised`
-1.1.0 payload). The newest statement is current and earlier ones stay in history. Never put the
-statement in a plan `summary`, and never infer it from commit messages or files.
+1.1.0 payload). On a resume that does not change the request, omit `task_statement`; the recorded
+statement stays current. The newest statement is current and earlier ones stay in history. Never
+put the statement in a plan `summary`, and never infer it from commit messages or files.
 
 ```json
 {

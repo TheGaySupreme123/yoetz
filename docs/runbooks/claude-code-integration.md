@@ -1413,11 +1413,16 @@ This behavior is identical on macOS, Linux and Windows via WSL 2. CLI callers ma
 
 Decision for Claude Code: supported through the agent-supplied field, identical on every host and OS.
 The agent passes the user's request verbatim as `start.task_statement` (MCP `start` or
-`yoetz start --task-statement-file`) and may revise it with a `plan_revised` 1.1.0 payload. The
-review packet carries it as the `task_statement` section labelled `agent_transcribed`, apart from
-the plan, only when the approved privacy policy names that section (privacy policy 1.2.0 presets
-Goal-aware, Assisted and Expanded; never Structural). Otherwise the check and receipt carry
-`task_statement_unavailable` with `task_statement_not_supplied` or `task_statement_not_authorized`.
+`yoetz start --task-statement-file`). To revise it, the agent calls `start` again with
+`mode=attach`, the `session_id` it holds, a fresh `request_id` and the whole amended request; a CLI
+publisher may instead carry it in a `plan_revised` 1.1.0 payload. A resume that does not change the
+request omits the field, and the recorded statement stays current. The review packet carries it as
+the `task_statement` section labelled `agent_transcribed`, apart from the plan, only when the
+approved privacy policy names that section (privacy policy 1.2.0 presets Goal-aware, Assisted and
+Expanded; never Structural). With no statement recorded the task title stands in, labelled
+`task_title_only`, and no gap is added. When the policy withholds the section the check and receipt
+carry `task_statement_unavailable` with `task_statement_not_authorized`; with neither a statement
+nor a readable title they carry `task_statement_unavailable` with `task_statement_not_supplied`.
 
 Claude Code's `UserPromptSubmit` payload can be captured under an ordinary content profile as `visible_user_message`, but that captured text never enters an AI-powered review packet; see below.
 
