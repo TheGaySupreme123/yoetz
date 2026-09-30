@@ -145,13 +145,19 @@ def test_background_advice_is_its_own_layer_with_its_reason() -> None:
     """Issue #888: the terminal interface shows the effective switch and why."""
 
     state, detail = _advice_layer(
-        _provider(
-            background_advice_enabled=False, background_advice_reason="explicit_checks_default"
-        )
+        _provider(background_advice_enabled=False, background_advice_reason="owner_disabled")
     )
     assert state is LayerState.NOT_CONFIGURED
-    assert "explicit AI-powered checks" in detail
-    assert "semantic_advice_enabled = true" in detail
+    assert "set to false" in detail
+    assert "set it to true" in detail
+
+    # On by default where AI-powered review is configured (#888), still unproven.
+    state, detail = _advice_layer(
+        _provider(background_advice_enabled=True, background_advice_reason="default_enabled")
+    )
+    assert state is LayerState.UNPROVEN
+    assert "on by default" in detail
+    assert "semantic_advice_enabled = false" in detail
 
     # Even when on it is unproven: it runs only while a provider is usable (#923).
     state, detail = _advice_layer(

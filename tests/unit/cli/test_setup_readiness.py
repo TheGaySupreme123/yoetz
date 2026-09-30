@@ -300,9 +300,11 @@ def test_setup_status_next_names_the_background_advice_setting(
         report = json.loads(output)
         validate_schema_instance("setup-readiness", "1.0.0", report)
         assert report["facts"]["background_advice"] == {
-            "enabled": False,
-            "reason": "explicit_checks_default",
+            "enabled": True,
+            "reason": "default_enabled",
         }
     else:
-        assert "Background AI-powered advice: off by default" in output
-        assert "semantic_advice_enabled = true" in output
+        assert "Background AI-powered advice: on by default" in output
+        # The reverse switch is named; the turn-on hint belongs only to an owner's ``false``.
+        assert "semantic_advice_enabled = false" in output
+        assert "= true" not in output

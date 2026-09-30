@@ -384,10 +384,13 @@ _ADVICE_NOTE_REASON_TEXT: Final[Mapping[str, str]] = {
 def _background_advice_off_text(reason: str) -> str | None:
     """Fixed text for a reason that says background advice is off; any other reason is ``None``."""
 
-    from yoetz.cli.provider_status import background_advice_human_line
+    from yoetz.cli.provider_status import (
+        BACKGROUND_ADVICE_ON_REASONS,
+        background_advice_human_line,
+    )
 
-    # ``owner_enabled`` is the only reason for an on switch; under "off" it contradicts itself.
-    if reason == "owner_enabled":
+    # A reason for an on switch contradicts itself under "off".
+    if reason in BACKGROUND_ADVICE_ON_REASONS:
         return None
     return background_advice_human_line({"reason": reason})
 
@@ -395,12 +398,14 @@ def _background_advice_off_text(reason: str) -> str | None:
 def _semantic_advice_readiness(status: Mapping[str, object]) -> tuple[bool, str]:
     """Background-advice readiness and its closed note from a provider status report.
 
-    Background advice is its own switch, off by default where explicit checks run (#888): a ready
-    provider alone is not ready background advice. A provider that is not ready is the
-    configuration-incomplete case whatever the advice fact says. Once it is ready, an absent,
-    malformed or unrecognized advice fact, or a reason that contradicts ``enabled``, is
-    unreadable, never a raw reason token.
+    Background advice is its own switch, on by default where AI-powered review is configured and
+    off when the owner sets it false (#888): a ready provider alone is not ready background
+    advice. A provider that is not ready is the configuration-incomplete case whatever the advice
+    fact says. Once it is ready, an absent, malformed or unrecognized advice fact, or a reason
+    that contradicts ``enabled``, is unreadable, never a raw reason token.
     """
+
+    from yoetz.cli.provider_status import BACKGROUND_ADVICE_ON_REASONS
 
     if status.get("semantic_ready") is not True:
         return False, "semantic_configuration_incomplete"
@@ -410,7 +415,7 @@ def _semantic_advice_readiness(status: Mapping[str, object]) -> tuple[bool, str]
     )
     enabled = facts.get("enabled")
     reason = facts.get("reason")
-    if enabled is True and reason == "owner_enabled":
+    if enabled is True and reason in BACKGROUND_ADVICE_ON_REASONS:
         return True, _ADVICE_READY_NOTE
     if enabled is False and type(reason) is str and _background_advice_off_text(reason):
         return False, _ADVICE_OFF_PREFIX + reason

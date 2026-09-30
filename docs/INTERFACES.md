@@ -4050,9 +4050,9 @@ Shared closed types:
   an explicit `claim_kind` value such as `completion`, `done`, or `finished`. Observation AI-powered
   advice is asynchronous (issue #619): the advice build never calls a provider. The service
   composes it only when `config.models.background_advice_setting` resolves enabled: an unset
-  `[observation] semantic_advice_enabled` is off wherever explicit AI-powered checks run, and an
+  `[observation] semantic_advice_enabled` is on wherever AI-powered review is configured, and an
   explicit value always wins (ADR-006 issue #888; closed reasons `owner_enabled`,
-  `owner_disabled`, `explicit_checks_default`, `semantic_review_disabled`, `observation_disabled`,
+  `default_enabled`, `owner_disabled`, `semantic_review_disabled`, `observation_disabled`,
   shown as `background_advice` by `yoetz provider status` and `yoetz setup status --next`).
   While it resolves off, startup rediscovery closes rows an earlier service left `pending` as
   `cancelled` / `cancelled` with no provider identity and no provider work.

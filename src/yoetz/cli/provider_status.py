@@ -37,6 +37,7 @@ from yoetz.service.client import connect_service
 
 __all__ = [
     "MachineScopeError",
+    "BACKGROUND_ADVICE_ON_REASONS",
     "background_advice_facts",
     "background_advice_human_line",
     "credential_human_display",
@@ -176,12 +177,19 @@ def review_budget_human_line(endpoint: object) -> str | None:
 _BACKGROUND_ADVICE_TEXT: Final[Mapping[str, str]] = {
     "owner_enabled": "on (set in [observation] semantic_advice_enabled); runs only while a "
     "provider is usable",
-    "owner_disabled": "off (set in [observation] semantic_advice_enabled)",
-    "explicit_checks_default": "off by default because explicit AI-powered checks review the "
-    "work; set [observation] semantic_advice_enabled = true to turn it on",
+    "default_enabled": "on by default where AI-powered review is configured; runs only while a "
+    "provider is usable; set [observation] semantic_advice_enabled = false to turn it off",
+    "owner_disabled": "off (set to false in [observation] semantic_advice_enabled); set it to "
+    "true, or remove the line, to turn it on",
     "semantic_review_disabled": "off because [verification] semantic is disabled",
     "observation_disabled": "off because observation is disabled",
 }
+
+
+# The closed reasons that accompany an enabled switch; every other known reason means off.
+BACKGROUND_ADVICE_ON_REASONS: Final[frozenset[str]] = frozenset(
+    {"owner_enabled", "default_enabled"}
+)
 
 
 def background_advice_facts(config: YoetzConfig) -> dict[str, JsonValue]:

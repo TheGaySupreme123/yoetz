@@ -1222,8 +1222,8 @@ async def test_applied_route_foreign_never_reports_drift(
 @pytest.mark.parametrize(
     ("semantic", "chosen", "enabled", "reason"),
     [
-        ("required", None, False, "explicit_checks_default"),
-        ("optional", None, False, "explicit_checks_default"),
+        ("required", None, True, "default_enabled"),
+        ("optional", None, True, "default_enabled"),
         ("required", True, True, "owner_enabled"),
         ("optional", False, False, "owner_disabled"),
         ("disabled", True, False, "semantic_review_disabled"),
@@ -1260,8 +1260,13 @@ async def test_background_advice_reports_the_effective_switch_and_its_reason(
     line = module.background_advice_human_line(report["background_advice"])
     assert line is not None
     assert line.startswith("on" if enabled else "off")
-    if reason == "explicit_checks_default":
-        # The way back is always named: the owner can turn it on again.
-        assert "semantic_advice_enabled = true" in line
+    if reason == "default_enabled":
+        # On by default, and the way to turn it off is named.
+        assert "semantic_advice_enabled = false" in line
+    if reason == "owner_disabled":
+        # The way back is named only where the owner turned it off.
+        assert "set it to true" in line
+    else:
+        assert "true" not in line
     # Only fixed text renders; an unknown token renders nothing.
     assert module.background_advice_human_line({"reason": "owner-authored text"}) is None

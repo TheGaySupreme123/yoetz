@@ -826,7 +826,7 @@ def fallback_external_endpoint(config: YoetzConfig) -> ExternalEndpointConfig | 
 type BackgroundAdviceReason = Literal[
     "owner_enabled",
     "owner_disabled",
-    "explicit_checks_default",
+    "default_enabled",
     "semantic_review_disabled",
     "observation_disabled",
 ]
@@ -843,13 +843,12 @@ class BackgroundAdviceSetting:
 def background_advice_setting(config: YoetzConfig) -> BackgroundAdviceSetting:
     """Resolve the effective background-advice switch from the owner's configuration.
 
-    Background advice reviews only rule codes and gap codes between checks; explicit AI-powered
-    checks already review the change with the full packet whenever ``verification.semantic`` is
-    ``required`` or ``optional``. So unless the owner sets ``[observation]
-    semantic_advice_enabled``, background advice is off wherever explicit AI-powered checks can
-    run (issue #888, recommended option B of #923). An explicit value always wins; observation
-    or AI-powered review being off leaves nothing to enable. Provider readiness is a separate,
-    live fact read by the service on every build (#923).
+    Unless the owner sets ``[observation] semantic_advice_enabled``, background advice is on
+    wherever AI-powered review is configured (``verification.semantic`` ``required`` or
+    ``optional``); this is the maintainer's recorded decision on issue #888 (2026-09-30). An
+    explicit value always wins, so ``false`` turns it off; observation or AI-powered review being
+    off leaves nothing to enable. Provider readiness is a separate, live fact read by the service
+    on every build (#923).
     """
 
     if type(config) is not YoetzConfig:
@@ -863,4 +862,4 @@ def background_advice_setting(config: YoetzConfig) -> BackgroundAdviceSetting:
         return BackgroundAdviceSetting(True, "owner_enabled")
     if chosen is False:
         return BackgroundAdviceSetting(False, "owner_disabled")
-    return BackgroundAdviceSetting(False, "explicit_checks_default")
+    return BackgroundAdviceSetting(True, "default_enabled")

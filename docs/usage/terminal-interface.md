@@ -160,9 +160,9 @@ The last five are deliberately separate lines, because each can be true while th
   has been admitted for this repository; the detail names each host as present or absent, and a
   stale admission that outlives its grant or route is called out for revocation.
 - **Background AI-powered advice** — whether AI-powered advice between checks is switched on, and
-  why. It is off by default because explicit AI-powered checks review your work; the detail names
-  the `[observation]` setting that turns it on. When on it is still shown as unproven, because it
-  runs only while a provider is usable.
+  why. It is on by default wherever AI-powered review is configured; the detail names the
+  `[observation]` setting that turns it off, or turns it back on after you switched it off. When
+  on it is still shown as unproven, because it runs only while a provider is usable.
 
 "Connected" is never a substitute for any of these. If the privacy policy could not be read,
 `/status` says so rather than claiming nothing is leaving your computer.

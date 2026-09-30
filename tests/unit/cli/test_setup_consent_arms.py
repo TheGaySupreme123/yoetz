@@ -209,7 +209,7 @@ def test_terminal_interface_consent_layer_names_the_kept_arms(tmp_path: Path) ->
 def test_setup_summary_explains_background_advice_off_in_fixed_words(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Issue #888: a ready provider with background advice off by default names why."""
+    """Issue #888: a ready provider with background advice turned off by the owner names why."""
 
     setup._emit_human_report(  # pyright: ignore[reportPrivateUsage]
         {
@@ -220,16 +220,52 @@ def test_setup_summary_explains_background_advice_off_in_fixed_words(
             "readiness": {
                 "observation_ready": True,
                 "semantic_advice_ready": False,
-                "semantic_advice_note": "background_advice_off:explicit_checks_default",
+                "semantic_advice_note": "background_advice_off:owner_disabled",
             },
             "next_steps": [],
         }
     )
 
     out = capsys.readouterr().out
-    assert "AI-powered advice readiness: off by default" in out
-    assert "semantic_advice_enabled = true" in out
+    assert "AI-powered advice readiness: off (set to false" in out
+    # The way back is named only where the owner turned it off.
+    assert "set it to true" in out
     assert "background_advice_off:" not in out
+
+
+@pytest.mark.parametrize(
+    "note",
+    [
+        "background_advice_off:semantic_review_disabled",
+        "background_advice_off:observation_disabled",
+        "semantic_configuration_incomplete",
+        "deterministic_only_until_provider_ready",
+        "background_advice_unreadable",
+    ],
+)
+def test_setup_summary_names_the_turn_on_hint_only_for_an_owner_false(
+    capsys: pytest.CaptureFixture[str], note: str
+) -> None:
+    """Issue #888: advice is on by default, so no other note tells the owner to set ``true``."""
+
+    setup._emit_human_report(  # pyright: ignore[reportPrivateUsage]
+        {
+            "registration": {},
+            "service": {"reachable": True, "state": "ready"},
+            "provider": {},
+            "integration": {},
+            "readiness": {
+                "observation_ready": True,
+                "semantic_advice_ready": False,
+                "semantic_advice_note": note,
+            },
+            "next_steps": [],
+        }
+    )
+
+    out = capsys.readouterr().out
+    assert "= true" not in out
+    assert "set it to true" not in out
 
 
 @pytest.mark.parametrize(
@@ -279,7 +315,8 @@ def test_setup_summary_never_renders_an_unreadable_background_advice_token(
         # A reason that contradicts ``enabled`` is unreadable, never rendered as its own text.
         {"enabled": False, "reason": "owner_enabled"},
         {"enabled": True, "reason": "owner_disabled"},
-        {"enabled": True, "reason": "explicit_checks_default"},
+        {"enabled": True, "reason": "semantic_review_disabled"},
+        {"enabled": False, "reason": "default_enabled"},
         {"enabled": True},
     ],
 )
@@ -301,13 +338,20 @@ def test_setup_readiness_marks_absent_or_malformed_background_advice_unreadable(
 def test_setup_readiness_keeps_known_background_advice_reasons() -> None:
     status = {
         "semantic_ready": True,
-        "background_advice": {"enabled": False, "reason": "explicit_checks_default"},
+        "background_advice": {"enabled": False, "reason": "owner_disabled"},
     }
 
     assert setup._semantic_advice_readiness(status) == (  # pyright: ignore[reportPrivateUsage]
         False,
-        "background_advice_off:explicit_checks_default",
+        "background_advice_off:owner_disabled",
     )
+    # Issue #888: an unset switch is on by default where AI-powered review is configured.
+    assert setup._semantic_advice_readiness(  # pyright: ignore[reportPrivateUsage]
+        {
+            "semantic_ready": True,
+            "background_advice": {"enabled": True, "reason": "default_enabled"},
+        }
+    ) == (True, "configured_and_composed; live_provider_dispatch_not_tested")
     assert setup._semantic_advice_readiness(  # pyright: ignore[reportPrivateUsage]
         {"semantic_ready": True, "background_advice": {"enabled": True, "reason": "owner_enabled"}}
     ) == (True, "configured_and_composed; live_provider_dispatch_not_tested")

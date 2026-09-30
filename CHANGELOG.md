@@ -23,16 +23,14 @@ reverse-chronological released versions.
 
 ### Changed
 
-- Background AI-powered observation advice is now off by default whenever explicit AI-powered
-  checks run (`[verification] semantic` is `required` or `optional`); those checks already review
-  your work with the full review packet. Upgrading turns it off for any installation whose config
-  has no `semantic_advice_enabled` line. To turn it back on, add `semantic_advice_enabled = true`
-  under `[observation]` and restart the service. Your explicit choice always wins, and Yoetz now
-  writes the line only when you set it. Config files written by 0.3 development builds since #890
-  already contain `semantic_advice_enabled = true`, because those builds wrote the old default
-  out; on those installations advice stays on until you remove the line. `yoetz provider status`,
+- Background AI-powered observation advice stays on by default wherever AI-powered review is
+  configured (`[verification] semantic` is `required` or `optional`), so upgrading does not change
+  it. `[observation] semantic_advice_enabled` is now an explicit owner choice: `false` turns
+  background advice off and `true` keeps it on whatever the default. Yoetz writes the line only
+  when you set it, so a config without it follows the default. `yoetz provider status`,
   `yoetz setup status --next` and the terminal interface `/status` show whether it is on and why.
-  Rows queued before it was switched off are closed at service start without being sent (#888).
+  While you have it off, rows queued before you switched it off are closed at service start
+  without being sent, so turning it back on never sends old work (#888).
 
 ### Fixed
 

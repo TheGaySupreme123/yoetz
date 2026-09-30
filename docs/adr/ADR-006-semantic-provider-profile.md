@@ -769,41 +769,41 @@ retained usage and a usage-unknown count in status or diagnostics would need a b
 wire change and remain open on #923. The same service behavior applies to Codex, Claude Code and
 Cursor on macOS, Linux and Windows through WSL 2.
 
-### Background advice default on explicit-check routes (2026-09-30, issue #888)
+### Background advice default and owner switch (2026-09-30, issue #888)
 
-Background advice reviews only structural rule and gap codes between checks, while explicit
-AI-powered checks review the change with the full packet. `observation.semantic_advice_enabled`
-is therefore tri-state: unset means the product default, which is off wherever explicit
-AI-powered checks run (`verification.semantic` `required` or `optional`); an explicit `true` or
-`false` always wins. `background_advice_setting` resolves the effective switch and one closed
-reason: `owner_enabled`, `owner_disabled`, `explicit_checks_default`, `semantic_review_disabled`
-or `observation_disabled`. The service composes the background scheduler and dispatch only when
-it is enabled, and provider readiness (issue #923) still gates every build and dispatch. The
-config writer persists the setting only when the owner set it, so a written default never turns
-into an apparent owner choice; configurations written by 0.3 development builds between #890 and
-this change carry an explicit `true` and keep advice on until that line is removed.
+Decision (maintainer, 2026-09-30): background advice is **on by default** wherever AI-powered
+review is configured, for both `verification.semantic` `optional` and `required`. This settles
+the default #923 left to #888: its option B off-by-default proposal is declined, and `optional`
+and `required` resolve the same way. A dedicated advice purpose and prompt (#923 option A)
+remains open.
+
+`observation.semantic_advice_enabled` is tri-state: unset means the product default (on), and an
+explicit `true` or `false` always wins, so `false` is the owner's way to turn background advice
+off. `background_advice_setting` resolves the effective switch and one closed reason:
+`owner_enabled`, `default_enabled`, `owner_disabled`, `semantic_review_disabled` or
+`observation_disabled`; only `owner_enabled` and `default_enabled` accompany an enabled switch.
+The service composes the background scheduler and dispatch only when it is enabled, and provider
+readiness (issue #923) still gates every build and dispatch. The config writer persists the
+setting only when the owner set it, so a written default never turns into an apparent owner
+choice and a configuration without the line, including one upgraded from 0.2.5, keeps advice on.
 `yoetz provider status` (`background_advice`), `yoetz setup status --next`
 (`facts.background_advice`) and the terminal interface status layer show the effective state and
-reason with fixed text; setting `true` is the way back. The setup wizard reports
-`semantic_advice_ready` only when the provider is ready and background advice is on, and its
-human summary renders the same fixed text for `background_advice_off:<reason>` otherwise. While
-the provider is not ready the note is the configuration-incomplete case whatever the advice fact
-says. Only once it is ready, a status whose advice fact is absent or malformed, carries a reason
-this client does not recognize, or carries a reason that contradicts `enabled` is
+reason with fixed text. The default-on text names `false` as the way to turn it off; only the
+owner-disabled text names `true` (or removing the line) as the way back.
+
+The setup wizard reports `semantic_advice_ready` only when the provider is ready and background
+advice is on, and its human summary renders the same fixed text for `background_advice_off:<reason>`
+otherwise. While the provider is not ready the note is the configuration-incomplete case whatever
+the advice fact says. Only once it is ready, a status whose advice fact is absent or malformed,
+carries a reason this client does not recognize, or carries a reason that contradicts `enabled` is
 `background_advice_unreadable` and renders as not demonstrated because the setting could not be
 read. The summary renders every readiness note in fixed words and never prints a note token.
-While
-the switch resolves off, the service still wires a closing dispatch: startup rediscovery closes a
-row an earlier service left `pending` as `cancelled` / `cancelled` with no provider identity and
-no route, authority or provider work, so it neither stays pending nor is replayed if the owner
-later turns advice back on. This supersedes the #888 statement that re-enabling lets such work
-drain. This records the recommended option B of
-#923 pending the owner's recorded choice on #888; a dedicated advice purpose and prompt (option
-A) remains open. That choice has two parts not yet recorded: whether to adopt the default at all,
-and whether it covers `optional` as well as `required`. #923 named `required` or `policy`, but
-`policy` is a route profile, not a `verification.semantic` value; this change treats `optional`
-as an explicit-check route, so an owner whose optional checks do not run on a change also gets no
-background advice for it unless they set `true`. The same resolution applies to Codex, Claude Code and Cursor on macOS, Linux and
+
+While the switch resolves off, the service still wires a closing dispatch: startup rediscovery
+closes a row an earlier service left `pending` as `cancelled` / `cancelled` with no provider
+identity and no route, authority or provider work, so it neither stays pending nor is replayed if
+the owner later turns advice back on. This supersedes the #888 statement that re-enabling lets
+such work drain. The same resolution applies to Codex, Claude Code and Cursor on macOS, Linux and
 Windows through WSL 2.
 
 ### Unassessable content and repair-first feedback (issue #885)

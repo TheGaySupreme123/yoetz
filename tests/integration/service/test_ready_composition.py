@@ -2999,7 +2999,7 @@ async def test_background_advice_is_admitted_only_while_a_provider_is_usable(
     await vault.initialize_passphrase(initialize, "sha256:" + "f" * 64)
     provider = fireworks_provider(model="accounts/fireworks/models/minimax-m3")
     # The benchmark's arm B: review required by default, nothing bound, local-only policy. The
-    # owner has turned background advice on (#888 made it off by default on this route).
+    # owner's explicit ``true`` keeps background advice on whatever the default (#888).
     config = YoetzConfig(
         profile="local-openai" if provider_bound else "strict-local",
         provider=provider if provider_bound else None,
@@ -3176,18 +3176,25 @@ async def test_background_advice_is_admitted_only_while_a_provider_is_usable(
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     ("semantic", "chosen", "scheduled"),
-    [("required", None, False), ("optional", None, False), ("required", True, True)],
+    [
+        ("required", None, True),
+        ("optional", None, True),
+        ("required", True, True),
+        ("required", False, False),
+        ("optional", False, False),
+    ],
 )
-async def test_background_advice_is_off_by_default_where_explicit_checks_run(
+async def test_background_advice_is_on_by_default_and_an_owner_false_turns_it_off(
     tmp_path: Path,
     semantic: str,
     chosen: bool | None,
     scheduled: bool,
 ) -> None:
-    """Issue #888 (option B of #923): explicit AI-powered checks carry the review.
+    """Issue #888 (maintainer decision 2026-09-30): background advice is on by default.
 
-    Without an owner choice the composed service wires neither the background scheduler nor
-    its dispatch, even with a bound provider; an explicit ``true`` turns it back on.
+    Without an owner choice the composed service wires the background scheduler wherever
+    AI-powered review is configured; an explicit ``false`` wires neither the scheduler nor its
+    dispatch, even with a bound provider, and closes rows an earlier service left pending.
     """
 
     tmp_path.chmod(0o700)

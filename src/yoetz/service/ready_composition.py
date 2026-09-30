@@ -5685,8 +5685,8 @@ async def provide_service_ready_context(
     advice_semantic_supervisor = ObservationAdviceSemanticSupervisor(
         service_generation=service_generation
     )
-    # The owner's switches decide whether background advice exists at all: off by default where
-    # explicit AI-powered checks run, an explicit setting always wins (#888). Provider readiness
+    # The owner's switches decide whether background advice exists at all: on by default where
+    # AI-powered review is configured, an explicit setting always wins (#888). Provider readiness
     # is re-read per build and per dispatch (#923). A credential or channel change takes effect
     # on the next observation; a binding change recomposes the service, never the host session.
     advice_semantic_enabled = background_advice_setting(config).enabled

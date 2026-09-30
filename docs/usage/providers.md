@@ -568,14 +568,13 @@ yoetz version --json      # installed package and runtime identity
 
 ## Background review frequency
 
-Background AI-powered advice is **off by default**. Explicit AI-powered checks already review
-your work with the full review packet whenever AI-powered review is `optional` or `required`,
-while background advice only sees rule and coverage-gap codes between checks. You can turn it on
+Background AI-powered advice is **on by default** whenever AI-powered review is `optional` or
+`required`. It reviews rule and coverage-gap codes between explicit checks. You can turn it off
 below; your choice always wins over the default. To see whether it is on and why, run
 `yoetz provider status` (the `background_advice` line), `yoetz setup status --next --operation
 review`, or `/status` in the terminal interface (run `yoetz` at a terminal).
 
-When you turn it on, background AI-powered advice uses the routine review budget. With Codex, it uses your configured
+Background AI-powered advice uses the routine review budget. With Codex, it uses your configured
 routine effort, or `low` when none is set; API-key providers keep their normal (effort-free)
 request, which is already capped at 2,048 output tokens. A review is reused while the set of
 advice candidates and coverage gaps is unchanged, even as more evidence for them arrives. New
@@ -593,17 +592,17 @@ longer say AI-powered advice is pending. Signing in or enabling the channel take
 next observation; connecting or disconnecting a provider takes effect when Yoetz restarts its
 service, which setup does for you. Your coding session keeps running either way.
 
-To turn background advice on, add `semantic_advice_enabled = true` to the existing
+To turn background advice off, add `semantic_advice_enabled = false` to the existing
 `[observation]` table in your Yoetz configuration:
 
 ```toml
 [observation]
-semantic_advice_enabled = true
+semantic_advice_enabled = false
 semantic_advice_min_interval_seconds = 180
 ```
 
-Set `semantic_advice_enabled = false`, or remove the line to return to the default, to stop
-background reviews while keeping deterministic advice and explicit AI-powered checks available.
+This stops background reviews while keeping deterministic advice and explicit AI-powered checks
+available. Set it to `true`, or remove the line to return to the default, to turn it back on.
 Yoetz writes this line only when you choose it, so a later default change still reaches you
 when you have not. Background reviews that were queued before advice was switched off are
 discarded when the service starts, without being sent, so turning advice back on never sends old
