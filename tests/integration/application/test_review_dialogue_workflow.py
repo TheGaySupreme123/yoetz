@@ -1,7 +1,7 @@
 """The review dialogue survives the real ledger and reaches the next review (issue #905).
 
 These cases run the real ready composition with a hermetic reviewer: a challenge becomes an
-AI-powered finding whose challenge fields are recorded on the ledger (``finding_recorded/1.4.0``),
+AI-powered finding whose challenge fields are recorded on the ledger (``finding_recorded/1.3.0``),
 the agent answers it, and the next check's review case carries that finding, what the reviewer
 asked, and the answer in the prior-findings section. A projection rebuilt from the recorded events
 reads exactly what the live projection holds.

@@ -1921,9 +1921,10 @@ def _admit_prior_verdicts(
 ) -> tuple[dict[str, PriorFindingVerdictRecord], int]:
     """Fence the reviewer's per-finding rulings (issue #905).
 
-    A ruling is kept only for a readable, unresolved AI-powered finding the packet's
-    prior-findings section carried (``prior_finding_refs``; the frozen fence when the composing
-    evaluator did not report the packet). Its cited refs are trimmed to what the packet offered
+    A ruling is kept only for a readable, unresolved AI-powered finding inside the frozen fence;
+    one on such a finding the packet's prior-findings section did not carry
+    (``prior_finding_refs``, when the composing evaluator reported the packet) is kept as
+    ``unassessable``. Its cited refs are trimmed to what the packet offered
     as citable. What a ruling may claim is bounded by what it still cites: ``fixed`` must cite
     evidence or a result recorded after the finding (a hallucinated ``fixed`` must not close a
     real defect), ``still_present`` and ``answered_not_fixed`` must cite something, and
@@ -1941,7 +1942,6 @@ def _admit_prior_verdicts(
         record = projection.findings.get(finding_id(key))
         if (
             key not in case.allowed_ids
-            or (prior_finding_refs is not None and key not in prior_finding_refs)
             or record is None
             or record.payload is None
             or record.redacted
@@ -1956,8 +1956,16 @@ def _admit_prior_verdicts(
             if ref in case.allowed_ids and (citable_refs is None or ref in citable_refs)
         )
         kind: str = verdict.verdict
-        if len(cited) != len(verdict.cited_refs) or not _ruling_supported(
-            kind, cited, record.source_frontier, record.payload.finding_id, projection
+        # A readable open finding the packet did not carry (past the section's row cap, or
+        # dropped by envelope bounding) was not shown to the reviewer: its ruling cannot stand,
+        # but an explicit ruling must not fall back to silence either, so it is unassessable.
+        shown = prior_finding_refs is None or key in prior_finding_refs
+        if (
+            not shown
+            or len(cited) != len(verdict.cited_refs)
+            or not _ruling_supported(
+                kind, cited, record.source_frontier, record.payload.finding_id, projection
+            )
         ):
             unsupported += 1
             kind = "unassessable"
