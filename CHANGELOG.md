@@ -8,6 +8,10 @@ reverse-chronological released versions.
 
 ### Added
 
+- `yoetz closure-prepare --output <file>` saves the complete inventory or prepared request to an
+  owner-only file, replaced whole, and prints a short summary, so agents query the file instead of
+  preparing again (#916).
+
 - Codex, Claude Code and Cursor session-start context can show a fresh repository-grant snapshot
   and name the owner's missing admission command. The notice leaves route and host approval
   unconfirmed, preserves existing context and spends only spare hook time. No cross-session
@@ -22,6 +26,14 @@ reverse-chronological released versions.
   separate. Live acceptance and the remaining cross-host work stay tracked in #857.
 
 ### Fixed
+
+- A cached 100-row `status` page no longer costs ~2 s. Every page was schema-validated about eleven
+  times on its way from the service to the host, each time walking every row of every non-matching
+  page shape. Valid results are now decided without rebuilding diagnostics, and repeated
+  validations of identical content are answered once per process. Leaf classification is decided
+  once per field shape. Pages, receipts and omission reasons are byte-identical; a synthetic
+  1,000-event Codex ledger shows ~8x less CPU per page and `closure-prepare` in a few seconds
+  (#916).
 
 - With the Codex subscription evaluator bound, the service no longer re-hashes the retained Codex
   runtime (about 359 MB on Linux) on the event loop for every observation advice cycle. Structural

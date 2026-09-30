@@ -182,7 +182,8 @@ operations and does not add a composer or a new protocol field:
 The optional `yoetz closure-prepare --session-id <returned-session> --writer-id <returned-writer>`
 command is read-only preparation. It may inventory obligations, results, evidence, findings, and
 history and draft one explicit phase, but it never invents attempts, evidence, finding responses,
-obligation satisfaction, or completion. Review and submit each draft at the new frontier.
+obligation satisfaction, or completion. `--output <file>` saves the result for repeated reading.
+Review and submit each draft at the new frontier.
 
 When a requested item is not observed as attempted, do not copy its unchecked value into
 `attempted_items` merely to make the draft validate. Correct the assertion or use a supported

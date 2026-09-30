@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+import hashlib
+import os
+import tempfile
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Annotated, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from yoetz import __version__
-from yoetz.protocol.canonical import JsonValue
+from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.models import (
     PublishWorkRequest,
@@ -40,6 +44,7 @@ PREPARATION_REMEDIATIONS = {
     "closure_unattempted_items": "Account for genuine attempts or revise the obligation; do not copy unchecked requested items.",
     "closure_obligation_content_unavailable": "The obligation's meaning fields are withheld; do not recreate them to resolve it.",
     "closure_claim_decision_required": "Supply the bounded completion assertion and explicitly select its obligations and support.",
+    "closure_output_unwritable": "Nothing was saved. Choose a writable file path in an existing directory and prepare again.",
 }
 
 
@@ -61,6 +66,53 @@ class Selection(BaseModel):
     reason: str | None = None
     supersedes_claim_refs: tuple[str, ...] = ()
     format: Literal["markdown", "text", "json"] = "markdown"
+
+
+def write_prepared_output(result: Mapping[str, JsonValue], path: Path) -> dict[str, JsonValue]:
+    """Save the complete preparation result to *path* and return the summary printed instead.
+
+    The file holds exactly the canonical JSON line the command prints without ``--output``, so an
+    agent can query it repeatedly instead of re-reading every status page (issue #916). It is
+    written owner-only to a temporary file in the same directory and renamed into place: a reader
+    never sees a partial inventory, and preparing again replaces it whole.
+    """
+
+    data = canonical_encode(cast(JsonValue, dict(result))) + b"\n"
+    target = Path(os.path.abspath(path))
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
+        )
+    except OSError as error:
+        raise ValueError("closure_output_unwritable") from error
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+    except OSError as error:
+        temporary.unlink(missing_ok=True)
+        raise ValueError("closure_output_unwritable") from error
+    inventory = result.get("inventory")
+    rows: dict[str, JsonValue] = (
+        {
+            str(view): len(cast(list[JsonValue], items))
+            for view, items in cast(Mapping[str, JsonValue], inventory).items()
+        }
+        if isinstance(inventory, Mapping)
+        else {}
+    )
+    return {
+        "preparatory_only": True,
+        "output": str(target),
+        "bytes": len(data),
+        "sha256": f"sha256:{hashlib.sha256(data).hexdigest()}",
+        "frontier": result.get("frontier"),
+        "inventory_rows": rows,
+        "operation": result.get("operation"),
+    }
 
 
 def _base(session_id: str, writer_id: str) -> dict[str, object]:

@@ -1065,7 +1065,8 @@ reauthorize it. Run `check`, which records the superseded context as history.
 ## Guided closure and recovery
 
 Run `yoetz closure-prepare --session-id <returned-session> --writer-id <returned-writer>` to inspect
-all pages of obligations, results, evidence, findings and history at one pinned frontier.
+all pages of obligations, results, evidence, findings and history at one pinned frontier. Add
+`--output <file>` to save the result, then read fields from that file rather than preparing again.
 `yoetz closure-schema` emits the selection schema. Supply a selection file with `--input` to
 prepare one phase: `attempt`, `respond`, `resolve`, `claim`, or `receipt`. The inventory is not an
 assertion that work occurred. Only explicitly selected requested-item indexes become attempts.

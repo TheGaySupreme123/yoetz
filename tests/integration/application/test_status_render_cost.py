@@ -50,7 +50,7 @@ from builders.status_render_cost import (
     CodexStatusLedger,
     build_codex_status_ledger,
 )
-from yoetz.cli.closure import Selection, prepare_closure
+from yoetz.cli.closure import Selection, prepare_closure, write_prepared_output
 from yoetz.mcp.server import result_from_public_model
 from yoetz.ports.control import ControlMethod, ControlResult
 from yoetz.protocol import models as models_module
@@ -477,9 +477,9 @@ async def test_page_cost_does_not_grow_with_the_ledger(monkeypatch: pytest.Monke
 
 
 async def test_closure_inventory_reads_each_view_once_per_page(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """``closure-prepare`` inventory of a ~1,000-event ledger: one status call per page."""
+    """``closure-prepare`` of a ~1,000-event ledger: one status call per page, saved whole."""
 
     ledger = await build_codex_status_ledger()
     processes = _Processes(monkeypatch)
@@ -503,6 +503,12 @@ async def test_closure_inventory_reads_each_view_once_per_page(
         "findings": 3,
         "history": ledger.head.sequence,
     }
+    # ``--output`` saves exactly the bytes the command prints, which are the pre-#916 inventory.
+    summary = write_prepared_output(inventory, tmp_path / "closure.json")
+    saved = (tmp_path / "closure.json").read_bytes()
+    golden = json.loads(_GOLDEN.read_text(encoding="utf-8"))["closure_inventory"]["digest"]
+    assert saved.endswith(b"\n") and _digest(saved[:-1]) == golden
+    assert summary["inventory_rows"] == {view: len(rows[view]) for view in CLOSURE_VIEWS}
     unit = _baseline_unit({"inventory": inventory["inventory"]})
     _report(
         f"closure-prepare inventory, {len(calls)} status calls (ledger head {ledger.head.sequence})",
