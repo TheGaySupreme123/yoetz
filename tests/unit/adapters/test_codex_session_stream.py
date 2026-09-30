@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -51,7 +52,7 @@ from yoetz.domain.observation import (
     ObservationStatusQuery,
 )
 from yoetz.domain.observation_budget import ObservationMode
-from yoetz.domain.values import JsonObject
+from yoetz.domain.values import JsonObject, Timestamp
 
 
 def test_source_file_identity_bounds_large_filesystem_integers() -> None:
@@ -1536,6 +1537,8 @@ def test_0_150_1_stream_admits_from_header_and_envelopes_carry_no_content(
         "exit_status",
         "tool_call_id",
         "subagent_id",
+        # A completed command's installation-keyed identity (#909, #910), never its text.
+        "command_commitment",
     }
     for envelope in advance.envelopes:
         assert set(envelope.structural_payload) <= allowed, envelope.structural_payload
@@ -2795,3 +2798,161 @@ def test_stream_selection_rejection_replays_exact_input(
         locator=locator,
     )
     assert retried["event_position"] == 2
+
+
+_DECIDE_SESSION = "hmac-sha256:" + ("d" * 64)
+_CMD = "hmac-sha256:" + ("c" * 64)
+
+
+def _decide_row(
+    position: int,
+    *,
+    hook: bool,
+    identity: str,
+    call_id: str,
+    exit_status: int | None = None,
+    commitment: str | None = _CMD,
+) -> ObservationEnvelope:
+    structural: dict[str, Any] = {"tool_call_id": call_id, "tool_name": "Bash"}
+    if commitment is not None:
+        structural["command_commitment"] = commitment
+    if exit_status is not None:
+        structural["exit_status"] = exit_status
+    if not hook:
+        structural["action"] = "CommandExecution"
+    return ObservationEnvelope(
+        session_commitment=_DECIDE_SESSION,
+        event_kind="PostToolUse" if hook else "item_completed",
+        source_identity=identity,
+        source=ObservationSource.CODEX_HOOK if hook else ObservationSource.CODEX_SESSION_STREAM,
+        cursor=ObservationCursor(
+            source_generation=1,
+            byte_position=position,
+            event_position=position,
+            last_source_commitment=_EMPTY,
+            mapping_version=STREAM_MAPPING_VERSION,
+        ),
+        receipt_time=Timestamp("2026-09-29T18:00:00.000Z"),
+        structural_payload=JsonObject(structural),
+        content_object_refs=(),
+        gap_codes=(),
+    )
+
+
+def _decisions(*rows: ObservationEnvelope) -> dict[str, str]:
+    return stream_module._rollout_item_decisions(  # pyright: ignore[reportPrivateUsage]
+        rows, _DECIDE_SESSION
+    )
+
+
+def test_rollout_item_read_before_its_post_is_decided_by_that_post() -> None:
+    """#910: arrival order between a rollout item and its hook post never loses an exit."""
+
+    item = _decide_row(1, hook=False, identity="item-a", call_id="exec-a", exit_status=101)
+    unstated = _decide_row(2, hook=True, identity="post-a", call_id="call-a")
+    stated = _decide_row(2, hook=True, identity="post-a", call_id="call-a", exit_status=101)
+    assert _decisions(item) == {"item-a": "pending"}
+    # An outcome-less post makes the earlier item its only outcome; a stated one its copy.
+    assert _decisions(item, unstated) == {"item-a": "carrier"}
+    assert _decisions(item, stated) == {"item-a": "copy"}
+    # The same facts in the other arrival order decide the same way.
+    assert _decisions(unstated, item) == {"item-a": "carrier"}
+    assert _decisions(stated, item) == {"item-a": "copy"}
+
+
+def test_rollout_item_decisions_never_change_once_made() -> None:
+    """A later post pairs only with a still-pending item, never with one already decided."""
+
+    early = _decide_row(1, hook=True, identity="post-a", call_id="call-a", exit_status=0)
+    copy = _decide_row(2, hook=False, identity="item-a", call_id="exec-a", exit_status=0)
+    pending = _decide_row(3, hook=False, identity="item-b", call_id="exec-b", exit_status=2)
+    late = _decide_row(4, hook=True, identity="post-b", call_id="call-b")
+    assert _decisions(early, copy, pending, late) == {"item-a": "copy", "item-b": "carrier"}
+    # A stated post with a different exit is not this item's copy; it stays pending.
+    other = _decide_row(4, hook=True, identity="post-b", call_id="call-b", exit_status=1)
+    assert _decisions(early, copy, pending, other)["item-b"] == "pending"
+
+
+def test_pending_rollout_items_persist_until_settled(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    other = "hmac-sha256:" + ("e" * 64)
+    item_a = _decide_row(1, hook=False, identity="item-a", call_id="exec-a", exit_status=101)
+    item_b = _decide_row(2, hook=False, identity="item-b", call_id="exec-b", exit_status=0)
+    item_c = replace(
+        _decide_row(3, hook=False, identity="item-c", call_id="exec-c"),
+        session_commitment=other,
+    )
+    store.note_pending_rollout_item(workspace, _DECIDE_SESSION, "host-1", item_a)
+    store.note_pending_rollout_item(workspace, _DECIDE_SESSION, "host-1", item_b)
+    store.note_pending_rollout_item(workspace, other, "host-2", item_c)
+    reopened = LocalObservationStore(_state=tmp_path)
+    kept = reopened.pending_rollout_items(workspace, _DECIDE_SESSION)
+    assert [item.source_identity for item in kept] == ["item-a", "item-b"]
+    # The account keeps the item itself, so its outcome survives ring eviction.
+    assert kept[0].envelope == item_a and kept[0].codex_session_id == "host-1"
+    # Settling is per session and idempotent.
+    reopened.settle_pending_rollout_item(workspace, other, "item-a")
+    reopened.settle_pending_rollout_item(workspace, _DECIDE_SESSION, "item-a")
+    reopened.settle_pending_rollout_item(workspace, _DECIDE_SESSION, "item-a")
+    assert [item.source_identity for item in reopened.pending_rollout_items(workspace)] == [
+        "item-b",
+        "item-c",
+    ]
+
+
+def test_parallel_same_command_items_wait_for_the_open_call() -> None:
+    """#910: an outcome-less post never takes a pending item an open same-command call owns."""
+
+    pre_a = replace(
+        _decide_row(1, hook=True, identity="pre-a", call_id="call-a"), event_kind="PreToolUse"
+    )
+    pre_b = replace(
+        _decide_row(2, hook=True, identity="pre-b", call_id="call-b"), event_kind="PreToolUse"
+    )
+    item_b = _decide_row(3, hook=False, identity="item-b", call_id="exec-b", exit_status=0)
+    item_a = _decide_row(4, hook=False, identity="item-a", call_id="exec-a", exit_status=1)
+    post_a = _decide_row(5, hook=True, identity="post-a", call_id="call-a")
+    post_b = _decide_row(6, hook=True, identity="post-b", call_id="call-b", exit_status=0)
+    stop = replace(
+        _decide_row(7, hook=True, identity="stop", call_id="none", commitment=None),
+        event_kind="Stop",
+    )
+    for order in ((item_b, item_a), (item_a, item_b)):
+        rows = (pre_a, pre_b, *order, post_a)
+        # B is still open: neither item is A's yet.
+        assert _decisions(*rows) == {"item-a": "pending", "item-b": "pending"}
+        assert _decisions(*rows, post_b) == {"item-a": "carrier", "item-b": "copy"}
+        # Posts first, items after: the same attribution.
+        assert _decisions(pre_a, pre_b, post_a, post_b, *order) == {
+            "item-a": "carrier",
+            "item-b": "copy",
+        }
+        # B's hook never fires: the turn's end delivers both rather than lose A's failure.
+        assert _decisions(*rows, stop) == {"item-a": "carrier", "item-b": "carrier"}
+    # The turn's end settles an unclaimed item as a copy only with a stored proof: without one
+    # (its post evicted, lost, or stored after Stop) it is delivered unpaired, never dropped.
+    assert _decisions(pre_b, item_b, stop) == {"item-b": "unpaired"}
+    twin = _decide_row(8, hook=False, identity="item-twin", call_id="exec-twin", exit_status=0)
+    assert _decisions(pre_b, post_b, item_b, twin, stop) == {
+        "item-b": "copy",
+        "item-twin": "copy",
+    }
+    assert _decisions(pre_b, post_b, item_a, stop) == {"item-a": "unpaired"}
+    # An MCP or patch item has no commitment: it stays local as its hooked call's copy.
+    mcp = _decide_row(9, hook=False, identity="item-mcp", call_id="exec-mcp", commitment=None)
+    assert _decisions(mcp, stop) == {"item-mcp": "copy"}
+
+
+def test_a_call_open_past_the_ring_still_owns_its_copy() -> None:
+    """#910: an evicted ``PreToolUse`` keeps its call open for the pairing replay."""
+
+    item_b = _decide_row(3, hook=False, identity="item-b", call_id="exec-b", exit_status=0)
+    post_a = _decide_row(5, hook=True, identity="post-a", call_id="call-a")
+    # Without the evicted call, A's outcome-less post would take B's item.
+    assert _decisions(item_b, post_a) == {"item-b": "carrier"}
+    kept_open = stream_module._rollout_item_decisions(  # pyright: ignore[reportPrivateUsage]
+        (item_b, post_a), _DECIDE_SESSION, ((_CMD, "call-a"), (_CMD, "call-b"))
+    )
+    assert kept_open == {"item-b": "pending"}

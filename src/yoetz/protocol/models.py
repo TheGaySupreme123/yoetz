@@ -3298,7 +3298,7 @@ FindingTodoStateLiteral = Literal[
 
 class StatusFindingItemModel(_ClosedModel):
     # Issue #905 to-do facts: present on every current row, absent only on older recordings.
-    optional_non_null_fields = frozenset({"todo_state", "review_rounds"})
+    optional_non_null_fields = frozenset({"todo_state", "review_rounds", "finding_frontier"})
 
     finding_id: FindingIdWire
     kind: FindingKindWire
@@ -3327,6 +3327,10 @@ class StatusFindingItemModel(_ClosedModel):
     waiver_expiry: TimestampWire | None
     todo_state: FindingTodoStateLiteral | None = None
     review_rounds: CanonicalUInt64Wire | None = None
+    # Issue #917: the frontier of the ledger event that carries this finding's record
+    # (sequence plus that event's head digest), for every origin. ``respond`` accepts it
+    # as ``finding_frontier`` as-is, so no historical frontier has to be reconstructed.
+    finding_frontier: FrontierModel | None = None
 
     @model_validator(mode="after")
     def _validate_finding_item(self) -> StatusFindingItemModel:
@@ -5090,6 +5094,7 @@ _STATUS_FINDINGS_STRUCTURAL_POINTERS: Final = (
     )
     + _prefix_leaf_patterns("/page/items/*/coverage", _COVERAGE_LEAVES)
     + _prefix_leaf_patterns("/page/items/*/subject_frontier", FRONTIER_LEAVES)
+    + _prefix_leaf_patterns("/page/items/*/finding_frontier", FRONTIER_LEAVES)
     + _prefix_leaf_patterns("/page/items/*/provenance", _SEMANTIC_PROVENANCE_LEAVES)
     + _prefix_leaf_patterns("/page/items/*/detail", _OMITTED_CONTENT_LEAVES)
     + _prefix_leaf_patterns("/page/items/*/reason", _OMITTED_CONTENT_LEAVES)
@@ -5620,7 +5625,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 1199:
+    if len(result) != 1201:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 

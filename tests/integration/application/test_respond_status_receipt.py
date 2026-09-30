@@ -7022,3 +7022,72 @@ async def test_a_finding_raised_before_the_task_statement_is_not_trapped_by_its_
     # later review that lacks it proves nothing new and the issue stays open.
     assert resolved is (statement != "before_finding")
     assert conclusions == [] and gaps_by_call == []
+
+
+async def test_status_finding_frontier_answers_every_origin_on_the_first_attempt() -> None:
+    """Issue #917: ``status view=findings`` names the frontier ``respond`` accepts as-is.
+
+    One deterministic, one AI-powered review and one observation-origin finding are each
+    answered with the ``finding_frontier`` their status item carries, without a frontier
+    hunt. The item's ``subject_frontier`` precedes its own record and stays distinct.
+    """
+
+    seed = 9170
+    app, runtime, _ = _build_app(
+        seed_offset=91,
+        semantic="optional",
+        semantic_evaluator=_semantic_challenge_evaluator(protocol_id("clm_", seed + 5)),
+    )
+    started, checked, _obligation = await _bootstrap_finding(
+        app, seed=seed, mode="semantic_if_configured"
+    )
+    drained = await _drain_observation_record(
+        app,
+        runtime,
+        started,
+        seed=seed + 40,
+        expected_frontier=checked.result_frontier.sequence,
+        finding=_drained_finding(
+            protocol_id("evt_", seed + 2),
+            Frontier(int(checked.result_frontier.sequence), checked.result_frontier.head_digest),
+            seed + 45,
+        ),
+    )
+    head = Frontier(drained.accepted[-1].ingestion_sequence, drained.accepted[-1].entry_digest)
+    status = await app.status(
+        StatusRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 50)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "view": "findings",
+                "limit": "10",
+                "at_frontier": str(head.sequence),
+            }
+        )
+    )
+    items = cast(StatusFindingsPageModel, status.page).items
+    origins = {item.origin for item in items}
+    assert origins == {"deterministic", "semantic_model_derived"}
+    assert any(item.finding_id == protocol_id("fnd_", seed + 45) for item in items)
+    assert all(item.finding_frontier is not None for item in items)
+    assert all(item.finding_frontier != item.subject_frontier for item in items)
+
+    current: Frontier | FrontierModel = head
+    for index, item in enumerate(items):
+        responded = await app.respond(
+            RespondRequest.model_validate(
+                {
+                    **_request_base(protocol_id("req_", seed + 60 + index)),
+                    "session_id": started.session_id,
+                    "writer_id": started.writer_id,
+                    "expected_frontier": _frontier(current),
+                    "finding_id": item.finding_id,
+                    "finding_frontier": _frontier(cast(FrontierModel, item.finding_frontier)),
+                    "disposition": "rejected",
+                    "reason": "Recorded as out of scope for this exercise.",
+                }
+            )
+        )
+        assert responded.response.disposition == "rejected"
+        current = responded.result_frontier

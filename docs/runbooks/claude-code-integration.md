@@ -425,6 +425,20 @@ A failure whose payload omits `tool_input` has no identity and relies on the edi
 Native dogfood acceptance of this path on macOS, Linux and WSL 2 is not yet recorded
 (owner: #909).
 
+**Shell outcome contract (issue #910).** On the ordinary profile a `Bash` `PostToolUse` is recorded
+as `success`. Claude's Bash result (`stdout`, `stderr`, `interrupted`, `isImage`) has no exit field,
+so the result has no `exit_status`. A `Bash` `PostToolUseFailure` is recorded as `failure`, with
+the closed status `interrupted` when `is_interrupt` is true and `error` otherwise. Its `error` text
+is never parsed for an exit code, so it too carries no `exit_status`. An exit status is kept only
+from a closed `exit_code`/`exitCode` field that Claude supplies. An ordinary-profile shell call is
+therefore `unknown`, with `host_outcome_unavailable`, only when Claude supplies an invalid or
+unrecognized outcome field; a background launch stays partial.
+The default structural profile observes no generic tool calls, so it records no shell outcomes.
+The shapes are pinned by `fixtures/observations/claude-code-bash-outcomes.case.json`, which is
+derived from the documented hook payloads. A raw hook stdin capture from an installed Claude Code
+is still owed, owned by issue #910. Native acceptance on macOS, Linux and Windows through WSL 2 is
+not established by source tests.
+
 Stale-verification advice is scoped to the logical tool call, not to the observed phase. On this
 profile one edit is observed twice — a `PreToolUse` attempt and a `PostToolUse` result sharing the
 normalized `tool_call_id` (Claude's `tool_use_id`) — and the pair reports one
@@ -1666,3 +1680,14 @@ Recording hook text there would label it `agent_transcribed`, which it is not, a
 the prompt-capture consent still open on issue #908.
 For Claude Code the first attach runs on `SessionStart`, before any prompt exists; a retry on
 `UserPromptSubmit` sees the prompt only as `visible_user_message`, which stays out of review.
+
+### Tool-call records and orphan notices (#917)
+
+The default structural Claude Code profiles are post-only: their ledger records are byte-identical
+after #917 (pinned by a replay of real `PostToolUse` payloads), and a post never diagnoses a missing
+pre. The opt-in ordinary profile (`claude-code-ordinary-observation-v1`) is on the conservative
+paired contract, so it receives the same fixes as Codex: an individually delivered `PreToolUse` and
+its post share one action (described as observed via Claude Code hook), and a post with no open pre
+keeps the standing `unpaired_event` record and triggers one "Yoetz notice (no response needed)"
+per new orphan scope instead of a recurring stale-observation advisory. Claude Code has no
+code-mode cell, so the stream wrapper rule does not apply.

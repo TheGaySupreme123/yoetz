@@ -11,7 +11,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import pytest
 
@@ -745,7 +745,14 @@ def test_post_tool_hook_never_delivers_observation_only_frontier_motion(tmp_path
             )
             == 0
         )
-        assert stdout.getvalue() == b"{}\n"
+        # Only #917's one-time orphan-scope notice may ride the lone post; no motion notice.
+        emitted = stdout.getvalue()
+        assert b"frontier moved" not in emitted and b"run status" not in emitted
+        document = json.loads(emitted)
+        context = document.get("hookSpecificOutput", {}).get("additionalContext")
+        assert context is None or context.startswith(
+            "Yoetz notice (no response needed): pairing was lost"
+        )
 
 
 @pytest.mark.parametrize("tool_name", ["start", "mcp__yoetz__publish_work"])
@@ -5920,15 +5927,25 @@ def test_hook_invocation_writes_the_state_file_once_not_fourteen_times(
         _monotonic=lambda: 0.0,
     )
     assert code == 0
-    delivered = "additionalContext" in out.getvalue().decode()
+    emitted = cast(dict[str, Any], json.loads(out.getvalue() or b"{}"))
+    context = cast(
+        str,
+        cast(dict[str, Any], emitted.get("hookSpecificOutput") or {}).get("additionalContext")
+        or "",
+    )
+    notice = "Yoetz notice (no response needed)"
+    noticed = notice in context
+    delivered = bool(context.split(notice)[0].strip())
     # Exact accounting, so a regression cannot hide inside a loose ceiling:
     #   1 local-pass batch flush
     # + 1 per drained outbox row, bounded by _HOOK_DRAIN_ROW_LIMIT (4 here)
     # + 1 advice-snapshot persistence now that oversized advice projects safely
     # + 1 advice-delivery commit, and only when advice actually reached stdout.
+    # + 1 orphan-scope notice commit, once per new orphan scope (#917); this
+    #   post has no pre, so its scope is new.
     # Seventeen were measured before the write batch. Nothing else writes: the
     # advice sidecar and the async-pair sample are gone.
-    assert _suffix_counts(written) == {".json": 6 + int(delivered)}, written
+    assert _suffix_counts(written) == {".json": 6 + int(delivered) + int(noticed)}, written
 
 
 def test_refresh_advice_does_not_rewrite_state_when_the_snapshot_is_unchanged(

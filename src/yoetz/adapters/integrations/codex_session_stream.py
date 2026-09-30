@@ -10,6 +10,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import Final, Literal, cast
 
 from yoetz.adapters.importers.codex_jsonl import (
@@ -30,9 +31,11 @@ from yoetz.adapters.integrations.observation_admission import (
     build_routine_read_summary,
 )
 from yoetz.adapters.integrations.observation_local import (
+    MAX_PENDING_ROLLOUT_ITEMS,
     STREAM_MAPPING_VERSION,
     YOETZ_TOOL_NAMES,
     LocalObservationStore,
+    PendingRolloutItem,
     self_observation_deliverable,
 )
 from yoetz.domain.observation import (
@@ -40,6 +43,8 @@ from yoetz.domain.observation import (
     ObservationEnvelope,
     ObservationGapCode,
     ObservationSource,
+    normalize_observed_command,
+    observed_command_commitment,
     stream_line_commitment,
 )
 from yoetz.domain.observation_budget import ObservationMode
@@ -142,6 +147,17 @@ _SUBAGENT_ACTIVITY_KINDS: Final = (
 # child's own start signal; the parent task it belongs to is resolved from admitted catalog
 # lineage, never from these host tokens.
 _SUBAGENT_THREAD_SOURCE: Final = "subagent"
+# Codex 0.150.1+ rollouts record a finished host tool call as ``event_msg`` whose payload is
+# ``item_completed`` and whose ``item.type`` names the tool family (issue #910, recorded 0.157.1
+# shape in ``observations/codex-post-tool-outcomes-0.157.1.case.json``). ``status`` and
+# ``exit_code`` on that item are the host's closed outcome facts. A command or patch item names no
+# tool, so it is recorded under its item family in the ``codex exec --json`` spelling; an MCP item
+# keeps its own ``tool`` name.
+_STREAM_COMPLETED_PAYLOAD: Final = "item_completed"
+_STREAM_TOOL_ITEM_NAMES: Final[Mapping[str, str]] = MappingProxyType(
+    {"CommandExecution": "command_execution", "FileChange": "file_change"}
+)
+_STREAM_COMPLETED_TOOL_ITEMS: Final = frozenset({"CommandExecution", "FileChange", "McpToolCall"})
 
 
 _JSONL_SUFFIXES: Final = (".jsonl", ".jsonl.zst")
@@ -619,6 +635,24 @@ def _normalize_tool_name(value: object) -> str | None:
     return token
 
 
+def _completed_tool_item(record: CodexParsedRecord) -> bool:
+    """True for an ``event_msg``/``item_completed`` record of a command, MCP or patch item."""
+
+    if record.wrapper_type != "event_msg" or record.item_type not in _STREAM_COMPLETED_TOOL_ITEMS:
+        return False
+    payload = record.value.get("payload")
+    return isinstance(payload, JsonObject) and payload.get("type") == _STREAM_COMPLETED_PAYLOAD
+
+
+def _mcp_item_failed(body: JsonObject) -> bool:
+    """A rollout ``McpToolCall`` item that states a failure beside its ``status``."""
+
+    if body.get("error") not in (None, False, ""):
+        return True
+    result = body.get("result")
+    return isinstance(result, JsonObject) and result.get("isError") is True
+
+
 def _structural_body(record: CodexParsedRecord) -> JsonObject | None:
     payload = record.value.get("payload")
     if isinstance(payload, JsonObject):
@@ -1073,11 +1107,14 @@ def structural_from_stream_record(
     record: CodexParsedRecord,
     *,
     profile: CodexCapabilityProfile | None = None,
+    key_material: bytes | None = None,
 ) -> tuple[JsonObject, tuple[str, ...]]:
     """Map a parsed stream record to allowlisted structural fields + opaque gaps.
 
     ``profile`` is the exact profile that admitted the record; without it the union of every
     supported vocabulary decides which ``type`` tokens are semantic rather than tool names.
+    ``key_material`` is the local observation store key: with it, a completed command item carries
+    the same installation-keyed ``command_commitment`` its hook copy carries (#909, #910).
     """
 
     item_types = _ROLLOUT_ITEM_TYPES if profile is None else frozenset(profile.item_types)
@@ -1097,13 +1134,24 @@ def structural_from_stream_record(
         type_token = _token(body.get("type"))
         if tool is None and type_token is not None and type_token not in item_types:
             tool = _normalize_tool_name(type_token)
+        if tool is None and item_type is not None:
+            # A completed command or patch item names no tool of its own; use the host's own
+            # item family, spelled as ``codex exec --json`` spells it, so the call keeps its
+            # command/edit family instead of an anonymous one (#910).
+            tool = _STREAM_TOOL_ITEM_NAMES.get(item_type)
         if tool is not None:
             fields["tool_name"] = tool
         status = _token(body.get("status")) or _token(body.get("result_status"))
+        if item_type == "McpToolCall" and _mcp_item_failed(body):
+            # Failure wins: an MCP item that names an error, or whose result carries the protocol
+            # ``isError`` bit, failed whatever its ``status`` says (#910).
+            status = "failed"
         if status is not None:
             fields["result_status"] = status
         exit_code = body.get("exit_code")
-        if "exit_code" in body:
+        if "exit_code" in body and exit_code is not None:
+            # ``exit_code: null`` is a command that never exited (declined or still running):
+            # no outcome fact, not an unsupported shape.
             if type(exit_code) is int and -1 <= exit_code <= 255:
                 fields["exit_status"] = exit_code
             else:
@@ -1111,6 +1159,13 @@ def structural_from_stream_record(
         # ``SubAgentActivity.id`` identifies the rollout item itself, not the
         # parent tool call.  Keep it out of the parent correlation family; only
         # an explicit call alias may identify that parent.
+        if key_material is not None and item_type == "CommandExecution":
+            # The rollout names the command as the argv Codex ran (``/bin/bash -lc <cmd>``). Commit
+            # to it with the hook's normalization and key so a passing rerun seen here supersedes
+            # a failure seen by either path; the text itself is dropped here (#909, #910).
+            normalized = normalize_observed_command(body.get("command"))
+            if normalized is not None:
+                fields["command_commitment"] = observed_command_commitment(key_material, normalized)
         if item_type != "SubAgentActivity":
             call_id = _token(body.get("id")) or _token(body.get("call_id"))
             if call_id is not None:
@@ -1165,8 +1220,11 @@ def envelope_from_stream_record(
     session_commitment: str,
     cursor: ObservationCursor,
     profile: CodexCapabilityProfile | None = None,
+    key_material: bytes | None = None,
 ) -> ObservationEnvelope:
-    structural, gaps = structural_from_stream_record(record, profile=profile)
+    structural, gaps = structural_from_stream_record(
+        record, profile=profile, key_material=key_material
+    )
     host_ids: dict[str, JsonValue] = {}
     body = _structural_body(record)
     if body is not None:
@@ -1204,6 +1262,11 @@ def envelope_from_stream_record(
         ).removeprefix("sha256:")[:48]
     )
     event_kind = _token(record.wrapper_type) or "unsupported_event"
+    if _completed_tool_item(record):
+        # ``event_msg``/``item_completed`` carrying a command, MCP or patch item is a completed
+        # host tool call with a closed ``status``/``exit_code`` outcome. Name its phase so the
+        # materializer records a result instead of an opaque ``event_msg`` row (#910).
+        event_kind = "item_completed"
     if record.item_type == "SubAgentActivity" and body is not None:
         activity_kind = _token(body.get("kind"))
         if activity_kind in _SUBAGENT_ACTIVITY_START_KINDS:
@@ -1705,6 +1768,7 @@ class SessionStreamReader:
                     session_commitment=self.session_commitment,
                     cursor=abs_cursor,
                     profile=self.profile,
+                    key_material=self.key_material,
                 )
             )
             structural, _structural_gaps = structural_from_stream_record(
@@ -1764,6 +1828,442 @@ def should_trigger_stream_reconcile(
     if last_reconcile_mono is None:
         return False
     return (current - last_reconcile_mono) >= PERIODIC_RECONCILE_SECONDS
+
+
+# Codex code mode runs model-written JavaScript in one custom ``exec`` tool; the
+# nested ``tools.*`` calls inside a cell fire their own hooks (#917).
+_CODE_MODE_CELL_TOOLS: Final = frozenset({"exec"})
+
+
+def _code_mode_cell_wrapper(structural: Mapping[str, JsonValue]) -> bool:
+    """True for the stream call/output record of one code-mode ``exec`` cell."""
+
+    return (
+        structural.get("action") in {"custom_tool_call", "custom_tool_call_output"}
+        and structural.get("tool_name") in _CODE_MODE_CELL_TOOLS
+    )
+
+
+def _hooked_tool_item(envelope: ObservationEnvelope) -> bool:
+    """True for a rollout ``item_completed`` command, MCP or patch record (#910).
+
+    The same host call fires its own ``PostToolUse`` hook, and since #910 that hook row carries
+    the call's exit status itself; the rollout item is normally a second copy under a different
+    id (``exec-<uuid>``) that no pairing can join to the hook row.
+    """
+
+    return (
+        envelope.event_kind == "item_completed"
+        and envelope.structural_payload.get("action") in _STREAM_COMPLETED_TOOL_ITEMS
+    )
+
+
+def _hook_post_stated(structural: Mapping[str, JsonValue]) -> bool:
+    return (
+        type(structural.get("exit_status")) is int
+        or type(structural.get("success")) is bool
+        or structural.get("denied") is True
+    )
+
+
+_ITEM_CARRIER: Final = "carrier"
+_ITEM_COPY: Final = "copy"
+_ITEM_PENDING: Final = "pending"
+# Closed by the turn's end with no proof of which call it belongs to.
+_ITEM_UNPAIRED: Final = "unpaired"
+# Workspace reconciles an undecided item may survive while its session stays silent.
+PENDING_ROLLOUT_IDLE_RECONCILES: Final = 8
+# A turn's end: every tool call of the turn has fired whatever hooks it will fire.
+_PAIRING_CLOSE_EVENTS: Final = frozenset({"Stop", "SessionEnd"})
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingRolloutItem:
+    source_identity: str
+    call_id: str | None
+    commitment: str | None
+    exit_status: int | None
+
+
+def _rollout_item_decisions(
+    envelopes: tuple[ObservationEnvelope, ...],
+    session_commitment: str,
+    evicted_open_calls: tuple[tuple[str, str], ...] = (),
+) -> dict[str, str]:
+    """Decide every rollout tool item of one session against its hook rows (#910).
+
+    The session's stored rows are replayed in arrival order, so an item is decided with exactly
+    the hook rows that preceded it, and a later row never changes a decision already made:
+
+    * an item whose id is an outcome-less hook call is that call's outcome (``carrier``; ADR-022
+      decision 15 then corrects the hook's ``unknown`` row), and an item whose id is a stated
+      hook call is that post's ``copy``;
+    * a command item whose exit equals an unpaired stated exit of a hook post for the same
+      command commitment is that post's ``copy``;
+    * otherwise a command item is ``pending`` until the outcome-less hook calls of its
+      commitment can be told apart from the calls it may still be a copy of.
+
+    Items and posts can arrive in either order: the rollout can record a completed call before
+    its ``PostToolUse`` is stored. A later post takes a pending item with its own call id, or, if
+    stated, a pending item of its commitment with the same exit, as its copy. While an
+    outcome-less call of a commitment is owed, its pending items become carriers only once no
+    other call of that commitment is open (its ``PreToolUse`` seen, its post not yet): with
+    parallel same-command runs, an open call's post may still claim one of them as its copy, and
+    taking the oldest or the newest would misattribute a pass and lose a failure. When several
+    items remain for fewer owed calls, every one is delivered; a second record is disclosed as
+    #909's later run, a lost failure would not be. ``Stop``/``SessionEnd`` close the turn: owed
+    calls take every pending item of their commitment. Any other pending command item is a copy
+    only when a stored stated post proves it (same call id, or same commitment and exit);
+    otherwise it is ``unpaired`` and delivered with ``unpaired_event`` rather than lost. The
+    replay is bounded by the local envelope ring. It starts with ``evicted_open_calls`` open:
+    calls whose ``PreToolUse`` the ring evicted before their post was evicted or the turn
+    ended, so a truncated window never makes a still-running parallel call look finished.
+    """
+
+    unstated_calls: dict[str, str | None] = {}
+    owed: dict[str, int] = {}
+    stated_exits: dict[str, list[int | None]] = {}
+    stated_calls: set[str] = set()
+    seen_exits: dict[str, set[int | None]] = {}
+    open_calls: dict[str, set[str]] = {}
+    for open_commitment, open_call in evicted_open_calls:
+        open_calls.setdefault(open_commitment, set()).add(open_call)
+    pending: list[_PendingRolloutItem] = []
+    decisions: dict[str, str] = {}
+
+    def proven_copy(item: _PendingRolloutItem) -> bool:
+        """A stored stated post names this item's call, or its command with the same exit.
+
+        An MCP or patch item has no command commitment and no join key beyond its id, so the
+        turn's end leaves it local as its hooked call's copy (a disclosed limit, #910).
+        """
+
+        if item.commitment is None:
+            return True
+        if item.call_id is not None and item.call_id in stated_calls:
+            return True
+        return item.exit_status in seen_exits.get(item.commitment, set())
+
+    def decide(item: _PendingRolloutItem, decision: str) -> None:
+        pending.remove(item)
+        decisions[item.source_identity] = decision
+
+    def settle(commitment: str | None, *, closing: bool = False) -> None:
+        if commitment is None or owed.get(commitment, 0) <= 0:
+            return
+        if open_calls.get(commitment) and not closing:
+            return
+        waiting = [item for item in pending if item.commitment == commitment]
+        for item in waiting:
+            decide(item, _ITEM_CARRIER)
+        owed[commitment] = max(0, owed[commitment] - len(waiting))
+
+    for envelope in envelopes:
+        if envelope.session_commitment != session_commitment:
+            continue
+        structural = envelope.structural_payload
+        call_id = _token(structural.get("tool_call_id"))
+        commitment = _token(structural.get("command_commitment"))
+        exit_status = structural.get("exit_status")
+        exit_fact = exit_status if type(exit_status) is int else None
+        if envelope.source is ObservationSource.CODEX_HOOK:
+            kind = envelope.event_kind
+            if kind == "PreToolUse":
+                if call_id is not None and commitment is not None:
+                    open_calls.setdefault(commitment, set()).add(call_id)
+                continue
+            if kind in _PAIRING_CLOSE_EVENTS:
+                open_calls.clear()
+                for owed_commitment in {item.commitment for item in pending}:
+                    settle(owed_commitment, closing=True)
+                for item in tuple(pending):
+                    decide(item, _ITEM_COPY if proven_copy(item) else _ITEM_UNPAIRED)
+                continue
+            if kind != "PostToolUse":
+                continue
+            if call_id is not None and commitment is not None:
+                open_calls.get(commitment, set()).discard(call_id)
+            joined = (
+                None
+                if call_id is None
+                else next((item for item in pending if item.call_id == call_id), None)
+            )
+            if not _hook_post_stated(structural):
+                if joined is not None:
+                    decide(joined, _ITEM_CARRIER)
+                else:
+                    if call_id is not None:
+                        unstated_calls[call_id] = commitment
+                    if commitment is not None:
+                        owed[commitment] = owed.get(commitment, 0) + 1
+                settle(commitment)
+                continue
+            if call_id is not None and call_id in unstated_calls:
+                # A later stated post of the same call settles it.
+                earlier = unstated_calls.pop(call_id)
+                if earlier is not None and owed.get(earlier, 0) > 0:
+                    owed[earlier] -= 1
+            if call_id is not None:
+                stated_calls.add(call_id)
+            if commitment is not None:
+                seen_exits.setdefault(commitment, set()).add(exit_fact)
+            if joined is None and commitment is not None:
+                joined = next(
+                    (
+                        item
+                        for item in pending
+                        if item.commitment == commitment and item.exit_status == exit_fact
+                    ),
+                    None,
+                )
+            if joined is not None:
+                decide(joined, _ITEM_COPY)
+            elif commitment is not None:
+                stated_exits.setdefault(commitment, []).append(exit_fact)
+            settle(commitment)
+            continue
+        if envelope.source is not ObservationSource.CODEX_SESSION_STREAM or not _hooked_tool_item(
+            envelope
+        ):
+            continue
+        if envelope.source_identity in decisions or any(
+            item.source_identity == envelope.source_identity for item in pending
+        ):
+            continue
+        if call_id is not None and call_id in unstated_calls:
+            decisions[envelope.source_identity] = _ITEM_CARRIER
+            earlier = unstated_calls.pop(call_id)
+            if earlier is not None and owed.get(earlier, 0) > 0:
+                owed[earlier] -= 1
+        elif call_id is not None and call_id in stated_calls:
+            decisions[envelope.source_identity] = _ITEM_COPY
+        elif commitment is not None and exit_fact in stated_exits.get(commitment, []):
+            stated_exits[commitment].remove(exit_fact)
+            decisions[envelope.source_identity] = _ITEM_COPY
+        else:
+            pending.append(
+                _PendingRolloutItem(envelope.source_identity, call_id, commitment, exit_fact)
+            )
+            settle(commitment)
+    for item in pending:
+        decisions[item.source_identity] = _ITEM_PENDING
+    return decisions
+
+
+def _session_rollout_decisions(
+    store: LocalObservationStore,
+    workspace_commitment: str,
+    session_commitment: str,
+) -> dict[str, str] | None:
+    """The session's rollout item decisions, or ``None`` when no tool hook fired or unreadable."""
+
+    counter = getattr(store, "codex_tool_hook_count", None)
+    lister = getattr(store, "list_envelopes", None)
+    if not callable(counter) or not callable(lister):
+        return None
+    try:
+        count: object = counter(workspace_commitment, session_commitment)
+        if type(count) is not int or count <= 0:
+            return None
+        envelopes = cast(tuple[ObservationEnvelope, ...], lister(workspace_commitment))
+        evicted = getattr(store, "evicted_open_calls", None)
+        open_calls = (
+            cast(tuple[tuple[str, str], ...], evicted(workspace_commitment, session_commitment))
+            if callable(evicted)
+            else ()
+        )
+    except AttributeError, OSError, ProtocolValueError, TypeError, ValueError:
+        return None
+    return _rollout_item_decisions(envelopes, session_commitment, open_calls)
+
+
+def _hooked_tool_item_decision(
+    store: LocalObservationStore,
+    workspace_commitment: str,
+    session_commitment: str,
+    envelope: ObservationEnvelope,
+) -> str | None:
+    """How one rollout tool item is handled on arrival (#910, beside #917's cells).
+
+    ``None`` delivers it: the envelope is not a completed tool item, no Codex tool hook fired
+    in the session, or the store lacks the seams or is unreadable. Otherwise it is held (kept
+    in the local store only) unless it is the ``carrier`` of a hooked call's outcome; a
+    ``pending`` item is held until a later hook post decides it.
+    """
+
+    if not _hooked_tool_item(envelope):
+        return None
+    decisions = _session_rollout_decisions(store, workspace_commitment, session_commitment)
+    if decisions is None:
+        return None
+    return decisions.get(envelope.source_identity, _ITEM_PENDING)
+
+
+def _deliver_pending_rollout_item(
+    store: LocalObservationStore,
+    workspace_commitment: str,
+    item: PendingRolloutItem,
+    *,
+    unpaired: bool,
+) -> bool:
+    """Deliver one held rollout item and settle its account in one batch (#910).
+
+    Later stream rows may already have reached the task, whose per-source cursor refuses an
+    older position (``cursor_stale``), so the item is stamped with the session's committed
+    stream frontier at release time. An item whose pairing was forgotten carries
+    ``unpaired_event``, so the receipt discloses that its attribution is unproven.
+    """
+
+    envelope = item.envelope
+    frontier = store.get_stream_cursor(workspace_commitment, item.session_commitment)
+    if frontier is not None and envelope.cursor.is_stale_relative_to(frontier):
+        envelope = replace(envelope, cursor=frontier)
+    if unpaired:
+        envelope = replace(
+            envelope,
+            gap_codes=tuple(
+                sorted(
+                    {*envelope.gap_codes, ObservationGapCode.UNPAIRED_EVENT.value},
+                    key=str.encode,
+                )
+            ),
+        )
+    try:
+        with store.batched(workspace_commitment):
+            if not store.flush_selected_admission(
+                workspace_commitment,
+                summary_builder=build_routine_read_summary,
+                force=True,
+                material_boundary=True,
+            ):
+                return False
+            plan = _restore_stream_individual_deliveries(
+                store.prepare_selected_admission(
+                    workspace_commitment,
+                    item.codex_session_id,
+                    envelope,
+                    fence="",
+                    focused=False,
+                    routine_candidate=False,
+                    proven_routine_success=False,
+                    summary_builder=build_routine_read_summary,
+                )
+            )
+            if not store.commit_selected_admission(
+                workspace_commitment,
+                plan,
+                incoming=envelope,
+                newly_observed=True,
+                replayable=True,
+            ):
+                return False
+            store.settle_pending_rollout_item(
+                workspace_commitment, item.session_commitment, item.source_identity
+            )
+    except AttributeError, OSError, ProtocolValueError, TypeError, ValueError:
+        return False
+    return True
+
+
+def _release_decided_rollout_items(
+    store: LocalObservationStore,
+    workspace_commitment: str,
+    session_commitment: str,
+) -> bool:
+    """Deliver, exactly once, each held rollout item a later hook row made a carrier (#910).
+
+    A pending item a later post, or the turn's end with a stored proof, made a copy is settled
+    and stays local. One the turn's end could not prove, one the envelope ring no longer holds,
+    one idle for ``PENDING_ROLLOUT_IDLE_RECONCILES`` workspace reconciles, and the oldest past
+    ``MAX_PENDING_ROLLOUT_ITEMS`` are delivered with ``unpaired_event`` rather than lost. Returns ``False`` when an admission could not commit; the item stays pending.
+    """
+
+    lister = getattr(store, "pending_rollout_items", None)
+    ager = getattr(store, "age_pending_rollout_items", None)
+    if not callable(lister) or not callable(ager):
+        return True
+    try:
+        aged = cast(tuple[PendingRolloutItem, ...], ager(workspace_commitment))
+        own = cast(tuple[PendingRolloutItem, ...], lister(workspace_commitment, session_commitment))
+    except AttributeError, OSError, ProtocolValueError, TypeError, ValueError:
+        return True
+    # A session that stopped storing rows (a crash, or a call that never finishes) cannot
+    # decide its items any more; after a bounded number of workspace reconciles they are
+    # delivered with ``unpaired_event`` instead of waiting for the account's size bound.
+    for item in aged:
+        if item.idle_reconciles < PENDING_ROLLOUT_IDLE_RECONCILES:
+            continue
+        if not _deliver_pending_rollout_item(store, workspace_commitment, item, unpaired=True):
+            return False
+    if aged:
+        stale = {
+            item.source_identity
+            for item in aged
+            if item.idle_reconciles >= PENDING_ROLLOUT_IDLE_RECONCILES
+        }
+        own = tuple(item for item in own if item.source_identity not in stale)
+    decisions = (
+        _session_rollout_decisions(store, workspace_commitment, session_commitment) if own else None
+    )
+    if decisions is not None:
+        for item in own:
+            decision = decisions.get(item.source_identity)
+            if decision == _ITEM_PENDING:
+                continue
+            if decision == _ITEM_COPY:
+                try:
+                    store.settle_pending_rollout_item(
+                        workspace_commitment, session_commitment, item.source_identity
+                    )
+                except AttributeError, OSError, ProtocolValueError, TypeError, ValueError:
+                    return False
+                continue
+            if not _deliver_pending_rollout_item(
+                store, workspace_commitment, item, unpaired=decision != _ITEM_CARRIER
+            ):
+                return False
+    try:
+        remaining = cast(tuple[PendingRolloutItem, ...], lister(workspace_commitment))
+    except AttributeError, OSError, ProtocolValueError, TypeError, ValueError:
+        return True
+    for item in remaining[: max(0, len(remaining) - MAX_PENDING_ROLLOUT_ITEMS)]:
+        if not _deliver_pending_rollout_item(store, workspace_commitment, item, unpaired=True):
+            return False
+    return True
+
+
+def _code_mode_cell_held(
+    store: LocalObservationStore,
+    workspace_commitment: str,
+    session_commitment: str,
+    structural: Mapping[str, JsonValue],
+) -> bool:
+    """Whether one code-mode ``exec`` cell row stays in the local store only (#917).
+
+    The decision is per cell: its call is held once Codex tool hooks fire in the
+    session, and its output stays local only when tool hooks fired after the
+    call was read, so a cell whose tools fire no hook keeps its record. A store
+    without the seams, an unreadable one, or a row without a call id answers
+    ``False`` so the row is delivered as before.
+    """
+
+    if not _code_mode_cell_wrapper(structural):
+        return False
+    call_id = _token(structural.get("tool_call_id"))
+    if call_id is None:
+        return False
+    name = (
+        "begin_code_mode_cell"
+        if structural.get("action") == "custom_tool_call"
+        else "finish_code_mode_cell"
+    )
+    decide = getattr(store, name, None)
+    if not callable(decide):
+        return False
+    try:
+        return decide(workspace_commitment, session_commitment, call_id) is True
+    except AttributeError, OSError, ProtocolValueError, TypeError, ValueError:
+        return False
 
 
 def _stream_phase(structural: Mapping[str, JsonValue]) -> str:
@@ -2067,6 +2567,14 @@ def _reconcile_session_stream_path(
         if not boundary_ok:
             delivery_blocked = True
 
+    # Hook posts stored since the last pass may decide rollout items held as pending; deliver
+    # those first, in their stream order, ahead of anything this pass reads (#910).
+    if not delivery_blocked and not _release_decided_rollout_items(
+        store, workspace_commitment, session_commitment
+    ):
+        overflow = True
+        delivery_blocked = True
+
     advance_classifications = advance.classifications
     for index, unpaired_envelope in enumerate(advance.envelopes):
         if delivery_blocked:
@@ -2206,7 +2714,33 @@ def _reconcile_session_stream_path(
                     routed=bool(selection_fence),
                 )
 
-        deliverable = self_observation_deliverable(
+        # A code-mode ``exec`` cell is a container: Codex fires no hook for it, and
+        # a host action inside it is a nested tool call that may fire its own
+        # hooks. When the cell's nested calls are hook-observed, those hook rows
+        # are the ledger's record of the cell, so the wrapper stays in the local
+        # store only instead of adding an independent action; a cell whose tools
+        # fire no hook keeps its own record (#917). A completed command, MCP or
+        # patch item follows the same rule unless it is the only carrier of a
+        # hooked call's outcome (#910).
+        item_decision = _hooked_tool_item_decision(
+            store, workspace_commitment, session_commitment, envelope
+        )
+        if item_decision == _ITEM_PENDING:
+            # Read before the hook post it pairs with: a later post decides it (#910).
+            note_pending = getattr(store, "note_pending_rollout_item", None)
+            if callable(note_pending):
+                try:
+                    note_pending(
+                        workspace_commitment, session_commitment, codex_session_id, envelope
+                    )
+                except AttributeError, OSError, ProtocolValueError, TypeError, ValueError:
+                    # The cursor must not pass an item whose later decision could not persist.
+                    delivery_blocked = True
+                    break
+        cell_wrapper = _code_mode_cell_held(
+            store, workspace_commitment, session_commitment, envelope.structural_payload
+        ) or item_decision not in {None, _ITEM_CARRIER}
+        deliverable = not cell_wrapper and self_observation_deliverable(
             _stream_phase(envelope.structural_payload), envelope.structural_payload
         )
         if deliverable:
@@ -2254,7 +2788,7 @@ def _reconcile_session_stream_path(
                         consume(workspace_commitment, session_commitment, read_protection_probe)
                     except AttributeError, OSError, ProtocolValueError, TypeError, ValueError:
                         pass
-        elif result.disposition.value == "accepted":
+        elif result.disposition.value == "accepted" and not cell_wrapper:
             # Self-observation suppression is intentional selection, not a
             # missing observation.  Count each accepted stream input once so
             # status/check accounting can distinguish it from queue loss.

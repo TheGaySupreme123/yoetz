@@ -154,8 +154,7 @@ reverse-chronological released versions.
   Hooks commit to the command with an installation-keyed `hmac-sha256:` value and discard the text,
   so no command text is stored, shown or sent. `status view=results` adds each observed run's tool,
   occurrence, command commitment and exit status. Older ledgers without a command identity use the
-  observed-edit rule only. Cooperative results keep their disclosure duty. Codex outcomes are still
-  `unknown` until #910 lands (#909).
+  observed-edit rule only. Cooperative results keep their disclosure duty (#909).
 
 - Hooks no longer tell the agent "task frontier moved … run status before an exact-frontier check"
   after routine tool calls. Every such notice described motion by the Yoetz observation writer,
@@ -213,6 +212,36 @@ reverse-chronological released versions.
   one fixed sentence. A custom recipe whose half-share is smaller than one part still carries the
   first part, and the files a review is recorded as having seen are counted from the packet the
   reviewer actually received.
+
+- Codex shell, exec, `apply_patch` and MCP results now record the outcome Codex states instead of
+  `unknown`: the exit code nested in the hook's tool result, the `Exit code: N` or
+  `Process exited with code N` header, or MCP's `isError`. A completed command, MCP or patch item
+  in the session rollout is recorded as a result with its status and exit code, and carries the
+  same command commitment as its hook copy, so a passing rerun on either path retires the failure.
+  Output text is never read as an outcome, and a result with no stated outcome stays `unknown`
+  with `host_outcome_unavailable` on that record only. Unresolved-command advice now also reads
+  Codex `exec_command` and `local_shell` calls. While the session's tool hooks fire, the rollout's
+  copy of a hooked call stays local when the hook already stated the outcome, so one command is one
+  result; when the hook stated none (a still-running process) or no tool hooks fire, the rollout
+  item is delivered with its outcome. This holds when the rollout item is read before its hook
+  result arrives: the item waits locally until the hook results of that command settle it. With
+  parallel runs of one command it waits until no other run of that command is still open, or
+  until the turn ends, so runs whose hook rows are still held locally do not trade outcomes. An
+  item that the turn's end cannot prove to be a stated hook result's copy is delivered with
+  `unpaired_event` instead of being dropped. So is an item whose pairing is lost to local
+  retention, to the pending bound, or to a session that stopped storing rows (#910).
+
+- Codex observation records each tool call once. A tool call's pre-event and its result now share
+  one ledger action instead of two, and a code-mode `exec` cell no longer adds its own action next
+  to the nested calls its hooks already recorded (a cell whose tools fire no hook is still
+  recorded), so a shell command costs at most four
+  observation records instead of about eight. Earlier sessions keep their recorded history. A lost
+  pre/post pairing (`unpaired_event`) stays disclosed on status, check coverage and the receipt,
+  but it no longer raises the "Observation coverage is incomplete or stale" advisory that no wait
+  could clear; the agent gets one no-response notice per new orphan scope. The advisory now names
+  its live cause and clears when source lag, drain, service or vault conditions recover;
+  unsupported-record gaps still keep it and do not clear in session. `status view=findings` items
+  carry the `finding_frontier` that `respond` accepts as-is (#917).
 - With the Codex subscription evaluator bound, the service no longer re-hashes the retained Codex
   runtime (about 359 MB on Linux) on the event loop for every observation advice cycle. Structural
   readiness is memoized by binding and file fingerprints and re-checked off the event loop only

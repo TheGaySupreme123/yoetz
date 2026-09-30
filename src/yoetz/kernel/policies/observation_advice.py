@@ -33,7 +33,7 @@ __all__ = [
 ]
 
 OBSERVATION_ADVICE_POLICY_ID: Final = "observation-advice"
-OBSERVATION_ADVICE_POLICY_VERSION: Final = "0.1.6"
+OBSERVATION_ADVICE_POLICY_VERSION: Final = "0.1.7"
 
 OBSERVATION_ADVICE_FACT_CODES: Final = frozenset(
     {
@@ -116,8 +116,12 @@ _VERIFICATION_TOOLS: Final = frozenset(
 )
 # Generic host shells.  A successful envelope here proves only that the host
 # tool returned; it never proves that a verification check ran.
-# Cursor's ordinary profile reports its shell tool as ``Shell`` (#909).
-_SHELL_TOOLS: Final = frozenset({"shell", "Shell", "Bash", "bash"})
+# Cursor's ordinary profile reports its shell tool as ``Shell`` (#909).  Codex hooks name a
+# shell call ``Bash`` (including code-mode ``tools.exec_command``) and its direct tools
+# ``exec_command``/``local_shell``; each now states its exit status (#910), so each is a
+# command whose failure the unresolved-command rule reads.  A session-stream
+# ``command_execution`` row is deliberately absent: advice must not name one run twice.
+_SHELL_TOOLS: Final = frozenset({"shell", "Shell", "Bash", "bash", "exec_command", "local_shell"})
 # Tools whose envelopes carry command outcomes at all, used by the failed and
 # unresolved-command rules, which reason about outcomes rather than checks.
 _COMMAND_TOOLS: Final = _VERIFICATION_TOOLS | _SHELL_TOOLS
@@ -703,23 +707,39 @@ def _outside_plan(
     ]
 
 
+# Observation conditions that still raise the ``refresh_observation`` advisory.
+# Source lag, a stale cursor, an unavailable service and a locked vault recover
+# while the session continues (reconcile, drain, restart, unlock), and the
+# advisory clears when they do. Unsupported rollout records keep their earlier
+# treatment and do not clear in session.
+_ADVISED_OBSERVATION_GAPS: Final = frozenset(
+    {
+        ObservationGapCode.SOURCE_LAG.value,
+        ObservationGapCode.CURSOR_STALE.value,
+        ObservationGapCode.SERVICE_UNAVAILABLE.value,
+        ObservationGapCode.VAULT_LOCKED.value,
+        ObservationGapCode.UNSUPPORTED_EVENT.value,
+        ObservationGapCode.UNSUPPORTED_FORMAT.value,
+    }
+)
+
+
 def _observation_gaps(
     lifecycle: ObservationLifecycle,
     gaps: Sequence[str],
     envelopes: Sequence[ObservationEnvelope],
 ) -> list[ObservationAdviceCandidate]:
-    interesting = {
-        ObservationGapCode.SOURCE_LAG.value,
-        ObservationGapCode.CURSOR_STALE.value,
-        ObservationGapCode.SERVICE_UNAVAILABLE.value,
-        ObservationGapCode.VAULT_LOCKED.value,
-        ObservationGapCode.UNPAIRED_EVENT.value,
-        ObservationGapCode.UNSUPPORTED_EVENT.value,
-        ObservationGapCode.UNSUPPORTED_FORMAT.value,
-    }
-    present = [gap for gap in gaps if gap in interesting]
+    # ``unpaired_event`` is a standing record, not a stale feed (#917): a lost
+    # pairing stays disclosed on status, check coverage and the receipt for the
+    # rest of the session, and no drain or wait can clear it. It is announced
+    # once per new orphan scope instead, so it never raises this advisory.
+    present = sorted({gap for gap in gaps if gap in _ADVISED_OBSERVATION_GAPS}, key=str.encode)
     if lifecycle in {ObservationLifecycle.STALE, ObservationLifecycle.DEGRADED} or present:
-        refs = [_envelope_ref(item) for item in envelopes[-3:]] or ("observation:gap",)
+        # Name the live cause. Refs are sorted, and ``cause:`` sorts before every
+        # observation source identity, so the hook's single evidence reference
+        # names it rather than a rolling envelope.
+        causes = [f"cause:{gap}" for gap in present] or [f"cause:lifecycle_{lifecycle.value}"]
+        refs = [*causes, *(_envelope_ref(item) for item in envelopes[-3:])]
         return [
             _candidate(
                 FindingKind.LEDGER_STALE_OR_INCOMPLETE,

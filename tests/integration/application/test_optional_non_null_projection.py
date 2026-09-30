@@ -156,7 +156,7 @@ _RESULT_OPTIONAL_NON_NULL: tuple[tuple[type[BaseModel], frozenset[str]], ...] = 
         ),
     ),
     (StatusCompactObligationModel, frozenset({"acceptance_criteria"})),
-    (StatusFindingItemModel, frozenset({"todo_state", "review_rounds"})),
+    (StatusFindingItemModel, frozenset({"todo_state", "review_rounds", "finding_frontier"})),
     (StatusFindingsPageModel, frozenset({"attempt_budget"})),
     (StatusObligationItemModel, frozenset({"acceptance_criteria"})),
     (
@@ -1149,7 +1149,7 @@ def test_every_result_optional_non_null_field_has_an_unset_projection_case() -> 
             ("child_frontier", "child_check_id", "child_receipt_id", "membership_generation"),
         ),
         ("ProjectTextRefModel", ("envelope_digest",)),
-        ("StatusFindingItemModel", ("todo_state", "review_rounds")),
+        ("StatusFindingItemModel", ("todo_state", "review_rounds", "finding_frontier")),
         ("StatusFindingsPageModel", ("attempt_budget",)),
         ("StatusProjectPageModel", ("title", "description", "title_ref", "description_ref")),
         (

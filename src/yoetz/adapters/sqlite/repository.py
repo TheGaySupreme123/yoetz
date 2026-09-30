@@ -2159,6 +2159,12 @@ class SqliteLedger:
         await self._ensure_recovered()
         return await self._oracle().lookup_operation(writer_id, operation_id)
 
+    async def projected_action_event(self, action: str) -> str | None:
+        """Return the event that records one action in the current task projection (#917)."""
+
+        await self._ensure_recovered()
+        return await self._oracle().projected_action_event(action)
+
     async def lookup_task_operation(
         self, writer_id: str, operation_id: str
     ) -> OperationRecord | None:

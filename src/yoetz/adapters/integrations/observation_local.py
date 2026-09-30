@@ -160,6 +160,7 @@ __all__ = [
     "PendingSessionLifecycle",
     "ReadProtection",
     "STREAM_MAPPING_VERSION",
+    "UnpairedScopeNotice",
     "YOETZ_OWNED_TOOL_NAMES",
     "YOETZ_READ_TOOL_NAMES",
     "YOETZ_TOOL_NAMES",
@@ -198,6 +199,13 @@ _OPEN_PRE_TTL_MS: Final = 600_000
 # history.  A valid pair in another source/session/generation must not clear
 # one of these conditions.
 _MAX_UNPAIRED_SCOPES: Final = 256
+_MAX_CODEX_TOOL_HOOK_ENTRIES: Final = 256
+_MAX_PENDING_ROLLOUT_TOKEN: Final = 128
+# Undecided rollout tool items (#910). Past the soft bound the stream reconciler
+# delivers the oldest with ``unpaired_event``; the hard bound only guards the
+# state file and records the loss as a session gap.
+MAX_PENDING_ROLLOUT_ITEMS: Final = 64
+_MAX_PENDING_ROLLOUT_ITEMS_HARD: Final = 4 * MAX_PENDING_ROLLOUT_ITEMS
 _MAX_OUTBOX: Final = 512
 # The largest selected profile is the hard local JSON ceiling.  Profile
 # specific limits come from the pure budget policy below; the standard value
@@ -1250,6 +1258,251 @@ class _GapState:
 
 
 @dataclass(frozen=True, slots=True)
+class _CodeModeCell:
+    """Tool-hook bookkeeping for one Codex code-mode ``exec`` cell (#917).
+
+    ``hooks_at_start`` is the session's tool-hook count when the stream read the
+    cell's call. The cell's own output is kept local only when that pre was held
+    and further tool hooks fired before the output; the decision, once made, is
+    replayed unchanged.
+    """
+
+    hooks_at_start: int
+    pre_withheld: bool
+    output_local: bool | None
+    touched: int
+
+
+def _code_mode_cell_key(session_commitment: str, call_id: str) -> str:
+    return canonical_digest(
+        JsonObject(
+            {
+                "kind": "codex-code-mode-cell",
+                "session_commitment": session_commitment,
+                "call_id": call_id,
+            }
+        )
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class UnpairedScopeNotice:
+    """One not-yet-delivered standing-limitation notice for a new orphan scope (#917).
+
+    A scope is one (source, host session, source generation) lane that has at
+    least one paired-profile orphan post. The notice is informational only: it
+    is never a finding, needs no response, and a delivered scope is never
+    announced again, across restart and resume.
+    """
+
+    lane: str
+    source: str
+    session_commitment: str
+    source_generation: int
+    delivered: bool = False
+    # Announcement order; the oldest delivered notice is the one a full map forgets.
+    ordinal: int = 0
+
+
+def _unpaired_notice_lane(
+    *, source: ObservationSource, session_commitment: str, source_generation: int
+) -> str:
+    return canonical_digest(
+        JsonObject(
+            {
+                "kind": "observation-orphan-scope",
+                "source": source.value,
+                "session_commitment": session_commitment,
+                "source_generation": source_generation,
+            }
+        )
+    )
+
+
+def _unpaired_notices_from_json(raw: object) -> dict[str, UnpairedScopeNotice]:
+    """Read the bounded notice map, dropping any malformed entry."""
+
+    notices: dict[str, UnpairedScopeNotice] = {}
+    if not isinstance(raw, Mapping):
+        return notices
+    for lane, value in cast(Mapping[object, object], raw).items():
+        if type(lane) is not str or not isinstance(value, Mapping):
+            continue
+        entry = cast(Mapping[str, object], value)
+        source = entry.get("source")
+        session = entry.get("session_commitment")
+        generation = entry.get("source_generation")
+        delivered = entry.get("delivered")
+        ordinal = entry.get("ordinal", 0)
+        if (
+            type(source) is not str
+            or source not in {item.value for item in ObservationSource}
+            or type(session) is not str
+            or not session
+            or type(generation) is not int
+            or generation < 0
+            or type(delivered) is not bool
+            or type(ordinal) is not int
+            or ordinal < 0
+        ):
+            continue
+        if lane != _unpaired_notice_lane(
+            source=ObservationSource(source),
+            session_commitment=session,
+            source_generation=generation,
+        ):
+            continue
+        notices[lane] = UnpairedScopeNotice(lane, source, session, generation, delivered, ordinal)
+        if len(notices) >= _MAX_UNPAIRED_SCOPES:
+            break
+    return notices
+
+
+def _bounded_counter(raw: object) -> int:
+    return raw if type(raw) is int and 0 <= raw <= _MAX_SAFE_INTEGER else 0
+
+
+def _codex_tool_hooks_from_json(raw: object) -> dict[str, tuple[int, int]]:
+    hooks: dict[str, tuple[int, int]] = {}
+    if not isinstance(raw, Mapping):
+        return hooks
+    for session, value in cast(Mapping[object, object], raw).items():
+        if type(session) is not str or not session or not isinstance(value, Mapping):
+            continue
+        entry = cast(Mapping[str, object], value)
+        count = _bounded_counter(entry.get("count"))
+        touched = _bounded_counter(entry.get("touched"))
+        if count:
+            hooks[session] = (count, touched)
+    return dict(sorted(hooks.items(), key=lambda item: item[1][1])[-_MAX_CODEX_TOOL_HOOK_ENTRIES:])
+
+
+def _pending_rollout_item_token(value: object) -> bool:
+    return type(value) is str and 0 < len(value) <= _MAX_PENDING_ROLLOUT_TOKEN
+
+
+@dataclass(frozen=True, slots=True)
+class PendingRolloutItem:
+    """One rollout tool item read before any hook post it pairs with (#910).
+
+    The structural envelope is kept beside the envelope ring so its outcome can
+    still be delivered, with ``unpaired_event``, when the ring or this bounded
+    account forgets the item before a hook post decides it.
+    """
+
+    session_commitment: str
+    codex_session_id: str
+    envelope: ObservationEnvelope
+    touched: int
+    # Workspace reconciles survived while the item's session stored no new hook
+    # or stream row, and that session's activity mark when last compared.
+    idle_reconciles: int = 0
+    activity: str = ""
+
+    @property
+    def source_identity(self) -> str:
+        return self.envelope.source_identity
+
+
+def _pending_rollout_items_from_json(raw: object) -> dict[str, PendingRolloutItem]:
+    items: dict[str, PendingRolloutItem] = {}
+    if not isinstance(raw, Mapping):
+        return items
+    for identity, value in cast(Mapping[object, object], raw).items():
+        if not _pending_rollout_item_token(identity) or not isinstance(value, Mapping):
+            continue
+        entry = cast(Mapping[str, object], value)
+        session = entry.get("session")
+        host_session = entry.get("codex_session_id")
+        raw_envelope = entry.get("envelope")
+        if (
+            not _pending_rollout_item_token(session)
+            or not _pending_rollout_item_token(host_session)
+            or not isinstance(raw_envelope, Mapping)
+        ):
+            continue
+        try:
+            envelope = observation_envelope_from_json(
+                JsonObject(cast(Mapping[str, JsonValue], raw_envelope))
+            )
+        except ProtocolValueError, TypeError, ValueError:
+            continue
+        if envelope.source_identity != identity or envelope.session_commitment != session:
+            continue
+        activity = entry.get("activity")
+        items[cast(str, identity)] = PendingRolloutItem(
+            cast(str, session),
+            cast(str, host_session),
+            envelope,
+            _bounded_counter(entry.get("touched")),
+            _bounded_counter(entry.get("idle_reconciles")),
+            activity if type(activity) is str and len(activity) <= 256 else "",
+        )
+    return dict(
+        sorted(items.items(), key=lambda item: item[1].touched)[-_MAX_PENDING_ROLLOUT_ITEMS_HARD:]
+    )
+
+
+def _evicted_open_call_key(session_commitment: str, call_id: str) -> str:
+    return canonical_digest(
+        JsonObject(
+            {
+                "kind": "codex-evicted-open-call",
+                "session_commitment": session_commitment,
+                "call_id": call_id,
+            }
+        )
+    )
+
+
+def _evicted_open_calls_from_json(raw: object) -> dict[str, tuple[str, str, str, int]]:
+    calls: dict[str, tuple[str, str, str, int]] = {}
+    if not isinstance(raw, Mapping):
+        return calls
+    for key, value in cast(Mapping[object, object], raw).items():
+        if type(key) is not str or not isinstance(value, Mapping):
+            continue
+        entry = cast(Mapping[str, object], value)
+        session = entry.get("session")
+        commitment = entry.get("commitment")
+        call_id = entry.get("call_id")
+        if not all(_pending_rollout_item_token(item) for item in (session, commitment, call_id)):
+            continue
+        if key != _evicted_open_call_key(cast(str, session), cast(str, call_id)):
+            continue
+        calls[key] = (
+            cast(str, session),
+            cast(str, commitment),
+            cast(str, call_id),
+            _bounded_counter(entry.get("touched")),
+        )
+    return dict(sorted(calls.items(), key=lambda item: item[1][3])[-_MAX_CODEX_TOOL_HOOK_ENTRIES:])
+
+
+def _code_mode_cells_from_json(raw: object) -> dict[str, _CodeModeCell]:
+    cells: dict[str, _CodeModeCell] = {}
+    if not isinstance(raw, Mapping):
+        return cells
+    for key, value in cast(Mapping[object, object], raw).items():
+        if type(key) is not str or not key or not isinstance(value, Mapping):
+            continue
+        entry = cast(Mapping[str, object], value)
+        withheld = entry.get("pre_withheld")
+        local = entry.get("output_local")
+        if type(withheld) is not bool or (local is not None and type(local) is not bool):
+            continue
+        cells[key] = _CodeModeCell(
+            _bounded_counter(entry.get("hooks_at_start")),
+            withheld,
+            local,
+            _bounded_counter(entry.get("touched")),
+        )
+    return dict(
+        sorted(cells.items(), key=lambda item: item[1].touched)[-_MAX_CODEX_TOOL_HOOK_ENTRIES:]
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class _OpenPre:
     """Durable identity for an accepted pre event awaiting its post.
 
@@ -1615,6 +1868,25 @@ class _WorkspaceState:
     frontier_motion_recency: int = 0
     open_pre: dict[str, _OpenPre] | None = None
     unpaired_scopes: set[str] | None = None
+    # One informational notice per new (source, session, generation) orphan
+    # scope, keyed by that lane; kept after delivery so a scope is announced once.
+    unpaired_notices: dict[str, UnpairedScopeNotice] | None = None
+    # Per host session: Codex tool-hook inputs admitted and a recency stamp; and
+    # per code-mode cell: the tool-hook count at its call (#917). Both maps are
+    # bounded and forget the least recently touched entry, which only makes that
+    # session's or cell's wrapper deliverable again.
+    codex_tool_hooks: dict[str, tuple[int, int]] | None = None
+    code_mode_cells: dict[str, _CodeModeCell] | None = None
+    codex_tool_hook_clock: int = 0
+    # Per rollout tool item read before any hook post it pairs with (#910): its
+    # source identity -> its account, stamped on the clock above. A later hook
+    # post or the turn's end decides it (see MAX_PENDING_ROLLOUT_ITEMS).
+    pending_rollout_items: dict[str, PendingRolloutItem] | None = None
+    # Codex tool calls whose ``PreToolUse`` left the envelope ring (#910): key ->
+    # (host session, command commitment, call id, recency). The rollout pairing
+    # replay starts with them open; a call's evicted post or its session's
+    # ``Stop``/``SessionEnd`` forgets it.
+    evicted_open_calls: dict[str, tuple[str, str, str, int]] | None = None
     # True when a state was written by a pre-/11 reader that could not retain
     # scoped pairing provenance. It is deliberately sticky: a later save must
     # not turn unknown history into proof that a gap was false.
@@ -1755,6 +2027,16 @@ class _WorkspaceState:
             self.open_pre = {}
         if self.unpaired_scopes is None:
             self.unpaired_scopes = set()
+        if self.unpaired_notices is None:
+            self.unpaired_notices = {}
+        if self.codex_tool_hooks is None:
+            self.codex_tool_hooks = {}
+        if self.code_mode_cells is None:
+            self.code_mode_cells = {}
+        if self.pending_rollout_items is None:
+            self.pending_rollout_items = {}
+        if self.evicted_open_calls is None:
+            self.evicted_open_calls = {}
         if type(self.pairing_state_unknown) is not bool:
             raise ProtocolValueError("invalid_event_value_type")
         if self.stream_cursors is None:
@@ -2320,6 +2602,12 @@ def _copy_state(state: _WorkspaceState) -> _WorkspaceState:
         frontier_motion_delivered=dict(state.frontier_motion_delivered or {}),
         open_pre=dict(state.open_pre or {}),
         unpaired_scopes=set(state.unpaired_scopes or ()),
+        unpaired_notices=dict(state.unpaired_notices or {}),
+        codex_tool_hooks=dict(state.codex_tool_hooks or {}),
+        code_mode_cells=dict(state.code_mode_cells or {}),
+        codex_tool_hook_clock=state.codex_tool_hook_clock,
+        pending_rollout_items=dict(state.pending_rollout_items or {}),
+        evicted_open_calls=dict(state.evicted_open_calls or {}),
         pairing_state_unknown=state.pairing_state_unknown,
         stream_cursors=dict(state.stream_cursors or {}),
         stream_partials=dict(state.stream_partials or {}),
@@ -4809,6 +5097,12 @@ class LocalObservationStore:
         with self._lock:
             state = self._load(workspace)
             assert state.unpaired_scopes is not None
+            self._note_unpaired_notice(
+                state,
+                source=source,
+                session_commitment=session_commitment,
+                source_generation=source_generation,
+            )
             scope = _orphan_scope_key(
                 source=source,
                 session_commitment=session_commitment,
@@ -4824,6 +5118,69 @@ class LocalObservationStore:
                     return
                 state.unpaired_scopes.add(scope)
             self._note_gap_state(state, ObservationGapCode.UNPAIRED_EVENT.value)
+            self._save(workspace, state)
+
+    @staticmethod
+    def _note_unpaired_notice(
+        state: _WorkspaceState,
+        *,
+        source: ObservationSource,
+        session_commitment: str,
+        source_generation: int,
+    ) -> None:
+        """Queue one informational notice the first time an orphan scope appears (#917).
+
+        Repeated orphans in a known scope add nothing. When the bounded map is
+        full, the oldest delivered notice is forgotten to make room; only when
+        every retained notice is still undelivered is no notice queued, and the
+        aggregate gap is still disclosed.
+        """
+
+        notices = state.unpaired_notices
+        assert notices is not None
+        lane = _unpaired_notice_lane(
+            source=source,
+            session_commitment=session_commitment,
+            source_generation=source_generation,
+        )
+        if lane in notices:
+            return
+        if len(notices) >= _MAX_UNPAIRED_SCOPES:
+            delivered = [notice for notice in notices.values() if notice.delivered]
+            if not delivered:
+                return
+            del notices[min(delivered, key=lambda notice: (notice.ordinal, notice.lane)).lane]
+        ordinal = min(_MAX_SAFE_INTEGER, max((n.ordinal for n in notices.values()), default=0) + 1)
+        notices[lane] = UnpairedScopeNotice(
+            lane, source.value, session_commitment, source_generation, ordinal=ordinal
+        )
+
+    @_read_mostly
+    def peek_unpaired_notice(
+        self, workspace: str, session_commitment: str
+    ) -> UnpairedScopeNotice | None:
+        """Return the oldest undelivered orphan-scope notice for one host session."""
+
+        with self._reading():
+            state = self._load(workspace)
+            pending = [
+                notice
+                for notice in (state.unpaired_notices or {}).values()
+                if notice.session_commitment == session_commitment and not notice.delivered
+            ]
+            return min(pending, key=lambda notice: (notice.ordinal, notice.lane), default=None)
+
+    def commit_unpaired_notice_delivery(self, workspace: str, lane: str) -> None:
+        """Mark one notice delivered after its bytes reached the host; it never repeats."""
+
+        with self._lock:
+            state = self._load(workspace)
+            notices = state.unpaired_notices or {}
+            current = notices.get(lane)
+            if current is None or current.delivered:
+                return
+            notices[lane] = dataclasses.replace(current, delivered=True)
+            state.unpaired_notices = notices
             self._save(workspace, state)
 
     def set_advice_snapshot(self, workspace: str, snapshot: AdviceSnapshot | None) -> None:
@@ -5547,6 +5904,268 @@ class LocalObservationStore:
             state.last_stream_reconcile_mono_ms = int(current * 1000)
             state.monotonic_epoch = self._boot_epoch()
             self._save(workspace, state)
+
+    @staticmethod
+    def _note_codex_tool_hook(state: _WorkspaceState, session_commitment: str) -> None:
+        """Count one Codex ``PreToolUse``/``PostToolUse`` hook for a host session (#917).
+
+        Lifecycle hooks do not count: they are registered even when no tool hook
+        fires. The bounded map forgets the least recently active session, never
+        the new one; a forgotten session only makes its later cells deliverable.
+        """
+
+        assert state.codex_tool_hooks is not None
+        state.codex_tool_hook_clock = min(_MAX_SAFE_INTEGER, state.codex_tool_hook_clock + 1)
+        count, _touched = state.codex_tool_hooks.pop(session_commitment, (0, 0))
+        state.codex_tool_hooks[session_commitment] = (
+            min(_MAX_SAFE_INTEGER, count + 1),
+            state.codex_tool_hook_clock,
+        )
+        while len(state.codex_tool_hooks) > _MAX_CODEX_TOOL_HOOK_ENTRIES:
+            oldest = min(state.codex_tool_hooks.items(), key=lambda item: item[1][1])[0]
+            del state.codex_tool_hooks[oldest]
+
+    @_read_mostly
+    def codex_tool_hook_count(self, workspace: str, session_commitment: str) -> int:
+        """How many Codex tool hooks this store has admitted for one host session."""
+
+        with self._reading():
+            state = self._load(workspace)
+            return (state.codex_tool_hooks or {}).get(session_commitment, (0, 0))[0]
+
+    def begin_code_mode_cell(self, workspace: str, session_commitment: str, call_id: str) -> bool:
+        """Note that the stream read a code-mode ``exec`` cell's call; return whether to hold it.
+
+        The call is held (kept local) when Codex tool hooks have already fired
+        in this session, so a hooked cell adds no second action. The first
+        answer for a cell is durable and replayed unchanged (#917).
+        """
+
+        with self._lock:
+            state = self._load(workspace)
+            assert state.code_mode_cells is not None
+            key = _code_mode_cell_key(session_commitment, call_id)
+            current = state.code_mode_cells.get(key)
+            if current is not None:
+                return current.pre_withheld
+            count = (state.codex_tool_hooks or {}).get(session_commitment, (0, 0))[0]
+            self._remember_code_mode_cell(state, key, _CodeModeCell(count, count > 0, None, 0))
+            self._save(workspace, state)
+            return count > 0
+
+    def finish_code_mode_cell(self, workspace: str, session_commitment: str, call_id: str) -> bool:
+        """Return whether a code-mode cell's output stays local (#917).
+
+        It stays local only when the cell's call was held and at least one
+        Codex tool hook fired in this session after the stream read that call:
+        the nested hook rows are then the cell's record. Otherwise the output is
+        delivered, so a cell whose tools fire no hook keeps its record. An
+        output whose call was never noted is delivered.
+        """
+
+        with self._lock:
+            state = self._load(workspace)
+            assert state.code_mode_cells is not None
+            key = _code_mode_cell_key(session_commitment, call_id)
+            current = state.code_mode_cells.get(key)
+            if current is None:
+                return False
+            if current.output_local is not None:
+                return current.output_local
+            count = (state.codex_tool_hooks or {}).get(session_commitment, (0, 0))[0]
+            local = current.pre_withheld and count > current.hooks_at_start
+            self._remember_code_mode_cell(
+                state, key, dataclasses.replace(current, output_local=local)
+            )
+            self._save(workspace, state)
+            return local
+
+    def note_pending_rollout_item(
+        self,
+        workspace: str,
+        session_commitment: str,
+        codex_session_id: str,
+        envelope: ObservationEnvelope,
+    ) -> None:
+        """Remember a rollout tool item read before any hook post it pairs with (#910).
+
+        The item stays in the local store only until a later hook post of the same
+        session, or the turn's end, decides it: the stream reconciler then delivers
+        it once when it is the only carrier of a call's outcome, or settles it as a
+        copy. Past a hard bound the oldest item is dropped and ``unpaired_event``
+        recorded for its session; the reconciler's soft bound normally delivers it
+        first.
+        """
+
+        if (
+            not _pending_rollout_item_token(session_commitment)
+            or not _pending_rollout_item_token(codex_session_id)
+            or type(envelope) is not ObservationEnvelope
+            or envelope.session_commitment != session_commitment
+            or not _pending_rollout_item_token(envelope.source_identity)
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+        with self._lock:
+            state = self._load(workspace)
+            assert state.pending_rollout_items is not None
+            identity = envelope.source_identity
+            state.codex_tool_hook_clock = min(_MAX_SAFE_INTEGER, state.codex_tool_hook_clock + 1)
+            state.pending_rollout_items.pop(identity, None)
+            state.pending_rollout_items[identity] = PendingRolloutItem(
+                session_commitment,
+                codex_session_id,
+                envelope,
+                state.codex_tool_hook_clock,
+                0,
+                self._pending_rollout_activity(state, session_commitment),
+            )
+            while len(state.pending_rollout_items) > _MAX_PENDING_ROLLOUT_ITEMS_HARD:
+                oldest = min(state.pending_rollout_items.values(), key=lambda item: item.touched)
+                del state.pending_rollout_items[oldest.source_identity]
+                self._note_gap_state(state, ObservationGapCode.UNPAIRED_EVENT.value)
+                self._note_session_gap_state(
+                    state, oldest.session_commitment, ObservationGapCode.UNPAIRED_EVENT.value
+                )
+            self._save(workspace, state)
+
+    @_read_mostly
+    def pending_rollout_items(
+        self, workspace: str, session_commitment: str | None = None
+    ) -> tuple[PendingRolloutItem, ...]:
+        """Undecided rollout tool items, oldest first; one session's, or all when ``None``."""
+
+        with self._reading():
+            state = self._load(workspace)
+            return tuple(
+                item
+                for item in sorted(
+                    (state.pending_rollout_items or {}).values(), key=lambda item: item.touched
+                )
+                if session_commitment is None or item.session_commitment == session_commitment
+            )
+
+    @staticmethod
+    def _note_evicted_tool_call(state: _WorkspaceState, evicted: ObservationEnvelope) -> None:
+        """Keep the open state of a Codex tool call whose hook row leaves the ring (#910).
+
+        An evicted ``PreToolUse`` leaves its call open for the rollout pairing replay, so a
+        parallel same-command run is not taken for finished; an evicted ``PostToolUse`` closes
+        it, since every later row the replay still holds follows that post.
+        """
+
+        if evicted.source is not ObservationSource.CODEX_HOOK:
+            return
+        assert state.evicted_open_calls is not None
+        call_id = evicted.structural_payload.get("tool_call_id")
+        if not _pending_rollout_item_token(call_id):
+            return
+        key = _evicted_open_call_key(evicted.session_commitment, cast(str, call_id))
+        if evicted.event_kind == "PostToolUse":
+            state.evicted_open_calls.pop(key, None)
+            return
+        commitment = evicted.structural_payload.get("command_commitment")
+        if evicted.event_kind != "PreToolUse" or not _pending_rollout_item_token(commitment):
+            return
+        state.codex_tool_hook_clock = min(_MAX_SAFE_INTEGER, state.codex_tool_hook_clock + 1)
+        state.evicted_open_calls[key] = (
+            evicted.session_commitment,
+            cast(str, commitment),
+            cast(str, call_id),
+            state.codex_tool_hook_clock,
+        )
+        while len(state.evicted_open_calls) > _MAX_CODEX_TOOL_HOOK_ENTRIES:
+            oldest = min(state.evicted_open_calls.items(), key=lambda item: item[1][3])[0]
+            del state.evicted_open_calls[oldest]
+
+    @staticmethod
+    def _forget_evicted_open_calls(state: _WorkspaceState, session_commitment: str) -> None:
+        assert state.evicted_open_calls is not None
+        for key, entry in tuple(state.evicted_open_calls.items()):
+            if entry[0] == session_commitment:
+                del state.evicted_open_calls[key]
+
+    @_read_mostly
+    def evicted_open_calls(
+        self, workspace: str, session_commitment: str
+    ) -> tuple[tuple[str, str], ...]:
+        """``(command commitment, call id)`` of one session's calls open past the ring."""
+
+        with self._reading():
+            state = self._load(workspace)
+            return tuple(
+                (commitment, call_id)
+                for session, commitment, call_id, _touched in sorted(
+                    (state.evicted_open_calls or {}).values(), key=lambda item: item[3]
+                )
+                if session == session_commitment
+            )
+
+    @staticmethod
+    def _pending_rollout_activity(state: _WorkspaceState, session_commitment: str) -> str:
+        """A mark that changes whenever the session stores a new tool hook or stream row."""
+
+        hooks = (state.codex_tool_hooks or {}).get(session_commitment, (0, 0))[0]
+        cursor = (state.stream_cursors or {}).get(session_commitment)
+        stream = (
+            "-"
+            if cursor is None
+            else f"{cursor.source_generation}.{cursor.byte_position}.{cursor.event_position}"
+        )
+        return f"{hooks}:{stream}"
+
+    def age_pending_rollout_items(self, workspace: str) -> tuple[PendingRolloutItem, ...]:
+        """Count one workspace reconcile against every undecided rollout item (#910).
+
+        An item whose session stored a new tool hook or stream row since the last
+        count starts again from zero; otherwise its idle count grows by one. Returns
+        the updated items, oldest first, so the reconciler can bound a session that
+        stopped (a crash, or a call that never finishes).
+        """
+
+        with self._lock:
+            state = self._load(workspace)
+            assert state.pending_rollout_items is not None
+            if not state.pending_rollout_items:
+                return ()
+            for identity, item in tuple(state.pending_rollout_items.items()):
+                activity = self._pending_rollout_activity(state, item.session_commitment)
+                state.pending_rollout_items[identity] = dataclasses.replace(
+                    item,
+                    activity=activity,
+                    idle_reconciles=(
+                        0
+                        if activity != item.activity
+                        else min(_MAX_SAFE_INTEGER, item.idle_reconciles + 1)
+                    ),
+                )
+            self._save(workspace, state)
+            return tuple(
+                sorted(state.pending_rollout_items.values(), key=lambda item: item.touched)
+            )
+
+    def settle_pending_rollout_item(
+        self, workspace: str, session_commitment: str, source_identity: str
+    ) -> None:
+        """Forget one decided rollout tool item; an unknown identity is a no-op."""
+
+        with self._lock:
+            state = self._load(workspace)
+            assert state.pending_rollout_items is not None
+            current = state.pending_rollout_items.get(source_identity)
+            if current is None or current.session_commitment != session_commitment:
+                return
+            del state.pending_rollout_items[source_identity]
+            self._save(workspace, state)
+
+    @staticmethod
+    def _remember_code_mode_cell(state: _WorkspaceState, key: str, cell: _CodeModeCell) -> None:
+        assert state.code_mode_cells is not None
+        state.codex_tool_hook_clock = min(_MAX_SAFE_INTEGER, state.codex_tool_hook_clock + 1)
+        state.code_mode_cells.pop(key, None)
+        state.code_mode_cells[key] = dataclasses.replace(cell, touched=state.codex_tool_hook_clock)
+        while len(state.code_mode_cells) > _MAX_CODEX_TOOL_HOOK_ENTRIES:
+            oldest = min(state.code_mode_cells.items(), key=lambda item: item[1].touched)[0]
+            del state.code_mode_cells[oldest]
 
     @_read_mostly
     def last_stream_reconcile_mono(self, workspace: str) -> float | None:
@@ -9228,12 +9847,23 @@ class LocalObservationStore:
                         state, evicted_session, ObservationGapCode.TRUNCATED_PAYLOAD.value
                     )
             state.cursors[cursor_key] = envelope.cursor
+            if envelope.source is ObservationSource.CODEX_HOOK and envelope.event_kind in {
+                "PreToolUse",
+                "PostToolUse",
+            }:
+                self._note_codex_tool_hook(state, envelope.session_commitment)
+            if envelope.source is ObservationSource.CODEX_HOOK and envelope.event_kind in {
+                "Stop",
+                "SessionEnd",
+            }:
+                self._forget_evicted_open_calls(state, envelope.session_commitment)
             state.envelopes.append(envelope)
             if len(state.envelopes) > _MAX_ENVELOPES:
                 state.envelopes_truncated = True
                 evicted_index = self._fair_envelope_index(state.envelopes)
                 if evicted_index is not None:
                     evicted = state.envelopes.pop(evicted_index)
+                    self._note_evicted_tool_call(state, evicted)
                     self._note_gap_state(state, _LOCAL_ENVELOPE_RETENTION_GAP)
                     self._note_gap_state(state, ObservationGapCode.TRUNCATED_PAYLOAD.value)
                     self._note_session_gap_state(
@@ -10161,6 +10791,7 @@ class LocalObservationStore:
                     if evicted_index is None:
                         break
                     evicted = candidate.envelopes.pop(evicted_index)
+                    self._note_evicted_tool_call(candidate, evicted)
                     candidate.envelopes_truncated = True
                     self._note_gap_state(candidate, ObservationGapCode.TRUNCATED_PAYLOAD.value)
                     self._note_session_gap_state(
@@ -10829,6 +11460,67 @@ class LocalObservationStore:
                     )
                 }
             )
+        if state.codex_tool_hooks:
+            payload["codex_tool_hooks"] = JsonObject(
+                {
+                    session: JsonObject({"count": count, "touched": touched})
+                    for session, (count, touched) in sorted(
+                        state.codex_tool_hooks.items(), key=lambda item: item[0].encode()
+                    )
+                }
+            )
+        if state.code_mode_cells:
+            payload["code_mode_cells"] = JsonObject(
+                {
+                    key: JsonObject(
+                        {
+                            "hooks_at_start": cell.hooks_at_start,
+                            "pre_withheld": cell.pre_withheld,
+                            "output_local": cell.output_local,
+                            "touched": cell.touched,
+                        }
+                    )
+                    for key, cell in sorted(
+                        state.code_mode_cells.items(), key=lambda item: item[0].encode()
+                    )
+                }
+            )
+        if state.codex_tool_hook_clock:
+            payload["codex_tool_hook_clock"] = state.codex_tool_hook_clock
+        if state.evicted_open_calls:
+            payload["evicted_open_calls"] = JsonObject(
+                {
+                    key: JsonObject(
+                        {
+                            "session": session,
+                            "commitment": commitment,
+                            "call_id": call_id,
+                            "touched": touched,
+                        }
+                    )
+                    for key, (session, commitment, call_id, touched) in sorted(
+                        state.evicted_open_calls.items(), key=lambda item: item[0].encode()
+                    )
+                }
+            )
+        if state.pending_rollout_items:
+            payload["pending_rollout_items"] = JsonObject(
+                {
+                    identity: JsonObject(
+                        {
+                            "session": item.session_commitment,
+                            "codex_session_id": item.codex_session_id,
+                            "envelope": observation_envelope_to_json(item.envelope),
+                            "touched": item.touched,
+                            "idle_reconciles": item.idle_reconciles,
+                            "activity": item.activity,
+                        }
+                    )
+                    for identity, item in sorted(
+                        state.pending_rollout_items.items(), key=lambda item: item[0].encode()
+                    )
+                }
+            )
         if state.stream_partial_dropped_sessions:
             payload["stream_partial_dropped_sessions"] = tuple(
                 sorted(state.stream_partial_dropped_sessions, key=str.encode)
@@ -10876,6 +11568,25 @@ class LocalObservationStore:
             payload["envelopes_truncated"] = True
         if state.unpaired_scopes:
             payload["unpaired_scopes"] = tuple(sorted(state.unpaired_scopes, key=str.encode))
+        if state.unpaired_notices:
+            # Optional and tolerated in both directions like every /15 key: an
+            # older reader ignores it and would at most announce a scope again.
+            payload["unpaired_notices"] = JsonObject(
+                {
+                    lane: JsonObject(
+                        {
+                            "source": notice.source,
+                            "session_commitment": notice.session_commitment,
+                            "source_generation": notice.source_generation,
+                            "delivered": notice.delivered,
+                            "ordinal": notice.ordinal,
+                        }
+                    )
+                    for lane, notice in sorted(
+                        state.unpaired_notices.items(), key=lambda item: item[0].encode()
+                    )
+                }
+            )
         if state.pending_lifecycles:
             payload["pending_lifecycles"] = tuple(
                 JsonObject(
@@ -11780,6 +12491,14 @@ class LocalObservationStore:
             frontier_motion_recency=frontier_motion_recency,
             open_pre=open_pre,
             unpaired_scopes=unpaired_scopes,
+            unpaired_notices=_unpaired_notices_from_json(raw.get("unpaired_notices")),
+            codex_tool_hooks=_codex_tool_hooks_from_json(raw.get("codex_tool_hooks")),
+            code_mode_cells=_code_mode_cells_from_json(raw.get("code_mode_cells")),
+            codex_tool_hook_clock=_bounded_counter(raw.get("codex_tool_hook_clock")),
+            pending_rollout_items=_pending_rollout_items_from_json(
+                raw.get("pending_rollout_items")
+            ),
+            evicted_open_calls=_evicted_open_calls_from_json(raw.get("evicted_open_calls")),
             pairing_state_unknown=pairing_state_unknown,
             stream_cursors=stream_cursors,
             stream_partials=stream_partials,

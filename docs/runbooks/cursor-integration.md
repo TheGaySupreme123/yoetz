@@ -632,6 +632,20 @@ For ordinary MCP tool events, `tool_output` contains tool-domain data. Only the 
 and exit-like fields do not describe the host execution. Built-in shell outcomes retain their
 separate exit-status handling.
 
+**Shell outcome contract (issue #910).** On the ordinary profile a `Shell` `postToolUse` records
+an outcome only from an explicit `exitCode`/`exit_code` in its `tool_output`, which is `success`
+for 0 and `failure` with that `exit_status` otherwise. Hook success alone is never taken for a
+command's success. A `Shell` `postToolUse` without an exit field stays `unknown` and carries
+`host_outcome_unavailable` for that record. A `postToolUseFailure` is recorded as `failure`, with
+the closed status from `failure_type` (`error`, `timeout` or `denied`), or `interrupted` when
+`is_interrupt` is true. Its message is never parsed for an exit code. It is unverified whether
+Cursor's real `Shell` `postToolUse` carries `exitCode`. Until a captured payload settles it, the
+documented decision for a result without one is `host_outcome_unavailable`, never an inferred
+outcome. The capture is owned by issue #910. The default structural profile records no generic
+tool outcomes. The shapes are pinned by `fixtures/observations/cursor-shell-outcomes.case.json`,
+which is derived from the documented hook payloads with raw hook stdin capture pending. Native
+acceptance on macOS, Linux and Windows through WSL 2 is not established by source tests.
+
 Select these hooks with `--observation-profile ordinary` on the existing native Cursor plugin
 preview/install/status commands. Repeat the same profile when applying an exact preview. To
 return to structural hooks, preview a replacement with `--observation-profile structural` and
@@ -1825,3 +1839,12 @@ Recording hook text there would label it `agent_transcribed`, which it is not, a
 the prompt-capture consent still open on issue #908.
 For Cursor the structural adapter discards prompt text before local storage, so an attach has
 no prompt to record.
+
+### Tool-call records and orphan notices (#917)
+
+Cursor's installed profiles are post-only: `postToolUse` and `afterMCPExecution` records are
+byte-identical after #917 (pinned by a replay of real payloads), and generation-only posts stay
+metadata evidence without `unpaired_event`. The opt-in ordinary profile
+(`cursor-ordinary-observation-v1`) is on the conservative paired contract, so a paired pre and post
+share one action and an orphan scope yields one informational notice rather than a recurring
+advisory. Cursor has no code-mode cell, so the stream wrapper rule does not apply.

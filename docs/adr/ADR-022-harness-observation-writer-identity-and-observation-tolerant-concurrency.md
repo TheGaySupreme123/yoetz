@@ -779,3 +779,63 @@ answered, until a change adds it to the allowlist with its own rationale.
 session reattach does not reopen it because its condition-scoped id is not re-recorded. A later
 distinct condition is a different finding. This applies to every host (Codex, Claude Code and
 Cursor) on macOS, Linux and WSL 2, because the rule is service-side.
+
+### Codex tool outcomes read where Codex states them (2026-09-30, #910)
+
+Decision 12 consumes host-stated outcome facts, but on Codex the only reader was the
+`apply_patch` `Exit code: N` prefix. Codex 0.157.x sends no top-level outcome: a shell, exec or MCP
+result states it nested in `tool_response`. Every Codex shell result was therefore `unknown`, and
+every Codex session carried `host_outcome_unavailable`. The Codex hook mapping now reads the
+closed facts of each tool family on every `PostToolUse`. Shell and exec tools contribute the exec
+result's `exit_code` (an object, or JSON text that carries a Codex exec-result key) and the
+`Exit code: N` / `Process exited with code N` line of the function-output header, which ends at
+`Output:`. `apply_patch` contributes that header. MCP tools contribute only the protocol-level
+`isError`. The facts pass through the shared native reducer, so `exit_status` stays in `-1..255`,
+conflicting facts resolve failure-first, and a result with no fact stays `UNKNOWN` with the
+`host_outcome_unavailable` gap on that record only. Output text is never read. Selection
+classifies the same facts, so a failed read cannot be summarized as a proven routine success.
+
+The session stream now names a rollout `event_msg`/`item_completed` command, MCP or patch item as
+the completed tool call it is (event kind `item_completed`). Its `status` and `exit_code` become a
+result instead of an opaque row, and `exit_code: null` states no outcome. Where the hook call id
+equals the rollout item id, decision 15's correction path applies unchanged. The item's id
+(`exec-<uuid>`) normally does not join the hook's call, so it follows #917's code-mode wrapper gate:
+once Codex tool hooks have admitted input for the session, the item stays in the local store with
+the wrapper's accounting unless it is the only carrier of a hooked call's outcome. Items pair with
+hook posts per call, in arrival order: an item whose id is an outcome-less hook call (a process
+still running when its hook fired) is delivered and decision 15 corrects the hook's `unknown` row;
+a command item whose exit matches an unpaired stated post of the same command commitment is that
+post's copy; otherwise, while an outcome-less call of that commitment is unpaired, the item is
+delivered as that call's exit, a second action for that run which #909 judges as the later run.
+Counting per call means one call's stated outcome never withholds another call's only exit. An
+item read before any hook post it pairs with is pending, not a copy. A later post with its call
+id decides it directly, and a stated post of its command commitment takes it as the copy when
+the exits match. An outcome-less post of that commitment takes its pending items only once no
+other call of the same command is open, so parallel same-command runs never trade outcomes by
+arrival order. Surplus items are all delivered (a second record over a lost failure). A call whose
+`PreToolUse` left the envelope ring stays open until its post is seen or evicted or the turn
+ends. `Stop`/`SessionEnd` close the turn: owed calls take their command's pending items, and any
+other pending command item stays local only when a stored stated post proves it a copy (same
+call id, or same commitment and exit); MCP and patch items, which have no commitment, stay local
+as copies. A carrier is delivered once on the next stream reconcile, committed together with its
+settlement and stamped with the committed stream frontier at release time, since the task's
+per-source cursor refuses an older position. The pending account keeps each item's structural
+record. An item with no proof at the turn's end, one the ring evicts before pairing, the oldest
+past the account's bound, and one idle for 8 workspace reconciles while its session stores
+nothing are delivered with `unpaired_event` as unpaired evidence, so the receipt discloses them;
+only the account's hard bound drops an item, with a local gap. A session without tool hooks
+delivers every item, with its outcome, as the only record of the call. An `McpToolCall` item that names an `error` or a result `isError: true` fails whatever its
+`status`, and a `FileChange` item belongs to the edit family. The Codex outcome reader reads only
+Codex's own shell tools (`Bash`, `shell`, `exec_command`, `local_shell`), never a code-mode `exec`
+cell, and JSON text only when it carries an exec-result key and a string `output`. Mapping versions
+are intentionally unchanged: already-stored envelopes keep the facts they recorded, so
+historical `unknown` rows and their gap are not re-materialized. Recording
+failures makes the failed-work rules reachable on Codex, so this change is sequenced after the
+failure-supersession change of #909. A stream `CommandExecution` item carries the same
+installation-keyed `command_commitment` as its hook copy, computed from its `command` argv with
+#909's normalization, so supersession spans both paths. Observation-advice policy `0.1.7` adds the
+Codex shell spellings `exec_command` and `local_shell` to the commands the unresolved-command rule
+reads, beside `Bash` and `shell`. A delivered stream `command_execution` row stays out of the
+advice, so the advice never names one run twice. The shapes are
+pinned by the OUT-001 fixture, which is derived from recorded 0.157.1 rollouts; a raw hook stdin
+capture is still owed on #910.

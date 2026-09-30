@@ -73,6 +73,7 @@ from yoetz.domain.values import (
     Frontier,
     JsonValue,
     ObjectId,
+    action_id,
     actor_id,
     event_id,
     finding_id,
@@ -1387,6 +1388,23 @@ def _authored_by_requester(
     )
 
 
+def _record_frontier(records: tuple[LedgerRecord, ...], sequence: int) -> Frontier | None:
+    """Return the frontier that ends at one ingestion sequence (#917).
+
+    Its head digest is that record's own entry digest, which is exactly what
+    ``respond`` authenticates for a supplied ``finding_frontier``.
+    """
+
+    if 0 < sequence <= len(records):
+        anchor = records[sequence - 1]
+        if anchor.ledger.ingestion_sequence == sequence:
+            return Frontier(sequence, anchor.entry_digest)
+    for anchor in records:
+        if anchor.ledger.ingestion_sequence == sequence:
+            return Frontier(sequence, anchor.entry_digest)
+    return None
+
+
 def _projection_items(
     view: ProjectionView,
     projection: ProjectionState,
@@ -1516,6 +1534,11 @@ def _projection_items(
     if view is ProjectionView.FINDINGS:
         finding_items: list[ProjectionItem] = []
         proof_state_cache: dict[tuple[int, int, str], ProjectionState | None] = {}
+        source_frontiers = {
+            record.payload.finding_id: record.source_frontier
+            for record in projection.findings.values()
+            if record.payload is not None
+        }
         ordered = sorted(
             (
                 record.payload
@@ -1527,6 +1550,7 @@ def _projection_items(
         for finding in ordered:
             response_record = projection.responses.get(finding.finding_id)
             response = None if response_record is None else response_record.payload
+            finding_frontier = _record_frontier(records, source_frontiers[finding.finding_id])
             finding_items.append(
                 StatusFindingItemModel(
                     finding_id=finding.finding_id,
@@ -1575,6 +1599,11 @@ def _projection_items(
                     ),
                     todo_state=finding_todo_state(projection, finding.finding_id).value,
                     review_rounds=str(projection.findings[finding.finding_id].review_rounds),
+                    finding_frontier=(
+                        None
+                        if finding_frontier is None
+                        else FrontierModel.model_validate(dict(finding_frontier.as_wire()))
+                    ),
                 )
             )
         return tuple(finding_items)
@@ -2616,6 +2645,22 @@ class MemoryLedgerAdapter:
         async with self._lock:
             row = self._state.operations.get((writer_id, operation_id))
         return None if row is None else row[0]
+
+    async def projected_action_event(self, action: str) -> str | None:
+        """Return the event that records one action in the current task projection.
+
+        Task-wide and read-only. The observation coordinator uses it so the later
+        phase of a paired host call links to the action its earlier phase already
+        recorded instead of minting a second one (#917).
+        """
+
+        try:
+            key = action_id(action)
+        except ValueError:
+            return None
+        async with self._lock:
+            record = self._state.projection.actions.get(key)
+        return None if record is None else str(record.source_event_id)
 
     async def lookup_task_operation(
         self, writer_id: str, operation_id: str

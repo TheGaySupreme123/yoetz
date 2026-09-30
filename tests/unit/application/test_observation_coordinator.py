@@ -40,6 +40,7 @@ from yoetz.application.observation_materialize import (
     observation_writer_id,
     stable_observation_id,
 )
+from yoetz.domain.events import AcceptedEvent
 from yoetz.domain.findings import Finding
 from yoetz.domain.observation import (
     ObservationContentChunk,
@@ -188,9 +189,9 @@ def test_materialization_uses_ledger_mapping_independent_of_transport_cursor() -
 
     current = materialize_observation_envelope(envelope, task_id=task)
     current_from_stream = materialize_observation_envelope(stream_transport, task_id=task)
+    # A paired pre keys its pending action on the host call, like its post (#917).
     action_source = (
-        f"pre-event:codex:{envelope.session_commitment}:"
-        f"{envelope.cursor.source_generation}:{envelope.source_identity}"
+        f"pre:codex:{envelope.session_commitment}:{envelope.cursor.source_generation}:c1:command"
     )
     current_event = stable_observation_id(
         kind=IdKind.EVENT,
@@ -5187,9 +5188,16 @@ async def test_conflicting_reuse_of_a_stable_event_id_still_fails_closed(tmp_pat
     """#560: the same event id under a different structural identity is a conflict."""
 
     cell = _reattach_fixture(tmp_path, "reattach-conflict")
-    # A PreToolUse mints its action and event ids from the source identity, so
-    # the same identity under another host call reuses committed event ids.
-    committed = _envelope(session=cell.session, kind="PreToolUse", identity="hook:560:conflict")
+    # Unpaired evidence mints its event ids from the source identity, so the same
+    # identity under another host call reuses committed event ids. (A paired
+    # PreToolUse now keys its action on the host call itself, #917.)
+    committed = _envelope(
+        session=cell.session,
+        kind="PostToolUse",
+        identity="hook:560:conflict",
+        exit_status=1,
+        gaps=(ObservationGapCode.UNPAIRED_EVENT.value,),
+    )
     first = await cell.ingest(committed)
     assert first.disposition is ObservationIngestDisposition.ACCEPTED, first.reason
     operations = cell.operation_count()
@@ -5200,15 +5208,230 @@ async def test_conflicting_reuse_of_a_stable_event_id_still_fails_closed(tmp_pat
     # committed operation.
     conflicting = _envelope(
         session=cell.session,
-        kind="PreToolUse",
+        kind="PostToolUse",
         identity="hook:560:conflict",
         corr="call-other",
+        exit_status=1,
+        gaps=(ObservationGapCode.UNPAIRED_EVENT.value,),
     )
     second = await cell.ingest(conflicting)
     assert second.disposition is ObservationIngestDisposition.REJECTED
     assert second.reason == ObservationGapCode.LEDGER_REJECTED.value
     assert route_observation_ingest(second).action is ObservationDrainAction.QUARANTINE
     assert cell.operation_count() == operations
+
+
+# --- issue #917: one ledger action per paired host call ---------------------
+
+
+def _schema_rows(cell: _ReattachCell, name: str) -> list[AcceptedEvent]:
+    from yoetz.domain.events import AcceptedEvent as _Accepted
+
+    return [
+        row
+        for row in cell.ledger._state.records  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+        if type(row) is _Accepted and row.schema.name == name
+    ]
+
+
+def _stream_copy(envelope: ObservationEnvelope, identity: str) -> ObservationEnvelope:
+    """The Codex session-stream observation of the same completed host call."""
+
+    return replace(
+        envelope,
+        source=ObservationSource.CODEX_SESSION_STREAM,
+        event_kind="function_call_output",
+        source_identity=identity,
+    )
+
+
+@pytest.mark.anyio
+async def test_paired_pre_then_post_records_one_action_linked_to_its_result(
+    tmp_path: Path,
+) -> None:
+    """#917: an individually delivered pre and its post share one action.
+
+    Before the fix the pre minted ``pre-event:<source_identity>`` and the post a
+    second action keyed on the call id, so one call held two actions.
+    """
+
+    from yoetz.domain.events import ActionRecordedPayload, ResultOutcome, ResultRecordedPayload
+
+    cell = _reattach_fixture(tmp_path, "paired-917")
+    pre = _envelope(session=cell.session, kind="PreToolUse", identity="hook:917:pre", corr="c917")
+    post = _envelope(
+        session=cell.session,
+        kind="PostToolUse",
+        identity="hook:917:post",
+        corr="c917",
+        exit_status=2,
+    )
+    first = await cell.ingest(pre)
+    assert first.disposition is ObservationIngestDisposition.ACCEPTED, first.reason
+    pending = _schema_rows(cell, "action_recorded")
+    assert len(pending) == 1
+    second = await cell.ingest(post)
+    assert second.disposition is ObservationIngestDisposition.ACCEPTED, second.reason
+
+    actions = _schema_rows(cell, "action_recorded")
+    results = _schema_rows(cell, "result_recorded")
+    assert [row.event_id for row in actions] == [pending[0].event_id]
+    assert len(results) == 1
+    action = cast(ActionRecordedPayload, actions[0].payload)
+    result = cast(ResultRecordedPayload, results[0].payload)
+    assert "pending" in action.description
+    assert result.action_id == action.action_id
+    assert result.outcome is ResultOutcome.FAILURE and result.exit_status == 2
+    assert actions[0].event_id in results[0].causal_parents
+    assert cell.operation_count() == 2
+
+    # The session-stream copy of the same completed call links to the same
+    # action and resolves to the hook copy's operation instead of re-recording.
+    records = cell.record_count()
+    stream = await cell.ingest(_stream_copy(post, "stream:917:post"))
+    assert stream.disposition is ObservationIngestDisposition.ACCEPTED, stream.reason
+    assert cell.record_count() == records
+    assert cell.operation_count() == 2
+
+    # A lost acknowledgement, a service restart and a workflow reattach replay
+    # both phases to their committed operations; nothing is re-minted.
+    for lifecycle in ("dropped_ack", "restart", "reattach"):
+        if lifecycle == "restart":
+            cell.coordinator = cell.build_coordinator()
+        elif lifecycle == "reattach":
+            cell.reattach()
+        for envelope in (pre, post):
+            again = await cell.ingest(envelope)
+            assert again.disposition is ObservationIngestDisposition.DUPLICATE, lifecycle
+        assert cell.record_count() == records
+        assert cell.operation_count() == 2
+    assert not cell.local.list_quarantine(cell.workspace)
+
+
+@pytest.mark.anyio
+async def test_post_without_delivered_pre_still_records_its_action(tmp_path: Path) -> None:
+    """#917: a post whose pre never reached the ledger keeps its own action.
+
+    Yoetz-owned calls deliver only their post (#564); a post-first order must also
+    not strand a later copy of the pre as a ledger conflict.
+    """
+
+    cell = _reattach_fixture(tmp_path, "post-only-917")
+    post = _envelope(
+        session=cell.session,
+        kind="PostToolUse",
+        identity="hook:917:yoetz-post",
+        tool="mcp__yoetz__publish_work",
+        corr="c917-yoetz",
+    )
+    accepted = await cell.ingest(post)
+    assert accepted.disposition is ObservationIngestDisposition.ACCEPTED, accepted.reason
+    assert len(_schema_rows(cell, "action_recorded")) == 1
+    assert len(_schema_rows(cell, "result_recorded")) == 1
+    records = cell.record_count()
+    operations = cell.operation_count()
+
+    # A late copy of the pre (for example the session-stream call record) finds
+    # the action already recorded and appends nothing.
+    late_pre = replace(
+        _envelope(
+            session=cell.session,
+            kind="PreToolUse",
+            identity="stream:917:yoetz-pre",
+            tool="mcp__yoetz__publish_work",
+            corr="c917-yoetz",
+        ),
+        source=ObservationSource.CODEX_SESSION_STREAM,
+    )
+    late = await cell.ingest(late_pre)
+    assert late.disposition is ObservationIngestDisposition.ACCEPTED, late.reason
+    assert cell.record_count() == records
+    assert cell.operation_count() == operations
+    assert not cell.local.list_quarantine(cell.workspace)
+
+
+@pytest.mark.anyio
+async def test_pre_committed_before_upgrade_is_never_rematerialized_as_a_third_action(
+    tmp_path: Path,
+) -> None:
+    """#917 lifecycle: a session spanning the upgrade keeps at most its historical double.
+
+    A pre committed by the older mapping (``pre-event:`` action identity) shares
+    the new pre's operation digest, so its redelivery replays the committed
+    operation instead of minting the new action. The post then records its own
+    action exactly as it did before the upgrade; no history is rewritten.
+    """
+
+    from types import SimpleNamespace
+
+    from yoetz.application import observation_materialize as materialize_module
+    from yoetz.domain.events import ActionRecordedPayload
+    from yoetz.domain.values import action_id
+
+    cell = _reattach_fixture(tmp_path, "upgrade-917")
+    pre = _envelope(
+        session=cell.session, kind="PreToolUse", identity="hook:917:old-pre", corr="c9u"
+    )
+    current = materialize_observation_envelope(pre, task_id=cell.task_id)
+    legacy_source = (
+        f"pre-event:codex:{pre.session_commitment}:{pre.cursor.source_generation}:"
+        f"{pre.source_identity}"
+    )
+    payload = cast(ActionRecordedPayload, current.drafts[0].draft.payload)
+    legacy_draft = materialize_module._draft(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+        event=stable_observation_id(
+            kind=IdKind.EVENT,
+            task_id=cell.task_id,
+            source_identity=legacy_source,
+            mapping_version=MATERIALIZATION_MAPPING_VERSION,
+            role="action_event",
+        ),
+        schema_name="action_recorded",
+        occurred_at=pre.receipt_time,
+        payload=replace(
+            payload,
+            action_id=action_id(
+                stable_observation_id(
+                    kind=IdKind.ACTION,
+                    task_id=cell.task_id,
+                    source_identity=legacy_source,
+                    mapping_version=MATERIALIZATION_MAPPING_VERSION,
+                    role="action",
+                )
+            ),
+        ),
+        role="action",
+    )
+    session_id = cell.mapping.yoetz_session_id
+    runtime = await cell.runtime_port.route(
+        SimpleNamespace(
+            session_id=session_id, writer_id=observation_writer_id(cell.task_id, session_id)
+        )
+    )
+    committed = await cell.coordinator._append_materialized(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+        runtime, pre, replace(current, drafts=(legacy_draft,))
+    )
+    assert committed is not None
+    assert len(_schema_rows(cell, "action_recorded")) == 1
+
+    # Redelivery of the same pre after the upgrade resolves to the committed
+    # pre-upgrade operation instead of minting the new action identity.
+    replayed = await cell.ingest(pre)
+    assert replayed.disposition is ObservationIngestDisposition.ACCEPTED, replayed.reason
+    assert len(_schema_rows(cell, "action_recorded")) == 1
+
+    post = _envelope(
+        session=cell.session,
+        kind="PostToolUse",
+        identity="hook:917:new-post",
+        corr="c9u",
+        exit_status=0,
+    )
+    linked = await cell.ingest(post)
+    assert linked.disposition is ObservationIngestDisposition.ACCEPTED, linked.reason
+    assert len(_schema_rows(cell, "action_recorded")) == 2
+    assert len(_schema_rows(cell, "result_recorded")) == 1
+    assert not cell.local.list_quarantine(cell.workspace)
 
 
 @pytest.mark.anyio

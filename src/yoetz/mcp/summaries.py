@@ -357,6 +357,37 @@ def _obligation_ids_from_status(source: Mapping[str, JsonValue], view: str) -> t
     )
 
 
+def _finding_frontiers_from_status(source: Mapping[str, JsonValue]) -> tuple[str, ...]:
+    """Pair each revalidated finding ID with the frontier ``respond`` accepts for it (#917).
+
+    Only an allowlisted finding ID, a canonical sequence and a digest-shaped head leave this
+    projector, so the text fallback can author ``respond`` without a frontier hunt.
+    """
+
+    page = source.get("page")
+    if not isinstance(page, Mapping):
+        return ()
+    raw_items: object = cast(Mapping[str, JsonValue], page).get("items")
+    if not isinstance(raw_items, list | tuple):
+        return ()
+    values: list[str] = []
+    for raw in cast(Sequence[JsonValue], raw_items):
+        if not isinstance(raw, Mapping):
+            continue
+        item = cast(Mapping[str, JsonValue], raw)
+        finding = item.get("finding_id")
+        frontier = item.get("finding_frontier")
+        if not is_valid_id(IdKind.FINDING, finding) or not isinstance(frontier, Mapping):
+            continue
+        typed_frontier = cast(Mapping[str, JsonValue], frontier)
+        sequence = _safe_count(typed_frontier.get("sequence"))
+        head = typed_frontier.get("head_digest")
+        if sequence == "unavailable" or type(head) is not str or not _HEAD_DIGEST.fullmatch(head):
+            continue
+        values.append(f"{cast(str, finding)} at {sequence} {head}")
+    return tuple(values)
+
+
 def _open_obligation_ids_from_receipt(source: Mapping[str, JsonValue]) -> tuple[str, ...]:
     raw_items = source.get("obligations")
     if not isinstance(raw_items, list | tuple):
@@ -820,6 +851,12 @@ def summary_for_status(envelope: object) -> str:
         obligation_ids,
         byte_budget=_MAX_SUMMARY_BYTES - len((prefix + suffix).encode("ascii")),
     )
+    if view == "findings":
+        clause += _bounded_list_clause(
+            "finding frontiers: ",
+            _finding_frontiers_from_status(source),
+            byte_budget=_MAX_SUMMARY_BYTES - len((prefix + clause + suffix).encode("ascii")),
+        )
     return _bounded(prefix + clause + suffix)
 
 

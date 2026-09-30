@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
+import json
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
@@ -448,7 +449,6 @@ async def _capture_claude_post_requests(
                 "tool_name": "Bash",
                 "tool_use_id": tool_use_id,
                 "tool_response": marker.decode("utf-8"),
-                "exit_status": 0,
             },
         )
         == 0
@@ -675,7 +675,6 @@ async def _native_claude_case(
                 "tool_name": "Bash",
                 "tool_use_id": "composition-tool-1",
                 "tool_response": marker.decode("utf-8"),
-                "exit_status": 0,
             },
         )
         == 0
@@ -2289,7 +2288,6 @@ async def test_unreadable_native_capture_degrades_without_semantic_content(tmp_p
             "tool_name": "Bash",
             "tool_use_id": "unreadable-tool-1",
             "tool_response": "unreadable-native-capture-marker",
-            "exit_status": 0,
         },
     )
     _pre_request, _capture_request, structural_request = _assert_native_handoff_requests(
@@ -2365,7 +2363,6 @@ async def test_disabled_native_content_never_enters_service_request(tmp_path: Pa
         "tool_name": "Bash",
         "tool_use_id": "disabled-tool-1",
         "tool_response": "must-not-be-captured",
-        "exit_status": 0,
     }
 
     def run_hook() -> int:
@@ -2442,7 +2439,6 @@ async def test_service_recovers_unknown_inventory_without_a_fresh_native_event(
                 "tool_name": "Bash",
                 "tool_use_id": "rejected-before-recovery",
                 "error": "synthetic failed command",
-                "exit_status": 1,
             },
         )
         == 0
@@ -2472,7 +2468,6 @@ async def test_service_recovers_unknown_inventory_without_a_fresh_native_event(
                     "tool_name": "Bash",
                     "tool_use_id": "accepted-after-recovery",
                     "tool_response": "capture-recovery-marker-695",
-                    "exit_status": 1,
                 },
             )
             == 0
@@ -2517,6 +2512,9 @@ def _competing_session(
             )
         )
         for index in range(outputs):
+            # Codex 0.157.x states the exit only inside ``tool_response`` (the nested
+            # ``exec_command`` result recorded in the rollout, OUT-001); it never sends a
+            # top-level ``exit_status`` (#910).
             events.append(
                 (
                     "PostToolUse",
@@ -2526,8 +2524,16 @@ def _competing_session(
                         "tool_name": "exec_command",
                         "tool_use_id": f"call-out-{index}",
                         "tool_input": {"cmd": f"pytest -q -k case{index}"},
-                        "tool_response": f"Exit code: 0\nOutput:\n{index} {pad}",
-                        "exit_status": 0,
+                        "tool_response": json.dumps(
+                            {
+                                "chunk_id": f"c{index:05x}",
+                                "wall_time_seconds": 0.5,
+                                "exit_code": 0,
+                                "original_token_count": 900,
+                                "output": f"{index} {pad}",
+                            },
+                            separators=(",", ":"),
+                        ),
                     },
                 )
             )
@@ -2903,3 +2909,204 @@ async def test_codex_code_mode_and_shell_edits_reach_the_packet(tmp_path: Path) 
     assert prepared.count("planted_nested_bug") == 1, "nested patch captured once"
     assert "*** Update File: src/kea/build.ts" in prepared
     assert root not in prepared
+
+
+@pytest.mark.anyio
+async def test_codex_recorded_outcome_shapes_reach_the_ledger(tmp_path: Path) -> None:
+    """#910: Codex hook and rollout outcome facts become ledger results; none is invented.
+
+    Every OUT-001 hook shape runs through the real hook handler, outbox, coordinator and SQLite
+    ledger. The rollout's completed tool items are handed to the coordinator directly, bypassing
+    the reader's delivery gate (covered in ``test_codex_code_mode_replay``). One of them shares its
+    id with an outcome-less hook call, the case that gate delivers in a hooked session, so the
+    stream failure corrects that ``unknown`` result.
+    """
+
+    from fixture_loader import load_fixture_json
+    from yoetz.adapters.integrations.codex_session_stream import SessionStreamReader
+    from yoetz.adapters.integrations.observation_local import (
+        STREAM_MAPPING_VERSION,
+        self_observation_deliverable,
+    )
+    from yoetz.application.observation_drain import ObservationOutboxSweeper
+    from yoetz.application.observation_materialize import HOST_OUTCOME_UNAVAILABLE_GAP
+    from yoetz.domain.events import ResultOutcome, ResultRecordedPayload
+    from yoetz.domain.observation import ObservationCursor, ObservationEnvelope
+
+    raw_session = "codex-outcomes"
+    (
+        project,
+        workspace,
+        session_commitment,
+        local,
+        _task_observation,
+        ledger,
+        runtime,
+        coordinator,
+        _client,
+        connect,
+    ) = await _pipeline(tmp_path, codex_session_id=raw_session, profile=None)
+    case = cast(
+        dict[str, object],
+        load_fixture_json("observations/codex-post-tool-outcomes-0.157.1.case.json"),
+    )
+    hook_inputs = cast(dict[str, dict[str, object]], cast(dict[str, object], case["input"])["hook"])
+    hook_expected = cast(
+        dict[str, dict[str, object]], cast(dict[str, object], case["expected"])["hook"]
+    )
+
+    def run_async(factory: Callable[[], Awaitable[object]]) -> object:
+        return asyncio.run(factory())
+
+    def run_hook(event_name: str, payload: Mapping[str, object]) -> int:
+        return handle_observe(
+            event_name=event_name,
+            stdin_bytes=canonical_encode(cast(CanonicalJsonValue, payload)),
+            workspace=str(project),
+            _state=tmp_path / "state",
+            stdout=io.BytesIO(),
+            connect=cast(object, connect),  # type: ignore[arg-type]
+            run_async=run_async,
+            source=ObservationSource.CODEX_HOOK,
+        )
+
+    for variant in sorted(hook_inputs):
+        post = {
+            **cast(dict[str, object], hook_inputs[variant]["payload"]),
+            "session_id": raw_session,
+            "cwd": str(project.resolve()),
+        }
+        pre = {key: value for key, value in post.items() if key != "tool_response"}
+        pre["hook_event_name"] = "PreToolUse"
+        assert await asyncio.to_thread(run_hook, "PreToolUse", pre) == 0
+        assert await asyncio.to_thread(run_hook, "PostToolUse", post) == 0
+
+    # A hook drains its own outbox row within the host deadline; on a slow runner a row can remain
+    # for the service sweeper, which is the production path that finishes it. Drain it here.
+    sweeper = ObservationOutboxSweeper(
+        local, coordinator, capture_recovery=coordinator.recover_capture_inventory
+    )
+    try:
+        for _attempt in range(8):
+            if local.pending_outbox_count(workspace) == 0:
+                break
+            await sweeper.sweep()
+    finally:
+        sweeper.close()
+    assert local.pending_outbox_count(workspace) == 0
+    task_store = cast(SqliteObservationStore, runtime.observation)
+    assert task_store.list_pending_capture_tickets(runtime.task_id) == ()
+
+    hook_posts = {
+        cast(str, envelope.structural_payload["tool_call_id"]): envelope
+        for envelope in local.list_envelopes(workspace)
+        if envelope.event_kind == "PostToolUse" and envelope.source is ObservationSource.CODEX_HOOK
+    }
+    generation = next(iter(hook_posts.values())).cursor.source_generation
+
+    # The session stream: the recorded rollout items, plus one completed command whose item id is
+    # the outcome-less hook call's id (an id join), which must correct that ``unknown`` result.
+    rollout = cast(dict[str, object], cast(dict[str, object], case["input"])["rollout"])
+    lines = list(cast(list[dict[str, object]], rollout["lines"]))
+    joined = json.loads(json.dumps(lines[1]))
+    joined["payload"]["item"]["id"] = "call_910_shell_running"
+    lines.append(joined)
+    rollout_path = tmp_path / "rollout.jsonl"
+    rollout_path.write_bytes(
+        b"".join(json.dumps(line, separators=(",", ":")).encode() + b"\n" for line in lines)
+    )
+    reader = SessionStreamReader(
+        session_commitment=session_commitment,
+        profile=None,
+        cursor=ObservationCursor(
+            source_generation=generation,
+            byte_position=0,
+            event_position=0,
+            last_source_commitment=_ZERO_DIGEST.replace("sha256:", "hmac-sha256:"),
+            mapping_version=STREAM_MAPPING_VERSION,
+        ),
+        key_material=local.key_material(),
+    )
+    stream = [
+        item
+        for item in reader.advance(rollout_path).envelopes
+        if item.event_kind == "item_completed"
+    ]
+    assert len(stream) == 6
+    for envelope in stream:
+        accepted = await coordinator.ingest_request(
+            ObservationIngestRequest(codex_session_id=raw_session, envelope=envelope)
+        )
+        assert accepted.disposition in {
+            ObservationIngestDisposition.ACCEPTED,
+            ObservationIngestDisposition.DUPLICATE,
+        }, accepted.reason
+
+    frontier = await ledger.load_frontier()
+    frozen = await ledger.freeze_case(
+        runtime.session_id,
+        cast(str, runtime.writer_id),
+        frontier.sequence,
+        _ids(IdKind.REQUEST, 8),
+        _ZERO_DIGEST,
+    )
+    assert isinstance(frozen, FrozenCase)
+    results = frozen.case.projection.results
+
+    def ledger_result(
+        envelope: ObservationEnvelope,
+    ) -> tuple[ResultRecordedPayload, tuple[str, ...]] | None:
+        drafted = materialize_observation_envelope(envelope, task_id=runtime.task_id)
+        result_id = next(
+            item.draft.payload.result_id
+            for item in drafted.drafts
+            if type(item.draft.payload) is ResultRecordedPayload
+        )
+        record = results.get(result_id)
+        if record is None:
+            return None
+        assert record.payload is not None
+        return record.payload, frozen.case.coverage_by_ref[result_id].known_gaps
+
+    folded: set[str] = set()
+    for variant, facts in hook_expected.items():
+        call_id = cast(str, cast(dict[str, object], hook_inputs[variant]["payload"])["tool_use_id"])
+        recorded = ledger_result(hook_posts[call_id])
+        if not self_observation_deliverable("PostToolUse", hook_posts[call_id].structural_payload):
+            # A successful or outcome-less Yoetz read stays in the local store only (#564); the
+            # service already holds that call. A stated MCP failure is delivered.
+            assert recorded is None, variant
+            continue
+        assert recorded is not None, variant
+        payload, gaps = recorded
+        assert payload.outcome is ResultOutcome(cast(str, facts["outcome"])), variant
+        assert payload.exit_status == facts["exit_status"], variant
+        assert (HOST_OUTCOME_UNAVAILABLE_GAP in gaps) is facts["host_outcome_unavailable"], variant
+        if hook_inputs[variant]["provenance"] != "constructed_control":
+            folded.update(gaps)
+    # Every recorded shape states its outcome, so none of them carries the standing gap.
+    assert HOST_OUTCOME_UNAVAILABLE_GAP not in folded
+
+    def stream_result(envelope: ObservationEnvelope) -> tuple[ResultOutcome, int | None]:
+        recorded = ledger_result(envelope)
+        assert recorded is not None
+        return recorded[0].outcome, recorded[0].exit_status
+
+    assert stream_result(stream[0]) == (ResultOutcome.FAILURE, 2)
+    assert stream_result(stream[1]) == (ResultOutcome.SUCCESS, 0)
+
+    running_record = ledger_result(hook_posts["call_910_shell_running"])
+    assert running_record is not None
+    running, running_gaps = running_record
+    assert running.outcome is ResultOutcome.UNKNOWN  # the hook row is never rewritten
+    assert HOST_OUTCOME_UNAVAILABLE_GAP in running_gaps
+    corrections = [
+        record.payload
+        for record in results.values()
+        if record.payload is not None
+        and record.payload.action_id == running.action_id
+        and record.payload.result_id != running.result_id
+    ]
+    assert [(item.outcome, item.exit_status) for item in corrections] == [
+        (ResultOutcome.FAILURE, 2)
+    ]

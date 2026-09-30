@@ -605,7 +605,11 @@ A successful Codex `shell` call is a command outcome, not a check. Deterministic
 verification baseline only on a current `passed` approved-check fact or an explicit success from a
 dedicated verification tool, and a routine read never moves it — including in Detailed mode, where
 a routine read keeps its `function_call_output` action and carries no routine marker (issue #681).
-Unresolved-command advice still reads every `shell` outcome.
+Unresolved-command advice (policy `0.1.7`) reads the outcome Codex states for each `Bash`,
+`exec_command`, `local_shell` or `shell` call, as
+described in [Tool outcomes](#tool-outcomes-issue-910) below. Before issue #910 no Codex shell call
+had a recorded outcome, so this advice never fired on Codex. A call whose outcome Codex did not
+state is `unknown`: it neither opens nor resolves a failed command.
 
 **Failure supersession (#909).** A later run of the same command (only the latest run of a command
 is judged; a pass clears it), or an observed edit that reported success (an `apply_patch` whose
@@ -615,10 +619,10 @@ claim need not list it in `limitation_refs`. The receipt still names it once as 
 commits to the command inside the hook process (`tool_input.cmd` for `exec_command`, the `command`
 argv for `shell`, with `/bin/bash -lc` and `bash -lc` wrappers stripped) using the installation key
 and forwards only the `hmac-sha256:` `command_commitment`; the command text is never stored or sent.
-`apply_patch` carries none. Decision: supported on the hook path. **Gap:** until #910 records Codex
-shell outcomes, Codex results stay `unknown`, so the rule has nothing to retire on Codex yet; the
-session-stream `CommandExecution` path computes no commitment, so a call that reaches the ledger
-only through the stream keeps `omitted:structural` and relies on the edit rule (owner: #910/#917).
+`apply_patch` carries none. Decision: supported on the hook and stream paths. With #910 the Codex
+hook records each shell outcome, and a rollout `CommandExecution` item commits to its `command`
+argv with the same normalization and key, so a later run seen on either path judges a failure
+seen on either path.
 Edits written through shell commands (for example heredocs in `exec_command`) are commands, not
 observed edits, so a failure followed only by such edits stays live unless the command is rerun; the
 DeepSWE dynamodb-toolbox B attempt edited mostly this way (owner: #909 follow-up). `status
@@ -1062,6 +1066,128 @@ descriptor advertises `publish-work-request/1.1.0`, which admits `claim_recorded
 descriptors remain limited to the frozen v1.0 draft union. The CLI command uses the same public
 request and service boundary. Neither Codex hooks nor imported observations synthesize, replace,
 or supersede claims.
+
+## Tool outcomes (issue #910)
+
+Codex states a tool call's outcome only inside the `PostToolUse` `tool_response`, never as a
+top-level field. For each tool family Yoetz reads only closed facts. It records them as the result's
+`outcome` and, when the host states one, its `exit_status` in the range `-1..255`:
+
+- **Shell and exec calls** (`Bash`, `exec_command`, `shell`, `local_shell`, including each nested
+  `tools.exec_command` in a code-mode `exec` cell): the `exit_code` of the exec result object,
+  sent as an object or as JSON text, or the `Exit code: N` / `Process exited with code N` line of
+  the function-output header. JSON text is read only when it carries one of Codex's exec-result
+  keys (`chunk_id`, `wall_time_seconds`, `original_token_count`) and a string `output`, so a
+  command's own JSON output is never taken for the host's result. The code-mode `exec` cell itself
+  is never read: its result is model-authored. A result sent as a JSON object with a fractional
+  number is refused whole by the strict hook parser (`float_forbidden`); the recorded shapes send
+  such results as text.
+- **`apply_patch`**: the `Exit code: N` header.
+- **MCP tools**, including Yoetz's own: only the protocol-level `isError`. The result body is
+  tool-domain data.
+
+Output text is never searched for words such as `FAILED`, and conflicting facts resolve
+failure-first. A result that states no fact stays `unknown` and carries `host_outcome_unavailable`
+for that record only. Examples are a unified-exec process still running (`Process running with
+session ID N`), an MCP result without `isError`, and a shape outside this list. The gap therefore
+leaves a session's coverage only when every observed call had an outcome. Outcomes are structural
+facts: they are read whether or not content capture is granted, and no command or output text is
+kept.
+
+The session stream carries the same facts. A rollout `event_msg` whose payload is
+`item_completed` and whose item is a `CommandExecution`, `McpToolCall` or `FileChange` is a
+completed tool call, and its `status` (`completed`, `failed`) and `exit_code` are its outcome. A
+command item names no tool, so it is recorded as `command_execution` (a patch item as
+`file_change`). An `exit_code` of `null`, as on a declined command, states no outcome. When a
+hook call id equals the rollout item id, the stream fact appends a correction to an `unknown` hook
+result and never rewrites it (ADR-022 decision 15).
+
+The rollout item is normally a second copy of a hooked call under a different id (`exec-<uuid>`),
+so it follows the same rule as a code-mode `exec` cell (#917). Once this session's tool hooks
+(`PreToolUse`/`PostToolUse`) have fired, the reader keeps a completed command, MCP or patch item in
+the local store and does not deliver it, unless the item is the only carrier of a hooked call's
+outcome. The reader pairs items with hook posts per call, in arrival order. An item whose id is an
+outcome-less hook call, for example a process still running when its hook fired, is that call's
+exit: ADR-022 decision 15 appends the correction to the hook's `unknown` result. A command item
+whose exit matches an unpaired stated hook post of the same command commitment is that post's copy
+and stays local. Otherwise, while an outcome-less hook call of the same commitment is unpaired,
+the item records that call's exit as its own result. That run is then two actions, a disclosed
+trade-off, and #909 judges the later one. Because pairing is counted per call, a later call's
+stated outcome never withholds an earlier same-command call's only exit. A rollout item can be
+read before its own hook post is stored, for example when another call's hook reconciles the
+stream while the call is still finishing. Such an item stays local as pending until a later hook
+row decides it. A post with the item's own call id decides it directly: a stated post makes it
+that post's copy, and an outcome-less post makes it the call's only exit. A stated post of the
+same command commitment takes a pending item with the same exit as its copy. An outcome-less post
+of that commitment takes its pending items only once no other call of the same command is still
+open (its `PreToolUse` seen, its post not yet). A call whose `PreToolUse` the local envelope ring
+evicted stays open until its post is seen, its post is evicted too, or the turn ends. With
+parallel runs of one command, an open call's post may still claim one of those items, so the
+reader waits for it instead of guessing by age.
+When more items remain than outcome-less calls, every one is delivered: a second record, judged by
+#909 as the later run, is disclosed, while a lost failure would not be. `Stop` or `SessionEnd`
+closes the turn. Outcome-less calls then take every pending item of their command. Any other
+pending command item stays local only with a proof of copy still in the ring: a stated post with
+the item's call id, or with its command commitment and the same exit. Without that proof (the
+post was evicted, stored after `Stop`, or never fired) the item is delivered with
+`unpaired_event`. A
+carrier is delivered once on the next stream reconcile, with delivery and settlement committed
+together. It is stamped with the session's committed stream frontier at release time, so a later
+stream row already delivered cannot make the task refuse it as `cursor_stale`.
+
+The pending account keeps each item's structural record beside the local envelope ring (64
+items per workspace). An item leaves the account when a hook post or a proof of copy settles it,
+when it is delivered as a carrier, or when it is delivered with `unpaired_event`, which happens
+when:
+
+- the ring evicts it before it is paired;
+- the turn ends without a proof of copy;
+- it is the oldest past the 64-item bound;
+- it survives 8 reconciles of its workspace while its session stores no new tool hook or stream
+  row (a crashed session, or a call that never finishes).
+
+An item delivered this way becomes unpaired evidence that names its exit, not an attributed run,
+and the receipt carries the `unpaired_event` coverage limitation. Two cases leave no ledger
+record of the item itself. A command item proven a copy by a stored stated post has its outcome
+recorded by that post. Past a hard bound of 256 items the oldest is dropped, recorded only as a
+local `unpaired_event` gap for its session. Entries of an ended session are
+decided by the reconcile that its `Stop` or `SessionEnd` hook triggers; no separate
+end-of-session pruning exists. A session whose tool hooks never fired delivers every item with its outcome, as the only
+record of those calls. One hooked command with
+a stated outcome is therefore one action and one result, and a red-latest claim names it once. Like
+a retained cell, a retained item counts in `observed_count` without an admitted, summarized or
+intentionally omitted bucket. A call in a hook-observed session whose own hook did not fire (an
+unhooked tool or a lost hook) is not recorded from the rollout; this limit is owned by #910. An
+`McpToolCall` or `FileChange` item has no command commitment, so in a hook-observed session it
+pairs with a hook post only when its id equals the hook's call id. An item under a different id
+is settled as its hooked call's copy when the turn ends and stays local by design, and its status
+is not delivered even when the hook post stated no outcome.
+Releasing such items at the end of a turn would record every hooked MCP or patch call twice,
+because the reader cannot tell a copy from an only carrier without a join key. This limit stays
+open on #910 until a native capture shows how Codex identifies those items.
+Outside code mode, a stream-only session records a direct `exec_command` twice, once from its
+`function_call` pair and once from its `item_completed` item, because their ids differ. #917 owns
+that pairing.
+
+An `McpToolCall` item fails when it names an `error` or its result carries `isError: true`,
+whatever its `status` says. A `FileChange` item is recorded in the edit family (tool
+`file_change`), so a stream-only patch retires an earlier failure under #909's edit rule. Mapping
+versions are intentionally unchanged: already-stored envelopes keep the facts they recorded.
+
+A delivered `CommandExecution` item carries the hook's installation-keyed `command_commitment`,
+computed from its `command` argv with the shell wrapper stripped, so failure supersession (#909)
+treats hook and rollout runs of one command as the same command. The item is recorded as tool
+`command_execution`, which the unresolved-command advice does not read. A command whose rollout
+text was redacted for a secret commits differently from its hook copy and relies on the edit rule.
+
+These shapes are pinned by `fixtures/observations/codex-post-tool-outcomes-0.157.1.case.json`,
+which is derived from recorded Codex 0.157.1 rollouts. The benchmark that exposed the defect did not
+archive raw hook stdin, so a raw-stdin capture is still owed on a machine with Codex, owned by issue
+#910. It should cover a nested `exec_command` with exit 0 and non-zero, a direct shell call,
+`apply_patch` success and failure, and a Yoetz MCP call. Until that capture lands, the reader
+accepts both the structured and the header forms. Source tests do not establish native Codex
+acceptance on macOS, Linux or Windows through WSL 2. Dogfood confirmation per platform is owed on
+the same issue.
 
 ## Smart observation selection (issue #687)
 
@@ -1835,6 +1961,37 @@ command when the agent records the action, result and output; captured tool outp
 identity until #910. An `insufficient_packet` check lists `missing_for_assessment` items with
 their availability in the MCP and CLI check result; recheck only after supplying an
 `agent_suppliable` item.
+
+### One action per tool call and the standing orphan record (#917)
+
+Each Codex tool call is one ledger action. An individually delivered `PreToolUse` becomes a
+pending action keyed on the call's `tool_use_id`; its `PostToolUse` links the result and captured
+output to that same action instead of recording a second one. A post whose pre never reached the
+ledger (a Yoetz `start`/`publish_work`/`check`/`respond` call, whose pre stays local, or a lost pre)
+still records its own action. In code mode the outer `exec` cell is decided per cell: its call is
+kept in the local store once this session's tool hooks (`PreToolUse`/`PostToolUse`) have fired, and
+its output stays local only when a tool hook fired after Yoetz read the call, so its nested
+`exec_command`, `apply_patch` and MCP calls are the ledger record. A cell whose tools fire no hook
+(only `tools.update_plan`, for example) delivers its output and is recorded, before or after hooked
+cells. Limits: a cell mixing hooked and unhooked tools stays local, so its unhooked tool is not
+recorded; a hooked cell read outside its hooks' window keeps its own action beside its nested calls,
+and a hook landing while an unhooked cell runs can keep that cell local; a retained wrapper counts
+in `observed_count` without an accounting bucket. The rollout's completed command, MCP and patch
+items follow the same session rule (#910, see [Tool outcomes](#tool-outcomes-issue-910)). A replay
+of the #917 code-mode example holds one action and one
+result per nested call and at most four hook-observed events per shell command, down from about
+7.9. Sessions that started before the upgrade keep their historical second action per call.
+
+A post with no open pre (`unpaired_event`) stays disclosed on `status`, check coverage and the
+receipt for the rest of the session, including after resume and restart. It no longer produces the
+"Observation coverage is incomplete or stale" advisory. The advisory names its cause as
+`cause:<gap>` and clears when source lag, a stale cursor, drain backlog, an unavailable service or
+a locked vault recovers. Unsupported rollout records (`unsupported_event`, `unsupported_format`)
+still raise it and do not clear in session; that classification is a follow-up. Instead the agent sees one "Yoetz notice (no response
+needed)" in hook `PostToolUse` context the first time a new source/session/generation scope has an
+orphan. It is not a finding: do not respond to it, recheck for it, or wait for it to clear. The
+same applies on macOS, Linux and Windows through WSL 2; native-host dogfood evidence for this
+change is tracked on #917.
 
 ### Reviewable native edits
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
 import re
 import sys
@@ -13,7 +14,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, BinaryIO, Final, Literal, Protocol, cast
+from typing import TYPE_CHECKING, BinaryIO, Final, Literal, NoReturn, Protocol, cast
 
 from yoetz.adapters.integrations.codex_lifecycle import (
     LifecycleMapping,
@@ -41,6 +42,7 @@ from yoetz.adapters.integrations.observation_local import (
     ObservationOutboxRow,
     ObservationStoreLockEvent,
     ObservationStoreLockTimeout,
+    UnpairedScopeNotice,
     observation_store_lock_deadline,
     observation_store_lock_scope,
     self_observation_deliverable,
@@ -790,9 +792,19 @@ def _extract_structural(
     event_name: str,
     *,
     classification: ObservationClassification | None = None,
+    source: ObservationSource = ObservationSource.CODEX_HOOK,
+    host_outcome: _NativeOutcomeFacts | None = None,
 ) -> JsonObject:
-    """Extract bounded structural fields and apply the typed selection result."""
+    """Extract bounded structural fields and apply the typed selection result.
 
+    A Codex ``PostToolUse`` carries its outcome nested in ``tool_response``; ``host_outcome`` is
+    that closed reading when the caller already made it (``handle_observe`` does, so selection
+    and the envelope share one decision), and it is read here otherwise.
+    """
+
+    codex_post = source is ObservationSource.CODEX_HOOK and event_name == "PostToolUse"
+    if codex_post and host_outcome is None:
+        host_outcome = _codex_post_tool_outcome(payload)
     fields: dict[str, JsonValue] = {"hook_name": event_name}
     tool_name = _token_or_none(payload.get("tool_name"))
     if tool_name is not None:
@@ -902,6 +914,12 @@ def _extract_structural(
                     call_id is None or any(_token_or_none(value) is None for value in values)
                 ):
                     fields.pop("subagent_id", None)
+    if classification is None and codex_post and host_outcome is not None:
+        # Selection must see the same outcome the envelope records, or a failed read could be
+        # summarized as a proven success and refused later by the summary builder (#753).
+        classification_payload = dict(payload)
+        _merge_outcome_facts(classification_payload, host_outcome)
+        classification = classify_observation(classification_payload, event_name)
     selected = classification or classify_observation(payload, event_name)
     if selected.routine_candidate and (
         event_name in {"PreToolUse", "preToolUse"} or selected.proven_routine_success
@@ -917,21 +935,12 @@ def _extract_structural(
         flag = _bool_or_none(payload.get(key))
         if flag is not None:
             fields[key] = flag
-    response = payload.get("tool_response")
-    if (
-        "exit_status" not in fields
-        and event_name == "PostToolUse"
-        and tool_name in _PATCH_TOOL_NAMES
-        and type(response) is str
-    ):
-        # Codex 0.157.x reports apply_patch's outcome only as the ``Exit code: N`` prefix of
-        # its text result. Keep that closed number so an applied or failed patch is not an
-        # outcome-less call (#883); the text itself is never copied here.
-        exit_match = _CODEX_EXIT_CODE.match(response)
-        if exit_match is not None:
-            exit_number = int(exit_match.group(1))
-            if -1 <= exit_number <= 255:
-                fields["exit_status"] = exit_number
+    if codex_post and host_outcome is not None:
+        # Codex 0.157.x states every tool outcome inside ``tool_response`` only: a nested
+        # ``exit_code``, an ``Exit code: N`` or ``Process exited with code N`` header, or MCP's
+        # ``isError``. Keep the closed facts so a shell, exec or patch result is not an
+        # outcome-less call (#883, #910); the result text itself is never copied here.
+        _merge_outcome_facts(fields, host_outcome)
     # Classification can prove success from nested host result aliases (for example
     # tool_response.exit_code). Preserve that bounded fact beside the routine marker:
     # summary construction revalidates the persisted envelope after process restart.
@@ -1367,6 +1376,7 @@ def map_hook_payload_to_envelope(
     gap_codes: tuple[str, ...] = (),
     source: ObservationSource = ObservationSource.CODEX_HOOK,
     classification: ObservationClassification | None = None,
+    host_outcome: _NativeOutcomeFacts | None = None,
 ) -> ObservationEnvelope:
     """Map a bounded hook payload to a structural ObservationEnvelope."""
 
@@ -1393,7 +1403,13 @@ def map_hook_payload_to_envelope(
             content_object_refs=(),
             gap_codes=gaps,
         )
-    structural = _extract_structural(payload, event_name, classification=classification)
+    structural = _extract_structural(
+        payload,
+        event_name,
+        classification=classification,
+        source=source,
+        host_outcome=host_outcome,
+    )
     if "event_ordinal" not in structural:
         structural = JsonObject({**structural, "event_ordinal": event_ordinal})
     command_commitment = command_commitment_for_payload(payload, key_material)
@@ -1469,7 +1485,7 @@ _PATCH_PATH_HEADER: Final = re.compile(
 _UNIFIED_FILE_HEADER: Final = re.compile(r"^(--- |\+\+\+ )(.*?)(\t[^\r\n]*)?(\r?)$")
 _GIT_DIFF_HEADER: Final = re.compile(r"^diff --git (\S+) (\S+)(\r?)$")
 _PATCH_RESULT_LINE: Final = re.compile(r"^([AMDR] )(.+?)(\r?)$")
-_CODEX_EXIT_CODE: Final = re.compile(r"\AExit code: (-?\d+)")
+_CODEX_EXIT_CODE: Final = re.compile(r"\AExit code: (-?[0-9]{1,4})(?![0-9])")
 
 
 def _absolute_path_key(value: str) -> tuple[str, bool] | None:
@@ -2119,6 +2135,18 @@ def _cached_recommendation_context(*, _state: Path | None) -> str:
             "start a fresh session afterwards. Fully restart the host only if activation requires it."
         )
     return text[:_MAX_ADVICE_CONTEXT]
+
+
+def _unpaired_notice_context(notice: UnpairedScopeNotice) -> str:
+    """Name one new orphan scope once, as a standing limitation that needs nothing (#917)."""
+
+    return (
+        "Yoetz notice (no response needed): pairing was lost for at least one tool call "
+        f"in this session (source {notice.source}, generation {notice.source_generation}). "
+        "It stays disclosed as the standing unpaired_event coverage limitation on status, "
+        "check coverage and the receipt. It is not a finding; do not respond, recheck or "
+        "wait for it to clear."
+    )
 
 
 async def _try_service_ingest(
@@ -4134,6 +4162,15 @@ def handle_observe(
             for outcome_key in ("success", "denied", "exit_status", "result_status"):
                 if outcome_key in payload:
                     classification_payload[outcome_key] = payload[outcome_key]
+            # Codex nests its outcome in ``tool_response``. Read it once, here, so selection and
+            # the persisted envelope share one closed decision (#910).
+            codex_outcome = (
+                _codex_post_tool_outcome(payload)
+                if source is ObservationSource.CODEX_HOOK and resolved_event == "PostToolUse"
+                else None
+            )
+            if codex_outcome is not None:
+                _merge_outcome_facts(classification_payload, codex_outcome)
             classification = classify_observation(classification_payload, resolved_event)
             pressure = store.update_selection_pressure(workspace_commitment, session_commitment)
             selected_focused = pressure.effective_mode is ObservationMode.FOCUSED
@@ -4177,6 +4214,7 @@ def handle_observe(
                 gap_codes=tuple(sorted(set(gap_codes), key=str.encode)),
                 source=source,
                 classification=classification,
+                host_outcome=codex_outcome,
             )
             if not selected_focused and envelope.structural_payload.get("action") == "routine_read":
                 envelope = replace(
@@ -4930,6 +4968,7 @@ def handle_observe(
         # a blocked host pipe delays advice, never observation ingest or outbox work.
         # Commit remains after emit, so a failed write never suppresses a later delivery.
         pending_delivery: AdviceDelivery | None = None
+        pending_unpaired_notice: UnpairedScopeNotice | None = None
         delivery_session_id: str | None = None
         # stop_hook_active is the host loop guard: a prior Stop already
         # continued this turn. Blocking again would loop; leave advice for a
@@ -4980,6 +5019,19 @@ def handle_observe(
                         :_MAX_ADVICE_CONTEXT
                     ]
                     pending_delivery = delivery
+                if resolved_event == "PostToolUse":
+                    # One informational notice per new orphan scope; it waits for
+                    # a pass with room rather than being truncated (#917).
+                    unpaired_notice = store.peek_unpaired_notice(
+                        workspace_commitment, session_commitment
+                    )
+                    if unpaired_notice is not None:
+                        notice_text = _unpaired_notice_context(unpaired_notice)
+                        if len(additional) + 1 + len(notice_text) <= _MAX_ADVICE_CONTEXT:
+                            additional = " ".join(
+                                part for part in (additional, notice_text) if part
+                            )
+                            pending_unpaired_notice = unpaired_notice
 
             # Release recommendations are read from one bounded local cache only.
             # Existing task/receipt advice keeps its place first on this shared context
@@ -5042,8 +5094,13 @@ def handle_observe(
                         yoetz_session_id=delivery_session_id,
                         session_commitment=session_commitment,
                     )
+            if emitted and host_consumable and pending_unpaired_notice is not None:
+                with contextlib.suppress(BaseException):
+                    store.commit_unpaired_notice_delivery(
+                        workspace_commitment, pending_unpaired_notice.lane
+                    )
         # Advice selection, the lease, the stdout write itself and the delivery
-        # commit sit past the 'drain' window; a blocked host pipe or a
+        # commits sit past the 'drain' window; a blocked host pipe or a
         # contended commit was previously invisible (#310/#311).
         stages["deliver"] = _elapsed_ms(deliver_started, _monotonic())
         # Attribute the whole pass's store work (#290), folded in last because
@@ -5309,6 +5366,7 @@ def _native_outcome_facts(
     claude_tool_response_boundary: bool = False,
     claude_mcp_tool_response_boundary: bool = False,
     cursor_mcp_result_boundary: bool = False,
+    mappings: tuple[Mapping[str, JsonValue], ...] | None = None,
 ) -> _NativeOutcomeFacts:
     """Extract closed native outcome facts without retaining host prose.
 
@@ -5317,6 +5375,10 @@ def _native_outcome_facts(
     that the event itself is an authoritative tool-level success signal. The
     latter still never manufactures an exit status. A background launch is
     only a partial result until the host supplies completion evidence.
+
+    ``mappings`` replaces the generic carrier walk with fact mappings a host
+    boundary has already selected (the Codex result reader below), so every
+    host shares one reduction and one failure-wins order.
     """
 
     success_true = False
@@ -5332,12 +5394,17 @@ def _native_outcome_facts(
     failure_status: str | None = "failure" if force_failure else None
     success_status = False
 
-    for mapping in _native_outcome_mappings(
-        payload,
-        claude_tool_response_boundary=claude_tool_response_boundary,
-        claude_mcp_tool_response_boundary=claude_mcp_tool_response_boundary,
-        cursor_mcp_result_boundary=cursor_mcp_result_boundary,
-    ):
+    selected_mappings = (
+        mappings
+        if mappings is not None
+        else _native_outcome_mappings(
+            payload,
+            claude_tool_response_boundary=claude_tool_response_boundary,
+            claude_mcp_tool_response_boundary=claude_mcp_tool_response_boundary,
+            cursor_mcp_result_boundary=cursor_mcp_result_boundary,
+        )
+    )
+    for mapping in selected_mappings:
         for key in ("denied", "is_denied", "permission_denied"):
             value = mapping.get(key)
             if type(value) is bool and value:
@@ -5453,6 +5520,178 @@ def _native_outcome_facts(
     if success_true or success_status or error_false:
         return _NativeOutcomeFacts(True, denied, None, "success")
     return _NativeOutcomeFacts(None, denied, None, None)
+
+
+# Codex 0.157.x states a tool call's outcome only inside ``tool_response`` (#910). The closed
+# shapes read here come from recorded Codex 0.157.1 rollouts (fixture
+# ``observations/codex-post-tool-outcomes-0.157.1.case.json``): a nested ``tools.exec_command``
+# result object ``{chunk_id, wall_time_seconds, exit_code, original_token_count, output}``, as an
+# object or as JSON text; the freeform function-output header ``Exit code: N`` (``apply_patch`` and
+# the classic shell); and the unified-exec header ``Process exited with code N``.
+_CODEX_TOP_LEVEL_FACT_KEYS: Final = ("exit_status", "success", "denied")
+# Codex's own shell tools, compared case-insensitively. The shared selection set also names
+# ``exec`` and ``command``; a code-mode ``exec`` cell's result is model-authored JSON, so it is
+# never read as a process exit here.
+_CODEX_SHELL_OUTCOME_TOOLS: Final = frozenset({"bash", "shell", "exec_command", "local_shell"})
+_CODEX_EXIT_FACT_KEYS: Final = ("exit_code", "exitCode", "exit_status", "exitStatus")
+_CODEX_EXEC_RESULT_MARKERS: Final = frozenset(
+    {"chunk_id", "wall_time_seconds", "original_token_count"}
+)
+_CODEX_HEADER_EXIT: Final = re.compile(r"(?:Exit code: |Process exited with code )(-?[0-9]{1,4})")
+_CODEX_HEADER_FIELD: Final = re.compile(
+    r"Chunk ID: [A-Za-z0-9._-]{1,64}"
+    r"|Wall time: [0-9]{1,12}(?:\.[0-9]{1,12})? seconds"
+    r"|Original token count: [0-9]{1,12}"
+    r"|Total output lines: [0-9]{1,12}"
+    r"|Process running with session ID [0-9]{1,20}"
+)
+_CODEX_HEADER_MAX_LINES: Final = 12
+
+
+def _unique_json_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise ValueError("duplicate_object_key")
+    return result
+
+
+def _drop_json_float(_literal: str) -> None:
+    """Drop a vendor fraction; the canonical value model has no float."""
+
+    return None
+
+
+def _reject_json_constant(_literal: str) -> NoReturn:
+    raise ValueError("nonfinite_number")
+
+
+def _codex_result_object(
+    value: object, *, require_exec_marker: bool
+) -> Mapping[str, JsonValue] | None:
+    """Return one Codex tool-result object, parsing JSON text transiently.
+
+    Codex serializes a nested ``exec_command`` result as JSON text whose ``wall_time_seconds`` is
+    fractional; that vendor float is dropped here and nothing parsed leaves this call. JSON text
+    counts as the host's result only when it carries one of Codex's own exec-result keys and a
+    string ``output``, so a command whose output happens to be a JSON document naming
+    ``exit_code`` is never mistaken for the host's outcome. A result sent as a JSON *object* with a
+    float field never reaches this reader: the strict hook stdin parser refuses the whole event as
+    ``float_forbidden`` (a pre-existing boundary; the recorded 0.157.1 shapes carry text).
+    """
+
+    if isinstance(value, Mapping):
+        return cast(Mapping[str, JsonValue], value)
+    if type(value) is not str or len(value) > MAX_HOOK_STDIN_BYTES:
+        return None
+    if not value.lstrip().startswith("{"):
+        return None
+    try:
+        parsed: object = json.loads(
+            value,
+            object_pairs_hook=_unique_json_pairs,
+            parse_float=_drop_json_float,
+            parse_constant=_reject_json_constant,
+        )
+    except ValueError, RecursionError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    result = cast(dict[str, JsonValue], parsed)
+    if require_exec_marker and (
+        _CODEX_EXEC_RESULT_MARKERS.isdisjoint(result) or type(result.get("output")) is not str
+    ):
+        return None
+    return result
+
+
+def _codex_header_exit_codes(text: str) -> tuple[int, ...]:
+    """Read exit codes from a Codex function-output header, never from the output itself.
+
+    The header is a closed grammar that ends at the ``Output:`` line. An unrecognized line, or a
+    text with no terminator, is not Codex's header and yields no fact rather than a guess.
+    ``Process running with session ID N`` is a process that has not exited: it states no exit.
+    """
+
+    codes: list[int] = []
+    for raw_line in text.split("\n", _CODEX_HEADER_MAX_LINES)[:_CODEX_HEADER_MAX_LINES]:
+        line = raw_line.removesuffix("\r")
+        if line == "Output:":
+            return tuple(codes)
+        exit_match = _CODEX_HEADER_EXIT.fullmatch(line)
+        if exit_match is not None:
+            codes.append(int(exit_match.group(1)))
+        elif _CODEX_HEADER_FIELD.fullmatch(line) is None:
+            return ()
+    return ()
+
+
+def _codex_post_tool_outcome(payload: Mapping[str, JsonValue]) -> _NativeOutcomeFacts:
+    """Return the closed outcome Codex states for one ``PostToolUse`` (#910).
+
+    Codex sends no top-level outcome: a command's exit status is nested in ``tool_response``.
+    Only each tool family's closed facts are read: process exit codes for shell and patch tools,
+    and the protocol-level ``isError`` bit for MCP tools, whose result body is tool-domain data.
+    Output text is never searched for words such as ``FAILED`` and no fact means unknown; the
+    shared reducer resolves conflicting facts failure-first. Top-level ``exit_status``,
+    ``success`` and ``denied`` stay honored for a caller that already normalized its payload.
+    """
+
+    facts: list[Mapping[str, JsonValue]] = []
+    top_level = {key: payload[key] for key in _CODEX_TOP_LEVEL_FACT_KEYS if key in payload}
+    if top_level:
+        facts.append(top_level)
+    tool = _token_or_none(payload.get("tool_name"))
+    response = payload.get("tool_response")
+    if tool is not None and response is not None:
+        if tool.lower().startswith("mcp__"):
+            result = _codex_result_object(response, require_exec_marker=False)
+            if result is not None:
+                facts.append({key: result[key] for key in _MCP_RESULT_FACT_KEYS if key in result})
+        elif tool.lower() in _CODEX_SHELL_OUTCOME_TOOLS or tool in _PATCH_TOOL_NAMES:
+            result = _codex_result_object(response, require_exec_marker=type(response) is str)
+            if result is not None:
+                # ``exit_code: null`` is a process that has not exited yet: no fact. A true error
+                # bit beside an exit still wins, but a false one never stands in for an exit.
+                facts.append(
+                    {
+                        key: result[key]
+                        for key in _CODEX_EXIT_FACT_KEYS
+                        if result.get(key) is not None
+                    }
+                )
+                facts.append(
+                    {key: True for key in _MCP_RESULT_FACT_KEYS if result.get(key) is True}
+                )
+            elif type(response) is str:
+                codes = _codex_header_exit_codes(response)
+                if not codes and tool in _PATCH_TOOL_NAMES:
+                    # A bare ``Exit code: N`` prefix keeps the apply_patch contract of #883.
+                    legacy = _CODEX_EXIT_CODE.match(response)
+                    codes = (int(legacy.group(1)),) if legacy is not None else ()
+                facts.extend({"exit_code": code} for code in codes)
+    return _native_outcome_facts(payload, mappings=tuple(facts))
+
+
+def _merge_outcome_facts(fields: dict[str, JsonValue], facts: _NativeOutcomeFacts) -> None:
+    """Write one host's closed outcome facts as structural fields, failure first.
+
+    ``fields`` is the structural copy of the payload, so a top-level fact it already carries was
+    part of ``facts`` too; only a stated exit, success, denial or closed status is written. A
+    result status the host already named is replaced only by a failure.
+    """
+
+    fields.pop("exit_status", None)
+    if facts.exit_status is not None:
+        fields["exit_status"] = facts.exit_status
+    if facts.success is not None:
+        fields["success"] = facts.success
+    else:
+        fields.pop("success", None)
+    if facts.denied:
+        fields["denied"] = True
+    if facts.result_status is not None and facts.result_status != "unknown":
+        if facts.success is False or "result_status" not in fields:
+            fields["result_status"] = facts.result_status
 
 
 def _record_claude_permission_denied(
