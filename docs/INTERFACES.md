@@ -1429,8 +1429,11 @@ material and never revoke a check.
 - `rank_findings(deterministic, semantic, context: RankingContext, max_findings) -> RankedFindings`
   (the exact stable `rank_key` is registered in §8; suppressed count, verdict, and the full
   weakest-material coverage baseline are retained with the ordered selection).
-- `ReceiptFindingState`, owned by `kernel/receipt_builder.py`, is exactly `(finding_id, resolved)`.
-  The ordered tuple contains one latest current row per issue key; its boolean is the one shared
+- `ReceiptFindingState`, owned by `kernel/receipt_builder.py`, is exactly `(finding_id, resolved,
+  acknowledged_not_done, rejection_accepted)`; at most one of the three booleans is true, and the
+  last two default to false (issue #905: `acknowledged_not_done` stays blocking, `rejection_accepted`
+  stops blocking on a receipt whose artifact carries the terminal sections).
+  The ordered tuple contains one latest current row per issue key; `resolved` is the one shared
   proof-based answer, `kernel/finding_resolution.finding_is_resolved`, read from the projection: a
   same-issue successor replaces the old row and starts unresolved, while only a later qualifying
   check resolves the current row (registered under the finding view below). A response disposition
@@ -1852,7 +1855,8 @@ semantic_review_context_withheld|semantic_challenges_rejected|
 semantic_missing_agent_suppliable|semantic_missing_structurally_unavailable|
 semantic_missing_already_supplied|semantic_missing_items_rejected|
 semantic_case_content_over_item_limit|semantic_case_finding_refs_over_limit|
-semantic_prior_findings_over_limit|semantic_prior_verdicts_unsupported`) plus the evidence-strength
+semantic_prior_findings_over_limit|semantic_prior_verdicts_unsupported|
+semantic_restatements_suppressed`) plus the evidence-strength
 codes
 (`evidence_content_digest_only|evidence_content_withheld|evidence_digest_subject_legacy_unknown`)
 and the host-observation codes (`captured_object_unavailable|content_unselected|
@@ -1863,9 +1867,10 @@ pack re-fires the issue or returns its own coverage finding. The exception also 
 finding's original coverage to contain only the pre-existing AI-powered review, evidence, and
 host-observation tolerances and to have freshness outside
 `stale_after_material_change|redacted_gap|unknown`. For `semantic_model_derived` rows only the
-evidence-strength codes, `semantic_prior_findings_over_limit` and
-`semantic_prior_verdicts_unsupported` are tolerated (plus, for a row the check records a `fixed`
-ruling for, the insufficient-packet codes and `content_unselected`), and the check must also record
+evidence-strength codes, `semantic_prior_findings_over_limit`,
+`semantic_prior_verdicts_unsupported` and `semantic_restatements_suppressed` are tolerated (plus,
+for a row the check records a `fixed` ruling for, the insufficient-packet codes and
+`content_unselected`), and the check must also record
 `succeeded/semantic_completed`. Outside the narrow command-gap partition described below, any
 other gap — redacted or unavailable payloads, redacted objects,
 missing refs, unknown events, completion scope, import range, or a code not in the list — blocks
@@ -6180,9 +6185,10 @@ Only consented accepted evidence earns coverage.
 ## 11. Application (`application/`)
 
 `Application` is a service-internal frozen dataclass wiring all use-case ports, `PrivacyCoordinator`,
-and `VerificationPolicy`. `VerificationPolicy(semantic, max_findings)` is the immutable
-application-safe snapshot of effective verification config: `semantic` is exactly
-`disabled|optional|required`, `max_findings` is an exact non-bool integer in `1..10`, and its
+and `VerificationPolicy`. `VerificationPolicy(semantic, max_findings, finding_attempt_budget)` is
+the immutable application-safe snapshot of effective verification config: `semantic` is exactly
+`disabled|optional|required`, `max_findings` is an exact non-bool integer in `1..10`,
+`finding_attempt_budget` is an exact non-bool integer in `1..50` (default 5; issue #905), and its
 derived default check mode is respectively
 `deterministic_only|semantic_if_configured|semantic_required`.
 
@@ -7391,7 +7397,10 @@ cited_refs}`, 1–8, ASCII-sorted by finding id, never the note; unreleased 1.3.
 present only when at least one ruling was admitted, so a check without rulings keeps its bytes
 (issue #907's optional `missing_for_assessment` shares the version the same way).
 `semantic_prior_verdicts_unsupported` discloses dropped or reduced rulings and, like
-`semantic_prior_findings_over_limit`, is tolerated by both proof classes. Tolerated means they never veto
+`semantic_prior_findings_over_limit`, is tolerated by both proof classes. A ruling on an item that
+is already final (`verified_resolved`, `acknowledged_not_done`, `rejection_accepted`), or one the
+same review's restatement contradicts, is set aside instead: it adds no gap and is counted only as
+the `semantic_prior_rulings_set_aside` diagnostic. Tolerated means they never veto
 a ruled row: on a check carrying either code, a `semantic_model_derived` row the check recorded no
 ruling for gets the blocker `reviewer_assessment_incomplete`, because the review may not have
 seen it (section limit, envelope trimming, or a selection without the assessments section, which
@@ -7403,7 +7412,103 @@ codes and `content_unselected` (excerpts the packet's count or byte budget cut, 
 issue #907) for that row only: the reviewer affirmatively ruled the finding fixed, citing refs that
 are fenced to the packet's `citable_refs`, so it assessed the finding on material it was shown.
 Silence gets no such tolerance, so a selection gap still blocks closing a row by not returning it;
-`withdrawn` keeps the ordinary rules (an assessable review that does not re-raise a rejected finding
-over changed state resolves it) and never lifts the veto; `still_present`, `answered_not_fixed` and
+`withdrawn` keeps the ordinary rules (an assessable review that does not re-raise a finding over
+changed state proves it absent) and never lifts the veto, but on a finding whose latest readable
+response is `rejected` that check records `rejection_accepted`, not resolution (below);
+`still_present`, `answered_not_fixed` and
 `unassessable` add the blocker `reviewer_verdict_<verdict>`. The resolution explanation names a
 resolution that came from a `fixed` ruling.
+
+#### Finding to-do states and `acknowledged_not_done` (issue #905)
+
+`acknowledged_not_done` is a `respond` disposition: the agent states, with a required non-empty
+`reason` (at most 4096 bytes), that it will not do what the finding asks. It accepts no waiver
+fields. A missing `reason` fails the request schema; a whitespace-only one is refused with
+`INVALID_REQUEST`, reason code `response_fields_invalid`, field `/reason`. It is carried only by
+`respond-request` `1.1.0`, `respond-result` `1.1.0` and the `response_recorded` `1.1.0` event, all
+new because their 1.0.0 predecessors are released; every other disposition is still recorded as
+`response_recorded` `1.0.0`, so the event version is a pure function of the payload. Control
+`2.9.0` (unreleased, changed in place) references the respond 1.1.0 pair. Every earlier control
+version keeps the 1.0.0 pair: the released ones (v0.2.5 ships control up to `2.6.1`) and the
+unreleased `2.7.0` and `2.8.0` of earlier 0.3 builds, so an older service refuses the disposition
+at its schema boundary. `status-request`
+`1.2.0`, `status-result` `1.4.0` and `receipt-document` `1.3.0` admit the value in place.
+
+Every recorded finding has one to-do state (`kernel/finding_todo.py`): `open`,
+`verified_resolved` (the shared `finding_is_resolved` rule), `acknowledged_not_done` (latest
+readable response has that disposition; never reads as resolved), or `rejection_accepted` (a later
+check recorded a `withdrawn` ruling on an AI-powered finding whose latest readable response was
+`rejected`; the projection records the check as `rejection_accepted_by_check_event_id`). When the
+same check also satisfies the absence proof for that row, the explicit ruling wins:
+`apply_check_rulings` clears that check's `resolved_by_check_event_id` and latches
+`rejection_accepted`, so the row has one final state. A row an earlier check resolved stays
+`verified_resolved`. The last
+three are terminal: `respond` on a terminal finding appends nothing and fails with
+`INVALID_REQUEST`, reason code `finding_terminal`, field `/finding_id` (no continuation: there is
+nothing to do); a latched row is never resolved later; redacting the latching check clears the
+latch. Terminal items are left out of the prior-findings section and rulings on them are not
+admitted. `receipt_blocking_finding_count` counts `acknowledged_not_done` rows and no longer counts
+`rejection_accepted` rows.
+
+`review_rounds` counts later recorded checks that assessed a finding and left it open: a check that
+returned a local finding again over a later subject, or a recorded `still_present`,
+`answered_not_fixed` or `unassessable` ruling. Projection snapshots emit `review_rounds` and
+`rejection_accepted_by_check_event_id` only when set. A snapshot rebuilt from an old ledger keeps
+its bytes unless that ledger has a local finding a later check returned again over a later
+subject: replay now derives `review_rounds` for it. Resolution and receipt outcomes are unchanged,
+and the snapshot projection version is not bumped because the field is additive. The
+owner's `verification.finding_attempt_budget` (`yoetz-config` `1.3.0`, integer 1–50, default 5;
+`YOETZ_VERIFICATION_FINDING_ATTEMPT_BUDGET`; written to the file only when not the default) is the
+round count at which an open item asks for a decision. It never throttles `check` and never
+changes state.
+
+Wire (all additive, unreleased versions changed in place):
+
+- `check-result` `1.3.0` success: optional `finding_checklist` `{attempt_budget, counts, items[],
+  next}`. `attempt_budget` is a canonical string `1`–`50`; each item is `{finding_id, todo_state,
+  review_rounds}` (at most 100: the current actionable items, newest row per issue, open items
+  first and otherwise in rank order, final rows included; coverage limitations are not to-dos);
+  `next` is `decide_at_budget` (an open item reached the budget: repair with new evidence or
+  respond `acknowledged_not_done`), `work_open_findings`, or `request_receipt`. It is current
+  projection context attached after the commit, like advisory notes, and is omitted when that read
+  is unavailable; it is never part of the check event.
+- `status-result` `1.4.0` findings view: each row carries `todo_state` and `review_rounds`
+  (canonical uint string); the page carries `attempt_budget`.
+- `receipt-document` `1.3.0`: optional `acknowledged_not_done_finding_ids` and
+  `rejection_accepted_finding_ids` (sorted, 1–100, each a carried finding; absent when empty). The
+  markdown and text renderings add "Acknowledged, not done" and "Rejection accepted" sections that
+  name finding ids only. The redacted-share profile drops `acknowledged_not_done` responses like
+  other reasoned dispositions and counts the redaction. Only an artifact that carries these
+  sections lets a `rejection_accepted` row stop blocking its conclusion; on an earlier artifact the
+  row still counts as unresolved and is listed as such. A child's terminal rows stay actionable
+  and unresolved in a parent's lineage rollup (the frozen child snapshot has only `actionable` and
+  `resolved`); the child's own receipt discloses them.
+- `check-result` `finding_checklist` also carries `counts` (`open`, `open_at_budget`,
+  `verified_resolved`, `acknowledged_not_done`, `rejection_accepted`) over every current actionable
+  item, and is read from the adapter-owned projection at the result frontier, never from a status
+  page or a replay; any failure reading it omits the list and records a
+  `finding_checklist_read` diagnostic instead of failing the committed check.
+- Stable identity: a challenge whose kind matches a recorded AI-powered finding, whose subject
+  set is exactly that finding's (the receipt's issue key), and none of whose subjects was recorded
+  after that finding (the evidence fingerprint) is a restatement. A narrower or wider challenge is
+  a distinct issue and is minted as its own finding, keeping its discrepancy and requested next
+  step. It is "seen again, suppressed": no second row is
+  minted, the check adds `semantic_restatements_suppressed` (tolerated by both proof classes, like
+  the other dialogue disclosures), and the `semantic_review_accounting` diagnostic counts it as
+  `semantic_restatements_suppressed` so returned = accepted + rejected + suppressed. Suppression
+  never reads as absence: on an open item the check records a `still_present` ruling citing the
+  restated subjects (at most 16), an explicit `fixed` or `withdrawn` ruling on the same item
+  becomes `unassessable`, and an `acknowledged_not_done` or `rejection_accepted` item needs
+  nothing recorded (it stays disclosed on the receipt). A `verified_resolved` row is never a
+  restatement target: done stays done, and the problem raised again after that proof is a #458
+  successor row, minted and blocking. When the check's 8-ruling bound is already full, the
+  restatement is minted as before instead. A challenge that cites newer material is a new item,
+  linked through `relates_to` when it cites the earlier finding.
+- MCP text summaries count items by state with closed tokens only (`to-do: open N (M at budget
+  B), verified V, not done A, rejection accepted R; next: <token>`); the CLI renders
+  `[ ] F-1 fnd_… open (2/5)`, `[x]` verified, `[~]` not done, `[-]` rejection accepted, and one
+  closed "Next:" sentence, plus a `Counts:` line from the check's whole-list counts and `Not
+  listed: K` when the list leaves items out. The status findings summary counts actionable rows
+  on the page only. The TUI `/findings` command reads the open task's `findings` status view
+  with `include_resolved` and renders it through the same CLI lines, so every item shows its one
+  state there too.

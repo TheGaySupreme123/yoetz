@@ -9,6 +9,7 @@ from typing import Final, cast
 
 from pydantic import BaseModel
 
+from yoetz.domain.findings import FINDING_KIND_TRAITS, FindingKind
 from yoetz.mcp.errors import VALIDATION_REASON_TOKENS
 from yoetz.protocol.canonical import JsonValue, ensure_canonical_value
 from yoetz.protocol.errors import PublicErrorCode, normalize_safe_details
@@ -129,6 +130,117 @@ def _identity_clause(envelope: Mapping[str, JsonValue]) -> str:
     if not parts:
         return ""
     return "; ".join(parts) + "; "
+
+
+_TODO_STATES: Final = ("open", "verified_resolved", "acknowledged_not_done", "rejection_accepted")
+_CHECKLIST_NEXT: Final = frozenset({"decide_at_budget", "request_receipt", "work_open_findings"})
+_BUDGET: Final = re.compile(r"^(?:[1-9]|[1-4][0-9]|50)$", re.ASCII)
+_ROUNDS: Final = re.compile(r"^(?:0|[1-9][0-9]{0,17})$", re.ASCII)
+
+
+def _actionable_kind(kind: object) -> bool:
+    """Whether a row's kind is a to-do; unknown or malformed kinds never count."""
+
+    if type(kind) is not str:
+        return False
+    try:
+        return FINDING_KIND_TRAITS[FindingKind(kind)][1]
+    except ValueError:
+        return False
+
+
+def _checklist_clause(rows: object, budget: object, next_step: object | None) -> str:
+    """Count findings by to-do state with closed tokens only (issue #905).
+
+    Rows are re-read from the structured result; anything that is not an allowlisted state,
+    a canonical count or a canonical budget is ignored, so no caller text reaches the summary.
+    Coverage-limitation kinds (and unknown kinds) are not to-dos and are not counted, matching the
+    check's own checklist counts.
+    """
+
+    if not isinstance(rows, list | tuple):
+        return ""
+    counts = dict.fromkeys(_TODO_STATES, 0)
+    at_budget = 0
+    budget_value = int(budget) if type(budget) is str and _BUDGET.fullmatch(budget) else None
+    for raw in cast(Sequence[JsonValue], rows):
+        if not isinstance(raw, Mapping):
+            continue
+        row = cast(Mapping[str, JsonValue], raw)
+        if not _actionable_kind(row.get("kind")):
+            continue
+        state = row.get("todo_state")
+        if type(state) is not str or state not in counts:
+            continue
+        counts[state] += 1
+        rounds = row.get("review_rounds")
+        if (
+            state == "open"
+            and budget_value is not None
+            and type(rounds) is str
+            and _ROUNDS.fullmatch(rounds)
+            and int(rounds) >= budget_value
+        ):
+            at_budget += 1
+    if not any(counts.values()):
+        return ""
+    clause = (
+        f"to-do: open {counts['open']}"
+        + (f" ({at_budget} at budget {budget_value})" if at_budget else "")
+        + f", verified {counts['verified_resolved']}"
+        + f", not done {counts['acknowledged_not_done']}"
+        + f", rejection accepted {counts['rejection_accepted']}; "
+    )
+    if type(next_step) is str and next_step in _CHECKLIST_NEXT:
+        clause += f"next: {next_step}; "
+    return clause
+
+
+def _checklist_counts_clause(counts: object, budget: object, next_step: object) -> str:
+    """The check's to-do counts, taken from its whole-list ``counts`` object (issue #905)."""
+
+    if not isinstance(counts, Mapping):
+        return ""
+    source = cast(Mapping[str, JsonValue], counts)
+    values: dict[str, int] = {}
+    for key in (
+        "open",
+        "open_at_budget",
+        "verified_resolved",
+        "acknowledged_not_done",
+        "rejection_accepted",
+    ):
+        raw = source.get(key)
+        if type(raw) is not str or _ROUNDS.fullmatch(raw) is None:
+            return ""
+        values[key] = int(raw)
+    budget_text = budget if type(budget) is str and _BUDGET.fullmatch(budget) else None
+    clause = (
+        f"to-do: open {values['open']}"
+        + (
+            f" ({values['open_at_budget']} at budget {budget_text})"
+            if values["open_at_budget"] and budget_text is not None
+            else ""
+        )
+        + f", verified {values['verified_resolved']}"
+        + f", not done {values['acknowledged_not_done']}"
+        + f", rejection accepted {values['rejection_accepted']}; "
+    )
+    if type(next_step) is str and next_step in _CHECKLIST_NEXT:
+        clause += f"next: {next_step}; "
+    return clause
+
+
+# Room the fixed identity, frontier and recovery clauses still need after an optional clause.
+_OPTIONAL_CLAUSE_RESERVE: Final = 240
+
+
+def _with_room(prefix: str, clause: str) -> str:
+    """Append an optional clause only while the fixed summary still fits beside it."""
+
+    if len((prefix + clause).encode("ascii")) > _MAX_SUMMARY_BYTES - _OPTIONAL_CLAUSE_RESERVE:
+        return prefix
+    return prefix + clause
 
 
 def _item_count(value: object) -> str:
@@ -549,6 +661,17 @@ def summary_for_check(envelope: object) -> str:
     notes = source.get("advisory_notes")
     if isinstance(notes, (list, tuple)) and notes:
         prefix += f"project advice (non-verdict): {len(notes)}; "
+    checklist = source.get("finding_checklist")
+    if isinstance(checklist, Mapping):
+        checklist_source = cast(Mapping[str, JsonValue], checklist)
+        prefix = _with_room(
+            prefix,
+            _checklist_counts_clause(
+                checklist_source.get("counts"),
+                checklist_source.get("attempt_budget"),
+                checklist_source.get("next"),
+            ),
+        )
     suffix = f"AI-powered review status/reason: {status}/{reason}; {_frontier_clause(source)}."
     recovery = continuation_for_semantic_outcome(
         status=status,
@@ -664,6 +787,16 @@ def summary_for_status(envelope: object) -> str:
             # Pathological counts cannot push the fixed suffix out of the bounded summary.
             operation_clause = "semantic progress: see structured page; "
         prefix += operation_clause
+    if view == "findings":
+        page = source.get("page")
+        if isinstance(page, Mapping):
+            page_source = cast(Mapping[str, JsonValue], page)
+            prefix = _with_room(
+                prefix,
+                _checklist_clause(
+                    page_source.get("items"), page_source.get("attempt_budget"), None
+                ),
+            )
     suffix = (
         f"unanswered findings: {unanswered}; "
         f"receipt-blocking findings: {receipt_blocking}; reported gaps: {gaps}."

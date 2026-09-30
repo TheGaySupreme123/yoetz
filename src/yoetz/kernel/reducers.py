@@ -64,6 +64,7 @@ from yoetz.domain.values import (
 )
 from yoetz.kernel.finding_resolution import (
     apply_check_resolution,
+    apply_check_rulings,
     reopen_findings_resolved_by,
 )
 from yoetz.kernel.observed_failures import (
@@ -1395,6 +1396,7 @@ def reduce_event(
                 # one: a finding proven absent stays resolved when a later weaker check adds
                 # nothing, and is re-fired only when a check returns the same issue again.
                 apply_check_resolution(findings, check, accepted.event_id, proof_state=state)
+                apply_check_rulings(findings, responses, check, accepted.event_id)
                 # Issue #907: the latest assessed review decides what is still named missing. A
                 # local-only or failed check leaves the prior request standing, and so does an
                 # ``insufficient_packet`` that recorded no item (a reply that named nothing, or

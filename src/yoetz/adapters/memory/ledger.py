@@ -100,6 +100,7 @@ from yoetz.kernel.finding_resolution import (
     finding_is_resolved,
     finding_resolution_explanation,
 )
+from yoetz.kernel.finding_todo import finding_todo_state
 from yoetz.kernel.observed_failures import (
     observed_event_ids_from_records,
     observed_run_facts,
@@ -1568,6 +1569,8 @@ def _projection_items(
                         if response is None or response.waiver_expiry is None
                         else response.waiver_expiry.wire
                     ),
+                    todo_state=finding_todo_state(projection, finding.finding_id).value,
+                    review_rounds=str(projection.findings[finding.finding_id].review_rounds),
                 )
             )
         return tuple(finding_items)

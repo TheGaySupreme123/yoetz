@@ -1051,16 +1051,82 @@ packet's `citable_refs`, so it assessed the finding on material it was shown. Si
 tolerance; a selection gap still blocks closing an AI-powered finding by not returning it. Every
 other rule still applies: completed review, the finding inside the tested frontier, no suppression,
 scope, readable freshness, the capture baseline, a material change after the finding, and the issue
-not returned again. `withdrawn` keeps the earlier rules, under which a reasoned rejection an
-assessable review does not re-raise resolves over changed state, and never lifts the whole-packet
-veto. `still_present`, `answered_not_fixed` and `unassessable` block only their own finding by name
+not returned again. `withdrawn` keeps the earlier absence rules and never lifts the whole-packet veto; on a finding
+whose latest readable response is a reasoned `rejected`, the check that rules it `withdrawn` records
+`rejection_accepted` rather than resolution (below). `still_present`,
+`answered_not_fixed` and `unassessable` block only their own finding by name
 (`reviewer_verdict_<verdict>`). Without a ruling the earlier rules are unchanged; silence is never
 read as `fixed`. Silence also proves nothing when the finding may never have been assessed: on a
 check whose packet left prior findings out (`semantic_prior_findings_over_limit`, including a
 selection without the assessments section) or dropped a ruling
 (`semantic_prior_verdicts_unsupported`), every AI-powered finding the check recorded no ruling for
 is blocked as `reviewer_assessment_incomplete`. The codes stay disclosures, never vetoes on ruled
-findings.
+findings. A ruling on an item that is already final, or one contradicted by the same review's
+restatement, is set aside without that gap (a diagnostic count only), so it cannot stall the
+review's other open findings.
+
+**Terminal states: findings as a to-do list that ends.** Every recorded finding is in exactly one
+to-do state, read from replayed projection facts only (`kernel/finding_todo.py`, transition table
+kept as data): `open`, or one of three terminal states. `verified_resolved` is the existing
+proof-based resolution. `acknowledged_not_done` is a new `respond` disposition, defined here for
+the whole issue set: the agent states that it will not do what the finding asks, with a required
+non-empty reason. `rejection_accepted` latches when a later review rules `withdrawn` on an
+AI-powered finding whose latest readable response is a reasoned `rejected`. When that same review
+would also prove the finding absent (assessable, over changed state, not returned again), the
+explicit ruling takes precedence over the implicit not-returned inference: the reviewer accepted
+the agent's reason, it did not observe a repair, so the item is `rejection_accepted` and that
+check's absence mark is dropped. A finding an earlier check already proved absent stays
+`verified_resolved`. The optional
+`superseded` state is not introduced: a successor row (#458) already starts `open` beside the
+resolved row it follows.
+
+Terminal is final. There is no reopen and no upgrade: `respond` records nothing on a terminal item
+and refuses with the typed reason `finding_terminal` (an exact replay of an earlier respond is still
+the idempotent stored answer); a latched `rejection_accepted` never later becomes resolved; an
+`acknowledged_not_done` row never reads as resolved, even if a later check proves the issue absent.
+New evidence about the same problem becomes a new finding. The only thing that clears a latch is
+redaction of the event that set it, because unreadable proof is no proof. A terminal item is never
+re-reviewed: it leaves the prior-findings section, and a ruling on it is not admitted.
+
+On the receipt, `acknowledged_not_done` keeps counting as receipt-blocking, so it can never read as
+clean, and has its own section ("Acknowledged, not done"). `rejection_accepted` stops blocking but
+stays disclosed in its own section ("Rejection accepted"). Both are named by finding id only; how
+the receipt conclusion names them is owned by issue #913. Using `acknowledged_not_done` to shorten
+a receipt is therefore impossible by construction.
+
+**Review rounds and the owner's budget.** Each later recorded check that assessed an item and left it
+open adds one review round: a local check that returned the same finding over a later subject, or a
+review that ruled it `still_present`, `answered_not_fixed` or `unassessable`. The owner's
+`verification.finding_attempt_budget` (default 5, 1–50; maintainer decision 2026-09-30) only
+changes what Yoetz asks next: at the budget it asks for a repair with new evidence or an explicit
+`acknowledged_not_done`. It never throttles `check`, never closes, and never acknowledges on the
+agent's behalf. The check result's `finding_checklist` and the status findings view carry each
+item's state and rounds, and a closed `next` token, for a checklist such as
+`[ ] F-3 open (2/5) | [x] F-1 verified_resolved | [~] F-2 acknowledged_not_done`.
+
+**Stable identity: seen again, suppressed.** An item's key is its origin, kind and subjects; its
+evidence fingerprint is what it rests on. A challenge with the kind of a recorded AI-powered finding,
+exactly that finding's subjects, and nothing among them recorded after that finding restates it (a
+narrower or wider challenge is a distinct issue, minted with its own discrepancy and next step): no second row is minted and the check discloses `semantic_restatements_suppressed`, so three
+identical re-raises remain one item with one state. Suppression must never read as absence, so on an
+open item the check records the restatement as a `still_present` ruling (a contradicting `fixed` or
+`withdrawn` becomes `unassessable`), which also counts a review round; an `acknowledged_not_done` or
+`rejection_accepted` item needs nothing recorded and stays disclosed. A `verified_resolved` row is
+never a restatement target: done stays done, and the problem raised again after that proof is a #458
+successor, minted and blocking. A challenge that cites newer material is a new item, linked to the
+earlier one when it cites it. This is the ledger-side half of "no re-raise
+without new material"; the prompt asks for the same.
+
+**Compatibility.** `response_recorded` 1.0.0 and `respond-request`/`respond-result` 1.0.0 are
+released, so the new disposition rides new 1.1.0 versions (every other disposition keeps 1.0.0
+bytes). Control 2.9.0 (unreleased) moves to the respond 1.1.0 pair in place. Every earlier control
+version keeps the 1.0.0 pair (v0.2.5 ships control up to 2.6.1; 2.7.0 and 2.8.0 are earlier 0.3
+builds), so an older service refuses the new disposition at its own schema boundary. Old ledgers
+replay to the same resolution and receipt outcomes: nothing they contain is `acknowledged_not_done`
+or `withdrawn`, and no earlier check carries the #905 packet gaps. The projection does derive one
+new fact from them: `review_rounds` counts a local finding each later check returned again over a
+later subject, so an old ledger's projection snapshot can now carry `review_rounds`. It feeds only
+the checklist and the budget's `next` token.
 
 ### Most valuable review content and named missing items (2026-09-30, #907 Phase 1a)
 

@@ -931,8 +931,20 @@ async def _exact_frontier(runtime: TaskRuntime, sequence: int | None) -> tuple[F
     return found, head
 
 
-def _page_model(page: ProjectionPage, next_cursor: str | None) -> StatusPage:
-    value = {"items": page.items, "next_cursor": next_cursor}
+def _finding_attempt_budget(app: Application) -> int | None:
+    """The owner's per-item review-round budget, when this application carries one (#905)."""
+
+    policy = getattr(app, "verification_policy", None)
+    budget = getattr(policy, "finding_attempt_budget", None)
+    return budget if type(budget) is int else None
+
+
+def _page_model(
+    page: ProjectionPage, next_cursor: str | None, *, attempt_budget: int | None = None
+) -> StatusPage:
+    value: dict[str, object] = {"items": page.items, "next_cursor": next_cursor}
+    if page.view == "findings" and attempt_budget is not None:
+        value["attempt_budget"] = str(attempt_budget)
     constructors = {
         "assignment": StatusAssignmentPageModel,
         "compact": StatusCompactPageModel,
@@ -1727,7 +1739,9 @@ async def execute_status(
                 )
             )
             with status_stage(StatusFaultStage.MODEL):
-                page = _page_model(raw_page, next_cursor)
+                page = _page_model(
+                    raw_page, next_cursor, attempt_budget=_finding_attempt_budget(app)
+                )
             if route_profile is not None and type(page) is StatusVersionsPageModel:
                 page = StatusVersionsPageModel(
                     items=tuple(

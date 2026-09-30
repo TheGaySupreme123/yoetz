@@ -6592,6 +6592,7 @@ async def provide_service_ready_context(
         verification_policy=VerificationPolicy(
             semantic=config.verification.semantic,
             max_findings=config.verification.max_findings,
+            finding_attempt_budget=config.verification.finding_attempt_budget,
         ),
         privacy=privacy,  # pyright: ignore[reportArgumentType]
         status_cursor_key=os.urandom(32),

@@ -21,7 +21,7 @@ from builders.operations import (
     start_request,
     status_request,
 )
-from property.strategies.events import strategy_valid_event_payloads
+from property.strategies.events import event_schema_version_for, strategy_valid_event_payloads
 from yoetz.domain.events import ClientKind, IntegrationKind, encode_payload
 from yoetz.domain.values import ActorType
 
@@ -172,7 +172,7 @@ def _event_draft_wire(draw: st.DrawFn) -> dict[str, JsonValue]:
     return build_event_draft(
         event_id=event_id(draw(_seed())),
         schema_name=family,
-        schema_version=_SCHEMA_VERSION,
+        schema_version=event_schema_version_for(payload),
         occurred_at=draw(_timestamp_wire()),
         causal_parents=(),
         payload=payload_json,

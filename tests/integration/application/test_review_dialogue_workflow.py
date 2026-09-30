@@ -15,9 +15,15 @@ from typing import Any, cast
 
 import pytest
 
-from builders.projection_workflow import build_projection_application, frontier_json, request_base
+from builders.projection_workflow import (
+    ProjectionCase,
+    build_projection_application,
+    frontier_json,
+    project_case,
+    request_base,
+)
 from builders.start_application import protocol_id, start_request
-from yoetz.application.check import FinalSemanticEvaluation
+from yoetz.application.check import FinalSemanticEvaluation, check_internal_json
 from yoetz.application.semantic_case import build_semantic_case, semantic_case_packet_view
 from yoetz.application.service import Application
 from yoetz.domain.events import CheckRecordedPayload, EventSchema, LedgerRecord
@@ -30,8 +36,12 @@ from yoetz.domain.findings import (
 )
 from yoetz.domain.privacy import ReviewContextProfile, ReviewSelectionPolicy
 from yoetz.kernel.finding_resolution import finding_resolution_explanation
+from yoetz.kernel.finding_todo import FindingTodoState, finding_todo, finding_todo_state
 from yoetz.kernel.projections import ProjectionState, projection_snapshot
+from yoetz.kernel.receipt_capacity import receipt_blocking_finding_count
 from yoetz.kernel.reducers import replay
+from yoetz.mcp.summaries import summary_for_check
+from yoetz.ports.control import ControlMethod
 from yoetz.ports.ledger import CheckCommitResult, FrozenCase
 from yoetz.ports.semantic import (
     MissingForAssessment,
@@ -42,12 +52,16 @@ from yoetz.ports.semantic import (
     SemanticJudgment,
 )
 from yoetz.protocol.canonical import JsonValue, strict_json_parse
+from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.models import (
     CheckRequest,
     PublishWorkRequest,
+    ReceiptRequest,
     RespondRequest,
     SemanticReason,
     SemanticStatus,
+    StatusFindingsPageModel,
+    StatusRequest,
 )
 
 pytestmark = pytest.mark.anyio
@@ -166,11 +180,21 @@ class _Session:
     session_id: str
     writer_id: str
     obligation_id: str
+    task_id: str = ""
 
 
-async def _session(reviewer: _Reviewer, seed: int) -> tuple[_Session, JsonValue]:
+async def _session(
+    reviewer: _Reviewer, seed: int, *, attempt_budget: int | None = None
+) -> tuple[_Session, JsonValue]:
     app, _policy = await build_projection_application("optional", seed=seed, max_findings=5)
     app = replace(app, semantic_evaluator=reviewer)
+    if attempt_budget is not None:
+        app = replace(
+            app,
+            verification_policy=replace(
+                app.verification_policy, finding_attempt_budget=attempt_budget
+            ),
+        )
     started = await app.start(start_request(seed, title="Converging review dialogue"))
     obligation_id = protocol_id("obl_", seed + 1)
     obligation_event = protocol_id("evt_", seed + 2)
@@ -202,7 +226,7 @@ async def _session(reviewer: _Reviewer, seed: int) -> tuple[_Session, JsonValue]
             }
         )
     )
-    session = _Session(app, started.session_id, started.writer_id, obligation_id)
+    session = _Session(app, started.session_id, started.writer_id, obligation_id, started.task_id)
     return session, frontier_json(published.result_frontier)
 
 
@@ -458,3 +482,475 @@ async def test_budget_cut_excerpts_block_silence_but_not_a_cited_fixed_ruling(
     else:
         assert resolved_by is None
     assert projection_snapshot(replay(_records(session.app))) == projection_snapshot(live)
+
+
+# Issue #905 slice 4: terminal states. ``acknowledged_not_done`` and ``rejection_accepted`` are final,
+# never re-reviewed, and reach the receipt in their own sections; ``respond`` records nothing more.
+
+
+def _respond_wire(
+    session: _Session,
+    frontier: JsonValue,
+    finding_frontier: JsonValue,
+    finding: Finding,
+    seed: int,
+    disposition: str,
+    reason: str | None,
+) -> dict[str, JsonValue]:
+    wire: dict[str, JsonValue] = {
+        **request_base(protocol_id("req_", seed)),
+        "session_id": session.session_id,
+        "writer_id": session.writer_id,
+        "expected_frontier": frontier,
+        "finding_id": finding.finding_id,
+        "finding_frontier": finding_frontier,
+        "disposition": disposition,
+    }
+    if reason is not None:
+        wire["reason"] = reason
+    return wire
+
+
+def _no_challenges(_frozen: FrozenCase) -> SemanticJudgment:
+    return SemanticJudgment("no_material_discrepancy", ())
+
+
+async def _receipt(session: _Session, frontier: JsonValue, seed: int, fmt: str) -> Any:
+    return await session.app.receipt(
+        ReceiptRequest.model_validate(
+            {
+                **request_base(protocol_id("req_", seed)),
+                "task_id": session.task_id,
+                "session_id": session.session_id,
+                "writer_id": session.writer_id,
+                "expected_frontier": frontier,
+                "format": fmt,
+                "include": "standard",
+                "redaction_profile": "full_local",
+            }
+        )
+    )
+
+
+async def test_acknowledged_not_done_is_final_never_rereviewed_and_never_clean() -> None:
+    """numba fnd_01c5aaf7: the agent says it will not do it, with a reason, and that is final."""
+
+    seed = 3000
+    reviewer = _Reviewer([_challenge_obligation, _no_challenges])
+    session, frontier = await _session(reviewer, seed)
+    first = await _check(session, frontier, seed + 10)
+    raised = _semantic(first)
+    at = frontier_json(first.result_frontier)
+
+    # A missing reason is refused by the request contract; a blank one by respond, typed.
+    with pytest.raises(ValueError):
+        RespondRequest.model_validate(
+            _respond_wire(session, at, at, raised, seed + 20, "acknowledged_not_done", None)
+        )
+    with pytest.raises(PublicOperationError) as blank:
+        await session.app.respond(
+            RespondRequest.model_validate(
+                _respond_wire(session, at, at, raised, seed + 21, "acknowledged_not_done", "   ")
+            )
+        )
+    assert blank.value.code is PublicErrorCode.INVALID_REQUEST
+    assert blank.value.safe_details is not None
+    assert blank.value.safe_details["reason_code"] == "response_fields_invalid"
+
+    reason = "llvmlite 0.46.0 is not installable in this sandbox; out of scope for this task."
+    wire = _respond_wire(session, at, at, raised, seed + 22, "acknowledged_not_done", reason)
+    recorded = await session.app.respond(RespondRequest.model_validate(wire))
+    assert recorded.response.disposition == "acknowledged_not_done"
+    response_rows = [row for row in _records(session.app) if row.schema.name == "response_recorded"]
+    assert [row.schema for row in response_rows] == [EventSchema("response_recorded", "1.1.0")]
+
+    # A replayed respond is a no-op: same answer, nothing appended.
+    count = len(_records(session.app))
+    replayed = await session.app.respond(RespondRequest.model_validate(wire))
+    assert replayed.accepted_event == recorded.accepted_event
+    assert len(_records(session.app)) == count
+
+    # Terminal is final: a later response records nothing and says why, typed.
+    after = frontier_json(recorded.result_frontier)
+    with pytest.raises(PublicOperationError) as terminal:
+        await session.app.respond(
+            RespondRequest.model_validate(
+                _respond_wire(session, after, at, raised, seed + 23, "rejected", "Changed mind.")
+            )
+        )
+    assert terminal.value.safe_details is not None
+    assert terminal.value.safe_details["reason_code"] == "finding_terminal"
+    assert len(_records(session.app)) == count
+
+    # The next review is not asked about it again, and the item stays not done.
+    second = await _check(session, after, seed + 30)
+    assert f"prior-finding-{raised.finding_id}" not in {
+        item.item_id for item in reviewer.cases[1].items
+    }
+    live = _live_projection(session.app)
+    assert finding_todo_state(live, raised.finding_id) is FindingTodoState.ACKNOWLEDGED_NOT_DONE
+    assert receipt_blocking_finding_count(live) >= 1
+
+    json_receipt = await _receipt(session, frontier_json(second.result_frontier), seed + 40, "json")
+    assert json_receipt.conclusion == "unresolved_findings_remain"
+    document = cast(Mapping[str, JsonValue], json_receipt.document)
+    assert document["acknowledged_not_done_finding_ids"] == [raised.finding_id]
+    for fmt in ("markdown", "text"):
+        rendered = await _receipt(
+            session, frontier_json(second.result_frontier), seed + 41 + len(fmt), fmt
+        )
+        assert "Acknowledged, not done" in cast(str, rendered.human_text)
+        assert raised.finding_id in cast(str, rendered.human_text)
+    assert projection_snapshot(replay(_records(session.app))) == projection_snapshot(
+        _live_projection(session.app)
+    )
+
+
+def _withdraw_first_finding(frozen: FrozenCase) -> SemanticJudgment:
+    projection = frozen.case.projection
+    finding = next(
+        key
+        for key, row in projection.findings.items()
+        if row.payload is not None and row.payload.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+    )
+    # ``insufficient_packet`` keeps the ordinary absence proof from resolving it, so only the
+    # withdrawal speaks.
+    return SemanticJudgment(
+        "insufficient_packet", (), (PriorFindingVerdict(str(finding), "withdrawn", ()),)
+    )
+
+
+async def test_a_withdrawn_reasoned_rejection_latches_rejection_accepted() -> None:
+    """termenv 34ddb7af: a reasoned rejection the reviewer withdraws stops blocking, disclosed."""
+
+    seed = 3100
+    reviewer = _Reviewer([_challenge_obligation, _withdraw_first_finding])
+    session, frontier = await _session(reviewer, seed)
+    first = await _check(session, frontier, seed + 10)
+    raised = _semantic(first)
+    at = frontier_json(first.result_frontier)
+    rejected = await session.app.respond(
+        RespondRequest.model_validate(
+            _respond_wire(
+                session, at, at, raised, seed + 20, "rejected", "The task statement excludes it."
+            )
+        )
+    )
+    blocking_before = receipt_blocking_finding_count(_live_projection(session.app))
+    second = await _check(session, frontier_json(rejected.result_frontier), seed + 30)
+
+    live = _live_projection(session.app)
+    check_row = [row for row in _records(session.app) if row.schema.name == "check_recorded"][-1]
+    record = live.findings[raised.finding_id]
+    assert record.resolved_by_check_event_id is None
+    assert record.rejection_accepted_by_check_event_id == check_row.event_id
+    assert finding_todo_state(live, raised.finding_id) is FindingTodoState.REJECTION_ACCEPTED
+    assert receipt_blocking_finding_count(live) == blocking_before - 1
+
+    after = frontier_json(second.result_frontier)
+    with pytest.raises(PublicOperationError) as terminal:
+        await session.app.respond(
+            RespondRequest.model_validate(
+                _respond_wire(session, after, at, raised, seed + 40, "acknowledged", None)
+            )
+        )
+    assert terminal.value.safe_details is not None
+    assert terminal.value.safe_details["reason_code"] == "finding_terminal"
+    json_receipt = await _receipt(session, after, seed + 50, "json")
+    document = cast(Mapping[str, JsonValue], json_receipt.document)
+    assert document["rejection_accepted_finding_ids"] == [raised.finding_id]
+    assert projection_snapshot(replay(_records(session.app))) == projection_snapshot(
+        _live_projection(session.app)
+    )
+
+
+def _withdraw_first_finding_assessably(frozen: FrozenCase) -> SemanticJudgment:
+    projection = frozen.case.projection
+    finding = next(
+        key
+        for key, row in projection.findings.items()
+        if row.payload is not None and row.payload.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+    )
+    # An assessable review that does not return the issue, over changed state: on its own the
+    # ordinary absence proof would resolve it. The explicit ``withdrawn`` must still win.
+    return SemanticJudgment(
+        "no_material_discrepancy", (), (PriorFindingVerdict(str(finding), "withdrawn", ()),)
+    )
+
+
+async def test_an_assessable_withdrawn_ruling_on_a_rejection_reads_rejection_accepted() -> None:
+    """PR #943 review P1: the reviewer's explicit ``withdrawn`` outranks the silent absence proof.
+
+    Raise, reject with a reason, change material state, then an assessable review that does not
+    return the issue and rules it ``withdrawn``. The same check would prove it absent, but the
+    item's one final state is ``rejection_accepted`` on every surface: projection, status
+    findings view and CLI text, the check's checklist and MCP text, and every receipt format.
+    """
+
+    from yoetz.cli.render import render_human_check, render_human_status
+    from yoetz.mcp.summaries import summary_for_status
+    from yoetz.protocol.models import (
+        CheckFindingChecklistModel,
+        CheckSuccessModel,
+        CoverageModel,
+        StatusResultModel,
+        StatusSuccessModel,
+    )
+
+    seed = 3600
+    reviewer = _Reviewer([_challenge_obligation, _withdraw_first_finding_assessably])
+    session, frontier = await _session(reviewer, seed)
+    first = await _check(session, frontier, seed + 10)
+    raised = _semantic(first)
+    at = frontier_json(first.result_frontier)
+    rejected = await session.app.respond(
+        RespondRequest.model_validate(
+            _respond_wire(
+                session, at, at, raised, seed + 20, "rejected", "The task statement excludes it."
+            )
+        )
+    )
+    _result, repaired = await _repair(session, frontier_json(rejected.result_frontier), seed + 30)
+    second = await _check(session, repaired, seed + 50)
+
+    live = _live_projection(session.app)
+    check_row = [row for row in _records(session.app) if row.schema.name == "check_recorded"][-1]
+    recorded = cast(CheckRecordedPayload, check_row.payload)
+    assert recorded.semantic_conclusion == "no_material_discrepancy"
+    assert [item.verdict for item in recorded.prior_finding_verdicts] == ["withdrawn"]
+    assert raised.finding_id not in recorded.returned_finding_ids
+    record = live.findings[raised.finding_id]
+    assert record.rejection_accepted_by_check_event_id == check_row.event_id
+    assert record.resolved_by_check_event_id is None
+    assert finding_todo_state(live, raised.finding_id) is FindingTodoState.REJECTION_ACCEPTED
+    assert "Rejection accepted" in finding_resolution_explanation(
+        live, raised.finding_id, _records(session.app)
+    )
+    assert receipt_blocking_finding_count(live) == 0
+
+    # The check's own checklist and its MCP text agree.
+    checklist = second.finding_checklist
+    assert checklist is not None
+    row = next(item for item in checklist.items if item.finding_id == raised.finding_id)
+    assert row.todo_state == "rejection_accepted"
+    assert (checklist.counts.rejection_accepted, checklist.counts.verified_resolved) == (1, 0)
+    wire = check_internal_json(second)
+    assert "verified 0, not done 0, rejection accepted 1" in summary_for_check(wire)
+    # CLI text of the same checklist wire (the rest of the check is not under test here).
+    checked = CheckSuccessModel.model_construct(
+        verdict="no_issue_detected",
+        semantic_status="succeeded",
+        semantic_reason="semantic_completed",
+        semantic_provenance=None,
+        findings=(),
+        suppressed_count="0",
+        finding_checklist=CheckFindingChecklistModel.model_validate(wire["finding_checklist"]),
+        children=None,
+        advisory_notes=(),
+        coverage=CoverageModel.model_construct(known_gaps=()),
+    )
+    assert f"[-] F-1 {raised.finding_id} rejection_accepted" in render_human_check(checked)
+
+    # Status findings view and its CLI/TUI text.
+    status_body: dict[str, JsonValue] = {
+        **request_base(protocol_id("req_", seed + 60)),
+        "session_id": session.session_id,
+        "writer_id": session.writer_id,
+        "view": "findings",
+        "limit": "100",
+    }
+    status = await session.app.status(StatusRequest.model_validate(status_body))
+    assert isinstance(status.page, StatusFindingsPageModel)
+    status_row = next(item for item in status.page.items if item.finding_id == raised.finding_id)
+    assert status_row.todo_state == "rejection_accepted"
+    assert status_row.resolved is False
+    # The client-projected wire the CLI and the terminal interface both render.
+    projected = await project_case(
+        session.app,
+        ProjectionCase("status/findings-terminal", ControlMethod.STATUS, status_body, status),
+        seed + 65,
+    )
+    success = StatusResultModel.model_validate(projected).root
+    assert isinstance(success, StatusSuccessModel)
+    text = render_human_status(success)
+    assert f"[-] F-1 {raised.finding_id} rejection_accepted" in text
+    assert "verified_resolved" not in text
+    assert "rejection accepted 1" in summary_for_status(projected)
+
+    # Every receipt format names it as a rejection accepted, never as resolved.
+    after = frontier_json(second.result_frontier)
+    json_receipt = await _receipt(session, after, seed + 70, "json")
+    document = cast(Mapping[str, JsonValue], json_receipt.document)
+    assert document["rejection_accepted_finding_ids"] == [raised.finding_id]
+    for fmt in ("markdown", "text"):
+        rendered = await _receipt(session, after, seed + 71 + len(fmt), fmt)
+        human = cast(str, rendered.human_text)
+        assert "Rejection accepted" in human
+        assert raised.finding_id in human
+    assert projection_snapshot(replay(_records(session.app))) == projection_snapshot(
+        _live_projection(session.app)
+    )
+
+
+def _still_present_first_finding(frozen: FrozenCase) -> SemanticJudgment:
+    projection = frozen.case.projection
+    finding = next(
+        key
+        for key, row in projection.findings.items()
+        if row.payload is not None and row.payload.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+    )
+    obligation = next(iter(projection.obligations))
+    return SemanticJudgment(
+        "no_material_discrepancy",
+        (),
+        (PriorFindingVerdict(str(finding), "still_present", (str(obligation),)),),
+    )
+
+
+async def test_review_rounds_count_toward_the_budget_and_never_close_or_throttle() -> None:
+    """Each later review that leaves an item open is one round; the budget only asks, never acts."""
+
+    seed = 3200
+    reviewer = _Reviewer(
+        [_challenge_obligation, _still_present_first_finding, _still_present_first_finding]
+    )
+    session, frontier = await _session(reviewer, seed, attempt_budget=2)
+    first = await _check(session, frontier, seed + 10)
+    raised = _semantic(first)
+    second = await _check(session, frontier_json(first.result_frontier), seed + 20)
+    third = await _check(session, frontier_json(second.result_frontier), seed + 30)
+    assert len(reviewer.cases) == 3  # every check ran its review; nothing was throttled
+
+    # The check result carries the to-do list; at the budget it asks for a decision, never acts.
+    assert first.finding_checklist is not None
+    assert first.finding_checklist.next == "work_open_findings"
+    checklist = third.finding_checklist
+    assert checklist is not None and checklist.attempt_budget == 2
+    row = next(item for item in checklist.items if item.finding_id == raised.finding_id)
+    assert (row.todo_state, row.review_rounds) == ("open", 2)
+    assert checklist.next == "decide_at_budget"
+    wire = check_internal_json(third)
+    assert cast(Mapping[str, JsonValue], wire["finding_checklist"])["next"] == "decide_at_budget"
+    summary = summary_for_check(wire)
+    assert "at budget 2" in summary and "next: decide_at_budget" in summary
+
+    status = await session.app.status(
+        StatusRequest.model_validate(
+            {
+                **request_base(protocol_id("req_", seed + 40)),
+                "session_id": session.session_id,
+                "writer_id": session.writer_id,
+                "view": "findings",
+                "limit": "100",
+            }
+        )
+    )
+    assert isinstance(status.page, StatusFindingsPageModel)
+    assert status.page.attempt_budget == "2"
+    status_row = next(item for item in status.page.items if item.finding_id == raised.finding_id)
+    assert (status_row.todo_state, status_row.review_rounds) == ("open", "2")
+
+    live = _live_projection(session.app)
+    todo = finding_todo(live, raised.finding_id, attempt_budget=2)
+    assert todo.review_rounds == 2
+    assert todo.state is FindingTodoState.OPEN
+    assert todo.budget_reached
+    assert not finding_todo(live, raised.finding_id).budget_reached  # default budget 5
+    # Still open: the budget never closes or acknowledges anything on the agent's behalf.
+    assert live.findings[raised.finding_id].resolved_by_check_event_id is None
+    assert live.responses.get(raised.finding_id) is None
+    assert third.result_frontier.sequence > second.result_frontier.sequence
+    assert projection_snapshot(replay(_records(session.app))) == projection_snapshot(live)
+
+
+async def test_three_restatements_become_one_item() -> None:
+    """numba x3: the same challenge on unchanged material is seen again and suppressed."""
+
+    seed = 3300
+    reviewer = _Reviewer([_challenge_obligation] * 3)
+    session, frontier = await _session(reviewer, seed)
+    first = await _check(session, frontier, seed + 10)
+    raised = _semantic(first)
+    second = await _check(session, frontier_json(first.result_frontier), seed + 20)
+    third = await _check(session, frontier_json(second.result_frontier), seed + 30)
+
+    semantic_rows = [
+        row
+        for row in _records(session.app)
+        if row.schema.name == "finding_recorded"
+        and isinstance(row.payload, Finding)
+        and row.payload.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+    ]
+    assert [cast(Finding, row.payload).finding_id for row in semantic_rows] == [raised.finding_id]
+    for later in (second, third):
+        assert "semantic_restatements_suppressed" in later.coverage.known_gaps
+        assert "semantic_challenges_rejected" not in later.coverage.known_gaps
+    live = _live_projection(session.app)
+    assert finding_todo_state(live, raised.finding_id) is FindingTodoState.OPEN
+    # Each suppressed restatement is recorded on the one item as still present: two rounds.
+    assert live.findings[raised.finding_id].review_rounds == 2
+    checks = [row for row in _records(session.app) if row.schema.name == "check_recorded"]
+    assert [
+        [
+            (str(item.finding_id), item.verdict)
+            for item in cast(Any, row.payload).prior_finding_verdicts
+        ]
+        for row in checks[1:]
+    ] == [[(raised.finding_id, "still_present")]] * 2
+    assert projection_snapshot(replay(_records(session.app))) == projection_snapshot(live)
+
+
+async def test_a_re_raise_after_verified_resolution_mints_a_successor() -> None:
+    """Done stays done; the problem found again after a cited ``fixed`` is a new item (D1).
+
+    Raise, repair, a cited ``fixed`` resolves it; the next review raises the same challenge on the
+    same unchanged obligation. The resolved row keeps its proof and a successor row is minted
+    and blocks, instead of the re-raise being swallowed as a restatement.
+    """
+
+    seed = 3400
+    reviewer = _Reviewer(
+        [
+            _challenge_obligation,
+            _rule_first_finding("fixed", cite_repair=True),
+            _challenge_obligation,
+        ]
+    )
+    session, frontier = await _session(reviewer, seed)
+    first = await _check(session, frontier, seed + 10)
+    raised = _semantic(first)
+    _result, repaired = await _repair(session, frontier_json(first.result_frontier), seed + 20)
+    second = await _check(session, repaired, seed + 40)
+    live = _live_projection(session.app)
+    assert finding_todo_state(live, raised.finding_id) is FindingTodoState.VERIFIED_RESOLVED
+    assert receipt_blocking_finding_count(live) == 0
+
+    third = await _check(session, frontier_json(second.result_frontier), seed + 60)
+    successor = _semantic(third)
+    assert successor.finding_id != raised.finding_id
+    assert "semantic_restatements_suppressed" not in third.coverage.known_gaps
+    live = _live_projection(session.app)
+    assert finding_todo_state(live, raised.finding_id) is FindingTodoState.VERIFIED_RESOLVED
+    assert finding_todo_state(live, successor.finding_id) is FindingTodoState.OPEN
+    assert receipt_blocking_finding_count(live) == 1
+    assert projection_snapshot(replay(_records(session.app))) == projection_snapshot(live)
+
+
+async def test_a_checklist_read_failure_never_strands_the_committed_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D2: the checklist is additive context; any failure reading it drops only the list."""
+
+    from yoetz.application import check as check_module
+
+    def broken(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("checklist read failed")
+
+    seed = 3500
+    reviewer = _Reviewer([_challenge_obligation])
+    session, frontier = await _session(reviewer, seed)
+    monkeypatch.setattr(check_module, "build_finding_checklist", broken)
+    checked = await _check(session, frontier, seed + 10)
+    assert checked.outcome == "committed"
+    assert checked.finding_checklist is None
+    assert _semantic(checked).finding_id in _live_projection(session.app).findings

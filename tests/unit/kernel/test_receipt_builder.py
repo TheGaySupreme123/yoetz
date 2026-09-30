@@ -1496,3 +1496,35 @@ def test_resolved_semantic_issue_keeps_capture_coverage_limit(resolved: bool) ->
         else ReceiptConclusion.UNRESOLVED_FINDINGS_REMAIN
     )
     assert bool(resolved_finding_ids_for_render(receipt)) is resolved
+
+
+def test_a_rejection_accepted_row_stops_blocking_only_where_the_receipt_discloses_it() -> None:
+    """D8 (issue #905): on an artifact without the terminal sections the row still blocks."""
+
+    finding = _finding()
+    base = _context(finding=finding, check=_check(CheckVerdict.NO_ISSUE_DETECTED, _coverage()))
+    context = replace(
+        base,
+        finding_states=(
+            ReceiptFindingState(finding.finding_id, resolved=False, rejection_accepted=True),
+        ),
+    )
+    legacy = _build(context)
+    assert legacy.conclusion is ReceiptConclusion.UNRESOLVED_FINDINGS_REMAIN
+    assert legacy.rejection_accepted_finding_ids == ()
+
+    current_versions = replace(
+        _versions(), schema_versions=(SchemaVersionEntry("receipts/receipt-document", "1.3.0"),)
+    )
+    current = build_receipt(
+        context,
+        receipt_id("rcp_00000000-0000-4000-8000-000000000001"),
+        task_id("tsk_00000000-0000-4000-8000-000000000001"),
+        session_id("ses_00000000-0000-4000-8000-000000000001"),
+        timestamp_from_string("2026-07-19T00:00:00.000Z"),
+        current_versions,
+        ReceiptRedactionProfile.FULL_LOCAL,
+        ReceiptInclude.FULL,
+    )
+    assert current.conclusion is not ReceiptConclusion.UNRESOLVED_FINDINGS_REMAIN
+    assert current.rejection_accepted_finding_ids == (finding.finding_id,)

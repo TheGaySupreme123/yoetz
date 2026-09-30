@@ -111,6 +111,7 @@ Type `/` to open the filtered command list.
 |---|---|
 | `/status` | show setup, readiness, and current work |
 | `/work` | open a task by title to view claims, evidence, and findings |
+| `/findings` | show the open task's findings as a to-do list, each with its state |
 | `/check` | run a verification check |
 | `/progress` | show the latest check's review phase and elapsed time |
 | `/receipt` | view or export an honest receipt |
@@ -253,6 +254,11 @@ running, its line shows the review phase, attempt, elapsed time, and time left b
 deadline, refreshed every few seconds. `/progress` reads the latest check of the open task again,
 including after the result arrives. Progress names phases only; it is not evidence that the
 review is correct.
+
+`/findings` lists every finding of the open task as one to-do item with its state: `[ ]` open
+(with review rounds against the budget, for example `(2/5)`), `[x]` verified resolved, `[~]`
+acknowledged, not done, and `[-]` rejection accepted. It reads the same `status` findings view the
+agent sees, verified items included.
 
 `/receipt` produces Markdown, plain text, or JSON. The readable view leads with the verdict, then
 coverage, open findings, limitations, whether deeper review contributed, freshness, and — always

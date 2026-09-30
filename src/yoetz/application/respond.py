@@ -9,6 +9,7 @@ from typing import Final, Literal, Protocol, cast
 from yoetz.application.ledger_snapshot import projection_for_records
 from yoetz.application.unit_of_work import PreparedMutation, run_prepared_append
 from yoetz.domain.events import (
+    RESPONSE_EVENT_SCHEMA_VERSION,
     CheckRecordedPayload,
     EventDraft,
     EventSchema,
@@ -37,6 +38,7 @@ from yoetz.domain.values import (
     timestamp_from_datetime,
     timestamp_from_string,
 )
+from yoetz.kernel.finding_todo import TERMINAL_TODO_STATES, finding_todo_state
 from yoetz.kernel.projections import FindingProjectionRecord, ProjectionState
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.diagnostics import RuntimeCapability
@@ -517,6 +519,29 @@ async def execute_respond(app: Application, request: RespondRequest) -> RespondI
                     reason_code="finding_not_in_prefix",
                     field="finding_frontier",
                 )
+            todo = finding_todo_state(current_projection, finding_id(request.finding_id))
+            if todo in TERMINAL_TODO_STATES:
+                # Issue #905: a terminal item is final. Nothing is recorded, so a repeat is an
+                # idempotent no-op; new evidence about the same problem becomes a new finding.
+                raise _error(
+                    PublicErrorCode.INVALID_REQUEST,
+                    (
+                        f"The finding is already {todo.value}; that state is final and nothing "
+                        "was recorded. New evidence about the same problem is raised by a later "
+                        "check as a new finding."
+                    ),
+                    reason_code="finding_terminal",
+                    field="/finding_id",
+                )
+            if request.disposition == "acknowledged_not_done" and (
+                request.reason is None or not request.reason.strip()
+            ):
+                raise _error(
+                    PublicErrorCode.INVALID_REQUEST,
+                    "acknowledged_not_done requires a non-empty reason.",
+                    reason_code="response_fields_invalid",
+                    field="/reason",
+                )
             attempted = False
             for ref in () if request.evidence_refs is None else request.evidence_refs:
                 present = (
@@ -574,7 +599,12 @@ async def execute_respond(app: Application, request: RespondRequest) -> RespondI
             now = app.clock.now_utc()
             draft = EventDraft(
                 event_id(app.ids.new(IdKind.EVENT)),
-                EventSchema("response_recorded", "1.0.0"),
+                EventSchema(
+                    "response_recorded",
+                    RESPONSE_EVENT_SCHEMA_VERSION
+                    if payload.disposition is ResponseDisposition.ACKNOWLEDGED_NOT_DONE
+                    else "1.0.0",
+                ),
                 timestamp_from_datetime(now),
                 (finding_record.source_event_id,),
                 payload,

@@ -1712,19 +1712,24 @@ async def test_response_to_unreturned_finding_produces_check_not_applicable() ->
     assert type(rechecked) is CheckCommitResult, f"unexpected nonterminal check: {type(rechecked)}"
     assert stale_finding.finding_id not in tuple(item.finding_id for item in rechecked.findings)
 
-    responded = await app.respond(
-        RespondRequest.model_validate(
-            {
-                **_request_base(protocol_id("req_", 1311)),
-                "session_id": started.session_id,
-                "writer_id": started.writer_id,
-                "expected_frontier": _frontier(rechecked.result_frontier),
-                "finding_id": stale_finding.finding_id,
-                "finding_frontier": _frontier(checked.result_frontier),
-                "disposition": "acknowledged",
-            }
+    # The recheck proved that finding absent, so it is verified_resolved and final (issue #905):
+    # a response to it records nothing, and so cannot make the applicable check inapplicable.
+    with pytest.raises(PublicOperationError) as terminal:
+        await app.respond(
+            RespondRequest.model_validate(
+                {
+                    **_request_base(protocol_id("req_", 1311)),
+                    "session_id": started.session_id,
+                    "writer_id": started.writer_id,
+                    "expected_frontier": _frontier(rechecked.result_frontier),
+                    "finding_id": stale_finding.finding_id,
+                    "finding_frontier": _frontier(checked.result_frontier),
+                    "disposition": "acknowledged",
+                }
+            )
         )
-    )
+    assert terminal.value.safe_details is not None
+    assert terminal.value.safe_details["reason_code"] == "finding_terminal"
 
     receipt = await app.receipt(
         ReceiptRequest.model_validate(
@@ -1733,7 +1738,7 @@ async def test_response_to_unreturned_finding_produces_check_not_applicable() ->
                 "task_id": started.task_id,
                 "session_id": started.session_id,
                 "writer_id": started.writer_id,
-                "expected_frontier": _frontier(responded.result_frontier),
+                "expected_frontier": _frontier(rechecked.result_frontier),
                 "format": "json",
                 "include": "standard",
                 "redaction_profile": "full_local",
@@ -1741,7 +1746,7 @@ async def test_response_to_unreturned_finding_produces_check_not_applicable() ->
         )
     )
 
-    assert "check_not_applicable" in receipt.coverage.known_gaps
+    assert "check_not_applicable" not in receipt.coverage.known_gaps
     assert "check_current_as_of_earlier_frontier" not in receipt.coverage.known_gaps
 
 
@@ -4444,18 +4449,24 @@ async def test_command_gap_partition_preserves_receipt_coverage(
         if fmt != "json":
             assert receipt.human_text is not None
             assert "command_attempt_uncorroborated" in receipt.human_text
-    response = await app.respond(
-        RespondRequest.model_validate(
-            {
-                **base(),
-                "expected_frontier": _frontier(frontier),
-                "finding_id": target.finding_id,
-                "finding_frontier": _frontier(first.result_frontier),
-                "disposition": "acknowledged",
-                "reason": "Historical finding remains in the record.",
-            }
-        )
+    respond_request = RespondRequest.model_validate(
+        {
+            **base(),
+            "expected_frontier": _frontier(frontier),
+            "finding_id": target.finding_id,
+            "finding_frontier": _frontier(first.result_frontier),
+            "disposition": "acknowledged",
+            "reason": "Historical finding remains in the record.",
+        }
     )
+    if should_resolve:
+        # A verified_resolved finding is final (issue #905): the response records nothing.
+        with pytest.raises(PublicOperationError) as terminal:
+            await app.respond(respond_request)
+        assert terminal.value.safe_details is not None
+        assert terminal.value.safe_details["reason_code"] == "finding_terminal"
+        return
+    response = await app.respond(respond_request)
     frontier = response.result_frontier
     receipt = await app.receipt(
         ReceiptRequest.model_validate(
@@ -5352,12 +5363,18 @@ async def test_a_defect_the_review_still_finds_after_repair_stays_current() -> N
     view = await _findings_view(app, started, seed + 41, include_resolved=True)
     by_id = {item.finding_id: item for item in view.items}
     assert by_id[finding.finding_id].resolved is False
+    # Issue #905: the unchanged restatement is seen again and suppressed rather than minted as a
+    # second row, and it is recorded on the open item as ``still_present`` so the later review
+    # still speaks for it: suppression never reads as absence.
     refired = [
         item
         for item in rechecked.findings
         if item.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED and item.kind is finding.kind
     ]
-    assert refired and all(not by_id[item.finding_id].resolved for item in refired)
+    assert refired == []
+    assert "semantic_restatements_suppressed" in rechecked.coverage.known_gaps
+    assert by_id[finding.finding_id].todo_state == "open"
+    assert by_id[finding.finding_id].review_rounds == "1"
 
 
 # Issue #912: the publication recipe's caller digests are a disclosed provenance label, never an
@@ -6811,3 +6828,71 @@ async def test_an_ai_finding_the_recheck_did_not_assess_never_resolves_by_silenc
 
 def _projected_detail(detail: object) -> str:
     return detail if type(detail) is str else ""
+
+
+@pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))
+async def test_the_check_carries_the_finding_checklist_on_both_ledgers(
+    ledger_backend: Literal["memory", "sqlite"],
+) -> None:
+    """Issue #905: the list is read from the adapter-owned projection, never a status page."""
+
+    app, _runtime, _ = _build_app(seed_offset=57, ledger_backend=ledger_backend)
+    _started, checked, _obligation = await _bootstrap_finding(app, seed=5700)
+    checklist = checked.finding_checklist
+    assert checklist is not None
+    from yoetz.domain.findings import FINDING_KIND_TRAITS
+
+    blocking = {item.finding_id for item in checked.findings if FINDING_KIND_TRAITS[item.kind][1]}
+    assert blocking <= {item.finding_id for item in checklist.items}
+    assert checklist.counts.open == len(checklist.items)
+    assert checklist.next == "work_open_findings"
+
+
+@pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))
+async def test_a_final_local_finding_returned_again_gains_no_review_round(
+    ledger_backend: Literal["memory", "sqlite"],
+) -> None:
+    """Greptile P2 on #943 through the real respond, check, status and replay path.
+
+    A local finding answered ``acknowledged_not_done`` is final. The next check returns it again
+    over a later subject; its review rounds stay 0 in the adapter's projection and in a replay.
+    """
+
+    app, runtime, _ = _build_app(seed_offset=58, ledger_backend=ledger_backend)
+    started, checked, _obligation = await _bootstrap_finding(app, seed=5800)
+    finding = checked.findings[0]
+    responded = await app.respond(
+        RespondRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 5810)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(checked.result_frontier),
+                "finding_id": finding.finding_id,
+                "finding_frontier": _frontier(checked.result_frontier),
+                "disposition": "acknowledged_not_done",
+                "reason": "The obligation is deferred to a later milestone by the owner.",
+            }
+        )
+    )
+    rechecked = await app.check(
+        CheckRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 5811)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(responded.result_frontier),
+                "mode": "deterministic_only",
+                "max_findings": "3",
+            }
+        )
+    )
+    assert type(rechecked) is CheckCommitResult
+    assert finding.finding_id in {item.finding_id for item in rechecked.findings}
+
+    view = await _findings_view(app, started, 5812, include_resolved=True)
+    row = next(item for item in view.items if item.finding_id == finding.finding_id)
+    assert (row.todo_state, row.review_rounds) == ("acknowledged_not_done", "0")
+    ledger, _ = next(iter(runtime.resources.values()))
+    records = tuple([item async for item in ledger.load_events(started.session_id)])
+    assert replay(records).findings[finding.finding_id].review_rounds == 0

@@ -144,6 +144,10 @@ never relax AI-powered review proof. A resolved finding stays visible as history
 material edit, evidence change, or plan change. A readable response to a finding returned by the
 current check does not require a recheck, nor does acknowledging an observation-authored
 non-actionable finding or publishing `work_closed`; a redacted or unreadable response does.
+`acknowledged_not_done` records, with a required reason, that you will not do what a finding asks;
+it is final, is not reviewed again, and keeps the receipt from reading clean. A finding that is
+already `verified_resolved`, `acknowledged_not_done` or `rejection_accepted` is final: `respond`
+records nothing and answers `finding_terminal`.
 
 ### `status`
 Reads current state — use it after a resume, a compaction, a handoff, or any uncertainty about what

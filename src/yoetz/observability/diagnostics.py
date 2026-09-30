@@ -48,6 +48,8 @@ _FIELD_ORDER: Final = (
     "semantic_challenges_returned",
     "semantic_candidates_accepted",
     "semantic_challenges_rejected",
+    "semantic_restatements_suppressed",
+    "semantic_prior_rulings_set_aside",
     "semantic_findings_selected",
     "semantic_findings_suppressed",
     "semantic_capture_parts_resolved",

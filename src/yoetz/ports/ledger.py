@@ -37,6 +37,7 @@ from yoetz.domain.values import (
 )
 from yoetz.kernel.closure_readiness import ClosureReadinessFacts
 from yoetz.kernel.deterministic_checks import CaseAvailabilityFacts, DeterministicCase
+from yoetz.kernel.finding_todo import FindingTodoCounts
 from yoetz.kernel.lineage import LineageRollupState
 from yoetz.kernel.projections import ProjectionState
 from yoetz.ports.objects import ObjectKind, ObjectRef
@@ -62,6 +63,8 @@ from yoetz.protocol.models import (
 )
 
 __all__ = [
+    "CheckChecklistItem",
+    "CheckFindingChecklist",
     "AcceptedEventSummary",
     "AppendCommand",
     "AppendEntry",
@@ -708,6 +711,78 @@ class CheckAdvisoryNote:
         object.__setattr__(self, "task_ids", tasks)
 
 
+FindingTodoStateWire = Literal[
+    "acknowledged_not_done", "open", "rejection_accepted", "verified_resolved"
+]
+_TODO_STATES: Final = frozenset(
+    {"acknowledged_not_done", "open", "rejection_accepted", "verified_resolved"}
+)
+# The closed "next:" tokens of the finding checklist (issue #905).
+ChecklistNext = Literal["decide_at_budget", "request_receipt", "work_open_findings"]
+_CHECKLIST_NEXT: Final = frozenset({"decide_at_budget", "request_receipt", "work_open_findings"})
+MAX_CHECKLIST_ITEMS: Final = 100
+
+
+@dataclass(frozen=True, slots=True)
+class CheckChecklistItem:
+    """One finding on the converging to-do list, structural only."""
+
+    finding_id: str
+    todo_state: FindingTodoStateWire
+    review_rounds: int
+
+    def __post_init__(self) -> None:
+        _id(IdKind.FINDING, self.finding_id)
+        if type(self.todo_state) is not str or self.todo_state not in _TODO_STATES:
+            raise _invalid()
+        _uint(self.review_rounds)
+
+
+@dataclass(frozen=True, slots=True)
+class CheckFindingChecklist:
+    """The task's findings as a to-do list after this check (issue #905).
+
+    Current projection context attached beside the frozen check, like advisory notes: it never
+    changes the recorded check event or its verdict.
+    """
+
+    attempt_budget: int
+    items: tuple[CheckChecklistItem, ...]
+    next: ChecklistNext
+    # Counted over every current actionable item, not only the listed ones.
+    counts: FindingTodoCounts
+
+    def __post_init__(self) -> None:
+        if type(self.attempt_budget) is not int or not 1 <= self.attempt_budget <= 50:
+            raise _invalid()
+        if type(self.counts) is not FindingTodoCounts:
+            raise _invalid()
+        for value in (
+            self.counts.open,
+            self.counts.verified_resolved,
+            self.counts.acknowledged_not_done,
+            self.counts.rejection_accepted,
+            self.counts.budget_reached,
+        ):
+            _uint(value)
+        total = (
+            self.counts.open
+            + self.counts.verified_resolved
+            + self.counts.acknowledged_not_done
+            + self.counts.rejection_accepted
+        )
+        if total < len(self.items) or self.counts.budget_reached > self.counts.open:
+            raise _invalid()
+        if type(self.items) is not tuple or len(self.items) > MAX_CHECKLIST_ITEMS:
+            raise _invalid()
+        if any(type(item) is not CheckChecklistItem for item in self.items):
+            raise _invalid()
+        if len({item.finding_id for item in self.items}) != len(self.items):
+            raise _invalid()
+        if type(self.next) is not str or self.next not in _CHECKLIST_NEXT:
+            raise _invalid()
+
+
 @dataclass(frozen=True, slots=True)
 class CheckCommitResult:
     outcome: Literal["committed", "replayed"]
@@ -730,6 +805,7 @@ class CheckCommitResult:
     advisory_notes: tuple[CheckAdvisoryNote, ...] = ()
     # Structural record of what an ``insufficient_packet`` review named as missing (issue #907).
     missing_for_assessment: tuple[MissingForAssessmentItem, ...] = ()
+    finding_checklist: CheckFindingChecklist | None = None
 
     def __post_init__(self) -> None:
         if type(self.outcome) is not str or self.outcome not in {"committed", "replayed"}:
@@ -771,6 +847,11 @@ class CheckCommitResult:
         if type(self.coverage) is not Coverage or type(self.versions) is not CheckVersionSlice:
             raise _invalid()
         if self.children is not None and type(self.children) is not CheckChildrenPreview:
+            raise _invalid()
+        if (
+            self.finding_checklist is not None
+            and type(self.finding_checklist) is not CheckFindingChecklist
+        ):
             raise _invalid()
         if type(self.advisory_notes) is not tuple or len(self.advisory_notes) > 64:
             raise _invalid()
@@ -1402,7 +1483,17 @@ class ObligationsProjectionFilter:
 class FindingsProjectionFilter:
     origin: Literal["deterministic", "semantic_model_derived"] | None
     priority: int | None
-    disposition: Literal["none", "acknowledged", "provenance_disputed", "rejected", "waived"] | None
+    disposition: (
+        Literal[
+            "none",
+            "acknowledged",
+            "acknowledged_not_done",
+            "provenance_disputed",
+            "rejected",
+            "waived",
+        ]
+        | None
+    )
     include_resolved: bool | None
 
     def __post_init__(self) -> None:
@@ -1418,7 +1509,14 @@ class FindingsProjectionFilter:
         if self.disposition is not None and (
             type(self.disposition) is not str
             or self.disposition
-            not in {"none", "acknowledged", "provenance_disputed", "rejected", "waived"}
+            not in {
+                "none",
+                "acknowledged",
+                "acknowledged_not_done",
+                "provenance_disputed",
+                "rejected",
+                "waived",
+            }
         ):
             raise _invalid()
         if self.include_resolved is not None and type(self.include_resolved) is not bool:

@@ -74,6 +74,8 @@ from yoetz.protocol.models import (
     StatusClosureReadinessModel,
     StatusCompactObligationModel,
     StatusEvidenceItemModel,
+    StatusFindingItemModel,
+    StatusFindingsPageModel,
     StatusObligationItemModel,
     StatusOperationPageModel,
     StatusProjectDetectionModel,
@@ -115,7 +117,10 @@ def _version_slice_payload() -> dict[str, object]:
 # A new result model that joins the set without a row in this table fails the inventory test.
 _RESULT_OPTIONAL_NON_NULL: tuple[tuple[type[BaseModel], frozenset[str]], ...] = (
     (CheckContinuationModel, frozenset({"pending_id", "expires_at"})),
-    (CheckSuccessModel, frozenset({"children", "advisory_notes", "missing_for_assessment"})),
+    (
+        CheckSuccessModel,
+        frozenset({"children", "advisory_notes", "missing_for_assessment", "finding_checklist"}),
+    ),
     (
         ChildDependencySnapshotModel,
         frozenset(
@@ -151,6 +156,8 @@ _RESULT_OPTIONAL_NON_NULL: tuple[tuple[type[BaseModel], frozenset[str]], ...] = 
         ),
     ),
     (StatusCompactObligationModel, frozenset({"acceptance_criteria"})),
+    (StatusFindingItemModel, frozenset({"todo_state", "review_rounds"})),
+    (StatusFindingsPageModel, frozenset({"attempt_budget"})),
     (StatusObligationItemModel, frozenset({"acceptance_criteria"})),
     (
         StatusAdviceItemModel,
@@ -872,6 +879,14 @@ async def test_root_start_and_check_omit_unset_multi_agent_fields() -> None:
         assert "advisory_notes" not in projected_check
         # Issue #907: only an insufficient_packet review that named items emits the list.
         assert "missing_for_assessment" not in projected_check
+        # Issue #905: the checklist is current context a ledger may not offer; unset, it is
+        # absent rather than null, and an explicit null is refused.
+        assert "finding_checklist" in projected_check
+        unset = {key: value for key, value in projected_check.items() if key != "finding_checklist"}
+        model = CheckSuccessModel.model_validate(unset)
+        assert "finding_checklist" not in model.model_dump(mode="json", exclude_unset=True)
+        with pytest.raises(ValidationError, match="optional_field_must_not_be_null"):
+            CheckSuccessModel.model_validate({**unset, "finding_checklist": None})
     finally:
         await app.close()
 
@@ -962,6 +977,33 @@ async def test_root_start_and_check_omit_unset_multi_agent_fields() -> None:
                 "coordination_resource_paths",
             ),
         ),
+        (
+            StatusFindingItemModel,
+            {
+                "finding_id": protocol_id("fnd_", 2918),
+                "kind": "result_without_action",
+                "origin": "deterministic",
+                "priority": 2,
+                "summary": "A result has no recorded action.",
+                "detail": "Record the action that produced the result.",
+                "subject_refs": (protocol_id("res_", 2919),),
+                "policy_id": "work-integrity",
+                "policy_version": "0.1.0",
+                "subject_frontier": {"sequence": "1", "head_digest": _DIGEST},
+                "coverage": dict(
+                    coverage_to_json(coverage_for_channel(PublicationChannel.COOPERATIVE_MCP))
+                ),
+                "provenance": None,
+                "disposition": "none",
+                "resolved": False,
+                "response_event_id": None,
+                "reason": None,
+                "waiver_scope": None,
+                "waiver_expiry": None,
+            },
+            ("todo_state", "review_rounds"),
+        ),
+        (StatusFindingsPageModel, {"items": [], "next_cursor": None}, ("attempt_budget",)),
         (
             StatusProjectDetectionModel,
             {
@@ -1093,7 +1135,10 @@ def test_every_result_optional_non_null_field_has_an_unset_projection_case() -> 
         )
     for model, fields in (
         ("StartSuccessModel", ("attach_handle", "parent_task_id", "depth", "origin", "acceptance")),
-        ("CheckSuccessModel", ("children", "advisory_notes", "missing_for_assessment")),
+        (
+            "CheckSuccessModel",
+            ("children", "advisory_notes", "missing_for_assessment", "finding_checklist"),
+        ),
     ):
         for field in fields:
             covered[model, field] = "test_root_start_and_check_omit_unset_multi_agent_fields"
@@ -1104,6 +1149,8 @@ def test_every_result_optional_non_null_field_has_an_unset_projection_case() -> 
             ("child_frontier", "child_check_id", "child_receipt_id", "membership_generation"),
         ),
         ("ProjectTextRefModel", ("envelope_digest",)),
+        ("StatusFindingItemModel", ("todo_state", "review_rounds")),
+        ("StatusFindingsPageModel", ("attempt_budget",)),
         ("StatusProjectPageModel", ("title", "description", "title_ref", "description_ref")),
         (
             "StatusAdviceItemModel",

@@ -64,6 +64,7 @@ from yoetz.protocol.models import (
 from yoetz.protocol.recovery import continuation_for_semantic_outcome, directive_for
 
 __all__ = [
+    "receipt_document_carries_terminal_sections",
     "CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP",
     "COMPLETION_CLAIM_OUTSIDE_PLAN_GAP",
     "COMPLETION_PLAN_NOT_CLAIMED_GAP",
@@ -92,6 +93,7 @@ __all__ = [
     "SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP",
     "SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP",
     "SEMANTIC_PRIOR_VERDICTS_UNSUPPORTED_GAP",
+    "SEMANTIC_RESTATEMENTS_SUPPRESSED_GAP",
     "SEMANTIC_CHALLENGES_REJECTED_GAP",
     "SEMANTIC_MISSING_AGENT_SUPPLIABLE_GAP",
     "SEMANTIC_MISSING_ALREADY_SUPPLIED_GAP",
@@ -176,6 +178,9 @@ SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP: Final = "semantic_prior_findings_over_li
 # no rejection to accept, or a finding outside the fence (issue #905). The ruling counts for
 # nothing beyond `unassessable`; this gap discloses it.
 SEMANTIC_PRIOR_VERDICTS_UNSUPPORTED_GAP: Final = "semantic_prior_verdicts_unsupported"
+# Issue #905: a challenge that restated a recorded AI-powered finding (same kind, subjects within
+# that finding's, nothing recorded since) was "seen again, suppressed" instead of minted twice.
+SEMANTIC_RESTATEMENTS_SUPPRESSED_GAP: Final = "semantic_restatements_suppressed"
 OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP: Final = "optional_semantic_review_blocked_by_policy"
 # The strict route ceiling blocked this process, but the durable applied-route record says the
 # last install applied the policy route (issue #537). The disagreement is the whole claim: a
@@ -539,6 +544,12 @@ def _receipt_document_artifact_version(versions: ReceiptVersionSlice) -> str | N
     )
 
 
+def receipt_document_carries_terminal_sections(versions: ReceiptVersionSlice) -> bool:
+    """Whether this receipt artifact version carries the issue #905 terminal-state sections."""
+
+    return _receipt_document_artifact_version(versions) == "1.3.0"
+
+
 @dataclass(frozen=True, slots=True)
 class ReceiptObligation:
     obligation_id: ObligationId
@@ -590,6 +601,7 @@ class ReceiptResponse:
             if self.waiver_scope is not None or self.waiver_expiry is not None:
                 raise ProtocolValueError(invalid)
         elif self.disposition in {
+            ResponseDisposition.ACKNOWLEDGED_NOT_DONE,
             ResponseDisposition.PROVENANCE_DISPUTED,
             ResponseDisposition.REJECTED,
         }:
@@ -784,6 +796,10 @@ class ReceiptDocument:
     # field is optional so historical local-only receipts keep their exact frozen bytes and
     # old readers can continue to omit it.
     semantic_provenance: SemanticProvenance | None = None
+    # Issue #905 terminal states, disclosed by id in their own sections on a 1.3.0 artifact.
+    # Absent (empty) keeps every earlier receipt's exact bytes.
+    acknowledged_not_done_finding_ids: tuple[FindingId, ...] = ()
+    rejection_accepted_finding_ids: tuple[FindingId, ...] = ()
 
     def __post_init__(self) -> None:
         invalid = "invalid_receipt_document"
@@ -839,6 +855,18 @@ class ReceiptDocument:
         receipt_schema_version = _receipt_document_artifact_version(self.versions)
         if self.children.children and receipt_schema_version != "1.3.0":
             raise ProtocolValueError("receipt_children_schema_version")
+        carried_ids = frozenset(
+            finding.finding_id for finding in cast(tuple[Finding, ...], findings)
+        )
+        for name in ("acknowledged_not_done_finding_ids", "rejection_accepted_finding_ids"):
+            raw_ids = _validate_tuple(getattr(self, name), 0, 100, invalid)
+            ids = tuple(finding_id(value) for value in raw_ids)
+            _validate_sorted_unique_strings(cast(tuple[str, ...], ids))
+            if ids and (receipt_schema_version != "1.3.0" or not carried_ids.issuperset(ids)):
+                raise ProtocolValueError(invalid)
+            object.__setattr__(self, name, ids)
+        if set(self.acknowledged_not_done_finding_ids) & set(self.rejection_accepted_finding_ids):
+            raise ProtocolValueError(invalid)
         section_keys = tuple(cast(ReceiptSection, section).key for section in sections)
         if section_keys not in _VALID_SECTION_KEY_SEQUENCES:
             raise ProtocolValueError("invalid_receipt_section_order")
@@ -1170,7 +1198,19 @@ def receipt_document_from_json(value: object) -> ReceiptDocument:
         raise ProtocolValueError(invalid)
     # The artifact version is selected by the version slice.  Its 1.3.0 successor adds the
     # required ``children`` member while retaining the document's historical inner version.
-    source = _closed_object(value, keys, frozenset({"children", "semantic_provenance"}), invalid)
+    source = _closed_object(
+        value,
+        keys,
+        frozenset(
+            {
+                "acknowledged_not_done_finding_ids",
+                "children",
+                "rejection_accepted_finding_ids",
+                "semantic_provenance",
+            }
+        ),
+        invalid,
+    )
     raw_suppressed = _field(source, "suppressed_finding_count", invalid)
     if type(raw_suppressed) is not int:
         raise ProtocolValueError("invalid_receipt_document")
@@ -1206,6 +1246,9 @@ def receipt_document_from_json(value: object) -> ReceiptDocument:
         raise ProtocolValueError("invalid_receipt_document")
     if not has_children and artifact_version == "1.3.0":
         raise ProtocolValueError("invalid_receipt_document")
+    for name in ("acknowledged_not_done_finding_ids", "rejection_accepted_finding_ids"):
+        if name in source and not _array(source[name], invalid):
+            raise ProtocolValueError(invalid)
     semantic_provenance_value = (
         semantic_provenance_from_json(freeze_json(_field(source, "semantic_provenance", invalid)))
         if "semantic_provenance" in source
@@ -1238,6 +1281,14 @@ def receipt_document_from_json(value: object) -> ReceiptDocument:
             _children_from_json(_field(source, "children", invalid))
             if has_children
             else ReceiptChildren()
+        ),
+        acknowledged_not_done_finding_ids=tuple(
+            finding_id(item)
+            for item in _array(source.get("acknowledged_not_done_finding_ids", ()), invalid)
+        ),
+        rejection_accepted_finding_ids=tuple(
+            finding_id(item)
+            for item in _array(source.get("rejection_accepted_finding_ids", ()), invalid)
         ),
     )
     return document
@@ -1384,6 +1435,12 @@ def receipt_document_to_json(document: ReceiptDocument) -> dict[str, object]:
     }
     if _receipt_document_artifact_version(document.versions) == "1.3.0":
         result["children"] = _children_to_json(document.children)
+    if document.acknowledged_not_done_finding_ids:
+        result["acknowledged_not_done_finding_ids"] = list(
+            document.acknowledged_not_done_finding_ids
+        )
+    if document.rejection_accepted_finding_ids:
+        result["rejection_accepted_finding_ids"] = list(document.rejection_accepted_finding_ids)
     # Omit absent provenance rather than emitting null: local-only and historical receipt
     # documents therefore retain their exact pre-extension bytes.
     if document.semantic_provenance is not None:
@@ -1429,10 +1486,19 @@ def resolved_finding_ids_for_render(document: ReceiptDocument) -> frozenset[str]
 
 
 def unresolved_findings_for_render(document: ReceiptDocument) -> tuple[Finding, ...]:
-    """Current (not resolved) finding rows, in document order."""
+    """Current (not resolved) finding rows, in document order.
+
+    A ``rejection_accepted`` row is unresolved but settled (issue #905): it has its own section
+    and does not count here.
+    """
 
     resolved = resolved_finding_ids_for_render(document)
-    return tuple(finding for finding in document.findings if finding.finding_id not in resolved)
+    settled = frozenset(document.rejection_accepted_finding_ids)
+    return tuple(
+        finding
+        for finding in document.findings
+        if finding.finding_id not in resolved and finding.finding_id not in settled
+    )
 
 
 def _waiver_for_render(document: ReceiptDocument) -> ReceiptResponse | None:
@@ -1519,6 +1585,30 @@ def render_receipt_human(document: ReceiptDocument, *, markdown: bool) -> str:
                     f"later_manifest={later}; findings={findings}"
                 )
         parts.append("\n".join(child_parts))
+    if document.acknowledged_not_done_finding_ids:
+        heading = "## Acknowledged, not done" if markdown else "Acknowledged, not done"
+        parts.append(
+            "\n".join(
+                (
+                    heading,
+                    "The agent recorded these findings as acknowledged and not done, each with a "
+                    "reason. They remain unresolved and keep this receipt from reading clean.",
+                    *(f"- {item}" for item in document.acknowledged_not_done_finding_ids),
+                )
+            )
+        )
+    if document.rejection_accepted_finding_ids:
+        heading = "## Rejection accepted" if markdown else "Rejection accepted"
+        parts.append(
+            "\n".join(
+                (
+                    heading,
+                    "The agent rejected these AI-powered findings with a reason and a later "
+                    "review withdrew them. They are not resolved and stay on the record.",
+                    *(f"- {item}" for item in document.rejection_accepted_finding_ids),
+                )
+            )
+        )
     advisory_count = sum(
         1 for finding in document.findings if not FINDING_KIND_TRAITS[finding.kind][1]
     )

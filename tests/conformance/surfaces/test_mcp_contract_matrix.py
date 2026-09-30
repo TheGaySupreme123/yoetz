@@ -298,8 +298,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(TOOL_DESCRIPTORS) == ("policy", "strict")
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == ("policy", "strict")
     assert TOOL_DESCRIPTOR_SET_DIGEST == {
-        "policy": "sha256:e63edce9f82599cadb1e736558143b8028aed6e04ffca1c492756094d0e907d1",
-        "strict": "sha256:9d390f49ba52005b27d31333f847b663068bffc81adc9d855dded3c6c15a92f6",
+        "policy": "sha256:2e65cf4976999623a3323248fbe5981f49be0254ee3d6860940c0b453184a055",
+        "strict": "sha256:2b3d3c703966eba20a6175a075f2e59d18cfcc52bb80134c84284703d3bcb5b9",
     }
     for profile, descriptors in TOOL_DESCRIPTORS.items():
         assert tuple(item.name for item in descriptors) == _EXPECTED_TOOL_NAMES
@@ -777,7 +777,13 @@ def test_respond_agent_surface_names_every_admitted_disposition() -> None:
     schema = cast(dict[str, Any], dict(descriptor.input_schema))
     disposition = cast(dict[str, Any], cast(dict[str, Any], schema["properties"])["disposition"])
     admitted = tuple(cast(list[str], disposition["enum"]))
-    assert admitted == ("acknowledged", "provenance_disputed", "rejected", "waived")
+    assert admitted == (
+        "acknowledged",
+        "acknowledged_not_done",
+        "provenance_disputed",
+        "rejected",
+        "waived",
+    )
     assert "allOf" not in schema
     rules = cast(str, disposition["description"]).lower()
     for value in admitted:

@@ -101,6 +101,11 @@ reverse-chronological released versions.
   While you have it off, rows queued before you switched it off are closed at service start
   without being sent, so turning it back on never sends old work (#888).
 
+- The generic-host initialize instructions (`agent-instructions.md`) no longer state the `client`
+  shape and the JSON-string rule for canonical integers twice; each rule is kept once, in the
+  canonical-values section. This keeps the combined 0.3 MCP surface inside its reviewed 224,000-byte
+  budget without dropping any rule.
+
 ### Fixed
 
 - A cached 100-row `status` page no longer costs ~2 s. Every page was schema-validated about eleven

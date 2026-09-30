@@ -39,10 +39,11 @@ def anyio_backend() -> str:
 
 
 class _Client:
-    def __init__(self) -> None:
+    def __init__(self, status_result: StatusResultModel | None = None) -> None:
         self.requests: list[
             StartRequestModel | CheckRequestModel | ReceiptRequestModel | StatusRequestModel
         ] = []
+        self.status_result = status_result
 
     async def start(self, request: StartRequestModel) -> object:
         self.requests.append(request)
@@ -67,7 +68,7 @@ class _Client:
 
     async def status(self, request: StatusRequestModel) -> object:
         self.requests.append(request)
-        return _lineage_status_result()
+        return self.status_result or _lineage_status_result()
 
     @staticmethod
     def _refused() -> object:
@@ -240,6 +241,90 @@ async def test_lineage_view_reuses_cli_renderer_and_preserves_child_facts(
     assert status_request.view == "lineage"
     assert status_request.limit == "50"
     assert status_request.cursor is None
+
+
+_FINDING_STATES = ("open", "verified_resolved", "acknowledged_not_done", "rejection_accepted")
+
+
+def _finding_row(number: int, todo_state: str) -> dict[str, object]:
+    digest = "sha256:" + "a" * 64
+    responded = {
+        "acknowledged_not_done": "acknowledged_not_done",
+        "rejection_accepted": "rejected",
+    }.get(todo_state)
+    return {
+        "finding_id": f"fnd_52000000-0000-4000-8000-00000000002{number}",
+        "kind": "claim_without_admissible_evidence",
+        "origin": "deterministic",
+        "priority": 2,
+        "summary": "A structural finding.",
+        "detail": "A structural finding detail.",
+        "subject_refs": [f"clm_52000000-0000-4000-8000-00000000003{number}"],
+        "policy_id": "work-integrity",
+        "policy_version": "0.1.0",
+        "subject_frontier": {"sequence": "7", "head_digest": digest},
+        "coverage": _lineage_status_result().model_dump(mode="json")["coverage"],
+        "provenance": None,
+        "disposition": responded or "none",
+        "resolved": todo_state == "verified_resolved",
+        "response_event_id": (
+            None if responded is None else f"evt_52000000-0000-4000-8000-00000000004{number}"
+        ),
+        "reason": None if responded is None else "A recorded reason.",
+        "waiver_scope": None,
+        "waiver_expiry": None,
+        "todo_state": todo_state,
+        "review_rounds": "2" if todo_state == "open" else "0",
+    }
+
+
+def _findings_status_result() -> StatusResultModel:
+    wire = _lineage_status_result().model_dump(mode="json")
+    wire["view"] = "findings"
+    wire["page"] = {
+        "items": [_finding_row(index, state) for index, state in enumerate(_FINDING_STATES)],
+        "next_cursor": None,
+        "attempt_budget": "5",
+    }
+    return StatusResultModel.model_validate(wire)
+
+
+async def test_findings_view_shows_each_items_final_state_through_the_cli_renderer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #943 review CG-1: the terminal interface lists every item with its one to-do state."""
+
+    client = _Client(_findings_status_result())
+
+    @asynccontextmanager
+    async def connect(_runtime: YoetzRuntime) -> AsyncGenerator[_Client]:
+        yield client
+
+    monkeypatch.setattr(YoetzRuntime, "_client", connect)
+    runtime = YoetzRuntime(cwd=tmp_path)
+    await runtime.open_task(_SESSION)
+
+    rendered = await runtime.task_status(_SESSION, "findings")
+    result = _findings_status_result().root
+    assert isinstance(result, StatusSuccessModel)
+    assert rendered.lines == tuple(render_human_status(result).splitlines())
+    rows = [_finding_row(index, state) for index, state in enumerate(_FINDING_STATES)]
+    expected = (
+        f"[ ] F-1 {rows[0]['finding_id']} open (2/5)",
+        f"[x] F-2 {rows[1]['finding_id']} verified_resolved",
+        f"[~] F-3 {rows[2]['finding_id']} acknowledged_not_done",
+        f"[-] F-4 {rows[3]['finding_id']} rejection_accepted",
+    )
+    for line in expected:
+        assert line in rendered.lines
+
+    status_request = client.requests[-1]
+    assert isinstance(status_request, StatusRequestModel)
+    assert status_request.view == "findings"
+    assert status_request.session_id == _SUCCESSOR
+    # Verified items are part of the to-do list, so the view asks for them explicitly.
+    assert status_request.filter is not None
+    assert status_request.filter.model_dump(exclude_none=True) == {"include_resolved": True}
 
 
 async def test_title_cannot_select_another_task(tmp_path: Path) -> None:

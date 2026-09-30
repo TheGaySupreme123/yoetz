@@ -494,6 +494,7 @@ class YoetzTui(App[int]):
             "work": self.command_work,
             "lineage": self.command_lineage,
             "project": self.command_project,
+            "findings": self.command_findings,
             "check": self.command_check,
             "progress": self.command_progress,
             "receipt": self.command_receipt,
@@ -2472,14 +2473,18 @@ class YoetzTui(App[int]):
     async def command_project(self) -> None:
         await self._command_task_view("project")
 
-    async def _command_task_view(self, view: Literal["lineage", "project"]) -> None:
+    async def command_findings(self) -> None:
+        await self._command_task_view("findings")
+
+    async def _command_task_view(self, view: Literal["lineage", "project", "findings"]) -> None:
         title = await self._require_task()
         if title is None:
             return
+        heading = {"lineage": "Child tasks", "project": "Project", "findings": "Findings"}[view]
         cursor: str | None = None
         while True:
             page = await self.runtime.task_status(title, view, cursor=cursor)
-            self.settle(Level.ACTIVE, "Child tasks" if view == "lineage" else "Project", page.lines)
+            self.settle(Level.ACTIVE, heading, page.lines)
             if page.next_cursor is None:
                 return
             chosen = await self.ask(

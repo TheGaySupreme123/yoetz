@@ -332,23 +332,36 @@ class FindingProjectionRecord(ProjectionRecord[Finding]):
     qualified to resolve this finding's issue (``kernel/finding_resolution.py``). It is ``None``
     while the finding is current. A response disposition never sets it; a check that returns the
     finding again clears it; redacting the proving check clears it.
+
+    ``review_rounds`` counts the later recorded checks that assessed this finding and left it
+    open (issue #905): a local check that returned it again, or an AI-powered review that ruled it
+    ``still_present``, ``answered_not_fixed`` or ``unassessable``. It feeds the per-item attempt
+    budget and never closes anything. ``rejection_accepted_by_check_event_id`` names the later
+    check whose reviewer withdrew this AI-powered finding after the agent rejected it with a
+    reason; it latches the terminal ``rejection_accepted`` state.
     """
 
     resolved_by_check_event_id: EventId | None = None
+    review_rounds: int = 0
+    rejection_accepted_by_check_event_id: EventId | None = None
 
     def __post_init__(self) -> None:
         super().__post_init__()
         if self.payload is not None and type(self.payload) is not Finding:
             raise _invalid()
-        if self.resolved_by_check_event_id is not None:
+        for name in ("resolved_by_check_event_id", "rejection_accepted_by_check_event_id"):
+            value = getattr(self, name)
+            if value is None:
+                continue
             try:
-                object.__setattr__(
-                    self,
-                    "resolved_by_check_event_id",
-                    event_id(self.resolved_by_check_event_id),
-                )
+                object.__setattr__(self, name, event_id(value))
             except ValueError as exc:
                 raise _invalid() from exc
+        if (
+            type(self.review_rounds) is not int
+            or not 0 <= self.review_rounds <= _MAX_SQLITE_SIGNED_INTEGER
+        ):
+            raise _invalid()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1025,6 +1038,14 @@ def _record_snapshot(record: _ProjectionRecordLike) -> dict[str, JsonValue]:
         # stays byte-identical to the generation-1 shape frozen before proof-based resolution.
         if record.resolved_by_check_event_id is not None:
             result["resolved_by_check_event_id"] = record.resolved_by_check_event_id
+        # Issue #905 facts follow the same rule: absent until set, so earlier snapshots keep
+        # their exact bytes.
+        if record.review_rounds:
+            result["review_rounds"] = record.review_rounds
+        if record.rejection_accepted_by_check_event_id is not None:
+            result["rejection_accepted_by_check_event_id"] = (
+                record.rejection_accepted_by_check_event_id
+            )
     return result
 
 
@@ -1310,7 +1331,13 @@ def _record_from_snapshot(
         required = _RECORD_KEYS | frozenset({"object_available"})
         optional = frozenset({"redacted_object_id"})
     elif collection == "findings":
-        optional = frozenset({"resolved_by_check_event_id"})
+        optional = frozenset(
+            {
+                "rejection_accepted_by_check_event_id",
+                "resolved_by_check_event_id",
+                "review_rounds",
+            }
+        )
     else:
         optional = frozenset()
     source = _snapshot_object(value, required=required, optional=optional)
@@ -1399,7 +1426,11 @@ def _record_from_snapshot(
             redacted_object_id=cast(ObjectId | None, source.get("redacted_object_id")),
         )
     if collection == "findings":
-        if "resolved_by_check_event_id" in source and source["resolved_by_check_event_id"] is None:
+        for name in ("resolved_by_check_event_id", "rejection_accepted_by_check_event_id"):
+            if name in source and source[name] is None:
+                raise _invalid()
+        rounds = source.get("review_rounds", 0)
+        if "review_rounds" in source and (type(rounds) is not int or rounds < 1):
             raise _invalid()
         return FindingProjectionRecord(
             payload=cast(Finding | None, payload),
@@ -1409,6 +1440,10 @@ def _record_from_snapshot(
             source_frontier=source_frontier,
             resolved_by_check_event_id=cast(
                 EventId | None, source.get("resolved_by_check_event_id")
+            ),
+            review_rounds=cast(int, rounds),
+            rejection_accepted_by_check_event_id=cast(
+                EventId | None, source.get("rejection_accepted_by_check_event_id")
             ),
         )
     return ProjectionRecord(

@@ -104,3 +104,98 @@ def test_check_lists_named_missing_items_as_a_limitation_not_a_finding() -> None
     assert "Missing for assessment (the reviewer could not assess the packet):" in rendered
     assert f"- verification_output ({claim}): agent_suppliable" in rendered
     assert "- command_identity (no packet ref): structurally_unavailable_on_this_host" in rendered
+
+
+def test_check_renders_the_finding_checklist_with_structural_tokens_only() -> None:
+    """Issue #905: ``[ ] F-1 ... open (2/2)`` lines and one closed "Next:" sentence."""
+
+    from yoetz.protocol.models import CheckFindingChecklistModel
+
+    checklist = CheckFindingChecklistModel.model_validate(
+        {
+            "attempt_budget": "2",
+            "counts": {
+                "acknowledged_not_done": "1",
+                "open": "1",
+                "open_at_budget": "1",
+                "rejection_accepted": "0",
+                "verified_resolved": "1",
+            },
+            "next": "decide_at_budget",
+            "items": [
+                {
+                    "finding_id": "fnd_59000000-0000-4000-8000-000000000001",
+                    "todo_state": "open",
+                    "review_rounds": "2",
+                },
+                {
+                    "finding_id": "fnd_59000000-0000-4000-8000-000000000002",
+                    "todo_state": "verified_resolved",
+                    "review_rounds": "0",
+                },
+                {
+                    "finding_id": "fnd_59000000-0000-4000-8000-000000000003",
+                    "todo_state": "acknowledged_not_done",
+                    "review_rounds": "1",
+                },
+            ],
+        }
+    )
+    result = CheckSuccessModel.model_construct(
+        verdict="no_issue_detected",
+        semantic_status="not_requested",
+        semantic_reason="deterministic_mode",
+        findings=(),
+        suppressed_count="0",
+        coverage=CoverageModel.model_construct(known_gaps=()),
+        children=None,
+        advisory_notes=(),
+        finding_checklist=checklist,
+    )
+    rendered = render_human_check(result)
+    assert "To-do list (review-round budget 2):" in rendered
+    assert "- [ ] F-1 fnd_59000000-0000-4000-8000-000000000001 open (2/2)" in rendered
+    assert "- [x] F-2 fnd_59000000-0000-4000-8000-000000000002 verified_resolved" in rendered
+    assert "- [~] F-3 fnd_59000000-0000-4000-8000-000000000003 acknowledged_not_done" in rendered
+    assert "Next: An open finding reached the review-round budget" in rendered
+    assert "Counts: open 1 (1 at budget), verified 1, not done 1, rejection accepted 0" in rendered
+    assert "Not listed:" not in rendered
+
+
+def test_check_checklist_says_how_many_items_the_list_leaves_out() -> None:
+    from yoetz.protocol.models import CheckFindingChecklistModel
+
+    checklist = CheckFindingChecklistModel.model_validate(
+        {
+            "attempt_budget": "5",
+            "counts": {
+                "acknowledged_not_done": "0",
+                "open": "1",
+                "open_at_budget": "0",
+                "rejection_accepted": "0",
+                "verified_resolved": "101",
+            },
+            "next": "work_open_findings",
+            "items": [
+                {
+                    "finding_id": "fnd_59000000-0000-4000-8000-000000000101",
+                    "todo_state": "open",
+                    "review_rounds": "0",
+                }
+            ],
+        }
+    )
+    result = CheckSuccessModel.model_construct(
+        verdict="action_required",
+        semantic_status="not_requested",
+        semantic_reason="deterministic_mode",
+        findings=(),
+        suppressed_count="0",
+        coverage=CoverageModel.model_construct(known_gaps=()),
+        children=None,
+        advisory_notes=(),
+        finding_checklist=checklist,
+    )
+    rendered = render_human_check(result)
+    assert "Counts: open 1, verified 101, not done 0, rejection accepted 0" in rendered
+    assert "Not listed: 101" in rendered

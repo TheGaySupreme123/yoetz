@@ -228,3 +228,50 @@ def test_new_defaults_preserve_omitted_existing_leaves_and_explicit_migration(
     assert (explicit.verification.semantic, explicit.verification.max_findings) == ("required", 10)
     assert path.read_bytes() == original
     assert explicit.privacy == old.privacy == fresh.privacy
+
+
+def test_finding_attempt_budget_is_owner_configurable_and_written_only_when_chosen(
+    tmp_path: Path,
+) -> None:
+    """Issue #905: default 5, set by file, environment or override, and bounded 1..50."""
+
+    from yoetz.config.models import DEFAULT_FINDING_ATTEMPT_BUDGET
+    from yoetz.kernel.finding_todo import (
+        DEFAULT_FINDING_ATTEMPT_BUDGET as KERNEL_DEFAULT,
+    )
+    from yoetz.kernel.finding_todo import MAX_FINDING_ATTEMPT_BUDGET as KERNEL_MAX
+
+    assert (DEFAULT_FINDING_ATTEMPT_BUDGET, KERNEL_DEFAULT, KERNEL_MAX) == (5, 5, 50)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text('profile = "test-fake"\n[verification]\nfinding_attempt_budget = 3\n')
+    assert load_config({}, {}, config_path).verification.finding_attempt_budget == 3
+    assert (
+        load_config(
+            {}, {"YOETZ_VERIFICATION_FINDING_ATTEMPT_BUDGET": "7"}, config_path
+        ).verification.finding_attempt_budget
+        == 7
+    )
+    assert (
+        load_config(
+            {"verification.finding_attempt_budget": "9"}, {}, config_path
+        ).verification.finding_attempt_budget
+        == 9
+    )
+    config_path.write_text('profile = "test-fake"\n')
+    assert load_config({}, {}, config_path).verification.finding_attempt_budget == 5
+    with pytest.raises(ConfigError):
+        load_config({"verification.finding_attempt_budget": "0"}, {}, config_path)
+
+
+def test_rendered_config_writes_the_budget_only_when_the_owner_chose_one(tmp_path: Path) -> None:
+    from yoetz.config.write import render_config_toml
+
+    config_path = tmp_path / "config.toml"
+    config_path.write_text('profile = "test-fake"\n')
+    default = load_config({}, {}, config_path)
+    assert "finding_attempt_budget" not in render_config_toml(default)
+    chosen = load_config({"verification.finding_attempt_budget": "8"}, {}, config_path)
+    rendered = render_config_toml(chosen)
+    assert "finding_attempt_budget = 8" in rendered
+    config_path.write_text(rendered)
+    assert load_config({}, {}, config_path).verification.finding_attempt_budget == 8

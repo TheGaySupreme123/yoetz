@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final, Literal, Protocol, cast
 
-from yoetz.application.ledger_snapshot import projection_for_records
+from yoetz.application.ledger_snapshot import projection_for_records, trusted_projection_at
 from yoetz.application.missing_for_assessment import (
     MissingItemsReview,
     review_missing_for_assessment,
@@ -17,6 +17,7 @@ from yoetz.domain.coordination import CoordinationError, CoordinationErrorCode
 from yoetz.domain.events import LedgerRecord
 from yoetz.domain.findings import (
     FINDING_KIND_TRAITS,
+    MAX_RECORDED_VERDICTS,
     CandidateFinding,
     Finding,
     FindingChallenge,
@@ -42,6 +43,7 @@ from yoetz.domain.receipts import (
     SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP,
     SEMANTIC_PRIOR_VERDICTS_UNSUPPORTED_GAP,
     SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
+    SEMANTIC_RESTATEMENTS_SUPPRESSED_GAP,
     SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP,
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
     semantic_coverage_gap_code,
@@ -73,6 +75,13 @@ from yoetz.kernel.deterministic_checks import (
     render_deterministic_finding_text,
 )
 from yoetz.kernel.finding_resolution import SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS
+from yoetz.kernel.finding_todo import (
+    DEFAULT_FINDING_ATTEMPT_BUDGET,
+    FindingTodoState,
+    finding_todo,
+    finding_todo_state,
+    todo_counts,
+)
 from yoetz.kernel.lineage import LineageEvaluation, evaluate_recorded_lineage
 from yoetz.kernel.policies.research_evidence import research_evidence_findings
 from yoetz.kernel.policies.response_support import (
@@ -82,6 +91,7 @@ from yoetz.kernel.policies.response_support import (
 from yoetz.kernel.policies.work_integrity import work_integrity_findings
 from yoetz.kernel.projections import PROJECTION_VERSION, ProjectionState
 from yoetz.kernel.ranking import CheckCompleteness, RankingContext, rank_findings
+from yoetz.kernel.receipt_capacity import current_receipt_findings
 from yoetz.observability.logging import (
     record_bounded_counts_without_raising,
     record_unexpected_exception_without_raising,
@@ -91,12 +101,15 @@ from yoetz.ports.control import McpHostProfile
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.ids import IdPort
 from yoetz.ports.ledger import (
+    MAX_CHECKLIST_ITEMS,
     CheckAdmissionStage,
     CheckAdvisoryNote,
     CheckAwaitingHuman,
+    CheckChecklistItem,
     CheckChildPreviewItem,
     CheckChildrenPreview,
     CheckCommitResult,
+    CheckFindingChecklist,
     CheckPhase,
     CheckPolicyExecution,
     CheckVersionSlice,
@@ -146,6 +159,7 @@ __all__ = [
     "SemanticJudgmentRejected",
     "SemanticJudgmentReview",
     "allocate_findings",
+    "build_finding_checklist",
     "carried_semantic_attempt_gaps",
     "case_coverage",
     "check_awaiting_human_json",
@@ -227,6 +241,11 @@ class SemanticJudgmentReview:
     # reviewer returned that the fence dropped or reduced to ``unassessable``.
     verdicts: tuple[PriorFindingVerdictRecord, ...] = ()
     verdicts_unsupported: int = 0
+    # Challenges that restated a recorded AI-powered finding with nothing newer (issue #905).
+    restatements_suppressed: int = 0
+    # Rulings set aside without the unsupported gap: on a final item, or contradicted by the same
+    # review's restatement (issue #905). A diagnostic count only.
+    verdicts_set_aside: int = 0
 
     def __post_init__(self) -> None:
         if (
@@ -238,15 +257,22 @@ class SemanticJudgmentReview:
             raise _invalid("semantic_judgment_review_invalid")
         if any(type(pair) is not tuple or len(pair) != 2 for pair in self.rejected_by_reason):
             raise _invalid("semantic_judgment_review_invalid")
+        if type(self.restatements_suppressed) is not int or self.restatements_suppressed < 0:
+            raise _invalid("semantic_judgment_review_invalid")
+        if type(self.verdicts_set_aside) is not int or self.verdicts_set_aside < 0:
+            raise _invalid("semantic_judgment_review_invalid")
         if any(
             reason not in _SEMANTIC_REJECTION_REASONS or type(count) is not int or count < 1
             for reason, count in self.rejected_by_reason
         ):
             raise _invalid("semantic_judgment_review_invalid")
-        # The diagnostic this value feeds claims that returned == accepted + rejected. Owning the
-        # invariant here turns any future accounting drift into an immediate failure rather than a
-        # durable count that quietly does not add up.
-        if self.challenges_returned != len(self.candidates) + self.challenges_rejected:
+        # The diagnostic this value feeds claims that returned == accepted + rejected + suppressed
+        # restatements. Owning the invariant here turns any future accounting drift into an
+        # immediate failure rather than a durable count that quietly does not add up.
+        if (
+            self.challenges_returned
+            != len(self.candidates) + self.challenges_rejected + self.restatements_suppressed
+        ):
             raise _invalid("semantic_judgment_review_invalid")
 
     @property
@@ -420,6 +446,34 @@ def check_internal_json(result: CheckCommitResult) -> dict[str, JsonValue]:
                 )
             }
         ),
+        **(
+            {}
+            if result.finding_checklist is None
+            else {"finding_checklist": _checklist_json(result.finding_checklist)}
+        ),
+    }
+
+
+def _checklist_json(checklist: CheckFindingChecklist) -> JsonValue:
+    counts = checklist.counts
+    return {
+        "attempt_budget": str(checklist.attempt_budget),
+        "counts": {
+            "acknowledged_not_done": str(counts.acknowledged_not_done),
+            "open": str(counts.open),
+            "open_at_budget": str(counts.budget_reached),
+            "rejection_accepted": str(counts.rejection_accepted),
+            "verified_resolved": str(counts.verified_resolved),
+        },
+        "items": tuple(
+            {
+                "finding_id": item.finding_id,
+                "todo_state": item.todo_state,
+                "review_rounds": str(item.review_rounds),
+            }
+            for item in checklist.items
+        ),
+        "next": checklist.next,
     }
 
 
@@ -919,6 +973,83 @@ async def _current_project_advisory_notes(
         if len(notes) >= 64:
             break
     return tuple(notes)
+
+
+def build_finding_checklist(
+    projection: ProjectionState, *, attempt_budget: int
+) -> CheckFindingChecklist:
+    """The current actionable findings as a to-do list, with whole-list counts (issue #905).
+
+    Items are the newest row per issue, open items first and otherwise in rank order, at most
+    100; the counts and ``next`` cover every current actionable item, so a long list can never
+    read as done. Coverage limitations
+    are not to-dos and never drive ``next``.
+    """
+
+    todos = tuple(
+        finding_todo(projection, finding.finding_id, attempt_budget=attempt_budget)
+        for finding in current_receipt_findings(projection)
+        if FINDING_KIND_TRAITS[finding.kind][1]
+    )
+    counts = todo_counts(
+        projection, (todo.finding_id for todo in todos), attempt_budget=attempt_budget
+    )
+    next_step: Literal["decide_at_budget", "request_receipt", "work_open_findings"] = (
+        "decide_at_budget"
+        if counts.budget_reached
+        else "work_open_findings"
+        if counts.open
+        else "request_receipt"
+    )
+    # Open items first (a stable sort keeps rank order inside each group), so a long history of
+    # closed rows can never push the remaining work out of the listed hundred.
+    listed = sorted(todos, key=lambda todo: todo.state is not FindingTodoState.OPEN)
+    return CheckFindingChecklist(
+        attempt_budget,
+        tuple(
+            CheckChecklistItem(str(todo.finding_id), todo.state.value, todo.review_rounds)
+            for todo in listed[:MAX_CHECKLIST_ITEMS]
+        ),
+        next_step,
+        counts,
+    )
+
+
+async def _attach_finding_checklist(
+    app: Application, runtime: TaskRuntime, result: CheckCommitResult
+) -> CheckCommitResult:
+    """Attach the task's findings as a to-do list after this check (issue #905).
+
+    Like project advice this is current projection context beside the frozen check: it never
+    changes the recorded event or its verdict. It reads only the adapter-owned projection at the
+    result frontier (never a replay or a status page); when that is unavailable, or anything
+    fails, the check is returned without the list rather than stranded after its commit.
+
+    The list holds the current actionable items (the newest row per issue, in rank order, at most
+    100); the counts and the ``next`` token are computed over all of them. Coverage limitations
+    are not to-dos and never drive ``next``. The budget only chooses ``next``: nothing here
+    closes, acknowledges or throttles.
+    """
+
+    policy = getattr(app, "verification_policy", None)
+    budget = getattr(policy, "finding_attempt_budget", DEFAULT_FINDING_ATTEMPT_BUDGET)
+    if type(budget) is not int:
+        budget = DEFAULT_FINDING_ATTEMPT_BUDGET
+    try:
+        projection = await trusted_projection_at(
+            runtime.ledger, result.session_id, result.result_frontier
+        )
+        if projection is None:
+            return result
+        checklist = build_finding_checklist(projection, attempt_budget=budget)
+    except Exception as exc:
+        record_unexpected_exception_without_raising(
+            exc,
+            component="check",
+            operation="finding_checklist_read",
+        )
+        return result
+    return replace(result, finding_checklist=checklist)
 
 
 async def _attach_current_project_advisory_notes(
@@ -1993,8 +2124,16 @@ def _admit_prior_verdicts(
     *,
     prior_finding_refs: frozenset[str] | None,
     citable_refs: frozenset[str] | None,
-) -> tuple[dict[str, PriorFindingVerdictRecord], int]:
+) -> tuple[dict[str, PriorFindingVerdictRecord], int, int]:
     """Fence the reviewer's per-finding rulings (issue #905).
+
+    Returns the admitted rulings, the count of unsupported ones (malformed, unknown or outside
+    the fence, unshown, trimmed, reduced or repeated; disclosed as
+    ``semantic_prior_verdicts_unsupported``), and the count set aside because their target is
+    already final (``verified_resolved``, ``acknowledged_not_done``, ``rejection_accepted``).
+    A final item is never re-reviewed, so a ruling on it says nothing about the review's other
+    findings and must not raise the gap that blocks every unruled open finding; it is only
+    counted as a diagnostic.
 
     A ruling is kept only for a readable, unresolved AI-powered finding inside the frozen fence;
     one on such a finding the packet's prior-findings section did not carry
@@ -2011,6 +2150,7 @@ def _admit_prior_verdicts(
 
     admitted: dict[str, PriorFindingVerdictRecord] = {}
     unsupported = judgment.prior_finding_verdicts_dropped
+    set_aside = 0
     projection = case.projection
     for verdict in judgment.prior_finding_verdicts:
         key = verdict.finding_id
@@ -2020,10 +2160,17 @@ def _admit_prior_verdicts(
             or record is None
             or record.payload is None
             or record.redacted
-            or record.resolved_by_check_event_id is not None
             or record.payload.origin is not FindingOrigin.SEMANTIC_MODEL_DERIVED
         ):
             unsupported += 1
+            continue
+        if (
+            record.resolved_by_check_event_id is not None
+            or finding_todo_state(projection, record.payload.finding_id)
+            is not FindingTodoState.OPEN
+        ):
+            # A terminal item is never re-reviewed, so no ruling on it is admitted.
+            set_aside += 1
             continue
         cited = tuple(
             ref
@@ -2051,7 +2198,7 @@ def _admit_prior_verdicts(
                 admitted[key] = PriorFindingVerdictRecord(finding_id(key), "unassessable", ())
             continue
         admitted[key] = PriorFindingVerdictRecord(finding_id(key), kind, cited)
-    return admitted, unsupported
+    return admitted, unsupported, set_aside
 
 
 def semantic_capture_baseline_gaps(result: FinalSemanticEvaluation) -> frozenset[str]:
@@ -2112,11 +2259,18 @@ def validate_semantic_judgment(
         or provenance.reason is not SemanticReason.SEMANTIC_COMPLETED
     ):
         raise _rejected("semantic_judgment_invalid")
-    admitted, verdicts_unsupported = _admit_prior_verdicts(
+    admitted, verdicts_unsupported, verdicts_set_aside = _admit_prior_verdicts(
         case, judgment, prior_finding_refs=prior_finding_refs, citable_refs=citable_refs
     )
     if judgment.conclusion != "challenges_returned":
-        return SemanticJudgmentReview((), 0, (), _sorted_verdicts(admitted), verdicts_unsupported)
+        return SemanticJudgmentReview(
+            (),
+            0,
+            (),
+            _sorted_verdicts(admitted),
+            verdicts_unsupported,
+            verdicts_set_aside=verdicts_set_aside,
+        )
     coverage = case_coverage(case, semantic=True)
     if not capture_baseline_gaps <= SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS:
         raise _rejected("semantic_judgment_invalid")
@@ -2134,6 +2288,7 @@ def validate_semantic_judgment(
         )
     candidates: list[CandidateFinding] = []
     rejections: dict[str, int] = {}
+    restatements = 0
     for challenge in judgment.challenges:
         resolution = _resolve_challenge_refs(case, deterministic, challenge)
         if resolution is None:
@@ -2152,6 +2307,18 @@ def validate_semantic_judgment(
                 rejections.get(SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM, 0) + 1
             )
             continue
+        restated = _restated_finding(case, challenge.finding_kind, refs)
+        if restated is not None:
+            suppressed, reduced = _record_restatement(case, admitted, restated, refs)
+            # A ruling the same review's restatement contradicts is recorded as unassessable on
+            # that item; it is not an unsupported ruling about the review's other findings.
+            verdicts_set_aside += reduced
+            if suppressed:
+                # Seen again, suppressed (issue #905): the recorded item already carries this
+                # problem and its state; a second row would only restart it. Disclosed on the
+                # check, and recorded on the open item so it can never close by silence.
+                restatements += 1
+                continue
         policy_id, policy_version = _policy_identity(challenge.finding_kind)
         priority, _actionable = FINDING_KIND_TRAITS[challenge.finding_kind]
         candidates.append(
@@ -2198,7 +2365,126 @@ def validate_semantic_judgment(
         tuple(sorted(rejections.items(), key=lambda item: item[0].encode("ascii"))),
         _sorted_verdicts(admitted),
         verdicts_unsupported,
+        restatements,
+        verdicts_set_aside,
     )
+
+
+def _ref_sequence(case: DeterministicCase, ref: str) -> int | None:
+    """The ledger sequence that last recorded ``ref`` in the frozen case, when it is known."""
+
+    projection = case.projection
+    sources: tuple[Mapping[object, object], ...]
+    if ref.startswith("obl_"):
+        sources = (cast(Mapping[object, object], projection.obligations),)
+    elif ref.startswith("clm_"):
+        sources = (cast(Mapping[object, object], projection.claims),)
+    elif ref.startswith("evd_"):
+        sources = (cast(Mapping[object, object], projection.evidence),)
+    elif ref.startswith("res_"):
+        sources = (cast(Mapping[object, object], projection.results),)
+    elif ref.startswith("act_"):
+        sources = (cast(Mapping[object, object], projection.actions),)
+    elif ref.startswith("evt_"):
+        for event in case.history:
+            if str(event.event_id) == ref:
+                return event.ingestion_sequence
+        sources = (
+            cast(Mapping[object, object], projection.decisions),
+            cast(Mapping[object, object], projection.assignments),
+        )
+    else:
+        return None
+    for rows in sources:
+        for key, row in rows.items():
+            sequence = getattr(row, "source_frontier", None)
+            if str(key) == ref and type(sequence) is int:
+                return sequence
+    return None
+
+
+_MAX_RULING_CITED_REFS: Final = 16
+
+
+def _record_restatement(
+    case: DeterministicCase,
+    admitted: dict[str, PriorFindingVerdictRecord],
+    restated: FindingId,
+    refs: tuple[str, ...],
+) -> tuple[bool, bool]:
+    """Carry a suppressed restatement onto the earlier item it restates (issue #905).
+
+    Returns whether the restatement is suppressed and whether an explicit ruling was reduced.
+
+    Suppression must never read as absence: a restatement of an open item records that the
+    reviewer still finds it (``still_present``, citing what the challenge cited), so the check
+    cannot resolve it by silence. A restatement contradicts an explicit ``fixed`` or
+    ``withdrawn`` ruling on the same item, which becomes ``unassessable``. An
+    ``acknowledged_not_done`` or ``rejection_accepted`` item is final, stays disclosed on the
+    receipt, and needs nothing recorded. (A ``verified_resolved`` item is never a restatement
+    target: see ``_restated_finding``.) When no ruling can be recorded (the check's ruling bound
+    is full) the restatement is not suppressed and is minted as before.
+    """
+
+    if finding_todo_state(case.projection, restated) in {
+        FindingTodoState.ACKNOWLEDGED_NOT_DONE,
+        FindingTodoState.REJECTION_ACCEPTED,
+    }:
+        return True, False
+    key = str(restated)
+    earlier = admitted.get(key)
+    if earlier is None:
+        if len(admitted) >= MAX_RECORDED_VERDICTS:
+            return False, False
+        cited = tuple(sorted(refs, key=str.encode))[:_MAX_RULING_CITED_REFS]
+        admitted[key] = PriorFindingVerdictRecord(restated, "still_present", cited)
+        return True, False
+    if earlier.verdict in {"fixed", "withdrawn"}:
+        admitted[key] = PriorFindingVerdictRecord(restated, "unassessable", ())
+        return True, True
+    return True, False
+
+
+def _restated_finding(
+    case: DeterministicCase, kind: FindingKind, refs: tuple[str, ...]
+) -> FindingId | None:
+    """The recorded AI-powered finding a challenge restates, if any (issue #905).
+
+    The stable key is the finding kind and its exact subject set, the same key the receipt uses
+    for an issue; the evidence fingerprint is what the challenge rests on. A restatement has the
+    same kind, exactly the recorded finding's subjects, and nothing among them recorded after that
+    finding. A narrower or wider challenge is a distinct issue: suppressing it would lose its
+    discrepancy and requested next step, which a ``still_present`` ruling cannot carry. A
+    challenge with newer material is a new, linked item, never a restatement. The newest match
+    wins.
+
+    A ``verified_resolved`` row is never a target: done stays done, and the reviewer finding the
+    problem again after that proof is a #458 successor, minted and blocking. Suppressing it would
+    hide a real re-raise behind a closed row.
+    """
+
+    wanted = frozenset(refs)
+    if not wanted:
+        return None
+    best: tuple[int, FindingId] | None = None
+    for key, record in case.projection.findings.items():
+        payload = record.payload
+        if (
+            payload is None
+            or record.redacted
+            or payload.origin is not FindingOrigin.SEMANTIC_MODEL_DERIVED
+            or payload.kind is not kind
+            or wanted != frozenset(str(ref) for ref in payload.subject_refs)
+            or finding_todo_state(case.projection, key) is FindingTodoState.VERIFIED_RESOLVED
+        ):
+            continue
+        if all(
+            (sequence := _ref_sequence(case, ref)) is not None
+            and sequence <= record.source_frontier
+            for ref in wanted
+        ) and (best is None or record.source_frontier > best[0]):
+            best = (record.source_frontier, key)
+    return None if best is None else best[1]
 
 
 def _sorted_verdicts(
@@ -2340,6 +2626,8 @@ def _record_semantic_review_accounting(
             "semantic_challenges_returned": review.challenges_returned,
             "semantic_candidates_accepted": len(review.candidates),
             "semantic_challenges_rejected": review.challenges_rejected,
+            "semantic_restatements_suppressed": review.restatements_suppressed,
+            "semantic_prior_rulings_set_aside": review.verdicts_set_aside,
             "semantic_findings_selected": selected,
             "semantic_findings_suppressed": len(semantic) - selected,
         },
@@ -2506,6 +2794,7 @@ async def execute_check_commit(
             )
         if isinstance(frozen_or_replay, CheckCommitResult):
             replayed = await _attach_replayed_lineage_preview(runtime, frozen_or_replay)
+            replayed = await _attach_finding_checklist(app, runtime, replayed)
             # The ledger replay is frozen; only the additive project-advice projection is current.
             return await _attach_current_project_advisory_notes(app, runtime.task_id, replayed)
         frozen = frozen_or_replay
@@ -2728,6 +3017,9 @@ async def execute_check_commit(
         # A per-finding ruling the fence dropped or reduced: disclosed, never read as agreement.
         if review.verdicts_unsupported:
             declared_gaps.add(SEMANTIC_PRIOR_VERDICTS_UNSUPPORTED_GAP)
+        # A restated finding was suppressed rather than minted twice: disclosed, never silent.
+        if review.restatements_suppressed:
+            declared_gaps.add(SEMANTIC_RESTATEMENTS_SUPPRESSED_GAP)
         # Recorded prose the case could not carry whole. The reviewer answered on a fragment, and
         # the author has no other signal that the text they published never arrived (issue #177).
         declared_gaps.update(semantic_result.case_content_gaps)
@@ -2808,6 +3100,7 @@ async def execute_check_commit(
         )
         preview = _lineage_preview(lineage_evaluation, frozen.case.frontier)
         projected = committed if preview is None else replace(committed, children=preview)
+        projected = await _attach_finding_checklist(app, runtime, projected)
         # Advice is deliberately attached after the deterministic commit.  It is current
         # projection context, never part of the frozen check event or its verdict calculation.
         return await _attach_current_project_advisory_notes(app, runtime.task_id, projected)

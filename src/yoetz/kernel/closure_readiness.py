@@ -37,9 +37,9 @@ from types import MappingProxyType
 from typing import Final, Literal
 
 from yoetz.domain.events import CheckRecordedPayload, LedgerRecord
-from yoetz.domain.findings import FINDING_KIND_TRAITS
 from yoetz.domain.values import FindingId, ObligationId
 from yoetz.kernel.finding_resolution import finding_is_resolved
+from yoetz.kernel.finding_todo import finding_blocks_receipt
 from yoetz.kernel.projections import ProjectionState, observation_limitation_finding_ids
 from yoetz.kernel.receipt_capacity import current_receipt_findings
 from yoetz.kernel.reducers import invalidates_recorded_check
@@ -182,6 +182,7 @@ GAP_CLASSIFICATION: Final[Mapping[str, GapClass]] = MappingProxyType(
         "semantic_case_finding_refs_over_limit": _S,
         "semantic_prior_findings_over_limit": _S,  # prior-findings packet bound (#905)
         "semantic_prior_verdicts_unsupported": _S,  # reviewer rulings dropped by the fence (#905)
+        "semantic_restatements_suppressed": _S,  # duplicate re-raises folded into one item (#905)
         "semantic_case_capacity_exceeded": _S,
         "semantic_reference_scope_reduced": _S,  # deliberate selection: bounded review scope (#904)
         "optional_semantic_review_blocked_by_policy": _S,
@@ -550,9 +551,14 @@ def closure_readiness_facts(
         for finding in current_receipt_findings(state)
         if not finding_is_resolved(state, finding.finding_id)
     )
-    # Same predicate as receipt_blocking_finding_count: an actionable finding kind that no later
-    # qualifying check resolved.
-    blocking = {finding.finding_id for finding in current if FINDING_KIND_TRAITS[finding.kind][1]}
+    # Same predicate as receipt_blocking_finding_count (``finding_todo.finding_blocks_receipt``): an
+    # actionable finding kind that no later qualifying check resolved and that is not a terminal
+    # ``rejection_accepted`` item (issue #905).
+    blocking = {
+        finding.finding_id
+        for finding in current
+        if finding_blocks_receipt(state, finding.finding_id)
+    }
     acknowledged = {
         finding.finding_id
         for finding in current

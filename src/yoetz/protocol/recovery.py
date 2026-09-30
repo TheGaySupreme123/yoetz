@@ -862,6 +862,9 @@ REASON_CODE_DIRECTIVE_EXEMPTIONS: Final[frozenset[str]] = frozenset(
         "unknown_payload_field",
         "unsupported_json_type",
         "unsupported_payload_type",
+        # Issue #905: a response to a terminal finding records nothing. The finding is done; there
+        # is nothing to retry or correct, and a directive would invite a loop.
+        "finding_terminal",
         # Internal invariants and defects. An agent cannot act on these; the correlation_id is the
         # recovery path, and inventing a directive would imply a repair that does not exist.
         "internal_error",

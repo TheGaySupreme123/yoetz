@@ -9,6 +9,7 @@ from builders.policy_cases import (
     FRONTIER,
     act,
     clm,
+    evt,
     finding_record,
     fnd,
     make_case,
@@ -580,3 +581,260 @@ def test_rulings_the_normalizer_dropped_are_disclosed_by_the_fence() -> None:
 
     assert _rulings(review) == [(str(fnd(1)), "fixed", (str(res(2)),))]
     assert review.verdicts_unsupported == 2
+
+
+def _restatement_case(
+    obligation_recorded_at: int,
+    *,
+    repaired: bool = False,
+    resolved: bool = False,
+    hidden: bool = False,
+) -> DeterministicCase:
+    """numba shape: one AI-powered finding on an obligation, recorded at sequence 5."""
+
+    from builders.policy_cases import obligation_record
+    from yoetz.domain.events import ObligationPublishedPayload, ObligationStatus
+
+    obligation = obligation_record(
+        ObligationPublishedPayload(
+            obl(1), "Verify with llvmlite 0.46.0", "stencil tests pass", ObligationStatus.OPEN
+        ),
+        obligation_recorded_at,
+    )
+    repair = record(
+        ResultRecordedPayload(res(2), act(2), ResultOutcome.SUCCESS, summary="regression"), 9
+    )
+    withheld = replace(BASE_COVERAGE, known_gaps=("captured_object_unavailable",))
+    return make_case(
+        obligations={obl(1): obligation},
+        coverage_overrides={obl(1): withheld} if hidden else None,
+        results={res(2): repair} if repaired else None,
+        findings={
+            fnd(1): finding_record(
+                _recorded_semantic_finding(1, str(obl(1))),
+                5,
+                resolved_by_check_event_id=evt(8) if resolved else None,
+            )
+        },
+    )
+
+
+def test_a_re_raise_of_a_verified_resolved_finding_is_a_new_item_not_a_restatement() -> None:
+    """Done stays done, and a re-raise after verified resolution is a #458 successor, minted.
+
+    Suppressing it would hide a problem the reviewer found again behind a closed row: the
+    receipt would read clean with nothing blocking (slice-4 verification D1)."""
+
+    case = _restatement_case(obligation_recorded_at=2, resolved=True)
+    review = validate_semantic_judgment(
+        case,
+        (),
+        SemanticJudgment("challenges_returned", (_obligation_challenge(str(obl(1))),)),
+        _provenance(),
+        expected_frontier=case.frontier,
+    )
+    assert len(review.candidates) == 1
+    assert review.restatements_suppressed == 0
+    assert review.verdicts == ()
+
+
+def _obligation_challenge(*refs: str) -> ReviewerChallenge:
+    return replace(
+        _challenge(*refs, summary="Required llvmlite 0.46.0 verification remains open"),
+        finding_kind=FindingKind.COMPLETION_WITH_OPEN_OBLIGATIONS,
+    )
+
+
+def test_a_restatement_without_newer_material_is_seen_again_and_suppressed() -> None:
+    """Three numba restatements must become one item, disclosed, never a silent drop."""
+
+    case = _restatement_case(obligation_recorded_at=2)
+    judgment = SemanticJudgment(
+        "challenges_returned",
+        (_obligation_challenge(str(obl(1))), _obligation_challenge(str(fnd(1)))),
+    )
+
+    review = validate_semantic_judgment(
+        case, (), judgment, _provenance(), expected_frontier=case.frontier
+    )
+
+    assert review.candidates == ()
+    assert review.restatements_suppressed == 2
+    assert review.rejected_by_reason == ()  # a restatement is not a rejected challenge
+    # Suppression never reads as absence: the open item is recorded as still present.
+    assert _rulings(review) == [(str(fnd(1)), "still_present", (str(obl(1)),))]
+
+
+def test_a_restatement_contradicts_an_explicit_fixed_and_leaves_terminal_items_alone() -> None:
+    case = _restatement_case(obligation_recorded_at=2)
+    repaired = _restatement_case(obligation_recorded_at=2, repaired=True)
+    supported = validate_semantic_judgment(
+        repaired,
+        (),
+        SemanticJudgment("no_material_discrepancy", (), (_verdict(1, "fixed", str(res(2))),)),
+        _provenance(),
+        expected_frontier=repaired.frontier,
+    )
+    assert _rulings(supported) == [(str(fnd(1)), "fixed", (str(res(2)),))]
+    contradicted = validate_semantic_judgment(
+        repaired,
+        (),
+        SemanticJudgment(
+            "challenges_returned",
+            (_obligation_challenge(str(obl(1))),),
+            (_verdict(1, "fixed", str(res(2))),),  # a supported fixed, then restated anyway
+        ),
+        _provenance(),
+        expected_frontier=repaired.frontier,
+    )
+    assert _rulings(contradicted) == [(str(fnd(1)), "unassessable", ())]
+    assert contradicted.restatements_suppressed == 1
+    # R3: the contradicted ruling is set aside on its own item, not an unsupported-ruling gap.
+    assert (contradicted.verdicts_unsupported, contradicted.verdicts_set_aside) == (0, 1)
+
+    not_done = ResponseRecordedPayload(
+        finding_id=fnd(1),
+        finding_frontier=FRONTIER,
+        disposition=ResponseDisposition.ACKNOWLEDGED_NOT_DONE,
+        reason="Out of scope for this task.",
+    )
+    terminal = replace(
+        case, projection=replace(case.projection, responses={fnd(1): record(not_done, 6)})
+    )
+    review = validate_semantic_judgment(
+        terminal,
+        (),
+        SemanticJudgment("challenges_returned", (_obligation_challenge(str(obl(1))),)),
+        _provenance(),
+        expected_frontier=terminal.frontier,
+    )
+    assert review.candidates == () and review.restatements_suppressed == 1
+    assert review.verdicts == ()  # a final item is never re-reviewed
+
+
+def test_newer_material_or_another_kind_is_a_new_item_not_a_restatement() -> None:
+    revised = _restatement_case(obligation_recorded_at=9)  # the obligation changed since
+    other_kind = _restatement_case(obligation_recorded_at=2)
+    judgments = (
+        (revised, _obligation_challenge(str(obl(1)))),
+        (other_kind, _challenge(str(obl(1)))),  # claim_without_admissible_evidence
+    )
+    for case, challenge in judgments:
+        review = validate_semantic_judgment(
+            case,
+            (),
+            SemanticJudgment("challenges_returned", (challenge,)),
+            _provenance(),
+            expected_frontier=case.frontier,
+        )
+        assert len(review.candidates) == 1
+        assert review.restatements_suppressed == 0
+
+
+def test_a_hidden_source_claim_is_rejected_before_any_restatement_is_recorded() -> None:
+    """D5: a challenge the fence rejects must not record ``still_present`` or a review round."""
+
+    case = _restatement_case(obligation_recorded_at=2, hidden=True)
+    hidden = replace(
+        _obligation_challenge(str(obl(1))),
+        discrepancy="The obligation is unchanged.",
+    )
+    review = validate_semantic_judgment(
+        case,
+        (),
+        SemanticJudgment("challenges_returned", (hidden,)),
+        _provenance(),
+        expected_frontier=case.frontier,
+    )
+    assert review.rejected_by_reason == ((SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM, 1),)
+    assert review.restatements_suppressed == 0
+    assert review.verdicts == ()
+
+
+def test_a_ruling_on_a_final_item_never_raises_the_gap_that_blocks_its_siblings() -> None:
+    """R3: a ruling on an ``acknowledged_not_done`` item is set aside as a diagnostic only.
+
+    Since unsupported rulings block every unruled open AI-powered finding on the check, counting
+    it there would stall the siblings for no honesty gain. A ruling on an unknown target still
+    counts as unsupported.
+    """
+
+    case = _dialogue_case()
+    not_done = ResponseRecordedPayload(
+        finding_id=fnd(2),
+        finding_frontier=FRONTIER,
+        disposition=ResponseDisposition.ACKNOWLEDGED_NOT_DONE,
+        reason="The index is unreachable from this sandbox; out of scope here.",
+    )
+    final = replace(
+        case,
+        projection=replace(
+            case.projection,
+            responses={**case.projection.responses, fnd(2): record(not_done, 8)},
+        ),
+    )
+    judgment = SemanticJudgment(
+        "no_material_discrepancy",
+        (),
+        (_verdict(1, "fixed", str(res(2))), _verdict(2, "fixed", str(res(2)))),
+    )
+    review = validate_semantic_judgment(
+        final, (), judgment, _provenance(), expected_frontier=final.frontier
+    )
+    assert _rulings(review) == [(str(fnd(1)), "fixed", (str(res(2)),))]
+    assert (review.verdicts_unsupported, review.verdicts_set_aside) == (0, 1)
+
+    unknown = validate_semantic_judgment(
+        final,
+        (),
+        SemanticJudgment("no_material_discrepancy", (), (_verdict(9, "fixed", str(res(2))),)),
+        _provenance(),
+        expected_frontier=final.frontier,
+    )
+    assert (unknown.verdicts_unsupported, unknown.verdicts_set_aside) == (1, 0)
+
+
+def test_a_narrower_challenge_is_its_own_item_not_a_restatement() -> None:
+    """Greptile P1 on #943: a challenge about one subject of a broader recorded finding is a
+    distinct issue (the receipt keys issues by their exact subject set). Suppressing it would
+    lose its discrepancy and requested next step, which a ``still_present`` ruling cannot carry.
+    """
+
+    from builders.policy_cases import obligation_record
+    from yoetz.domain.events import ObligationPublishedPayload, ObligationStatus
+
+    obligations = {
+        obl(number): obligation_record(
+            ObligationPublishedPayload(
+                obl(number), f"Obligation {number}", "criteria", ObligationStatus.OPEN
+            ),
+            2,
+        )
+        for number in (1, 2)
+    }
+    case = make_case(
+        obligations=obligations,
+        findings={
+            fnd(1): finding_record(_recorded_semantic_finding(1, str(obl(1)), str(obl(2))), 5)
+        },
+    )
+    narrower = validate_semantic_judgment(
+        case,
+        (),
+        SemanticJudgment("challenges_returned", (_obligation_challenge(str(obl(1))),)),
+        _provenance(),
+        expected_frontier=case.frontier,
+    )
+    assert len(narrower.candidates) == 1
+    assert narrower.candidates[0].subject_refs == (obl(1),)
+    assert narrower.restatements_suppressed == 0
+    assert narrower.verdicts == ()
+    # The exact same subject set is still a restatement.
+    same = validate_semantic_judgment(
+        case,
+        (),
+        SemanticJudgment("challenges_returned", (_obligation_challenge(str(obl(1)), str(obl(2))),)),
+        _provenance(),
+        expected_frontier=case.frontier,
+    )
+    assert (len(same.candidates), same.restatements_suppressed) == (0, 1)

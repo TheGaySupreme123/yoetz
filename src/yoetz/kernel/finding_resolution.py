@@ -16,12 +16,18 @@ projection checkpoint all read the same fact.
 
 from __future__ import annotations
 
-from collections.abc import MutableMapping
+from collections.abc import Mapping, MutableMapping
 from dataclasses import replace
 from typing import Final
 
 from yoetz.domain.coordination import CoordinationGapCode
-from yoetz.domain.events import CheckRecordedPayload, ClaimKind, LedgerRecord, RequestedItemKind
+from yoetz.domain.events import (
+    CheckRecordedPayload,
+    ClaimKind,
+    LedgerRecord,
+    RequestedItemKind,
+    ResponseRecordedPayload,
+)
 from yoetz.domain.findings import Finding, FindingKind, FindingOrigin, ResponseDisposition
 from yoetz.domain.receipts import (
     OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
@@ -37,6 +43,7 @@ from yoetz.domain.receipts import (
     SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP,
     SEMANTIC_PRIOR_VERDICTS_UNSUPPORTED_GAP,
     SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
+    SEMANTIC_RESTATEMENTS_SUPPRESSED_GAP,
     SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP,
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
     SEMANTIC_REVIEW_NOT_REQUESTED_GAP,
@@ -46,6 +53,7 @@ from yoetz.kernel.claims import effective_claim_items
 from yoetz.kernel.plan_scope import current_plan_scope
 from yoetz.kernel.projections import (
     FindingProjectionRecord,
+    ProjectionRecord,
     ProjectionState,
     is_observation_limitation,
     is_observation_limitation_kind,
@@ -57,7 +65,9 @@ from yoetz.protocol.models import SemanticReason, SemanticStatus
 __all__ = [
     "SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS",
     "IssueKey",
+    "OPEN_REVIEW_VERDICTS",
     "apply_check_resolution",
+    "apply_check_rulings",
     "finding_is_resolved",
     "issue_key",
     "prior_finding_verdict",
@@ -134,7 +144,11 @@ _HOST_OBSERVATION_GAPS: Final = frozenset(
 # earlier finding is no weaker than the review before that section existed, so the gap stays on
 # the receipt as a disclosure and proves nothing about any finding's absence either way.
 _REVIEW_DIALOGUE_DISCLOSURE_GAPS: Final = frozenset(
-    {SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP, SEMANTIC_PRIOR_VERDICTS_UNSUPPORTED_GAP}
+    {
+        SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP,
+        SEMANTIC_PRIOR_VERDICTS_UNSUPPORTED_GAP,
+        SEMANTIC_RESTATEMENTS_SUPPRESSED_GAP,
+    }
 )
 _BASE_DETERMINISTIC_PROOF_TOLERATED_GAPS: Final = (
     _SEMANTIC_ONLY_GAPS | _EVIDENCE_STRENGTH_GAPS | _REVIEW_DIALOGUE_DISCLOSURE_GAPS
@@ -428,8 +442,10 @@ def _prior_verdict_effect(
     budget cut (``content_unselected``, issue #907) no longer veto it; every
     other rule still applies, including freshness, material change and the issue not being
     returned again. ``withdrawn`` (the reviewer accepting the agent's rejection) keeps the
-    ordinary rules, under which an assessable review that does not re-raise a rejected finding
-    over changed state resolves it; it never lifts the ``insufficient_packet`` veto. Any other
+    ordinary rules here, under which an assessable review that does not re-raise a finding over
+    changed state proves it absent; it never lifts the ``insufficient_packet`` veto. When the
+    finding's latest response is a readable ``rejected``, ``apply_check_rulings`` then records
+    that same check's outcome as ``rejection_accepted`` rather than resolved. Any other
     ruling blocks this finding by name and speaks for no other finding. Without a ruling nothing
     changes (silence is never read as ``fixed``), except that a check whose packet left prior
     findings out or dropped a ruling blocks every unruled AI-powered finding
@@ -719,6 +735,27 @@ def _finding_resolution_explanation(
     finding_record = state.findings.get(finding_id)
     if finding_record is None or finding_record.payload is None:
         return "Resolution explanation unavailable: original finding is unreadable."
+    # Terminal to-do states are named first (issue #905): they are final, never re-reviewed, and
+    # the blockers of a later check (``reviewer_assessment_incomplete`` included) do not apply.
+    response = state.responses.get(finding_id)
+    disposition = (
+        None if response is None or response.payload is None else response.payload.disposition
+    )
+    if disposition is ResponseDisposition.ACKNOWLEDGED_NOT_DONE:
+        return (
+            "Acknowledged, not done: the agent recorded with a reason that it will not do this. "
+            "The item is final, is not reviewed again, and keeps the receipt from reading clean."
+        )
+    if (
+        finding_record.rejection_accepted_by_check_event_id is not None
+        and disposition is ResponseDisposition.REJECTED
+        and not finding_is_resolved(state, finding_id)
+    ):
+        return (
+            "Rejection accepted: the agent rejected this AI-powered finding with a reason and "
+            f"check {finding_record.rejection_accepted_by_check_event_id} withdrew it. The item "
+            "is final and no longer blocks the receipt, which still lists it."
+        )
     superseded = _superseded_coordination_context(state, finding_record.payload)
     if finding_is_resolved(state, finding_id):
         resolving = finding_record.resolved_by_check_event_id
@@ -853,6 +890,8 @@ def apply_check_resolution(
         if (
             record.payload is None
             or record.resolved_by_check_event_id is not None
+            # A terminal ``rejection_accepted`` item never upgrades to resolved (issue #905).
+            or record.rejection_accepted_by_check_event_id is not None
             or current_id in check.returned_finding_ids
         ):
             continue
@@ -862,15 +901,112 @@ def apply_check_resolution(
             findings[current_id] = replace(record, resolved_by_check_event_id=check_event_id)
 
 
+OPEN_REVIEW_VERDICTS: Final = frozenset({"answered_not_fixed", "still_present", "unassessable"})
+
+
+def apply_check_rulings(
+    findings: dict[FindingId, FindingProjectionRecord],
+    responses: Mapping[FindingId, ProjectionRecord[ResponseRecordedPayload]],
+    check: CheckRecordedPayload,
+    check_event_id: EventId,
+) -> None:
+    """Fold one recorded check into the to-do facts of the findings it assessed (issue #905).
+
+    Runs after ``apply_check_resolution``. A readable finding the check left open gains one review
+    round: a local finding the check returned again over a later subject, or an AI-powered finding
+    the reviewer ruled ``still_present``, ``answered_not_fixed`` or ``unassessable``. A
+    ``withdrawn`` ruling on an AI-powered finding whose latest readable response is ``rejected``
+    latches ``rejection_accepted``; the reviewer accepted the agent's reasoned rejection. Final
+    rows (resolved, ``rejection_accepted``, ``acknowledged_not_done``) never change, and nothing
+    here resolves or reopens a finding.
+
+    One check can reach two terminal outcomes for the same rejected finding: an assessable review
+    over changed state that does not return it satisfies the absence proof, so
+    ``apply_check_resolution`` has just marked it resolved by *this* check, and the same review
+    rules it ``withdrawn``. The explicit ruling wins over the implicit not-returned inference: the
+    reviewer said it accepts the agent's reasoned rejection, not that a repair proved the issue
+    gone. The same-check absence mark is dropped and ``rejection_accepted`` is latched, so the item
+    has exactly one final state. A finding an *earlier* check already proved absent is final and
+    stays ``verified_resolved``.
+    """
+
+    rulings = {item.finding_id: item.verdict for item in check.prior_finding_verdicts}
+    touched = frozenset(check.returned_finding_ids) | frozenset(rulings)
+    for current_id in sorted(touched, key=str.encode):
+        record = findings.get(current_id)
+        latest = responses.get(current_id)
+        if (
+            record is not None
+            and record.payload is not None
+            and record.payload.origin is not FindingOrigin.DETERMINISTIC
+            and record.resolved_by_check_event_id == check_event_id
+            and record.rejection_accepted_by_check_event_id is None
+            and rulings.get(current_id) == "withdrawn"
+            and _readable_rejection(latest)
+        ):
+            findings[current_id] = replace(
+                record,
+                resolved_by_check_event_id=None,
+                rejection_accepted_by_check_event_id=check_event_id,
+            )
+            continue
+        if (
+            record is None
+            or record.payload is None
+            or record.resolved_by_check_event_id is not None
+            or record.rejection_accepted_by_check_event_id is not None
+            # ``acknowledged_not_done`` is final too: a later return of the same local issue, or a
+            # stray ruling, is not a new round on it.
+            or (
+                latest is not None
+                and latest.payload is not None
+                and latest.payload.disposition is ResponseDisposition.ACKNOWLEDGED_NOT_DONE
+            )
+        ):
+            continue
+        finding = record.payload
+        verdict = rulings.get(current_id)
+        if finding.origin is FindingOrigin.DETERMINISTIC:
+            reassessed = (
+                current_id in check.returned_finding_ids
+                and check.subject_frontier.sequence > finding.subject_frontier.sequence
+            )
+            if reassessed:
+                findings[current_id] = replace(record, review_rounds=record.review_rounds + 1)
+            continue
+        if verdict in OPEN_REVIEW_VERDICTS:
+            findings[current_id] = replace(record, review_rounds=record.review_rounds + 1)
+        elif verdict == "withdrawn" and _readable_rejection(latest):
+            findings[current_id] = replace(
+                record, rejection_accepted_by_check_event_id=check_event_id
+            )
+
+
+def _readable_rejection(response: ProjectionRecord[ResponseRecordedPayload] | None) -> bool:
+    """Whether the finding's latest response is a readable, reasoned ``rejected``."""
+
+    return (
+        response is not None
+        and response.payload is not None
+        and response.payload.disposition is ResponseDisposition.REJECTED
+    )
+
+
 def reopen_findings_resolved_by(
     findings: dict[FindingId, FindingProjectionRecord],
     event_ids: frozenset[EventId],
 ) -> None:
-    """Drop resolution whose proving check was redacted: unreadable proof is no proof."""
+    """Drop resolution whose proving check was redacted: unreadable proof is no proof.
+
+    The same holds for a ``rejection_accepted`` latch whose withdrawing check was redacted.
+    """
 
     for current_id, record in tuple(findings.items()):
         if record.resolved_by_check_event_id in event_ids:
-            findings[current_id] = replace(record, resolved_by_check_event_id=None)
+            record = replace(record, resolved_by_check_event_id=None)
+            findings[current_id] = record
+        if record.rejection_accepted_by_check_event_id in event_ids:
+            findings[current_id] = replace(record, rejection_accepted_by_check_event_id=None)
 
 
 def finding_is_resolved(state: ProjectionState, finding_id: FindingId) -> bool:
@@ -890,7 +1026,12 @@ def finding_is_resolved(state: ProjectionState, finding_id: FindingId) -> bool:
         return True
     if response.payload is None:
         return False
-    return response.payload.disposition is not ResponseDisposition.PROVENANCE_DISPUTED
+    # ``acknowledged_not_done`` is terminal and never reads as resolved (issue #905): the agent
+    # said it will not do this, so a later absence proof must not turn it into a clean row.
+    return response.payload.disposition not in {
+        ResponseDisposition.ACKNOWLEDGED_NOT_DONE,
+        ResponseDisposition.PROVENANCE_DISPUTED,
+    }
 
 
 def resolved_finding_ids(state: ProjectionState) -> frozenset[FindingId]:

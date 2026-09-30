@@ -81,6 +81,7 @@ from yoetz.domain.values import (
 from yoetz.domain.values import (
     JsonValue as DomainJsonValue,
 )
+from yoetz.kernel.finding_todo import DEFAULT_FINDING_ATTEMPT_BUDGET, MAX_FINDING_ATTEMPT_BUDGET
 from yoetz.kernel.lineage import LineageEvaluation
 from yoetz.observability.logging import record_classified_exception_without_raising
 from yoetz.ports.clock import ClockPort
@@ -440,12 +441,19 @@ class VerificationPolicy:
 
     semantic: Literal["disabled", "optional", "required"] = "optional"
     max_findings: int = 3
+    # Issue #905: the owner's per-item review-round budget (``kernel/finding_todo.py``).
+    finding_attempt_budget: int = DEFAULT_FINDING_ATTEMPT_BUDGET
 
     def __post_init__(self) -> None:
         if self.semantic not in {"disabled", "optional", "required"}:
             raise ValueError("verification_semantic_invalid")
         if type(self.max_findings) is not int or not 1 <= self.max_findings <= _MAX_FINDINGS_LIMIT:
             raise ValueError("verification_max_findings_invalid")
+        if (
+            type(self.finding_attempt_budget) is not int
+            or not 1 <= self.finding_attempt_budget <= MAX_FINDING_ATTEMPT_BUDGET
+        ):
+            raise ValueError("verification_finding_attempt_budget_invalid")
 
     @property
     def default_check_mode(

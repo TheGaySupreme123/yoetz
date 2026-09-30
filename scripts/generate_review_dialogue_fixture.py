@@ -12,7 +12,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from yoetz.domain.events import EventSchema, decode_payload, encode_payload
 from yoetz.domain.values import freeze_json
@@ -87,6 +87,26 @@ def _check(root: Path) -> dict[str, Any]:
     }
 
 
+def _first_privacy_projection(value: object) -> dict[str, Any]:
+    """Reuse a reviewed privacy projection instead of inventing one."""
+
+    if isinstance(value, dict):
+        source = cast(dict[str, Any], value)
+        found = source.get("privacy_projection")
+        if isinstance(found, dict):
+            return cast(dict[str, Any], found)
+        children: list[object] = list(source.values())
+    elif isinstance(value, list):
+        children = list(cast(list[object], value))
+    else:
+        return {}
+    for item in children:
+        nested = _first_privacy_projection(item)
+        if nested:
+            return nested
+    return {}
+
+
 def document(root: Path) -> dict[str, Any]:
     # numba-stencil-boundary-modes (DeepSWE v2): one environment-blocked obligation raised, then
     # restated under a new id. The earlier row has no dialogue fields; the restatement records the
@@ -128,6 +148,23 @@ def document(root: Path) -> dict[str, Any]:
             "verdict": "fixed",
         },
     ]
+    # numba fnd_01c5aaf7: the agent answers that it will not do the environment-blocked item.
+    # Only this terminal disposition rides response_recorded 1.1.0; a rejection keeps 1.0.0 bytes.
+    frontier = check["subject_frontier"]
+    not_done: dict[str, Any] = {
+        "finding_id": _RESTATED,
+        "finding_frontier": frontier,
+        "disposition": "acknowledged_not_done",
+        "reason": "llvmlite 0.46.0 is not installable in this sandbox; out of scope here.",
+        "evidence_refs": [],
+    }
+    rejected: dict[str, Any] = {
+        "finding_id": _FIRST,
+        "finding_frontier": frontier,
+        "disposition": "rejected",
+        "reason": "The task statement excludes the llvmlite upgrade.",
+        "evidence_refs": [],
+    }
     vectors: list[dict[str, Any]] = []
     for family, version, wire in (
         ("finding_recorded", "1.3.0", legacy),
@@ -135,6 +172,8 @@ def document(root: Path) -> dict[str, Any]:
         ("finding_recorded", "1.3.0", link_only),
         ("check_recorded", "1.3.0", check),
         ("check_recorded", "1.3.0", ruled),
+        ("response_recorded", "1.0.0", rejected),
+        ("response_recorded", "1.1.0", not_done),
     ):
         payload = decode_payload(EventSchema(family, version), freeze_json(wire))
         encoded = encode_payload(payload)
@@ -147,11 +186,71 @@ def document(root: Path) -> dict[str, Any]:
                 "digest": canonical_digest(encoded),
             }
         )
+    request: dict[str, Any] = {
+        "protocol_version": "0.1",
+        "schema_version": "1.0.0",
+        "request_id": "req_01c5aaf7-0000-4000-8000-000000000001",
+        "session_id": "ses_01c5aaf7-0000-4000-8000-000000000001",
+        "writer_id": "wri_01c5aaf7-0000-4000-8000-000000000001",
+        "expected_frontier": frontier,
+        "finding_id": _RESTATED,
+        "finding_frontier": frontier,
+        "disposition": "acknowledged_not_done",
+        "reason": not_done["reason"],
+        "actor": {"actor_id": "harness:dialogue", "actor_type": "harness"},
+        "client": {"kind": "test_client", "version": "0.1.0", "integration": "local_cli"},
+    }
+    status = json.loads(
+        (root / "fixtures/canonical/status-check-admission-1.4.0.case.json").read_bytes()
+    )
+    projection = _first_privacy_projection(status)
+    result: dict[str, Any] = {
+        "protocol_version": "0.1",
+        "schema_version": "1.0.0",
+        "request_id": request["request_id"],
+        "ok": True,
+        "task_id": "tsk_01c5aaf7-0000-4000-8000-000000000001",
+        "session_id": request["session_id"],
+        "writer_id": request["writer_id"],
+        "subject_frontier": frontier,
+        "result_frontier": frontier,
+        "accepted_event": {
+            "event_id": "evt_01c5aaf7-0000-4000-8000-000000000001",
+            "writer_sequence": "3",
+            "ingestion_sequence": frontier["sequence"],
+            "accepted_at": "2026-09-30T12:00:00.000Z",
+            "entry_digest": frontier["head_digest"],
+        },
+        "response": {
+            "response_event_id": "evt_01c5aaf7-0000-4000-8000-000000000001",
+            "finding_id": _RESTATED,
+            "finding_frontier": frontier,
+            "disposition": "acknowledged_not_done",
+            "reason": not_done["reason"],
+            "evidence": [],
+        },
+        "coverage": check["coverage"],
+        "warning_codes": [],
+        "versions": {
+            "protocol_version": "0.1",
+            "engine_version": "0.1.0",
+            "projection_version": "yoetz/0.1.0",
+            "policy_packs": ["research-evidence/0.1.0", "work-integrity/0.1.0"],
+        },
+        "privacy_projection": projection,
+    }
+    operations: list[dict[str, Any]] = [
+        {"schema": "respond-request", "schema_version": "1.1.0", "payload": request},
+        {"schema": "respond-result", "schema_version": "1.1.0", "payload": result},
+    ]
     return {
         "fixture_schema": "yoetz.fixture-case/1.0.0",
         "fixture_version": "1.0.0",
         "fixture_id": _ID,
-        "purpose": "Pin the additive review-dialogue event bytes beside unchanged legacy rows.",
+        "purpose": (
+            "Pin the additive review-dialogue event bytes beside unchanged legacy rows, and the "
+            "terminal acknowledged_not_done response on its 1.1.0 event and respond wire."
+        ),
         "minimum_versions": {"fixture_contract": "1.0.0", "protocol": "1.0"},
         "owns_requirements": ["ISSUE-905/review-dialogue"],
         "controls": {
@@ -161,7 +260,7 @@ def document(root: Path) -> dict[str, Any]:
             "external_io": "forbidden",
             "randomness": "forbidden",
         },
-        "input": {"vectors": vectors},
+        "input": {"vectors": vectors, "operations": operations},
         "expected": {"legacy_challenge": None},
     }
 

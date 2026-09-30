@@ -198,6 +198,8 @@ def test_profile_capability_matrix_is_closed() -> None:
         ),
         (lambda: VerificationConfig(max_findings=0), "max_findings_out_of_range"),
         (lambda: VerificationConfig(max_findings=11), "max_findings_out_of_range"),
+        (lambda: VerificationConfig(finding_attempt_budget=0), "config_value_invalid"),
+        (lambda: VerificationConfig(finding_attempt_budget=51), "config_value_invalid"),
         (lambda: LineageSettings(max_depth=-1), "config_value_invalid"),
         (lambda: LineageSettings(max_fanout=65), "config_value_invalid"),
         (

@@ -792,6 +792,22 @@ async def test_progress_command_reads_the_latest_check_operation(make_app: MakeA
         assert "Semantic review phase: provider_sampling (attempt 1, active)" in text
 
 
+async def test_findings_command_lists_each_item_with_its_state(make_app: MakeApp) -> None:
+    """PR #943 review CG-1: the to-do list's per-item states reach the terminal interface."""
+
+    runtime = FakeRuntime()
+    app = make_app(runtime=runtime)
+    app._active_task_title = "upload"  # pyright: ignore[reportPrivateUsage]
+    async with app.run_test(size=WIDE) as pilot:
+        await pilot.pause()
+        await run_command(pilot, app, "/findings")
+        assert runtime.task_views == [("upload", "findings")]
+        text = transcript(app)
+        for token in ("open (2/5)", "verified_resolved", "acknowledged_not_done"):
+            assert token in text
+        assert "rejection_accepted" in text
+
+
 async def test_receipt_offers_the_supported_formats(make_app: MakeApp) -> None:
     app = make_app()
     app._active_task_title = "upload"  # pyright: ignore[reportPrivateUsage]
