@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
 from builders.policy_cases import (
     claim_record,
     clm,
@@ -23,6 +25,8 @@ from yoetz.application.check import (
 )
 from yoetz.application.egress import _within_excerpt_limits  # pyright: ignore[reportPrivateUsage]
 from yoetz.application.semantic_case import (
+    LineageSemanticCapacityExceeded,
+    SemanticCaseCapacityExceeded,
     build_semantic_case,
     semantic_case_to_candidate_context,
     semantic_case_to_prepared_payload,
@@ -194,7 +198,9 @@ class _Ids:
         return new_id(kind)
 
 
-def _prose_heavy_case(excerpts: int) -> tuple[DeterministicCase, tuple[Finding, ...]]:
+def _prose_heavy_case(
+    excerpts: int, unsupported_claims: int = 18
+) -> tuple[DeterministicCase, tuple[Finding, ...]]:
     """18 claims with no admissible evidence, and one claim that ``excerpts`` 2,000-byte rows
     support. Each finding carries 8,192-byte summary and detail prose, which the builder clips to
     its 4,096-byte item bound (the R944-01 review trigger)."""
@@ -223,7 +229,7 @@ def _prose_heavy_case(excerpts: int) -> tuple[DeterministicCase, tuple[Finding, 
             3,
         )
     }
-    for number in range(2, 20):
+    for number in range(2, unsupported_claims + 2):
         claims[clm(number)] = claim_record(
             ClaimRecordedPayload(
                 clm(number), ClaimKind.COMPLETION, f"Claim {number}", (), obligation_refs=()
@@ -281,6 +287,7 @@ def test_a_case_over_the_aggregate_case_bound_is_narrowed_before_it_is_construct
         ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED, preset_version="1.1.0")
     )
     assert len(legacy.packet.targeted_excerpts) == 16
+    assert legacy.excerpts_cut_for_case_bound == 0
     fixed = sum(item.content_bytes for item in legacy.items if item.section != "excerpt")
     # Every approved excerpt beside the fixed part is over the case's aggregate bound.
     assert fixed + 64 * 2_000 > MAX_SEMANTIC_CASE_BYTES
@@ -289,6 +296,8 @@ def test_a_case_over_the_aggregate_case_bound_is_narrowed_before_it_is_construct
 
     assert sum(item.content_bytes for item in built.items) <= MAX_SEMANTIC_CASE_BYTES
     assert 16 < len(built.packet.targeted_excerpts) < 64
+    # The cut is reported as its own cause, distinct from consent and from ceiling planning.
+    assert built.excerpts_cut_for_case_bound == 64 - len(built.packet.targeted_excerpts)
     assert "content_unselected" in built.packet.coverage.known_gaps
     # Every cut is disclosed as an unselected excerpt, and the highest-ranked excerpts stay.
     kept = _excerpt_refs(built)
@@ -309,6 +318,23 @@ def test_a_case_over_the_aggregate_case_bound_is_narrowed_before_it_is_construct
     )
     assert len(_prepared(planned)) <= _LIMIT
     assert selection.max_total_excerpt_bytes <= _CURRENT.max_total_excerpt_bytes
+
+
+def test_fixed_material_over_the_case_bound_is_a_typed_capacity_refusal() -> None:
+    """The residual: without any excerpt, 32 findings' clipped prose alone is over the bound.
+
+    Cutting excerpts cannot help, so the builder refuses with a typed capacity error the
+    composition maps to ``case_capacity_exceeded`` instead of the constructor's generic
+    ``semantic_case_invalid``.
+    """
+
+    # The completion claim has no evidence either, so 31 unsupported claims give 32 findings.
+    case, findings = _prose_heavy_case(0, unsupported_claims=31)
+    assert len(findings) == 32
+
+    with pytest.raises(SemanticCaseCapacityExceeded) as raised:
+        _prose_builder(case, findings)(_CURRENT)
+    assert type(raised.value) is not LineageSemanticCapacityExceeded
 
 
 def _withholding_policy() -> PrivacyPolicy:

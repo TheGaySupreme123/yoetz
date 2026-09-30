@@ -852,14 +852,22 @@ bytes, so the count constant was the real limit.
   aggregate bound. Before constructing the case, the builder drops the lowest-ranked excerpts until
   it fits, each disclosed as a `not_selected` omission with `content_unselected` (and
   `truncated_payload` when only later parts of a split excerpt go). Only a case the constructor
-  would otherwise refuse changes, so every constructible case keeps its bytes and digest, and the
-  ceiling planner always receives a case it can narrow.
+  would otherwise refuse changes, so every constructible case keeps its bytes and digest. The
+  guarantee is that the excerpt selection never causes the bound to be exceeded. It does not cover
+  the rest of the case: non-excerpt items alone (for example 32 findings whose summary and detail
+  are each clipped to 4,096 bytes) can still exceed 262,144 bytes with no excerpt at all. That
+  residual is refused before dispatch as `SemanticCaseCapacityExceeded`, which composition reports
+  as `case_capacity_exceeded` (diagnostic operation `semantic_not_dispatched_case_capacity`), not
+  as a coordinator failure.
 - `semantic_case_built` diagnostics add `semantic_excerpt_count_approved` and
-  `semantic_excerpt_byte_approved` (the owner-approved selection) and
-  `semantic_excerpt_count_limit` and `semantic_excerpt_byte_limit` (the effective limits the case
-  was built with after ceiling planning) beside the selected counts. A reader can tell whether
-  consent or planning bound the excerpts. Neither pair is proof of delivery: both precede privacy
-  minimization. `semantic_excerpt_ceiling_rounds` counts the rebuilds that planning used.
+  `semantic_excerpt_byte_approved` (the owner-approved selection),
+  `semantic_excerpt_count_cut_for_case_bound` (excerpts the approved selection lost to the
+  aggregate case bound, before any ceiling planning) and `semantic_excerpt_count_limit` and
+  `semantic_excerpt_byte_limit` (the effective limits the case was built with after ceiling
+  planning) beside the selected counts. A reader can tell whether consent, the case bound or
+  ceiling planning bound the excerpts, and otherwise that less material was available. None of
+  these is proof of delivery: all precede privacy minimization. `semantic_excerpt_ceiling_rounds`
+  counts the rebuilds that planning used.
 - Composition (`service/semantic_ceiling.py`) plans the case below the channel ceiling as
   described in the ADR-009 amendment. It sizes the payload the channel releases: items whose
   category or data class the destination's ceiling withholds (the LLM channel for an external

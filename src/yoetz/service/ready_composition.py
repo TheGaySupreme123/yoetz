@@ -141,6 +141,7 @@ from yoetz.application.semantic_case import (
     MAX_CAPTURED_SEMANTIC_CONTENT_PARTS,
     MAX_CAPTURED_SEMANTIC_INPUT_BYTES,
     LineageSemanticCapacityExceeded,
+    SemanticCaseCapacityExceeded,
     SemanticCaseTooLarge,
     build_semantic_case,
     semantic_case_to_candidate_context,
@@ -4285,8 +4286,9 @@ def _privacy_gated_semantic_evaluator(
             try:
                 # Plan below the channel ceiling before egress would refuse the whole packet: a
                 # smaller excerpt budget is a narrowing of the approved selection (issue #907).
+                approved_case = build_case(review_selection, tuple(captured_content_gaps))
                 semantic_case, planned_selection, ceiling_rounds = plan_under_channel_ceiling(
-                    build_case(review_selection, tuple(captured_content_gaps)),
+                    approved_case,
                     review_selection,
                     channel_prepared_limit(policy),
                     lambda selection: build_case(
@@ -4296,13 +4298,18 @@ def _privacy_gated_semantic_evaluator(
                     # minimization withholds from the channel.
                     channel_admission(policy, (provider, fallback_binding)),
                 )
-            except LineageSemanticCapacityExceeded:
+            except SemanticCaseCapacityExceeded as exc:
                 # Same pre-dispatch contract as an envelope that cannot be reduced: local
                 # findings stay recorded, no job is created, and the caller sees a capacity
-                # reason instead of a generic coordinator failure.
+                # reason instead of a generic coordinator failure. Lineage keeps its own
+                # operation; fixed non-excerpt material over the case bound gets its own too.
                 record_bounded_event_without_raising(
                     component="semantic_composition",
-                    operation="semantic_not_dispatched_lineage_capacity",
+                    operation=(
+                        "semantic_not_dispatched_lineage_capacity"
+                        if isinstance(exc, LineageSemanticCapacityExceeded)
+                        else "semantic_not_dispatched_case_capacity"
+                    ),
                     reason=SemanticReason.CASE_CAPACITY_EXCEEDED.value,
                     request_id=frozen.lease.operation_id,
                 )
@@ -4341,6 +4348,11 @@ def _privacy_gated_semantic_evaluator(
                     "semantic_excerpt_count_approved": review_selection.max_excerpts,
                     "semantic_excerpt_byte_approved": review_selection.max_total_excerpt_bytes,
                     "semantic_excerpt_count_limit": planned_selection.max_excerpts,
+                    # A third cause: excerpts the approved selection lost so the case fits its
+                    # aggregate item bound, before any ceiling planning (not consent).
+                    "semantic_excerpt_count_cut_for_case_bound": (
+                        approved_case.excerpts_cut_for_case_bound
+                    ),
                     "semantic_excerpt_byte_limit": planned_selection.max_total_excerpt_bytes,
                     "semantic_excerpt_ceiling_rounds": ceiling_rounds,
                 },

@@ -126,6 +126,7 @@ _LOG_FIELDS: Final = frozenset(
         "semantic_excerpt_count_approved",
         "semantic_excerpt_byte_approved",
         "semantic_excerpt_count_limit",
+        "semantic_excerpt_count_cut_for_case_bound",
         "semantic_excerpt_byte_limit",
         "semantic_excerpt_ceiling_rounds",
     }
@@ -229,6 +230,7 @@ _INTEGER_FIELDS: Final = frozenset(
         "semantic_excerpt_count_approved",
         "semantic_excerpt_byte_approved",
         "semantic_excerpt_count_limit",
+        "semantic_excerpt_count_cut_for_case_bound",
         "semantic_excerpt_byte_limit",
         "semantic_excerpt_ceiling_rounds",
     }

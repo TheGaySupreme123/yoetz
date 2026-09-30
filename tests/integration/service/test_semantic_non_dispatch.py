@@ -1692,6 +1692,7 @@ async def test_expanded_1_2_0_counters_show_the_protocol_maximum_not_16(
     assert built["semantic_excerpt_count_limit"] == 64
     assert built["semantic_excerpt_byte_limit"] == 131_072
     assert built["semantic_excerpt_ceiling_rounds"] == 0
+    assert built["semantic_excerpt_count_cut_for_case_bound"] == 0
 
 
 @pytest.mark.anyio
@@ -1731,6 +1732,114 @@ async def test_a_case_over_the_channel_ceiling_is_planned_below_it_and_disclosed
     assert all(row["semantic_excerpt_byte_approved"] == 131_072 for row in built)
     assert all(cast(int, row["semantic_excerpt_byte_limit"]) < 131_072 for row in built)
     assert digests[0] == digests[1]
+
+
+def _prose_heavy_frozen(
+    excerpts: int, unsupported_claims: int
+) -> tuple[FrozenCase, tuple[Finding, ...]]:
+    """Unsupported claims whose findings carry 4 KiB clipped summary and detail prose, beside one
+    claim that ``excerpts`` 2,000-byte evidence rows support (the R944-01 trigger)."""
+
+    from yoetz.protocol.coverage import EvidenceImmutability
+
+    evidence: dict[EvidenceId, EvidenceProjectionRecord] = {}
+    for index in range(1, excerpts + 1):
+        evidence[evd(index)] = evidence_record(
+            EvidenceRecordedPayload(
+                evidence_id=evd(index),
+                evidence_kind=EvidenceKind.TEST_RESULT,
+                strength=EvidenceImmutability.METADATA_ONLY,
+                observed_at=timestamp_from_string("2026-07-01T00:00:00.000Z"),
+                description="e" * 2_000,
+            ),
+            index + 30,
+        )
+    claims = {
+        clm(1): record(
+            ClaimRecordedPayload(
+                clm(1),
+                ClaimKind.COMPLETION,
+                "Work is complete",
+                tuple(evidence),
+                obligation_refs=(),
+            ),
+            3,
+        )
+    }
+    for number in range(2, unsupported_claims + 2):
+        claims[clm(number)] = record(
+            ClaimRecordedPayload(
+                clm(number), ClaimKind.COMPLETION, f"Claim {number}", (), obligation_refs=()
+            ),
+            number + 3,
+        )
+    case = make_case(
+        plans={1: plan_record(PlanPublishedPayload(1, "Ship it", ()), 1)},
+        claims=claims,
+        evidence=evidence,
+        extra_refs=(*claims, *evidence),
+    )
+    assessments, _ = run_deterministic_policies(
+        case, CheckScope((), ()), ("research-evidence/0.1.0", "work-integrity/0.1.0")
+    )
+    findings = tuple(
+        replace(finding, summary="s" * 8_192, detail="d" * 8_192)
+        for finding in allocate_findings(
+            _FindingIds(),
+            tuple(item.candidate for item in assessments),
+            prior_finding_ids(case.projection),
+        )
+    )
+    return replace(_frozen(), case=case), findings
+
+
+@pytest.mark.anyio
+async def test_excerpts_cut_for_the_case_bound_are_their_own_diagnostic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R944-01: the cut is reported apart from consent (approved) and planning (rounds, limit)."""
+
+    monkeypatch.setattr(diagnostics_module, "log_dir", lambda: tmp_path)
+    privacy = _Privacy(profile=ReviewContextProfile.EXPANDED)
+    privacy.terminal_provider_result = True
+    _with_channel_ceiling(monkeypatch, 262_144)
+    frozen, findings = _prose_heavy_frozen(64, 18)
+
+    result = await _evaluator(privacy, lambda: _PROVIDER, _route())(frozen, findings)
+
+    assert result.reason is not SemanticReason.COORDINATOR_FAILURE
+    assert privacy.calls == 1
+    assert "content_unselected" in result.case_content_gaps
+    [built] = [row for row in _records(tmp_path) if row["operation"] == "semantic_case_built"]
+    assert built["semantic_excerpt_count_approved"] == 64
+    assert cast(int, built["semantic_excerpt_count_cut_for_case_bound"]) > 0
+
+
+@pytest.mark.anyio
+async def test_fixed_material_over_the_case_bound_is_a_capacity_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without excerpts to cut, 32 findings' prose over the case bound is a typed refusal."""
+
+    monkeypatch.setattr(diagnostics_module, "log_dir", lambda: tmp_path)
+    privacy = _Privacy(profile=ReviewContextProfile.EXPANDED)
+    _with_channel_ceiling(monkeypatch, 262_144)
+    # The completion claim has no evidence either, so 31 unsupported claims give 32 findings.
+    frozen, findings = _prose_heavy_frozen(0, 31)
+    assert len(findings) == 32
+
+    result = await _evaluator(privacy, lambda: _PROVIDER, _route())(frozen, findings)
+
+    assert (result.status, result.reason) == (
+        SemanticStatus.FAILED,
+        SemanticReason.CASE_CAPACITY_EXCEEDED,
+    )
+    assert privacy.calls == 0
+    _assert_record(
+        tmp_path,
+        "semantic_not_dispatched_case_capacity",
+        SemanticReason.CASE_CAPACITY_EXCEEDED,
+    )
 
 
 @pytest.mark.anyio

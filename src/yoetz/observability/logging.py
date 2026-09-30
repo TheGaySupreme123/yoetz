@@ -66,6 +66,7 @@ _FIELD_ORDER: Final = (
     "semantic_excerpt_count_approved",
     "semantic_excerpt_byte_approved",
     "semantic_excerpt_count_limit",
+    "semantic_excerpt_count_cut_for_case_bound",
     "semantic_excerpt_byte_limit",
     "semantic_excerpt_ceiling_rounds",
     # Admits the loop-health connection count into _CALLER_FIELDS/_COUNT_FIELDS below, so a

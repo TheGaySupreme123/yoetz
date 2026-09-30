@@ -6996,12 +6996,16 @@ plan. Names and contracts:
   (304), and outbound-case 1.2.0 `content_items` allows 305.
 - The `semantic_case_built` counters add `semantic_excerpt_count_approved` and
   `semantic_excerpt_byte_approved` (the owner-approved selection),
-  `semantic_excerpt_count_limit` and `semantic_excerpt_byte_limit` (the effective limits the case
+  `semantic_excerpt_count_cut_for_case_bound` (excerpts dropped to fit
+  `MAX_SEMANTIC_CASE_BYTES` before ceiling planning), `semantic_excerpt_count_limit` and `semantic_excerpt_byte_limit` (the effective limits the case
   was built with after ceiling planning) and `semantic_excerpt_ceiling_rounds`. All precede privacy
   minimization and certify neither consent nor delivery.
 - `build_semantic_case` drops the lowest-ranked excerpts, as `not_selected` omissions with
   `content_unselected`, when the case would otherwise exceed `MAX_SEMANTIC_CASE_BYTES`; a case
-  within that bound is unchanged.
+  within that bound is unchanged. The count is `SemanticCase.excerpts_cut_for_case_bound`, local
+  composition state outside the envelope and digest. When non-excerpt items alone exceed the
+  bound it raises `SemanticCaseCapacityExceeded` (the base of `LineageSemanticCapacityExceeded`),
+  reported as `case_capacity_exceeded` with operation `semantic_not_dispatched_case_capacity`.
 - `service/semantic_ceiling.py`: `channel_prepared_limit(policy)` is the narrowest of the LLM
   channel's `max_bytes`, `max_tokens × 4` (zero is unset) and `MAX_MINIMIZED_DISCLOSURE_BYTES`
   (`ports/privacy.py`, 262,144), so an unset or high ceiling still plans below what egress can

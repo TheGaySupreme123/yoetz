@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Final, Literal, Protocol, cast
 
@@ -1036,11 +1036,19 @@ class SemanticCase:
     question_set: tuple[str, ...]
     case_digest: str
     omitted_reference_count: int = 0
+    # Local composition fact, not wire or digest material: how many selected excerpts the builder
+    # dropped to fit MAX_SEMANTIC_CASE_BYTES (issue #907 Phase 1b). Diagnostics report it.
+    excerpts_cut_for_case_bound: int = field(default=0, compare=False)
 
     def __post_init__(self) -> None:
         if (
             type(self.omitted_reference_count) is not int
             or not 0 <= self.omitted_reference_count <= _MAX_SAFE_INTEGER
+        ):
+            raise _invalid_case()
+        if (
+            type(self.excerpts_cut_for_case_bound) is not int
+            or not 0 <= self.excerpts_cut_for_case_bound <= MAX_REVIEW_EXCERPTS
         ):
             raise _invalid_case()
         try:

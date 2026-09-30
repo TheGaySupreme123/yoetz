@@ -244,8 +244,10 @@ An Expanded policy you approved earlier keeps its 16-excerpt limit until you app
 recipe. `yoetz privacy show` and `yoetz --privacy` show your current limits beside the ones the
 current recipe offers, and the approval screen marks the higher count as a widening. When many
 large excerpts would push a review over your per-case ceiling, the review carries fewer excerpts
-and says so (`content_unselected`) instead of being refused. Only content your review channel
-actually sends counts toward that ceiling. A review packet with more excerpts or
+and says so (`content_unselected`) instead of being refused. Content your review channel does not
+send does not count toward that ceiling. The packet's own structure always counts, and when a
+fallback destination is set, anything either destination may receive counts, so the estimate never
+comes in under what is sent. A review packet with more excerpts or
 bytes than your policy allows is still refused, never cut down to fit. To go
 back to 16, choose Assisted in `yoetz --privacy`, or propose the earlier Expanded limits with
 `yoetz privacy propose`. A lower limit is a narrowing, so it needs no new approval.

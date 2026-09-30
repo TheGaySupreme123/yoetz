@@ -122,6 +122,7 @@ __all__ = [
     "MAX_CAPTURED_SEMANTIC_CONTENT_PARTS",
     "MAX_CAPTURED_SEMANTIC_INPUT_BYTES",
     "LineageSemanticCapacityExceeded",
+    "SemanticCaseCapacityExceeded",
     "OVER_CASE_ITEM_LIMIT_REASON",
     "REVIEW_PACKET_ITEM_ID",
     "SEMANTIC_REVIEW_PURPOSE",
@@ -597,7 +598,16 @@ def _task_statement_item(
     )
 
 
-class LineageSemanticCapacityExceeded(ValueError):
+class SemanticCaseCapacityExceeded(ValueError):
+    """The case's fixed material alone exceeds ``MAX_SEMANTIC_CASE_BYTES``.
+
+    Excerpts are cut first, so this is raised only when the non-excerpt items (task statement,
+    goals, obligations, claims, decisions, timeline and finding prose) cannot fit on their own.
+    Callers map it to a pre-dispatch capacity outcome instead of a generic coordinator failure.
+    """
+
+
+class LineageSemanticCapacityExceeded(SemanticCaseCapacityExceeded):
     """Recorded lineage cannot be carried as complete semantic items.
 
     One child or gap fact is larger than a single item, or the partitioned set would exceed the
@@ -932,7 +942,7 @@ def _fit_excerpts_within_case_bound(
     capture_gaps: set[str],
     *,
     fixed_item_ids: set[str],
-) -> None:
+) -> int:
     """Drop the lowest-ranked excerpts until the case fits ``MAX_SEMANTIC_CASE_BYTES``.
 
     The excerpt budget and the case's aggregate item bound are independent. Since the Expanded
@@ -940,14 +950,16 @@ def _fit_excerpts_within_case_bound(
     rich finding prose can cross the aggregate bound, and ``SemanticCase`` would refuse the whole
     case before the channel-ceiling planner could narrow it. Only a case that would otherwise be
     refused is changed, so every constructible case keeps its exact bytes and digest. Each dropped
-    excerpt is disclosed as ``not_selected`` with ``content_unselected``, never silently.
+    excerpt is disclosed as ``not_selected`` with ``content_unselected``, never silently. Returns
+    how many excerpts were dropped. Non-excerpt material over the bound on its own is not cut here.
     """
 
     by_id = {item.item_id: item for item in items}
     case_bytes = sum(by_id[item_id].content_bytes for item_id in fixed_item_ids if item_id in by_id)
     case_bytes += sum(by_id[excerpt.excerpt_item_id].content_bytes for excerpt in targeted)
     if case_bytes <= MAX_SEMANTIC_CASE_BYTES or not targeted:
-        return
+        return 0
+    selected = len(targeted)
     dropped_refs: set[str] = set()
     while targeted and case_bytes > MAX_SEMANTIC_CASE_BYTES:
         excerpt = targeted.pop()
@@ -959,6 +971,7 @@ def _fit_excerpts_within_case_bound(
     if any(by_id[excerpt.excerpt_item_id].source_ref in dropped_refs for excerpt in targeted):
         # Later parts of a split excerpt were cut while its earlier parts stay.
         capture_gaps.add("truncated_payload")
+    return selected - len(targeted)
 
 
 def _captured_content_groups(
@@ -2358,7 +2371,7 @@ def build_semantic_case(
     review_assessments = review_assessments[: selection.max_assessments]
     changes = changes[: selection.max_change_observations]
     targeted = targeted[: selection.max_excerpts]
-    _fit_excerpts_within_case_bound(
+    excerpts_cut_for_case_bound = _fit_excerpts_within_case_bound(
         items,
         targeted,
         omissions,
@@ -2485,6 +2498,9 @@ def build_semantic_case(
         # Refuse with the same typed pre-dispatch outcome instead of leaking the
         # constructor's generic semantic_case_invalid ValueError to the coordinator.
         raise LineageSemanticCapacityExceeded("lineage_semantic_case_too_large")
+    if sum(item.content_bytes for item in items) > MAX_SEMANTIC_CASE_BYTES:
+        # Excerpts were already cut to fit, so what remains over the bound is fixed material.
+        raise SemanticCaseCapacityExceeded("semantic_case_too_large")
 
     capture_gaps = tuple(sorted(capture_gap_set, key=str.encode))
     coverage = case_coverage(frozen_case, semantic=True)
@@ -2722,6 +2738,7 @@ def build_semantic_case(
         question_set=_QUESTION_SET,
         case_digest=case_digest,
         omitted_reference_count=omitted_reference_count,
+        excerpts_cut_for_case_bound=excerpts_cut_for_case_bound,
     )
 
 
