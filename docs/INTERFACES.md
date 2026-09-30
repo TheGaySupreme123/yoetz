@@ -6945,10 +6945,15 @@ plan. Names and contracts:
   whether or not a statement is recorded) or
   `task_statement_not_supplied` (the section is selected but neither a statement nor a readable
   title is recorded). A title standing in adds no gap; its `task_title_only` source label is the
-  disclosure. Receipts add fixed prose for each code. They are semantic-only for deterministic
+  disclosure. Receipts add fixed prose for each code. Without those codes, a receipt whose
+  applicable check completed an AI-powered review also names the source in its limitations
+  section, read from the ledger prefix that check tested: `agent_transcribed` when a statement
+  preceded it, `task_title_only` ("had at most the task title") when none did, and nothing when a
+  statement-bearing event there is no longer readable. They are semantic-only for deterministic
   absence proof and join `SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS` for semantic findings. A
   finding that carries none of them and was raised before the ledger's first statement-capable
-  event (`ReplayIndex.first_task_statement_sequence`, by envelope schema version) tolerates them
+  event (`ReplayIndex.first_task_statement_sequence`: a statement-bearing schema version whose
+  readable payload carries a statement, or whose payload is no longer readable) tolerates them
   on a later check, so an AI-powered finding recorded before the upgrade can still clear: the
   review that raised it had at most the task title (`task_title_only`), never the user's request.
 - Privacy: review section `task_statement` in privacy-policy 1.2.0. `ReviewSelectionPolicy

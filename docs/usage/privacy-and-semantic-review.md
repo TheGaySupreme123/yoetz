@@ -222,7 +222,9 @@ The reviewer judges the work against what you asked for, not only against the ag
 Agents pass your request verbatim when they start a task (`task_statement`); the reviewer receives
 it as its own section, labelled as the agent's transcription, and is told it is the specification
 and wins over the plan (which is labelled "agent plan (the agent's own summary)"). When no
-statement was supplied, the task title stands in and is labelled as a title.
+statement was supplied, the task title stands in and is labelled as a title. After an
+AI-powered review, the receipt's limitations section says which one the reviewer had: your
+request as the agent transcribed it, or at most the task title.
 
 This is new content, so it has its own consent. Goal-aware, Assisted and Expanded policies approved
 from this version on include it; Structural never does; Custom only when you list the

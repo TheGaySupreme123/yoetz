@@ -75,6 +75,35 @@ put the statement in a plan `summary`, and never infer it from commit messages o
 }
 ```
 
+### `start`: revise the task statement
+
+The ordinary `publish_work` tool does not list the plan shapes that carry `task_statement`, so over
+MCP revise the statement with this reattaching `start`. It records the whole amended request on a
+`session_resumed` event, and that newest statement becomes current. Continue with the ids it
+returns.
+
+```json
+{
+  "protocol_version": "0.1",
+  "schema_version": "1.0.0",
+  "request_id": "req_00000000-0000-4000-8000-000000000020",
+  "mode": "attach",
+  "session_id": "ses_00000000-0000-4000-8000-000000000001",
+  "task_title": "Replace with the bounded task title",
+  "task_statement": "Replace with the whole amended request, verbatim",
+  "requested_view": "compact",
+  "actor": {
+    "actor_id": "harness:mcp-template",
+    "actor_type": "harness"
+  },
+  "client": {
+    "kind": "cooperative_agent",
+    "version": "0.1.0",
+    "integration": "cooperative_mcp"
+  }
+}
+```
+
 ## `publish_work`: plan plus obligation
 
 This is the first material publication. Name the requested outcome in `description` and

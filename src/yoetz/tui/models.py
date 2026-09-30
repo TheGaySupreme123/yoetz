@@ -291,6 +291,10 @@ class PrivacyPosture:
     profile: str | None
     llm_inference_enabled: bool | None
     readable: bool
+    # Whether the composed policy sends the task statement, and the ``privacy show`` sentence that
+    # says so (issue #908). ``None`` when the policy document is unreadable.
+    task_statement_sent: bool | None = None
+    task_statement_disclosure: str | None = None
     never_send: tuple[str, ...] = ()
     enabled_channels: tuple[str, ...] = ()
     network_egress_permitted: bool | None = None

@@ -261,8 +261,8 @@ class ReplayIndex:
     payload_event_by_object: Mapping[ObjectId, EventId]
     evidence_sources_by_object: Mapping[ObjectId, tuple[EvidenceObjectSource, ...]]
     redaction_root_by_object: Mapping[ObjectId, EventId]
-    # The ingestion sequence of the first event whose schema version can carry a task statement
-    # (issue #908); ``None`` while the prefix has none. Finding resolution uses it to recognize an
+    # The ingestion sequence of the first event that may have carried a task statement
+    # (``may_carry_task_statement``, issue #908); ``None`` while the prefix has none. Finding resolution uses it to recognize an
     # AI-powered finding raised before any review could have received a statement.
     first_task_statement_sequence: int | None = None
 

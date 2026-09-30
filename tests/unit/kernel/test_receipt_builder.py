@@ -40,6 +40,7 @@ from yoetz.domain.receipts import (
     COMPLETION_SCOPE_UNDECLARED_GAP,
     PolicyVersionEntry,
     ReceiptConclusion,
+    ReceiptDocument,
     ReceiptObligationStatus,
     ReceiptRedactionCategory,
     ReceiptRedactionReason,
@@ -1335,6 +1336,95 @@ def test_task_statement_limitation_is_disclosed_in_every_receipt_format(
             assert code in rendered
         for sentence in sentences:
             assert sentence in rendered
+
+
+def _renderings(receipt: ReceiptDocument) -> tuple[str, str, str]:
+    return (
+        str(receipt_document_to_json(receipt)),
+        render_receipt_human(receipt, markdown=True),
+        render_receipt_human(receipt, markdown=False),
+    )
+
+
+_TITLE_ONLY_SENTENCE = "had at most the task title in place of the user's request"
+_TRANSCRIBED_SENTENCE = "the agent's transcription of the user's request"
+
+
+@pytest.mark.parametrize(
+    ("statement", "sentence", "source"),
+    [
+        (None, _TITLE_ONLY_SENTENCE, "task_title_only"),
+        (
+            "Under Ascii, Style.Truncate returns plain text without tail.",
+            _TRANSCRIBED_SENTENCE,
+            "agent_transcribed",
+        ),
+    ],
+)
+def test_task_statement_source_is_disclosed_in_every_receipt_format(
+    statement: str | None, sentence: str, source: str
+) -> None:
+    """Review 942-G4 (issue #908): a title-only review must not read like one with the request."""
+
+    from builders.replay import genesis_session_opened_variant
+
+    opened = genesis_session_opened_variant(version="1.2.0", statement=statement)
+    check = _check(CheckVerdict.NO_ISSUE_DETECTED, _coverage(), semantic_provenance=_provenance())
+    receipt = _build(replace(_context(check=check), records=(opened,)))
+    for rendered in _renderings(receipt):
+        assert sentence in rendered
+        assert source in rendered
+    other = _TRANSCRIBED_SENTENCE if sentence == _TITLE_ONLY_SENTENCE else _TITLE_ONLY_SENTENCE
+    assert all(other not in rendered for rendered in _renderings(receipt))
+
+
+def test_task_statement_source_is_not_claimed_without_a_completed_review_or_history() -> None:
+    from builders.replay import genesis_session_opened_variant
+
+    opened = genesis_session_opened_variant(version="1.2.0", statement=None)
+    deterministic = _check(CheckVerdict.NO_ISSUE_DETECTED, _coverage())
+    reviewed = _check(
+        CheckVerdict.NO_ISSUE_DETECTED, _coverage(), semantic_provenance=_provenance()
+    )
+    for receipt in (
+        # No AI-powered review ran, so there is nothing to say about what it saw.
+        _build(replace(_context(check=deterministic), records=(opened,))),
+        # Without the ledger history the receipt cannot know, so it says nothing.
+        _build(_context(check=reviewed)),
+    ):
+        for rendered in _renderings(receipt):
+            assert _TITLE_ONLY_SENTENCE not in rendered
+            assert _TRANSCRIBED_SENTENCE not in rendered
+
+
+def test_a_redacted_statement_event_is_not_reported_as_title_only() -> None:
+    from builders.replay import genesis_session_opened_variant
+    from yoetz.domain.events import RedactionState
+
+    opened = genesis_session_opened_variant(
+        version="1.2.0", statement="The request.", redaction=RedactionState.LOGICALLY_REDACTED
+    )
+    check = _check(CheckVerdict.NO_ISSUE_DETECTED, _coverage(), semantic_provenance=_provenance())
+    receipt = _build(replace(_context(check=check), records=(opened,)))
+    for rendered in _renderings(receipt):
+        assert _TITLE_ONLY_SENTENCE not in rendered
+
+
+def test_a_withheld_statement_keeps_its_gap_prose_instead_of_a_source_sentence() -> None:
+    from builders.replay import genesis_session_opened_variant
+
+    gaps = ("task_statement_not_authorized", "task_statement_unavailable")
+    coverage = _coverage(gaps=gaps)
+    opened = genesis_session_opened_variant(version="1.2.0", statement="The request.")
+    check = _check(CheckVerdict.NO_ISSUE_DETECTED, coverage, semantic_provenance=_provenance())
+    context = _context(
+        coverage=coverage, gaps=tuple(CaseGap(code, code, ()) for code in gaps), check=check
+    )
+    receipt = _build(replace(context, records=(opened,)))
+    for rendered in _renderings(receipt):
+        assert "did not receive the task statement" in rendered
+        assert _TRANSCRIBED_SENTENCE not in rendered
+        assert _TITLE_ONLY_SENTENCE not in rendered
 
 
 def test_child_receipt_retains_provider_usage_under_the_combined_contract() -> None:

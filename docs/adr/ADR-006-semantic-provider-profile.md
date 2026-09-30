@@ -826,10 +826,14 @@ a requirement both plan and diff omitted.
   `task_description`) or `task_statement_not_supplied` (neither statement nor readable
   title) travels on the packet, check, finding baseline and receipt coverage. The source order is
   followed literally: a title standing in is disclosed by its `task_title_only` label, not by a
-  gap. These codes do not weaken deterministic absence proof, and they tolerate semantic absence
-  proof only when the finding was raised under the same limit, or was raised before the ledger's
-  first statement-capable event and carries none of them: that review had at most the task title
-  (`task_title_only`), never the user's request.
+  gap, and the receipt of a completed review names that source in fixed words. These codes do
+  not weaken deterministic absence proof, and they tolerate semantic absence proof only when the
+  finding was raised under the same limit, or was raised before the ledger's first
+  statement-capable event and carries none of them: that review had at most the task title
+  (`task_title_only`), never the user's request. A statement-bearing schema version counts only
+  when its readable payload carries a statement or the payload is no longer readable, so a
+  lineage-only `session_opened` 1.2.0 without one does not start that frontier, and a later
+  redaction never moves it.
 - `TASK_STATEMENT_REVIEW_INSTRUCTION` is appended to the system instruction: the task statement is
   the specification and wins over the plan; a plan or diff that omits a stated requirement is a
   discrepancy citing the statement; never request behaviour the statement excludes; weigh

@@ -1726,3 +1726,11 @@ Codex renders a `UserPromptSubmit` hook, but whether `codex exec` fires it for t
 Host-captured prompts (`host_captured_user_prompt`) are not used on any host in this version:
 captured prompt text never enters the packet, and the Expanded-only, explicit prompt-capture
 choice that would allow it is still open on issue #908.
+
+Automatic attach does not record a task statement. The shared observation hook opens the task
+with a generic title and no `task_statement`, so until the agent calls `start` with the user's
+request the reviewer sees at most that title (`task_title_only`), and the receipt says so.
+Recording hook text there would label it `agent_transcribed`, which it is not, and would bypass
+the prompt-capture consent still open on issue #908.
+For Codex the first attach runs on `SessionStart`, before any prompt exists; a retry on
+`UserPromptSubmit` is also unproven for the initial `codex exec` prompt (above).

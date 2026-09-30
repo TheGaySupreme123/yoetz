@@ -1724,6 +1724,8 @@ class YoetzTui(App[int]):
         authority_lines = [f"Repository grant: {current.repository_authority_summary}"]
         if current.repository_migration_summary is not None:
             authority_lines.append(current.repository_migration_summary)
+        if current.task_statement_disclosure is not None:
+            authority_lines.append(f"Task statement: {current.task_statement_disclosure}")
         self.say(
             Level.ACTIVE,
             "Privacy",

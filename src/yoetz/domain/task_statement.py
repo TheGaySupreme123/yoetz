@@ -194,7 +194,7 @@ def current_task_statement(records: Iterable[LedgerRecord]) -> RecordedTaskState
 
 
 # Event versions minted to carry a task statement. Nothing older can, so a review whose frozen
-# frontier precedes the first of these in the ledger cannot have received a statement.
+# frontier precedes the first of these that may hold one cannot have received a statement.
 _STATEMENT_CAPABLE_SCHEMAS: Final = frozenset(
     {
         ("session_opened", "1.2.0"),
@@ -206,16 +206,21 @@ _STATEMENT_CAPABLE_SCHEMAS: Final = frozenset(
 
 
 def may_carry_task_statement(record: LedgerRecord) -> bool:
-    """Whether ``record``'s schema version can carry a task statement.
+    """Whether ``record`` may have carried a task statement.
 
-    Decided by the envelope alone, never the payload: redacting an event later must not make a
-    review that held the statement look like one that predates the feature (issue #908).
+    Its schema version must be one minted to carry a statement. A readable payload then decides:
+    a lineage-only ``session_opened`` 1.2.0 without a statement carried none (review 942-G2). A
+    payload the ledger cannot read still counts, so redacting an event later never makes a review
+    that held the statement look like one that predates it (issue #908).
     """
 
-    return (
-        type(record) is AcceptedEvent
-        and (record.schema.name, record.schema.version) in _STATEMENT_CAPABLE_SCHEMAS
-    )
+    if (
+        type(record) is not AcceptedEvent
+        or (record.schema.name, record.schema.version) not in _STATEMENT_CAPABLE_SCHEMAS
+    ):
+        return False
+    payload = record.payload
+    return payload is None or getattr(payload, "task_statement", None) is not None
 
 
 def review_selection_for_delivery(policy: PrivacyPolicy) -> ReviewSelectionPolicy:
