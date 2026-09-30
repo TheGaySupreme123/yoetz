@@ -151,7 +151,7 @@ def test_approving_the_earlier_preset_again_is_a_narrowing_back_to_the_released_
     assert back and not any(change.widens for change in back)
     count = next(change for change in back if change.field == "max_excerpts")
     assert _task_statement_change_note(count) == (
-        "max_excerpts: fewer excerpts will be sent in one review."
+        "max_excerpts: at most 16 excerpts will be sent in one review."
     )
     restored = encode_privacy_policy_json(
         replace(_expanded(), review_selection=legacy.review_selection)

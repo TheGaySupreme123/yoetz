@@ -2184,7 +2184,7 @@ class PrivacyCoordinator:
 def _exceeds_current_limits(
     proposal: DisclosureProposal, effective: EffectivePrivacyPolicy
 ) -> bool:
-    """Whether a stored review proposal is outside the excerpt limits or byte ceiling now."""
+    """Whether a stored review proposal is outside the excerpt limits or channel ceilings now."""
 
     if proposal.purpose != _SEMANTIC_PURPOSE:
         return False
@@ -2198,7 +2198,9 @@ def _exceeds_current_limits(
         ),
         None,
     )
-    return llm is not None and 0 < llm.max_bytes < len(proposal.prepared_bytes)
+    return llm is not None and (
+        0 < llm.max_bytes < len(proposal.prepared_bytes) or 0 < llm.max_tokens < proposal.max_tokens
+    )
 
 
 def _within_excerpt_limits(prepared: bytes, selection: ReviewSelectionPolicy) -> bool:

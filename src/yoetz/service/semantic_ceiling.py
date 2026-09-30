@@ -23,6 +23,7 @@ from yoetz.application.semantic_case import (
     semantic_case_to_prepared_payload,
 )
 from yoetz.domain.privacy import EgressChannel, PrivacyPolicy, ReviewSelectionPolicy
+from yoetz.ports.privacy import MAX_MINIMIZED_DISCLOSURE_BYTES
 from yoetz.ports.semantic import SemanticCase
 
 __all__ = [
@@ -42,10 +43,11 @@ CEILING_PLANNING_GAP: Final = "content_unselected"
 
 
 def channel_prepared_limit(policy: PrivacyPolicy) -> int | None:
-    """The prepared-packet byte size the AI-powered review channel admits, if it sets one.
+    """The prepared-packet byte size the AI-powered review channel admits.
 
-    It is the narrower of ``max_bytes`` and ``max_tokens`` at the estimate egress uses. Zero means
-    unset.
+    It is the narrowest of ``max_bytes``, ``max_tokens`` at the estimate egress uses, and the
+    largest disclosure the privacy port carries at all, so an unset (zero) or high Custom ceiling
+    still plans below what egress can prepare. ``None`` only without an LLM channel.
     """
 
     llm = next(
@@ -63,13 +65,13 @@ def channel_prepared_limit(policy: PrivacyPolicy) -> int | None:
         for limit in (llm.max_bytes, llm.max_tokens * EGRESS_BYTES_PER_TOKEN_ESTIMATE)
         if limit > 0
     ]
-    return min(limits) if limits else None
+    return min([MAX_MINIMIZED_DISCLOSURE_BYTES, *limits])
 
 
 def with_ceiling_planning_gap(gaps: Sequence[str]) -> tuple[str, ...]:
     """``gaps`` plus the disclosure a planned reduction adds, without duplicating it."""
 
-    return tuple(gaps) if CEILING_PLANNING_GAP in gaps else (*gaps, CEILING_PLANNING_GAP)
+    return tuple(sorted({*gaps, CEILING_PLANNING_GAP}, key=str.encode))
 
 
 def _prepared_size(case: SemanticCase) -> int | None:

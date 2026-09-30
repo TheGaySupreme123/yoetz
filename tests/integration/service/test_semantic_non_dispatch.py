@@ -1707,3 +1707,39 @@ async def test_a_case_over_the_channel_ceiling_is_planned_below_it_and_disclosed
     assert all(1 <= cast(int, row["semantic_excerpt_ceiling_rounds"]) <= 4 for row in built)
     assert all(16 < cast(int, row["semantic_excerpts_selected"]) < 64 for row in built)
     assert digests[0] == digests[1]
+
+
+@pytest.mark.anyio
+async def test_an_unset_custom_ceiling_still_plans_below_the_disclosure_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #907 Phase 1b: zero ``max_bytes``/``max_tokens`` mean unset, not unbounded.
+
+    Without a bound the planner left a 64-excerpt case over the 262,144-byte disclosure limit,
+    and preparing it failed as a coordinator error instead of a planned, disclosed review.
+    """
+
+    monkeypatch.setattr(diagnostics_module, "log_dir", lambda: tmp_path)
+    privacy = _Privacy(profile=ReviewContextProfile.EXPANDED)
+    privacy.terminal_provider_result = True
+    store = privacy.policy_application.policy_store
+    effective = store._effective  # pyright: ignore[reportPrivateUsage]
+    custom = replace(effective.policy, review_context_profile=ReviewContextProfile.CUSTOM)
+    assert all(
+        (channel.max_bytes, channel.max_tokens) == (0, 0)
+        for channel in custom.channel_policies
+        if channel.channel is EgressChannel.LLM_INFERENCE
+    )
+    store._effective = replace(effective, policy=custom)  # pyright: ignore[reportPrivateUsage]
+
+    result = await _evaluator(privacy, lambda: _PROVIDER, _route())(
+        _excerpt_heavy_frozen(64, '"' * 8_000), ()
+    )
+
+    assert result.reason is not SemanticReason.COORDINATOR_FAILURE
+    assert privacy.calls == 1
+    [candidate] = privacy.candidates
+    assert _prepared_size(candidate) <= 262_144
+    assert "content_unselected" in result.case_content_gaps
+    [built] = [row for row in _records(tmp_path) if row["operation"] == "semantic_case_built"]
+    assert cast(int, built["semantic_excerpt_ceiling_rounds"]) >= 1

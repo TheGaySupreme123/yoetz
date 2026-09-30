@@ -622,7 +622,11 @@ def _task_statement_change_note(
 
     if (change.area, change.field) == ("review", "max_excerpts"):
         if not change.widens:
-            return "max_excerpts: fewer excerpts will be sent in one review."
+            return (
+                f"max_excerpts: at most {change.after.count} excerpts will be sent in one review."
+                if change.after.kind == "count"
+                else "max_excerpts: fewer excerpts will be sent in one review."
+            )
         bytes_widen = any(
             other.area == "review"
             and other.field in {"max_excerpt_bytes", "max_total_excerpt_bytes"}

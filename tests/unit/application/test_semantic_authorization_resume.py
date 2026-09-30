@@ -374,28 +374,60 @@ def _packet_with_excerpts(count: int) -> bytes:
     )
 
 
+_SMALL_PACKET = b'{"p":"' + b"x" * 2_048 + b'"}'
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    ("prepared", "max_bytes"),
-    [(_packet_with_excerpts(17), 262_144), (b'{"p":"' + b"x" * 2_048 + b'"}', 1_024)],
-    ids=["over_excerpt_count", "over_channel_bytes"],
+    ("prepared", "max_bytes", "max_tokens", "local"),
+    [
+        (_packet_with_excerpts(17), 262_144, 4_096, False),
+        (_SMALL_PACKET, 1_024, 4_096, False),
+        (_SMALL_PACKET, 262_144, 100, False),
+        (_packet_with_excerpts(17), 262_144, 4_096, True),
+    ],
+    ids=["over_excerpt_count", "over_channel_bytes", "over_channel_tokens", "local_model"],
 )
 async def test_resume_rechecks_the_current_limits_before_dispatch(
-    prepared: bytes, max_bytes: int, monkeypatch: pytest.MonkeyPatch
+    prepared: bytes,
+    max_bytes: int,
+    max_tokens: int,
+    local: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Issue #907 Phase 1b: a stored proposal answers to the policy in force at resume."""
 
-    proposal = replace(_proposal(expires_at=_NOW + timedelta(minutes=5)), prepared_bytes=prepared)
+    from yoetz.domain.privacy import DataClass, LocalDisclosureSink
+    from yoetz.protocol.models import DataCategory
+
+    proposal = replace(
+        _proposal(expires_at=_NOW + timedelta(minutes=5)),
+        prepared_bytes=prepared,
+        max_tokens=(len(prepared) + 3) // 4,
+    )
     current = _effective()
     narrowed = replace(
         current.policy,
         channel_policies=tuple(
-            replace(channel, max_bytes=max_bytes)
+            replace(channel, max_bytes=max_bytes, max_tokens=max_tokens)
             if channel.provider_binding is not None
             else channel
             for channel in current.policy.channel_policies
         ),
     )
+    if local:
+        proposal = replace(
+            proposal, provider_binding=None, local_sink=LocalDisclosureSink.LOCAL_MODEL
+        )
+        narrowed = replace(
+            narrowed,
+            local_model_enabled=True,
+            local_model_binding=ProviderBinding(
+                "local-model", "test-model", "local-model-af-unix", "1.0.0", "local_af_unix"
+            ),
+            local_model_categories=(DataCategory.BOUNDED_STRUCTURAL_METADATA,),
+            local_model_data_classes=(DataClass.PUBLIC_STRUCTURAL,),
+        )
     monkeypatch.setattr(
         sys.modules[__name__],
         "_effective",

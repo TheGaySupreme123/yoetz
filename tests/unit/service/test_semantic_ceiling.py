@@ -101,7 +101,7 @@ def _plan(case: DeterministicCase, limit: int) -> tuple[SemanticCase, ReviewSele
     )
 
 
-def test_the_limit_is_the_narrower_channel_ceiling_and_zero_is_unset() -> None:
+def test_the_limit_is_the_narrowest_ceiling_and_never_above_the_disclosure_bound() -> None:
     policy = minimal_external_policy()
 
     def with_llm(max_bytes: int, max_tokens: int):  # noqa: ANN202
@@ -118,7 +118,9 @@ def test_the_limit_is_the_narrower_channel_ceiling_and_zero_is_unset() -> None:
     assert channel_prepared_limit(with_llm(262_144, 65_536)) == 262_144
     assert channel_prepared_limit(with_llm(262_144, 4_096)) == 16_384
     assert channel_prepared_limit(with_llm(0, 1_000)) == 4_000
-    assert channel_prepared_limit(with_llm(0, 0)) is None
+    # Unset or high ceilings still plan below the largest disclosure egress can prepare.
+    assert channel_prepared_limit(with_llm(0, 0)) == 262_144
+    assert channel_prepared_limit(with_llm(0, 100_000)) == 262_144
 
 
 def test_a_case_over_the_ceiling_is_rebuilt_below_it_with_the_reduction_disclosed() -> None:

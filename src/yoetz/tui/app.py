@@ -1748,7 +1748,7 @@ class YoetzTui(App[int]):
             if on_recipe:
                 self.say(
                     Level.OPTIONAL,
-                    "A newer version of your recipe is available. Your current limits stay until "
+                    "A newer version of your recipe is available. Your current policy stays until "
                     "you review and approve it in the trusted terminal.",
                 )
             options.append(
