@@ -9,7 +9,9 @@ an item re-requested after it was supplied is dropped unless the reviewer cites 
 (its run, exact command, file path, or a correction of it), so a record that relates only to
 another path, run or claim never answers it.
 
-Pure: reads only the frozen projection and the frozen review selection.
+Reads the frozen projection and review selection. Its only filesystem access is resolving the
+workspace root the caller supplies (an ``isdir`` check, then ``os.path.realpath``, once per
+call); a path an agent recorded is compared lexically and never resolved or stat'ed.
 """
 
 from __future__ import annotations
@@ -631,11 +633,19 @@ def _run_key(payload: ActionRecordedPayload | None) -> _RunKey | None:
 
 
 def _workspace_roots(workspace_root: str | None) -> frozenset[str]:
-    """The workspace root as given and as ``realpath`` resolves it (``/tmp``, ``/private/tmp``)."""
+    """The workspace root as given and, when it exists, as ``realpath`` resolves it.
+
+    This is the module's only filesystem access: the root the session opened with, never a path an
+    agent named. Both spellings let ``/tmp/w/a.py`` and ``/private/tmp/w/a.py`` name one file.
+    """
 
     if workspace_root is None or not os.path.isabs(workspace_root):
         return frozenset()
-    return frozenset({os.path.normpath(workspace_root), os.path.realpath(workspace_root)} - {"/"})
+    given = os.path.normpath(workspace_root)
+    roots = {given}
+    if os.path.isdir(given):
+        roots.add(os.path.realpath(given))
+    return frozenset(roots - {"/"})
 
 
 def _normal_path(text: str, roots: frozenset[str], *, known_path: bool = False) -> _Path | None:
@@ -643,8 +653,9 @@ def _normal_path(text: str, roots: frozenset[str], *, known_path: bool = False) 
 
     Surrounding whitespace, ``./`` and ``.`` segments, repeated and trailing slashes are dropped;
     case and every other character are kept, and ``..`` is never resolved. An absolute path counts
-    only inside the workspace root (tried as written, then through ``realpath``), as the path
-    relative to it; the root itself is the whole tree (``.``). A single segment with no slash is
+    only inside the workspace root (as given or as it resolves), compared lexically after
+    ``os.path.normpath`` and never resolved on the filesystem, as the path relative to it; the
+    root itself is the whole tree (``.``). A single segment with no slash is
     not certainly a path (``Makefile`` or ``stdout``) unless ``known_path`` says so (a captured
     edit's path, a ``git diff`` argument); it then matches only a certain path.
     """
@@ -654,8 +665,6 @@ def _normal_path(text: str, roots: frozenset[str], *, known_path: bool = False) 
         return None
     if text.startswith("/"):
         relative = _inside(os.path.normpath(text), roots)
-        if relative is None and roots:
-            relative = _inside(os.path.realpath(text), roots)
         return None if relative is None else (relative, True)
     parts = [part for part in text.split("/") if part not in {"", "."}]
     if not parts:

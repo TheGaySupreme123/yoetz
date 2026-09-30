@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator, Iterable, Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -885,9 +886,37 @@ def test_an_aliased_workspace_root_resolves_to_the_same_files(tmp_path: Path) ->
     real.mkdir()
     link = tmp_path / "link"
     link.symlink_to(real, target_is_directory=True)
-    for root, written in ((link, real), (real, link)):
+    # The root is resolved; an agent path is only compared lexically, never resolved.
+    for written in (link, real):
         case = _reference_case("src/a.py", f"{written}/src/a.py")
-        assert _dropped(case, "current_diff_for_path", str(evd(1)), workspace_root=str(root))
+        assert _dropped(case, "current_diff_for_path", str(evd(1)), workspace_root=str(link))
+    via_link = _reference_case("src/a.py", f"{link}/src/a.py")
+    assert not _dropped(via_link, "current_diff_for_path", str(evd(1)), workspace_root=str(real))
+
+
+def test_an_agent_named_absolute_path_is_never_resolved_on_the_filesystem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the workspace root is resolved; a path the agent names could be an unreachable mount."""
+
+    root = str(tmp_path)
+    resolve = os.path.realpath
+    touched: list[str] = []
+
+    def guarded(path: str | os.PathLike[str], *, strict: bool = False) -> str:
+        if os.fspath(path) != root:
+            touched.append(os.fspath(path))
+            raise AssertionError("agent-named path resolved")
+        return resolve(path, strict=strict)
+
+    monkeypatch.setattr(os.path, "realpath", guarded)
+    for reference in ("/net/unreachable/src/a.py", f"{root}/src/a.py"):
+        case = _reference_case("src/a.py", reference)
+        _dropped(case, "current_diff_for_path", str(evd(1)), workspace_root=root)
+    assert not _answers_capture(
+        frozenset({"src/a.py"}), "git diff /net/unreachable/src/a.py", workspace_root=root
+    )
+    assert touched == []
 
 
 def test_a_bare_or_dot_file_name_is_a_path_when_the_other_side_is_one() -> None:

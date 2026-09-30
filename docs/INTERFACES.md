@@ -6889,32 +6889,32 @@ diff` behind it, and its own `reference` unless a command other than `git diff` 
 artifact such as `reports/junit.xml` is answered only through that command's runs). Paths compare
 normalized but exact: `./`, `.` segments, repeated and trailing slashes are dropped, case is kept,
 `..` is not resolved. An absolute path counts only inside the workspace root the session opened with
-(tried as given and through `realpath`), as the path relative to it; outside it, or when the root is
-unknown, it matches nothing, and a basename alone never matches. A single segment without a slash
-(`Makefile`, `.gitignore`, but also `stdout`) is a path only when the other side is certainly one
-(`./Makefile`, a captured path, a `git diff` argument). A content `git diff` is `git [--no-pager]
-[-C <workspace root>] diff [options] [revisions] [--] [paths]`; no path (or `.`) is the whole tree,
-and a directory covers the files beneath it; summary forms (`--stat`, `--name-only`, `--numstat` and
-the like) and `-C` naming another directory do not count. The workspace root and the captured paths
-are compared in process and never recorded, logged or sent. Re-citing the old target, a shared
-obligation, or a record that only cites other new material ties nothing. A claim is answered by
-material tied to what it cites, and by a correction that supersedes or disputes it together with the
-new material the correction cites when that material is tied to the claim's support, or when the
-claim cited nothing Yoetz can relate (the request was for the claim itself). A finding is answered
-by a response to it and what that cites, a plan by the version superseding it, an obligation by new
-actions, results, claims and plans naming it. A record related to the target only through another
-path, run or claim therefore never answers it. Only an item with no target is matched by record
-family alone, and `supplied_since` lists refs on the same rule. Only agent-published material
-answers a request, never hook-captured tool output: authorship is the service-stamped envelope fact,
-carried on the frozen case as `observation_event_ids`, the observation-authored events recorded
-after the request, emitted only when non-empty so other cases keep their bytes; and a result answers
-`verification_output` only when it carries output (linked evidence or a summary). Yoetz classifies
-each kept item as `agent_suppliable` or `structurally_unavailable_on_this_host` (a kind the
-effective review selection or channel can never carry, or a redacted target), adding
-`semantic_missing_agent_suppliable` and `semantic_missing_structurally_unavailable`. These are check
-limitations, never findings, and weigh on finding resolution exactly like the
-`semantic_packet_insufficient` they ride beside: a local issue is still proven absent, and a `fixed`
-ruling (#905) still resolves its own finding.
+(the root as given and as `realpath` resolves it; the agent's path is compared lexically and never
+resolved), as the path relative to it; outside it, or when the root is unknown, it matches nothing,
+and a basename alone never matches. A single segment without a slash (`Makefile`, `.gitignore`, but
+also `stdout`) is a path only when the other side is certainly one (`./Makefile`, a captured path, a
+`git diff` argument). A content `git diff` is `git [--no-pager] [-C <workspace root>] diff [options]
+[revisions] [--] [paths]`; no path (or `.`) is the whole tree, and a directory covers the files
+beneath it; summary forms (`--stat`, `--name-only`, `--numstat` and the like) and `-C` naming
+another directory do not count. The workspace root and the captured paths are compared in process
+and never recorded, logged or sent. Re-citing the old target, a shared obligation, or a record that
+only cites other new material ties nothing. A claim is answered by material tied to what it cites,
+and by a correction that supersedes or disputes it together with the new material the correction
+cites when that material is tied to the claim's support, or when the claim cited nothing Yoetz can
+relate (the request was for the claim itself). A finding is answered by a response to it and what
+that cites, a plan by the version superseding it, an obligation by new actions, results, claims and
+plans naming it. A record related to the target only through another path, run or claim therefore
+never answers it. Only an item with no target is matched by record family alone, and
+`supplied_since` lists refs on the same rule. Only agent-published material answers a request, never
+hook-captured tool output: authorship is the service-stamped envelope fact, carried on the frozen
+case as `observation_event_ids`, the observation-authored events recorded after the request, emitted
+only when non-empty so other cases keep their bytes; and a result answers `verification_output` only
+when it carries output (linked evidence or a summary). Yoetz classifies each kept item as
+`agent_suppliable` or `structurally_unavailable_on_this_host` (a kind the effective review selection
+or channel can never carry, or a redacted target), adding `semantic_missing_agent_suppliable` and
+`semantic_missing_structurally_unavailable`. These are check limitations, never findings, and weigh
+on finding resolution exactly like the `semantic_packet_insufficient` they ride beside: a local
+issue is still proven absent, and a `fixed` ruling (#905) still resolves its own finding.
 
 The unreleased `check_recorded` 1.3.0 is extended in place with the optional
 `missing_for_assessment` (kind, target refs, availability; no reviewer prose; 1–8 items, only beside
