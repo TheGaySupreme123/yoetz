@@ -201,6 +201,11 @@ _OPEN_PRE_TTL_MS: Final = 600_000
 _MAX_UNPAIRED_SCOPES: Final = 256
 _MAX_CODEX_TOOL_HOOK_ENTRIES: Final = 256
 _MAX_PENDING_ROLLOUT_TOKEN: Final = 128
+# Undecided rollout tool items (#910). Past the soft bound the stream reconciler
+# delivers the oldest with ``unpaired_event``; the hard bound only guards the
+# state file and records the loss as a session gap.
+MAX_PENDING_ROLLOUT_ITEMS: Final = 64
+_MAX_PENDING_ROLLOUT_ITEMS_HARD: Final = 4 * MAX_PENDING_ROLLOUT_ITEMS
 _MAX_OUTBOX: Final = 512
 # The largest selected profile is the hard local JSON ceiling.  Profile
 # specific limits come from the pure budget policy below; the standard value
@@ -1376,8 +1381,27 @@ def _pending_rollout_item_token(value: object) -> bool:
     return type(value) is str and 0 < len(value) <= _MAX_PENDING_ROLLOUT_TOKEN
 
 
-def _pending_rollout_items_from_json(raw: object) -> dict[str, tuple[str, int]]:
-    items: dict[str, tuple[str, int]] = {}
+@dataclass(frozen=True, slots=True)
+class PendingRolloutItem:
+    """One rollout tool item read before any hook post it pairs with (#910).
+
+    The structural envelope is kept beside the envelope ring so its outcome can
+    still be delivered, with ``unpaired_event``, when the ring or this bounded
+    account forgets the item before a hook post decides it.
+    """
+
+    session_commitment: str
+    codex_session_id: str
+    envelope: ObservationEnvelope
+    touched: int
+
+    @property
+    def source_identity(self) -> str:
+        return self.envelope.source_identity
+
+
+def _pending_rollout_items_from_json(raw: object) -> dict[str, PendingRolloutItem]:
+    items: dict[str, PendingRolloutItem] = {}
     if not isinstance(raw, Mapping):
         return items
     for identity, value in cast(Mapping[object, object], raw).items():
@@ -1385,10 +1409,31 @@ def _pending_rollout_items_from_json(raw: object) -> dict[str, tuple[str, int]]:
             continue
         entry = cast(Mapping[str, object], value)
         session = entry.get("session")
-        if not _pending_rollout_item_token(session):
+        host_session = entry.get("codex_session_id")
+        raw_envelope = entry.get("envelope")
+        if (
+            not _pending_rollout_item_token(session)
+            or not _pending_rollout_item_token(host_session)
+            or not isinstance(raw_envelope, Mapping)
+        ):
             continue
-        items[cast(str, identity)] = (cast(str, session), _bounded_counter(entry.get("touched")))
-    return dict(sorted(items.items(), key=lambda item: item[1][1])[-_MAX_CODEX_TOOL_HOOK_ENTRIES:])
+        try:
+            envelope = observation_envelope_from_json(
+                JsonObject(cast(Mapping[str, JsonValue], raw_envelope))
+            )
+        except ProtocolValueError, TypeError, ValueError:
+            continue
+        if envelope.source_identity != identity or envelope.session_commitment != session:
+            continue
+        items[cast(str, identity)] = PendingRolloutItem(
+            cast(str, session),
+            cast(str, host_session),
+            envelope,
+            _bounded_counter(entry.get("touched")),
+        )
+    return dict(
+        sorted(items.items(), key=lambda item: item[1].touched)[-_MAX_PENDING_ROLLOUT_ITEMS_HARD:]
+    )
 
 
 def _code_mode_cells_from_json(raw: object) -> dict[str, _CodeModeCell]:
@@ -1791,10 +1836,9 @@ class _WorkspaceState:
     code_mode_cells: dict[str, _CodeModeCell] | None = None
     codex_tool_hook_clock: int = 0
     # Per rollout tool item read before any hook post it pairs with (#910): its
-    # source identity -> (host session, recency stamp on the clock above). A
-    # later hook post decides it; the bounded map forgets the least recently
-    # touched item, which then stays in the local store only, as before.
-    pending_rollout_items: dict[str, tuple[str, int]] | None = None
+    # source identity -> its account, stamped on the clock above. A later hook
+    # post or the turn's end decides it (see MAX_PENDING_ROLLOUT_ITEMS).
+    pending_rollout_items: dict[str, PendingRolloutItem] | None = None
     # True when a state was written by a pre-/11 reader that could not retain
     # scoped pairing provenance. It is deliberately sticky: a later save must
     # not turn unknown history into proof that a gap was false.
@@ -5886,45 +5930,62 @@ class LocalObservationStore:
             return local
 
     def note_pending_rollout_item(
-        self, workspace: str, session_commitment: str, source_identity: str
+        self,
+        workspace: str,
+        session_commitment: str,
+        codex_session_id: str,
+        envelope: ObservationEnvelope,
     ) -> None:
         """Remember a rollout tool item read before any hook post it pairs with (#910).
 
         The item stays in the local store only until a later hook post of the same
-        session decides it: the stream reconciler then delivers it once when it is
-        the only carrier of that call's outcome, or settles it as the post's copy.
+        session, or the turn's end, decides it: the stream reconciler then delivers
+        it once when it is the only carrier of a call's outcome, or settles it as a
+        copy. Past a hard bound the oldest item is dropped and ``unpaired_event``
+        recorded for its session; the reconciler's soft bound normally delivers it
+        first.
         """
 
-        if not _pending_rollout_item_token(session_commitment) or not _pending_rollout_item_token(
-            source_identity
+        if (
+            not _pending_rollout_item_token(session_commitment)
+            or not _pending_rollout_item_token(codex_session_id)
+            or type(envelope) is not ObservationEnvelope
+            or envelope.session_commitment != session_commitment
+            or not _pending_rollout_item_token(envelope.source_identity)
         ):
             raise ProtocolValueError("invalid_event_value_type")
         with self._lock:
             state = self._load(workspace)
             assert state.pending_rollout_items is not None
+            identity = envelope.source_identity
             state.codex_tool_hook_clock = min(_MAX_SAFE_INTEGER, state.codex_tool_hook_clock + 1)
-            state.pending_rollout_items.pop(source_identity, None)
-            state.pending_rollout_items[source_identity] = (
-                session_commitment,
-                state.codex_tool_hook_clock,
+            state.pending_rollout_items.pop(identity, None)
+            state.pending_rollout_items[identity] = PendingRolloutItem(
+                session_commitment, codex_session_id, envelope, state.codex_tool_hook_clock
             )
-            while len(state.pending_rollout_items) > _MAX_CODEX_TOOL_HOOK_ENTRIES:
-                oldest = min(state.pending_rollout_items.items(), key=lambda item: item[1][1])[0]
-                del state.pending_rollout_items[oldest]
+            while len(state.pending_rollout_items) > _MAX_PENDING_ROLLOUT_ITEMS_HARD:
+                oldest = min(state.pending_rollout_items.values(), key=lambda item: item.touched)
+                del state.pending_rollout_items[oldest.source_identity]
+                self._note_gap_state(state, ObservationGapCode.UNPAIRED_EVENT.value)
+                self._note_session_gap_state(
+                    state, oldest.session_commitment, ObservationGapCode.UNPAIRED_EVENT.value
+                )
             self._save(workspace, state)
 
     @_read_mostly
-    def pending_rollout_items(self, workspace: str, session_commitment: str) -> tuple[str, ...]:
-        """Source identities of one session's undecided rollout tool items, oldest first."""
+    def pending_rollout_items(
+        self, workspace: str, session_commitment: str | None = None
+    ) -> tuple[PendingRolloutItem, ...]:
+        """Undecided rollout tool items, oldest first; one session's, or all when ``None``."""
 
         with self._reading():
             state = self._load(workspace)
             return tuple(
-                identity
-                for identity, (session, _touched) in sorted(
-                    (state.pending_rollout_items or {}).items(), key=lambda item: item[1][1]
+                item
+                for item in sorted(
+                    (state.pending_rollout_items or {}).values(), key=lambda item: item.touched
                 )
-                if session == session_commitment
+                if session_commitment is None or item.session_commitment == session_commitment
             )
 
     def settle_pending_rollout_item(
@@ -5936,7 +5997,7 @@ class LocalObservationStore:
             state = self._load(workspace)
             assert state.pending_rollout_items is not None
             current = state.pending_rollout_items.get(source_identity)
-            if current is None or current[0] != session_commitment:
+            if current is None or current.session_commitment != session_commitment:
                 return
             del state.pending_rollout_items[source_identity]
             self._save(workspace, state)
@@ -11267,8 +11328,15 @@ class LocalObservationStore:
         if state.pending_rollout_items:
             payload["pending_rollout_items"] = JsonObject(
                 {
-                    identity: JsonObject({"session": session, "touched": touched})
-                    for identity, (session, touched) in sorted(
+                    identity: JsonObject(
+                        {
+                            "session": item.session_commitment,
+                            "codex_session_id": item.codex_session_id,
+                            "envelope": observation_envelope_to_json(item.envelope),
+                            "touched": item.touched,
+                        }
+                    )
+                    for identity, item in sorted(
                         state.pending_rollout_items.items(), key=lambda item: item[0].encode()
                     )
                 }

@@ -45,7 +45,10 @@ reverse-chronological released versions.
   copy of a hooked call stays local when the hook already stated the outcome, so one command is one
   result; when the hook stated none (a still-running process) or no tool hooks fire, the rollout
   item is delivered with its outcome. This holds when the rollout item is read before its hook
-  result arrives: the item waits locally and the later hook result decides it (#910).
+  result arrives: the item waits locally until the hook results of that command settle it. With
+  parallel runs of one command it waits until no other run of that command is still open, or
+  until the turn ends, so runs never trade outcomes. An item whose pairing is lost is delivered
+  with `unpaired_event` instead of being dropped (#910).
 
 - Codex observation records each tool call once. A tool call's pre-event and its result now share
   one ledger action instead of two, and a code-mode `exec` cell no longer adds its own action next

@@ -723,12 +723,18 @@ a command item whose exit matches an unpaired stated post of the same command co
 post's copy; otherwise, while an outcome-less call of that commitment is unpaired, the item is
 delivered as that call's exit, a second action for that run which #909 judges as the later run.
 Counting per call means one call's stated outcome never withholds another call's only exit. An
-item read before any hook post it pairs with is pending, not a copy: the first later post that
-pairs with it (call id, then command commitment) decides it by the same rules, and an item made
-the carrier is delivered once on the next stream reconcile, committed together with its
-settlement and stamped with the stream frontier where it was decided, since the task's
-per-source cursor refuses an older position. The pending account is bounded and limited to the
-local envelope ring; an evicted or never-paired item stays local. A session without tool hooks
+item read before any hook post it pairs with is pending, not a copy. A later post with its call
+id decides it directly, and a stated post of its command commitment takes it as the copy when
+the exits match. An outcome-less post of that commitment takes its pending items only once no
+other call of the same command is open, so parallel same-command runs never trade outcomes by
+arrival order. Surplus items are all delivered (a second record over a lost failure), and
+`Stop`/`SessionEnd` close the turn: owed calls take their command's pending items and the rest
+stay local as copies. A carrier is delivered once on the next stream reconcile, committed
+together with its settlement and stamped with the committed stream frontier at release time,
+since the task's per-source cursor refuses an older position. The pending account keeps each
+item's structural record; an item the envelope ring evicts before pairing, or the oldest past
+the account's bound, is delivered with `unpaired_event` as unpaired evidence, so the receipt
+discloses it instead of dropping it. A session without tool hooks
 delivers every item, with its outcome, as the only record of the call. An `McpToolCall` item that names an `error` or a result `isError: true` fails whatever its
 `status`, and a `FileChange` item belongs to the edit family. The Codex outcome reader reads only
 Codex's own shell tools (`Bash`, `shell`, `exec_command`, `local_shell`), never a code-mode `exec`

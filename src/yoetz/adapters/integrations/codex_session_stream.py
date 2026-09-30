@@ -31,9 +31,11 @@ from yoetz.adapters.integrations.observation_admission import (
     build_routine_read_summary,
 )
 from yoetz.adapters.integrations.observation_local import (
+    MAX_PENDING_ROLLOUT_ITEMS,
     STREAM_MAPPING_VERSION,
     YOETZ_TOOL_NAMES,
     LocalObservationStore,
+    PendingRolloutItem,
     self_observation_deliverable,
 )
 from yoetz.domain.observation import (
@@ -1867,8 +1869,8 @@ def _hook_post_stated(structural: Mapping[str, JsonValue]) -> bool:
 _ITEM_CARRIER: Final = "carrier"
 _ITEM_COPY: Final = "copy"
 _ITEM_PENDING: Final = "pending"
-# Sentinel: an outcome-less post pairs with a pending command item whatever its exit.
-_ANY_EXIT: Final = object()
+# A turn's end: every tool call of the turn has fired whatever hooks it will fire.
+_PAIRING_CLOSE_EVENTS: Final = frozenset({"Stop", "SessionEnd"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -1886,50 +1888,51 @@ def _rollout_item_decisions(
     """Decide every rollout tool item of one session against its hook rows (#910).
 
     The session's stored rows are replayed in arrival order, so an item is decided with exactly
-    the hook rows that preceded it, and a later row never changes a decision already made. Per
-    call:
+    the hook rows that preceded it, and a later row never changes a decision already made:
 
     * an item whose id is an outcome-less hook call is that call's outcome (``carrier``; ADR-022
-      decision 15 then corrects the hook's ``unknown`` row);
-    * an item whose id is a stated hook call, or a command item whose exit equals an unpaired
-      stated exit of a hook post for the same command commitment, is that post's ``copy``;
-    * otherwise a command item pairs with an outcome-less hook call of the same commitment,
-      counted per call, so one call's stated outcome never withholds another call's only exit.
+      decision 15 then corrects the hook's ``unknown`` row), and an item whose id is a stated
+      hook call is that post's ``copy``;
+    * a command item whose exit equals an unpaired stated exit of a hook post for the same
+      command commitment is that post's ``copy``;
+    * otherwise a command item is ``pending`` until the outcome-less hook calls of its
+      commitment can be told apart from the calls it may still be a copy of.
 
-    An item that pairs with no earlier hook row is ``pending``: the rollout can record a
-    completed call before its ``PostToolUse`` is stored (#910). A later hook post decides
-    it by the same rules, taking the oldest pending item it pairs with, so an outcome-less post
-    makes the item its carrier and a stated one makes it its copy. The replay is bounded by the
-    local envelope ring and forgets what it evicts.
+    Items and posts can arrive in either order: the rollout can record a completed call before
+    its ``PostToolUse`` is stored. A later post takes a pending item with its own call id, or, if
+    stated, a pending item of its commitment with the same exit, as its copy. While an
+    outcome-less call of a commitment is owed, its pending items become carriers only once no
+    other call of that commitment is open (its ``PreToolUse`` seen, its post not yet): with
+    parallel same-command runs, an open call's post may still claim one of them as its copy, and
+    taking the oldest or the newest would misattribute a pass and lose a failure. When several
+    items remain for fewer owed calls, every one is delivered; a second record is disclosed as
+    #909's later run, a lost failure would not be. ``Stop``/``SessionEnd`` close the turn: owed
+    calls take every pending item of their commitment, and any other pending item is a copy of a
+    call whose post stated its outcome or never fired. The replay is bounded by the local
+    envelope ring and forgets what it evicts.
     """
 
     unstated_calls: dict[str, str | None] = {}
     owed: dict[str, int] = {}
     stated_exits: dict[str, list[int | None]] = {}
     stated_calls: set[str] = set()
+    open_calls: dict[str, set[str]] = {}
     pending: list[_PendingRolloutItem] = []
     decisions: dict[str, str] = {}
 
-    def claim(call_id: str | None, commitment: str | None, exit_status: object) -> str | None:
-        """Take the oldest pending item a hook post pairs with; ``exit_status`` is a filter."""
+    def decide(item: _PendingRolloutItem, decision: str) -> None:
+        pending.remove(item)
+        decisions[item.source_identity] = decision
 
-        chosen: _PendingRolloutItem | None = None
-        if call_id is not None:
-            chosen = next((item for item in pending if item.call_id == call_id), None)
-        if chosen is None and commitment is not None:
-            chosen = next(
-                (
-                    item
-                    for item in pending
-                    if item.commitment == commitment
-                    and (exit_status is _ANY_EXIT or item.exit_status == exit_status)
-                ),
-                None,
-            )
-        if chosen is None:
-            return None
-        pending.remove(chosen)
-        return chosen.source_identity
+    def settle(commitment: str | None, *, closing: bool = False) -> None:
+        if commitment is None or owed.get(commitment, 0) <= 0:
+            return
+        if open_calls.get(commitment) and not closing:
+            return
+        waiting = [item for item in pending if item.commitment == commitment]
+        for item in waiting:
+            decide(item, _ITEM_CARRIER)
+        owed[commitment] = max(0, owed[commitment] - len(waiting))
 
     for envelope in envelopes:
         if envelope.session_commitment != session_commitment:
@@ -1939,16 +1942,37 @@ def _rollout_item_decisions(
         commitment = _token(structural.get("command_commitment"))
         exit_status = structural.get("exit_status")
         exit_fact = exit_status if type(exit_status) is int else None
-        if envelope.source is ObservationSource.CODEX_HOOK and envelope.event_kind == "PostToolUse":
+        if envelope.source is ObservationSource.CODEX_HOOK:
+            kind = envelope.event_kind
+            if kind == "PreToolUse":
+                if call_id is not None and commitment is not None:
+                    open_calls.setdefault(commitment, set()).add(call_id)
+                continue
+            if kind in _PAIRING_CLOSE_EVENTS:
+                open_calls.clear()
+                for owed_commitment in {item.commitment for item in pending}:
+                    settle(owed_commitment, closing=True)
+                for item in tuple(pending):
+                    decide(item, _ITEM_COPY)
+                continue
+            if kind != "PostToolUse":
+                continue
+            if call_id is not None and commitment is not None:
+                open_calls.get(commitment, set()).discard(call_id)
+            joined = (
+                None
+                if call_id is None
+                else next((item for item in pending if item.call_id == call_id), None)
+            )
             if not _hook_post_stated(structural):
-                claimed = claim(call_id, commitment, _ANY_EXIT)
-                if claimed is not None:
-                    decisions[claimed] = _ITEM_CARRIER
-                    continue
-                if call_id is not None:
-                    unstated_calls[call_id] = commitment
-                if commitment is not None:
-                    owed[commitment] = owed.get(commitment, 0) + 1
+                if joined is not None:
+                    decide(joined, _ITEM_CARRIER)
+                else:
+                    if call_id is not None:
+                        unstated_calls[call_id] = commitment
+                    if commitment is not None:
+                        owed[commitment] = owed.get(commitment, 0) + 1
+                settle(commitment)
                 continue
             if call_id is not None and call_id in unstated_calls:
                 # A later stated post of the same call settles it.
@@ -1957,12 +1981,20 @@ def _rollout_item_decisions(
                     owed[earlier] -= 1
             if call_id is not None:
                 stated_calls.add(call_id)
-            claimed = claim(call_id, commitment, exit_fact)
-            if claimed is not None:
-                decisions[claimed] = _ITEM_COPY
-                continue
-            if commitment is not None:
+            if joined is None and commitment is not None:
+                joined = next(
+                    (
+                        item
+                        for item in pending
+                        if item.commitment == commitment and item.exit_status == exit_fact
+                    ),
+                    None,
+                )
+            if joined is not None:
+                decide(joined, _ITEM_COPY)
+            elif commitment is not None:
                 stated_exits.setdefault(commitment, []).append(exit_fact)
+            settle(commitment)
             continue
         if envelope.source is not ObservationSource.CODEX_SESSION_STREAM or not _hooked_tool_item(
             envelope
@@ -1982,13 +2014,11 @@ def _rollout_item_decisions(
         elif commitment is not None and exit_fact in stated_exits.get(commitment, []):
             stated_exits[commitment].remove(exit_fact)
             decisions[envelope.source_identity] = _ITEM_COPY
-        elif commitment is not None and owed.get(commitment, 0) > 0:
-            decisions[envelope.source_identity] = _ITEM_CARRIER
-            owed[commitment] -= 1
         else:
             pending.append(
                 _PendingRolloutItem(envelope.source_identity, call_id, commitment, exit_fact)
             )
+            settle(commitment)
     for item in pending:
         decisions[item.source_identity] = _ITEM_PENDING
     return decisions
@@ -2037,88 +2067,119 @@ def _hooked_tool_item_decision(
     return decisions.get(envelope.source_identity, _ITEM_PENDING)
 
 
+def _deliver_pending_rollout_item(
+    store: LocalObservationStore,
+    workspace_commitment: str,
+    item: PendingRolloutItem,
+    *,
+    unpaired: bool,
+) -> bool:
+    """Deliver one held rollout item and settle its account in one batch (#910).
+
+    Later stream rows may already have reached the task, whose per-source cursor refuses an
+    older position (``cursor_stale``), so the item is stamped with the session's committed
+    stream frontier at release time. An item whose pairing was forgotten carries
+    ``unpaired_event``, so the receipt discloses that its attribution is unproven.
+    """
+
+    envelope = item.envelope
+    frontier = store.get_stream_cursor(workspace_commitment, item.session_commitment)
+    if frontier is not None and envelope.cursor.is_stale_relative_to(frontier):
+        envelope = replace(envelope, cursor=frontier)
+    if unpaired:
+        envelope = replace(
+            envelope,
+            gap_codes=tuple(
+                sorted(
+                    {*envelope.gap_codes, ObservationGapCode.UNPAIRED_EVENT.value},
+                    key=str.encode,
+                )
+            ),
+        )
+    try:
+        with store.batched(workspace_commitment):
+            if not store.flush_selected_admission(
+                workspace_commitment,
+                summary_builder=build_routine_read_summary,
+                force=True,
+                material_boundary=True,
+            ):
+                return False
+            plan = _restore_stream_individual_deliveries(
+                store.prepare_selected_admission(
+                    workspace_commitment,
+                    item.codex_session_id,
+                    envelope,
+                    fence="",
+                    focused=False,
+                    routine_candidate=False,
+                    proven_routine_success=False,
+                    summary_builder=build_routine_read_summary,
+                )
+            )
+            if not store.commit_selected_admission(
+                workspace_commitment,
+                plan,
+                incoming=envelope,
+                newly_observed=True,
+                replayable=True,
+            ):
+                return False
+            store.settle_pending_rollout_item(
+                workspace_commitment, item.session_commitment, item.source_identity
+            )
+    except AttributeError, OSError, ProtocolValueError, TypeError, ValueError:
+        return False
+    return True
+
+
 def _release_decided_rollout_items(
     store: LocalObservationStore,
     workspace_commitment: str,
     session_commitment: str,
-    codex_session_id: str,
 ) -> bool:
-    """Deliver, exactly once, each held rollout item a later hook post made the carrier (#910).
+    """Deliver, exactly once, each held rollout item a later hook row made a carrier (#910).
 
-    A pending item that a later stated post paired with is settled as that post's copy; one the
-    replay no longer holds (evicted from the ring) is forgotten and stays local only. Delivery
-    and settlement commit in one batch, so a failure keeps the item pending for the next pass.
-    Returns ``False`` when an admission could not commit.
+    A pending item a later post or the turn's end made a copy is settled and stays local. One
+    the envelope ring no longer holds cannot be paired any more; rather than lose its outcome it
+    is delivered with ``unpaired_event``. Past ``MAX_PENDING_ROLLOUT_ITEMS`` the oldest items of
+    any session are delivered the same way, so the bounded account never drops an outcome
+    silently. Returns ``False`` when an admission could not commit; the item stays pending.
     """
 
     lister = getattr(store, "pending_rollout_items", None)
-    settle = getattr(store, "settle_pending_rollout_item", None)
-    if not callable(lister) or not callable(settle):
+    if not callable(lister):
         return True
     try:
-        pending = cast(tuple[str, ...], lister(workspace_commitment, session_commitment))
+        own = cast(tuple[PendingRolloutItem, ...], lister(workspace_commitment, session_commitment))
     except AttributeError, OSError, ProtocolValueError, TypeError, ValueError:
         return True
-    if not pending:
-        return True
-    decisions = _session_rollout_decisions(store, workspace_commitment, session_commitment)
-    if decisions is None:
-        return True
-    try:
-        ring = {
-            envelope.source_identity: envelope
-            for envelope in store.list_envelopes(workspace_commitment)
-            if envelope.session_commitment == session_commitment and _hooked_tool_item(envelope)
-        }
-    except AttributeError, OSError, ProtocolValueError, TypeError, ValueError:
-        return True
-    # Later stream rows may already have reached the task, whose per-source cursor refuses an
-    # older position (``cursor_stale``). A late-decided item is therefore delivered at the
-    # committed stream frontier where it was decided, never at its original read position.
-    frontier = store.get_stream_cursor(workspace_commitment, session_commitment)
-    for identity in pending:
-        decision = decisions.get(identity)
-        envelope = ring.get(identity)
-        if decision == _ITEM_PENDING and envelope is not None:
-            continue
-        if (
-            envelope is not None
-            and frontier is not None
-            and envelope.cursor.is_stale_relative_to(frontier)
-        ):
-            envelope = replace(envelope, cursor=frontier)
-        try:
-            with store.batched(workspace_commitment):
-                if decision == _ITEM_CARRIER and envelope is not None:
-                    if not store.flush_selected_admission(
-                        workspace_commitment,
-                        summary_builder=build_routine_read_summary,
-                        force=True,
-                        material_boundary=True,
-                    ):
-                        return False
-                    plan = _restore_stream_individual_deliveries(
-                        store.prepare_selected_admission(
-                            workspace_commitment,
-                            codex_session_id,
-                            envelope,
-                            fence="",
-                            focused=False,
-                            routine_candidate=False,
-                            proven_routine_success=False,
-                            summary_builder=build_routine_read_summary,
-                        )
+    decisions = (
+        _session_rollout_decisions(store, workspace_commitment, session_commitment) if own else None
+    )
+    if decisions is not None:
+        for item in own:
+            decision = decisions.get(item.source_identity)
+            if decision == _ITEM_PENDING:
+                continue
+            if decision == _ITEM_COPY:
+                try:
+                    store.settle_pending_rollout_item(
+                        workspace_commitment, session_commitment, item.source_identity
                     )
-                    if not store.commit_selected_admission(
-                        workspace_commitment,
-                        plan,
-                        incoming=envelope,
-                        newly_observed=True,
-                        replayable=True,
-                    ):
-                        return False
-                settle(workspace_commitment, session_commitment, identity)
-        except AttributeError, OSError, ProtocolValueError, TypeError, ValueError:
+                except AttributeError, OSError, ProtocolValueError, TypeError, ValueError:
+                    return False
+                continue
+            if not _deliver_pending_rollout_item(
+                store, workspace_commitment, item, unpaired=decision != _ITEM_CARRIER
+            ):
+                return False
+    try:
+        remaining = cast(tuple[PendingRolloutItem, ...], lister(workspace_commitment))
+    except AttributeError, OSError, ProtocolValueError, TypeError, ValueError:
+        return True
+    for item in remaining[: max(0, len(remaining) - MAX_PENDING_ROLLOUT_ITEMS)]:
+        if not _deliver_pending_rollout_item(store, workspace_commitment, item, unpaired=True):
             return False
     return True
 
@@ -2461,7 +2522,7 @@ def _reconcile_session_stream_path(
     # Hook posts stored since the last pass may decide rollout items held as pending; deliver
     # those first, in their stream order, ahead of anything this pass reads (#910).
     if not delivery_blocked and not _release_decided_rollout_items(
-        store, workspace_commitment, session_commitment, codex_session_id
+        store, workspace_commitment, session_commitment
     ):
         overflow = True
         delivery_blocked = True
@@ -2621,7 +2682,9 @@ def _reconcile_session_stream_path(
             note_pending = getattr(store, "note_pending_rollout_item", None)
             if callable(note_pending):
                 try:
-                    note_pending(workspace_commitment, session_commitment, envelope.source_identity)
+                    note_pending(
+                        workspace_commitment, session_commitment, codex_session_id, envelope
+                    )
                 except AttributeError, OSError, ProtocolValueError, TypeError, ValueError:
                     # The cursor must not pass an item whose later decision could not persist.
                     delivery_blocked = True

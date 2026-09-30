@@ -1000,16 +1000,31 @@ the item records that call's exit as its own result. That run is then two action
 trade-off, and #909 judges the later one. Because pairing is counted per call, a later call's
 stated outcome never withholds an earlier same-command call's only exit. A rollout item can be
 read before its own hook post is stored, for example when another call's hook reconciles the
-stream while the call is still finishing. Such an item stays local as pending. The first later
-hook post it pairs with (same call id, or same command commitment) decides it by the same rules:
-a stated post makes it that post's copy, and an outcome-less post makes it the call's only exit,
-delivered once on the next stream reconcile. Delivery and settlement commit together, and the
-item is delivered at the stream position where it was decided, so a later stream row already
-delivered cannot make the task refuse it as `cursor_stale`. The pending account is bounded
-(256 items per workspace) and, like the pairing replay, is limited to the local envelope ring. An
-item that is evicted, or that no later post pairs with, stays local only, as before. A session
-whose tool hooks never fired delivers every item with its outcome, as the only record of those
-calls. One hooked command with
+stream while the call is still finishing. Such an item stays local as pending until a later hook
+row decides it. A post with the item's own call id decides it directly: a stated post makes it
+that post's copy, and an outcome-less post makes it the call's only exit. A stated post of the
+same command commitment takes a pending item with the same exit as its copy. An outcome-less post
+of that commitment takes its pending items only once no other call of the same command is still
+open (its `PreToolUse` seen, its post not yet). With parallel runs of one command, an open call's
+post may still claim one of those items, so the reader waits for it instead of guessing by age.
+When more items remain than outcome-less calls, every one is delivered: a second record, judged by
+#909 as the later run, is disclosed, while a lost failure would not be. `Stop` or `SessionEnd`
+closes the turn. Outcome-less calls then take every pending item of their command, and any other
+pending item stays local as the copy of a call whose post stated its outcome or never fired. A
+carrier is delivered once on the next stream reconcile, with delivery and settlement committed
+together. It is stamped with the session's committed stream frontier at release time, so a later
+stream row already delivered cannot make the task refuse it as `cursor_stale`.
+
+The pending account keeps each item's structural record beside the local envelope ring (64
+items per workspace). An outcome is never dropped silently. A pending item that the ring evicts
+before it is paired, or that is the oldest past the 64-item bound, is delivered with
+`unpaired_event`. It becomes unpaired evidence that names its exit, not an attributed run, and the
+receipt carries the `unpaired_event` coverage limitation. Only past a hard bound of 256 items is
+the oldest dropped, recorded as a local `unpaired_event` gap for its session. Entries of an ended
+session are decided by the reconcile that its `Stop` or `SessionEnd` hook triggers; no separate
+end-of-session pruning exists. A session that never reconciles again is drained by the 64-item
+bound. A session whose tool hooks never fired delivers every item with its outcome, as the only
+record of those calls. One hooked command with
 a stated outcome is therefore one action and one result, and a red-latest claim names it once. Like
 a retained cell, a retained item counts in `observed_count` without an admitted, summarized or
 intentionally omitted bucket. A call in a hook-observed session whose own hook did not fire (an

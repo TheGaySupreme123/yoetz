@@ -1150,3 +1150,159 @@ async def test_item_read_before_its_stated_post_stays_one_run(replay: _Replay) -
     ) == 1
     assert not any(envelope.event_kind == "item_completed" for envelope in recorder.delivered)
     assert replay.store.pending_rollout_items(replay.commitment, replay.session) == ()
+
+
+def _post(cell: _Replay, call: str, command: str, exit_code: int | None) -> None:
+    response: dict[str, Any] = {
+        "chunk_id": call[-6:],
+        "original_token_count": 1,
+        "output": "public synthetic output",
+        "wall_time_seconds": 1.0,
+    }
+    if exit_code is None:
+        response["session_id"] = 3
+    else:
+        response["exit_code"] = exit_code
+    cell.hook(
+        "PostToolUse",
+        tool_name="Bash",
+        tool_use_id=call,
+        tool_input={"command": command},
+        tool_response=json.dumps(response),
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("b_item_first", [True, False])
+@pytest.mark.parametrize("items_first", [True, False])
+async def test_parallel_same_command_runs_keep_each_outcome(
+    replay: _Replay, items_first: bool, b_item_first: bool
+) -> None:
+    """#910: two parallel ``cargo test`` runs never trade outcomes, whatever the arrival order.
+
+    A still runs when its hook fires (no exit) and its rollout item later records exit 1; B
+    finishes first with exit 0, stated by its hook. B's item is B's copy and A's item is A's only
+    exit, whether the items are read before or after the posts, and in either item order.
+    """
+
+    _session_start(replay)
+    command = {"command": "cargo test"}
+    replay.hook("PreToolUse", tool_name="Bash", tool_use_id="call_run_a", tool_input=command)
+    replay.hook("PreToolUse", tool_name="Bash", tool_use_id="call_run_b", tool_input=command)
+    item_a = _command_execution("exec-910-run-a", "cargo test", 1, "2026-09-29T18:00:20.000Z")
+    item_b = _command_execution("exec-910-run-b", "cargo test", 0, "2026-09-29T18:00:10.000Z")
+    items = (item_b, item_a) if b_item_first else (item_a, item_b)
+    if items_first:
+        replay.append(*items)
+        _interleaved_pre(replay)
+        assert len(replay.store.pending_rollout_items(replay.commitment, replay.session)) == 2
+    _post(replay, "call_run_a", "cargo test", None)
+    _post(replay, "call_run_b", "cargo test", 0)
+    if not items_first:
+        replay.append(*items)
+        _interleaved_pre(replay)
+    _interleaved_post(replay)
+    replay.hook("Stop", last_assistant_message="Tests pass.", stop_hook_active=False)
+    recorder = await _sweep_all(replay)
+    results = [cast(ResultRecordedPayload, row.payload) for row in replay.rows("result_recorded")]
+    facts = [(item.outcome, item.exit_status) for item in results]
+    assert facts.count((ResultOutcome.FAILURE, 1)) == 1
+    # B's pass once (its hook, plus the interleaved git status), A's hook unknown once.
+    assert facts.count((ResultOutcome.SUCCESS, 0)) == 2
+    assert facts.count((ResultOutcome.UNKNOWN, None)) == 1
+    delivered = [
+        envelope.structural_payload.get("exit_status")
+        for envelope in recorder.delivered
+        if envelope.event_kind == "item_completed"
+    ]
+    assert delivered == [1]
+    assert replay.store.pending_rollout_items(replay.commitment, replay.session) == ()
+
+
+def _unpaired_evidence(cell: _Replay) -> list[str | None]:
+    return [
+        cast(EvidenceRecordedPayload, row.payload).description
+        for row in cell.rows("evidence_recorded")
+        if (cast(EvidenceRecordedPayload, row.payload).description or "").startswith("Unpaired")
+    ]
+
+
+def _unpaired_items(recorder: _Recorder) -> list[object]:
+    return [
+        envelope.structural_payload.get("exit_status")
+        for envelope in recorder.delivered
+        if envelope.event_kind == "item_completed"
+        and ObservationGapCode.UNPAIRED_EVENT.value in envelope.gap_codes
+    ]
+
+
+@pytest.mark.anyio
+async def test_pending_item_evicted_from_the_envelope_ring_is_delivered_unpaired(
+    replay: _Replay, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#910: a held item the local ring forgets before it is paired is disclosed, not dropped.
+
+    It is delivered with ``unpaired_event``: the receipt names the unproven pairing, and the
+    exit stays visible as unpaired evidence.
+    """
+
+    from yoetz.adapters.integrations import observation_local
+
+    _session_start(replay)
+    command = {"command": "cargo test"}
+    replay.hook("PreToolUse", tool_name="Bash", tool_use_id="call_evicted", tool_input=command)
+    replay.append(
+        _command_execution("exec-910-evicted", "cargo test", 101, "2026-09-29T18:00:10.000Z")
+    )
+    _interleaved_pre(replay)
+    assert len(replay.store.pending_rollout_items(replay.commitment, replay.session)) == 1
+    monkeypatch.setattr(observation_local, "_MAX_ENVELOPES", 6)
+    for index in range(4):
+        call = f"call_flood_{index}"
+        replay.hook(
+            "PreToolUse", tool_name="Bash", tool_use_id=call, tool_input={"command": "git log"}
+        )
+        _post(replay, call, "git log", 0)
+    assert not any(
+        envelope.event_kind == "item_completed"
+        for envelope in replay.store.list_envelopes(replay.commitment)
+    )
+    replay.hook("Stop", last_assistant_message="Tests pass.", stop_hook_active=False)
+    recorder = await _sweep_all(replay)
+    # Its pairing is unproven, so it is unpaired evidence, not an attributed run.
+    assert _unpaired_evidence(replay) == ["Unpaired observed tool result exit=101"]
+    assert _unpaired_items(recorder) == [101]
+    assert replay.store.pending_rollout_items(replay.commitment, replay.session) == ()
+
+
+@pytest.mark.anyio
+async def test_pending_items_over_the_bound_are_delivered_unpaired(
+    replay: _Replay, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#910: the bounded pending account delivers its oldest item instead of dropping it."""
+
+    from yoetz.adapters.integrations import codex_session_stream
+
+    monkeypatch.setattr(codex_session_stream, "MAX_PENDING_ROLLOUT_ITEMS", 1, raising=False)
+    _session_start(replay)
+    replay.hook(
+        "PreToolUse", tool_name="Bash", tool_use_id="call_old", tool_input={"command": "make"}
+    )
+    replay.hook(
+        "PreToolUse", tool_name="Bash", tool_use_id="call_new", tool_input={"command": "cargo test"}
+    )
+    replay.append(
+        _command_execution("exec-910-old", "make", 2, "2026-09-29T18:00:10.000Z"),
+        _command_execution("exec-910-new", "cargo test", 0, "2026-09-29T18:00:11.000Z"),
+    )
+    _interleaved_pre(replay)
+    # The next reconcile finds two undecided items over a bound of one.
+    _interleaved_post(replay)
+    assert len(replay.store.pending_rollout_items(replay.commitment)) == 1
+    _post(replay, "call_old", "make", 2)
+    _post(replay, "call_new", "cargo test", 0)
+    replay.hook("Stop", last_assistant_message="Done.", stop_hook_active=False)
+    recorder = await _sweep_all(replay)
+    assert _unpaired_items(recorder) == [2]
+    assert _unpaired_evidence(replay) == ["Unpaired observed tool result exit=2"]
+    assert replay.store.pending_rollout_items(replay.commitment) == ()

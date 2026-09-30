@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -2877,14 +2878,58 @@ def test_pending_rollout_items_persist_until_settled(tmp_path: Path) -> None:
     workspace = store.workspace_commitment(str(tmp_path.resolve()))
     store.grant_consent(workspace)
     other = "hmac-sha256:" + ("e" * 64)
-    store.note_pending_rollout_item(workspace, _DECIDE_SESSION, "item-a")
-    store.note_pending_rollout_item(workspace, _DECIDE_SESSION, "item-b")
-    store.note_pending_rollout_item(workspace, other, "item-c")
+    item_a = _decide_row(1, hook=False, identity="item-a", call_id="exec-a", exit_status=101)
+    item_b = _decide_row(2, hook=False, identity="item-b", call_id="exec-b", exit_status=0)
+    item_c = replace(
+        _decide_row(3, hook=False, identity="item-c", call_id="exec-c"),
+        session_commitment=other,
+    )
+    store.note_pending_rollout_item(workspace, _DECIDE_SESSION, "host-1", item_a)
+    store.note_pending_rollout_item(workspace, _DECIDE_SESSION, "host-1", item_b)
+    store.note_pending_rollout_item(workspace, other, "host-2", item_c)
     reopened = LocalObservationStore(_state=tmp_path)
-    assert reopened.pending_rollout_items(workspace, _DECIDE_SESSION) == ("item-a", "item-b")
+    kept = reopened.pending_rollout_items(workspace, _DECIDE_SESSION)
+    assert [item.source_identity for item in kept] == ["item-a", "item-b"]
+    # The account keeps the item itself, so its outcome survives ring eviction.
+    assert kept[0].envelope == item_a and kept[0].codex_session_id == "host-1"
     # Settling is per session and idempotent.
     reopened.settle_pending_rollout_item(workspace, other, "item-a")
     reopened.settle_pending_rollout_item(workspace, _DECIDE_SESSION, "item-a")
     reopened.settle_pending_rollout_item(workspace, _DECIDE_SESSION, "item-a")
-    assert reopened.pending_rollout_items(workspace, _DECIDE_SESSION) == ("item-b",)
-    assert reopened.pending_rollout_items(workspace, other) == ("item-c",)
+    assert [item.source_identity for item in reopened.pending_rollout_items(workspace)] == [
+        "item-b",
+        "item-c",
+    ]
+
+
+def test_parallel_same_command_items_wait_for_the_open_call() -> None:
+    """#910: an outcome-less post never takes a pending item an open same-command call owns."""
+
+    pre_a = replace(
+        _decide_row(1, hook=True, identity="pre-a", call_id="call-a"), event_kind="PreToolUse"
+    )
+    pre_b = replace(
+        _decide_row(2, hook=True, identity="pre-b", call_id="call-b"), event_kind="PreToolUse"
+    )
+    item_b = _decide_row(3, hook=False, identity="item-b", call_id="exec-b", exit_status=0)
+    item_a = _decide_row(4, hook=False, identity="item-a", call_id="exec-a", exit_status=1)
+    post_a = _decide_row(5, hook=True, identity="post-a", call_id="call-a")
+    post_b = _decide_row(6, hook=True, identity="post-b", call_id="call-b", exit_status=0)
+    stop = replace(
+        _decide_row(7, hook=True, identity="stop", call_id="none", commitment=None),
+        event_kind="Stop",
+    )
+    for order in ((item_b, item_a), (item_a, item_b)):
+        rows = (pre_a, pre_b, *order, post_a)
+        # B is still open: neither item is A's yet.
+        assert _decisions(*rows) == {"item-a": "pending", "item-b": "pending"}
+        assert _decisions(*rows, post_b) == {"item-a": "carrier", "item-b": "copy"}
+        # Posts first, items after: the same attribution.
+        assert _decisions(pre_a, pre_b, post_a, post_b, *order) == {
+            "item-a": "carrier",
+            "item-b": "copy",
+        }
+        # B's hook never fires: the turn's end delivers both rather than lose A's failure.
+        assert _decisions(*rows, stop) == {"item-a": "carrier", "item-b": "carrier"}
+    # Without an owed call the turn's end leaves an unclaimed item local as a copy.
+    assert _decisions(pre_b, item_b, stop) == {"item-b": "copy"}
