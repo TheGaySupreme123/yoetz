@@ -107,7 +107,6 @@ from yoetz.ports.start_catalog import SessionState, StartCatalogPort, TaskRoute,
 from yoetz.protocol.canonical import (
     MAX_JSON_DEPTH,
     JsonValue,
-    canonical_digest,
     canonical_encode,
     strict_json_parse,
 )
@@ -2786,13 +2785,16 @@ class Application:
                 cast(str, source["writer_id"]),
                 _frontier_for_projection(source),
             )
+        # One encoding serves both the subject digest and the audit context (issue #916);
+        # ``canonical_digest`` is the SHA-256 of exactly these bytes.
+        source_canonical = canonical_encode(source)
         candidate = CandidateContext(
             request_id=projection_request_id,
             channel=None,
             local_sink=sink,
             purpose="client_result_projection",
             scope=scope,
-            subject_digest=canonical_digest(source),
+            subject_digest=f"sha256:{hashlib.sha256(source_canonical).hexdigest()}",
             provider_binding=None,
             items=tuple(items),
             provenance_context=(provenance if sink is LocalDisclosureSink.AGENT_CONTEXT else None),
@@ -2804,7 +2806,7 @@ class Application:
                 binding.original_request_id,
                 binding.route_identity_digest,
                 binding.control_request_canonical,
-                canonical_encode(source),
+                source_canonical,
             ),
         )
         decision = await self.privacy.prepare_local_disclosure(candidate)

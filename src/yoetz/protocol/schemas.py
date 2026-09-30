@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Iterator, Mapping, Sequence
+import threading
+from collections import OrderedDict
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -12,19 +14,20 @@ from functools import lru_cache
 from importlib import resources
 from importlib.resources.abc import Traversable
 from types import MappingProxyType
-from typing import Final, Never, Protocol, cast
+from typing import Any, Final, Never, Protocol, cast
 from urllib.parse import urldefrag, urlsplit
 
 from jsonschema import Draft202012Validator, FormatChecker
+from jsonschema import validators as jsonschema_validators
 from jsonschema.exceptions import SchemaError, ValidationError
 from referencing import Registry
 from referencing.exceptions import NoSuchResource
 from referencing.jsonschema import DRAFT202012, Schema, SchemaRegistry
 
 from yoetz.protocol.canonical import (
+    CanonicalFragment,
     JsonValue,
     canonical_encode,
-    ensure_canonical_value,
     strict_json_parse,
 )
 from yoetz.protocol.errors import ProtocolValueError
@@ -178,6 +181,90 @@ def _is_rfc3339_date_time(value: object) -> bool:
 
 
 _FORMAT_CHECKER.checks("date-time")(_is_rfc3339_date_time)
+
+
+type _KeywordErrors = Iterator[ValidationError]
+
+
+def _any_of_first_error(
+    validator: Any, any_of: Sequence[object], instance: object, schema: object
+) -> _KeywordErrors:
+    """``anyOf`` that stops each failing branch at its first error.
+
+    The stock keyword runs every failing branch to exhaustion so it can report the best error.
+    Validity only depends on whether a branch has *an* error, and a status page's ``page`` is an
+    ``anyOf`` over thirteen page shapes, each failing one of which otherwise walked every row
+    (issue #916). This accepts and rejects exactly what the stock keyword does.
+    """
+
+    del schema
+    for index, subschema in enumerate(any_of):
+        if next(validator.descend(instance, subschema, schema_path=index), None) is None:
+            return
+    yield ValidationError("instance is not valid under any of the given schemas")
+
+
+def _one_of_first_error(
+    validator: Any, one_of: Sequence[object], instance: object, schema: object
+) -> _KeywordErrors:
+    """``oneOf`` with the stock keyword's decision, stopping each failing branch at one error."""
+
+    del schema
+    branches = enumerate(one_of)
+    for index, subschema in branches:
+        if next(validator.descend(instance, subschema, schema_path=index), None) is None:
+            break
+    else:
+        yield ValidationError("instance is not valid under any of the given schemas")
+        return
+    if any(validator.evolve(schema=each).is_valid(instance) for _, each in branches):
+        yield ValidationError("instance is valid under more than one of the given schemas")
+
+
+def _ref_resolved_once(
+    resolved_references: dict[tuple[str, str], Any],
+    document_roots: Mapping[int, str],
+    verdicts: _ValidInstanceVerdicts | None,
+) -> Any:
+    """``$ref`` exactly as the stock keyword applies it, resolving each reference once.
+
+    The catalog is immutable for the life of its checker and uses no dynamic references
+    (``_ValidityChecker.build`` refuses any), so a reference resolves to the same target from the
+    same base URI every time. Re-walking its JSON pointer through ``referencing`` on every row was
+    about a third of the remaining validation cost.
+
+    A reference to a whole catalog document asks exactly what validating the sub-instance against
+    that document asks, so it shares the checker's verdict memory when *verdicts* is given: the
+    control envelope's ``body`` is the status result the service or client already validated.
+    """
+
+    def keyword(validator: Any, ref: str, instance: object, schema: object) -> _KeywordErrors:
+        del schema
+        resolver = validator._resolver
+        key = (cast(str, resolver._base_uri), ref)
+        resolved = resolved_references.get(key)
+        if resolved is None:
+            resolved = resolver.lookup(ref)
+            resolved_references[key] = resolved
+        document_id = document_roots.get(id(resolved.contents))
+        if verdicts is None or document_id is None:
+            yield from validator.descend(instance, resolved.contents, resolver=resolved.resolver)
+            return
+        verdict = (
+            document_id,
+            hashlib.sha256(canonical_encode(cast(JsonValue, instance))).digest(),
+        )
+        if verdicts.seen(verdict):
+            return
+        errors = validator.descend(instance, resolved.contents, resolver=resolved.resolver)
+        first = next(errors, None)
+        if first is None:
+            verdicts.remember(verdict)
+            return
+        yield first
+        yield from errors
+
+    return keyword
 
 
 def _deny_retrieve(uri: str) -> Never:
@@ -474,13 +561,59 @@ def _freeze_json(value: JsonValue) -> JsonValue:
     return value
 
 
-def _plain_validation_value(value: JsonValue) -> JsonValue:
-    if _actual_mapping(value):
-        source = cast(Mapping[str, JsonValue], value)
-        return {key: _plain_validation_value(item) for key, item in source.items()}
-    if type(value) is list or type(value) is tuple:
-        return [_plain_validation_value(item) for item in value]
-    return value
+def _plain_validation_instance(value: JsonValue) -> tuple[JsonValue, bool]:
+    """The plain dict/list instance the validator reads, and whether it holds a spliced fragment.
+
+    A :class:`CanonicalFragment` has the canonical text of the value it stands for but is not that
+    value to the validator, so its verdict must never be shared with that value.
+    """
+
+    spliced = False
+
+    def plain(item: JsonValue) -> JsonValue:
+        nonlocal spliced
+        if _actual_mapping(item):
+            source = cast(Mapping[str, JsonValue], item)
+            return {key: plain(member) for key, member in source.items()}
+        if type(item) is list or type(item) is tuple:
+            return [plain(member) for member in item]
+        if type(cast(object, item)) is CanonicalFragment:
+            spliced = True
+        return item
+
+    return plain(value), spliced
+
+
+class _ValidInstanceVerdicts:
+    """A bounded, thread-safe memory of (schema id, canonical instance digest) pairs found valid.
+
+    Validity is a pure function of the immutable packaged schema and the instance, and canonical
+    bytes identify a JSON value exactly, so a repeated validation of the same bytes against the
+    same schema has the same answer. One status page is validated about ten times on its way from
+    the service to the host (result model, control envelope, client parse, bridge rendering); only
+    the first of each needs the validator (issue #916). Invalid instances are never remembered.
+    """
+
+    __slots__ = ("_entries", "_limit", "_lock")
+
+    def __init__(self, limit: int) -> None:
+        self._entries: OrderedDict[tuple[str, bytes], None] = OrderedDict()
+        self._limit = limit
+        self._lock = threading.Lock()
+
+    def seen(self, key: tuple[str, bytes]) -> bool:
+        with self._lock:
+            if key not in self._entries:
+                return False
+            self._entries.move_to_end(key)
+            return True
+
+    def remember(self, key: tuple[str, bytes]) -> None:
+        with self._lock:
+            self._entries[key] = None
+            self._entries.move_to_end(key)
+            while len(self._entries) > self._limit:
+                self._entries.popitem(last=False)
 
 
 def _walk_refs(value: JsonValue) -> Iterator[str]:
@@ -678,6 +811,119 @@ def load_schema_catalog() -> SchemaCatalog:
     """Load and validate the immutable packaged schema catalog."""
 
     return _load_catalog_state().catalog
+
+
+def _uses_dynamic_reference(value: JsonValue) -> bool:
+    if type(value) is dict:
+        source = cast(dict[str, JsonValue], value)
+        return any(
+            key in {"$dynamicRef", "$recursiveRef"} or _uses_dynamic_reference(item)
+            for key, item in source.items()
+        )
+    if type(value) is list:
+        return any(_uses_dynamic_reference(item) for item in cast(list[JsonValue], value))
+    return False
+
+
+@dataclass(frozen=True, slots=True)
+class _ValidityChecker:
+    """Decides schema validity for one loaded catalog without building diagnostics (issue #916).
+
+    It accepts and rejects exactly what the stock ``Draft202012Validator`` does; its keywords
+    differ only in how much they evaluate. ``anyOf`` and ``oneOf`` stop each failing branch at its
+    first error, and ``$ref`` resolves each reference once. Documents drop their root ``$schema``
+    marker because ``jsonschema`` picks the class for a referenced document from it, which would
+    hand every cross-document reference back to the stock class; every member is draft 2020-12
+    (``_plain_schema`` refuses anything else) and is registered with that specification
+    explicitly, so the marker changes no keyword and no reference. An instance it rejects goes to
+    the stock validator, which builds the exact diagnostic the caller always received.
+    """
+
+    state: _CatalogState
+    plain_by_id: Mapping[str, dict[str, JsonValue]]
+    registry: SchemaRegistry
+    verdicts: _ValidInstanceVerdicts
+    # Remembers and reuses verdicts; the other one never does, for an instance holding a fragment.
+    remembering_class: Any
+    forgetful_class: Any
+
+    @classmethod
+    def build(cls, state: _CatalogState) -> _ValidityChecker | None:
+        if any(_uses_dynamic_reference(plain) for plain in state.plain_by_id.values()):
+            # Dynamic scope would make a resolved reference depend on the path taken to it.
+            return None
+        stripped = {
+            schema_id: {key: value for key, value in plain.items() if key != "$schema"}
+            for schema_id, plain in state.plain_by_id.items()
+        }
+        document_roots = MappingProxyType(
+            {id(plain): schema_id for schema_id, plain in stripped.items()}
+        )
+        verdicts = _ValidInstanceVerdicts(_VALID_INSTANCE_MEMORY)
+        extend = cast(Callable[..., Any], getattr(jsonschema_validators, "extend"))
+
+        def validator_class(memory: _ValidInstanceVerdicts | None) -> Any:
+            return extend(
+                Draft202012Validator,
+                {
+                    "$ref": _ref_resolved_once({}, document_roots, memory),
+                    "anyOf": _any_of_first_error,
+                    "oneOf": _one_of_first_error,
+                },
+            )
+
+        return cls(
+            state,
+            MappingProxyType(stripped),
+            _build_registry(stripped),
+            verdicts,
+            validator_class(verdicts),
+            validator_class(None),
+        )
+
+    def is_valid(self, schema_id: str, instance: JsonValue, digest: bytes | None) -> bool:
+        """Whether the stock validator accepts *instance*; ``False`` whenever it cannot tell.
+
+        *digest* is the SHA-256 of the instance's canonical bytes, or ``None`` when the instance
+        holds a spliced fragment and must not share verdicts.
+        """
+
+        try:
+            if digest is not None and self.verdicts.seen((schema_id, digest)):
+                return True
+            validator_class = self.forgetful_class if digest is None else self.remembering_class
+            validator = validator_class(
+                self.plain_by_id[schema_id],
+                registry=self.registry,
+                format_checker=_FORMAT_CHECKER,
+            )
+            valid = next(validator.iter_errors(instance), None) is None
+        except Exception:
+            return False
+        if valid and digest is not None:
+            self.verdicts.remember((schema_id, digest))
+        return valid
+
+
+_VALID_INSTANCE_MEMORY: Final = 256
+_VALIDITY_CHECKER_LOCK: Final = threading.Lock()
+# (catalog state, its checker or None when the catalog cannot use one); rebuilt with the catalog.
+_validity_checker_slot: list[tuple[_CatalogState, _ValidityChecker | None]] = []
+
+
+def _validity_checker() -> _ValidityChecker | None:
+    """The validity checker for the currently loaded catalog."""
+
+    state = _load_catalog_state()
+    with _VALIDITY_CHECKER_LOCK:
+        if _validity_checker_slot and _validity_checker_slot[0][0] is state:
+            return _validity_checker_slot[0][1]
+        try:
+            checker = _ValidityChecker.build(state)
+        except Exception:
+            checker = None
+        _validity_checker_slot[:] = [(state, checker)]
+        return checker
 
 
 @lru_cache(maxsize=1)
@@ -909,7 +1155,18 @@ def validate_schema_instance(name: str, version: str, value: JsonValue) -> None:
     """Validate a canonical JSON value against one exact local schema."""
 
     document = schema_document_for(name, version)
-    ensure_canonical_value(value)
+    # Encoding enforces the canonical profile exactly as ``ensure_canonical_value`` does, and its
+    # bytes identify the instance for the checker's verdict memory.
+    digest = hashlib.sha256(canonical_encode(value)).digest()
+    try:
+        instance, spliced = _plain_validation_instance(value)
+    except BaseException:
+        raise SchemaInstanceInvalid() from None
+    checker = _validity_checker()
+    if checker is not None and checker.is_valid(
+        document.schema_id, instance, None if spliced else digest
+    ):
+        return
     state = _load_catalog_state()
     plain = state.plain_by_id[document.schema_id]
     validator = Draft202012Validator(
@@ -919,7 +1176,7 @@ def validate_schema_instance(name: str, version: str, value: JsonValue) -> None:
     )
     try:
         validator_api = cast(_ValidatorProtocol, cast(object, validator))
-        validator_api.validate(_plain_validation_value(value))
+        validator_api.validate(instance)
     except ValidationError as exc:
         best = _best_schema_instance_error(exc)
         # A selected nested oneOf can expose a missing peer even though the parent request path is

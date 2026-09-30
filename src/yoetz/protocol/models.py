@@ -9,6 +9,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
+from functools import lru_cache
 from types import MappingProxyType
 from typing import (
     Annotated,
@@ -5194,6 +5195,9 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             raise RuntimeError("invalid_result_leaf_context")
         if any(segment == "**" or ("*" in segment and segment != "*") for segment in rule.segments):
             raise RuntimeError("invalid_result_leaf_pattern")
+        if any(segment.isascii() and segment.isdecimal() for segment in rule.segments):
+            # An array position is matched by ``*`` alone; ``_classify_leaf_shape`` relies on it.
+            raise RuntimeError("invalid_result_leaf_pattern")
         if (
             rule.classification != "public_structural"
             and type(rule.classification) is not DataCategory
@@ -5264,20 +5268,53 @@ def _traverse_result_leaf(
     return current, tuple(array_segments)
 
 
-def _rule_matches(
-    rule: _ResultLeafRule,
-    segments: tuple[str, ...],
-    array_segments: tuple[bool, ...],
-) -> bool:
-    if not rule.segments or len(rule.segments) != len(segments):
+def _shape_matches(rule: _ResultLeafRule, shape: tuple[str | None, ...]) -> bool:
+    if len(rule.segments) != len(shape):
         return False
-    for expected, actual, is_array in zip(rule.segments, segments, array_segments, strict=True):
+    for expected, actual in zip(rule.segments, shape, strict=True):
         if expected == "*":
-            if not is_array:
+            if actual is not None:
                 return False
         elif expected != actual:
             return False
     return True
+
+
+@lru_cache(maxsize=4096)
+def _classify_leaf_shape(
+    method: str,
+    status_view: str | None,
+    event_selector: _EventSelector | None,
+    shape: tuple[str | None, ...],
+) -> _LeafClassification | None:
+    """The single rule for one leaf shape, or ``None`` when no single rule applies.
+
+    ``shape`` is the leaf's decoded pointer with every array index replaced by ``None``. No rule
+    names an array index literally (``_build_result_leaf_rules`` refuses one), so which rule
+    matches depends only on this shape: every row of a page shares one decision instead of
+    scanning all rules per leaf (issue #916).
+    """
+
+    contextual = tuple(
+        rule
+        for rule in _RESULT_LEAF_RULES
+        if rule.method == method
+        and (rule.status_view is None or rule.status_view == status_view)
+        and (rule.event_selector is None or rule.event_selector == event_selector)
+    )
+    exact = tuple(
+        rule for rule in contextual if "*" not in rule.segments and _shape_matches(rule, shape)
+    )
+    if len(exact) > 1:
+        return None
+    if exact:
+        return exact[0].classification
+    wildcard = tuple(
+        rule for rule in contextual if "*" in rule.segments and _shape_matches(rule, shape)
+    )
+    if len(wildcard) != 1:
+        return None
+    return wildcard[0].classification
 
 
 def _publish_event_selector(
@@ -5341,27 +5378,11 @@ def classify_result_leaf(
         status_view = candidate
     event_selector = _publish_event_selector(result, segments) if method == "publish_work" else None
 
-    contextual = tuple(
-        rule
-        for rule in _RESULT_LEAF_RULES
-        if rule.method == method
-        and (rule.status_view is None or rule.status_view == status_view)
-        and (rule.event_selector is None or rule.event_selector == event_selector)
+    shape = tuple(
+        None if is_array else segment
+        for segment, is_array in zip(segments, array_segments, strict=True)
     )
-    exact = tuple(
-        rule
-        for rule in contextual
-        if "*" not in rule.segments and _rule_matches(rule, segments, array_segments)
-    )
-    if len(exact) > 1:
+    classification = _classify_leaf_shape(method, status_view, event_selector, shape)
+    if classification is None:
         raise ProtocolValueError("invalid_json_pointer")
-    if exact:
-        return exact[0].classification
-    wildcard = tuple(
-        rule
-        for rule in contextual
-        if "*" in rule.segments and _rule_matches(rule, segments, array_segments)
-    )
-    if len(wildcard) != 1:
-        raise ProtocolValueError("invalid_json_pointer")
-    return wildcard[0].classification
+    return classification

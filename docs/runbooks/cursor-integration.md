@@ -1554,3 +1554,12 @@ and `writer_id` (`safe_details.state` is the probed state), or replay the unchan
 under that same request ID. Never mint a replacement write ID to recover an unknown outcome.
 A lost first `start` still uses exact same-body replay because session/writer IDs may be absent.
 This behavior is identical on macOS, Linux and Windows via WSL 2. CLI callers may set `--deadline-ms`.
+
+
+## Status page cost (issue #916)
+
+`status` pages and `closure-prepare` no longer pay ~18 ms per returned row: the shared service,
+control and bridge path decides schema validity without rebuilding diagnostics for valid results,
+with byte-identical pages and receipts. This host uses that path unchanged. Its per-host dogfood
+timing on macOS, Linux and WSL 2 is not yet measured; issue #916 owns it. See
+[status render performance](status-render-performance.md).

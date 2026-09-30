@@ -81,8 +81,9 @@ def _matching_rules(
 ) -> str:
     """Mirror classify_result_leaf's rule selection for one pointer pattern."""
 
-    rule_matches = getattr(models, "_rule_matches")
-    array_segments = tuple(segment == "*" for segment in segments)
+    shape_matches = getattr(models, "_shape_matches")
+    # Array positions are ``*`` here and ``None`` in the classifier's per-shape key.
+    shape = tuple(None if segment == "*" else segment for segment in segments)
     contextual = [
         rule
         for rule in getattr(models, "_RESULT_LEAF_RULES")
@@ -93,7 +94,7 @@ def _matching_rules(
     exact = [
         rule
         for rule in contextual
-        if "*" not in rule.segments and rule_matches(rule, segments, array_segments)
+        if "*" not in rule.segments and shape_matches(rule, shape)
     ]
     if len(exact) > 1:
         return "ambiguous"
@@ -102,7 +103,7 @@ def _matching_rules(
     wildcard = [
         rule
         for rule in contextual
-        if "*" in rule.segments and rule_matches(rule, segments, array_segments)
+        if "*" in rule.segments and shape_matches(rule, shape)
     ]
     if len(wildcard) == 1:
         return "covered"
