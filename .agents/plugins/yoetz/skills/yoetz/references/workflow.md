@@ -254,7 +254,9 @@ Do not copy a command onto an edit action just to close the accounting gap. Do n
 wrappers or changed test targets into an exact-command claim.
 
 The optional CLI `yoetz closure-prepare --session-id <returned-session> --writer-id <returned-writer>`
-reads the complete closure inventory without publishing. `yoetz closure-schema` describes explicit
+reads the complete closure inventory without publishing. Add `--output <file>` with a path outside
+the working repository to save the result, and read fields from that file instead of preparing
+again. `yoetz closure-schema` describes explicit
 selection inputs; `--input <selection.json>` prepares one operation with fresh lowercase UUID-v4
 IDs, a dry-run publication where applicable, and a same-request recovery query. Review and submit
 explicitly. It never invents attempts, evidence, finding dispositions, or obligation satisfaction.

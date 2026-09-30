@@ -1587,3 +1587,11 @@ failure is `privacy_audit_unreadable` rather than `invalid_request`. In-process 
 real service, socket and client. Open evidence gap, owned by #921: a dogfood run on Cursor
 (macOS, Linux and WSL 2) that completes an AI-powered review session and then shows that
 session's `network_egress` receipts in `yoetz privacy receipts list`.
+
+## Status page cost (issue #916)
+
+`status` pages and `closure-prepare` no longer pay ~18 ms per returned row: the shared service,
+control and bridge path decides schema validity without rebuilding diagnostics for valid results,
+with byte-identical pages and receipts. This host uses that path unchanged. Its per-host dogfood
+timing on macOS, Linux and WSL 2 is not yet measured; issue #916 owns it. See
+[status render performance](status-render-performance.md).

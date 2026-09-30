@@ -1452,10 +1452,25 @@ def closure_prepare_command(
     session_id: Annotated[str, typer.Option("--session-id")],
     writer_id: Annotated[str, typer.Option("--writer-id")],
     input_path: _INPUT = None,
+    output_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--output",
+            help=(
+                "Save the complete result to this file (owner-only, replaced whole) and print "
+                "a short summary instead; query the file rather than preparing again."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Read closure inventory or prepare one explicitly selected phase; never publish."""
 
-    from yoetz.cli.closure import PREPARATION_REMEDIATIONS, Selection, prepare_closure
+    from yoetz.cli.closure import (
+        PREPARATION_REMEDIATIONS,
+        Selection,
+        prepare_closure,
+        write_prepared_output,
+    )
 
     async def prepare() -> None:
         selection = (
@@ -1468,7 +1483,10 @@ def closure_prepare_command(
             result = await prepare_closure(client.status, session_id, writer_id, selection)
         finally:
             await client.close()
-        _stdout_json(result)
+        if output_path is None:
+            _stdout_json(result)
+        else:
+            _stdout_json(write_prepared_output(result, output_path))
 
     try:
         run_async(prepare)
