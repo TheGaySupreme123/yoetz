@@ -2554,6 +2554,16 @@ def build_semantic_case(
                 required_refs.add(str(record.source_event_id))
             if record.payload is not None and not record.redacted:
                 retain(cast(JsonValue, encode_payload(record.payload)))
+    if (
+        not task_statement_ids
+        and recorded_statement is not None
+        and (recorded_statement.source_family in {"session_opened", "session_resumed"})
+    ):
+        # The frozen case holds a lifecycle event only because it recorded the statement. When
+        # the policy withholds the statement, its own gaps already say so; counting that event
+        # as a reduced reference scope would add ``semantic_reference_scope_reduced`` to every
+        # check an existing approval runs (issue #908).
+        frontier_refs = frontier_refs - {str(recorded_statement.source_event_id)}
     selected_frontier_refs = frozenset(required_refs & frontier_refs)
     omitted_reference_count = len(frontier_refs - selected_frontier_refs)
     frontier_refs = selected_frontier_refs

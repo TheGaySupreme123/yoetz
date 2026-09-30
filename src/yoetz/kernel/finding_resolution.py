@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import MutableMapping
 from dataclasses import replace
-from typing import Final
+from typing import Final, Literal
 
 from yoetz.domain.coordination import CoordinationGapCode
 from yoetz.domain.events import CheckRecordedPayload, ClaimKind, LedgerRecord, RequestedItemKind
@@ -35,7 +35,7 @@ from yoetz.domain.receipts import (
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
     SEMANTIC_REVIEW_NOT_REQUESTED_GAP,
 )
-from yoetz.domain.task_statement import TASK_STATEMENT_GAPS
+from yoetz.domain.task_statement import TASK_STATEMENT_GAPS, may_carry_task_statement
 from yoetz.domain.values import EventId, FindingId, ResultId
 from yoetz.kernel.claims import effective_claim_items
 from yoetz.kernel.plan_scope import current_plan_scope
@@ -377,6 +377,7 @@ def qualifying_check_resolves(
     returned_issue_keys: frozenset[IssueKey],
     *,
     proof_state: ProjectionState | None = None,
+    raised_before_task_statement: bool = False,
 ) -> bool:
     """True when *check* proves the issue *finding* reports is absent from the state it tested.
 
@@ -391,7 +392,12 @@ def qualifying_check_resolves(
     if type(finding_source_frontier) is not int or finding_source_frontier < 1:
         raise ValueError("finding_resolution_invalid")
     return not resolution_blockers(
-        finding, finding_source_frontier, check, returned_issue_keys, proof_state=proof_state
+        finding,
+        finding_source_frontier,
+        check,
+        returned_issue_keys,
+        proof_state=proof_state,
+        raised_before_task_statement=raised_before_task_statement,
     )
 
 
@@ -402,8 +408,13 @@ def resolution_blockers(
     returned_issue_keys: frozenset[IssueKey],
     *,
     proof_state: ProjectionState | None = None,
+    raised_before_task_statement: bool = False,
 ) -> tuple[str, ...]:
-    """Explain the exact qualification predicate without weakening its proof requirements."""
+    """Explain the exact qualification predicate without weakening its proof requirements.
+
+    ``raised_before_task_statement`` is the replay-derived fact that no event able to carry a task
+    statement preceded the frontier *finding* was raised at (issue #908).
+    """
 
     reasons: list[str] = []
     if check.subject_frontier.sequence < finding_source_frontier:
@@ -434,6 +445,13 @@ def resolution_blockers(
             # The later review still must complete and not return the issue. Its unchanged
             # capture limitations remain on the receipt; a response alone changes nothing.
             tolerated |= original_gaps & _SEMANTIC_BASELINE_CAPTURE_GAPS
+            if raised_before_task_statement and not original_gaps & TASK_STATEMENT_GAPS:
+                # The review that raised this issue predates the task statement (issue #908): it
+                # had no statement and no title, so a later review that still lacks the statement
+                # saw no less. Without this, every AI-powered finding recorded before the upgrade
+                # stays open until the owner consents to sending the user's words, and forever
+                # under Structural. The codes stay on every receipt.
+                tolerated |= TASK_STATEMENT_GAPS
         if not _semantic_freshness_proven(check.coverage.ledger_freshness, gaps, tolerated):
             reasons.append("freshness_unproven")
         if not _semantic_subject_changed(finding, finding_source_frontier, check, proof_state):
@@ -649,7 +667,14 @@ def finding_resolution_explanation(
             {} if proof_state_cache is None else proof_state_cache,
         )
     reasons = resolution_blockers(
-        finding_record.payload, finding_record.source_frontier, check, keys, proof_state=proof_state
+        finding_record.payload,
+        finding_record.source_frontier,
+        check,
+        keys,
+        proof_state=proof_state,
+        raised_before_task_statement=_raised_before_task_statement(
+            finding_record.payload, first_task_statement_sequence_of(records)
+        ),
     )
     returned_again = "issue_returned_again" in reasons
     relation = "Returned again" if returned_again else "Not returned; absence remains unproven"
@@ -681,12 +706,39 @@ def append_resolution_explanation(detail: str, explanation: str) -> str:
     return detail + suffix
 
 
+def _raised_before_task_statement(
+    finding: Finding, first_task_statement_sequence: int | None | Literal["unknown"]
+) -> bool:
+    """Whether no statement-capable event preceded the frontier *finding* was raised at."""
+
+    if first_task_statement_sequence == "unknown":
+        return False
+    return (
+        first_task_statement_sequence is None
+        or first_task_statement_sequence > finding.subject_frontier.sequence
+    )
+
+
+def first_task_statement_sequence_of(records: tuple[LedgerRecord, ...]) -> int | None:
+    """The first statement-capable event's ingestion sequence in ``records``, if any."""
+
+    return next(
+        (
+            record.ledger.ingestion_sequence
+            for record in records
+            if may_carry_task_statement(record)
+        ),
+        None,
+    )
+
+
 def apply_check_resolution(
     findings: dict[FindingId, FindingProjectionRecord],
     check: CheckRecordedPayload,
     check_event_id: EventId,
     *,
     proof_state: ProjectionState | None = None,
+    first_task_statement_sequence: int | None | Literal["unknown"] = "unknown",
 ) -> None:
     """Fold one recorded check into the resolution facts of the findings it could speak to.
 
@@ -717,7 +769,14 @@ def apply_check_resolution(
         ):
             continue
         if qualifying_check_resolves(
-            record.payload, record.source_frontier, check, frozen_keys, proof_state=proof_state
+            record.payload,
+            record.source_frontier,
+            check,
+            frozen_keys,
+            proof_state=proof_state,
+            raised_before_task_statement=_raised_before_task_statement(
+                record.payload, first_task_statement_sequence
+            ),
         ):
             findings[current_id] = replace(record, resolved_by_check_event_id=check_event_id)
 

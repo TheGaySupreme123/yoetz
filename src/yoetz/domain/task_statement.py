@@ -42,6 +42,7 @@ __all__ = [
     "RecordedTaskStatement",
     "TaskStatementSource",
     "current_task_statement",
+    "may_carry_task_statement",
     "recorded_task_title",
     "task_statement_disclosure_text",
     "task_statement_gap_detail",
@@ -185,6 +186,31 @@ def current_task_statement(records: Iterable[LedgerRecord]) -> RecordedTaskState
             ingestion_sequence=record.ledger.ingestion_sequence,
         )
     return current
+
+
+# Event versions minted to carry a task statement. Nothing older can, so a review whose frozen
+# frontier precedes the first of these in the ledger cannot have received a statement.
+_STATEMENT_CAPABLE_SCHEMAS: Final = frozenset(
+    {
+        ("session_opened", "1.2.0"),
+        ("session_resumed", "1.2.0"),
+        ("plan_published", "1.1.0"),
+        ("plan_revised", "1.1.0"),
+    }
+)
+
+
+def may_carry_task_statement(record: LedgerRecord) -> bool:
+    """Whether ``record``'s schema version can carry a task statement.
+
+    Decided by the envelope alone, never the payload: redacting an event later must not make a
+    review that held the statement look like one that predates the feature (issue #908).
+    """
+
+    return (
+        type(record) is AcceptedEvent
+        and (record.schema.name, record.schema.version) in _STATEMENT_CAPABLE_SCHEMAS
+    )
 
 
 def recorded_task_title(records: Iterable[LedgerRecord]) -> str | None:

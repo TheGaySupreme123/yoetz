@@ -8,7 +8,7 @@ newest statement as a citable source for the AI-powered review packet.
 
 from __future__ import annotations
 
-from typing import NoReturn, cast
+from typing import Literal, NoReturn, cast
 
 import pytest
 
@@ -290,3 +290,108 @@ async def test_reattach_with_a_statement_records_it_on_the_resumed_session() -> 
     assert (resumed.schema.name, resumed.schema.version) == ("session_resumed", "1.2.0")
     current = current_task_statement(records)
     assert current is not None and current.text == _AMENDED
+
+
+@pytest.mark.parametrize("preset_version", ["1.1.0", "1.2.0"])
+@pytest.mark.parametrize(
+    "profile",
+    [
+        ReviewContextProfile.GOAL_AWARE,
+        ReviewContextProfile.ASSISTED,
+        ReviewContextProfile.EXPANDED,
+        ReviewContextProfile.STRUCTURAL,
+    ],
+)
+async def test_frozen_history_rows_never_carry_a_revised_statement(
+    profile: ReviewContextProfile, preset_version: str
+) -> None:
+    """Criterion 7 (issue #908) over real frozen history, not only the projection fallback.
+
+    Plan events that carry a statement are timeline rows too. Under an approval without the
+    section no copy leaves in any item; with it, only the ``task-statement`` item carries it.
+    """
+
+    app, runtime = _app()
+    started = await app.start(_start(9090, _REQUEST))
+    published = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_base(protocol_id("req_", 9091)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(started.frontier),
+                "event_drafts": (
+                    {
+                        "event_id": protocol_id("evt_", 9092),
+                        "schema": {"name": "plan_published", "version": "1.1.0"},
+                        "occurred_at": "2026-09-30T12:00:00.000Z",
+                        "causal_parents": (),
+                        "payload": {
+                            "plan_version": 1,
+                            "summary": "Implement ANSI-safe truncation.",
+                            "obligation_refs": (),
+                            "no_obligations_reason": "single_atomic_change",
+                            "task_statement": _AMENDED,
+                        },
+                        "artifact_refs": (),
+                        "evidence_refs": (),
+                    },
+                ),
+            }
+        )
+    )
+    assert published.ok is True
+    ledger, _ = runtime.resources[started.task_id]
+    records = tuple(ledger._state.records)  # pyright: ignore[reportPrivateUsage]
+    case = build_deterministic_case(replay(records), records, CaseAvailabilityFacts())
+    assert case.history_availability == "available"
+    assert any(item.schema_name == "plan_published" for item in case.history)
+    selection = ReviewSelectionPolicy.for_profile(
+        profile, preset_version=cast(Literal["1.1.0", "1.2.0"], preset_version)
+    )
+    semantic = build_semantic_case(
+        case_id="cas_90800000-0000-4000-8000-000000000010",
+        frozen_case=case,
+        dependency_digest="sha256:" + "b" * 64,
+        findings=(),
+        review_context_profile=profile,
+        review_selection=selection,
+        policy_id="pvy_90800000-0000-4000-8000-000000000010",
+        policy_version="1",
+    )
+    assert any(item.section == "timeline" for item in semantic.items)
+    marker = b"Output.Truncate returns text with tail"
+    carriers = [item.item_id for item in semantic.items if marker in item.content]
+    expected = ["task-statement"] if "task_statement" in selection.sections else []
+    assert carriers == expected
+
+
+@pytest.mark.parametrize("preset_version", ["1.1.0", "1.2.0"])
+async def test_a_withheld_statement_is_not_a_reduced_reference_scope(preset_version: str) -> None:
+    """Issue #908: the statement's lifecycle event joins the frozen case only to be citable.
+
+    When the approved policy withholds the statement, its own gaps disclose that; the event must
+    not also count as an omitted reference (``semantic_reference_scope_reduced``), which would
+    ride on every check an existing approval runs.
+    """
+
+    app, runtime = _app()
+    started = await app.start(_start(9095, _REQUEST))
+    ledger, _ = runtime.resources[started.task_id]
+    records = tuple(ledger._state.records)  # pyright: ignore[reportPrivateUsage]
+    case = build_deterministic_case(replay(records), records, CaseAvailabilityFacts())
+    profile = ReviewContextProfile.ASSISTED
+    semantic = build_semantic_case(
+        case_id="cas_90800000-0000-4000-8000-000000000011",
+        frozen_case=case,
+        dependency_digest="sha256:" + "b" * 64,
+        findings=(),
+        review_context_profile=profile,
+        review_selection=ReviewSelectionPolicy.for_profile(
+            profile, preset_version=cast(Literal["1.1.0", "1.2.0"], preset_version)
+        ),
+        policy_id="pvy_90800000-0000-4000-8000-000000000011",
+        policy_version="1",
+    )
+    assert semantic.omitted_reference_count == 0
+    assert "semantic_reference_scope_reduced" not in semantic.packet.coverage.known_gaps

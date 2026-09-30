@@ -491,6 +491,7 @@ def test_replay_index_is_frozen_and_nonplaintext() -> None:
         "payload_event_by_object",
         "evidence_sources_by_object",
         "redaction_root_by_object",
+        "first_task_statement_sequence",
     )
     assert tuple(field.name for field in fields(EvidenceObjectSource)) == (
         "evidence_id",

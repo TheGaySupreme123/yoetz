@@ -1340,15 +1340,42 @@ def test_v29_custom_capacity_runtime_validates_only_on_29_wire() -> None:
         validate_schema_instance("control-result", "2.9.0", cast(JsonValue, profile))
 
 
+_POLICY_V12 = "https://schemas.yoetz.dev/0.1/privacy/privacy-policy-1.2.0.schema.json"
+
+
+def _without_policy_v12(value: Any) -> Any:
+    """Undo the one other 2.9 change: admitting the privacy-policy 1.2.0 wire (issue #908)."""
+
+    if isinstance(value, list):
+        return [_without_policy_v12(item) for item in cast(list[Any], value)]
+    if not isinstance(value, dict):
+        return value
+    source = cast(dict[str, Any], value)
+    branches = source.get("anyOf")
+    if isinstance(branches, list) and {"$ref": _POLICY_V12} in branches:
+        kept = [branch for branch in cast(list[Any], branches) if branch != {"$ref": _POLICY_V12}]
+        return kept[0] if len(kept) == 1 else {**source, "anyOf": kept}
+    if source.get("$ref") == _POLICY_V12 + "#/$defs/review_selection_policy":
+        return {
+            **source,
+            "$ref": _POLICY_V12.replace("1.2.0", "1.0.0") + "#/$defs/review_selection_policy",
+        }
+    return {key: _without_policy_v12(item) for key, item in source.items()}
+
+
 def test_v29_changes_only_the_selection_runtime_and_keeps_frozen_v28() -> None:
-    """2.9 derives from 2.8 by one runtime definition; the 2.8 documents are not rewritten."""
+    """2.9 derives from 2.8 by one runtime definition and the privacy-policy 1.2.0 admission
+    (issue #908); the 2.8 documents are not rewritten."""
 
     for name in ("control-hello", "control-hello-result", "control-request", "control-result"):
         v28 = cast(
             dict[str, Any], strict_json_parse((_ROOT / f"{name}-2.8.0.schema.json").read_bytes())
         )
         v29 = cast(
-            dict[str, Any], strict_json_parse((_ROOT / f"{name}-2.9.0.schema.json").read_bytes())
+            dict[str, Any],
+            _without_policy_v12(
+                strict_json_parse((_ROOT / f"{name}-2.9.0.schema.json").read_bytes())
+            ),
         )
         assert v28["$id"] == f"https://schemas.yoetz.dev/0.1/service/{name}-2.8.0.schema.json"
         assert v29["$id"] == f"https://schemas.yoetz.dev/0.1/service/{name}-2.9.0.schema.json"

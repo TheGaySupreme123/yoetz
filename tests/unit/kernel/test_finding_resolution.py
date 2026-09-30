@@ -1163,3 +1163,43 @@ def test_unassessable_conclusion_blocks_proof_even_without_a_coverage_gap() -> N
     original = _finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED)
     later = replace(_check(semantic=_SEMANTIC_OK), semantic_conclusion="insufficient_packet")
     assert _resolves(original, later) is False
+
+
+@pytest.mark.parametrize(
+    ("first_statement_sequence", "resolves"),
+    [
+        # No event able to carry a statement yet, or the first came after the raising review's
+        # frontier (3): that review predates the statement, so the later one saw no less.
+        (None, True),
+        (4, True),
+        # The raising review's frontier already held a statement-capable event: it may have had
+        # the statement, so a review without it proves nothing.
+        (3, False),
+        (1, False),
+        # A caller that does not know the history never tolerates the codes.
+        ("unknown", False),
+    ],
+)
+def test_a_finding_raised_before_the_task_statement_resolves_within_that_baseline(
+    first_statement_sequence: int | None | str, resolves: bool
+) -> None:
+    """Issue #908: pre-statement AI-powered findings are not trapped by the new gaps."""
+
+    from yoetz.kernel.finding_resolution import _raised_before_task_statement  # pyright: ignore
+
+    finding = _finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED)
+    coverage = _coverage(
+        gaps=("task_statement_not_authorized", "task_statement_unavailable"), semantic=True
+    )
+    check = replace(
+        _check(semantic=_SEMANTIC_OK, coverage=coverage),
+        semantic_conclusion="no_material_discrepancy",
+    )
+    before = _raised_before_task_statement(finding, first_statement_sequence)  # type: ignore[arg-type]
+    state = _changed_state(check, recorded_at=4)
+    assert (
+        qualifying_check_resolves(
+            finding, 4, check, frozenset(), proof_state=state, raised_before_task_statement=before
+        )
+        is resolves
+    )
