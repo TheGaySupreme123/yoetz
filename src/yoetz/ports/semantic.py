@@ -70,6 +70,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "MAX_PRIOR_FINDING_ITEMS",
+    "MAX_PRIOR_FINDING_REFS",
     "MAX_SEMANTIC_CASE_ITEMS",
     "MAX_SEMANTIC_ITEM_SUBJECT_REFS",
     "PRIOR_FINDING_VERDICT_KINDS",
@@ -170,6 +171,8 @@ MAX_SEMANTIC_CASE_ITEMS: Final = _MAX_CASE_ITEMS
 # The prior-findings section (issue #905): at most eight earlier AI-powered findings, each one
 # structural row plus up to six prose rows (summary, message, three challenge fields, response).
 MAX_PRIOR_FINDING_ITEMS: Final = 56
+# The rulable list: one entry per carried earlier finding, never one per row (issue #905).
+MAX_PRIOR_FINDING_REFS: Final = 8
 _OPAQUE_REF_PATTERN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$", re.ASCII)
 _IDENTITY_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9._-]*$", re.ASCII)
 _MODEL_IDENTITY_PATTERN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$", re.ASCII)
@@ -930,6 +933,10 @@ class ReviewPacket:
     omissions: tuple[ReviewOmission, ...]
     # Earlier AI-powered findings with the agent's answers, outside the timeline (issue #905).
     prior_finding_item_ids: tuple[str, ...] = ()
+    # The rulable list: each carried earlier finding once, newest first. A finding contributes a
+    # structural row and, under a prose profile, several prose rows; the reviewer rules once per
+    # entry here, never once per row, so the eight-ruling cap always covers every finding.
+    prior_finding_refs: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -940,6 +947,16 @@ class ReviewPacket:
             "prior_finding_item_ids",
             _validated_item_ids(self.prior_finding_item_ids, maximum=MAX_PRIOR_FINDING_ITEMS),
         )
+        refs = self.prior_finding_refs
+        if type(refs) is not tuple or len(refs) > MAX_PRIOR_FINDING_REFS:
+            raise _invalid_case()
+        canonical_refs = tuple(
+            str(_snapshot_finding_id(item, error=_invalid_case()))
+            for item in cast(tuple[object, ...], refs)
+        )
+        if len(canonical_refs) != len(set(canonical_refs)):
+            raise _invalid_case()
+        object.__setattr__(self, "prior_finding_refs", canonical_refs)
         object.__setattr__(
             self,
             "obligation_item_ids",
@@ -1126,6 +1143,18 @@ class SemanticCase:
                 item = item_by_id.get(item_id)
                 if item is None or item.section != section:
                     raise _invalid_case()
+        # Each rulable earlier finding is exactly one carried finding, in section order, and its
+        # structural row is the one the ref names; every prior-finding row belongs to one of them.
+        structural = tuple(
+            item.source_ref
+            for item_id in packet.prior_finding_item_ids
+            if (item := item_by_id[item_id]).item_id == f"prior-finding-{item.source_ref}"
+        )
+        if packet.prior_finding_refs != structural or any(
+            item_by_id[item_id].source_ref not in structural
+            for item_id in packet.prior_finding_item_ids
+        ):
+            raise _invalid_case()
         for assessment in packet.deterministic_assessments:
             if (
                 assessment.finding_ref not in local_refs

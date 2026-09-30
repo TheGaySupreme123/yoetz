@@ -3447,11 +3447,11 @@ def _outbound_case_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     """Add the prior-findings review section to outbound-case v1.2 (issue #905).
 
     The section carries earlier AI-powered findings and the agent's answers under the existing
-    finding categories, so no new data category crosses egress; only the section name and the
-    packet's id list are new.
+    finding categories, so no new data category crosses egress; only the section name, the
+    packet's id list and its one-entry-per-finding rulable list are new.
     """
 
-    from yoetz.ports.semantic import MAX_PRIOR_FINDING_ITEMS
+    from yoetz.ports.semantic import MAX_PRIOR_FINDING_ITEMS, MAX_PRIOR_FINDING_REFS
 
     document = _load_versioned_template(entry, "privacy/outbound-case-1.1.0.schema.json")
     try:
@@ -3480,6 +3480,16 @@ def _outbound_case_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     }
     if "prior_finding_item_ids" not in packet_required:
         packet_required.append("prior_finding_item_ids")
+    # The rulable list: each carried earlier finding once, however many rows it has.
+    packet_properties["prior_finding_refs"] = {
+        "items": {"$ref": "#/$defs/finding_id"},
+        "maxItems": MAX_PRIOR_FINDING_REFS,
+        "minItems": 0,
+        "type": "array",
+        "uniqueItems": True,
+    }
+    if "prior_finding_refs" not in packet_required:
+        packet_required.append("prior_finding_refs")
     properties["schema_version"] = {"const": entry.schema_version}
     document["title"] = f"Yoetz outbound case {entry.schema_version}"
     return document

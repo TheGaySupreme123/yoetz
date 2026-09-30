@@ -2426,6 +2426,7 @@ def build_semantic_case(
     # prose only where the profile already sends finding prose. Its own bounds keep it out of the
     # 64-row timeline, and it takes only capacity the case bounds leave.
     prior_finding_ids: list[str] = []
+    prior_finding_refs: list[str] = []
     # A selection without the assessments section shows the reviewer no earlier finding at all;
     # when any is open, that is the same disclosed truncation as a full section.
     prior_findings_truncated = "deterministic_assessments" not in sections and bool(
@@ -2441,6 +2442,12 @@ def build_semantic_case(
         )
         items.extend(prior_items)
         prior_finding_ids = [item.item_id for item in prior_items]
+        # One rulable entry per carried finding (its structural row), never one per prose row.
+        prior_finding_refs = [
+            item.source_ref
+            for item in prior_items
+            if item.item_id == f"prior-finding-{item.source_ref}"
+        ]
         if prior_omissions:
             omissions = sorted(
                 set([*omissions, *prior_omissions]),
@@ -2576,6 +2583,7 @@ def build_semantic_case(
         targeted_excerpts=tuple(targeted),
         omissions=tuple(omissions),
         prior_finding_item_ids=tuple(prior_finding_ids),
+        prior_finding_refs=tuple(prior_finding_refs),
     )
 
     # The local case owns the complete frontier. The reviewer needs the dependency
@@ -2812,6 +2820,7 @@ def _packet_to_json(packet: ReviewPacket) -> dict[str, JsonValue]:
             "goal_item_ids": list(packet.goal_item_ids),
             "obligation_item_ids": list(packet.obligation_item_ids),
             "prior_finding_item_ids": list(packet.prior_finding_item_ids),
+            "prior_finding_refs": list(packet.prior_finding_refs),
             "omissions": [
                 {
                     "category": item.category.value,
@@ -3010,6 +3019,7 @@ def assemble_filtered_review_packet(
 
     for key in _PACKET_ID_LIST_KEYS:
         packet_obj[key] = _filter_ids(packet_obj.get(key))
+    _sync_prior_finding_refs(packet_obj)
 
     excerpts_raw = packet_obj.get("targeted_excerpts")
     if type(excerpts_raw) is list:
@@ -3200,6 +3210,7 @@ def _drop_catalog_row(envelope: dict[str, JsonValue]) -> bool:
                     if not (type(value) is str and value == dropped_id)
                 ],
             )
+    _sync_prior_finding_refs(packet_obj)
     excerpts = packet_obj.get("targeted_excerpts")
     if type(excerpts) is list:
         packet_obj["targeted_excerpts"] = cast(
@@ -3221,6 +3232,33 @@ def _drop_catalog_row(envelope: dict[str, JsonValue]) -> bool:
             if isinstance(raw, dict) and cast(dict[str, object], raw).get(key) == dropped_id:
                 cast(dict[str, object], raw).pop(key, None)
     return True
+
+
+def _sync_prior_finding_refs(packet_obj: dict[str, JsonValue]) -> None:
+    """Keep a rulable earlier finding only while its structural row is still carried (#905).
+
+    ``prior_finding_refs`` is the list the reviewer rules on, one entry per finding. When bounding
+    or approval removes a finding's structural row, the finding leaves that list too, so the
+    reviewer is never asked to rule on a finding the packet no longer shows.
+    """
+
+    refs = packet_obj.get("prior_finding_refs")
+    if type(refs) is not list:
+        return
+    ids = packet_obj.get("prior_finding_item_ids")
+    carried = (
+        {value for value in cast(list[object], ids) if type(value) is str}
+        if type(ids) is list
+        else set[str]()
+    )
+    packet_obj["prior_finding_refs"] = cast(
+        JsonValue,
+        [
+            value
+            for value in cast(list[object], refs)
+            if type(value) is str and f"prior-finding-{value}" in carried
+        ],
+    )
 
 
 def _drop_prior_finding_rows(envelope: dict[str, JsonValue]) -> int:
@@ -3257,6 +3295,7 @@ def _drop_prior_finding_rows(envelope: dict[str, JsonValue]) -> int:
                     JsonValue,
                     [value for value in cast(list[object], current) if value not in removed],
                 )
+            _sync_prior_finding_refs(packet_obj)
             coverage = packet_obj.get("coverage")
             if isinstance(coverage, dict):
                 gaps = coverage.get("known_gaps")

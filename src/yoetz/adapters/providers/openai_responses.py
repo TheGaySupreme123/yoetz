@@ -160,9 +160,11 @@ SEMANTIC_REVIEW_INSTRUCTION: Final = (
     "again a finding the main agent has answered, or request an action the packet shows was "
     "already done, unless material newer than that response shows the problem remains; then cite "
     "that newer material and the earlier finding's fnd_ id from citable_refs. "
-    "For each earlier finding in review_packet.prior_finding_item_ids, return one "
-    "prior_finding_verdicts entry, with finding_id set to that row's finding_ref (never an "
-    "item_id), whatever the conclusion: fixed only when evidence or results "
+    "review_packet.prior_finding_refs lists each earlier finding once; its rows in "
+    "prior_finding_item_ids (one structural row, and prose rows under the same finding_ref) all "
+    "describe that one finding. For each finding_ref in review_packet.prior_finding_refs, return "
+    "exactly one prior_finding_verdicts entry, never one per row, with finding_id set to that "
+    "finding_ref (never an item_id), whatever the conclusion: fixed only when evidence or results "
     "recorded after the finding show the problem is gone, citing them; still_present or "
     "answered_not_fixed citing the material that shows it remains; withdrawn when the main "
     "agent's reasoned rejection holds; unassessable when the packet cannot settle it. A verdict "
@@ -481,8 +483,8 @@ CHALLENGE_FIELD_GLOSSARY: Final[dict[str, str]] = {
 
 VERDICT_FIELD_GLOSSARY: Final[dict[str, str]] = {
     "finding_id": (
-        "The earlier finding this ruling is about: one finding_ref from the packet's "
-        "prior-finding rows (review_packet.prior_finding_item_ids)."
+        "The earlier finding this ruling is about: one finding_ref from "
+        "review_packet.prior_finding_refs. Give each listed finding exactly one ruling."
     ),
     "verdict": (
         "Your ruling on that finding alone. fixed: cited material recorded after the finding "
@@ -901,12 +903,19 @@ def normalize_judgment(parsed: JsonValue) -> SemanticJudgment:
 
 
 def _separate_prior_verdicts(body: JsonValue) -> tuple[list[JsonValue], int]:
-    """Keep well-formed per-finding rulings and count the rest, never failing the judgment.
+    """Keep one well-formed ruling per earlier finding and count the rest, never failing.
 
     A ruling is advisory about one earlier finding. A reply without the array (the 1.0.0 shape a
     local model or prompt-only host may still return) carries no rulings, and a malformed or
     surplus ruling is dropped and counted so the check can disclose it: neither may discard the
     challenges beside it, and neither can ever become ``fixed``.
+
+    The contract is one ruling per ``finding_ref`` in ``review_packet.prior_finding_refs``. A
+    reply that rules per prior-finding row instead repeats a finding, so rulings are folded by
+    ``finding_id`` before the cap applies (issue #905): the first ruling on a finding stands,
+    each repeat is counted, and a repeat that disagrees turns the finding's ruling into
+    ``unassessable`` with no cited refs. Otherwise one finding's rows could exhaust the cap and
+    leave a later finding unruled.
     """
 
     if type(body) is not dict:
@@ -918,19 +927,25 @@ def _separate_prior_verdicts(body: JsonValue) -> tuple[list[JsonValue], int]:
     if type(raw) is not list:
         # A present ``null`` or non-array value is a malformed reply, not the older shape.
         return [], 1
-    kept: list[JsonValue] = []
+    folded: dict[str, dict[str, JsonValue]] = {}
     dropped = 0
     for item in cast(list[JsonValue], raw):
-        if len(kept) >= MAX_PRIOR_FINDING_VERDICTS:
-            dropped += 1
-            continue
         try:
-            _PRIOR_VERDICT_ADAPTER.validate_python(item)
+            model = _PRIOR_VERDICT_ADAPTER.validate_python(item)
         except ValidationError:
             dropped += 1
             continue
-        kept.append(item)
-    return kept, dropped
+        ruling = cast(dict[str, JsonValue], item)
+        earlier = folded.get(model.finding_id)
+        if earlier is None:
+            folded[model.finding_id] = ruling
+            continue
+        dropped += 1
+        if earlier["verdict"] != model.verdict:
+            folded[model.finding_id] = {**earlier, "verdict": "unassessable", "cited_refs": []}
+    kept: list[JsonValue] = list(folded.values())
+    dropped += max(0, len(kept) - MAX_PRIOR_FINDING_VERDICTS)
+    return kept[:MAX_PRIOR_FINDING_VERDICTS], dropped
 
 
 def normalize_response(

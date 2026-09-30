@@ -58,7 +58,7 @@ from yoetz.domain.privacy import ReviewContextProfile, ReviewSelectionPolicy
 from yoetz.domain.receipts import SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP
 from yoetz.domain.values import FindingId, timestamp_from_string
 from yoetz.kernel.deterministic_checks import DeterministicCase
-from yoetz.kernel.projections import FindingProjectionRecord
+from yoetz.kernel.projections import FindingProjectionRecord, ProjectionRecord
 from yoetz.ports.semantic import SemanticCase
 from yoetz.protocol.canonical import JsonValue, strict_json_parse
 from yoetz.protocol.coverage import EvidenceImmutability
@@ -127,6 +127,7 @@ _CHALLENGE = FindingChallenge(
 
 def _numba_case(
     extra_findings: Mapping[FindingId, FindingProjectionRecord] | None = None,
+    extra_responses: Mapping[FindingId, ProjectionRecord[ResponseRecordedPayload]] | None = None,
 ) -> DeterministicCase:
     """numba-stencil-boundary-modes: a legacy finding, a restatement, two blocked attempts."""
 
@@ -179,7 +180,7 @@ def _numba_case(
         results=attempts,
         evidence={evd(1): stale},
         findings=findings,
-        responses={fnd(2): record(response, 16)},
+        responses={fnd(2): record(response, 16), **(extra_responses or {})},
         extra_refs=(obl(1), clm(1)),
     )
 
@@ -241,6 +242,41 @@ def test_prior_findings_carry_the_challenge_the_answer_and_newer_material() -> N
     )
     packet = cast(Mapping[str, JsonValue], payload["review_packet"])
     assert packet["prior_finding_item_ids"] == list(case.packet.prior_finding_item_ids)
+
+
+def test_three_prose_bearing_findings_give_one_rulable_ref_each() -> None:
+    """The reviewer rules once per finding, however many prose rows each one carries (#905).
+
+    With finding prose selected, each earlier finding contributes its structural row plus up to
+    six prose rows. The rulable list names each carried finding once, newest first, so a
+    provider answering it cannot spend the eight-ruling cap on one finding's rows.
+    """
+
+    answer = ResponseRecordedPayload(
+        finding_id=fnd(3),
+        finding_frontier=FRONTIER,
+        disposition=ResponseDisposition.REJECTED,
+        reason="The sandbox has no route to the package index; the attempt is recorded.",
+        evidence_refs=(res(2),),
+    )
+    third = finding_record(_semantic(3, challenge=_CHALLENGE, related=(fnd(2),)), 18)
+    case = _build(_numba_case({fnd(3): third}, {fnd(3): record(answer, 19)}))
+
+    refs = (str(fnd(3)), str(fnd(2)), str(fnd(1)))
+    assert case.packet.prior_finding_refs == refs
+    assert len(case.packet.prior_finding_item_ids) > len(refs)
+    for ref in refs:
+        assert f"prior-finding-{ref}" in case.packet.prior_finding_item_ids
+        rows = [item for item in case.items if item.section == "prior_finding"]
+        assert sum(1 for item in rows if item.source_ref == ref) > 1
+    payload = cast(
+        Mapping[str, JsonValue],
+        strict_json_parse(
+            semantic_case_to_prepared_payload(case, {item.item_id for item in case.items})
+        ),
+    )
+    packet = cast(Mapping[str, JsonValue], payload["review_packet"])
+    assert packet["prior_finding_refs"] == list(refs)
 
 
 def test_a_legacy_finding_degrades_to_summary_and_message_with_an_explicit_omission() -> None:
@@ -347,6 +383,7 @@ def test_envelope_pressure_removes_the_oldest_prior_findings_before_any_work_con
                 f"prior-finding-summary-{older}",
                 f"prior-finding-{newer}",
             ],
+            "prior_finding_refs": [newer, older],
         },
         "filler": "",
     }
@@ -361,6 +398,7 @@ def test_envelope_pressure_removes_the_oldest_prior_findings_before_any_work_con
     assert kept == [f"prior-finding-{newer}", "excerpt-evd"]
     packet = cast(Mapping[str, JsonValue], envelope["review_packet"])
     assert packet["prior_finding_item_ids"] == [f"prior-finding-{newer}"]
+    assert packet["prior_finding_refs"] == [newer]
     coverage = cast(Mapping[str, JsonValue], packet["coverage"])
     assert coverage["known_gaps"] == [SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP]
     assert len(canonical_encode(cast(JsonValue, envelope))) <= MAX_EGRESS_ENVELOPE_BYTES
@@ -400,6 +438,7 @@ def test_bounded_case_envelope_drops_prior_findings_first_and_accounts_for_them(
             "review_packet": {
                 "coverage": {"known_gaps": []},
                 "prior_finding_item_ids": [f"prior-finding-{older}", f"prior-finding-{newer}"],
+                "prior_finding_refs": [newer, older],
             },
             "filler": "",
         }
@@ -423,6 +462,8 @@ def test_bounded_case_envelope_drops_prior_findings_first_and_accounts_for_them(
         for item in cast(list[JsonValue], bounded["item_catalog"])
     ]
     assert kept == [f"prior-finding-{newer}", "excerpt-evd"]
+    packet_view = cast(Mapping[str, JsonValue], bounded["review_packet"])
+    assert packet_view["prior_finding_refs"] == [newer]
     accounting = cast(Mapping[str, JsonValue], bounded["selection_accounting"])
     assert accounting["catalog_dropped_count"] == "1"
     packet = cast(Mapping[str, JsonValue], bounded["review_packet"])

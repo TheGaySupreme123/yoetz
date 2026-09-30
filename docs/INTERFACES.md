@@ -6921,8 +6921,10 @@ A cited `fnd_` in a challenge resolves to that finding's subjects when it is a l
 the same check or a readable recorded finding inside the frozen fence; only already-recorded
 findings are kept as `relates_to`, so a link never names a finding that was ranked away.
 
-The review packet (`outbound-case` `1.2.0`) adds the `prior_finding` section and
-`review_packet.prior_finding_item_ids`. It carries the newest readable, unresolved AI-powered
+The review packet (`outbound-case` `1.2.0`) adds the `prior_finding` section,
+`review_packet.prior_finding_item_ids` (every row of the section, at most 56) and
+`review_packet.prior_finding_refs` (the ruling unit: each carried finding's `finding_ref` exactly
+once, newest first, at most 8, listed only while its structural row is carried). It carries the newest readable, unresolved AI-powered
 findings (at most 8, 48 KiB of item content, and only case capacity the other sections leave;
 outside the timeline's 64 rows, so hook rows never crowd it out). Under egress-envelope pressure its
 rows are removed first, oldest finding first, before any other bounding step, so the section never
@@ -6946,6 +6948,11 @@ The provider judgment is `provider-judgment` `1.1.0`: every conclusion branch re
 `prior_finding_verdicts` (0–8 of `{finding_id, verdict, cited_refs, note}`; `verdict` ∈
 `fixed|still_present|answered_not_fixed|unassessable|withdrawn`), for the Codex app-server,
 Responses and Chat Completions cells alike (the prompt-only Chat Completions shape names it too).
+The reviewer returns exactly one ruling per `finding_ref` in `review_packet.prior_finding_refs`,
+never one per prior-finding row; the shared instruction says so for every provider cell. The
+shared normalizer folds rulings by `finding_id` before applying the cap: the first ruling on a
+finding stands, each repeat counts as dropped, and a repeat with a different verdict makes that
+finding's ruling `unassessable` with no cited refs.
 A reply that omits the array (the 1.0.0 shape a local model or prompt-only host may still return)
 is read as carrying no rulings; a malformed or surplus ruling is dropped and counted instead of
 failing the judgment. Post-validation admits and bounds each ruling as ADR-006 describes, fenced to

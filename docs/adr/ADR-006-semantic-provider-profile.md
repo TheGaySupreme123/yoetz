@@ -849,12 +849,21 @@ rows the profile's finding-prose selection already permits. It is bounded (8 fin
 leftover case capacity only); what does not fit is named as `not_selected` omissions and discloses
 `semantic_prior_findings_over_limit`, a gap that stays on the receipt but does not veto absence
 proof. Findings recorded without challenge fields degrade to summary and message with a `not_recorded`
-omission. No new data category leaves the machine.
+omission. No new data category leaves the machine. A carried finding contributes one structural
+row and, under a prose profile, up to six prose rows, so `review_packet.prior_finding_item_ids`
+(up to 56 rows) is row accounting, not the ruling unit. `review_packet.prior_finding_refs` is the
+ruling unit: each carried finding's `finding_ref` exactly once, newest first, at most 8, and only
+while that finding's structural row is still carried after bounding.
 
 **Per-finding rulings.** `provider-judgment/1.1.0` adds a required `prior_finding_verdicts`
 array (at most 8) to every conclusion branch: `{finding_id, verdict, cited_refs, note}` with
 `verdict` one of `fixed`, `still_present`, `answered_not_fixed`, `unassessable`, `withdrawn`.
-The note is turn-local reasoning and is never recorded. A reply without the array reads as the 1.0.0
+The note is turn-local reasoning and is never recorded. Ruling cardinality is one entry per
+`finding_ref` in `review_packet.prior_finding_refs`, never one per row, and every provider shares
+the instruction that says so. The shared normalizer enforces it before the 8-entry cap: rulings are
+folded by `finding_id` (the first stands, each repeat is counted, and a repeat with a different
+verdict turns that finding's ruling into `unassessable` with no cited refs), so a reply that rules
+per row cannot spend the cap on one finding's rows and strand a later finding. A reply without the array reads as the 1.0.0
 shape with no rulings, so a local model or prompt-only host that has not adopted it still gets its
 challenges read, and a malformed or surplus ruling is dropped and counted rather than failing the
 review. Post-validation keeps a ruling only for a readable, unresolved AI-powered finding inside

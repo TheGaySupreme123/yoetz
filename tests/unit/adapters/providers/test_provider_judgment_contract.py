@@ -629,11 +629,80 @@ def test_a_malformed_or_surplus_ruling_is_dropped_and_counted_not_fatal() -> Non
     surplus = normalize_judgment(
         cast(
             JsonValue,
-            {**_judgment(), "prior_finding_verdicts": [_ruling(verdict="unassessable")] * 9},
+            {
+                **_judgment(),
+                "prior_finding_verdicts": [
+                    _ruling(verdict="unassessable", finding_id=_finding(number))
+                    for number in range(1, 10)
+                ],
+            },
         )
     )
     assert len(surplus.prior_finding_verdicts) == 8
     assert surplus.prior_finding_verdicts_dropped == 1
+
+
+def _finding(number: int) -> str:
+    return f"fnd_866db2dd-0000-4000-8000-{number:012d}"
+
+
+def test_row_level_rulings_fold_to_one_per_finding_before_the_cap() -> None:
+    """A reply with one ruling per prior-finding row must not strand a later finding (#905).
+
+    Prose-bearing earlier findings carry several rows each. A provider that answers per row
+    returns more rulings than the eight-entry cap while naming only three findings; the rulings
+    are folded by ``finding_id`` first, so every finding keeps its ruling and each repeat is
+    counted.
+    """
+
+    rows: list[JsonValue] = [
+        *[_ruling(finding_id=_finding(3), verdict="still_present")] * 7,
+        *[_ruling(finding_id=_finding(2), verdict="answered_not_fixed")] * 7,
+        *[_ruling(finding_id=_finding(1), verdict="fixed")] * 3,
+    ]
+    judgment = normalize_judgment(cast(JsonValue, {**_judgment(), "prior_finding_verdicts": rows}))
+    assert [(item.finding_id, item.verdict) for item in judgment.prior_finding_verdicts] == [
+        (_finding(3), "still_present"),
+        (_finding(2), "answered_not_fixed"),
+        (_finding(1), "fixed"),
+    ]
+    assert judgment.prior_finding_verdicts_dropped == len(rows) - 3
+
+
+def test_conflicting_rulings_on_one_finding_fold_to_unassessable() -> None:
+    """Two different rulings on one finding settle nothing about it, and never become fixed."""
+
+    judgment = normalize_judgment(
+        cast(
+            JsonValue,
+            {
+                **_judgment(),
+                "prior_finding_verdicts": [
+                    _ruling(finding_id=_finding(1), verdict="fixed"),
+                    _ruling(finding_id=_finding(2), verdict="withdrawn", cited_refs=[]),
+                    _ruling(finding_id=_finding(1), verdict="still_present"),
+                ],
+            },
+        )
+    )
+    assert [
+        (item.finding_id, item.verdict, item.cited_refs) for item in judgment.prior_finding_verdicts
+    ] == [(_finding(1), "unassessable", ()), (_finding(2), "withdrawn", ())]
+    assert judgment.prior_finding_verdicts_dropped == 1
+
+
+def test_the_instruction_asks_for_exactly_one_ruling_per_listed_finding() -> None:
+    """Every provider shares the text that names the rulable list and the per-finding rule."""
+
+    from yoetz.adapters.providers.openai_responses import (
+        SEMANTIC_REVIEW_INSTRUCTION,
+        VERDICT_FIELD_GLOSSARY,
+    )
+
+    assert "review_packet.prior_finding_refs" in SEMANTIC_REVIEW_INSTRUCTION
+    assert "exactly one prior_finding_verdicts entry" in SEMANTIC_REVIEW_INSTRUCTION
+    assert "never one per row" in SEMANTIC_REVIEW_INSTRUCTION
+    assert "review_packet.prior_finding_refs" in VERDICT_FIELD_GLOSSARY["finding_id"]
 
 
 @pytest.mark.parametrize("value", [None, "fixed", {"finding_id": "fnd_866db2dd"}])
