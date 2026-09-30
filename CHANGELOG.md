@@ -130,6 +130,11 @@ reverse-chronological released versions.
   While you have it off, rows queued before you switched it off are closed at service start
   without being sent, so turning it back on never sends old work (#888).
 
+- The served `workflow.md` and `coverage-and-receipts.md` guidance drop repeated wording that the
+  combined 0.3 changes had accumulated, so each stays under the 65,536-byte `read_guidance` limit;
+  every rule is still stated, and the closure-readiness text now says `acknowledged_not_done`
+  findings are recorded while obligations cannot be yet.
+
 - The generic-host initialize instructions (`agent-instructions.md`) no longer state the `client`
   shape and the JSON-string rule for canonical integers twice; each rule is kept once, in the
   canonical-values section. This keeps the combined 0.3 MCP surface inside its reviewed 224,000-byte
