@@ -1,4 +1,4 @@
-"""Closed classification of coverage gap codes for closure readiness (ADR-031).
+"""Closed classification of coverage gap codes for closure readiness (ADR-032).
 
 Closure readiness answers one question for the agent: is there anything left that *it* can do, or
 is every remaining condition a limitation that the receipt will disclose? A gap code answers that
@@ -49,6 +49,7 @@ __all__ = [
     "GAP_CLASSIFICATION",
     "GAP_CLASSIFICATION_VERSION",
     "MAX_ACKNOWLEDGED_READINESS_ITEMS",
+    "READINESS_CHECK_CONDITIONS",
     "UNCLASSIFIED_GAP_PREFIX",
     "CheckApplicability",
     "ClosureReadinessFacts",
@@ -156,6 +157,9 @@ GAP_CLASSIFICATION: Final[Mapping[str, GapClass]] = MappingProxyType(
         # observations is a disclosure (real material staleness reads check_not_applicable).
         "check_not_recorded": _A,
         "check_not_applicable": _A,
+        # A readiness condition rather than a recorded gap: a check holds the session frontier
+        # right now, so its result (and any finding it returns) is still to come.
+        "check_in_progress": _A,
         "check_current_as_of_earlier_frontier": _S,
         "check_payload_unavailable": _S,
         # -- AI-powered review outcome and packet bounds: disclosure of how the review was bounded.
@@ -344,7 +348,7 @@ def split_gaps(
 # ---------------------------------------------------------------------------------------------
 
 # The one "not done" vocabulary shared by findings (#905's ``respond`` disposition) and
-# obligations (ADR-031). An acknowledged item is carried to the receipt as not done; it is never
+# obligations (ADR-032). An acknowledged item is carried to the receipt as not done; it is never
 # resolved, never counted as clean, and never reopened.
 ACKNOWLEDGED_NOT_DONE: Final = "acknowledged_not_done"
 # Readiness conditions the agent removes by its own action, in their wire order.
@@ -359,6 +363,12 @@ AGENT_READINESS_CONDITIONS: Final = (
     "projection_stale",
 )
 MAX_ACKNOWLEDGED_READINESS_ITEMS: Final = 64
+# Check conditions readiness derives itself, in their wire order; each is classified above.
+READINESS_CHECK_CONDITIONS: Final = (
+    "check_in_progress",
+    "check_not_recorded",
+    "check_not_applicable",
+)
 
 type CheckApplicability = Literal[
     "applicable", "not_recorded", "not_applicable", "payload_unavailable"
@@ -509,6 +519,7 @@ def derive_closure_readiness(
     facts: ClosureReadinessFacts | None,
     *,
     semantic_review_required: bool,
+    check_in_flight: bool = False,
 ) -> ClosureReadinessSplit:
     """Split readiness into agent-actionable work, standing limitations and acknowledged items.
 
@@ -516,7 +527,8 @@ def derive_closure_readiness(
     findings, missing plan or scope, a stale projection, an unacknowledged receipt-blocking
     finding, a missing or superseded check and every actionable gap stay agent-actionable. When
     ``facts`` is unavailable nothing is inferred from its absence: no acknowledgement is assumed
-    and a receipt-blocking condition stays actionable.
+    and a receipt-blocking condition stays actionable. ``check_in_flight`` means a check holds the
+    session frontier right now: nothing reads as done until its result is recorded.
     """
 
     conditions = tuple(blocking_conditions)
@@ -530,6 +542,8 @@ def derive_closure_readiness(
                 continue
         actionable.append(condition)
     standing: set[str] = set()
+    if check_in_flight:
+        actionable.append("check_in_progress")
     if facts is not None:
         if facts.check_applicability in {"not_recorded", "not_applicable"}:
             actionable.append("check_" + facts.check_applicability)

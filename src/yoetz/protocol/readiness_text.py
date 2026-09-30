@@ -1,4 +1,4 @@
-"""Frozen agent-facing text for the closure-readiness checklist states (issue #913, ADR-031).
+"""Frozen agent-facing text for the closure-readiness checklist states (issue #913, ADR-032).
 
 Like ``yoetz.protocol.recovery``, the *state token* travels and the text does not: every surface
 (the MCP text summary, the CLI, the terminal interface and the shipped guidance) reconstructs the

@@ -1,4 +1,4 @@
-"""Build-time completeness of the closure-readiness gap classification (issue #913, ADR-031).
+"""Build-time completeness of the closure-readiness gap classification (issue #913, ADR-032).
 
 ``ready_with_limitations`` is only reachable if every gap code the product emits is classified:
 a real code that falls through to the conservative ``unclassified_gap:<code>`` default keeps
@@ -36,6 +36,7 @@ from yoetz.domain.receipts import semantic_coverage_gap_code
 from yoetz.kernel.closure_readiness import (
     GAP_CLASSIFICATION,
     GAP_CLASSIFICATION_VERSION,
+    READINESS_CHECK_CONDITIONS,
     UNCLASSIFIED_GAP_PREFIX,
     GapClass,
     classify_gap,
@@ -362,7 +363,8 @@ def test_the_table_names_only_emitted_codes(
     """A closed table stays honest in both directions: no entry for a code nothing emits."""
 
     literal_codes, _ = scanned
-    emitted = set(literal_codes) | set(_typed_producers())
+    # Readiness derives its check conditions itself; they are classified like any gap code.
+    emitted = set(literal_codes) | set(_typed_producers()) | set(READINESS_CHECK_CONDITIONS)
     assert set(GAP_CLASSIFICATION) <= emitted, sorted(set(GAP_CLASSIFICATION) - emitted)
 
 

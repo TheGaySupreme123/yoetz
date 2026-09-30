@@ -92,7 +92,8 @@ each status read and never cached across frontiers:
 
 - `agent_actionable`: work you can still do. Open obligations, unanswered findings, a missing
   plan or scope, a stale projection, a receipt-blocking finding you have not acknowledged, a
-  missing or superseded check, and every gap code whose remedy is an agent action (for example
+  check still in progress, a missing or superseded check, and every gap code whose remedy is an
+  agent action (for example
   `completion_plan_not_claimed`, `completion_claim_outside_plan`, `missing_ref`).
 - `standing_limitations`: gap codes that no action available under this host, profile and
   privacy policy removes, such as `host_outcome_unavailable`, `unpaired_event`,
@@ -100,7 +101,10 @@ each status read and never cached across frontiers:
   `check_current_as_of_earlier_frontier`, and the bounded-selection and capture disclosures of an
   AI-powered review (`semantic_reference_scope_reduced`, `semantic_packet_insufficient`,
   `truncated_payload`). They are disclosed on the receipt, never instructions.
-- `acknowledged_not_done`: obligations and findings you recorded as not done, with a reason.
+- `acknowledged_not_done`: obligations and findings recorded as not done, with a reason. This
+  build has no way to record that yet, so the group stays empty until the `acknowledged_not_done`
+  disposition ships; until then an item you cannot finish stays in `agent_actionable` and you
+  disclose it in your final answer.
 
 A closed, versioned table (`gap_classification_version`) assigns every gap code the product
 emits to exactly one group. `semantic_review_not_requested` is standing on a route where

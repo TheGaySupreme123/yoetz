@@ -35,9 +35,10 @@ names what the receipt will disclose.
    `blocking_conditions`, a `state` and three groups:
    - `agent_actionable`: what the agent can still do — `obligations_open`, `findings_unanswered`,
      an unacknowledged `receipt_findings_unresolved`, `no_plan_published`,
-     `no_obligations_declared`, `projection_stale`, `check_not_recorded` or `check_not_applicable`
-     (the receipt's own applicability rule: run a check after the material change), and every gap
-     code the table classifies as actionable;
+     `no_obligations_declared`, `projection_stale`, `check_in_progress` (a check holds the session
+     frontier; its result is still to come), `check_not_recorded` or `check_not_applicable` (the
+     receipt's own applicability rule: run a check after the material change), and every gap code
+     the table classifies as actionable;
    - `standing_limitations`: gap codes no available agent action removes under the current host,
      profile and privacy policy; they are disclosed on the receipt, never instructions;
    - `acknowledged_not_done`: obligations and findings the agent recorded as not done, with a
@@ -79,6 +80,7 @@ names what the receipt will disclose.
    the recorded prefix at the requested frontier on every read, never cached across frontiers and
    never recorded. A restart, a reattach or an upgrade over a ledger written by an older build
    recomputes it without migrating any event, and old receipts keep their recorded wording.
+   Readiness facts that an adapter cannot derive make readiness `unknown`, never a stop state.
    Classification never removes a code from `known_gaps`, never changes a check verdict or receipt
    conclusion, and never strengthens coverage. The frozen directive for each state lives in
    `yoetz.protocol.readiness_text`; the `ready_with_limitations` sentence is the owner-approved

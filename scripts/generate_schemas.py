@@ -2838,7 +2838,7 @@ def _status_result_v1_4_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
 
 
 def _add_status_closure_checklist(definitions: dict[str, JsonValue]) -> None:
-    """Split closure readiness into a checklist with a stop state (issue #913, ADR-031)."""
+    """Split closure readiness into a checklist with a stop state (issue #913, ADR-032)."""
 
     readiness = cast(dict[str, JsonValue], definitions["closure_readiness"])
     properties = cast(dict[str, JsonValue], readiness["properties"])

@@ -183,11 +183,13 @@ changes or new evidence, not unchanged state. Request `receipt` last, then repor
 Closure is a checklist. `closure_readiness.state` names the next move:
 
 - `action_required`: do each item in `agent_actionable` — open obligations, unanswered findings,
-  an unacknowledged receipt-blocking finding, `check_not_recorded` or `check_not_applicable` (run a
+  an unacknowledged receipt-blocking finding, `check_in_progress` (recover the running check's
+  result through `status view=operation`), `check_not_recorded` or `check_not_applicable` (run a
   check after the material change), or an actionable gap such as `completion_plan_not_claimed`.
 - `ready_with_limitations`: nothing further to do. Every remaining condition is a
   `standing_limitations` code this host, profile or privacy policy always has, or an item in
-  `acknowledged_not_done`. Request the receipt now; do not recheck unchanged state. The receipt
+  `acknowledged_not_done` (empty in this build: nothing can record that disposition yet). Request
+  the receipt now; do not recheck unchanged state. The receipt
   still discloses every limitation and acknowledged item, and its verdict stays coverage-bounded
   (a local-only check stays `insufficient_coverage`).
 - `ready`: nothing further to do and nothing to disclose; request the receipt.

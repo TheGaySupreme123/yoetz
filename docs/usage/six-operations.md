@@ -169,7 +169,8 @@ missing or out-of-date check, or a gap you can repair such as `completion_plan_n
 `ready_with_limitations` means nothing further to do: every remaining condition is either a
 `standing_limitations` code that this assistant, capture profile or privacy policy always has
 (for example `host_outcome_unavailable` or, when AI-powered review is off, `semantic_review_not_requested`)
-or an item in `acknowledged_not_done`. Request the receipt; another check of unchanged state
+or an item in `acknowledged_not_done` (always empty in this release: recording an item as not
+done is not available yet). Request the receipt; another check of unchanged state
 changes nothing. The receipt still lists every limitation, and its conclusion is unchanged: a
 local-only check with limitations is still `insufficient_coverage`. `ready` means nothing remains
 at all, and `unknown` means read status again once it is readable.

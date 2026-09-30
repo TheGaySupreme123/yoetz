@@ -1658,7 +1658,7 @@ class ProjectionPage:
     gaps: tuple[str, ...]
     next_position: ProjectionPosition | None
     # Internal, compact-only: the per-request closure-readiness facts the status application
-    # cannot read off the compact row (ADR-031). Never part of a wire page and never cached
+    # cannot read off the compact row (ADR-032). Never part of a wire page and never cached
     # across frontiers; an adapter that cannot derive them leaves ``None``.
     readiness_facts: ClosureReadinessFacts | None = None
 

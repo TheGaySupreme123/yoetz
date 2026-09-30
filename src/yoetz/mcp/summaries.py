@@ -633,7 +633,7 @@ def _readiness_tokens(readiness: Mapping[str, JsonValue], key: str) -> tuple[str
 
 
 def _closure_clause(source: Mapping[str, JsonValue], *, byte_budget: int) -> str:
-    """Name the closure-readiness state and its frozen directive (issue #913, ADR-031).
+    """Name the closure-readiness state and its frozen directive (issue #913, ADR-032).
 
     Only the closed state token, service counts and classified gap or condition tokens appear.
     The first variant that fits the remaining budget wins. ``ready_with_limitations`` always keeps

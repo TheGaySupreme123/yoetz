@@ -85,6 +85,8 @@ def test_read_ledger_can_look_up_an_operation() -> None:
     assert callable(getattr(facade, "lookup_operation", None))
     assert callable(getattr(facade, "lookup_task_operation", None))
     assert callable(getattr(facade, "load_disclosure_wait", None))
+    # Closure readiness (#913) must see a check that holds the frontier through the read route.
+    assert callable(getattr(facade, "has_active_frozen_case", None))
 
 
 @dataclass(frozen=True)

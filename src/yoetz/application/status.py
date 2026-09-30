@@ -1122,7 +1122,7 @@ def _semantic_review_required(app: object) -> bool:
     """True only when the effective verification policy requires AI-powered review.
 
     That is the one route on which ``semantic_review_not_requested`` stays agent-actionable
-    (ADR-031). A composition without a verification policy never makes it actionable.
+    (ADR-032). A composition without a verification policy never makes it actionable.
     """
 
     policy = getattr(app, "verification_policy", None)
@@ -1137,6 +1137,7 @@ async def _closure_readiness(
     *,
     lineage_gaps: tuple[str, ...] = (),
     semantic_review_required: bool = False,
+    check_in_flight: bool = False,
 ) -> StatusClosureReadinessModel:
     """Derive what currently bounds a completion conclusion, from the compact projection.
 
@@ -1154,7 +1155,7 @@ async def _closure_readiness(
     leaves a bounded diagnostic, rather than raising into the daemon as an unbounded internal
     error on a read that changed nothing.
 
-    The checklist split (ADR-031) is derived here, per request, from the page's own gaps and
+    The checklist split (ADR-032) is derived here, per request, from the page's own gaps and
     readiness facts; nothing about it is cached across frontiers or recorded.
     """
 
@@ -1197,6 +1198,10 @@ async def _closure_readiness(
         gap_markers = (*page.gaps, *lineage_gaps)
         declared_gaps = bool(gap_markers)
         facts = page.readiness_facts
+        if facts is None:
+            # Without the per-request facts readiness cannot tell whether a check applies or an
+            # item was acknowledged; "done" would be manufactured out of missing data.
+            return _readiness_unknown()
     except (AttributeError, IndexError, TypeError, ValueError) as exc:
         record_unexpected_exception_without_raising(
             exc,
@@ -1225,6 +1230,7 @@ async def _closure_readiness(
         gap_markers,
         facts,
         semantic_review_required=semantic_review_required,
+        check_in_flight=check_in_flight,
     )
     return StatusClosureReadinessModel(
         declared_obligation_count=str(declared_obligations),
@@ -1255,6 +1261,22 @@ async def _closure_readiness(
             tuple(blocking),
         ),
     )
+
+
+async def _check_in_flight(runtime: TaskRuntime) -> bool:
+    """True while a check holds this session's frontier (issue #913).
+
+    Readiness must not say "nothing further to do" while a check's result — and any finding it
+    returns — is still to come. A ledger that cannot answer is treated as in flight.
+    """
+
+    probe = getattr(runtime.ledger, "has_active_frozen_case", None)
+    if not callable(probe):
+        return True
+    try:
+        return bool(await cast(Callable[[str], Awaitable[bool]], probe)(runtime.session_id))
+    except Exception:  # noqa: BLE001 - a secondary read; unknown is reported as in flight
+        return True
 
 
 async def _task_coverage(
@@ -1718,6 +1740,7 @@ async def execute_status(
             request.request_id,
             lineage_gaps=lineage_gaps,
             semantic_review_required=_semantic_review_required(app),
+            check_in_flight=frontier == head and await _check_in_flight(runtime),
         )
         return StatusInternalResult(
             "0.1",

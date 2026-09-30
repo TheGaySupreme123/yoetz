@@ -71,6 +71,7 @@ from yoetz.protocol.models import (
     RespondResponseModel,
     StartSuccessModel,
     StatusAdviceItemModel,
+    StatusClosureReadinessModel,
     StatusCompactObligationModel,
     StatusObligationItemModel,
     StatusOperationPageModel,
@@ -134,6 +135,19 @@ _RESULT_OPTIONAL_NON_NULL: tuple[tuple[type[BaseModel], frozenset[str]], ...] = 
     (
         StartSuccessModel,
         frozenset({"attach_handle", "parent_task_id", "depth", "origin", "acceptance"}),
+    ),
+    (
+        StatusClosureReadinessModel,
+        frozenset(
+            {
+                "state",
+                "gap_classification_version",
+                "agent_actionable",
+                "standing_limitations",
+                "acknowledged_not_done",
+                "acknowledged_not_done_count",
+            }
+        ),
     ),
     (StatusCompactObligationModel, frozenset({"acceptance_criteria"})),
     (StatusObligationItemModel, frozenset({"acceptance_criteria"})),
@@ -800,6 +814,24 @@ def test_closed_model_still_rejects_explicit_null(
         model_type.model_validate(payload)
 
 
+def test_status_closure_readiness_omits_an_unset_checklist() -> None:
+    """A readiness shaped by an earlier 0.3 build carries no checklist; it stays absent (#913)."""
+
+    parsed = StatusClosureReadinessModel.model_validate(
+        {
+            "declared_obligation_count": "0",
+            "no_obligations_reason": None,
+            "open_obligation_count": "0",
+            "unanswered_finding_count": "0",
+            "receipt_blocking_finding_count": "0",
+            "blocking_conditions": ["no_obligations_declared"],
+        }
+    )
+    dumped = parsed.model_dump(mode="json", exclude_unset=True)
+    assert not StatusClosureReadinessModel.optional_non_null_fields & dumped.keys()
+    assert dumped["no_obligations_reason"] is None
+
+
 def test_status_version_slice_omits_unset_route_profile() -> None:
     parsed = StatusVersionSliceModel.model_validate(_version_slice_payload())
     assert "route_profile" not in parsed.model_dump(mode="json", exclude_unset=True)
@@ -1033,6 +1065,18 @@ def test_every_result_optional_non_null_field_has_an_unset_projection_case() -> 
             "test_absent_operation_page_omits_admission_when_nothing_is_known"
         ),
     }
+    for field in (
+        "state",
+        "gap_classification_version",
+        "agent_actionable",
+        "standing_limitations",
+        "acknowledged_not_done",
+        "acknowledged_not_done_count",
+    ):
+        # Issue #913: the checklist is absent as a whole on an earlier 0.3 build's readiness.
+        covered["StatusClosureReadinessModel", field] = (
+            "test_status_closure_readiness_omits_an_unset_checklist"
+        )
     for field in ("remaining_ms", "terminal_outcome", "terminal_reason"):
         # The sampling case omits the terminal pair; the terminal case omits remaining_ms.
         covered["StatusSemanticProgressModel", field] = (

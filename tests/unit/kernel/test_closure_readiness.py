@@ -294,3 +294,16 @@ def test_semantic_currency_needs_a_completed_review_with_no_later_material_chang
         closure_readiness_facts(replay(prefix), (*reviewed, *suffix)).semantic_review_current
         is False
     )
+
+
+def test_a_check_in_flight_is_never_nothing_further_to_do() -> None:
+    split = derive_closure_readiness(
+        ("coverage_gaps_declared",),
+        _BANDIT_B_GAPS,
+        _facts(),
+        semantic_review_required=False,
+        check_in_flight=True,
+    )
+    assert split.state == "action_required"
+    assert split.agent_actionable == ("check_in_progress",)
+    assert split.standing_limitations == _BANDIT_B_GAPS

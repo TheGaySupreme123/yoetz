@@ -1,4 +1,4 @@
-"""Closure readiness as a checklist through the real application (issue #913, ADR-031).
+"""Closure readiness as a checklist through the real application (issue #913, ADR-032).
 
 The DeepSWE v2 shapes replayed here are real Codex ledger shapes: a cooperative plan, obligation,
 evidence and completion claim beside hook rows materialized by the production Codex mapping from
@@ -26,6 +26,7 @@ import pytest
 import integration.application.test_respond_status_receipt as workflow
 from builders.ledger_adapters import MemoryObjects
 from builders.start_application import protocol_id, start_request
+from yoetz.adapters.memory.ledger import MemoryLedgerAdapter
 from yoetz.application.check import CheckCommitResult
 from yoetz.application.observation_materialize import (
     materialize_observation_envelope,
@@ -40,7 +41,14 @@ from yoetz.domain.events import EVIDENCE_SCHEMA_VERSION, media_type_for
 from yoetz.domain.observation import ObservationCursor, ObservationEnvelope, ObservationSource
 from yoetz.domain.values import Frontier, JsonObject, Timestamp
 from yoetz.mcp.summaries import summary_for_status
-from yoetz.ports.ledger import AppendCommand, AppendEntry, LedgerPort, OperationKind
+from yoetz.ports.ledger import (
+    AppendCommand,
+    AppendEntry,
+    LedgerPort,
+    OperationKind,
+    ProjectionPage,
+    ProjectionQuery,
+)
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectSource
 from yoetz.protocol.canonical import JsonValue
 from yoetz.protocol.models import (
@@ -338,6 +346,7 @@ async def test_bandit_b_reads_ready_with_limitations_and_keeps_its_verdict(
 
     status = await session.status()
     readiness = status.closure_readiness
+    assert readiness.agent_actionable is not None and readiness.standing_limitations is not None
     assert readiness.state == "ready_with_limitations"
     assert readiness.agent_actionable == ()
     assert _CODEX_STANDING <= set(readiness.standing_limitations)
@@ -419,6 +428,7 @@ async def test_work_closed_does_not_ask_for_an_identical_recheck(
     )
     changed = await session.status()
     assert changed.closure_readiness.state == "action_required"
+    assert changed.closure_readiness.agent_actionable is not None
     assert "check_not_applicable" in changed.closure_readiness.agent_actionable
     assert "Closure: action_required." in summary_for_status(changed.as_json())
 
@@ -448,6 +458,7 @@ async def test_open_work_and_actionable_gaps_stay_agent_actionable() -> None:
     )
     await session.codex_post_tool_use(paired=True)
     no_check = await session.status()
+    assert no_check.closure_readiness.agent_actionable is not None
     assert no_check.closure_readiness.state == "action_required"
     assert no_check.closure_readiness.agent_actionable[:1] == ("obligations_open",)
     assert "check_not_recorded" in no_check.closure_readiness.agent_actionable
@@ -490,6 +501,7 @@ async def test_open_work_and_actionable_gaps_stay_agent_actionable() -> None:
     await session.check()
     partial = await session.status()
     readiness = partial.closure_readiness
+    assert readiness.agent_actionable is not None and readiness.standing_limitations is not None
     assert readiness.state == "action_required"
     assert "obligations_open" in readiness.agent_actionable
     # A plan item the completion claim omits is the agent's to repair, never a limitation.
@@ -506,6 +518,73 @@ async def test_required_ai_review_keeps_the_local_only_gap_actionable(
     assert "semantic_review_not_requested" in checked.coverage.known_gaps
     status = await session.status()
     readiness = status.closure_readiness
+    assert readiness.standing_limitations is not None
     assert readiness.state == "action_required"
     assert readiness.agent_actionable == ("semantic_review_not_requested",)
     assert "semantic_review_not_requested" not in readiness.standing_limitations
+
+
+@pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))
+async def test_a_check_still_in_flight_is_never_nothing_further_to_do(
+    ledger_backend: Literal["memory", "sqlite"],
+) -> None:
+    """A second check holding the frontier keeps readiness actionable until its result lands."""
+
+    session, _ = await _bandit_b(ledger_backend)
+    assert (await session.status()).closure_readiness.state == "ready_with_limitations"
+    resources = cast(
+        dict[str, tuple[LedgerPort, MemoryObjects]], cast(Any, session.runtime).resources
+    )
+    ledger, _objects = next(iter(resources.values()))
+    request_id = session.next("req_")
+    frozen = await ledger.freeze_case(
+        session.started.session_id,
+        session.started.writer_id,
+        int(session.frontier.sequence),
+        request_id,
+        "sha256:" + "8" * 64,
+    )
+    assert type(frozen) is not CheckCommitResult
+    assert await ledger.has_active_frozen_case(session.started.session_id)
+
+    pending = await session.status()
+    readiness = pending.closure_readiness
+    assert readiness.state == "action_required"
+    assert readiness.agent_actionable == ("check_in_progress",)
+    summary = summary_for_status(pending.as_json())
+    assert "Nothing further to do" not in summary
+    assert "Agent-actionable: check_in_progress." in summary
+    operation = await session.app.status(
+        StatusRequest.model_validate(
+            {
+                **workflow._request_base(session.next("req_")),  # pyright: ignore[reportPrivateUsage]
+                "session_id": session.started.session_id,
+                "writer_id": session.started.writer_id,
+                "view": "operation",
+                "limit": "1",
+                "filter": {"operation_request_id": request_id},
+            }
+        )
+    )
+    operation_summary = summary_for_status(operation.as_json())
+    assert "operation state: pending" in operation_summary
+    assert "Nothing further to do" not in operation_summary
+    assert operation.closure_readiness.state == "action_required"
+
+
+async def test_missing_readiness_facts_read_as_unknown_never_as_done(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defence in depth: an adapter that derives no facts cannot manufacture a stop state."""
+
+    session, _ = await _bandit_b("memory")
+    original = MemoryLedgerAdapter.query_projection
+
+    async def without_facts(self: MemoryLedgerAdapter, query: ProjectionQuery) -> ProjectionPage:
+        return replace(await original(self, query), readiness_facts=None)
+
+    monkeypatch.setattr(MemoryLedgerAdapter, "query_projection", without_facts)
+    status = await session.status()
+    assert status.closure_readiness.state == "unknown"
+    assert status.closure_readiness.blocking_conditions == ("readiness_unknown",)
+    assert "Nothing further to do" not in summary_for_status(status.as_json())

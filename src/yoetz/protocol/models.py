@@ -3229,7 +3229,7 @@ class StatusClosureReadinessModel(_ClosedModel):
     profile or privacy policy always limits (``standing_limitations``, classified by the closed
     table ``gap_classification_version`` names), and what the agent recorded as not done
     (``acknowledged_not_done``). ``state`` is ``ready_with_limitations`` exactly when nothing is
-    left to do but the receipt will disclose limitations or acknowledged items (ADR-031).
+    left to do but the receipt will disclose limitations or acknowledged items (ADR-032).
     """
 
     declared_obligation_count: CanonicalUInt64Wire | None

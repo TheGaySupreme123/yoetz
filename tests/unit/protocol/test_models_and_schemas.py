@@ -3413,11 +3413,12 @@ def test_closure_checklist_is_absent_as_a_whole_or_complete() -> None:
     result["closure_readiness"] = partial
     with pytest.raises(ProtocolValueError):
         validate_schema_instance("status-result", "1.4.0", result)
-    for mismatch in (
+    mismatches: tuple[dict[str, JsonValue], ...] = (
         {**complete, "state": "ready_with_limitations"},
         {**complete, "agent_actionable": []},
         {**complete, "standing_limitations": ["no_obligations_declared"]},
         {**complete, "acknowledged_not_done_count": "1"},
-    ):
+    )
+    for mismatch in mismatches:
         with pytest.raises(ValidationError):
             models.StatusClosureReadinessModel.model_validate(mismatch)

@@ -1,4 +1,4 @@
-"""Guidance, skills and every rendering agree on the closure stop signal (issue #913, ADR-031).
+"""Guidance, skills and every rendering agree on the closure stop signal (issue #913, ADR-032).
 
 After ``closure_readiness.state`` reads ``ready_with_limitations`` nothing is left to do, and no
 shipped surface may send the agent back to recheck unchanged state. These tests pin the phrases

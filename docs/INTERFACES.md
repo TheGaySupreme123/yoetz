@@ -6028,7 +6028,9 @@ unchanged `blocking_conditions` it carries `state` (`action_required|ready|ready
 `gap_classification_version` (`"1"`), and three groups. `agent_actionable` lists, in order, the
 agent conditions present (`obligations_open`, `findings_unanswered`, `receipt_findings_unresolved`
 unless every receipt-blocking finding's latest response is `acknowledged_not_done`,
-`no_plan_published`, `no_obligations_declared`, `projection_stale`), then `check_not_recorded` or
+`no_plan_published`, `no_obligations_declared`, `projection_stale`), then `check_in_progress`
+while a check holds the session frontier (read at the head through the ledger's
+`has_active_frozen_case`; an unanswerable probe counts as in flight), then `check_not_recorded` or
 `check_not_applicable` from the receipt applicability rule, then every actionable gap code and
 `unclassified_gap:<code>` for a base code the running build does not know.
 `standing_limitations` lists the classified standing base codes (plus
@@ -6046,7 +6048,8 @@ recorded without a later material change. The inputs the compact row cannot carr
 internal compact `ProjectionPage.readiness_facts` (`ClosureReadinessFacts`: check applicability,
 AI-powered review currency, receipt-blocking and acknowledged finding ids, acknowledged obligation
 ids), derived per request from the projection and record prefix at the requested frontier and
-never cached across frontiers. MCP text, the CLI and the terminal interface render the state's
+never cached across frontiers. A compact page without those facts yields `readiness_unknown`, never
+a stop state. MCP text, the CLI and the terminal interface render the state's
 frozen directive from `yoetz.protocol.readiness_text`; for `ready_with_limitations` it is "Nothing
 further to do. N standing limitation(s) and M acknowledged item(s) will be disclosed on the
 receipt. Request the receipt." Readiness never recounts findings: "this finding still needs an answer" has the one source
