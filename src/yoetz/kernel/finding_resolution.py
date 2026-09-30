@@ -373,6 +373,12 @@ def _semantic_subject_changed(
     return False
 
 
+# A check carrying either code may have left an unruled AI-powered finding unassessed (#905).
+_ASSESSMENT_INCOMPLETE_GAPS: Final = frozenset(
+    {SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP, SEMANTIC_PRIOR_VERDICTS_UNSUPPORTED_GAP}
+)
+
+
 def prior_finding_verdict(check: CheckRecordedPayload, finding: Finding) -> str | None:
     """The admitted reviewer ruling this check recorded for *finding*, if any (issue #905)."""
 
@@ -394,7 +400,9 @@ def _prior_verdict_effect(
     ordinary rules, under which an assessable review that does not re-raise a rejected finding
     over changed state resolves it; it never lifts the ``insufficient_packet`` veto. Any other
     ruling blocks this finding by name and speaks for no other finding. Without a ruling nothing
-    changes: silence is never read as ``fixed``.
+    changes (silence is never read as ``fixed``), except that a check whose packet left prior
+    findings out or dropped a ruling blocks every unruled AI-powered finding
+    (``reviewer_assessment_incomplete``, in ``resolution_blockers``).
     """
 
     verdict = prior_finding_verdict(check, finding)
@@ -457,6 +465,11 @@ def resolution_blockers(
         ruled_fixed, verdict_reasons, verdict_tolerated = _prior_verdict_effect(finding, check)
         reasons.extend(verdict_reasons)
         tolerated |= verdict_tolerated
+        if prior_finding_verdict(check, finding) is None and gaps & _ASSESSMENT_INCOMPLETE_GAPS:
+            # The review may never have seen this finding (the prior-findings section left it out)
+            # or a ruling on it may have been dropped. Either way it was not assessed, so silence
+            # here proves nothing; the gaps themselves stay disclosed, not vetoes on ruled rows.
+            reasons.append("reviewer_assessment_incomplete")
         if check.semantic_conclusion == "insufficient_packet" and not ruled_fixed:
             reasons.append("semantic_packet_insufficient")
         original_gaps = frozenset(finding.coverage.known_gaps)

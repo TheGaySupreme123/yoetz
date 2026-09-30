@@ -2426,7 +2426,11 @@ def build_semantic_case(
     # prose only where the profile already sends finding prose. Its own bounds keep it out of the
     # 64-row timeline, and it takes only capacity the case bounds leave.
     prior_finding_ids: list[str] = []
-    prior_findings_truncated = False
+    # A selection without the assessments section shows the reviewer no earlier finding at all;
+    # when any is open, that is the same disclosed truncation as a full section.
+    prior_findings_truncated = "deterministic_assessments" not in sections and bool(
+        _prior_finding_candidates(projection, allowed)
+    )
     if "deterministic_assessments" in sections:
         prior_items, prior_omissions, prior_findings_truncated = _prior_findings_section(
             projection,
