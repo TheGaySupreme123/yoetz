@@ -33,6 +33,7 @@ from yoetz.domain.values import (
     validate_commitment,
     validate_sha256_digest,
 )
+from yoetz.kernel.closure_readiness import ClosureReadinessFacts
 from yoetz.kernel.deterministic_checks import CaseAvailabilityFacts, DeterministicCase
 from yoetz.kernel.lineage import LineageRollupState
 from yoetz.kernel.projections import ProjectionState
@@ -1656,6 +1657,10 @@ class ProjectionPage:
     coverage: Coverage
     gaps: tuple[str, ...]
     next_position: ProjectionPosition | None
+    # Internal, compact-only: the per-request closure-readiness facts the status application
+    # cannot read off the compact row (ADR-031). Never part of a wire page and never cached
+    # across frontiers; an adapter that cannot derive them leaves ``None``.
+    readiness_facts: ClosureReadinessFacts | None = None
 
     def __post_init__(self) -> None:
         if type(self.view) is not str or self.view not in {
@@ -1710,6 +1715,10 @@ class ProjectionPage:
             raise _invalid()
         _sorted_unique_strings(self.gaps)
         if self.gaps != self.coverage.known_gaps:
+            raise _invalid()
+        if self.readiness_facts is not None and (
+            self.view != "compact" or type(self.readiness_facts) is not ClosureReadinessFacts
+        ):
             raise _invalid()
         expected_position = {
             "assignment": IdProjectionPosition,

@@ -122,6 +122,8 @@ the current typed continuation and the shared recovery guidance.
 
 Follow the linked coverage and publication references for the repair, evidence, finding-response,
 and receipt sequence. Request a receipt last. Report the closure counts and checked frontier, the
-check's AI-powered review status/reason, and the receipt's coverage limits. Keep completed product
+check's AI-powered review status/reason, and the receipt's coverage limits. At
+`closure_readiness.state: ready_with_limitations` nothing further is to do: request the receipt
+without another check; its `standing_limitations` are disclosed, never tasks. Keep completed product
 work separate from unresolved verification. Activation, registration, and hook delivery do not
 establish observation, AI-powered review, or completion.

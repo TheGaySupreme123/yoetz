@@ -1198,6 +1198,13 @@ coverage.
 
 ## 9. Kernel (`kernel/`)
 
+- `kernel/closure_readiness.py` owns the closed, versioned gap classification
+  (`GAP_CLASSIFICATION`, `GAP_CLASSIFICATION_VERSION`, `GapClass`, `gap_base_code`,
+  `classify_gap`, `split_gaps`), the per-request `ClosureReadinessFacts`
+  (`closure_readiness_facts(projection, records)`), the checklist derivation
+  `derive_closure_readiness(blocking_conditions, gap_markers, facts, *,
+  semantic_review_required)`, and `ACKNOWLEDGED_NOT_DONE`. It is pure: it reads the projection and
+  the recorded prefix only, and it never changes coverage, a verdict or a receipt (ADR-032).
 - `ProjectionState` (frozen): `frontier`, `head_digest`, `plans`, `obligations`, `decisions`,
   `assignments`, `actions`, `results`, `evidence`, `claims`, `contradictions`, `findings`,
   `responses`, `latest_tested_state`, `freshness`, `unknown_event_count`, `coverage_gaps`.
@@ -6005,6 +6012,35 @@ comparison contributes `lineage_readiness_unavailable`; it cannot make the paren
 Pending child annotations do not block. These current advisory facts never refresh a manifest,
 open a child bundle, change a recorded check, or strengthen a receipt. Reading readiness records
 nothing, creates no verdict or IDs, and never strengthens coverage.
+
+`closure_readiness` is also a checklist (ADR-032, issue #913). Beside the unchanged
+`blocking_conditions` it carries `state` (`action_required|ready|ready_with_limitations|unknown`),
+`gap_classification_version` (`"1"`), and three groups. `agent_actionable` lists, in order, the
+agent conditions present (`obligations_open`, `findings_unanswered`, `receipt_findings_unresolved`
+unless every receipt-blocking finding's latest response is `acknowledged_not_done`,
+`no_plan_published`, `no_obligations_declared`, `projection_stale`), then `check_not_recorded` or
+`check_not_applicable` from the receipt applicability rule, then every actionable gap code and
+`unclassified_gap:<code>` for a base code the running build does not know.
+`standing_limitations` lists the classified standing base codes (plus
+`check_payload_unavailable`). `acknowledged_not_done` lists up to 64 obligation and finding ids
+recorded as not done, and `acknowledged_not_done_count` counts them all. Every page gap and lineage
+gap is classified by its base code through `yoetz.kernel.closure_readiness.GAP_CLASSIFICATION`; no
+gap is dropped from `gaps` or `known_gaps`. `state` is `unknown` exactly with `readiness_unknown`
+(then `agent_actionable` is `("readiness_unknown",)` and the other groups are empty); otherwise it
+is `action_required` while `agent_actionable` is non-empty, `ready_with_limitations` when only
+standing or acknowledged entries remain, and `ready` when nothing remains. The five agent
+conditions other than `receipt_findings_unresolved` appear in `agent_actionable` exactly when they
+appear in `blocking_conditions`. `semantic_review_not_requested` is agent-actionable only when the
+effective verification policy is `required` and no check whose AI-powered review succeeded has been
+recorded without a later material change. The inputs the compact row cannot carry travel on the
+internal compact `ProjectionPage.readiness_facts` (`ClosureReadinessFacts`: check applicability,
+AI-powered review currency, receipt-blocking and acknowledged finding ids, acknowledged obligation
+ids), derived per request from the projection and record prefix at the requested frontier and
+never cached across frontiers. MCP text, the CLI and the terminal interface render the state's
+frozen directive from `yoetz.protocol.readiness_text`; for `ready_with_limitations` it is "Nothing
+further to do. N standing limitation(s) and M acknowledged item(s) will be disclosed on the
+receipt. Request the receipt." Readiness never recounts findings: "this finding still needs an answer" has the one source
+`kernel.projections.unanswered_finding_count`, read through the compact row.
 `findings_unanswered` identifies response work still to do;
 `receipt_findings_unresolved` is a persistent conclusion bound, not an instruction to respond
 again. Once every readable finding is answered, the latter condition remains and tells the caller
@@ -6756,8 +6792,8 @@ virtual-environment Python does not lose its runtime pin.
 claim and `current_plan_scope`. `completion_claim_outside_plan` and
 `completion_plan_not_claimed` are fixed coverage codes carried by publication previews/results,
 status, checks, and receipts. There are at most two case gaps regardless of relation count.
-Status readiness uses its existing `coverage_gaps_declared` condition; declared/open obligation
-counts stay plan-derived. Receipt gap details contain at most 16 ID-pair examples plus full
+Status readiness uses its existing `coverage_gaps_declared` condition and classifies both codes
+as agent-actionable in its checklist (ADR-032); declared/open obligation counts stay plan-derived. Receipt gap details contain at most 16 ID-pair examples plus full
 relation counts, with an explicit omission marker; default privacy projection still applies.
 Partial claims are accepted. Material/superseded claims are excluded, and unavailable input is
 not an empty scope. Multiple partial claims are compared independently; older effective claims

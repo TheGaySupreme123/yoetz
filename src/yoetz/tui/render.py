@@ -47,6 +47,7 @@ __all__ = [
     "render_session_header",
     "render_status",
     "render_welcome",
+    "closure_level",
     "render_work_detail",
     "yoetz_mark",
 ]
@@ -615,6 +616,16 @@ def render_provider_failure(message: str, width: int) -> tuple[str, ...]:
 # ---------------------------------------------------------------------------
 
 
+def closure_level(state: str | None) -> Level:
+    """The glyph for a closure-readiness state; never ``VERIFIED`` (issue #913).
+
+    ``ready`` and ``ready_with_limitations`` mean nothing further to do, and an acknowledged item
+    is carried as not done: none of them is an observed postcondition, so they read as limited.
+    """
+
+    return Level.ACTIVE if state == "action_required" else Level.UNPROVEN
+
+
 def render_work_detail(detail: WorkDetail, width: int) -> tuple[str, ...]:
     """One task, expanded into the layers a receipt would report."""
 
@@ -636,6 +647,17 @@ def render_work_detail(detail: WorkDetail, width: int) -> tuple[str, ...]:
             gap=4,
         )
     )
+    if detail.closure:
+        lines.append("")
+        lines.append(
+            truncate(_bullet(closure_level(detail.closure_state), detail.closure[0]), width)
+        )
+        lines.extend(
+            _indent(
+                tuple(line for item in detail.closure[1:] for line in wrap(item, width - 2)),
+                width=2,
+            )
+        )
     for label, items in (
         ("Claims", detail.claims),
         ("Checks", detail.checks),

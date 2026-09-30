@@ -163,6 +163,17 @@ rechecked once, and should not trigger another response loop. After that recheck
 the check did not qualify, stop rechecking unchanged state, request the bounded receipt, and
 disclose the current finding and limiting coverage.
 
+`closure_readiness.state` tells you whether anything is left to do. `action_required` lists the
+work in `agent_actionable`: open obligations, unanswered findings, a receipt-blocking finding, a
+missing or out-of-date check, or a gap you can repair such as `completion_plan_not_claimed`.
+`ready_with_limitations` means nothing further to do: every remaining condition is either a
+`standing_limitations` code that this assistant, capture profile or privacy policy always has
+(for example `host_outcome_unavailable` or, when AI-powered review is off, `semantic_review_not_requested`)
+or an item in `acknowledged_not_done`. Request the receipt; another check of unchanged state
+changes nothing. The receipt still lists every limitation, and its conclusion is unchanged: a
+local-only check with limitations is still `insufficient_coverage`. `ready` means nothing remains
+at all, and `unknown` means read status again once it is readable.
+
 ### `receipt`
 Projects the honest summary of what was checked, at what coverage, and what remains open. Formats:
 `json`, `markdown`, `text` — all three project under the default policy. If a stricter owner policy

@@ -1410,6 +1410,29 @@ Only service-stamped, explicitly linked observations can support a match or mism
 CLI closure composer uses the same projected status inputs; it does not grant capture or egress.
 These shared regressions are synthetic contract evidence, not live-host certification.
 
+### Closure readiness and standing limitations (#913)
+
+Codex sessions carry standing limitations that no agent action removes, so `closure_readiness`
+names them in `standing_limitations` instead of as work: `host_outcome_unavailable` (Codex hooks
+state no command outcome; #910 removes it where an outcome exists), `unpaired_event` (pairing
+loss, sticky by design; #917 owns how it surfaces), and commonly `content_unselected`,
+`observation_qualified_partial`, `advice_semantic_pending` and
+`check_current_as_of_earlier_frontier`. Observation status may also report
+`pending_attempt_expired` and `unsupported_event`; both are standing. A finished Codex session whose
+remaining conditions are only these reads `ready_with_limitations`.
+
+Classification is service-side and host-agnostic: the closed table in ADR-032 assigns each code
+once, a code the running build does not know stays agent-actionable as `unclassified_gap:<code>`,
+and nothing is removed from `known_gaps` or the receipt. `semantic_review_not_requested` is
+standing on a local-only or optional route and agent-actionable only when the verification policy
+requires AI-powered review and none has succeeded since the last material change. At
+`closure_readiness.state: ready_with_limitations` the agent requests the receipt without another
+check; the receipt conclusion is unchanged (a local-only check stays `insufficient_coverage`).
+
+X-HOST evidence: the derivation is covered by service-side contract tests over a Codex-shaped
+ledger replay; a dogfood transcript on this host across macOS, Linux and WSL 2 has not been
+recorded yet. That gap is owned by issue #913.
+
 ### Bounded workflow recovery examples (#613)
 
 These examples use the existing MCP operations and selectors on the local Codex cell. Replace

@@ -22,7 +22,7 @@ import shlex
 import sys
 from collections.abc import AsyncGenerator, Mapping, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
@@ -1754,7 +1754,44 @@ class YoetzRuntime:
             if title not in self._opened_titles:
                 self._opened_titles.append(title)
             compact = success.compact
-        return self._work_detail(title, session, compact)
+            closure = await self._closure_readiness(client, session)
+        return replace(self._work_detail(title, session, compact), **closure)
+
+    async def _closure_readiness(self, client: Any, session: _WorkSession) -> dict[str, Any]:
+        """Read the closure checklist for an opened task; never fabricate a clean answer.
+
+        The panel renders the same service-derived lines as ``yoetz status`` (issue #913). A read
+        that fails leaves the panel saying readiness is unknown rather than implying it is done.
+        """
+
+        from yoetz.cli.render import render_closure_readiness_lines
+        from yoetz.protocol.models import StatusRequestModel, StatusSuccessModel
+        from yoetz.protocol.readiness_text import readiness_directive
+
+        request = StatusRequestModel.model_validate(
+            {
+                **self._workflow_identity(),
+                "session_id": session.session_id,
+                "writer_id": session.writer_id,
+                "view": "compact",
+                "limit": "1",
+            }
+        )
+        unknown: dict[str, Any] = {
+            "closure": ("Closure: unknown", readiness_directive("unknown")),
+            "closure_state": "unknown",
+        }
+        try:
+            result = await client.status(request)
+        except Exception:  # noqa: BLE001 - a secondary read; the panel says unknown instead
+            return unknown
+        success = getattr(result, "root", None)
+        if type(success) is not StatusSuccessModel:
+            return unknown
+        return {
+            "closure": render_closure_readiness_lines(success.closure_readiness),
+            "closure_state": success.closure_readiness.state,
+        }
 
     async def task_status(
         self, title: str, view: Literal["lineage", "project"], *, cursor: str | None = None

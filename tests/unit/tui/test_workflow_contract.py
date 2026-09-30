@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from builders.readiness import with_checklist
 from yoetz.cli.render import render_human_status
 from yoetz.protocol.models import (
     CheckAwaitingHumanModel,
@@ -140,14 +141,16 @@ def _lineage_status_result() -> StatusResultModel:
                 "report_evidence_id": None,
                 "source_identity_digest": None,
             },
-            "closure_readiness": {
-                "declared_obligation_count": "0",
-                "no_obligations_reason": None,
-                "open_obligation_count": "0",
-                "unanswered_finding_count": "0",
-                "receipt_blocking_finding_count": "0",
-                "blocking_conditions": ["no_obligations_declared"],
-            },
+            "closure_readiness": with_checklist(
+                {
+                    "declared_obligation_count": "0",
+                    "no_obligations_reason": None,
+                    "open_obligation_count": "0",
+                    "unanswered_finding_count": "0",
+                    "receipt_blocking_finding_count": "0",
+                    "blocking_conditions": ["no_obligations_declared"],
+                }
+            ),
             "privacy_projection": {
                 "sink": "local_human_view",
                 "local_disclosure_receipt_id": "egr_52000000-0000-4000-8000-000000000013",
@@ -180,11 +183,19 @@ async def test_exact_selector_and_returned_frontier_reach_check_and_receipt(
     assert isinstance(start, StartRequestModel)
     assert start.session_id == _SESSION
     assert start.mode == "attach"
+    # The opened panel reads the service's closure checklist for the returned session (#913) and
+    # renders the same lines as `yoetz status`; nothing in it reads as verified.
+    readiness = client.requests[1]
+    assert isinstance(readiness, StatusRequestModel)
+    assert readiness.view == "compact"
+    assert readiness.session_id == _SUCCESSOR
+    assert detail.closure_state == "action_required"
+    assert detail.closure[0] == "Closure: action_required"
     with pytest.raises(RuntimeError_, match="The task is busy"):
         await runtime.run_check(_SESSION, CheckMode.DETERMINISTIC_ONLY)
     with pytest.raises(RuntimeError_, match="The task is busy"):
         await runtime.build_receipt(_SESSION, "markdown")
-    for request in client.requests[1:]:
+    for request in client.requests[2:]:
         assert isinstance(request, (CheckRequestModel, ReceiptRequestModel))
         assert request.session_id == _SUCCESSOR
         assert request.writer_id == _WRITER
@@ -243,7 +254,7 @@ async def test_awaiting_human_replays_the_exact_request_even_if_picker_mode_chan
     class AwaitingClient(_Client):
         async def check(self, request: CheckRequestModel) -> object:
             self.requests.append(request)
-            if len(self.requests) > 2:
+            if sum(isinstance(item, CheckRequestModel) for item in self.requests) > 1:
                 return self._refused()
             frontier = request.expected_frontier.model_dump(mode="json")
             return SimpleNamespace(
@@ -303,6 +314,8 @@ async def test_awaiting_human_replays_the_exact_request_even_if_picker_mode_chan
     assert "No verdict yet" in "\n".join(lines)
     with pytest.raises(RuntimeError_, match="The task is busy"):
         await runtime.run_check(_SESSION, CheckMode.DETERMINISTIC_ONLY)
-    assert client.requests[1] is client.requests[2]
-    assert isinstance(client.requests[1], CheckRequestModel)
-    assert client.requests[1].mode == "semantic_required"
+    # The opened panel's closure read is a status request; the check replay follows it.
+    requests = [item for item in client.requests if not isinstance(item, StatusRequestModel)]
+    assert requests[1] is requests[2]
+    assert isinstance(requests[1], CheckRequestModel)
+    assert requests[1].mode == "semantic_required"

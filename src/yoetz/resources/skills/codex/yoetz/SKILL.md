@@ -208,6 +208,9 @@ For a material repair, follow the shared ledger sequence:
    checked frontier, AI-powered review status/reason, and coverage limits. If a response to an older
    finding or any other material record follows the check, recheck before the receipt. Stop
    repeating an unchanged check when proof still cannot qualify and disclose the blocker.
+   `closure_readiness.state` is the stop signal: do each `agent_actionable` item while it reads
+   `action_required`; at `ready_with_limitations` nothing further is to do, so request the receipt
+   without another check. Its `standing_limitations` are disclosed, never tasks.
 
 ## Compatibility
 

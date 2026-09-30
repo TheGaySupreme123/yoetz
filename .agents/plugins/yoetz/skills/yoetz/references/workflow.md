@@ -180,6 +180,23 @@ finding disposition, pending decisions, and coverage-bounded wording. `respond` 
 finding: only a later qualifying check of the repaired record may resolve it. Recheck after material
 changes or new evidence, not unchanged state. Request `receipt` last, then report what it supports.
 
+Closure is a checklist. `closure_readiness.state` names the next move:
+
+- `action_required`: do each item in `agent_actionable` — open obligations, unanswered findings,
+  an unacknowledged receipt-blocking finding, `check_not_recorded` or `check_not_applicable` (run a
+  check after the material change), or an actionable gap such as `completion_plan_not_claimed`.
+- `ready_with_limitations`: nothing further to do. Every remaining condition is a
+  `standing_limitations` code this host, profile or privacy policy always has, or an item in
+  `acknowledged_not_done`. Request the receipt now; do not recheck unchanged state. The receipt
+  still discloses every limitation and acknowledged item, and its verdict stays coverage-bounded
+  (a local-only check stays `insufficient_coverage`).
+- `ready`: nothing further to do and nothing to disclose; request the receipt.
+- `unknown`: read `status` again once the projection is readable.
+
+`blocking_conditions` still names everything that bounds the conclusion; `coverage_gaps_declared`
+there is a disclosure, not a task. Never treat a standing limitation as work, and never describe
+an acknowledged item as done.
+
 Before claiming feedback complete, put its obligation in a supported plan revision or exact
 next-version restatement; a stored or resolved obligation alone does not update effective scope.
 Include each material delivery outcome the user requested in the effective obligations, or state the

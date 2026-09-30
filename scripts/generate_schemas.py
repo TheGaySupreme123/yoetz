@@ -2831,9 +2831,95 @@ def _status_result_v1_4_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     )
     _add_status_semantic_progress(definitions)
     _add_status_operation_admission(definitions)
+    _add_status_closure_checklist(definitions)
     document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
     document["title"] = f"Yoetz status result {entry.schema_version}"
     return document
+
+
+def _add_status_closure_checklist(definitions: dict[str, JsonValue]) -> None:
+    """Split closure readiness into a checklist with a stop state (issue #913, ADR-031)."""
+
+    readiness = cast(dict[str, JsonValue], definitions["closure_readiness"])
+    properties = cast(dict[str, JsonValue], readiness["properties"])
+    required = cast(list[JsonValue], readiness["required"])
+    properties.update(
+        {
+            "acknowledged_not_done": {
+                "items": {
+                    "oneOf": [
+                        {"$ref": "#/$defs/finding_id"},
+                        {"$ref": "#/$defs/obligation_id"},
+                    ]
+                },
+                "maxItems": 64,
+                "type": "array",
+                "uniqueItems": True,
+            },
+            "acknowledged_not_done_count": {"$ref": "#/$defs/canonical_uint"},
+            "agent_actionable": {
+                "items": {
+                    "maxLength": 145,
+                    "pattern": r"^(?:unclassified_gap:)?[a-z][a-z0-9_]{0,127}$",
+                    "type": "string",
+                },
+                "maxItems": 128,
+                "type": "array",
+                "uniqueItems": True,
+            },
+            "gap_classification_version": {"const": "1", "type": "string"},
+            "standing_limitations": {
+                "items": {"$ref": "#/$defs/code"},
+                "maxItems": 128,
+                "type": "array",
+                "uniqueItems": True,
+            },
+            "state": {
+                "enum": ["action_required", "ready", "ready_with_limitations", "unknown"],
+                "type": "string",
+            },
+        }
+    )
+    for name in (
+        "state",
+        "gap_classification_version",
+        "agent_actionable",
+        "standing_limitations",
+        "acknowledged_not_done",
+        "acknowledged_not_done_count",
+    ):
+        if name not in required:
+            required.append(name)
+    rules = cast(list[JsonValue], readiness.setdefault("allOf", []))
+    rules.extend(
+        [
+            {
+                "if": {
+                    "properties": {"state": {"const": "action_required"}},
+                    "required": ["state"],
+                },
+                "then": {"properties": {"agent_actionable": {"minItems": 1}}},
+            },
+            {
+                "if": {
+                    "properties": {"state": {"enum": ["ready", "ready_with_limitations"]}},
+                    "required": ["state"],
+                },
+                "then": {"properties": {"agent_actionable": {"maxItems": 0}}},
+            },
+            {
+                "if": {"properties": {"state": {"const": "unknown"}}, "required": ["state"]},
+                "then": {
+                    "properties": {
+                        "acknowledged_not_done": {"maxItems": 0},
+                        "agent_actionable": {"const": ["readiness_unknown"]},
+                        "blocking_conditions": {"const": ["readiness_unknown"]},
+                        "standing_limitations": {"maxItems": 0},
+                    }
+                },
+            },
+        ]
+    )
 
 
 def _add_status_semantic_progress(definitions: dict[str, JsonValue]) -> None:

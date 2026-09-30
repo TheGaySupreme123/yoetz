@@ -9,7 +9,10 @@
 `src/yoetz/application/observation_coordinator.py`, `src/yoetz/kernel/deterministic_checks.py`,
 `src/yoetz/application/semantic_case.py`, and the public event schemas and guidance.
 **Relates to:** ADR-002 (canonical protocol), ADR-009 (data egress and privacy), ADR-010
-(harness integration port), and ADR-011 (structural subject-state capture).
+(harness integration port), ADR-011 (structural subject-state capture), and ADR-032 (closure
+readiness treats the evidence-provenance gaps as standing limitations, and records the direction
+that service-verified capture, never caller-declared strength, may strengthen the coverage of the
+evidence it backs).
 
 ## Context
 

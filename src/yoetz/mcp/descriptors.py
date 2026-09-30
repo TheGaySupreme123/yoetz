@@ -1836,7 +1836,8 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "receipt: unanswered_finding_count needs responses, while receipt_blocking_finding_count "
         "needs repair or a limited receipt; only a later qualifying check resolves one, never a "
         "response. Answer findings_unanswered; repair and recheck receipt_findings_unresolved once, "
-        "then disclose if unchanged state still limits coverage. Call after resume, compaction, or "
+        "then disclose if unchanged state still limits coverage. At state ready_with_limitations "
+        "nothing is left to do: request the receipt. Call after resume, compaction, or "
         "delegate handoff and before a completion claim. Guidance: "
         "yoetz://guidance/workflow.md.",
         read_only=True,
@@ -1919,7 +1920,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
                 "publish_work": "sha256:5b7e151a4583762f500803165aa48d3c49ec61172a36945a6af92064ffc171ff",
                 "check": "sha256:9befe13b257acf10535009c1dd69d9a933f3d94f5cd2aaac1655d4867596f89e",
                 "respond": "sha256:8b5dc94f431a411ef332021af01050a4b0c248a800e46d5b3bdb567f770d25a5",
-                "status": "sha256:517eb05aa015834d98bd96ed59d4b647a95e6c42a13013803caf19b9b4b07875",
+                "status": "sha256:b10f6ec759489bcbf73d4d50280265a9c07cd93ef4eca6f728be6897d36b2d1b",
                 "receipt": "sha256:c7676e1ca9afd96d9d7e74503edd5b31a758a05d7e7e1cf0d62c763611ffcecb",
                 "read_guidance": "sha256:4198e5fd133f7b37cc25c0c1a63161657c5d4396a1718f1f4f1f3db7c302a13d",
             }
@@ -1930,7 +1931,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
                 "publish_work": "sha256:5b7e151a4583762f500803165aa48d3c49ec61172a36945a6af92064ffc171ff",
                 "check": "sha256:2bd9947abc7b60564474840a73d99a80bfa528b98af1a725d11fdfde5dac9795",
                 "respond": "sha256:8b5dc94f431a411ef332021af01050a4b0c248a800e46d5b3bdb567f770d25a5",
-                "status": "sha256:517eb05aa015834d98bd96ed59d4b647a95e6c42a13013803caf19b9b4b07875",
+                "status": "sha256:b10f6ec759489bcbf73d4d50280265a9c07cd93ef4eca6f728be6897d36b2d1b",
                 "receipt": "sha256:c7676e1ca9afd96d9d7e74503edd5b31a758a05d7e7e1cf0d62c763611ffcecb",
                 "read_guidance": "sha256:4198e5fd133f7b37cc25c0c1a63161657c5d4396a1718f1f4f1f3db7c302a13d",
             }
@@ -1939,8 +1940,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:9c103a3fa8fdb85a6c2c20608bdde6294651e94b24407bca719c7e32a8c50722",
-        "strict": "sha256:e272d0216684ffa792ad0b10b55cdd4c436f1a8877cc03033b2fa14126a737b0",
+        "policy": "sha256:96dabf20c24f84ed1a3bceb22f2775542c590f541c5927ee3b90abf8d460a20f",
+        "strict": "sha256:ab028281c06370cdc613bc794921680163d36507599a2148743ce8c6840a9858",
     }
 )
 

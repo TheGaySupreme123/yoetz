@@ -34,6 +34,7 @@ from yoetz.domain.values import (
     format_rfc3339_millis,
     repository_grant_continuation,
 )
+from yoetz.kernel.closure_readiness import GAP_CLASSIFICATION_VERSION, derive_closure_readiness
 from yoetz.kernel.deterministic_checks import (
     DeterministicAssessment,
     build_deterministic_case,
@@ -1099,6 +1100,8 @@ def _unknown_structural_coverage() -> Coverage:
 
 
 def _readiness_unknown() -> StatusClosureReadinessModel:
+    # Unknown is never "nothing to do": the one checklist entry is to read status again once the
+    # projection can be read.
     return StatusClosureReadinessModel(
         declared_obligation_count=None,
         no_obligations_reason=None,
@@ -1106,7 +1109,24 @@ def _readiness_unknown() -> StatusClosureReadinessModel:
         unanswered_finding_count=None,
         receipt_blocking_finding_count=None,
         blocking_conditions=("readiness_unknown",),
+        state="unknown",
+        gap_classification_version=GAP_CLASSIFICATION_VERSION,
+        agent_actionable=("readiness_unknown",),
+        standing_limitations=(),
+        acknowledged_not_done=(),
+        acknowledged_not_done_count="0",
     )
+
+
+def _semantic_review_required(app: object) -> bool:
+    """True only when the effective verification policy requires AI-powered review.
+
+    That is the one route on which ``semantic_review_not_requested`` stays agent-actionable
+    (ADR-031). A composition without a verification policy never makes it actionable.
+    """
+
+    policy = getattr(app, "verification_policy", None)
+    return getattr(policy, "semantic", None) == "required"
 
 
 async def _closure_readiness(
@@ -1116,6 +1136,7 @@ async def _closure_readiness(
     request_id: str | None = None,
     *,
     lineage_gaps: tuple[str, ...] = (),
+    semantic_review_required: bool = False,
 ) -> StatusClosureReadinessModel:
     """Derive what currently bounds a completion conclusion, from the compact projection.
 
@@ -1132,6 +1153,9 @@ async def _closure_readiness(
     ``readiness_unknown`` — the same honest answer a lagging projection already produces — and
     leaves a bounded diagnostic, rather than raising into the daemon as an unbounded internal
     error on a read that changed nothing.
+
+    The checklist split (ADR-031) is derived here, per request, from the page's own gaps and
+    readiness facts; nothing about it is cached across frontiers or recorded.
     """
 
     if compact_page is not None:
@@ -1163,12 +1187,16 @@ async def _closure_readiness(
             return _readiness_unknown()
         declared_obligations = int(item.declared_obligation_count)
         open_obligations = int(item.open_obligation_count)
+        # "Is this finding still unanswered" has one source: the compact row's count from
+        # yoetz.kernel.projections.unanswered_finding_count. Readiness never recounts findings.
         unanswered_findings = int(item.unanswered_finding_count)
         receipt_blocking_findings = int(item.receipt_blocking_finding_count)
         has_plan = item.current_plan_event_id is not None
         no_obligations_reason = item.no_obligations_reason
         stale = page.rebuild_state != "current" or bool(page.lag)
-        declared_gaps = bool(page.gaps or lineage_gaps)
+        gap_markers = (*page.gaps, *lineage_gaps)
+        declared_gaps = bool(gap_markers)
+        facts = page.readiness_facts
     except (AttributeError, IndexError, TypeError, ValueError) as exc:
         record_unexpected_exception_without_raising(
             exc,
@@ -1192,12 +1220,24 @@ async def _closure_readiness(
         blocking.append("projection_stale")
     if declared_gaps:
         blocking.append("coverage_gaps_declared")
+    checklist = derive_closure_readiness(
+        blocking,
+        gap_markers,
+        facts,
+        semantic_review_required=semantic_review_required,
+    )
     return StatusClosureReadinessModel(
         declared_obligation_count=str(declared_obligations),
         no_obligations_reason=no_obligations_reason,
         open_obligation_count=str(open_obligations),
         unanswered_finding_count=str(unanswered_findings),
         receipt_blocking_finding_count=str(receipt_blocking_findings),
+        state=checklist.state,
+        gap_classification_version=GAP_CLASSIFICATION_VERSION,
+        agent_actionable=checklist.agent_actionable,
+        standing_limitations=checklist.standing_limitations,
+        acknowledged_not_done=checklist.acknowledged_not_done,
+        acknowledged_not_done_count=str(checklist.acknowledged_not_done_count),
         blocking_conditions=cast(
             tuple[
                 Literal[
@@ -1640,7 +1680,12 @@ async def execute_status(
                 ),
             )
         closure_readiness = await _closure_readiness(
-            runtime, frontier, compact_page, request.request_id, lineage_gaps=lineage_gaps
+            runtime,
+            frontier,
+            compact_page,
+            request.request_id,
+            lineage_gaps=lineage_gaps,
+            semantic_review_required=_semantic_review_required(app),
         )
         return StatusInternalResult(
             "0.1",

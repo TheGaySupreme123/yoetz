@@ -55,7 +55,9 @@ The normal sequence is:
    response or other material record follows the check, recheck before the receipt.
 7. Request a receipt last and report `unanswered_finding_count`, `receipt_blocking_finding_count`,
    the checked frontier, AI-powered review status/reason, and coverage limits. Stop repeating an
-   unchanged check when proof still cannot qualify; disclose the blocker.
+   unchanged check when proof still cannot qualify; disclose the blocker. At
+   `closure_readiness.state: ready_with_limitations` nothing further is to do: request the receipt
+   without another check; its `standing_limitations` are disclosed, never tasks.
 
 A portable plugin is a carrier only. Its presence, validation, installation, discovery, or host
 activation grants no privacy authority, provider authority, observation consent, AI-powered review

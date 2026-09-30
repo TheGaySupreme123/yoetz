@@ -454,6 +454,10 @@ class WorkDetail:
     findings: tuple[str, ...] = ()
     limitations: tuple[str, ...] = ()
     receipt_available: bool = False
+    # The service's closure checklist lines and state token (issue #913). ``ready`` and
+    # ``ready_with_limitations`` mean "nothing further to do", never "verified".
+    closure: tuple[str, ...] = ()
+    closure_state: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

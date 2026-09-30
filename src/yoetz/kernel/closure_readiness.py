@@ -7,8 +7,9 @@ only through this table. Each code the product can emit is assigned exactly once
 * ``agent_actionable`` — a documented agent action (publish, respond, revise a claim or plan,
   recheck after a material change, or re-read status once the service catches up) removes it.
 * ``standing_limitation`` — no agent action available under the current host, profile and privacy
-  policy removes it. It describes the bounds of observation, capture, review or the ledger and is
-  disclosed on the receipt; it is never an instruction.
+  policy removes it. It describes the bounds of observation, capture, review or the ledger — a
+  deliberate selection or a capture failure — and is disclosed on the receipt; it is never an
+  instruction.
 * ``route_dependent`` — only ``semantic_review_not_requested``: standing on a route where
   AI-powered review is optional or off, and actionable only on a route that requires it when no
   AI-powered review has completed since the last material change (remedy: run it).
@@ -31,15 +32,33 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
-from typing import Final
+from typing import Final, Literal
+
+from yoetz.domain.events import CheckRecordedPayload, LedgerRecord
+from yoetz.domain.findings import FINDING_KIND_TRAITS
+from yoetz.domain.values import FindingId, ObligationId
+from yoetz.kernel.finding_resolution import finding_is_resolved
+from yoetz.kernel.projections import ProjectionState
+from yoetz.kernel.receipt_capacity import current_receipt_findings
+from yoetz.kernel.reducers import invalidates_recorded_check
+from yoetz.protocol.models import SemanticStatus
 
 __all__ = [
+    "ACKNOWLEDGED_NOT_DONE",
+    "AGENT_READINESS_CONDITIONS",
     "GAP_CLASSIFICATION",
     "GAP_CLASSIFICATION_VERSION",
+    "MAX_ACKNOWLEDGED_READINESS_ITEMS",
     "UNCLASSIFIED_GAP_PREFIX",
+    "CheckApplicability",
+    "ClosureReadinessFacts",
+    "ClosureReadinessSplit",
     "GapClass",
     "GapSplit",
     "classify_gap",
+    "closure_readiness_facts",
+    "derive_closure_readiness",
+    "finding_acknowledged_not_done",
     "gap_base_code",
     "split_gaps",
 ]
@@ -78,7 +97,7 @@ GAP_CLASSIFICATION: Final[Mapping[str, GapClass]] = MappingProxyType(
         "unpaired_event": _S,  # host pairing loss; sticky by design (#917 owns its surfacing)
         "unsupported_event": _S,
         "unsupported_format": _S,
-        "truncated_payload": _S,  # bounded capture or packet truncation (disclosure, #904)
+        "truncated_payload": _S,  # capture failure: bounded capture or packet truncation (#904)
         "service_unavailable": _S,
         "vault_locked": _S,
         "ledger_rejected": _S,
@@ -98,8 +117,8 @@ GAP_CLASSIFICATION: Final[Mapping[str, GapClass]] = MappingProxyType(
         "content_capture_unavailable": _S,  # consent or capture profile
         "capture_budget_exhausted": _S,
         "content_capture_profile_mismatch": _S,
-        "content_unselected": _S,  # selection policy chose not to capture
-        "content_redacted": _S,  # privacy-policy redaction
+        "content_unselected": _S,  # deliberate selection: the policy chose not to capture
+        "content_redacted": _S,  # capture failure: privacy-policy redaction
         "routine_read_detail_omitted": _S,
         "routine_read_summary_invalid": _S,
         "routine_summary_invalid": _S,
@@ -149,12 +168,12 @@ GAP_CLASSIFICATION: Final[Mapping[str, GapClass]] = MappingProxyType(
         "semantic_case_content_over_item_limit": _S,  # packet item bound (#907)
         "semantic_case_finding_refs_over_limit": _S,
         "semantic_case_capacity_exceeded": _S,
-        "semantic_reference_scope_reduced": _S,  # bounded selection (#904)
+        "semantic_reference_scope_reduced": _S,  # deliberate selection: bounded review scope (#904)
         "optional_semantic_review_blocked_by_policy": _S,
         "optional_semantic_review_registration_drift": _S,  # owner reinstall, not the agent
         # -- Ledger and evidence facts found by the deterministic case.
         "unknown_event": _S,  # written by a newer build
-        "redacted_event": _S,
+        "redacted_event": _S,  # capture failures: the recorded payload or object is unreadable
         "redacted_object": _S,
         "event_payload_unavailable": _S,
         "captured_object_unavailable": _S,
@@ -317,4 +336,231 @@ def split_gaps(
     return GapSplit(
         tuple(sorted(actionable, key=str.encode)),
         tuple(sorted(standing, key=str.encode)),
+    )
+
+
+# ---------------------------------------------------------------------------------------------
+# Readiness facts and the checklist split
+# ---------------------------------------------------------------------------------------------
+
+# The one "not done" vocabulary shared by findings (#905's ``respond`` disposition) and
+# obligations (ADR-031). An acknowledged item is carried to the receipt as not done; it is never
+# resolved, never counted as clean, and never reopened.
+ACKNOWLEDGED_NOT_DONE: Final = "acknowledged_not_done"
+# Readiness conditions the agent removes by its own action, in their wire order.
+# ``receipt_findings_unresolved`` joins them unless every receipt-blocking finding is acknowledged
+# as not done; ``coverage_gaps_declared`` is replaced by the per-code classification above.
+AGENT_READINESS_CONDITIONS: Final = (
+    "obligations_open",
+    "findings_unanswered",
+    "receipt_findings_unresolved",
+    "no_plan_published",
+    "no_obligations_declared",
+    "projection_stale",
+)
+MAX_ACKNOWLEDGED_READINESS_ITEMS: Final = 64
+
+type CheckApplicability = Literal[
+    "applicable", "not_recorded", "not_applicable", "payload_unavailable"
+]
+
+
+@dataclass(frozen=True, slots=True)
+class ClosureReadinessFacts:
+    """Ledger-derived inputs closure readiness cannot read off the compact row.
+
+    Derived per request from the exact projection and record prefix at the requested frontier;
+    never cached across frontiers and never persisted, so a restart, a reattach or an upgrade over
+    an older ledger recomputes the same answer without migrating any recorded event.
+    """
+
+    check_applicability: CheckApplicability
+    semantic_review_current: bool
+    receipt_blocking_finding_ids: tuple[FindingId, ...]
+    acknowledged_finding_ids: tuple[FindingId, ...]
+    acknowledged_obligation_ids: tuple[ObligationId, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            self.check_applicability
+            not in {
+                "applicable",
+                "not_recorded",
+                "not_applicable",
+                "payload_unavailable",
+            }
+            or type(self.semantic_review_current) is not bool
+        ):
+            raise ValueError("closure_readiness_facts_invalid")
+        for values in (
+            self.receipt_blocking_finding_ids,
+            self.acknowledged_finding_ids,
+            self.acknowledged_obligation_ids,
+        ):
+            if type(values) is not tuple or values != tuple(sorted(set(values), key=str.encode)):
+                raise ValueError("closure_readiness_facts_invalid")
+
+
+def finding_acknowledged_not_done(state: ProjectionState, finding: FindingId) -> bool:
+    """True when the finding's latest response records it as acknowledged, not done.
+
+    Read by disposition *value* so the finding form defined by #905 flows into readiness as soon
+    as that disposition is recorded, without a second acknowledgement mechanism here.
+    """
+
+    response = state.responses.get(finding)
+    if response is None or response.payload is None:
+        return False
+    return str(response.payload.disposition.value) == ACKNOWLEDGED_NOT_DONE
+
+
+def _check_applicability(
+    state: ProjectionState, records: tuple[LedgerRecord, ...]
+) -> CheckApplicability:
+    # The receipt's own applicability rule (application/receipt.py, kernel/receipt_capacity.py):
+    # a check covers this state unless a later material record superseded it.
+    latest = state.latest_tested_state
+    if latest is None:
+        return "not_recorded"
+    check_record = next(
+        (record for record in records if record.event_id == latest.source_check_event_id), None
+    )
+    if check_record is None:
+        return "payload_unavailable"
+    if any(
+        invalidates_recorded_check(
+            record, check_record.ledger.ingestion_sequence, latest.returned_finding_ids
+        )
+        for record in records
+    ):
+        return "not_applicable"
+    if type(check_record.payload) is not CheckRecordedPayload:
+        return "payload_unavailable"
+    return "applicable"
+
+
+def _semantic_review_current(records: tuple[LedgerRecord, ...]) -> bool:
+    """True when an AI-powered review completed and no material change was recorded since."""
+
+    for record in reversed(records):
+        payload = record.payload
+        if (
+            record.schema.name != "check_recorded"
+            or type(payload) is not CheckRecordedPayload
+            or payload.semantic_status is not SemanticStatus.SUCCEEDED
+        ):
+            continue
+        return not any(
+            invalidates_recorded_check(
+                later, record.ledger.ingestion_sequence, payload.returned_finding_ids
+            )
+            for later in records
+        )
+    return False
+
+
+def _acknowledged_obligation_ids(state: ProjectionState) -> tuple[ObligationId, ...]:
+    return ()
+
+
+def closure_readiness_facts(
+    state: ProjectionState, records: tuple[LedgerRecord, ...]
+) -> ClosureReadinessFacts:
+    """Derive the readiness facts for exactly this projection and its record prefix."""
+
+    if type(state) is not ProjectionState or type(records) is not tuple:
+        raise ValueError("closure_readiness_facts_invalid")
+    current = tuple(
+        finding
+        for finding in current_receipt_findings(state)
+        if not finding_is_resolved(state, finding.finding_id)
+    )
+    # Same predicate as receipt_blocking_finding_count: an actionable finding kind that no later
+    # qualifying check resolved.
+    blocking = {finding.finding_id for finding in current if FINDING_KIND_TRAITS[finding.kind][1]}
+    acknowledged = {
+        finding.finding_id
+        for finding in current
+        if finding_acknowledged_not_done(state, finding.finding_id)
+    }
+    return ClosureReadinessFacts(
+        check_applicability=_check_applicability(state, records),
+        semantic_review_current=_semantic_review_current(records),
+        receipt_blocking_finding_ids=tuple(sorted(blocking, key=str.encode)),
+        acknowledged_finding_ids=tuple(sorted(acknowledged, key=str.encode)),
+        acknowledged_obligation_ids=_acknowledged_obligation_ids(state),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ClosureReadinessSplit:
+    """The checklist answer: what the agent can still do, and what the receipt will disclose."""
+
+    state: Literal["action_required", "ready", "ready_with_limitations"]
+    agent_actionable: tuple[str, ...]
+    standing_limitations: tuple[str, ...]
+    acknowledged_not_done: tuple[str, ...]
+    acknowledged_not_done_count: int
+
+
+def derive_closure_readiness(
+    blocking_conditions: Iterable[str],
+    gap_markers: Iterable[str],
+    facts: ClosureReadinessFacts | None,
+    *,
+    semantic_review_required: bool,
+) -> ClosureReadinessSplit:
+    """Split readiness into agent-actionable work, standing limitations and acknowledged items.
+
+    ``blocking_conditions`` is the unchanged condition list. Open obligations, unanswered
+    findings, missing plan or scope, a stale projection, an unacknowledged receipt-blocking
+    finding, a missing or superseded check and every actionable gap stay agent-actionable. When
+    ``facts`` is unavailable nothing is inferred from its absence: no acknowledgement is assumed
+    and a receipt-blocking condition stays actionable.
+    """
+
+    conditions = tuple(blocking_conditions)
+    actionable: list[str] = []
+    for condition in AGENT_READINESS_CONDITIONS:
+        if condition not in conditions:
+            continue
+        if condition == "receipt_findings_unresolved" and facts is not None:
+            blocking = set(facts.receipt_blocking_finding_ids)
+            if blocking and blocking <= set(facts.acknowledged_finding_ids):
+                continue
+        actionable.append(condition)
+    standing: set[str] = set()
+    if facts is not None:
+        if facts.check_applicability in {"not_recorded", "not_applicable"}:
+            actionable.append("check_" + facts.check_applicability)
+        elif facts.check_applicability == "payload_unavailable":
+            standing.add("check_payload_unavailable")
+    split = split_gaps(
+        gap_markers,
+        semantic_review_required=semantic_review_required,
+        semantic_review_current=facts is not None and facts.semantic_review_current,
+    )
+    actionable.extend(code for code in split.agent_actionable if code not in actionable)
+    standing.update(split.standing_limitations)
+    acknowledged: tuple[str, ...] = ()
+    if facts is not None:
+        acknowledged = tuple(
+            sorted(
+                {*facts.acknowledged_obligation_ids, *facts.acknowledged_finding_ids},
+                key=str.encode,
+            )
+        )
+    state: Literal["action_required", "ready", "ready_with_limitations"]
+    if actionable:
+        state = "action_required"
+    elif standing or acknowledged:
+        state = "ready_with_limitations"
+    else:
+        state = "ready"
+    return ClosureReadinessSplit(
+        state=state,
+        agent_actionable=tuple(actionable),
+        standing_limitations=tuple(sorted(standing, key=str.encode)),
+        acknowledged_not_done=acknowledged[:MAX_ACKNOWLEDGED_READINESS_ITEMS],
+        acknowledged_not_done_count=len(acknowledged),
     )

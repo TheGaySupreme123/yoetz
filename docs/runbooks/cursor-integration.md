@@ -1249,6 +1249,27 @@ Only service-stamped, explicitly linked observations can support a match or mism
 CLI closure composer uses the same projected status inputs; it does not grant capture or egress.
 These shared regressions are synthetic contract evidence, not live-host certification.
 
+### Closure readiness and standing limitations (#913)
+
+Cursor's hooks are post-only: accepted observations carry no synthetic `unpaired_event`. Its
+standing set depends on the capture profile and privacy policy: content selection and capture
+limits (`content_unselected`, `content_capture_unavailable`, `payload_content_omitted`,
+`payload_too_large`), the AI-powered review bounds when a review ran, and
+`semantic_review_not_requested` on a local-only route. A finished session whose remaining
+conditions are only standing reads `ready_with_limitations`.
+
+Classification is service-side and host-agnostic: the closed table in ADR-032 assigns each code
+once, a code the running build does not know stays agent-actionable as `unclassified_gap:<code>`,
+and nothing is removed from `known_gaps` or the receipt. `semantic_review_not_requested` is
+standing on a local-only or optional route and agent-actionable only when the verification policy
+requires AI-powered review and none has succeeded since the last material change. At
+`closure_readiness.state: ready_with_limitations` the agent requests the receipt without another
+check; the receipt conclusion is unchanged (a local-only check stays `insufficient_coverage`).
+
+X-HOST evidence: the derivation is covered by service-side contract tests over a Codex-shaped
+ledger replay; a dogfood transcript on this host across macOS, Linux and WSL 2 has not been
+recorded yet. That gap is owned by issue #913.
+
 ### Bounded workflow recovery examples (#613)
 
 These examples use the existing MCP operations on the pinned local Cursor IDE or Agent CLI cell.

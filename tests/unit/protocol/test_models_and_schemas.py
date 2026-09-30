@@ -17,6 +17,7 @@ import pytest
 from pydantic import BaseModel, Field, ValidationError
 
 import yoetz.protocol.schemas as schemas_module
+from builders.readiness import with_checklist
 from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 from yoetz.protocol.errors import ProtocolValueError
 from yoetz.protocol.schemas import (
@@ -313,7 +314,7 @@ _EXPECTED_RESULT_PATTERN_COUNTS: dict[tuple[str, str | None], int] = {
     ("receipt", None): 272,
     ("respond", None): 53,
     ("start", None): 72,
-    ("status", None): 47,
+    ("status", None): 53,
     ("status", "advice"): 25,
     ("status", "assignment"): 6,
     ("status", "candidate_findings"): 32,
@@ -432,7 +433,7 @@ _RESULT_SUPPORT_MODEL_SPECS: tuple[tuple[str, str, str], ...] = (
     ("StatusImportStatusModel", "operations/status-result-1.1.0.schema.json", "import_status"),
     (
         "StatusClosureReadinessModel",
-        "operations/status-result-1.1.0.schema.json",
+        "operations/status-result-1.4.0.schema.json",
         "closure_readiness",
     ),
     ("StatusObligationItemModel", "operations/status-result-1.1.0.schema.json", "obligation_item"),
@@ -744,14 +745,16 @@ def _status_result_wire() -> dict[str, JsonValue]:
             "report_evidence_id": None,
             "source_identity_digest": None,
         },
-        "closure_readiness": {
-            "declared_obligation_count": "0",
-            "no_obligations_reason": None,
-            "open_obligation_count": "0",
-            "unanswered_finding_count": "0",
-            "receipt_blocking_finding_count": "0",
-            "blocking_conditions": ["no_obligations_declared"],
-        },
+        "closure_readiness": with_checklist(
+            {
+                "declared_obligation_count": "0",
+                "no_obligations_reason": None,
+                "open_obligation_count": "0",
+                "unanswered_finding_count": "0",
+                "receipt_blocking_finding_count": "0",
+                "blocking_conditions": ["no_obligations_declared"],
+            }
+        ),
         "privacy_projection": _privacy_projection_wire(),
     }
 
@@ -883,14 +886,16 @@ def test_human_status_reports_unknown_readiness_counts_as_unavailable() -> None:
 
     models = _models_module()
     result = _status_result_wire()
-    result["closure_readiness"] = {
-        "declared_obligation_count": None,
-        "no_obligations_reason": None,
-        "open_obligation_count": None,
-        "unanswered_finding_count": None,
-        "receipt_blocking_finding_count": None,
-        "blocking_conditions": ["readiness_unknown"],
-    }
+    result["closure_readiness"] = with_checklist(
+        {
+            "declared_obligation_count": None,
+            "no_obligations_reason": None,
+            "open_obligation_count": None,
+            "unanswered_finding_count": None,
+            "receipt_blocking_finding_count": None,
+            "blocking_conditions": ["readiness_unknown"],
+        }
+    )
     parsed = models.StatusResultModel.model_validate(result)
     assert type(parsed.root) is models.StatusSuccessModel
     rendered = render_human_status(parsed.root)
@@ -1371,30 +1376,34 @@ def test_closure_readiness_never_reports_unknown_state_as_a_clean_record() -> No
     model = models.StatusClosureReadinessModel
 
     unknown = model.model_validate(
-        {
-            "declared_obligation_count": None,
-            "no_obligations_reason": None,
-            "open_obligation_count": None,
-            "unanswered_finding_count": None,
-            "receipt_blocking_finding_count": None,
-            "blocking_conditions": ["readiness_unknown"],
-        }
+        with_checklist(
+            {
+                "declared_obligation_count": None,
+                "no_obligations_reason": None,
+                "open_obligation_count": None,
+                "unanswered_finding_count": None,
+                "receipt_blocking_finding_count": None,
+                "blocking_conditions": ["readiness_unknown"],
+            }
+        )
     )
     assert unknown.open_obligation_count is None
     assert unknown.blocking_conditions == ("readiness_unknown",)
 
     findings = model.model_validate(
-        {
-            "declared_obligation_count": "1",
-            "no_obligations_reason": None,
-            "open_obligation_count": "0",
-            "unanswered_finding_count": "2",
-            "receipt_blocking_finding_count": "1",
-            "blocking_conditions": [
-                "findings_unanswered",
-                "receipt_findings_unresolved",
-            ],
-        }
+        with_checklist(
+            {
+                "declared_obligation_count": "1",
+                "no_obligations_reason": None,
+                "open_obligation_count": "0",
+                "unanswered_finding_count": "2",
+                "receipt_blocking_finding_count": "1",
+                "blocking_conditions": [
+                    "findings_unanswered",
+                    "receipt_findings_unresolved",
+                ],
+            }
+        )
     )
     assert findings.unanswered_finding_count == "2"
     assert findings.receipt_blocking_finding_count == "1"
@@ -1402,109 +1411,127 @@ def test_closure_readiness_never_reports_unknown_state_as_a_clean_record() -> No
     for missing in ("findings_unanswered", "receipt_findings_unresolved"):
         with pytest.raises(ValidationError):
             model.model_validate(
-                {
-                    **findings.model_dump(mode="json"),
-                    "blocking_conditions": [
-                        item for item in findings.blocking_conditions if item != missing
-                    ],
-                }
+                with_checklist(
+                    {
+                        **findings.model_dump(mode="json"),
+                        "blocking_conditions": [
+                            item for item in findings.blocking_conditions if item != missing
+                        ],
+                    }
+                )
             )
 
     # Absent counts must declare themselves unknown...
     with pytest.raises(ValidationError):
         model.model_validate(
-            {
-                "declared_obligation_count": None,
-                "no_obligations_reason": None,
-                "open_obligation_count": None,
-                "unanswered_finding_count": None,
-                "receipt_blocking_finding_count": None,
-                "blocking_conditions": [],
-            }
+            with_checklist(
+                {
+                    "declared_obligation_count": None,
+                    "no_obligations_reason": None,
+                    "open_obligation_count": None,
+                    "unanswered_finding_count": None,
+                    "receipt_blocking_finding_count": None,
+                    "blocking_conditions": [],
+                }
+            )
         )
     # ...known counts must not claim to be unknown...
     with pytest.raises(ValidationError):
         model.model_validate(
+            with_checklist(
+                {
+                    "declared_obligation_count": "0",
+                    "no_obligations_reason": None,
+                    "open_obligation_count": "0",
+                    "unanswered_finding_count": "0",
+                    "receipt_blocking_finding_count": "0",
+                    "blocking_conditions": ["readiness_unknown"],
+                }
+            )
+        )
+    # ...unknown is never partial...
+    with pytest.raises(ValidationError):
+        model.model_validate(
+            with_checklist(
+                {
+                    "declared_obligation_count": "2",
+                    "no_obligations_reason": None,
+                    "open_obligation_count": "2",
+                    "unanswered_finding_count": None,
+                    "receipt_blocking_finding_count": "0",
+                    "blocking_conditions": ["readiness_unknown"],
+                }
+            )
+        )
+    # ...and it is never mixed with conditions derived from data that could not be read.
+    with pytest.raises(ValidationError):
+        model.model_validate(
+            with_checklist(
+                {
+                    "declared_obligation_count": None,
+                    "no_obligations_reason": None,
+                    "open_obligation_count": None,
+                    "unanswered_finding_count": None,
+                    "receipt_blocking_finding_count": None,
+                    "blocking_conditions": ["readiness_unknown", "no_plan_published"],
+                }
+            )
+        )
+
+    no_plan = model.model_validate(
+        with_checklist(
             {
                 "declared_obligation_count": "0",
                 "no_obligations_reason": None,
                 "open_obligation_count": "0",
                 "unanswered_finding_count": "0",
                 "receipt_blocking_finding_count": "0",
-                "blocking_conditions": ["readiness_unknown"],
+                "blocking_conditions": ["no_plan_published"],
             }
         )
-    # ...unknown is never partial...
-    with pytest.raises(ValidationError):
-        model.model_validate(
-            {
-                "declared_obligation_count": "2",
-                "no_obligations_reason": None,
-                "open_obligation_count": "2",
-                "unanswered_finding_count": None,
-                "receipt_blocking_finding_count": "0",
-                "blocking_conditions": ["readiness_unknown"],
-            }
-        )
-    # ...and it is never mixed with conditions derived from data that could not be read.
-    with pytest.raises(ValidationError):
-        model.model_validate(
-            {
-                "declared_obligation_count": None,
-                "no_obligations_reason": None,
-                "open_obligation_count": None,
-                "unanswered_finding_count": None,
-                "receipt_blocking_finding_count": None,
-                "blocking_conditions": ["readiness_unknown", "no_plan_published"],
-            }
-        )
-
-    no_plan = model.model_validate(
-        {
-            "declared_obligation_count": "0",
-            "no_obligations_reason": None,
-            "open_obligation_count": "0",
-            "unanswered_finding_count": "0",
-            "receipt_blocking_finding_count": "0",
-            "blocking_conditions": ["no_plan_published"],
-        }
     )
     assert no_plan.blocking_conditions == ("no_plan_published",)
 
     undeclared = model.model_validate(
-        {
-            "declared_obligation_count": "0",
-            "no_obligations_reason": None,
-            "open_obligation_count": "0",
-            "unanswered_finding_count": "0",
-            "receipt_blocking_finding_count": "0",
-            "blocking_conditions": ["no_obligations_declared"],
-        }
+        with_checklist(
+            {
+                "declared_obligation_count": "0",
+                "no_obligations_reason": None,
+                "open_obligation_count": "0",
+                "unanswered_finding_count": "0",
+                "receipt_blocking_finding_count": "0",
+                "blocking_conditions": ["no_obligations_declared"],
+            }
+        )
     )
     assert undeclared.blocking_conditions == ("no_obligations_declared",)
 
     declared_none = model.model_validate(
-        {
-            "declared_obligation_count": "0",
-            "no_obligations_reason": "single_atomic_change",
-            "open_obligation_count": "0",
-            "unanswered_finding_count": "0",
-            "receipt_blocking_finding_count": "0",
-            "blocking_conditions": [],
-        }
+        with_checklist(
+            {
+                "declared_obligation_count": "0",
+                "no_obligations_reason": "single_atomic_change",
+                "open_obligation_count": "0",
+                "unanswered_finding_count": "0",
+                "receipt_blocking_finding_count": "0",
+                "blocking_conditions": [],
+            }
+        )
     )
     assert declared_none.no_obligations_reason == "single_atomic_change"
 
     with pytest.raises(ValidationError):
         model.model_validate(
-            {
-                "declared_obligation_count": "0",
-                "no_obligations_reason": None,
-                "open_obligation_count": "0",
-                "unanswered_finding_count": "0",
-                "receipt_blocking_finding_count": "0",
-                "blocking_conditions": [],
-            }
+            with_checklist(
+                {
+                    "declared_obligation_count": "0",
+                    "no_obligations_reason": None,
+                    "open_obligation_count": "0",
+                    "unanswered_finding_count": "0",
+                    "receipt_blocking_finding_count": "0",
+                    "blocking_conditions": [],
+                }
+            )
         )
 
 
@@ -1676,7 +1703,7 @@ def test_operation_cross_field_matrix() -> None:
     }
     disputed_status["page"] = {"items": [disputed_item], "next_cursor": None}
     models.StatusResultModel.model_validate(disputed_status)
-    validate_schema_instance("status-result", "1.0.0", disputed_status)
+    validate_schema_instance("status-result", "1.4.0", disputed_status)
     for field, invalid_value in (
         ("reason", None),
         ("resolved", True),
@@ -1691,7 +1718,7 @@ def test_operation_cross_field_matrix() -> None:
         invalid_item = cast(dict[str, JsonValue], invalid_items[0])
         invalid_item[field] = invalid_value
         with pytest.raises(ProtocolValueError):
-            validate_schema_instance("status-result", "1.0.0", invalid_status)
+            validate_schema_instance("status-result", "1.4.0", invalid_status)
         with pytest.raises(ValidationError):
             models.StatusResultModel.model_validate(invalid_status)
 
@@ -2390,7 +2417,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     rules = cast(tuple[Any, ...], getattr(models, "_RESULT_LEAF_RULES"))
 
     derived_patterns = _derived_result_success_patterns(catalog)
-    assert len(derived_patterns) == 1145
+    assert len(derived_patterns) == 1151
 
     derived_counts = {
         context: sum(1 for method, view, _ in derived_patterns if (method, view) == context)
@@ -2399,7 +2426,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert derived_counts == _EXPECTED_RESULT_PATTERN_COUNTS
 
     assert type(rules) is tuple
-    assert len(rules) == 1170
+    assert len(rules) == 1176
     assert rules == tuple(sorted(rules, key=_test_rule_sort_key))
 
     rule_keys = {
@@ -2408,7 +2435,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert len(rule_keys) == len(rules)
 
     registry_patterns = {(rule.method, rule.status_view, rule.segments) for rule in rules}
-    assert len(registry_patterns) == 1145
+    assert len(registry_patterns) == 1151
     assert registry_patterns == derived_patterns
 
     content_rules = _expected_nonpublish_content_rules(models)
@@ -3080,7 +3107,7 @@ def test_schema_catalog_record_shape_and_indexes_are_exact() -> None:
     root = resources.files("yoetz").joinpath("resources", "schemas")
     manifest_bytes = root.joinpath("manifest.json").read_bytes()
     assert catalog.manifest_digest == f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
-    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 6_783
+    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 6_787
 
 
 def test_schema_name_derivation_and_version_maps_are_exact() -> None:
