@@ -22,7 +22,7 @@ import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import apsw
 import pytest
@@ -602,7 +602,10 @@ async def test_cell_without_tool_hooks_is_still_recorded(replay: _Replay) -> Non
     """Delay, not drop: lifecycle hooks alone do not prove a cell's nested calls were hooked.
 
     A cell whose nested tool fired no tool hook (an unhooked tool, an older Codex,
-    a hook timeout) is the only record of that work, so its wrapper is delivered.
+    a hook timeout) is the only record of that work, so its output is delivered
+    and records the cell. The call stays held until the output decides the cell,
+    and the delivered output keeps every fact both wrapper rows would have
+    recorded.
     """
 
     replay.append(
@@ -643,13 +646,55 @@ async def test_cell_without_tool_hooks_is_still_recorded(replay: _Replay) -> Non
         for envelope in recorder.delivered
         if envelope.structural_payload.get("tool_name") == "exec"
     ]
-    assert len(delivered) == 2
+    assert [item.structural_payload.get("action") for item in delivered] == [
+        "custom_tool_call_output"
+    ]
     actions = [cast(ActionRecordedPayload, row.payload) for row in replay.rows("action_recorded")]
-    results = replay.rows("result_recorded")
+    results = [cast(ResultRecordedPayload, row.payload) for row in replay.rows("result_recorded")]
+    evidence = [
+        cast(EvidenceRecordedPayload, row.payload) for row in replay.rows("evidence_recorded")
+    ]
     assert len(actions) == 1 and len(results) == 1
+    assert results[0].action_id == actions[0].action_id
+    # The held call pairs the delivered output locally: no orphan is disclosed.
+    assert not any(
+        ObservationGapCode.UNPAIRED_EVENT.value in envelope.gap_codes
+        for envelope in recorder.delivered
+    )
+    wrappers = [
+        envelope
+        for envelope in replay.store.list_envelopes(replay.commitment)
+        if envelope.source is ObservationSource.CODEX_SESSION_STREAM
+        and envelope.structural_payload.get("tool_name") == "exec"
+    ]
+    assert len(wrappers) == 2
+    before_actions: list[ActionRecordedPayload] = []
+    before_results: list[ResultRecordedPayload] = []
+    before_evidence: list[EvidenceRecordedPayload] = []
+    for envelope in wrappers:
+        batch = materialize_observation_envelope(envelope, task_id=replay.task_id)
+        for item in batch.drafts:
+            payload = item.draft.payload
+            if type(payload) is ActionRecordedPayload:
+                before_actions.append(payload)
+            elif type(payload) is ResultRecordedPayload:
+                before_results.append(payload)
+            elif type(payload) is EvidenceRecordedPayload:
+                before_evidence.append(payload)
+    before = _facts(before_actions, before_results, before_evidence)
+    after = _facts(actions, results, evidence)
+    assert before <= after, before - after
+    # The cell's action and result are the ones both wrapper rows would have
+    # recorded; the held call row alone contributes only content-free metadata.
+    assert before_actions == actions
+    assert [(item.action_id, item.outcome) for item in before_results] == [
+        (item.action_id, item.outcome) for item in results
+    ]
+    assert all(item.content_digest is None for item in before_evidence)
     accounting = replay.store.selection_accounting(replay.commitment)
     assert accounting["intentionally_omitted_input_count"] == 0
-    assert accounting["observed_count"] == accounting["admitted_input_count"]
+    # The held call is retained locally without an accounting bucket (disclosed).
+    assert accounting["observed_count"] == cast(int, accounting["admitted_input_count"]) + 1
 
 
 @pytest.mark.anyio
@@ -1477,3 +1522,123 @@ async def test_item_of_a_silent_session_is_released_after_idle_reconciles(
     assert replay.store.pending_rollout_items(replay.commitment) == ()
     await _sweep_all(replay)
     assert _disclosed_failure(replay, 1)
+
+
+@pytest.mark.anyio
+async def test_concurrent_pre_and_post_deliveries_record_one_action(
+    replay: _Replay, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The action-link read and its append are one step under the coordinator lock (#917).
+
+    The pre and the post of one call are delivered concurrently. The first
+    delivery pauses after its existence read and before its append; the second
+    must still observe the action the first appended, never an empty read
+    beside it.
+    """
+
+    replay.append(
+        _rollout_row(
+            "session_meta",
+            {
+                "cli_version": "0.157.1",
+                "cwd": str(replay.workspace),
+                "history_mode": "legacy",
+                "id": HOST,
+                "originator": "codex_exec",
+            },
+            "2026-09-29T17:54:00.000Z",
+        )
+    )
+    command = {"command": "npm run test-type"}
+    replay.hook("PreToolUse", tool_name="Bash", tool_use_id="call_nRace", tool_input=command)
+    replay.advance(6.0)
+    assert replay.store.flush_selected_admission(
+        replay.commitment, summary_builder=build_routine_read_summary
+    )
+    replay.hook(
+        "PostToolUse",
+        tool_name="Bash",
+        tool_use_id="call_nRace",
+        tool_input=command,
+        tool_response=json.dumps({"chunk_id": "r1", "exit_code": 0, "output": "ok"}),
+    )
+    rows = [
+        row
+        for row in replay.store.list_pending_outbox_rows(replay.commitment)
+        if row.envelope.source is ObservationSource.CODEX_HOOK
+        and row.envelope.event_kind in {"PreToolUse", "PostToolUse"}
+    ]
+    assert sorted(row.envelope.event_kind for row in rows) == ["PostToolUse", "PreToolUse"]
+
+    class _ObservedLock(asyncio.Lock):
+        """The coordinator lock, noting when a second delivery waits on it."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.contended = asyncio.Event()
+
+        async def acquire(self) -> Literal[True]:
+            if self.locked():
+                self.contended.set()
+            return await super().acquire()
+
+    coordinator = _coordinator(replay)
+    lock = _ObservedLock()
+    monkeypatch.setattr(coordinator, "_lock", lock)
+    lookups: list[str | None] = []
+    entered: list[str] = []
+    second_lookup = asyncio.Event()
+    original = replay.ledger.projected_action_event
+
+    async def _racing_lookup(action_id: str) -> str | None:
+        entered.append(action_id)
+        found = await original(action_id)
+        lookups.append(found)
+        if len(entered) > 1:
+            second_lookup.set()
+        else:
+            # Hold the first delivery between its existence read and its append
+            # until the other delivery has either made its own read (the
+            # check-then-append race) or is waiting on the coordinator lock.
+            waiters = [
+                asyncio.ensure_future(lock.contended.wait()),
+                asyncio.ensure_future(second_lookup.wait()),
+            ]
+            done, pending = await asyncio.wait(
+                waiters, timeout=10.0, return_when=asyncio.FIRST_COMPLETED
+            )
+            for waiter in pending:
+                waiter.cancel()
+            assert done, "the second delivery never reached the action-link window"
+        return found
+
+    monkeypatch.setattr(replay.ledger, "projected_action_event", _racing_lookup)
+    requests = {
+        row.envelope.event_kind: ObservationIngestRequest(
+            codex_session_id=row.codex_session_id, envelope=row.envelope
+        )
+        for row in rows
+    }
+    # The pre takes the coordinator lock first, as the ordered drain delivers
+    # it; the post is then delivered while the pre is still in flight.
+    first = asyncio.ensure_future(coordinator.ingest_request(requests["PreToolUse"]))
+    deadline = asyncio.get_running_loop().time() + 10.0
+    while not lock.locked():
+        assert not first.done(), "the pre finished before it was observed holding the lock"
+        assert asyncio.get_running_loop().time() < deadline
+        await asyncio.sleep(0.001)
+    second = asyncio.ensure_future(coordinator.ingest_request(requests["PostToolUse"]))
+    results = await asyncio.gather(first, second)
+    assert [item.disposition.value for item in results] == ["accepted", "accepted"]
+    assert not replay.store.list_quarantine(replay.commitment)
+    actions = [cast(ActionRecordedPayload, row.payload) for row in replay.rows("action_recorded")]
+    results_recorded = [
+        cast(ResultRecordedPayload, row.payload) for row in replay.rows("result_recorded")
+    ]
+    assert len(actions) == 1, [item.description for item in actions]
+    assert len(results_recorded) == 1
+    assert results_recorded[0].action_id == actions[0].action_id
+    # The other delivery waited on the lock while the first read was open, and
+    # its own read then saw the action the first delivery committed.
+    assert lock.contended.is_set()
+    assert len(lookups) == 2 and lookups[0] is None and lookups[1] is not None

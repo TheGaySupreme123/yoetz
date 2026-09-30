@@ -2240,11 +2240,11 @@ def _code_mode_cell_held(
 ) -> bool:
     """Whether one code-mode ``exec`` cell row stays in the local store only (#917).
 
-    The decision is per cell: its call is held once Codex tool hooks fire in the
-    session, and its output stays local only when tool hooks fired after the
-    call was read, so a cell whose tools fire no hook keeps its record. A store
-    without the seams, an unreadable one, or a row without a call id answers
-    ``False`` so the row is delivered as before.
+    The decision is per cell: its call is always held, and its output stays
+    local only when a tool hook of the session was ingested after the call was
+    read and settled by a complete earlier pass that did not see the output, so
+    a cell whose tools fire no hook keeps its record through its output. A store without the seams, an unreadable one, or a row without a
+    call id answers ``False`` so the row is delivered as before.
     """
 
     if not _code_mode_cell_wrapper(structural):
@@ -2264,6 +2264,42 @@ def _code_mode_cell_held(
         return decide(workspace_commitment, session_commitment, call_id) is True
     except AttributeError, OSError, ProtocolValueError, TypeError, ValueError:
         return False
+
+
+def _code_mode_pass_snapshot(
+    store: LocalObservationStore, workspace_commitment: str, session_commitment: str
+) -> int | None:
+    """Read the session's tool-hook stamp before a pass reads; ``None`` settles nothing."""
+
+    snapshot = getattr(store, "code_mode_pass_snapshot", None)
+    if not callable(snapshot):
+        return None
+    try:
+        value = snapshot(workspace_commitment, session_commitment)
+    except AttributeError, OSError, ProtocolValueError, TypeError, ValueError:
+        return None
+    return value if type(value) is int and value > 0 else None
+
+
+def _settle_code_mode_pass(
+    store: LocalObservationStore,
+    workspace_commitment: str,
+    session_commitment: str,
+    snapshot: int,
+) -> None:
+    """Settle the pre-pass tool hooks after a complete pass; failure only delays (#917).
+
+    An unsettled hook never keeps a cell local, so a failed write can at most
+    deliver a cell's output beside its nested hooks, never lose the cell.
+    """
+
+    settle = getattr(store, "settle_code_mode_pass", None)
+    if not callable(settle):
+        return
+    try:
+        settle(workspace_commitment, session_commitment, snapshot)
+    except AttributeError, OSError, ProtocolValueError, TypeError, ValueError:
+        pass
 
 
 def _stream_phase(structural: Mapping[str, JsonValue]) -> str:
@@ -2544,6 +2580,9 @@ def _reconcile_session_stream_path(
         partial_line=partial,
         _source_identity=source_identity,
     )
+    # Tool hooks ingested before this pass reads fired before any row it does
+    # not see was written; a complete pass settles them for code-mode cells (#917).
+    hook_snapshot = _code_mode_pass_snapshot(store, workspace_commitment, session_commitment)
     advance = reader.advance(path)
     if advance.cursor.source_generation != existing.source_generation:
         call_tools.clear()
@@ -2850,6 +2889,8 @@ def _reconcile_session_stream_path(
         profile_id=persisted_profile_id,
     )
     store.note_stream_reconcile(workspace_commitment)
+    if hook_snapshot is not None and not overflow and not delivery_blocked and source_read_complete:
+        _settle_code_mode_pass(store, workspace_commitment, session_commitment, hook_snapshot)
     gaps = advance.gaps
     for durable_gap in (
         ObservationGapCode.UNSUPPORTED_EVENT.value,

@@ -463,19 +463,28 @@ unchanged, so a pre committed before the upgrade replays its committed operation
 the upgrade keeps its historical second action, never a third, and no history is rewritten.
 
 A Codex code-mode `exec` cell fires no hook of its own; each nested `tools.*` call fires its hooks.
-The session-stream reader decides per cell. It keeps the cell's call row in the local store once
-Codex tool hooks (`PreToolUse`/`PostToolUse`; lifecycle hooks do not count) have fired for the host
-session, and keeps the output local too only when a further tool hook fired after it read the
-call; the nested hook rows are then the ledger's record of the cell. Otherwise the output is
-delivered and records the cell, so a cell whose tools fire no hook keeps its record in a session
-where other cells were hooked. The decision is durable per cell; the tool-hook counts and cell
-decisions are bounded maps that forget the least recently active entry, which can only make a
-later cell deliverable. The option of recording the cell as the explicit parent of its nested
+The session-stream reader decides per cell. It always keeps the cell's call row in the local store,
+since whether the nested calls are hook-recorded is known only later, and keeps the output local
+too only when a Codex tool hook (`PreToolUse`/`PostToolUse`; lifecycle hooks do not count) of the
+same host session was ingested after it read the call and before the start of a complete stream
+pass that still did not see the output. Such a hook fired while the cell ran, so the nested hook
+rows are the ledger's record of the cell; a hook ingested after the output was written (the next
+cell's) never settles before the output is read, so it cannot remove this cell's record. Otherwise
+the output is delivered and records the cell, so a cell whose tools fire no hook keeps its record
+in any session. The decision is durable per cell and does not use the session's earlier hook
+history: a first decision taken before the cell's evidence could exist would be irreversible, and a
+manual or early reconcile, or a session forgotten by the bounded map, would then record a hooked
+cell twice. The per-session hook stamps and cell decisions are bounded maps that forget the least
+recently active entry, which can only make an output deliverable; cells stored in the earlier
+count format are migrated. The option of recording the cell as the explicit parent of its nested
 actions was not taken: nested hook payloads carry no cell identity to link. Residual limits: a cell
 mixing hooked and unhooked tools stays local, so its unhooked tool is not recorded; the decision
-follows the order in which the reader sees rows relative to hook ingestion, so a hooked cell read
-outside its hooks' window keeps its own action (a second record, not a loss) and a hook landing
-while an unhooked cell runs can keep that cell local; a retained wrapper counts in `observed_count`
+follows the order in which the reader sees rows relative to hook ingestion, so a hooked cell whose
+call is read only after all its nested hooks, whose nested hooks no complete pass settled before
+its output, whose hooks fired before an upgrade from the count format, or whose entry the bounded
+maps forget before its output keeps its own action (a second record, not a loss), and a hook
+landing while an unhooked cell runs can keep that cell local; an interrupted cell whose output
+never reaches the rollout adds no record of its own; a retained wrapper counts in `observed_count`
 without an accounting bucket.
 
 ### The standing `unpaired_event` record (decisions for the set)
@@ -493,7 +502,7 @@ without an accounting bucket.
   orphan in it queues one local notice, delivered once in hook `PostToolUse` context and not
   repeated, across restart. The notice map holds 256 scopes and makes room for a new scope by
   forgetting its oldest delivered notice, so new scopes keep getting notices; only a scope older
-  than 256 newer announced scopes could be announced again. It is informational, not a ledger record or finding: it never counts
+  than 256 newer announced scopes can be announced again, and again after further churn. It is informational, not a ledger record or finding: it never counts
   as unanswered, never adds `findings_unanswered`, and cannot be answered or supersede a check.
   Count growth inside a scope is not re-announced.
 - **B3.** The optional one-time acknowledgement depends on #905's `acknowledged_not_done`
