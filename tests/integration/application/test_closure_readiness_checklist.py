@@ -144,7 +144,12 @@ class _Session:
         self.frontier = result.result_frontier
         return result
 
-    async def status(self, view: str = "compact") -> StatusInternalResult:
+    async def status(
+        self,
+        view: str = "compact",
+        *,
+        route_profile: Literal["policy", "strict"] | None = None,
+    ) -> StatusInternalResult:
         request: dict[str, JsonValue] = {
             **workflow._request_base(self.next("req_")),  # pyright: ignore[reportPrivateUsage]
             "session_id": self.started.session_id,
@@ -154,7 +159,9 @@ class _Session:
         }
         if view == "findings":
             request["filter"] = {"include_resolved": True}
-        return await self.app.status(StatusRequest.model_validate(request))
+        return await self.app.status(
+            StatusRequest.model_validate(request), route_profile=route_profile
+        )
 
     async def receipt(self) -> str:
         receipt = await self.app.receipt(
@@ -463,6 +470,9 @@ async def test_open_work_and_actionable_gaps_stay_agent_actionable() -> None:
     assert no_check.closure_readiness.state == "action_required"
     assert no_check.closure_readiness.agent_actionable[:1] == ("obligations_open",)
     assert "check_not_recorded" in no_check.closure_readiness.agent_actionable
+    # No recorded form acknowledges an obligation yet (#913 slice C): the group stays empty.
+    assert no_check.closure_readiness.acknowledged_not_done == ()
+    assert no_check.closure_readiness.acknowledged_not_done_count == "0"
 
     evidence = session.next("evd_")
     await session.publish(
@@ -523,6 +533,46 @@ async def test_required_ai_review_keeps_the_local_only_gap_actionable(
     assert readiness.state == "action_required"
     assert readiness.agent_actionable == ("semantic_review_not_requested",)
     assert "semantic_review_not_requested" not in readiness.standing_limitations
+
+
+@pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))
+async def test_a_strict_route_never_asks_for_an_ai_review_it_cannot_dispatch(
+    ledger_backend: Literal["memory", "sqlite"],
+) -> None:
+    """PR #937 review F1: a strict MCP process has no AI-powered review capability (ADR-018).
+
+    With the repository policy requiring AI-powered review, the missing review is a route-side
+    limitation the owner lifts by serving the policy route, never an action the agent can take
+    from this process; asking for it recreated the unchanged-state recheck loop of issue #913.
+    """
+
+    session, checked = await _bandit_b(ledger_backend, semantic="required")
+    assert "semantic_review_not_requested" in checked.coverage.known_gaps
+    status = await session.status(route_profile="strict")
+    readiness = status.closure_readiness
+    assert readiness.agent_actionable is not None and readiness.standing_limitations is not None
+    assert readiness.state == "ready_with_limitations"
+    assert readiness.agent_actionable == ()
+    assert "semantic_review_not_requested" in readiness.standing_limitations
+    # Still bounded and still disclosed: the gap stays in coverage and in the conditions.
+    assert readiness.blocking_conditions == ("coverage_gaps_declared",)
+    assert "semantic_review_not_requested" in status.coverage.known_gaps
+    sentence = _APPROVED.format(n=len(readiness.standing_limitations), m=0)
+    summary = summary_for_status(status.as_json())
+    assert "Closure: ready_with_limitations." in summary
+    assert sentence in summary
+    rendered = render_human_status(_wire(status)).splitlines()
+    assert "Closure: ready_with_limitations" in rendered
+    assert sentence in rendered
+    for view in ("findings", "results", "evidence", "history", "obligations"):
+        other = await session.status(view, route_profile="strict")
+        assert other.closure_readiness == readiness
+    # The same ledger read by a caller that can dispatch AI-powered review still owes it.
+    policy = await session.status(route_profile="policy")
+    assert policy.closure_readiness.state == "action_required"
+    assert policy.closure_readiness.agent_actionable == ("semantic_review_not_requested",)
+    # Honesty: the receipt conclusion is unchanged.
+    assert await session.receipt() == "insufficient_coverage"
 
 
 @pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))

@@ -6047,8 +6047,9 @@ is `action_required` while `agent_actionable` is non-empty, `ready_with_limitati
 standing or acknowledged entries remain, and `ready` when nothing remains. The five agent
 conditions other than `receipt_findings_unresolved` appear in `agent_actionable` exactly when they
 appear in `blocking_conditions`. `semantic_review_not_requested` is agent-actionable only when the
-effective verification policy is `required` and no check whose AI-powered review succeeded has been
-recorded without a later material change. The inputs the compact row cannot carry travel on the
+effective verification policy is `required`, the status read is not served by a strict MCP route
+(which never dispatches AI-powered review, ADR-018), and no check whose AI-powered review succeeded
+has been recorded without a later material change; on a strict route it is a standing limitation. The inputs the compact row cannot carry travel on the
 internal compact `ProjectionPage.readiness_facts` (`ClosureReadinessFacts`: check applicability,
 AI-powered review currency, receipt-blocking and acknowledged finding ids, acknowledged obligation
 ids), derived per request from the projection and record prefix at the requested frontier and

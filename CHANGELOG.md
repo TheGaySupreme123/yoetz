@@ -17,7 +17,9 @@ reverse-chronological released versions.
   Request the receipt." A closed, versioned table classifies every gap code, and a build-time test
   fails on any unclassified code. Verdicts, receipt conclusions and coverage are unchanged: a
   local-only check with limitations is still `insufficient_coverage`, and every gap is still
-  disclosed (#913).
+  disclosed (#913). A missing AI-powered review is agent work only where the connection can run
+  one: on a strict MCP connection, which never dispatches AI-powered review, it is a standing
+  limitation even when the repository policy requires review.
 - Every `status` view now reports the same task coverage and gaps as the compact view at that
   frontier. A results, history or evidence view no longer shows the newest record's own
   `current / 0 gaps` beside a partial task (#913).

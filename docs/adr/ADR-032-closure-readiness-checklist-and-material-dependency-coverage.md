@@ -73,8 +73,13 @@ names what the receipt will disclose.
 
 4. **One route-dependent code.** `semantic_review_not_requested` is standing on a route where
    AI-powered review is optional or disabled. It is actionable only when the effective verification
-   policy requires AI-powered review and no check whose AI-powered review succeeded has been
-   recorded without a later material change (remedy: run it).
+   policy requires AI-powered review, the serving route can dispatch it, and no check whose
+   AI-powered review succeeded has been recorded without a later material change (remedy: run it).
+   A strict MCP route never dispatches AI-powered review (ADR-018), so a status read served by it
+   classifies the code as standing even under a `required` policy: the remedy is the owner's
+   (serve the policy route), and asking the agent for an impossible check would recreate the
+   unchanged-state recheck loop. Status callers without a route (CLI, terminal interface, closure
+   preparation) check on the policy route and keep the policy-derived rule.
 
 5. **Derived per request; no verdict changes.** Readiness is derived from the compact projection and
    the recorded prefix at the requested frontier on every read, never cached across frontiers and

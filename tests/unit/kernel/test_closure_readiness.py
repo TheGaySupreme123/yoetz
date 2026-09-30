@@ -180,6 +180,24 @@ def test_only_an_acknowledgement_moves_a_receipt_blocking_finding_off_the_agent_
     assert fully.acknowledged_not_done_count == 2
 
 
+def test_an_obligation_acknowledgement_never_clears_an_open_obligation() -> None:
+    """PR #937 review F2: the obligation seam may name an item but never reads it as done.
+
+    No recorded obligation form feeds ``acknowledged_obligation_ids`` yet (#913 slice C), so the
+    derived facts keep it empty. Whatever eventually does must also close the obligation: an
+    acknowledgement alone leaves ``obligations_open`` agent-actionable.
+    """
+
+    split = derive_closure_readiness(
+        ("obligations_open", "coverage_gaps_declared"),
+        _BANDIT_B_GAPS,
+        _facts(acknowledged_obligation_ids=(_OBLIGATION,)),
+        semantic_review_required=False,
+    )
+    assert split.state == "action_required"
+    assert split.agent_actionable == ("obligations_open",)
+
+
 def test_missing_facts_never_assume_an_acknowledgement() -> None:
     split = derive_closure_readiness(
         ("receipt_findings_unresolved", "coverage_gaps_declared"),

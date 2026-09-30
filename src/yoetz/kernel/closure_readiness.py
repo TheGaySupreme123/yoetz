@@ -286,7 +286,7 @@ def classify_gap(
     """Resolve one gap to ``agent_actionable`` or ``standing_limitation``; ``None`` if unknown.
 
     ``semantic_review_required`` is true only on a route whose verification policy requires
-    AI-powered review. ``semantic_review_current`` is true when an AI-powered review completed
+    AI-powered review and which can dispatch it (never a strict MCP route, ADR-018). ``semantic_review_current`` is true when an AI-powered review completed
     and no material change has been recorded since. Neither flag affects any other code.
     """
 
@@ -500,6 +500,16 @@ def _semantic_review_current(records: tuple[LedgerRecord, ...]) -> bool:
 
 
 def _acknowledged_obligation_ids(state: ProjectionState) -> tuple[ObligationId, ...]:
+    """Always empty: no recorded form acknowledges an obligation as not done yet.
+
+    The obligation-level acknowledgement is issue #913 slice C (it needs a new
+    ``obligation_published`` version); #905 owns only the finding form, which
+    ``finding_acknowledged_not_done`` already reads. Until slice C ships, an obligation the agent
+    cannot finish stays open, so ``obligations_open`` keeps readiness ``action_required``; the
+    guidance says so. Nothing here may be inferred from other records.
+    """
+
+    del state
     return ()
 
 

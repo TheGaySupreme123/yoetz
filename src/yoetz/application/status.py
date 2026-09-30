@@ -1122,13 +1122,21 @@ def _readiness_unknown() -> StatusClosureReadinessModel:
     )
 
 
-def _semantic_review_required(app: object) -> bool:
-    """True only when the effective verification policy requires AI-powered review.
+def _semantic_review_required(
+    app: object, route_profile: Literal["policy", "strict"] | None
+) -> bool:
+    """True only when the serving route can and must run AI-powered review.
 
     That is the one route on which ``semantic_review_not_requested`` stays agent-actionable
-    (ADR-032). A composition without a verification policy never makes it actionable.
+    (ADR-032). A composition without a verification policy never makes it actionable. A strict
+    MCP process never dispatches AI-powered review (ADR-018; ``execute_check`` requests the
+    semantic capability only on the policy route), so there the missing review is a route-side
+    limitation the owner lifts by serving the policy route, not something the agent can do.
+    Callers without a route (CLI, TUI, closure preparation) check on the policy route.
     """
 
+    if route_profile == "strict":
+        return False
     policy = getattr(app, "verification_policy", None)
     return getattr(policy, "semantic", None) == "required"
 
@@ -1747,7 +1755,7 @@ async def execute_status(
             compact_page,
             request.request_id,
             lineage_gaps=lineage_gaps,
-            semantic_review_required=_semantic_review_required(app),
+            semantic_review_required=_semantic_review_required(app, route_profile),
             check_in_flight=frontier == head and await _check_in_flight(runtime),
         )
         return StatusInternalResult(

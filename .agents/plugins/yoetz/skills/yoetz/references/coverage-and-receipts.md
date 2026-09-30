@@ -108,8 +108,9 @@ each status read and never cached across frontiers:
 
 A closed, versioned table (`gap_classification_version`) assigns every gap code the product
 emits to exactly one group. `semantic_review_not_requested` is standing on a route where
-AI-powered review is optional or off, and actionable only when the verification policy requires
-AI-powered review and none has completed since the last material change. A code the running build
+AI-powered review is optional or off, and on a strict connection that cannot run AI-powered review
+at all; it is actionable only when the verification policy requires AI-powered review, this
+connection can run it, and none has completed since the last material change. A code the running build
 does not know appears as `unclassified_gap:<code>` in `agent_actionable`, so an unknown limit is
 never silently treated as done.
 
