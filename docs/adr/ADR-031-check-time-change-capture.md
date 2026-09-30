@@ -61,31 +61,60 @@ content-returning read needed its own decision. This is that decision, for exact
    the change. Only when no base can be kept or resolved is the change shown against HEAD.
 4. **Read-only and bounded.** Git runs through the ADR-011 hardened runner: no shell, no global or
    system config, hooks, fsmonitor, external diff, textconv or credential helper, and every diff
-   passes `--no-ext-diff --no-textconv`. Git transports are disabled and partial clones are
-   refused, so a capture never fetches. The ADR-011 root and metadata fences apply (a real `.git`
-   directory, no alternates). Because a diff against the working tree runs any `clean` filter the
-   repository defines, the capture also asks Git for its whole effective configuration
-   (`git config --list --name-only --includes --show-scope`) and refuses any `filter.*`,
-   `include.*`, `includeIf.*` or partial-clone key, from whichever file or include it came. That
-   needs Git 2.26 or later; an older Git cannot answer, and the capture is unavailable rather than
-   taken without the check. Untracked files honour `.gitignore`, `.git/info/exclude`, a
-   repository-level `core.excludesFile` and the owner's global Git ignore file. They are opened one
-   path component at a time beneath the validated root descriptor without following links; only
-   regular files owned by the service user with a single link, at most 64 KiB each and 500 in all,
-   are read. Files whose names follow common credential conventions (`.env`, `.env.*`, `.netrc`,
-   `.npmrc`, `id_rsa`, `*.pem`, `*.key`, `*.tfvars` and similar), tracked or untracked, are listed
-   by name only and their content is never shown. That list is a name heuristic, not a detector:
-   it catches common conventions, and every shown line still passes redaction and the never-send
-   scan. The stored text is at most 256 KiB and leaves an oversized file out whole rather than
-   cutting it mid-hunk; the packet then splits that text on line boundaries. An untracked listing
-   over 8 MiB keeps the names that fit and says the untracked count is a lower bound. One 20-second
-   deadline bounds the whole capture: each Git call, and the read of the global ignore setting, gets
-   at most 10 seconds and never more than what is left. A deadline reached while the change is
-   being read leaves the named files unshown and says so; one reached before the file list exists
-   makes the capture unavailable. The effective-config check and the diffs are separate Git calls,
-   so a filter written into the repository config between them would run; only a process of the
-   same user can do that, and that user can already run code as itself, so this window is low
-   severity.
+   passes `--no-ext-diff --no-textconv`. Git transports are disabled, replace refs are ignored
+   (`--no-replace-objects`) and partial clones are refused, so a capture never fetches. The ADR-011
+   root and metadata fences apply (a real `.git` directory, no alternates). Because a diff against
+   the working tree runs any `clean` filter the repository defines, the capture also asks Git for
+   its whole effective configuration (`git config --list --name-only --includes --show-scope`) and
+   refuses any `filter.*`, `include.*`, `includeIf.*` or partial-clone key, from whichever file or
+   include it came. That needs Git 2.26 or later; an older Git cannot answer, and the capture is
+   unavailable rather than taken without the check. The effective-config check and the diffs are
+   separate Git calls, so a filter written into the repository config between them would run; only
+   a process of the same user can do that, and that user can already run code as itself, so this
+   window is low severity. The read has these fences:
+   - **The validated root, and only it.** Git can only be given a pathname, so the root is pinned by
+     identity: before and after every Git call the root pathname and its `.git` must still be the
+     device and inode that were validated, or the capture is `unsafe_root`. A directory renamed
+     away and replaced at the same path, even by a clone of the same base, is never read. A swap
+     made and undone entirely within one Git call is the residual this cannot see.
+   - **No link is read, tracked or untracked.** Untracked files honour `.gitignore`,
+     `.git/info/exclude`, a repository-level `core.excludesFile` and the owner's global Git ignore
+     file. They are opened one path component at a time beneath the validated root descriptor
+     without following links; only regular files owned by the service user with a single link, at
+     most 64 KiB each and 500 in all, are read. A changed tracked file whose working copy is a
+     link, a special file, another user's, multiply linked, or reachable only through a linked
+     directory is named with `not_regular_file`, and neither its diff nor its line counts are
+     shown, because Git would read what it points at.
+   - **Every object read is the one its name commits to.** Git trusts each object file it opens.
+     `.git/objects`, its `info` and `pack` directories and every pack entry must be real
+     directories and files (otherwise `unsafe_root`), and a `.git/commondir` that borrows another
+     repository's store is `unsupported_repository`. Every blob a shown diff reads (the base side,
+     and the index side Git uses for a file it did not re-read from the working tree) must be
+     packed or a loose object that is not a link, and must hash to its own name; each is read once
+     with `git cat-file` (at most 8 MiB each and 64 MiB in all). A blob that does not verify
+     withholds that file's diff and line counts as `object_unverified`; one over the bound is
+     `too_large`. So neither a link nor a hard link, in the working tree or the object store, puts
+     bytes from outside the workspace in the change.
+   - **One state, not a mix.** After assembling the change the adapter reads again the changed-file
+     list, the identity (inode, size, modification and change times, link count) of every working
+     copy and untracked file it read, the untracked listing, HEAD and the index, and each untracked
+     file is re-checked on its open descriptor after it is read. If anything moved, the whole
+     capture is taken again, at most three times in all; a tree that never holds still is
+     `changed_during_capture`.
+   - **Credential names.** Files whose names follow common credential conventions (`.env`,
+     `.env.*`, `.netrc`, `.npmrc`, `id_rsa`, `*.pem`, `*.key`, `*.tfvars` and similar), tracked or
+     untracked, are listed by name only and their content is never shown. That list is a name
+     heuristic, not a detector: it catches common conventions, and every shown line still passes
+     redaction and the never-send scan.
+   - **Size and time.** The stored text is at most 256 KiB and leaves an oversized file out whole
+     rather than cutting it mid-hunk; the packet then splits that text on line boundaries. An
+     untracked listing over 8 MiB keeps the names that fit and says the untracked count is a lower
+     bound. One 20-second deadline bounds the whole capture: each Git call, and the read of the
+     global ignore setting, gets at most 10 seconds and never more than what is left. Assembly may
+     use the first 15 seconds; the last 5 are kept for the closing stability check. A deadline
+     reached while the change is being read leaves the named files unshown and says so; one
+     reached before the file list exists, or during the stability check, makes the capture
+     unavailable.
 5. **The same privacy path as every other excerpt.** The rendered text receives the capture-time
    redaction native observation content receives, with the same detector as the egress never-send
    scan, and is stored encrypted. Its parts are `repository_excerpt` case items, because this is
@@ -95,12 +124,16 @@ content-returning read needed its own decision. This is that decision, for exact
    part, and the check reports `semantic_review_context_withheld`, as for any other category the
    recipe selects and the channel withholds. How a never-send match affects the review is owned by
    #920.
-6. **A reserved share of the packet, first.** The change is admitted before every other excerpt,
-   up to half of the recipe's excerpt count (at least one) and half of its excerpt bytes. Room it
-   does not use stays with the other excerpts; parts left over after all of them backfill whatever
-   the recipe still has free. Each part begins `[Yoetz check-time change, part i of n]`, its item
-   ids sort ahead of every other item, and it links to the case's effective claims and obligations
-   (else its latest plan). `_check_time_change_reservation` is the single seam for this share.
+6. **A reserved share of the packet, first.** The change is admitted before every other excerpt, up
+   to half of the recipe's excerpt count (at least one) and half of its excerpt bytes, rounded up to
+   the change's first part. A part is never larger than the recipe's per-excerpt or total excerpt
+   budget, so a captured change always reaches the packet ahead of every other excerpt unless that
+   budget is too small for a readable part (256 bytes of change plus its marker), which is disclosed
+   as `check_time_change_unavailable`. Room it does not use stays with the other excerpts; parts
+   left over after all of them backfill whatever the recipe still has free. Each part begins `[Yoetz
+   check-time change, part i of n]`, its item ids sort ahead of every other item, and it links to
+   the case's effective claims and obligations (else its latest plan).
+   `_check_time_change_reservation` is the single seam for this share.
 7. **Frozen with the job.** The object's pointer, or the fact that it was unavailable, is frozen
    into the job's semantic-case object. A recovered or resumed job reloads exactly that object and
    never re-reads a working tree that has since moved, so the case digest is unchanged. The object
@@ -113,46 +146,48 @@ content-returning read needed its own decision. This is that decision, for exact
    time before this decision.
 9. **AI-powered finding resolution compares the files each review was shown.** A completed review
    whose packet carried the change records, on its `check_recorded` 1.3.0 event, keyed commitments
-   to the changed files it carried: `fully_shown` (the file's whole diff, unredacted and
-   untruncated) and `partially_shown` (the rest it carried any of), each with `shown_bytes` (the
-   bytes of the file's diff section that reached the packet, redaction markers included),
-   `redactions` (the redacted spans among them), `section_admitted` (the whole section reached
-   the packet, so only redaction made it partial) and `clean_bytes` (where the first shown
-   redaction marker starts; `shown_bytes` without one). Each commitment is the task bundle's object
-   commitment key over the change's base commit, the file's `diff --git` line and its change kind
-   (binary, deleted), so no path is recorded, the same file under the task's fixed base commits the
-   same way in every check of the task, and a file that turned binary or was deleted never stands
-   in for the text diff it replaced. Only shown files count toward the 128-file bound; past it the
-   record keeps the first 128 in change order and says it is incomplete. Replay folds, onto the
-   finding's projection row, the record of every completed review that raised or re-raised an
+   to the changed files it carried. What it carried is counted from the bounded provider envelope,
+   after `bounded_case_envelope` minimization (only the unbroken run of parts from the first whose
+   catalog rows survived), and is nothing when the channel withholds `repository_excerpt`, so the
+   record never claims a part the reviewer could not read. The files are `fully_shown` (the file's
+   whole diff, unredacted and untruncated) and `partially_shown` (the rest it carried any of), each
+   with `shown_bytes` (the bytes of the file's diff section that reached the packet, redaction
+   markers included), `redactions` (the redacted spans among them), `section_admitted` (the whole
+   section reached the packet, so only redaction made it partial) and `clean_bytes` (where the first
+   shown redaction marker starts; `shown_bytes` without one). Each commitment is the task bundle's
+   object commitment key over the change's base commit, the file's `diff --git` line and its change
+   kind (binary, deleted), so no path is recorded, the same file under the task's fixed base commits
+   the same way in every check of the task, and a file that turned binary or was deleted never
+   stands in for the text diff it replaced. Only shown files count toward the 128-file bound; past
+   it the record keeps the first 128 in change order and says it is incomplete. Replay folds, onto
+   the finding's projection row, the record of every completed review that raised or re-raised an
    AI-powered finding (R): whole files are united, a file any of them saw whole must be seen whole,
    and a file they saw in part keeps the largest n (`shown_bytes`) and the smallest k
-   (`redactions`). At most 64 contributing checks and 1024 files are kept on the finding's row
-   (one event row still holds at most 128); past either bound R is unknown. A later repair
-   review's `check_time_change_truncated`, `_redacted`, `_base_unavailable` and `_unavailable`
-   codes are tolerated for that finding exactly when the repair saw at least what R requires.
-   Every file R needs whole reached the repair whole. Every file R saw in part (n, k) reached the
-   repair whole, or in part with (the repair showed at least n bytes, or its whole current
-   section) and (it showed at most k redacted spans, or its first n bytes held no marker). Each arm
-   is sound on its own: a repair that admitted its whole section saw the file's entire current
-   diff apart from its redacted spans; a repair with at least n bytes saw at least as long a view;
-   at most k spans hides no more than the raising review had hidden; and `clean_bytes` at least n
-   means the repair saw the first n bytes with nothing hidden. So a view cut at the packet edge
-   before a marker is covered by a longer repair whose first n bytes are clean, a whole section
-   whose diff the fix shrank is covered while its redaction persists, and a new redaction or a
-   shorter cut view still blocks. The repair's record may be incomplete, since each entry it holds
-   is still true. An empty R (reviews that carried no change, including every review from before
-   this decision) is always tolerated. R is also unknown, which never tolerates, when a raising
-   record is incomplete or when a raising review carried parts without a readable record (0.3
-   development builds). None of these codes is a capture
-   baseline stamped on the finding. Redacting any contributing check makes R unknown and reopens a
-   resolution that depended on it; redacting the resolving check reopens it as before. The
+   (`redactions`). At most 64 contributing checks and 1024 files are kept on the finding's row (one
+   event row still holds at most 128); past either bound R is unknown. A later repair review's
+   `check_time_change_truncated`, `_redacted`, `_base_unavailable` and `_unavailable` codes are
+   tolerated for that finding exactly when the repair saw at least what R requires. Every file R
+   needs whole reached the repair whole. Every file R saw in part (n, k) reached the repair whole,
+   or in part with (the repair showed at least n bytes, or its whole current section) and (it showed
+   at most k redacted spans, or its first n bytes held no marker). Each arm is sound on its own: a
+   repair that admitted its whole section saw the file's entire current diff apart from its redacted
+   spans; a repair with at least n bytes saw at least as long a view; at most k spans hides no more
+   than the raising review had hidden; and `clean_bytes` at least n means the repair saw the first n
+   bytes with nothing hidden. So a view cut at the packet edge before a marker is covered by a
+   longer repair whose first n bytes are clean, a whole section whose diff the fix shrank is covered
+   while its redaction persists, and a new redaction or a shorter cut view still blocks. The
+   repair's record may be incomplete, since each entry it holds is still true. An empty R (reviews
+   that carried no change, including every review from before this decision) is always tolerated. R
+   is also unknown, which never tolerates, when a raising record is incomplete or when a raising
+   review carried parts without a readable record (0.3 development builds). None of these codes is a
+   capture baseline stamped on the finding. Redacting any contributing check makes R unknown and
+   reopens a resolution that depended on it; redacting the resolving check reopens it as before. The
    relation is a pure fold over recorded checks, so the memory and SQLite ledgers replay it
    identically. Residual limits: the rule compares lengths and counts, not content. A redacted span
-   that moved while the count stayed the same could hide the region the finding was about, and for
-   a repair view cut at the packet edge (not the whole section) a hunk that moved past the m bytes
-   it saw could too; a repair review that stays silent about either could clear the finding.
-   Explicit `fixed` rulings (#905) are the long-term guard.
+   that moved while the count stayed the same could hide the region the finding was about, and for a
+   repair view cut at the packet edge (not the whole section) a hunk that moved past the m bytes it
+   saw could too; a repair review that stays silent about either could clear the finding. Explicit
+   `fixed` rulings (#905) are the long-term guard.
 
 ## Consequences
 
@@ -162,8 +197,10 @@ it came from, within the existing per-item, count and total caps; #907 owns lift
 
 The capture is unavailable, and says so, for linked Git worktrees (whose `.git` is a file),
 group- or world-writable roots, repositories whose effective config defines a filter or an include
-(for example a repository-local Git LFS or git-crypt setup), partial clones, and Git older than
-2.26.
+(for example a repository-local Git LFS or git-crypt setup), partial clones, Git older than 2.26,
+an object store reached through a link or shared through `commondir` (for example some `repo`
+tool checkouts), a root replaced while it was read, and a working tree that kept changing through
+every attempt. Tracked files that are links or multiply linked are named but not shown.
 Submodule changes appear as commit ids and binary files as a one-line description.
 
 This decision does not add an MCP tool, a repository browser or an `ArtifactInspectionPort`, and

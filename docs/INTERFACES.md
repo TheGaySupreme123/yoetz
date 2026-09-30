@@ -6958,19 +6958,41 @@ correctness. The record contains no content, paths, or content hashes.
 CheckChangeCapture`. `GitChangeCaptureAdapter` is the only implementation; the service runs it and
 every redaction pass off the event loop. One 20-second deadline bounds a capture: each Git call
 (including workspace discovery and the global `core.excludesFile` read) gets
-`min(10 s, time left)`. Past the deadline a file whose diff was not read is listed with
-`capture_limit` and untracked files are not listed; before the file list exists the capture is
-unavailable. Before any diff the adapter lists the effective config with
-`git config --list --name-only --includes --show-scope -z` and refuses any non-`command` scope key
-`filter.*`, `include.*`, `includeIf.*`, `extensions.partialClone`, `remote.*.promisor` or
+`min(10 s, time left)`. Assembly may use the first 75% (`_ASSEMBLY_SHARE`); the rest is kept for
+the closing stability check. Past the assembly share a file whose diff was not read is listed with
+`capture_limit` and untracked files are not listed; before the file list exists, or during the
+stability check, the capture is unavailable. Before any diff the adapter lists the effective config
+with `git config --list --name-only --includes --show-scope -z` and refuses any non-`command` scope
+key `filter.*`, `include.*`, `includeIf.*`, `extensions.partialClone`, `remote.*.promisor` or
 `remote.*.partialCloneFilter` (`unsupported_repository`); a Git that rejects `--show-scope` fails
-as `git_failed`. Tracked and untracked files whose base name is on the adapter's credential-name
-list are listed by name only (`credential_name`). The untracked listing uses
+as `git_failed`. Every Git call runs as `git --no-replace-objects -c core.quotePath=true -c
+protocol.allow=never ...` through `run_read_only_git`, and before and after each one the root
+pathname and its `.git` must still `lstat` to the device and inode recorded from the validated
+descriptor (`unsafe_root` otherwise). The object store must be real directories and pack files
+(`.git/objects`, `objects/info`, `objects/pack` and each pack entry; a link is `unsafe_root`,
+more than 4096 pack entries `unsupported_repository`), and a `.git/commondir` is
+`unsupported_repository`. The tracked list is `git diff --raw -z --no-abbrev <base> --`; each
+changed working copy is `lstat`ed beneath the root descriptor without following any component and
+must be a regular, single-link file of the service user unless the entry is a deletion or a
+submodule, otherwise it is omitted as `not_regular_file` with its line counts. Every blob a shown
+section reads (`src`, and a non-zero `dst`, of mode 100644, 100755 or 120000) is read once with
+`git cat-file blob` (at most 8 MiB each, 64 MiB in all) and must hash to its id, with its loose
+object and fan-out directory, when present, not links; otherwise the section is omitted as
+`object_unverified` (or `too_large` / `capture_limit` at the bounds), line counts withheld.
+Tracked and untracked files whose base name is on the adapter's credential-name list are listed by
+name only (`credential_name`). The untracked listing uses
 `run_read_only_git(..., keep_prefix_on_limit=True)`: past 8 MiB the hardened runner raises
 `GitOutputTruncated` (still a `ValueError("git_output_limit")`) holding the whole names that fit,
-and the header says the untracked count is a lower bound. `discover_workspace_root` and
-`open_local_workspace` take an optional `timeout_seconds`. `ChangeCaptureUnavailable.reason` is one of `git_unavailable`, `not_git`,
-`unsafe_root`, `unsupported_repository`, `git_failed` (a Git call over its time bound included) or
+and the header says the untracked count is a lower bound. Each untracked file read must still have
+the identity its path had just before (mode, device, inode, size, mtime and ctime in ns, link count,
+owner) when opened and after it is read, with exactly `st_size` bytes read. The closing stability
+check re-reads the raw tracked list, every recorded working-copy and untracked identity, the
+untracked listing, `HEAD^{commit}` and the identity of `.git/index`; any difference retakes the
+whole capture, at most `_CAPTURE_ATTEMPTS` (3) times while the assembly share lasts.
+`discover_workspace_root` and `open_local_workspace` take an optional `timeout_seconds`.
+`ChangeCaptureUnavailable.reason` is one of `git_unavailable`, `not_git`, `unsafe_root`,
+`unsupported_repository`, `git_failed` (a Git call over its time bound included),
+`changed_during_capture` (the working tree moved during every attempt) or
 `redaction_incomplete` (credential-shaped spans still found after 64 redaction passes, so the change
 is withheld whole), recorded as a bounded
 `semantic_composition/check_time_change_unavailable` (or `start/task_change_base_unavailable`)
@@ -7001,17 +7023,23 @@ diagnostic and never as text.
   check_time_change_unavailable=bool)` admits parts with ids `change-check-time-NNN`, section
   `excerpt`, category `repository_excerpt`, source kind `diff`, source ref `check-time-change`,
   linked to effective claims and obligations (else the latest plan), each prefixed
-  `[Yoetz check-time change, part i of n]`. `_check_time_change_reservation(selection)` returns the
-  share admitted before other excerpts (half the excerpt count, at least one, and half the total
-  bytes); leftovers backfill after every other excerpt. The case digest binds the object identity,
+  `[Yoetz check-time change, part i of n]`. Each part is at most
+  `min(max_excerpt_bytes, max_total_excerpt_bytes, 4 KiB, item bound)` bytes, marker included.
+  `_check_time_change_reservation(selection, first_part_bytes)` returns the share admitted before
+  other excerpts (half the excerpt count, at least one, and half the total bytes rounded up to the
+  first part); leftovers backfill after every other excerpt. The case digest binds the object identity,
   content digest, base, flags and admitted part count; a case without a selected change keeps its
   historical digest input.
 - **Shown files.** `check_time_change_shown_files(capture, selection, admitted_parts)` returns each
   `diff --git` section of the stored change that reached the admitted parts, whether it arrived
   whole and without a `[REDACTED]` marker, the section bytes that arrived, the markers among
-  them, whether the whole section arrived, and where the first shown marker starts. The identity is the section's first line plus `\0binary` for a `Binary files ` line and
-  `\0deleted` for a `deleted file mode ` line. `check_change_shown_files(runtime, change,
-  selection, admitted_parts)` commits each through `runtime.objects.commitment_for(...,
+  them, whether the whole section arrived, and where the first shown marker starts. The identity
+  is the section's first line plus `\0binary` for a `Binary files ` line and `\0deleted` for a
+  `deleted file mode ` line. `admitted_parts` is
+  `check_time_change_parts_carried(case, withheld_categories=)`: the unbroken run of parts from
+  the first whose catalog rows `bounded_case_envelope(case)` kept, or 0 when the policy withholds
+  `repository_excerpt`. `check_change_shown_files(runtime, change, selection, admitted_parts)`
+  commits each through `runtime.objects.commitment_for(...,
   CHANGE_CAPTURE)` over the domain `yoetz/check-change-shown-file/v1`, the base commit and that
   identity.
   `CheckChangeCapture` and `yoetz.check-change/1` carry `base_commit`. The composition passes it to

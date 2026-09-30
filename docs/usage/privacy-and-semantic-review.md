@@ -198,17 +198,21 @@ the **check-time change**.
 
 The check-time change is the one thing Yoetz reads from your repository for review. When the recipe
 includes diff excerpts, each check reads the change from the commit the task started on (for a task
-started before this version, the commit at its first check) — committed
-and uncommitted edits to tracked files, plus untracked files Git does not ignore — from the
-repository of the check's own connection, and shows it to the reviewer first, with a header naming
-every changed file. It covers edits made by scripts and commits that no hook captured. Because the
-starting point is a commit, uncommitted or untracked work that was already in your working tree
-when the task started is included too. Git hooks, helpers, filters and network access are off while
-it is read, credential-like text is redacted, and each part still passes the never-send check.
-Files named like credentials (`.env`, `.env.*`, `.netrc`, `*.pem`, `*.key` and similar) are listed
-by name only and their content is never shown; this is a check on file names, so a secret kept in
-an ordinarily named file relies on the redaction and never-send checks instead. A change larger
-than the packet is cut and says so.
+started before this version, the commit at its first check) — committed and uncommitted edits to
+tracked files, plus untracked files Git does not ignore — from the repository of the check's own
+connection, and shows it to the reviewer first, with a header naming every changed file. It covers
+edits made by scripts and commits that no hook captured. Because the starting point is a commit,
+uncommitted or untracked work that was already in your working tree when the task started is
+included too. Git hooks, helpers, filters and network access are off while it is read,
+credential-like text is redacted, and each part still passes the never-send check. Files named like
+credentials (`.env`, `.env.*`, `.netrc`, `*.pem`, `*.key` and similar) are listed by name only and
+their content is never shown; this is a check on file names, so a secret kept in an ordinarily named
+file relies on the redaction and never-send checks instead. Files that are links, or that have a
+second name elsewhere on disk, are listed but never shown, and every stored Git object the change
+shows must match its own name, so nothing from outside the repository enters the change through a
+link. If your working tree keeps changing while the change is read, Yoetz reads it again, up to
+three times, and otherwise reports the change as unavailable rather than send a mix of two states. A
+change larger than the packet is cut and says so.
 
 The change travels as **repository excerpts**. If your policy's AI-powered review channel does not
 allow repository excerpts, the change is never sent, and the check result says the review ran with
