@@ -1144,3 +1144,170 @@ def test_unassessable_conclusion_blocks_proof_even_without_a_coverage_gap() -> N
     original = _finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED)
     later = replace(_check(semantic=_SEMANTIC_OK), semantic_conclusion="insufficient_packet")
     assert _resolves(original, later) is False
+
+
+def _ruled(
+    check: CheckRecordedPayload, *rulings: tuple[int, str], conclusion: str
+) -> CheckRecordedPayload:
+    from yoetz.domain.findings import PriorFindingVerdictRecord
+
+    return replace(
+        check,
+        semantic_conclusion=conclusion,
+        prior_finding_verdicts=tuple(
+            PriorFindingVerdictRecord(fnd(number), verdict) for number, verdict in sorted(rulings)
+        ),
+    )
+
+
+def test_a_fixed_ruling_resolves_even_when_the_packet_as_a_whole_was_insufficient() -> None:
+    """kea fnd_866db2dd (issue #905): a repaired real defect stayed open forever.
+
+    The recheck after the repair concluded ``insufficient_packet`` for the packet as a whole,
+    which vetoed every open AI-powered finding. A per-finding ``fixed`` ruling on material
+    recorded after the finding now resolves that finding, while a sibling the same review could
+    not assess keeps the whole-packet veto and a sibling ruled unassessable is blocked by name.
+    """
+
+    from yoetz.kernel.finding_resolution import resolution_blockers
+
+    gapped = _coverage(
+        gaps=("semantic_packet_insufficient",), semantic=True, freshness=LedgerFreshness.PARTIAL
+    )
+    repaired = _finding(1, origin=FindingOrigin.SEMANTIC_MODEL_DERIVED)
+    sibling = _finding(2, origin=FindingOrigin.SEMANTIC_MODEL_DERIVED, subject_refs=(obl(2),))
+    silent = _finding(3, origin=FindingOrigin.SEMANTIC_MODEL_DERIVED, subject_refs=(obl(3),))
+    check = _ruled(
+        _check(semantic=_SEMANTIC_OK, coverage=gapped),
+        (1, "fixed"),
+        (2, "unassessable"),
+        conclusion="insufficient_packet",
+    )
+    state = _changed_state(check)
+
+    assert resolution_blockers(repaired, 4, check, frozenset(), proof_state=state) == ()
+    assert _resolves(repaired, check) is True
+    assert "reviewer_verdict_unassessable" in resolution_blockers(
+        sibling, 4, check, frozenset(), proof_state=state
+    )
+    silent_blockers = resolution_blockers(silent, 4, check, frozenset(), proof_state=state)
+    assert "semantic_packet_insufficient" in silent_blockers
+    assert "coverage:semantic_packet_insufficient" in silent_blockers
+
+
+def test_a_fixed_ruling_never_bypasses_material_change_freshness_or_a_re_raise() -> None:
+    from yoetz.kernel.finding_resolution import issue_key, resolution_blockers
+
+    finding = _finding(1, origin=FindingOrigin.SEMANTIC_MODEL_DERIVED)
+    check = _ruled(
+        _check(semantic=_SEMANTIC_OK), (1, "fixed"), conclusion="no_material_discrepancy"
+    )
+    # A ruling over unchanged state is a re-roll, not proof.
+    assert _resolves(finding, check, changed=False) is False
+    # The same review re-raising the issue contradicts its own ruling: nothing resolves.
+    assert "issue_returned_again" in resolution_blockers(
+        finding, 4, check, frozenset({issue_key(finding)}), proof_state=_changed_state(check)
+    )
+    stale = replace(
+        check,
+        coverage=_coverage(semantic=True, freshness=LedgerFreshness.STALE_AFTER_MATERIAL_CHANGE),
+    )
+    assert _resolves(finding, stale) is False
+    # Rulings exist only on a recorded, succeeded review conclusion.
+    with pytest.raises(ValueError):
+        replace(check, semantic_conclusion=None)
+
+
+@pytest.mark.parametrize("verdict", ["still_present", "answered_not_fixed"])
+def test_any_other_ruling_blocks_its_own_finding_even_under_an_assessable_review(
+    verdict: str,
+) -> None:
+    from yoetz.kernel.finding_resolution import resolution_blockers
+
+    finding = _finding(1, origin=FindingOrigin.SEMANTIC_MODEL_DERIVED)
+    check = _ruled(
+        _check(semantic=_SEMANTIC_OK), (1, verdict), conclusion="no_material_discrepancy"
+    )
+    assert resolution_blockers(
+        finding, 4, check, frozenset(), proof_state=_changed_state(check)
+    ) == (f"reviewer_verdict_{verdict}",)
+    # A ruling speaks only for its own finding: an unruled sibling still resolves as before.
+    sibling = _finding(2, origin=FindingOrigin.SEMANTIC_MODEL_DERIVED, subject_refs=(obl(2),))
+    assert _resolves(sibling, check) is True
+
+
+def test_a_ruling_on_a_local_finding_is_ignored_by_local_proof() -> None:
+    local = _finding(1)
+    check = _ruled(
+        _check(semantic=_SEMANTIC_OK), (1, "still_present"), conclusion="no_material_discrepancy"
+    )
+    assert _resolves(local, check) is True
+
+
+def test_a_withdrawn_ruling_accepts_a_rejection_without_lifting_the_packet_veto() -> None:
+    """The owner's rule: a reasoned rejection not re-raised counts as accepted (issue #905).
+
+    ``withdrawn`` must not block what an assessable recheck over changed state already resolves,
+    and it is no licence to resolve under a whole-packet ``insufficient_packet``.
+    """
+
+    from yoetz.kernel.finding_resolution import resolution_blockers
+
+    finding = _finding(1, origin=FindingOrigin.SEMANTIC_MODEL_DERIVED)
+    assessable = _ruled(
+        _check(semantic=_SEMANTIC_OK), (1, "withdrawn"), conclusion="no_material_discrepancy"
+    )
+    assert _resolves(finding, assessable) is True
+    gapped = _coverage(
+        gaps=("semantic_packet_insufficient",), semantic=True, freshness=LedgerFreshness.PARTIAL
+    )
+    unassessable = _ruled(
+        _check(semantic=_SEMANTIC_OK, coverage=gapped),
+        (1, "withdrawn"),
+        conclusion="insufficient_packet",
+    )
+    assert "semantic_packet_insufficient" in resolution_blockers(
+        finding, 4, unassessable, frozenset(), proof_state=_changed_state(unassessable)
+    )
+
+
+@pytest.mark.parametrize(
+    "gap", ["semantic_prior_findings_over_limit", "semantic_prior_verdicts_unsupported"]
+)
+def test_an_unruled_finding_the_review_may_not_have_assessed_never_resolves(gap: str) -> None:
+    """Greptile P1 on #905: silence about a finding left out of the packet, or whose ruling was
+    dropped, is not assessment. It blocks that finding; ruled siblings keep their own effect."""
+
+    from yoetz.kernel.finding_resolution import resolution_blockers
+
+    incomplete = _coverage(gaps=(gap,), semantic=True, freshness=LedgerFreshness.PARTIAL)
+    unruled = _finding(1, origin=FindingOrigin.SEMANTIC_MODEL_DERIVED)
+    ruled = _finding(2, origin=FindingOrigin.SEMANTIC_MODEL_DERIVED, subject_refs=(obl(2),))
+    local = _finding(3, subject_refs=(obl(3),))
+    check = _ruled(
+        _check(semantic=_SEMANTIC_OK, coverage=incomplete),
+        (2, "fixed"),
+        conclusion="no_material_discrepancy",
+    )
+    state = _changed_state(check)
+
+    assert resolution_blockers(unruled, 4, check, frozenset(), proof_state=state) == (
+        "reviewer_assessment_incomplete",
+    )
+    assert _resolves(unruled, check) is False
+    # The gap is a disclosure, not a veto: a finding the review did rule on still resolves.
+    assert resolution_blockers(ruled, 4, check, frozenset(), proof_state=state) == ()
+    assert _resolves(ruled, check) is True
+    # Local proof never depended on the reviewer.
+    assert "reviewer_assessment_incomplete" not in resolution_blockers(
+        local, 4, check, frozenset(), proof_state=state
+    )
+
+
+def test_an_unruled_finding_still_follows_the_ordinary_rules_on_a_complete_review() -> None:
+    from yoetz.kernel.finding_resolution import resolution_blockers
+
+    finding = _finding(1, origin=FindingOrigin.SEMANTIC_MODEL_DERIVED)
+    check = _ruled(_check(semantic=_SEMANTIC_OK), conclusion="no_material_discrepancy")
+    state = _changed_state(check)
+    assert resolution_blockers(finding, 4, check, frozenset(), proof_state=state) == ()

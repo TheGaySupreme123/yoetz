@@ -30,6 +30,7 @@ from yoetz.ports.clock import ClockPort
 from yoetz.ports.secret_memory import ProviderAttemptAuthBinding, ProviderCredentialHandle
 from yoetz.ports.semantic import (
     Deadline,
+    PriorFindingVerdict,
     ProviderAttemptProvenance,
     ReviewerChallenge,
     SemanticJudgment,
@@ -48,6 +49,7 @@ from yoetz.protocol.canonical import (
     strict_json_parse,
 )
 from yoetz.protocol.models import (
+    MAX_PRIOR_FINDING_VERDICTS,
     MAX_REVIEW_CHALLENGES,
     ProviderChallengeModel,
     ProviderJudgmentChallengesModel,
@@ -55,6 +57,7 @@ from yoetz.protocol.models import (
     ProviderJudgmentInsufficientModel,
     ProviderJudgmentModel,
     ProviderJudgmentNoDiscrepancyModel,
+    ProviderPriorFindingVerdictModel,
     SemanticStatus,
 )
 
@@ -72,6 +75,7 @@ __all__ = [
     "OPENAI_MAX_RESPONSE_BODY_BYTES",
     "PACKET_GAP_GLOSSARY",
     "SEMANTIC_REVIEW_INSTRUCTION",
+    "VERDICT_FIELD_GLOSSARY",
     "JudgmentValidationError",
     "JudgmentValidationStage",
     "OneAttemptCredentialTransport",
@@ -273,12 +277,33 @@ SEMANTIC_REVIEW_INSTRUCTION: Final = (
     "packet limits, and may point at a real discrepancy. "
     + "; ".join(f"{code}: {gloss}" for code, gloss in sorted(ACCOUNT_GAP_GLOSSARY.items()))
     + ". Do not restate an account code alone as a finding; challenge the discrepancy it points to "
-    "when readable material shows it in the work or the claim."
+    "when readable material shows it in the work or the claim. "
+    # Issue #905: the review is a dialogue that must converge. One challenge per round let a
+    # stale item hold the only slot while a real defect waited, and a reviewer blind to its own
+    # answered findings restated them under new ids. Kept as one self-contained paragraph.
+    "Return one challenge for each distinct material problem the readable material supports, up "
+    "to the challenge limit, never only the most important one and never two for one problem. "
+    "The packet records earlier findings and the main agent's responses to them. Do not raise "
+    "again a finding the main agent has answered, or request an action the packet shows was "
+    "already done, unless material newer than that response shows the problem remains; then cite "
+    "that newer material and the earlier finding's fnd_ id from citable_refs. "
+    "review_packet.prior_finding_refs lists each earlier finding once; its rows in "
+    "prior_finding_item_ids (one structural row, and prose rows under the same finding_ref) all "
+    "describe that one finding. For each finding_ref in review_packet.prior_finding_refs, return "
+    "exactly one prior_finding_verdicts entry, never one per row, with finding_id set to that "
+    "finding_ref (never an item_id), whatever the conclusion: fixed only when evidence or results "
+    "recorded after the finding show the problem is gone, citing them; still_present or "
+    "answered_not_fixed citing the material that shows it remains; withdrawn when the main "
+    "agent's reasoned rejection holds; unassessable when the packet cannot settle it. A verdict "
+    "speaks only for its own finding."
 )
 _SYSTEM_INSTRUCTION: Final = SEMANTIC_REVIEW_INSTRUCTION
 
 _PROVIDER_JUDGMENT_ADAPTER: Final[TypeAdapter[ProviderJudgmentModel]] = TypeAdapter(
     ProviderJudgmentModel
+)
+_PRIOR_VERDICT_ADAPTER: Final[TypeAdapter[ProviderPriorFindingVerdictModel]] = TypeAdapter(
+    ProviderPriorFindingVerdictModel
 )
 _PROVIDER_JUDGMENT_ENVELOPE_ADAPTER: Final[TypeAdapter[ProviderJudgmentEnvelopeModel]] = (
     TypeAdapter(ProviderJudgmentEnvelopeModel)
@@ -588,6 +613,25 @@ CHALLENGE_FIELD_GLOSSARY: Final[dict[str, str]] = {
 }
 
 
+VERDICT_FIELD_GLOSSARY: Final[dict[str, str]] = {
+    "finding_id": (
+        "The earlier finding this ruling is about: one finding_ref from "
+        "review_packet.prior_finding_refs. Give each listed finding exactly one ruling."
+    ),
+    "verdict": (
+        "Your ruling on that finding alone. fixed: cited material recorded after the finding "
+        "shows the problem is gone; still_present: newer material shows it remains; "
+        "answered_not_fixed: the main agent answered but the problem remains; withdrawn: you "
+        "accept the main agent's rejection; unassessable: the packet cannot settle it."
+    ),
+    "cited_refs": (
+        "The refs the ruling rests on, from citable_refs. fixed must cite evidence or a result "
+        "recorded after the finding, or it is treated as unassessable."
+    ),
+    "note": "One short sentence saying why, addressed to the main agent.",
+}
+
+
 def _apply_reviewer_glossary(schema: dict[str, JsonValue]) -> dict[str, JsonValue]:
     """Attach the curated reviewer definitions to the stripped schema.
 
@@ -616,8 +660,23 @@ def _apply_reviewer_glossary(schema: dict[str, JsonValue]) -> dict[str, JsonValu
         FINDING_KIND_GLOSSARY
     ):
         raise RuntimeError("provider_judgment_schema_invalid")
-    for name, gloss in CHALLENGE_FIELD_GLOSSARY.items():
-        target = challenge_properties[name]
+    verdict = definitions.get("ProviderPriorFindingVerdict")
+    verdict_properties = (
+        cast(dict[str, JsonValue], verdict).get("properties") if type(verdict) is dict else None
+    )
+    if type(verdict_properties) is not dict or set(
+        cast(dict[str, JsonValue], verdict_properties)
+    ) != set(VERDICT_FIELD_GLOSSARY):
+        raise RuntimeError("provider_judgment_schema_invalid")
+    glossed = (
+        *((challenge_properties, name, gloss) for name, gloss in CHALLENGE_FIELD_GLOSSARY.items()),
+        *(
+            (cast(dict[str, JsonValue], verdict_properties), name, gloss)
+            for name, gloss in VERDICT_FIELD_GLOSSARY.items()
+        ),
+    )
+    for owner, name, gloss in glossed:
+        target = owner[name]
         if type(target) is not dict:
             raise RuntimeError("provider_judgment_schema_invalid")
         source = cast(dict[str, JsonValue], target)
@@ -634,7 +693,7 @@ def _apply_reviewer_glossary(schema: dict[str, JsonValue]) -> dict[str, JsonValu
                 JsonValue, {**cast(dict[str, JsonValue], referenced), "description": gloss}
             )
             continue
-        challenge_properties[name] = cast(JsonValue, {**source, "description": gloss})
+        owner[name] = cast(JsonValue, {**source, "description": gloss})
     return schema
 
 
@@ -919,6 +978,10 @@ def _provenance(
     )
 
 
+def _verdict_from_model(verdict: ProviderPriorFindingVerdictModel) -> PriorFindingVerdict:
+    return PriorFindingVerdict(verdict.finding_id, verdict.verdict, verdict.cited_refs)
+
+
 def _challenge_from_model(challenge: ProviderChallengeModel) -> ReviewerChallenge:
     return ReviewerChallenge(
         FindingKind(challenge.finding_kind),
@@ -947,18 +1010,74 @@ def normalize_judgment(parsed: JsonValue) -> SemanticJudgment:
     # provider that flattens the wrapper is still returning output the contract can admit.
     model: ProviderJudgmentModel
     source: JsonValue = parsed
-    if type(parsed) is dict and "judgment" in parsed:
+    envelope = type(parsed) is dict and "judgment" in parsed
+    body: JsonValue = (
+        cast(dict[str, JsonValue], parsed)["judgment"] if envelope else cast(JsonValue, parsed)
+    )
+    kept, dropped = _separate_prior_verdicts(body)
+    if type(body) is dict:
+        body = {**cast(dict[str, JsonValue], body), "prior_finding_verdicts": kept}
+    if envelope:
         try:
-            model = _PROVIDER_JUDGMENT_ENVELOPE_ADAPTER.validate_python(parsed).judgment
+            model = _PROVIDER_JUDGMENT_ENVELOPE_ADAPTER.validate_python(
+                {**cast(dict[str, JsonValue], parsed), "judgment": body}
+            ).judgment
         except ValidationError as exc:
             raise JudgmentValidationError(_classify_rejected_judgment(source)) from exc
     else:
         try:
-            model = _PROVIDER_JUDGMENT_ADAPTER.validate_python(parsed)
+            model = _PROVIDER_JUDGMENT_ADAPTER.validate_python(body)
         except ValidationError as exc:
             raise JudgmentValidationError(_classify_rejected_judgment(source)) from exc
     challenges = tuple(_challenge_from_model(item) for item in model.reviewer_challenges)
-    return SemanticJudgment(model.conclusion, challenges)
+    verdicts = tuple(_verdict_from_model(item) for item in model.prior_finding_verdicts)
+    return SemanticJudgment(model.conclusion, challenges, verdicts, dropped)
+
+
+def _separate_prior_verdicts(body: JsonValue) -> tuple[list[JsonValue], int]:
+    """Keep one well-formed ruling per earlier finding and count the rest, never failing.
+
+    A ruling is advisory about one earlier finding. A reply without the array (the 1.0.0 shape a
+    local model or prompt-only host may still return) carries no rulings, and a malformed or
+    surplus ruling is dropped and counted so the check can disclose it: neither may discard the
+    challenges beside it, and neither can ever become ``fixed``.
+
+    The contract is one ruling per ``finding_ref`` in ``review_packet.prior_finding_refs``. A
+    reply that rules per prior-finding row instead repeats a finding, so rulings are folded by
+    ``finding_id`` before the cap applies (issue #905): the first ruling on a finding stands,
+    each repeat is counted, and a repeat that disagrees turns the finding's ruling into
+    ``unassessable`` with no cited refs. Otherwise one finding's rows could exhaust the cap and
+    leave a later finding unruled.
+    """
+
+    if type(body) is not dict:
+        return [], 0
+    source = cast(dict[str, JsonValue], body)
+    if "prior_finding_verdicts" not in source:
+        return [], 0
+    raw = source["prior_finding_verdicts"]
+    if type(raw) is not list:
+        # A present ``null`` or non-array value is a malformed reply, not the older shape.
+        return [], 1
+    folded: dict[str, dict[str, JsonValue]] = {}
+    dropped = 0
+    for item in cast(list[JsonValue], raw):
+        try:
+            model = _PRIOR_VERDICT_ADAPTER.validate_python(item)
+        except ValidationError:
+            dropped += 1
+            continue
+        ruling = cast(dict[str, JsonValue], item)
+        earlier = folded.get(model.finding_id)
+        if earlier is None:
+            folded[model.finding_id] = ruling
+            continue
+        dropped += 1
+        if earlier["verdict"] != model.verdict:
+            folded[model.finding_id] = {**earlier, "verdict": "unassessable", "cited_refs": []}
+    kept: list[JsonValue] = list(folded.values())
+    dropped += max(0, len(kept) - MAX_PRIOR_FINDING_VERDICTS)
+    return kept[:MAX_PRIOR_FINDING_VERDICTS], dropped
 
 
 def normalize_response(

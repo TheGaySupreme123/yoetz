@@ -15,9 +15,12 @@ from yoetz.domain.findings import (
     FINDING_KIND_TRAITS,
     CandidateFinding,
     Finding,
+    FindingChallenge,
     FindingKind,
     FindingOrigin,
+    PriorFindingVerdictRecord,
     RankedFindings,
+    ResponseDisposition,
     SemanticProvenance,
     finding_from_json,
     finding_to_json,
@@ -32,6 +35,8 @@ from yoetz.domain.receipts import (
     SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
     SEMANTIC_CHALLENGES_REJECTED_GAP,
     SEMANTIC_PACKET_INSUFFICIENT_GAP,
+    SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP,
+    SEMANTIC_PRIOR_VERDICTS_UNSUPPORTED_GAP,
     SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
     SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP,
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
@@ -47,9 +52,11 @@ from yoetz.domain.values import (
     SemanticContinuation,
     claim_id,
     event_id,
+    evidence_id,
     finding_id,
     freeze_json,
     obligation_id,
+    result_id,
 )
 from yoetz.kernel.deterministic_checks import (
     DETERMINISTIC_TEXT_CONTRACT_DIGEST,
@@ -127,6 +134,7 @@ from yoetz.version import ENGINE_VERSION
 __all__ = [
     "SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM",
     "SEMANTIC_REJECTED_REF_OUTSIDE_CASE",
+    "SEMANTIC_REJECTED_SUBJECTS_OVER_LIMIT",
     "Application",
     "CheckScope",
     "FinalSemanticEvaluation",
@@ -178,6 +186,7 @@ _WORK_KINDS = frozenset(
 
 SEMANTIC_REJECTED_REF_OUTSIDE_CASE: Final = "ref_outside_case"
 SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM: Final = "hidden_source_claim"
+SEMANTIC_REJECTED_SUBJECTS_OVER_LIMIT: Final = "subject_refs_over_limit"
 
 
 class SemanticJudgmentRejected(ValueError):
@@ -209,6 +218,10 @@ class SemanticJudgmentReview:
     candidates: tuple[CandidateFinding, ...]
     challenges_returned: int
     rejected_by_reason: tuple[tuple[str, int], ...]
+    # Admitted per-finding rulings on earlier AI-powered findings (issue #905), and how many the
+    # reviewer returned that the fence dropped or reduced to ``unassessable``.
+    verdicts: tuple[PriorFindingVerdictRecord, ...] = ()
+    verdicts_unsupported: int = 0
 
     def __post_init__(self) -> None:
         if (
@@ -237,7 +250,11 @@ class SemanticJudgmentReview:
 
 
 _SEMANTIC_REJECTION_REASONS: Final = frozenset(
-    {SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM, SEMANTIC_REJECTED_REF_OUTSIDE_CASE}
+    {
+        SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM,
+        SEMANTIC_REJECTED_REF_OUTSIDE_CASE,
+        SEMANTIC_REJECTED_SUBJECTS_OVER_LIMIT,
+    }
 )
 _EMPTY_SEMANTIC_REVIEW: Final = SemanticJudgmentReview((), 0, ())
 
@@ -952,6 +969,10 @@ class FinalSemanticEvaluation:
     case_content_over_item_limit: bool = False
     case_reference_scope_reduced: bool = False
     case_content_gaps: tuple[str, ...] = ()
+    # The packet the reviewer was shown (issue #905): the earlier findings its prior-findings
+    # section carried and its citable refs. ``None`` when the evaluator did not report them.
+    case_prior_finding_refs: frozenset[str] | None = None
+    case_citable_refs: frozenset[str] | None = None
     # Set only on the nonterminal awaiting_human branch: what the caller must do to resume this
     # exact request. Every terminal outcome leaves it None. A one-use disclosure wait keeps its
     # job and attempt open; a missing standing repository grant stops before either exists.
@@ -969,6 +990,7 @@ class FinalSemanticEvaluation:
                 "content_unselected",
                 "content_redacted",
                 SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
+                SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP,
             }
         ):
             raise _invalid("semantic_judgment_invalid")
@@ -1664,6 +1686,8 @@ def allocate_findings(
                 candidate.subject_frontier,
                 candidate.coverage,
                 candidate.provenance,
+                candidate.challenge,
+                candidate.related_finding_ids,
             )
         )
     return tuple(output)
@@ -1774,26 +1798,49 @@ def _policy_identity(kind: FindingKind) -> tuple[str, str]:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _ResolvedChallengeRefs:
+    subject_refs: tuple[str, ...]
+    # The cited earlier (recorded) findings: the ``relates_to`` link the new finding records.
+    related_finding_ids: tuple[FindingId, ...]
+
+
 def _resolve_challenge_refs(
     case: DeterministicCase,
     deterministic: tuple[Finding, ...],
     challenge: ReviewerChallenge,
-) -> tuple[str, ...] | None:
+) -> _ResolvedChallengeRefs | None:
     """Resolve one challenge's citations to frozen subject refs, or ``None`` if any is outside.
 
     Every per-ref test below is byte-identical to the fence this replaced; only the disposition of
     a failure changed, from raising (which discarded the entire judgment, and with it the check)
     to returning ``None`` so the caller can drop this one challenge and count it.
+
+    A cited ``fnd_`` resolves to that finding's subjects. It is either one of this check's local
+    findings or a recorded finding the frozen case carries: ``citable_refs`` offers every recorded
+    finding id, and the prompt asks the reviewer to name the earlier finding a re-raise concerns,
+    so a challenge that does exactly that must not be dropped as outside the case (issue #905).
+    Cited recorded findings are kept as the new finding's ``relates_to`` link.
     """
 
     findings = {str(item.finding_id): item for item in deterministic}
     resolved: set[str] = set()
+    related: set[str] = set()
     for ref in challenge.cited_refs:
         if ref.startswith("fnd_"):
-            finding = findings.get(ref)
-            if finding is None:
+            local = findings.get(ref)
+            subjects = (
+                tuple(map(str, local.subject_refs))
+                if local is not None
+                else _recorded_finding_subjects(case, ref)
+            )
+            if subjects is None:
                 return None
-            resolved.update(map(str, finding.subject_refs))
+            resolved.update(subjects)
+            if finding_id(ref) in case.projection.findings:
+                # Only an already-recorded finding is linked: a fresh local finding of this check
+                # may still be ranked away and never recorded, and a link must never dangle.
+                related.add(ref)
         elif ref not in case.allowed_ids:
             return None
         elif ref.startswith(("evt_", "obl_", "clm_")):
@@ -1820,7 +1867,33 @@ def _resolve_challenge_refs(
             resolved.add(source)
     if not resolved:
         return None
-    return tuple(sorted(resolved, key=str.encode))
+    return _ResolvedChallengeRefs(
+        tuple(sorted(resolved, key=str.encode)),
+        tuple(finding_id(ref) for ref in sorted(related, key=str.encode)),
+    )
+
+
+# A finding names at most 64 subjects. Several cited findings can union past that; such a
+# challenge is dropped and counted rather than failing the whole check on the finding bound.
+_MAX_CHALLENGE_SUBJECT_REFS: Final = 64
+
+
+def _recorded_finding_subjects(case: DeterministicCase, ref: str) -> tuple[str, ...] | None:
+    """The subjects of a readable recorded finding inside the frozen case, else ``None``.
+
+    The finding id and each of its subjects must be inside the frozen fence, exactly as a
+    directly cited subject would have to be; an unreadable (redacted) finding proves nothing.
+    """
+
+    if ref not in case.allowed_ids:
+        return None
+    record = case.projection.findings.get(finding_id(ref))
+    if record is None or record.payload is None:
+        return None
+    subjects = tuple(str(item) for item in record.payload.subject_refs)
+    if any(item not in case.allowed_ids for item in subjects):
+        return None
+    return subjects
 
 
 def _claims_unchanged_over_hidden_source(
@@ -1837,6 +1910,111 @@ def _claims_unchanged_over_hidden_source(
         for ref in challenge.cited_refs
         if ref in case.coverage_by_ref
     )
+
+
+def _ruling_supported(
+    kind: str,
+    cited: tuple[str, ...],
+    finding_frontier: int,
+    finding: FindingId,
+    projection: ProjectionState,
+) -> bool:
+    """Whether the refs a ruling kept can carry what that ruling claims."""
+
+    if kind == "fixed":
+        for ref in cited:
+            row = (
+                projection.evidence.get(evidence_id(ref))
+                if ref.startswith("evd_")
+                else projection.results.get(result_id(ref))
+                if ref.startswith("res_")
+                else None
+            )
+            if (
+                row is not None
+                and row.payload is not None
+                and not row.redacted
+                and row.source_frontier > finding_frontier
+            ):
+                return True
+        return False
+    if kind in {"still_present", "answered_not_fixed"}:
+        return bool(cited)
+    if kind == "withdrawn":
+        response = projection.responses.get(finding)
+        return (
+            response is not None
+            and response.payload is not None
+            and response.payload.disposition is ResponseDisposition.REJECTED
+        )
+    return True
+
+
+def _admit_prior_verdicts(
+    case: DeterministicCase,
+    judgment: SemanticJudgment,
+    *,
+    prior_finding_refs: frozenset[str] | None,
+    citable_refs: frozenset[str] | None,
+) -> tuple[dict[str, PriorFindingVerdictRecord], int]:
+    """Fence the reviewer's per-finding rulings (issue #905).
+
+    A ruling is kept only for a readable, unresolved AI-powered finding inside the frozen fence;
+    one on such a finding the packet's prior-findings section did not carry
+    (``prior_finding_refs``, when the composing evaluator reported the packet) is kept as
+    ``unassessable``. Its cited refs are trimmed to what the packet offered
+    as citable. What a ruling may claim is bounded by what it still cites: ``fixed`` must cite
+    evidence or a result recorded after the finding (a hallucinated ``fixed`` must not close a
+    real defect), ``still_present`` and ``answered_not_fixed`` must cite something, and
+    ``withdrawn`` answers only a readable ``rejected`` response. A ruling that loses any cited ref
+    or fails its claim is kept as ``unassessable`` for that finding alone, so a bad ruling can
+    never leave its finding to close by silence; two different rulings on one finding become
+    ``unassessable``. Every dropped, trimmed, reduced or repeated ruling is counted.
+    """
+
+    admitted: dict[str, PriorFindingVerdictRecord] = {}
+    unsupported = judgment.prior_finding_verdicts_dropped
+    projection = case.projection
+    for verdict in judgment.prior_finding_verdicts:
+        key = verdict.finding_id
+        record = projection.findings.get(finding_id(key))
+        if (
+            key not in case.allowed_ids
+            or record is None
+            or record.payload is None
+            or record.redacted
+            or record.resolved_by_check_event_id is not None
+            or record.payload.origin is not FindingOrigin.SEMANTIC_MODEL_DERIVED
+        ):
+            unsupported += 1
+            continue
+        cited = tuple(
+            ref
+            for ref in verdict.cited_refs
+            if ref in case.allowed_ids and (citable_refs is None or ref in citable_refs)
+        )
+        kind: str = verdict.verdict
+        # A readable open finding the packet did not carry (past the section's row cap, or
+        # dropped by envelope bounding) was not shown to the reviewer: its ruling cannot stand,
+        # but an explicit ruling must not fall back to silence either, so it is unassessable.
+        shown = prior_finding_refs is None or key in prior_finding_refs
+        if (
+            not shown
+            or len(cited) != len(verdict.cited_refs)
+            or not _ruling_supported(
+                kind, cited, record.source_frontier, record.payload.finding_id, projection
+            )
+        ):
+            unsupported += 1
+            kind = "unassessable"
+        earlier = admitted.get(key)
+        if earlier is not None:
+            unsupported += 1
+            if earlier.verdict != kind:
+                admitted[key] = PriorFindingVerdictRecord(finding_id(key), "unassessable", ())
+            continue
+        admitted[key] = PriorFindingVerdictRecord(finding_id(key), kind, cited)
+    return admitted, unsupported
 
 
 def semantic_capture_baseline_gaps(result: FinalSemanticEvaluation) -> frozenset[str]:
@@ -1861,8 +2039,15 @@ def validate_semantic_judgment(
     *,
     expected_frontier: Frontier,
     capture_baseline_gaps: frozenset[str] = frozenset(),
+    prior_finding_refs: frozenset[str] | None = None,
+    citable_refs: frozenset[str] | None = None,
 ) -> SemanticJudgmentReview:
     """Fence AI-powered challenges to the exact frozen refs, coverage, and final provenance.
+
+    ``prior_finding_refs`` and ``citable_refs`` describe the packet the reviewer was actually
+    shown (its prior-findings rows and its ``citable_refs``); per-finding rulings are fenced to
+    them (issue #905). ``None`` means the composing evaluator did not report the packet, and the
+    frozen fence bounds them instead.
 
     ``capture_baseline_gaps`` are the closed native capture limits under which this review ran
     (issue #884). They are stamped onto every accepted challenge's coverage, so each semantic
@@ -1890,8 +2075,11 @@ def validate_semantic_judgment(
         or provenance.reason is not SemanticReason.SEMANTIC_COMPLETED
     ):
         raise _rejected("semantic_judgment_invalid")
+    admitted, verdicts_unsupported = _admit_prior_verdicts(
+        case, judgment, prior_finding_refs=prior_finding_refs, citable_refs=citable_refs
+    )
     if judgment.conclusion != "challenges_returned":
-        return SemanticJudgmentReview((), 0, ())
+        return SemanticJudgmentReview((), 0, (), _sorted_verdicts(admitted), verdicts_unsupported)
     coverage = case_coverage(case, semantic=True)
     if not capture_baseline_gaps <= SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS:
         raise _rejected("semantic_judgment_invalid")
@@ -1910,10 +2098,16 @@ def validate_semantic_judgment(
     candidates: list[CandidateFinding] = []
     rejections: dict[str, int] = {}
     for challenge in judgment.challenges:
-        refs = _resolve_challenge_refs(case, deterministic, challenge)
-        if refs is None:
+        resolution = _resolve_challenge_refs(case, deterministic, challenge)
+        if resolution is None:
             rejections[SEMANTIC_REJECTED_REF_OUTSIDE_CASE] = (
                 rejections.get(SEMANTIC_REJECTED_REF_OUTSIDE_CASE, 0) + 1
+            )
+            continue
+        refs = resolution.subject_refs
+        if len(refs) > _MAX_CHALLENGE_SUBJECT_REFS:
+            rejections[SEMANTIC_REJECTED_SUBJECTS_OVER_LIMIT] = (
+                rejections.get(SEMANTIC_REJECTED_SUBJECTS_OVER_LIMIT, 0) + 1
             )
             continue
         if _claims_unchanged_over_hidden_source(case, challenge):
@@ -1943,13 +2137,37 @@ def validate_semantic_judgment(
                 case.frontier,
                 coverage,
                 provenance,
+                # Persisted so a later review and the agent see what would settle the finding,
+                # not only its headline (issue #905).
+                FindingChallenge(
+                    discrepancy=challenge.discrepancy,
+                    alternative_interpretation=challenge.alternative_interpretation,
+                    requested_next_step=challenge.requested_next_step,
+                    uncertainty=challenge.uncertainty,
+                ),
+                resolution.related_finding_ids,
             )
         )
+    # A ruling of ``fixed`` on a finding an admitted challenge of the same review re-raises
+    # contradicts itself: neither half proves the issue gone.
+    contested = {str(ref) for candidate in candidates for ref in candidate.related_finding_ids}
+    for key in sorted(contested & set(admitted), key=str.encode):
+        if admitted[key].verdict == "fixed":
+            admitted[key] = PriorFindingVerdictRecord(finding_id(key), "unassessable", ())
+            verdicts_unsupported += 1
     return SemanticJudgmentReview(
         tuple(candidates),
         len(judgment.challenges),
         tuple(sorted(rejections.items(), key=lambda item: item[0].encode("ascii"))),
+        _sorted_verdicts(admitted),
+        verdicts_unsupported,
     )
+
+
+def _sorted_verdicts(
+    admitted: Mapping[str, PriorFindingVerdictRecord],
+) -> tuple[PriorFindingVerdictRecord, ...]:
+    return tuple(admitted[key] for key in sorted(admitted, key=str.encode))
 
 
 def _request_digest(
@@ -2401,6 +2619,8 @@ async def execute_check_commit(
                     semantic_result.provenance,
                     expected_frontier=frozen.case.frontier,
                     capture_baseline_gaps=semantic_capture_baseline_gaps(semantic_result),
+                    prior_finding_refs=semantic_result.case_prior_finding_refs,
+                    citable_refs=semantic_result.case_citable_refs,
                 )
             except SemanticJudgmentRejected as exc:
                 # The reviewer's answer is unusable, so the check has no AI-powered review result — but the
@@ -2455,6 +2675,9 @@ async def execute_check_commit(
         # carry. Saying so is what keeps a dropped challenge from reading as one never made.
         if review.challenges_rejected:
             declared_gaps.add(SEMANTIC_CHALLENGES_REJECTED_GAP)
+        # A per-finding ruling the fence dropped or reduced: disclosed, never read as agreement.
+        if review.verdicts_unsupported:
+            declared_gaps.add(SEMANTIC_PRIOR_VERDICTS_UNSUPPORTED_GAP)
         # Recorded prose the case could not carry whole. The reviewer answered on a fragment, and
         # the author has no other signal that the text they published never arrived (issue #177).
         declared_gaps.update(semantic_result.case_content_gaps)
@@ -2527,6 +2750,9 @@ async def execute_check_commit(
                 if semantic_result.status is SemanticStatus.SUCCEEDED
                 and semantic_result.judgment is not None
                 else None
+            ),
+            prior_finding_verdicts=(
+                review.verdicts if semantic_result.status is SemanticStatus.SUCCEEDED else ()
             ),
         )
         preview = _lineage_preview(lineage_evaluation, frozen.case.frontier)

@@ -1008,7 +1008,9 @@ Work-integrity finding kinds (`FindingKind`):
 `failed_work_omitted`, `claim_without_admissible_evidence`, `result_without_action`,
 `action_without_result`,
 `stale_evidence_for_changed_state`, `contradictory_claims_unresolved`,
-`ledger_stale_or_incomplete`, `weak_or_stale_response` (flags a hollow or stale rejection/waiver).
+`ledger_stale_or_incomplete`, `weak_or_stale_response` (flags a hollow or stale rejection/waiver
+of a local finding; an AI-powered finding is advisory, so rejecting one never mints it — the next
+review judges that rejection, issue #905).
 Research/evidence-assessment kinds: `evidence_does_not_support_claim`, `diff_does_not_match_account`,
 `material_limitation_omitted`, `questionable_finding_rejection` (flags a current hollow
 rejection/waiver of a local finding).
@@ -1178,7 +1180,11 @@ Four further codes describe a review that did run but could not deliver everythi
 
 - `semantic_review_context_withheld` — the review ran without categories its own profile selected;
 - `semantic_challenges_rejected` — the reviewer returned challenges and post-validation dropped at
-  least one (a citation outside the frozen case, or an unchanged-claim over a withheld source);
+  least one (a citation outside the frozen case, an unchanged-claim over a withheld source, or
+  citations whose resolved subjects exceed one finding's 64-subject bound). A cited `fnd_` from
+  `citable_refs` resolves to that finding's subjects whether it is one of this check's local
+  findings or a readable recorded finding inside the frozen fence, so a re-raise that names the
+  earlier finding it concerns is not dropped (issue #905);
 - `semantic_case_content_over_item_limit` — recorded text the publish-side prose bound accepted
   (`MAX_TEXT_BYTES`, 8192) exceeded what one case item carries (`MAX_REVIEW_TEXT_BYTES`, 4096), so
   the case shortened it or replaced the payload with a `yoetz.bounded-content-omission/1` marker.
@@ -1843,8 +1849,9 @@ AI-powered review absence/weakness codes
 semantic_relevance_review_not_run|optional_semantic_review_blocked_by_policy|
 optional_semantic_review_registration_drift|
 semantic_review_context_withheld|semantic_challenges_rejected|
-semantic_case_content_over_item_limit|semantic_case_finding_refs_over_limit`) plus the
-evidence-strength codes
+semantic_case_content_over_item_limit|semantic_case_finding_refs_over_limit|
+semantic_prior_findings_over_limit|semantic_prior_verdicts_unsupported`) plus the evidence-strength
+codes
 (`evidence_content_digest_only|evidence_content_withheld|evidence_digest_subject_legacy_unknown`)
 and the host-observation codes (`captured_object_unavailable|content_unselected|
 host_outcome_unavailable|unpaired_event`). Those host codes remain receipt coverage limitations;
@@ -1854,7 +1861,8 @@ pack re-fires the issue or returns its own coverage finding. The exception also 
 finding's original coverage to contain only the pre-existing AI-powered review, evidence, and
 host-observation tolerances and to have freshness outside
 `stale_after_material_change|redacted_gap|unknown`. For `semantic_model_derived` rows only the
-evidence-strength codes are tolerated, and the check must also record
+evidence-strength codes, `semantic_prior_findings_over_limit` and
+`semantic_prior_verdicts_unsupported` are tolerated, and the check must also record
 `succeeded/semantic_completed`. Outside the narrow command-gap partition described below, any
 other gap — redacted or unavailable payloads, redacted objects,
 missing refs, unknown events, completion scope, import range, or a code not in the list — blocks
@@ -3679,7 +3687,8 @@ replies through the existing `respond`/`publish_work` operations and rechecks.
 Provider generation and consumption share one owning wire model, `ProviderJudgmentModel` in
 `protocol/models.py` (with `ProviderChallengeModel`). The constrained- output JSON Schema sent to
 Responses/Chat Completions hosts is generated from that model (`JUDGMENT_JSON_SCHEMA` /
-`schemas/findings/provider-judgment-1.0.0.schema.json`); `normalize_judgment` validates through the
+`schemas/findings/provider-judgment-1.1.0.schema.json`, which supersedes the frozen 1.0.0 artifact
+by adding per-finding rulings); `normalize_judgment` validates through the
 same model before constructing domain `SemanticJudgment`/`ReviewerChallenge`. The schema expresses
 closed `FindingKind` and next-step enums, one-to-sixteen citable subject refs with prefix/pattern
 and uniqueness, non-empty byte-bounded prose (the provider schema conservatively caps Unicode code
@@ -7222,3 +7231,74 @@ with integer counts: `semantic_capture_parts_resolved`, `semantic_diff_parts_res
 `semantic_excerpt_bytes_selected`. Resolved parts have passed capture authentication; selected
 excerpts are in the built packet. These counts precede privacy minimization and do not prove
 provider delivery or code correctness. The record contains no content, paths, or content hashes.
+
+### Review dialogue record (issue #905)
+
+`finding_recorded` `1.3.0` (unreleased on the 0.3 line, extended in place) admits two optional
+review-dialogue fields on an AI-powered finding only: `challenge` (the reviewer's `discrepancy`,
+`alternative_interpretation`, `requested_next_step` and `uncertainty`, each bounded like the
+provider challenge) and `relates_to` (1–16 earlier recorded finding ids the challenge cited; never
+the finding's own id). Released versions never carry them. Local findings, and AI-powered findings
+without these fields, keep the bytes earlier 0.3 builds wrote, and those rows still validate, so
+old ledgers replay unchanged. The public `finding` object (check result, status, receipt) stays
+closed at 1.3.0 and carries the challenge only as `summary` and `detail`.
+`fixtures/canonical/review-dialogue-1.3.0.case.json` locks the rows with and without the fields.
+
+A cited `fnd_` in a challenge resolves to that finding's subjects when it is a local finding of
+the same check or a readable recorded finding inside the frozen fence; only already-recorded
+findings are kept as `relates_to`, so a link never names a finding that was ranked away.
+
+The review packet (`outbound-case` `1.2.0`) adds the `prior_finding` section,
+`review_packet.prior_finding_item_ids` (every row of the section, at most 56) and
+`review_packet.prior_finding_refs` (the ruling unit: each carried finding's `finding_ref` exactly
+once, newest first, at most 8, listed only while its structural row is carried). It carries the newest readable, unresolved AI-powered
+findings (at most 8, 48 KiB of item content, and only case capacity the other sections leave;
+outside the timeline's 64 rows, so hook rows never crowd it out). Under egress-envelope pressure its
+rows are removed first, oldest finding first, before any other bounding step, so the section never
+displaces work content; removed rows count in `catalog_dropped_count` and add
+`semantic_prior_findings_over_limit`. Each carried finding has one
+`yoetz.prior-finding/1` structural row per finding (kind, ids, recorded sequence, requested next
+step, `relates_to`, the latest response disposition, cited refs and recorded sequence, and the
+readable evidence/results recorded after the finding) plus, where the profile already sends
+finding prose, the summary, message, challenge fields and response reason as
+`finding_summary` rows. No new data category crosses egress. A finding recorded without
+challenge fields (by an earlier build) degrades to summary and message with a `not_recorded` omission. Findings the section cannot carry
+are `not_selected` omissions and add `semantic_prior_findings_over_limit` to coverage. That code
+is a selection gap, but of the dialogue view, not of the work under review: it stays on the receipt
+and is deliberately tolerated by both finding-resolution proof classes (unlike the selection gaps
+issue #904 classifies), because a partial dialogue view is no weaker than the review before the
+section existed. A finding recorded without challenge fields is disclosed through its structural row
+(`challenge_fields: not_recorded`) and a `not_recorded` omission rather than a coverage gap: its
+record is complete for its version, and nothing it lacks was lost.
+
+The provider judgment is `provider-judgment` `1.1.0`: every conclusion branch requires
+`prior_finding_verdicts` (0–8 of `{finding_id, verdict, cited_refs, note}`; `verdict` ∈
+`fixed|still_present|answered_not_fixed|unassessable|withdrawn`), for the Codex app-server,
+Responses and Chat Completions cells alike (the prompt-only Chat Completions shape names it too).
+The reviewer returns exactly one ruling per `finding_ref` in `review_packet.prior_finding_refs`,
+never one per prior-finding row; the shared instruction says so for every provider cell. The
+shared normalizer folds rulings by `finding_id` before applying the cap: the first ruling on a
+finding stands, each repeat counts as dropped, and a repeat with a different verdict makes that
+finding's ruling `unassessable` with no cited refs.
+A reply that omits the array (the 1.0.0 shape a local model or prompt-only host may still return)
+is read as carrying no rulings; a malformed or surplus ruling is dropped and counted instead of
+failing the judgment. Post-validation admits and bounds each ruling as ADR-006 describes, fenced to
+the prior-findings rows and `citable_refs` of the packet the reviewer was actually shown (a ruling
+on a readable open finding the packet did not carry is recorded as `unassessable`); admitted
+rulings are recorded as
+the optional `check_recorded` `1.3.0` field `prior_finding_verdicts` (`{finding_id, verdict,
+cited_refs}`, 1–8, ASCII-sorted by finding id, never the note; unreleased 1.3.0 extended in place),
+present only when at least one ruling was admitted, so a check without rulings keeps its bytes.
+`semantic_prior_verdicts_unsupported` discloses dropped or reduced rulings and, like
+`semantic_prior_findings_over_limit`, is tolerated by both proof classes. Tolerated means they never veto
+a ruled row: on a check carrying either code, a `semantic_model_derived` row the check recorded no
+ruling for gets the blocker `reviewer_assessment_incomplete`, because the review may not have
+seen it (section limit, envelope trimming, or a selection without the assessments section, which
+also adds `semantic_prior_findings_over_limit`) or its ruling may have been dropped. Such a row
+never resolves by silence on that check. For a
+`semantic_model_derived` row, a recorded `fixed` ruling on that row lifts the
+`insufficient_packet` veto and tolerates `semantic_packet_insufficient` for that row only;
+`withdrawn` keeps the ordinary rules (an assessable review that does not re-raise a rejected finding
+over changed state resolves it) and never lifts the veto; `still_present`, `answered_not_fixed` and
+`unassessable` add the blocker `reviewer_verdict_<verdict>`. The resolution explanation names a
+resolution that came from a `fixed` ruling.

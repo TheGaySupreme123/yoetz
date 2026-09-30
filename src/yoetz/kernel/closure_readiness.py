@@ -174,6 +174,8 @@ GAP_CLASSIFICATION: Final[Mapping[str, GapClass]] = MappingProxyType(
         "semantic_challenges_rejected": _S,  # reviewer output dropped by the validation fence
         "semantic_case_content_over_item_limit": _S,  # packet item bound (#907)
         "semantic_case_finding_refs_over_limit": _S,
+        "semantic_prior_findings_over_limit": _S,  # prior-findings packet bound (#905)
+        "semantic_prior_verdicts_unsupported": _S,  # reviewer rulings dropped by the fence (#905)
         "semantic_case_capacity_exceeded": _S,
         "semantic_reference_scope_reduced": _S,  # deliberate selection: bounded review scope (#904)
         "optional_semantic_review_blocked_by_policy": _S,

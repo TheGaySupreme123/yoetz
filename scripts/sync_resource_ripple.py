@@ -166,6 +166,7 @@ def _check(repo_root: Path) -> bool:
     return (
         _run(repo_root, "generate_project_policy_fixture.py", "--check")
         and _run(repo_root, "generate_check_conclusion_fixture.py", "--check")
+        and _run(repo_root, "generate_review_dialogue_fixture.py", "--check")
         and _run(repo_root, "generate_schemas.py", "--check")
         and _run(repo_root, "verify_resource_manifest.py", "--check")
         and _installed_manifest_agrees_with_schema(repo_root)
@@ -183,6 +184,7 @@ def _write_pass(repo_root: Path) -> bool:
     steps = (
         ("generate_project_policy_fixture.py", "--write"),
         ("generate_check_conclusion_fixture.py", "--write"),
+        ("generate_review_dialogue_fixture.py", "--write"),
         (
             "generate_schemas.py",
             "--write",

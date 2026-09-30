@@ -31,7 +31,9 @@ from yoetz.protocol.models import SemanticStatus
 
 _NOW = datetime(2026, 7, 25, tzinfo=UTC)
 _DIGEST = "sha256:" + "c" * 64
-_JUDGMENT = '{"conclusion":"no_material_discrepancy","reviewer_challenges":[]}'
+_JUDGMENT = (
+    '{"conclusion":"no_material_discrepancy","reviewer_challenges":[],"prior_finding_verdicts":[]}'
+)
 
 
 class _CaptureTransport(httpx.AsyncBaseTransport):

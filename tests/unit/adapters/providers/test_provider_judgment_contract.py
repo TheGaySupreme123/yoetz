@@ -22,6 +22,7 @@ from yoetz.adapters.providers.openai_responses import (
     CHALLENGE_FIELD_GLOSSARY,
     FINDING_KIND_GLOSSARY,
     JUDGMENT_JSON_SCHEMA,
+    VERDICT_FIELD_GLOSSARY,
     JudgmentValidationError,
     OpenAIProfile,
     build_judgment_json_schema,
@@ -54,7 +55,7 @@ from yoetz.protocol.models import (
 _NOW = datetime(2026, 7, 28, tzinfo=UTC)
 _DIGEST = "sha256:" + "c" * 64
 _REPO = Path(__file__).resolve().parents[4]
-_FROZEN_SCHEMA = _REPO / "schemas" / "findings" / "provider-judgment-1.0.0.schema.json"
+_FROZEN_SCHEMA = _REPO / "schemas" / "findings" / "provider-judgment-1.1.0.schema.json"
 
 _REF_A = "clm_20000000-0000-4000-8000-000000000001"
 _REF_B = "act_10000000-0000-4000-8000-000000000001"
@@ -86,6 +87,7 @@ def _judgment(
     return {
         "conclusion": conclusion,
         "reviewer_challenges": cast(list[JsonValue], [] if challenges is None else challenges),
+        "prior_finding_verdicts": [],
     }
 
 
@@ -172,7 +174,7 @@ def test_generated_schema_matches_owning_model_and_frozen_artifact() -> None:
     frozen_doc = cast(dict[str, Any], frozen)
     # Frozen catalog adds $id/$schema/root title; after dropping catalog chrome and nested titles,
     # the constrained-output body matches the runtime request schema byte-for-byte.
-    assert frozen_doc["$id"].endswith("provider-judgment-1.0.0.schema.json")
+    assert frozen_doc["$id"].endswith("provider-judgment-1.1.0.schema.json")
 
     def _strip_titles(node: object) -> object:
         # The catalog artifact keeps title/description chrome for human readers; the request
@@ -265,7 +267,7 @@ def test_request_schema_carries_no_docstring_commentary() -> None:
 
     assert _annotations(JUDGMENT_JSON_SCHEMA, "title") == []
 
-    curated = set(CHALLENGE_FIELD_GLOSSARY.values())
+    curated = set(CHALLENGE_FIELD_GLOSSARY.values()) | set(VERDICT_FIELD_GLOSSARY.values())
     descriptions = _annotations(JUDGMENT_JSON_SCHEMA, "description")
     assert descriptions
     assert set(descriptions) <= curated
@@ -428,7 +430,7 @@ def test_provider_model_and_normalize_share_rejection_surface() -> None:
         ("", SemanticFailureClass.RESPONSE_SCHEMA),
         ("```json\n{}\n```", SemanticFailureClass.RESPONSE_SCHEMA),
         (
-            'prefix {"conclusion":"no_material_discrepancy","reviewer_challenges":[]}',
+            'prefix {"conclusion":"no_material_discrepancy","reviewer_challenges":[],"prior_finding_verdicts":[]}',
             SemanticFailureClass.RESPONSE_SCHEMA,
         ),
         (
@@ -577,3 +579,144 @@ def test_rejected_judgments_carry_one_closed_validation_stage(
     assert info.value.stage == stage
     # Every stage token doubles as the ``judgment_<stage>`` runtime-evidence member.
     assert f"judgment_{stage}" in RUNTIME_FAILURE_STAGES
+
+
+def _ruling(**overrides: JsonValue) -> dict[str, JsonValue]:
+    return {
+        "finding_id": "fnd_866db2dd-0000-4000-8000-000000000001",
+        "verdict": "fixed",
+        "cited_refs": [_REF_C],
+        "note": "The regression result recorded after the finding shows distinct keys.",
+        **overrides,
+    }
+
+
+def test_a_reply_without_rulings_reads_as_the_1_0_0_shape_with_none() -> None:
+    """A local model or prompt-only host may still answer without the array (issue #905).
+
+    That is an explicit backward read: no rulings, so nothing can ever be ``fixed``; it must not
+    fail the whole review and discard its challenges.
+    """
+
+    legacy = {"conclusion": "challenges_returned", "reviewer_challenges": [_challenge()]}
+    for parsed in (legacy, {"judgment": legacy}):
+        judgment = normalize_judgment(cast(JsonValue, parsed))
+        assert len(judgment.challenges) == 1
+        assert judgment.prior_finding_verdicts == ()
+        assert judgment.prior_finding_verdicts_dropped == 0
+
+
+def test_a_malformed_or_surplus_ruling_is_dropped_and_counted_not_fatal() -> None:
+    malformed: list[JsonValue] = [
+        _ruling(finding_id="fnd_866db2dd"),
+        _ruling(verdict="resolved"),
+        _ruling(note=""),
+        "fixed",
+    ]
+    judgment = normalize_judgment(
+        cast(
+            JsonValue,
+            {
+                **_judgment("challenges_returned", [_challenge()]),
+                "prior_finding_verdicts": [_ruling(), *malformed],
+            },
+        )
+    )
+    assert len(judgment.challenges) == 1
+    assert [item.verdict for item in judgment.prior_finding_verdicts] == ["fixed"]
+    assert judgment.prior_finding_verdicts_dropped == len(malformed)
+
+    surplus = normalize_judgment(
+        cast(
+            JsonValue,
+            {
+                **_judgment(),
+                "prior_finding_verdicts": [
+                    _ruling(verdict="unassessable", finding_id=_finding(number))
+                    for number in range(1, 10)
+                ],
+            },
+        )
+    )
+    assert len(surplus.prior_finding_verdicts) == 8
+    assert surplus.prior_finding_verdicts_dropped == 1
+
+
+def _finding(number: int) -> str:
+    return f"fnd_866db2dd-0000-4000-8000-{number:012d}"
+
+
+def test_row_level_rulings_fold_to_one_per_finding_before_the_cap() -> None:
+    """A reply with one ruling per prior-finding row must not strand a later finding (#905).
+
+    Prose-bearing earlier findings carry several rows each. A provider that answers per row
+    returns more rulings than the eight-entry cap while naming only three findings; the rulings
+    are folded by ``finding_id`` first, so every finding keeps its ruling and each repeat is
+    counted.
+    """
+
+    rows: list[JsonValue] = [
+        *[_ruling(finding_id=_finding(3), verdict="still_present")] * 7,
+        *[_ruling(finding_id=_finding(2), verdict="answered_not_fixed")] * 7,
+        *[_ruling(finding_id=_finding(1), verdict="fixed")] * 3,
+    ]
+    judgment = normalize_judgment(cast(JsonValue, {**_judgment(), "prior_finding_verdicts": rows}))
+    assert [(item.finding_id, item.verdict) for item in judgment.prior_finding_verdicts] == [
+        (_finding(3), "still_present"),
+        (_finding(2), "answered_not_fixed"),
+        (_finding(1), "fixed"),
+    ]
+    assert judgment.prior_finding_verdicts_dropped == len(rows) - 3
+
+
+def test_conflicting_rulings_on_one_finding_fold_to_unassessable() -> None:
+    """Two different rulings on one finding settle nothing about it, and never become fixed."""
+
+    judgment = normalize_judgment(
+        cast(
+            JsonValue,
+            {
+                **_judgment(),
+                "prior_finding_verdicts": [
+                    _ruling(finding_id=_finding(1), verdict="fixed"),
+                    _ruling(finding_id=_finding(2), verdict="withdrawn", cited_refs=[]),
+                    _ruling(finding_id=_finding(1), verdict="still_present"),
+                ],
+            },
+        )
+    )
+    assert [
+        (item.finding_id, item.verdict, item.cited_refs) for item in judgment.prior_finding_verdicts
+    ] == [(_finding(1), "unassessable", ()), (_finding(2), "withdrawn", ())]
+    assert judgment.prior_finding_verdicts_dropped == 1
+
+
+def test_the_instruction_asks_for_exactly_one_ruling_per_listed_finding() -> None:
+    """Every provider shares the text that names the rulable list and the per-finding rule."""
+
+    from yoetz.adapters.providers.openai_responses import (
+        SEMANTIC_REVIEW_INSTRUCTION,
+        VERDICT_FIELD_GLOSSARY,
+    )
+
+    assert "review_packet.prior_finding_refs" in SEMANTIC_REVIEW_INSTRUCTION
+    assert "exactly one prior_finding_verdicts entry" in SEMANTIC_REVIEW_INSTRUCTION
+    assert "never one per row" in SEMANTIC_REVIEW_INSTRUCTION
+    assert "review_packet.prior_finding_refs" in VERDICT_FIELD_GLOSSARY["finding_id"]
+
+
+@pytest.mark.parametrize("value", [None, "fixed", {"finding_id": "fnd_866db2dd"}])
+def test_a_present_non_array_rulings_value_is_counted_not_read_as_the_1_0_0_shape(
+    value: JsonValue,
+) -> None:
+    """Only an absent key is the older shape; ``null`` or a non-array is a malformed reply."""
+
+    judgment = normalize_judgment(
+        cast(
+            JsonValue,
+            {**_judgment("challenges_returned", [_challenge()]), "prior_finding_verdicts": value},
+        )
+    )
+    assert len(judgment.challenges) == 1
+    assert judgment.prior_finding_verdicts == ()
+    assert judgment.prior_finding_verdicts_dropped == 1

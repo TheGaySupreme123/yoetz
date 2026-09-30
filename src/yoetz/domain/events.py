@@ -24,16 +24,19 @@ from yoetz.domain.coordination import (
 )
 from yoetz.domain.findings import (
     FINDING_KIND_TRAITS,
+    MAX_RECORDED_VERDICTS,
     CheckVerdict,
     Finding,
     FindingKind,
     FindingOrigin,
+    PriorFindingVerdictRecord,
     ResponseDisposition,
     SemanticDispatchKind,
     SemanticProvenance,
     WaiverScope,
-    finding_from_json,
-    finding_to_json,
+    finding_event_from_json,
+    finding_event_to_json,
+    finding_has_dialogue_fields,
     semantic_provenance_from_json,
     semantic_provenance_to_json,
 )
@@ -83,7 +86,7 @@ from yoetz.domain.values import (
     writer_id,
 )
 from yoetz.protocol.canonical import JsonValue as CanonicalJsonValue
-from yoetz.protocol.canonical import canonical_digest
+from yoetz.protocol.canonical import canonical_digest, ensure_canonical_set
 from yoetz.protocol.canonical import entry_digest as compute_entry_digest
 from yoetz.protocol.coverage import (
     ArtifactObservation,
@@ -231,9 +234,14 @@ EVIDENCE_SCHEMA_VERSIONS: Final = (
     EVIDENCE_SCHEMA_VERSION,
 )
 CLAIM_SCHEMA_VERSION: Final = "1.1.0"
+# 1.3.0 (unreleased on the 0.3 line) also carries the optional per-finding reviewer rulings of
+# issue #905; a check without rulings keeps its earlier 1.3.0 bytes.
 CHECK_EVENT_SCHEMA_VERSION: Final = "1.3.0"
 SEMANTIC_EVENT_SCHEMA_VERSION: Final = "1.2.0"
 SEMANTIC_EVENT_SCHEMA_VERSIONS: Final = ("1.1.0", SEMANTIC_EVENT_SCHEMA_VERSION)
+# 1.3.0 (unreleased on the 0.3 line) also admits the optional review-dialogue fields of issue #905
+# (the persisted challenge fields and the ``relates_to`` link) on AI-powered findings; a finding
+# without them keeps its earlier 1.3.0 bytes.
 FINDING_EVENT_SCHEMA_VERSION: Final = "1.3.0"
 COORDINATION_EVENT_SCHEMA_VERSION: Final = "1.0.0"
 SESSION_EVENT_SCHEMA_VERSION: Final = "1.1.0"
@@ -2209,6 +2217,8 @@ class CheckRecordedPayload:
     projection_version: str
     semantic_provenance: SemanticProvenance | None = None
     semantic_conclusion: str | None = None
+    # Admitted reviewer rulings on earlier AI-powered findings, ASCII-ascending by finding id.
+    prior_finding_verdicts: tuple[PriorFindingVerdictRecord, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "mode", _exact_enum(self.mode, CheckMode))
@@ -2283,6 +2293,15 @@ class CheckRecordedPayload:
             raise ProtocolValueError("invalid_event_value_type")
         if type(self.projection_version) is not str or self.projection_version != "yoetz/0.1.0":
             raise ProtocolValueError("invalid_event_value_type")
+        verdicts = self.prior_finding_verdicts
+        if (
+            type(verdicts) is not tuple
+            or len(verdicts) > MAX_RECORDED_VERDICTS
+            or any(type(item) is not PriorFindingVerdictRecord for item in verdicts)
+            or (verdicts and self.semantic_conclusion is None)
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+        ensure_canonical_set(tuple(str(item.finding_id) for item in verdicts))
 
 
 @dataclass(frozen=True, slots=True)
@@ -2999,7 +3018,7 @@ _PAYLOAD_SHAPES: Final[Mapping[str, tuple[frozenset[str], frozenset[str]]]] = Ma
                     "projection_version",
                 }
             ),
-            frozenset({"semantic_provenance", "semantic_conclusion"}),
+            frozenset({"semantic_provenance", "semantic_conclusion", "prior_finding_verdicts"}),
         ),
         "receipt_recorded": (
             frozenset(
@@ -3107,6 +3126,29 @@ _PAYLOAD_SHAPES: Final[Mapping[str, tuple[frozenset[str], frozenset[str]]]] = Ma
 )
 
 
+def _decode_prior_verdicts(value: JsonValue | None) -> tuple[PriorFindingVerdictRecord, ...]:
+    if value is None:
+        return ()
+    rows = _array(value)
+    if not rows:
+        raise ProtocolValueError("invalid_event_value_type")
+    verdicts: list[PriorFindingVerdictRecord] = []
+    for row in rows:
+        source = _closed_object(
+            row,
+            required=frozenset({"cited_refs", "finding_id", "verdict"}),
+            optional=frozenset(),
+        )
+        verdicts.append(
+            PriorFindingVerdictRecord(
+                finding_id=finding_id(_field(source, "finding_id")),
+                verdict=cast(str, _field(source, "verdict")),
+                cited_refs=cast(tuple[str, ...], tuple(_array(_field(source, "cited_refs")))),
+            )
+        )
+    return tuple(verdicts)
+
+
 def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
     """Decode one exact known schema pair into its immutable domain payload."""
 
@@ -3116,7 +3158,7 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
         raise ProtocolValueError("unknown_event_schema")
     frozen = freeze_json(payload)
     if schema.name == "finding_recorded":
-        finding = finding_from_json(frozen)
+        finding = finding_event_from_json(frozen)
         _validate_event_schema_payload(schema, finding)
         return finding
     required, optional = _PAYLOAD_SHAPES[schema.name]
@@ -3455,6 +3497,9 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
             engine_version=cast(str, _field(source, "engine_version")),
             projection_version=cast(str, _field(source, "projection_version")),
             semantic_conclusion=cast(str | None, _optional(source, "semantic_conclusion")),
+            prior_finding_verdicts=_decode_prior_verdicts(
+                _optional(source, "prior_finding_verdicts")
+            ),
             semantic_provenance=(
                 None
                 if provenance_value is None
@@ -3570,7 +3615,7 @@ def encode_payload(payload: EventPayload) -> JsonValue:
 
     payload_type = type(payload)
     if payload_type is Finding:
-        return finding_to_json(cast(Finding, payload))
+        return finding_event_to_json(cast(Finding, payload))
     if payload_type is ChildDependenciesRecordedPayload:
         value = cast(ChildDependenciesRecordedPayload, payload)
         return _json_object(
@@ -3941,6 +3986,18 @@ def encode_payload(payload: EventPayload) -> JsonValue:
             else semantic_provenance_to_json(value.semantic_provenance),
         )
         _optional_value(result, "semantic_conclusion", value.semantic_conclusion)
+        _optional_tuple(
+            result,
+            "prior_finding_verdicts",
+            tuple(
+                {
+                    "cited_refs": item.cited_refs,
+                    "finding_id": item.finding_id,
+                    "verdict": item.verdict,
+                }
+                for item in value.prior_finding_verdicts
+            ),
+        )
         return _json_object(result)
     if payload_type is ReceiptRecordedPayload:
         value = cast(ReceiptRecordedPayload, payload)
@@ -3995,6 +4052,9 @@ def _validate_event_schema_payload(
         if (payload.semantic_conclusion is not None) != (
             schema.version == CHECK_EVENT_SCHEMA_VERSION
         ):
+            raise ProtocolValueError("invalid_event_schema")
+    if type(payload) is Finding and schema.name == "finding_recorded":
+        if finding_has_dialogue_fields(payload) and schema.version != FINDING_EVENT_SCHEMA_VERSION:
             raise ProtocolValueError("invalid_event_schema")
     if schema.version == SCHEMA_VERSION:
         profile: RuntimeProfile | None = None

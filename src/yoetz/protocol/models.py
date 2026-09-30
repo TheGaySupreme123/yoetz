@@ -150,12 +150,15 @@ __all__ = [
     "RespondRequestModel",
     "RespondResult",
     "RespondResultModel",
+    "MAX_PRIOR_FINDING_VERDICTS",
+    "PriorFindingVerdictWire",
     "ProviderChallengeModel",
     "ProviderJudgmentChallengesModel",
     "ProviderJudgmentEnvelopeModel",
     "ProviderJudgmentInsufficientModel",
     "ProviderJudgmentModel",
     "ProviderJudgmentNoDiscrepancyModel",
+    "ProviderPriorFindingVerdictModel",
     "SEMANTIC_PROGRESS_PHASE_RANK",
     "SemanticProgressPhase",
     "SemanticReason",
@@ -1878,11 +1881,53 @@ class ProviderChallengeModel(_ClosedModel):
         return self
 
 
+# Issue #905: one ruling per earlier AI-powered finding the packet's prior-findings section
+# carries. ``withdrawn`` accepts the main agent's rejection; ``unassessable`` speaks only for its
+# own finding. The section carries at most eight findings.
+type PriorFindingVerdictWire = Literal[
+    "fixed",
+    "still_present",
+    "answered_not_fixed",
+    "unassessable",
+    "withdrawn",
+]
+MAX_PRIOR_FINDING_VERDICTS: Final = 8
+ProviderFindingIdWire = Annotated[
+    str,
+    Field(pattern=r"^fnd_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"),
+]
+
+
+class ProviderPriorFindingVerdictModel(_ClosedModel):
+    """The reviewer's ruling on one earlier finding, independent of the packet conclusion."""
+
+    finding_id: ProviderFindingIdWire
+    verdict: PriorFindingVerdictWire
+    cited_refs: Annotated[
+        tuple[SubjectIdWire, ...],
+        Field(min_length=0, max_length=16, json_schema_extra={"uniqueItems": True}),
+    ]
+    note: ProviderReviewTextWire
+
+    @model_validator(mode="after")
+    def _validate_verdict_invariants(self) -> ProviderPriorFindingVerdictModel:
+        _require_unique(self.cited_refs, limit=16)
+        _require_review_text_utf8_bytes(self.note)
+        return self
+
+
+PriorFindingVerdictsWire = Annotated[
+    tuple[ProviderPriorFindingVerdictModel, ...],
+    Field(min_length=0, max_length=MAX_PRIOR_FINDING_VERDICTS),
+]
+
+
 class ProviderJudgmentNoDiscrepancyModel(_ClosedModel):
     conclusion: Literal["no_material_discrepancy"]
     reviewer_challenges: Annotated[
         tuple[ProviderChallengeModel, ...], Field(min_length=0, max_length=0)
     ]
+    prior_finding_verdicts: PriorFindingVerdictsWire
 
 
 class ProviderJudgmentChallengesModel(_ClosedModel):
@@ -1891,6 +1936,7 @@ class ProviderJudgmentChallengesModel(_ClosedModel):
         tuple[ProviderChallengeModel, ...],
         Field(min_length=1, max_length=MAX_REVIEW_CHALLENGES),
     ]
+    prior_finding_verdicts: PriorFindingVerdictsWire
 
 
 class ProviderJudgmentInsufficientModel(_ClosedModel):
@@ -1898,6 +1944,9 @@ class ProviderJudgmentInsufficientModel(_ClosedModel):
     reviewer_challenges: Annotated[
         tuple[ProviderChallengeModel, ...], Field(min_length=0, max_length=0)
     ]
+    # A whole-packet ``insufficient_packet`` may still rule on individual earlier findings the
+    # reviewer could judge (issue #905); it vetoes only those it leaves without a verdict.
+    prior_finding_verdicts: PriorFindingVerdictsWire
 
 
 type ProviderJudgmentModel = (

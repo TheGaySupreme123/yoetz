@@ -1281,6 +1281,8 @@ def _check_result_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
 
 
 def _check_recorded_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    from yoetz.domain.findings import MAX_RECORDED_VERDICTS, PRIOR_FINDING_VERDICTS
+
     document = _simple_versioned_schema(entry, "events/check-recorded-1.2.0.schema.json", {})
     properties = cast(dict[str, JsonValue], document["properties"])
     properties["semantic_conclusion"] = {
@@ -1289,6 +1291,44 @@ def _check_recorded_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     }
     cast(list[JsonValue], document["required"]).append("semantic_conclusion")
     properties["semantic_status"] = {"const": "succeeded", "type": "string"}
+    # Issue #905: the reviewer's admitted per-finding rulings, optional so every check written by
+    # an earlier 0.3 build (and every check without rulings) keeps validating byte for byte.
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+    returned = cast(dict[str, JsonValue], properties["returned_finding_ids"])
+    finding_ref = cast(dict[str, JsonValue], returned["items"])
+    definitions["prior_finding_verdict"] = cast(
+        JsonValue,
+        {
+            "additionalProperties": False,
+            "properties": {
+                "cited_refs": {
+                    "items": {
+                        "pattern": (
+                            "^(act|clm|evd|evt|fnd|obl|res)_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}"
+                            "-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                        ),
+                        "type": "string",
+                    },
+                    "maxItems": 16,
+                    "type": "array",
+                    "uniqueItems": True,
+                },
+                "finding_id": dict(finding_ref),
+                "verdict": {
+                    "enum": sorted(PRIOR_FINDING_VERDICTS, key=str.encode),
+                    "type": "string",
+                },
+            },
+            "required": ["cited_refs", "finding_id", "verdict"],
+            "type": "object",
+        },
+    )
+    properties["prior_finding_verdicts"] = {
+        "items": {"$ref": "#/$defs/prior_finding_verdict"},
+        "maxItems": MAX_RECORDED_VERDICTS,
+        "minItems": 1,
+        "type": "array",
+    }
     return document
 
 
@@ -1422,6 +1462,95 @@ def _finding_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         branches.append(priority)
     document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
     document["title"] = f"Yoetz finding {entry.schema_version}"
+    return document
+
+
+def _provider_judgment_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Freeze the exact constrained-output schema every provider cell sends (issue #905).
+
+    The runtime request schema is the owning source: it renames the provider kind alias to the
+    frozen ``FindingKindWire`` anchor and carries the curated reviewer glossary. Version 1.1.0
+    adds the required per-finding ``prior_finding_verdicts`` array to every conclusion branch.
+    """
+
+    from yoetz.adapters.providers.openai_responses import build_judgment_json_schema
+
+    document = cast(dict[str, JsonValue], dict(build_judgment_json_schema()))
+    ordered: dict[str, JsonValue] = {
+        "$id": SCHEMA_NAMESPACE + entry.relative_path,
+        "$schema": _DRAFT_2020_12,
+    }
+    ordered.update(document)
+    ordered["title"] = entry.schema_name
+    return ordered
+
+
+def _finding_recorded_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """The finding event payload: the public finding plus the optional review-dialogue fields.
+
+    The public ``finding`` object stays closed at 1.3.0. The (unreleased) 1.3.0 event payload is
+    that object plus the optional closed ``challenge`` record and the ``relates_to`` link (issue
+    #905); only an AI-powered finding may carry them, and a finding without them keeps its earlier
+    bytes, so every row written by an earlier 0.3 build still validates.
+    """
+
+    from yoetz.domain.findings import MAX_RELATED_FINDING_IDS, REVIEWER_NEXT_STEPS
+    from yoetz.protocol.models import MAX_REVIEW_TEXT_BYTES
+
+    document = _load_versioned_template(entry, "findings/finding-1.3.0.schema.json")
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+    properties = cast(dict[str, JsonValue], document["properties"])
+    # Code points never exceed UTF-8 bytes, so this admits every byte-bounded domain value.
+    review_text: dict[str, JsonValue] = {
+        "maxLength": MAX_REVIEW_TEXT_BYTES,
+        "minLength": 1,
+        "type": "string",
+    }
+    definitions["review_text"] = review_text
+    definitions["finding_challenge"] = cast(
+        JsonValue,
+        {
+            "additionalProperties": False,
+            "properties": {
+                "alternative_interpretation": {"$ref": "#/$defs/review_text"},
+                "discrepancy": {"$ref": "#/$defs/review_text"},
+                "requested_next_step": {
+                    "enum": sorted(REVIEWER_NEXT_STEPS, key=str.encode),
+                    "type": "string",
+                },
+                "uncertainty": {"$ref": "#/$defs/review_text"},
+            },
+            "required": [
+                "discrepancy",
+                "alternative_interpretation",
+                "requested_next_step",
+                "uncertainty",
+            ],
+            "type": "object",
+        },
+    )
+    properties["challenge"] = {"$ref": "#/$defs/finding_challenge"}
+    properties["relates_to"] = {
+        "items": {"$ref": "#/$defs/finding_id"},
+        "maxItems": MAX_RELATED_FINDING_IDS,
+        "minItems": 1,
+        "type": "array",
+        "uniqueItems": True,
+    }
+    all_of = cast(list[JsonValue], document["allOf"])
+    all_of.append(
+        {
+            "if": {
+                "anyOf": [{"required": ["challenge"]}, {"required": ["relates_to"]}],
+            },
+            "then": {
+                "properties": {"origin": {"const": "semantic_model_derived"}},
+                "required": ["origin"],
+            },
+        }
+    )
+    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    document["title"] = f"Yoetz finding recorded {entry.schema_version}"
     return document
 
 
@@ -3454,6 +3583,58 @@ def _outbound_case_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         "import_observed",
         "observation_captured",
     ]
+    return document
+
+
+def _outbound_case_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Add the prior-findings review section to outbound-case v1.2 (issue #905).
+
+    The section carries earlier AI-powered findings and the agent's answers under the existing
+    finding categories, so no new data category crosses egress; only the section name, the
+    packet's id list and its one-entry-per-finding rulable list are new.
+    """
+
+    from yoetz.ports.semantic import MAX_PRIOR_FINDING_ITEMS, MAX_PRIOR_FINDING_REFS
+
+    document = _load_versioned_template(entry, "privacy/outbound-case-1.1.0.schema.json")
+    try:
+        definitions = cast(dict[str, JsonValue], document["$defs"])
+        item = cast(dict[str, JsonValue], definitions["content_item"])
+        item_properties = cast(dict[str, JsonValue], item["properties"])
+        section = cast(dict[str, JsonValue], item_properties["section"])
+        sections = cast(list[JsonValue], section["enum"])
+        packet = cast(dict[str, JsonValue], definitions["review_packet"])
+        packet_properties = cast(dict[str, JsonValue], packet["properties"])
+        packet_required = cast(list[JsonValue], packet["required"])
+        properties = cast(dict[str, JsonValue], document["properties"])
+    except (KeyError, TypeError) as exc:
+        raise SchemaGenerationError(
+            "outbound_case_schema_template_invalid", entries=(entry.relative_path,)
+        ) from exc
+    if "prior_finding" not in sections:
+        sections.append("prior_finding")
+        sections.sort(key=lambda value: str(value).encode("ascii"))
+    packet_properties["prior_finding_item_ids"] = {
+        "items": {"$ref": "#/$defs/item_id"},
+        "maxItems": MAX_PRIOR_FINDING_ITEMS,
+        "minItems": 0,
+        "type": "array",
+        "uniqueItems": True,
+    }
+    if "prior_finding_item_ids" not in packet_required:
+        packet_required.append("prior_finding_item_ids")
+    # The rulable list: each carried earlier finding once, however many rows it has.
+    packet_properties["prior_finding_refs"] = {
+        "items": {"$ref": "#/$defs/finding_id"},
+        "maxItems": MAX_PRIOR_FINDING_REFS,
+        "minItems": 0,
+        "type": "array",
+        "uniqueItems": True,
+    }
+    if "prior_finding_refs" not in packet_required:
+        packet_required.append("prior_finding_refs")
+    properties["schema_version"] = {"const": entry.schema_version}
+    document["title"] = f"Yoetz outbound case {entry.schema_version}"
     return document
 
 
@@ -6264,6 +6445,18 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         ),
     ),
     _RegistryEntry(
+        "findings/provider-judgment-1.1.0.schema.json",
+        "provider-judgment",
+        "1.1.0",
+        "request_result",
+        "provider-judgment",
+        lambda: (
+            __import__(
+                "yoetz.protocol.models", fromlist=["ProviderJudgmentEnvelopeModel"]
+            ).ProviderJudgmentEnvelopeModel
+        ),
+    ),
+    _RegistryEntry(
         "operations/check-request-1.0.0.schema.json",
         "check-request",
         "1.0.0",
@@ -6597,6 +6790,18 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "privacy/outbound-case-1.1.0.schema.json",
         "outbound-case",
         "1.1.0",
+        "request_result",
+        "outbound-case",
+        lambda: (
+            __import__(
+                "yoetz.domain.privacy", fromlist=["ApprovedOutboundCase"]
+            ).ApprovedOutboundCase
+        ),
+    ),
+    _RegistryEntry(
+        "privacy/outbound-case-1.2.0.schema.json",
+        "outbound-case",
+        "1.2.0",
         "request_result",
         "outbound-case",
         lambda: (
@@ -7173,6 +7378,7 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
 _BUILDER_OWNED_SCHEMA_PATHS: Final[frozenset[str]] = frozenset(
     {
         "events/check-recorded-1.3.0.schema.json",
+        "findings/provider-judgment-1.1.0.schema.json",
         "consent/status-7.0.0.schema.json",
         "consent/review-result-7.0.0.schema.json",
         "consent/prepare-result-7.0.0.schema.json",
@@ -7194,6 +7400,7 @@ _BUILDER_OWNED_SCHEMA_PATHS: Final[frozenset[str]] = frozenset(
         "events/event-draft-1.2.0.schema.json",
         "events/finding-recorded-1.3.0.schema.json",
         "events/opaque-unknown-event-draft-1.2.0.schema.json",
+        "privacy/outbound-case-1.2.0.schema.json",
         "events/session-opened-1.2.0.schema.json",
         "events/work-abandoned-1.0.0.schema.json",
         "events/work-cancelled-1.0.0.schema.json",
@@ -7463,6 +7670,8 @@ def build_schema_documents(
             normalized = _check_recorded_v1_1_schema(entry)
         elif entry.relative_path == "events/check-recorded-1.3.0.schema.json":
             normalized = _check_recorded_v1_3_schema(entry)
+        elif entry.relative_path == "findings/provider-judgment-1.1.0.schema.json":
+            normalized = _provider_judgment_v1_1_schema(entry)
         elif entry.relative_path == "events/check-recorded-1.2.0.schema.json":
             normalized = _simple_versioned_schema(
                 entry,
@@ -7476,11 +7685,7 @@ def build_schema_documents(
                 {"finding-1.0.0": "finding-1.1.0"},
             )
         elif entry.relative_path == "events/finding-recorded-1.3.0.schema.json":
-            normalized = _simple_versioned_schema(
-                entry,
-                "events/finding-recorded-1.2.0.schema.json",
-                {"finding-1.2.0": "finding-1.3.0"},
-            )
+            normalized = _finding_recorded_v1_3_schema(entry)
         elif entry.relative_path in {
             "events/evidence-recorded-1.1.0.schema.json",
             "events/evidence-recorded-1.2.0.schema.json",
@@ -7639,6 +7844,8 @@ def build_schema_documents(
             normalized = _privacy_policy_v1_1_schema(entry)
         elif entry.relative_path == "privacy/outbound-case-1.1.0.schema.json":
             normalized = _outbound_case_schema(entry)
+        elif entry.relative_path == "privacy/outbound-case-1.2.0.schema.json":
+            normalized = _outbound_case_v1_2_schema(entry)
         else:
             try:
                 python_type = entry.loader()

@@ -69,7 +69,13 @@ if TYPE_CHECKING:
     )
 
 __all__ = [
+    "MAX_PRIOR_FINDING_ITEMS",
+    "MAX_PRIOR_FINDING_REFS",
+    "MAX_SEMANTIC_CASE_ITEMS",
     "MAX_SEMANTIC_ITEM_SUBJECT_REFS",
+    "PRIOR_FINDING_VERDICT_KINDS",
+    "PriorFindingVerdict",
+    "PriorFindingVerdictKind",
     "ChangeObservation",
     "Deadline",
     "ExcerptDigestProvenance",
@@ -104,6 +110,7 @@ type SemanticCaseSection = Literal[
     "obligation",
     "claim",
     "decision",
+    "prior_finding",
     "timeline",
     "deterministic_summary",
     "deterministic_detail",
@@ -160,6 +167,12 @@ _MAX_SUBJECT_REFS: Final = 16
 MAX_SEMANTIC_ITEM_SUBJECT_REFS: Final = _MAX_SUBJECT_REFS
 _MAX_INTERNAL_SUBJECT_REFS: Final = 64
 _MAX_CASE_ITEMS: Final = 256
+MAX_SEMANTIC_CASE_ITEMS: Final = _MAX_CASE_ITEMS
+# The prior-findings section (issue #905): at most eight earlier AI-powered findings, each one
+# structural row plus up to six prose rows (summary, message, three challenge fields, response).
+MAX_PRIOR_FINDING_ITEMS: Final = 56
+# The rulable list: one entry per carried earlier finding, never one per row (issue #905).
+MAX_PRIOR_FINDING_REFS: Final = 8
 _OPAQUE_REF_PATTERN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$", re.ASCII)
 _IDENTITY_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9._-]*$", re.ASCII)
 _MODEL_IDENTITY_PATTERN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$", re.ASCII)
@@ -181,6 +194,7 @@ _SECTIONS: Final = frozenset(
         "obligation",
         "claim",
         "decision",
+        "prior_finding",
         "timeline",
         "deterministic_summary",
         "deterministic_detail",
@@ -195,6 +209,9 @@ _SECTION_ORDINAL: Final = {
             "obligation",
             "claim",
             "decision",
+            # Ahead of the timeline: envelope bounding drops catalog rows from the tail, and the
+            # dialogue record must never be crowded out by hook rows (issue #905).
+            "prior_finding",
             "timeline",
             "deterministic_summary",
             "deterministic_detail",
@@ -914,11 +931,32 @@ class ReviewPacket:
     coverage: Coverage
     targeted_excerpts: tuple[TargetedExcerptRef, ...]
     omissions: tuple[ReviewOmission, ...]
+    # Earlier AI-powered findings with the agent's answers, outside the timeline (issue #905).
+    prior_finding_item_ids: tuple[str, ...] = ()
+    # The rulable list: each carried earlier finding once, newest first. A finding contributes a
+    # structural row and, under a prose profile, several prose rows; the reviewer rules once per
+    # entry here, never once per row, so the eight-ruling cap always covers every finding.
+    prior_finding_refs: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self, "goal_item_ids", _validated_item_ids(self.goal_item_ids, maximum=4)
         )
+        object.__setattr__(
+            self,
+            "prior_finding_item_ids",
+            _validated_item_ids(self.prior_finding_item_ids, maximum=MAX_PRIOR_FINDING_ITEMS),
+        )
+        refs = self.prior_finding_refs
+        if type(refs) is not tuple or len(refs) > MAX_PRIOR_FINDING_REFS:
+            raise _invalid_case()
+        canonical_refs = tuple(
+            str(_snapshot_finding_id(item, error=_invalid_case()))
+            for item in cast(tuple[object, ...], refs)
+        )
+        if len(canonical_refs) != len(set(canonical_refs)):
+            raise _invalid_case()
+        object.__setattr__(self, "prior_finding_refs", canonical_refs)
         object.__setattr__(
             self,
             "obligation_item_ids",
@@ -995,6 +1033,7 @@ class ReviewPacket:
             *self.obligation_item_ids,
             *self.claim_item_ids,
             *self.decision_item_ids,
+            *self.prior_finding_item_ids,
             *self.timeline_item_ids,
         ]
         for assessment in self.deterministic_assessments:
@@ -1096,6 +1135,7 @@ class SemanticCase:
             (packet.obligation_item_ids, "obligation"),
             (packet.claim_item_ids, "claim"),
             (packet.decision_item_ids, "decision"),
+            (packet.prior_finding_item_ids, "prior_finding"),
             (packet.timeline_item_ids, "timeline"),
         )
         for ids, section in expected_sections:
@@ -1103,6 +1143,18 @@ class SemanticCase:
                 item = item_by_id.get(item_id)
                 if item is None or item.section != section:
                     raise _invalid_case()
+        # Each rulable earlier finding is exactly one carried finding, in section order, and its
+        # structural row is the one the ref names; every prior-finding row belongs to one of them.
+        structural = tuple(
+            item.source_ref
+            for item_id in packet.prior_finding_item_ids
+            if (item := item_by_id[item_id]).item_id == f"prior-finding-{item.source_ref}"
+        )
+        if packet.prior_finding_refs != structural or any(
+            item_by_id[item_id].source_ref not in structural
+            for item_id in packet.prior_finding_item_ids
+        ):
+            raise _invalid_case()
         for assessment in packet.deterministic_assessments:
             if (
                 assessment.finding_ref not in local_refs
@@ -1153,6 +1205,7 @@ class SemanticCase:
             *packet.obligation_item_ids,
             *packet.claim_item_ids,
             *packet.decision_item_ids,
+            *packet.prior_finding_item_ids,
             *packet.timeline_item_ids,
             *(item.excerpt_item_id for item in packet.targeted_excerpts),
         }
@@ -1222,10 +1275,53 @@ class ReviewerChallenge:
             raise _invalid_judgment()
 
 
+type PriorFindingVerdictKind = Literal[
+    "fixed", "still_present", "answered_not_fixed", "unassessable", "withdrawn"
+]
+PRIOR_FINDING_VERDICT_KINDS: Final = frozenset(
+    {"fixed", "still_present", "answered_not_fixed", "unassessable", "withdrawn"}
+)
+_MAX_PRIOR_FINDING_VERDICTS: Final = 8
+
+
+@dataclass(frozen=True, slots=True)
+class PriorFindingVerdict:
+    """The reviewer's ruling on one earlier finding (issue #905), before post-validation.
+
+    The reviewer's free-text note is advisory reasoning for this turn only; it is never recorded.
+    """
+
+    finding_id: str
+    verdict: PriorFindingVerdictKind
+    cited_refs: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "finding_id", _snapshot_finding_id(self.finding_id, error=_invalid_judgment())
+        )
+        if type(self.verdict) is not str or self.verdict not in PRIOR_FINDING_VERDICT_KINDS:
+            raise _invalid_judgment()
+        object.__setattr__(
+            self,
+            "cited_refs",
+            _validated_ref_tuple(
+                self.cited_refs,
+                minimum=0,
+                maximum=_MAX_SUBJECT_REFS,
+                public_only=False,
+                error=_invalid_judgment(),
+                canonicalize=True,
+            ),
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class SemanticJudgment:
     conclusion: SemanticConclusion
     challenges: tuple[ReviewerChallenge, ...]
+    prior_finding_verdicts: tuple[PriorFindingVerdict, ...] = ()
+    # Rulings the reviewer returned that were malformed or over the cap and so were never read.
+    prior_finding_verdicts_dropped: int = 0
 
     def __post_init__(self) -> None:
         if type(self.conclusion) is not str or self.conclusion not in _CONCLUSIONS:
@@ -1238,6 +1334,16 @@ class SemanticJudgment:
             if not self.challenges:
                 raise _invalid_judgment()
         elif self.challenges:
+            raise _invalid_judgment()
+        verdicts = self.prior_finding_verdicts
+        if (
+            type(verdicts) is not tuple
+            or len(verdicts) > _MAX_PRIOR_FINDING_VERDICTS
+            or any(type(item) is not PriorFindingVerdict for item in verdicts)
+        ):
+            raise _invalid_judgment()
+        dropped = self.prior_finding_verdicts_dropped
+        if type(dropped) is not int or not 0 <= dropped <= _MAX_SAFE_INTEGER:
             raise _invalid_judgment()
 
 

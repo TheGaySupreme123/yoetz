@@ -145,7 +145,9 @@ from yoetz.application.semantic_case import (
     MAX_CAPTURED_SEMANTIC_INPUT_BYTES,
     LineageSemanticCapacityExceeded,
     SemanticCaseTooLarge,
+    SemanticPacketView,
     build_semantic_case,
+    semantic_case_packet_view,
     semantic_case_to_candidate_context,
 )
 from yoetz.application.semantic_content import resolve_captured_semantic_content
@@ -209,6 +211,7 @@ from yoetz.domain.privacy import (
 from yoetz.domain.receipts import (
     SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
     SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
+    SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP,
     PolicyVersionEntry,
     ReceiptVersionSlice,
     SchemaVersionEntry,
@@ -3445,6 +3448,17 @@ async def _publish_semantic_case_object(
     return await runtime.objects.finalize(staged)
 
 
+def _packet_view_gaps(view: SemanticPacketView) -> frozenset[str]:
+    """Gaps the packet the reviewer was shown adds to the check (issue #905).
+
+    Prior-finding rows envelope bounding removed are disclosed like any other cut.
+    """
+
+    if view.prior_findings_trimmed:
+        return frozenset({SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP})
+    return frozenset()
+
+
 def _judgment_to_response_json(judgment: object) -> dict[str, CanonicalJsonValue]:
     """Encode a SemanticJudgment into the durable SEMANTIC_RESPONSE wire object."""
 
@@ -3468,10 +3482,23 @@ def _judgment_to_response_json(judgment: object) -> dict[str, CanonicalJsonValue
                 "uncertainty": item.uncertainty,
             }
         )
-    return {
+    result: dict[str, CanonicalJsonValue] = {
         "conclusion": judgment.conclusion,
         "reviewer_challenges": challenges,
     }
+    # Emitted only when present, so a judgment without verdicts keeps its earlier stored bytes.
+    if judgment.prior_finding_verdicts:
+        result["prior_finding_verdicts"] = [
+            {
+                "cited_refs": list(item.cited_refs),
+                "finding_id": item.finding_id,
+                "verdict": item.verdict,
+            }
+            for item in judgment.prior_finding_verdicts
+        ]
+    if judgment.prior_finding_verdicts_dropped:
+        result["prior_finding_verdicts_dropped"] = judgment.prior_finding_verdicts_dropped
+    return result
 
 
 def _judgment_from_response_json(value: object) -> object:
@@ -3479,6 +3506,8 @@ def _judgment_from_response_json(value: object) -> object:
 
     from yoetz.domain.findings import FindingKind
     from yoetz.ports.semantic import (
+        PriorFindingVerdict,
+        PriorFindingVerdictKind,
         ReviewerChallenge,
         ReviewerNextStep,
         SemanticConclusion,
@@ -3528,7 +3557,37 @@ def _judgment_from_response_json(value: object) -> object:
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("semantic_response_judgment_invalid") from exc
-    return SemanticJudgment(cast(SemanticConclusion, conclusion_raw), tuple(challenges))
+    raw_verdicts = source.get("prior_finding_verdicts", [])
+    if type(raw_verdicts) is not list:
+        raise ValueError("semantic_response_judgment_invalid")
+    verdicts: list[PriorFindingVerdict] = []
+    for item in cast(list[object], raw_verdicts):
+        if type(item) is not dict:
+            raise ValueError("semantic_response_judgment_invalid")
+        row = cast(dict[str, object], item)
+        cited = row.get("cited_refs")
+        if type(cited) is not list:
+            raise ValueError("semantic_response_judgment_invalid")
+        try:
+            verdicts.append(
+                PriorFindingVerdict(
+                    cast(str, row["finding_id"]),
+                    cast(PriorFindingVerdictKind, row["verdict"]),
+                    tuple(cast(list[str], cited)),
+                )
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("semantic_response_judgment_invalid") from exc
+    dropped = source.get("prior_finding_verdicts_dropped", 0)
+    try:
+        return SemanticJudgment(
+            cast(SemanticConclusion, conclusion_raw),
+            tuple(challenges),
+            tuple(verdicts),
+            cast(int, dropped),
+        )
+    except ValueError as exc:
+        raise ValueError("semantic_response_judgment_invalid") from exc
 
 
 async def _publish_semantic_response_object(
@@ -4353,9 +4412,16 @@ def _privacy_gated_semantic_evaluator(
             # The builder folds the gap into the packet coverage the reviewer sees; the check
             # result is a separate coverage fold, so carry the fact rather than re-deriving it.
             reference_scope_reduced = semantic_case.omitted_reference_count > 0
+            # What the reviewer is shown bounds what its per-finding rulings may speak for, and
+            # prior-finding rows envelope bounding removed are disclosed like any other cut.
+            packet_view = semantic_case_packet_view(semantic_case)
+            packet_prior_refs = packet_view.prior_finding_refs
+            packet_citable_refs = packet_view.citable_refs
+            trimmed_prior = set(_packet_view_gaps(packet_view))
             content_gaps = tuple(
                 sorted(
-                    set(semantic_case.packet.coverage.known_gaps)
+                    trimmed_prior
+                    | set(semantic_case.packet.coverage.known_gaps)
                     & {
                         "captured_object_unavailable",
                         "content_capture_unavailable",
@@ -4363,6 +4429,7 @@ def _privacy_gated_semantic_evaluator(
                         "content_redacted",
                         "truncated_payload",
                         SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
+                        SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP,
                     }
                 )
             )
@@ -4422,6 +4489,8 @@ def _privacy_gated_semantic_evaluator(
                     case_content_over_item_limit=over_item_limit,
                     case_reference_scope_reduced=reference_scope_reduced,
                     case_content_gaps=content_gaps,
+                    case_prior_finding_refs=packet_prior_refs,
+                    case_citable_refs=packet_citable_refs,
                 )
 
             # Build the packet before anything durable exists. A packet that cannot be built is a
@@ -4749,6 +4818,8 @@ def _privacy_gated_semantic_evaluator(
                     case_content_over_item_limit=over_item_limit,
                     case_reference_scope_reduced=reference_scope_reduced,
                     case_content_gaps=content_gaps,
+                    case_prior_finding_refs=packet_prior_refs,
+                    case_citable_refs=packet_citable_refs,
                     continuation=continuation,
                 )
 

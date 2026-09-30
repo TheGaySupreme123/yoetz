@@ -153,6 +153,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
+        "fixtures/canonical/review-dialogue-1.3.0.case.json",
+        "canonical_vector",
+        "application/json",
+        True,
+    ),
+    (
         "schemas/integrations/mcp-removal-1.0.0.schema.json",
         "json_schema",
         "application/schema+json",
@@ -792,6 +798,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
+        "schemas/findings/provider-judgment-1.1.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
         "schemas/findings/semantic-provenance-1.0.0.schema.json",
         "json_schema",
         "application/schema+json",
@@ -1166,6 +1178,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     (
         "schemas/privacy/outbound-case-1.1.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/privacy/outbound-case-1.2.0.schema.json",
         "json_schema",
         "application/schema+json",
         True,

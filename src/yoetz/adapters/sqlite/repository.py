@@ -40,7 +40,13 @@ from yoetz.domain.events import (
     accepted_record_to_json,
     decode_payload,
 )
-from yoetz.domain.findings import RankedFindings, RuntimeTokenUsage, SemanticProvenance, rank_key
+from yoetz.domain.findings import (
+    PriorFindingVerdictRecord,
+    RankedFindings,
+    RuntimeTokenUsage,
+    SemanticProvenance,
+    rank_key,
+)
 from yoetz.domain.values import (
     Actor,
     ActorType,
@@ -2654,6 +2660,7 @@ class SqliteLedger:
         *,
         scope: CheckScopeModel | None = None,
         semantic_conclusion: str | None = None,
+        prior_finding_verdicts: tuple[PriorFindingVerdictRecord, ...] = (),
     ) -> CheckCommitResult:
         await self._ensure_recovered()
         async with self._lock:
@@ -2680,6 +2687,7 @@ class SqliteLedger:
                     request_id,
                     scope=scope,
                     semantic_conclusion=semantic_conclusion,
+                    prior_finding_verdicts=prior_finding_verdicts,
                 )
             except PublicOperationError:
                 # The memory oracle terminalizes a frontier conflict before raising it. Preserve

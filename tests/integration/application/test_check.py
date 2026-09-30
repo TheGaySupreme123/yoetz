@@ -148,6 +148,7 @@ class _Ledger:
         self.phase_transitions: list[tuple[CheckPhase, CheckPhase]] = []
         self.last_ranked: RankedFindings | None = None
         self.last_executions: tuple[CheckPolicyExecution, ...] | None = None
+        self.last_verdicts: tuple[object, ...] = ()
         self.operation: OperationRecord | None = None
 
     async def load_events(
@@ -251,8 +252,10 @@ class _Ledger:
         *,
         scope: CheckScopeModel | None = None,
         semantic_conclusion: str | None = None,
+        prior_finding_verdicts: tuple[object, ...] = (),
     ) -> CheckCommitResult:
         assert frozen == self.frozen
+        self.last_verdicts = prior_finding_verdicts
         if self.commit_failure is not None:
             raise self.commit_failure
         self.commit_count += 1

@@ -454,7 +454,7 @@ class _Runtime:
                     "item": {
                         "type": "agentMessage",
                         "text": (
-                            '{"conclusion":"no_material_discrepancy","reviewer_challenges":[]}'
+                            '{"conclusion":"no_material_discrepancy","reviewer_challenges":[],"prior_finding_verdicts":[]}'
                         ),
                     }
                 },
@@ -1941,7 +1941,9 @@ async def test_evaluator_rejects_deadline_not_bound_to_runtime_authority() -> No
 # --- issue #527: bounded validation-stage diagnostics -------------------------------------------
 
 _REF = "clm_20000000-0000-4000-8000-000000000001"
-_NO_DISCREPANCY = '{"conclusion":"no_material_discrepancy","reviewer_challenges":[]}'
+_NO_DISCREPANCY = (
+    '{"conclusion":"no_material_discrepancy","reviewer_challenges":[],"prior_finding_verdicts":[]}'
+)
 
 
 def _challenge_json(**overrides: object) -> str:
@@ -1956,7 +1958,13 @@ def _challenge_json(**overrides: object) -> str:
         "uncertainty": "The missing material may exist outside the case.",
     }
     challenge.update(overrides)
-    return json.dumps({"conclusion": "challenges_returned", "reviewer_challenges": [challenge]})
+    return json.dumps(
+        {
+            "conclusion": "challenges_returned",
+            "reviewer_challenges": [challenge],
+            "prior_finding_verdicts": [],
+        }
+    )
 
 
 def _agent_message(text: str, *, phase: str | None = None) -> dict[str, object]:
@@ -2038,13 +2046,16 @@ async def test_unknown_message_phase_is_a_forbidden_event(
         ('{"conclusion":"no_material_discrepancy","reviewer_challenges":[],}', "output_not_json"),
         ('{"result":' + _NO_DISCREPANCY + "}", "judgment_envelope_invalid"),
         ('{"judgment":"' + "prose-canary" + '"}', "judgment_envelope_invalid"),
-        ('{"conclusion":"maybe-canary","reviewer_challenges":[]}', "judgment_enum_invalid"),
+        (
+            '{"conclusion":"maybe-canary","reviewer_challenges":[],"prior_finding_verdicts":[]}',
+            "judgment_enum_invalid",
+        ),
         (_challenge_json(finding_kind="hunch-canary"), "judgment_enum_invalid"),
         (_challenge_json(requested_next_step="ask-canary"), "judgment_enum_invalid"),
         (_challenge_json(cited_refs=[_REF, _REF]), "judgment_refs_duplicate"),
         (_challenge_json(cited_refs=["item-canary"]), "judgment_refs_invalid"),
         (
-            '{"conclusion":"challenges_returned","reviewer_challenges":[]}',
+            '{"conclusion":"challenges_returned","reviewer_challenges":[],"prior_finding_verdicts":[]}',
             "judgment_conclusion_mismatch",
         ),
         (
@@ -2052,6 +2063,7 @@ async def test_unknown_message_phase_is_a_forbidden_event(
                 {
                     "conclusion": "no_material_discrepancy",
                     "reviewer_challenges": json.loads(_challenge_json())["reviewer_challenges"],
+                    "prior_finding_verdicts": [],
                 }
             ),
             "judgment_conclusion_mismatch",
