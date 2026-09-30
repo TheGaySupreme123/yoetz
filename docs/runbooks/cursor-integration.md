@@ -1560,18 +1560,21 @@ reports `semantic_review_context_withheld`. Credential-like spans are redacted f
 (`check_time_change_redacted`), every part still passes the never-send scan, files named like
 credentials (`.env`, `.env.*`, `.netrc`, `*.pem`, `*.key` and similar, a name heuristic) are listed
 by name only, and a change larger than the packet reports `check_time_change_truncated`. The whole
-capture has 20 seconds. It is `check_time_change_unavailable` for a linked Git worktree (its `.git`
-is a file), a group- or world-writable repository root, a repository whose effective Git config
-defines a filter or an include (for example a repository-local Git LFS or git-crypt setup), a
-partial clone, Git older than 2.26, a repository whose object store is reached through a link or
-shared with another repository (`.git/commondir`, alternates, or packs a local `git clone`
-hard-linked; clone with `--no-hardlinks` instead), a repository whose Git settings point its working
-tree elsewhere (`core.worktree`), a repository directory replaced at the same path between Git
-commands, or a working tree that kept changing through three attempts to read it. A changed file,
-tracked or untracked, that is a link or has a second name is listed but neither its content nor its
-line counts are shown. A replayed or resumed check reviews the change captured when it first ran,
-not the tree as it is later. `yoetz service diagnostics` counts the parts that reached the packet as
-`semantic_check_change_parts_selected`.
+capture has 20 seconds. It is `check_time_change_unavailable` for a linked Git worktree or a
+submodule checkout opened as the repository (its `.git` is a file), a group- or world-writable
+repository root, a repository whose effective Git config defines a filter or an include (for example
+a repository-local Git LFS or git-crypt setup), a partial clone, Git older than 2.26, a repository
+whose object store is reached through a link or borrowed from another repository (`.git/commondir`
+or alternates), a repository whose Git settings point its working tree elsewhere (`core.worktree`),
+a repository directory replaced at the same path between Git commands, or a working tree that kept
+changing through three attempts to read it. A changed file, tracked or untracked, that is a link or
+has a second name is listed but neither its content nor its line counts are shown. Object files a
+local `git clone` hard-linked are read normally, because every Git object a shown diff uses must
+match its own name. Beside `check_time_change_unavailable` the check records a reason code such as
+`check_time_change_unavailable_changed_during_capture`, and the check result, `yoetz status` and the
+receipt each state that reason in one plain sentence. A replayed or resumed check reviews the change
+captured when it first ran, not the tree as it is later. `yoetz service diagnostics` counts the
+parts that reached the packet as `semantic_check_change_parts_selected`.
 
 ## Background semantic advice controls
 

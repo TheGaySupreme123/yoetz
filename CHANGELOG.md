@@ -41,12 +41,15 @@ reverse-chronological released versions.
   before this version takes its base from its first check, so commits between checks stay in the
   change. The read is pinned to the validated repository directory and its own `.git` (a
   `core.worktree` redirection is refused), never shows a tracked or untracked file that is a link
-  or has a second name, refuses an object store shared with another repository (including packs a
-  local `git clone` hard-linked), verifies every Git object it shows against its name, and retakes
-  the change (up to three times, then `changed_during_capture`) when the working tree or object
-  store moves while it is read. A custom recipe whose half-share is smaller than one part
-  still carries the first part, and the files a review is recorded as having seen are counted from
-  the packet the reviewer actually received.
+  or has a second name, refuses an object store reached through a link or borrowed from another
+  repository, verifies every Git object it shows against its name (so a local `git clone` that
+  hard-links its objects is read normally), and retakes the change (up to three times, then
+  `changed_during_capture`) when the working tree or object store moves while it is read. When the
+  change is unavailable, a closed reason code beside `check_time_change_unavailable` makes the
+  check result, status, receipts (JSON, markdown and text) and the MCP check summary say why in
+  one fixed sentence. A custom recipe whose half-share is smaller than one part still carries the
+  first part, and the files a review is recorded as having seen are counted from the packet the
+  reviewer actually received.
 - With the Codex subscription evaluator bound, the service no longer re-hashes the retained Codex
   runtime (about 359 MB on Linux) on the event loop for every observation advice cycle. Structural
   readiness is memoized by binding and file fingerprints and re-checked off the event loop only

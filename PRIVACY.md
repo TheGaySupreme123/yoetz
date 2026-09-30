@@ -78,17 +78,18 @@ named like credentials (`.env`, `.env.*`, `.netrc`, `*.pem`, `*.key` and similar
 only; that list is a name heuristic, not a detector. Links and files with a second name, tracked or
 untracked, are listed without their content or line counts: Git may open a link target while it
 works, but that output is discarded and never enters the change. Every Git object a shown diff reads
-must hash to its own name through an object store that shares no file with another repository, every
-Git call is pinned to the validated repository directory and its own `.git`, and the read fails
-closed if that directory is replaced between Git calls or the working tree keeps moving. A directory
-replaced and put back within a single Git call is not detected. The change is redacted like captured
-content, stored encrypted, and offered to the privacy gateway as bounded `repository_excerpt` items
-under the same policy and never-send scan: a policy whose inference channel does not allow
-repository excerpts never sends it, and the check says the review's context was withheld. Everything
-else must already be captured or agent-published in the frozen case. The separate ADR-011 `yoetz
-state capture` support command may read one explicitly named local Git worktree and return only
-bounded structural state digests. It returns no source or path content. Neither it nor the
-check-time change gives MCP clients or review providers a repository handle.
+must hash to its own name through an object store that is neither reached through a link nor
+borrowed from another repository, every Git call is pinned to the validated repository directory and
+its own `.git`, and the read fails closed if that directory is replaced between Git calls or the
+working tree keeps moving. A directory replaced and put back within a single Git call is not
+detected. The change is redacted like captured content, stored encrypted, and offered to the privacy
+gateway as bounded `repository_excerpt` items under the same policy and never-send scan: a policy
+whose inference channel does not allow repository excerpts never sends it, and the check says the
+review's context was withheld. Everything else must already be captured or agent-published in the
+frozen case. The separate ADR-011 `yoetz state capture` support command may read one explicitly
+named local Git worktree and return only bounded structural state digests. It returns no source or
+path content. Neither it nor the check-time change gives MCP clients or review providers a
+repository handle.
 
 The upstream recommendation appears only for an exact installed endpoint whose current versioned
 data-use record states customer-content training `prohibited`, retention `none|bounded`, and

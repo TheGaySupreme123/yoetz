@@ -212,11 +212,13 @@ a secret kept in an ordinarily named file relies on the redaction and never-send
 Files that are links, or that have a second name elsewhere on disk, are listed but their content and
 line counts are never shown; Git may still open such a file while it works, but that output is
 discarded and never enters the change. Every stored Git object a shown diff uses must match its own
-name, and a repository whose object store shares files with another repository (for example a local
-`git clone` that hard-links its objects) is not read. If your working tree or object store keeps
-changing while the change is read, Yoetz reads it again, up to three times, and otherwise reports
-the change as unavailable rather than send a mix of two states. A change larger than the packet is
-cut and says so.
+name, and a repository whose object store is reached through a link or borrowed from another
+repository is not read; a local `git clone` that hard-links its objects is read normally. If your
+working tree or object store keeps changing while the change is read, Yoetz reads it again, up to
+three times, and otherwise reports the change as unavailable rather than send a mix of two states.
+Whenever the change is unavailable, the check result, `yoetz status` and the receipt say why in one
+plain sentence (for example, that the working tree kept changing, or that the repository failed a
+safety check). A change larger than the packet is cut and says so.
 
 The change travels as **repository excerpts**. If your policy's AI-powered review channel does not
 allow repository excerpts, the change is never sent, and the check result says the review ran with

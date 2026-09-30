@@ -3,12 +3,14 @@
 **Status:** Accepted for issue #883. The maintainer asked for this scoped work in the issue's
 2026-09-29 acceptance boundary (items 1 and 3) and recorded the design-gate acknowledgement for
 the privacy/egress and storage changes it needs.
-**Implemented by:** `src/yoetz/ports/change_capture.py`, `src/yoetz/adapters/git_change_capture.py`,
-the public seam of `src/yoetz/adapters/git_subject_state.py`, `src/yoetz/application/check_change.py`,
+**Implemented by:** `src/yoetz/ports/change_capture.py`,
+`src/yoetz/adapters/git_change_capture.py`, the public seam of
+`src/yoetz/adapters/git_subject_state.py`, `src/yoetz/application/check_change.py`,
 `CheckTimeChange` and `_check_time_change_reservation` in `src/yoetz/application/semantic_case.py`,
-the semantic evaluator in `src/yoetz/service/ready_composition.py`, `start`/`check` in
-`src/yoetz/application/service.py`, the task-base root in `src/yoetz/adapters/sqlite/repository.py`
-and `src/yoetz/adapters/memory/ledger.py`, the shown-file record (`CheckChangeShownFiles` in
+the reason codes and sentences in `src/yoetz/domain/receipts.py`, the semantic evaluator in
+`src/yoetz/service/ready_composition.py`, `start`/`check` in `src/yoetz/application/service.py`,
+the task-base root in `src/yoetz/adapters/sqlite/repository.py` and
+`src/yoetz/adapters/memory/ledger.py`, the shown-file record (`CheckChangeShownFiles` in
 `src/yoetz/domain/events.py`) and resolution rule (`src/yoetz/kernel/finding_resolution.py`,
 `src/yoetz/kernel/projections.py`), and the suites `tests/unit/adapters/test_git_change_capture.py`,
 `tests/unit/application/test_semantic_case_check_change.py`,
@@ -99,19 +101,23 @@ content-returning read needed its own decision. This is that decision, for exact
      end, so a link swapped in only while Git reads and then put back retakes the capture.
    - **Every object read is the one its name commits to.** Git trusts each blob it opens.
      `.git/objects` and its `info` and `pack` directories must be real directories of the service
-     user and every fan-out directory a real directory, every pack-directory entry (packs, indexes and the rest) a
-     regular file of the service user, not group- or world-writable, with a single link; a link is
-     `unsafe_root`, and a pack shared with another repository (as a local `git clone` hard-links
-     them) is `unsupported_repository`, as are `.git/commondir`, `objects/info/alternates` and
-     `objects/info/http-alternates`. Every blob a shown diff reads (the base side, and the index
-     side Git uses for a file it did not re-read from the working tree) is verified: a loose object
-     must meet the same file fence and still have the identity taken before the diff, and is
-     inflated and hashed from that same open descriptor; and the blob is read again the way the
-     diff read it (`git cat-file`, packs first) and hashed. Each must hash to its own name (at most
-     8 MiB each and 64 MiB in all). A blob that does not verify withholds that file's diff and line
-     counts as `object_unverified`; one over the bound is `too_large`. Git itself rejects a tree or
-     commit whose bytes do not match its name. The verification buffers the adapter owns are
-     overwritten after use; the runner's returned bytes are immutable and are only dropped.
+     user and every fan-out directory a real directory; every pack-directory entry (packs, indexes
+     and the rest) must be a regular file of the service user that no other user may write. A link
+     there, or `objects/info/alternates` or `objects/info/http-alternates` (static or written later,
+     matching the ADR-011 open fence), is `unsafe_root`; a `.git/commondir` is
+     `unsupported_repository`. A second hard link is accepted, so a local `git clone` (which hard
+     links its source's objects) is read normally: a link count proves nothing a plain copy would
+     not defeat, and what makes a blob this repository's is that it hashes to the name the base
+     tree or index gives it. So every blob a shown diff reads (the base side, and the index side Git
+     uses for a file it did not re-read from the working tree) is verified: a loose object must be
+     a regular, owner-only file reached without a link that still has the identity taken before
+     the diff, and is inflated and hashed from that same open descriptor; and the blob is read
+     again the way the diff read it (`git cat-file`, packs first) and hashed. Each must hash to its
+     own name (at most 8 MiB each and 64 MiB in all). A blob that does not verify withholds that
+     file's diff and line counts as `object_unverified`; one over the bound is `too_large`. Git
+     itself rejects a tree or commit whose bytes do not match its name. The verification buffers
+     the adapter owns are overwritten after use; the runner's returned bytes are immutable and are
+     only dropped.
    - **One state, not a mix.** After assembling the change the adapter reads again the raw
      changed-file list; the identity (inode, size, modification and change times, link count) of
      every working copy, every loose blob a diff reads, every untracked file it read, every object
@@ -159,7 +165,16 @@ content-returning read needed its own decision. This is that decision, for exact
    is check-scoped and not a ledger root.
 8. **Disclosed limits.** `check_time_change_unavailable` (selected but nothing carried),
    `check_time_change_base_unavailable`, `check_time_change_truncated` (a file or part not shown)
-   and `check_time_change_redacted` join the packet and check coverage. They describe AI-powered
+   and `check_time_change_redacted` join the packet and check coverage. Beside
+   `check_time_change_unavailable` the check records one closed reason code,
+   `check_time_change_unavailable_<reason>` (`git_unavailable`, `not_git`, `unsafe_root`,
+   `unsupported_repository`, `git_failed`, `changed_during_capture`, `redaction_incomplete`,
+   `repository_mismatch`, `capture_failed`, `no_linked_subject`, `no_packet_room`), frozen with the
+   job so recovery reproduces it. Receipts (JSON detail, markdown and text), `check` and `status`
+   text and the MCP check summary render one fixed sentence per code; no path, Git output or
+   other user-controlled text is recorded. Files left out of a captured change keep their reason
+   in the change's own header (`object_unverified`, `not_regular_file` and the rest) and report
+   `check_time_change_truncated`. They describe AI-powered
    review input only, so they never weaken local absence proof. A check whose connection named no
    workspace has nothing to read and reports no check-time code; its review is the review of the
    time before this decision.
@@ -214,14 +229,15 @@ Every host and supported operating system gets the same capture, because it depe
 repository, not on how the edit was made. The reviewer sees the actual change and the file list
 it came from, within the existing per-item, count and total caps; #907 owns lifting those caps.
 
-The capture is unavailable, and says so, for linked Git worktrees (whose `.git` is a file),
-group- or world-writable roots, repositories whose effective config defines a filter or an include
-(for example a repository-local Git LFS or git-crypt setup), partial clones, Git older than 2.26,
-an object store reached through a link or shared with another repository (through `commondir`,
-alternates, or packs hard-linked by a local `git clone`; a clone made with `--no-hardlinks` or
-`--no-local` has its own), a `core.worktree` redirection, a root replaced between Git calls, and a
-working tree or object store that kept changing through every attempt. Tracked files that are links
-or multiply linked, and files whose loose blob is hard-linked, are named but not shown.
+The capture is unavailable, and says so, for linked Git worktrees and a submodule checkout
+opened as the root (in both, `.git` is a file pointing elsewhere, which the ADR-011 open fence
+refuses as `unsafe_root`), group- or world-writable roots, repositories whose effective config
+defines a filter or an include (for example a repository-local Git LFS or git-crypt setup),
+partial clones, Git older than 2.26, an object store reached through a link or borrowed through
+`commondir` or alternates, a `core.worktree` redirection, a root replaced between Git calls, and a
+working tree or object store that kept changing through every attempt. Tracked files that are
+links or multiply linked are named but not shown. Hard-linked object files (a local `git clone`)
+are read, because every blob shown is verified against its name.
 Submodule changes appear as commit ids and binary files as a one-line description.
 
 This decision does not add an MCP tool, a repository browser or an `ArtifactInspectionPort`, and
