@@ -1646,12 +1646,15 @@ Each Codex tool call is one ledger action. An individually delivered `PreToolUse
 pending action keyed on the call's `tool_use_id`; its `PostToolUse` links the result and captured
 output to that same action instead of recording a second one. A post whose pre never reached the
 ledger (a Yoetz `start`/`publish_work`/`check`/`respond` call, whose pre stays local, or a lost pre)
-still records its own action. In code mode the outer `exec` cell is kept in the local store and not
-delivered once this session's tool hooks (`PreToolUse`/`PostToolUse`) have fired; its nested
-`exec_command`, `apply_patch` and MCP calls are the ledger record. A session whose tool hooks never
-fired keeps delivering its cells. A cell whose only nested tool is unhooked, in a session where
-other tools are hooked, is not recorded, and a retained wrapper counts in `observed_count` without
-an accounting bucket. A replay of the #917 code-mode example holds one action and one
+still records its own action. In code mode the outer `exec` cell is decided per cell: its call is
+kept in the local store once this session's tool hooks (`PreToolUse`/`PostToolUse`) have fired, and
+its output stays local only when a tool hook fired after Yoetz read the call, so its nested
+`exec_command`, `apply_patch` and MCP calls are the ledger record. A cell whose tools fire no hook
+(only `tools.update_plan`, for example) delivers its output and is recorded, before or after hooked
+cells. Limits: a cell mixing hooked and unhooked tools stays local, so its unhooked tool is not
+recorded; a hooked cell read outside its hooks' window keeps its own action beside its nested calls,
+and a hook landing while an unhooked cell runs can keep that cell local; a retained wrapper counts
+in `observed_count` without an accounting bucket. A replay of the #917 code-mode example holds one action and one
 result per nested call and at most four hook-observed events per shell command, down from about
 7.9. Sessions that started before the upgrade keep their historical second action per call.
 

@@ -25,7 +25,8 @@ reverse-chronological released versions.
 
 - Codex observation records each tool call once. A tool call's pre-event and its result now share
   one ledger action instead of two, and a code-mode `exec` cell no longer adds its own action next
-  to the nested calls its hooks already recorded, so a shell command costs at most four
+  to the nested calls its hooks already recorded (a cell whose tools fire no hook is still
+  recorded), so a shell command costs at most four
   observation records instead of about eight. Earlier sessions keep their recorded history. A lost
   pre/post pairing (`unpaired_event`) stays disclosed on status, check coverage and the receipt,
   but it no longer raises the "Observation coverage is incomplete or stale" advisory that no wait

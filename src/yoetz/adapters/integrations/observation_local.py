@@ -199,6 +199,7 @@ _OPEN_PRE_TTL_MS: Final = 600_000
 # history.  A valid pair in another source/session/generation must not clear
 # one of these conditions.
 _MAX_UNPAIRED_SCOPES: Final = 256
+_MAX_CODEX_TOOL_HOOK_ENTRIES: Final = 256
 _MAX_OUTBOX: Final = 512
 # The largest selected profile is the hard local JSON ceiling.  Profile
 # specific limits come from the pure budget policy below; the standard value
@@ -1251,6 +1252,34 @@ class _GapState:
 
 
 @dataclass(frozen=True, slots=True)
+class _CodeModeCell:
+    """Tool-hook bookkeeping for one Codex code-mode ``exec`` cell (#917).
+
+    ``hooks_at_start`` is the session's tool-hook count when the stream read the
+    cell's call. The cell's own output is kept local only when that pre was held
+    and further tool hooks fired before the output; the decision, once made, is
+    replayed unchanged.
+    """
+
+    hooks_at_start: int
+    pre_withheld: bool
+    output_local: bool | None
+    touched: int
+
+
+def _code_mode_cell_key(session_commitment: str, call_id: str) -> str:
+    return canonical_digest(
+        JsonObject(
+            {
+                "kind": "codex-code-mode-cell",
+                "session_commitment": session_commitment,
+                "call_id": call_id,
+            }
+        )
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class UnpairedScopeNotice:
     """One not-yet-delivered standing-limitation notice for a new orphan scope (#917).
 
@@ -1265,6 +1294,8 @@ class UnpairedScopeNotice:
     session_commitment: str
     source_generation: int
     delivered: bool = False
+    # Announcement order; the oldest delivered notice is the one a full map forgets.
+    ordinal: int = 0
 
 
 def _unpaired_notice_lane(
@@ -1296,6 +1327,7 @@ def _unpaired_notices_from_json(raw: object) -> dict[str, UnpairedScopeNotice]:
         session = entry.get("session_commitment")
         generation = entry.get("source_generation")
         delivered = entry.get("delivered")
+        ordinal = entry.get("ordinal", 0)
         if (
             type(source) is not str
             or source not in {item.value for item in ObservationSource}
@@ -1304,6 +1336,8 @@ def _unpaired_notices_from_json(raw: object) -> dict[str, UnpairedScopeNotice]:
             or type(generation) is not int
             or generation < 0
             or type(delivered) is not bool
+            or type(ordinal) is not int
+            or ordinal < 0
         ):
             continue
         if lane != _unpaired_notice_lane(
@@ -1312,10 +1346,52 @@ def _unpaired_notices_from_json(raw: object) -> dict[str, UnpairedScopeNotice]:
             source_generation=generation,
         ):
             continue
-        notices[lane] = UnpairedScopeNotice(lane, source, session, generation, delivered)
+        notices[lane] = UnpairedScopeNotice(lane, source, session, generation, delivered, ordinal)
         if len(notices) >= _MAX_UNPAIRED_SCOPES:
             break
     return notices
+
+
+def _bounded_counter(raw: object) -> int:
+    return raw if type(raw) is int and 0 <= raw <= _MAX_SAFE_INTEGER else 0
+
+
+def _codex_tool_hooks_from_json(raw: object) -> dict[str, tuple[int, int]]:
+    hooks: dict[str, tuple[int, int]] = {}
+    if not isinstance(raw, Mapping):
+        return hooks
+    for session, value in cast(Mapping[object, object], raw).items():
+        if type(session) is not str or not session or not isinstance(value, Mapping):
+            continue
+        entry = cast(Mapping[str, object], value)
+        count = _bounded_counter(entry.get("count"))
+        touched = _bounded_counter(entry.get("touched"))
+        if count:
+            hooks[session] = (count, touched)
+    return dict(sorted(hooks.items(), key=lambda item: item[1][1])[-_MAX_CODEX_TOOL_HOOK_ENTRIES:])
+
+
+def _code_mode_cells_from_json(raw: object) -> dict[str, _CodeModeCell]:
+    cells: dict[str, _CodeModeCell] = {}
+    if not isinstance(raw, Mapping):
+        return cells
+    for key, value in cast(Mapping[object, object], raw).items():
+        if type(key) is not str or not key or not isinstance(value, Mapping):
+            continue
+        entry = cast(Mapping[str, object], value)
+        withheld = entry.get("pre_withheld")
+        local = entry.get("output_local")
+        if type(withheld) is not bool or (local is not None and type(local) is not bool):
+            continue
+        cells[key] = _CodeModeCell(
+            _bounded_counter(entry.get("hooks_at_start")),
+            withheld,
+            local,
+            _bounded_counter(entry.get("touched")),
+        )
+    return dict(
+        sorted(cells.items(), key=lambda item: item[1].touched)[-_MAX_CODEX_TOOL_HOOK_ENTRIES:]
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1687,9 +1763,13 @@ class _WorkspaceState:
     # One informational notice per new (source, session, generation) orphan
     # scope, keyed by that lane; kept after delivery so a scope is announced once.
     unpaired_notices: dict[str, UnpairedScopeNotice] | None = None
-    # Host sessions whose Codex tool hooks have admitted input (bounded like the
-    # orphan scopes; a full set only keeps later sessions' cell wrappers delivered).
-    codex_tool_hook_sessions: set[str] | None = None
+    # Per host session: Codex tool-hook inputs admitted and a recency stamp; and
+    # per code-mode cell: the tool-hook count at its call (#917). Both maps are
+    # bounded and forget the least recently touched entry, which only makes that
+    # session's or cell's wrapper deliverable again.
+    codex_tool_hooks: dict[str, tuple[int, int]] | None = None
+    code_mode_cells: dict[str, _CodeModeCell] | None = None
+    codex_tool_hook_clock: int = 0
     # True when a state was written by a pre-/11 reader that could not retain
     # scoped pairing provenance. It is deliberately sticky: a later save must
     # not turn unknown history into proof that a gap was false.
@@ -1832,8 +1912,10 @@ class _WorkspaceState:
             self.unpaired_scopes = set()
         if self.unpaired_notices is None:
             self.unpaired_notices = {}
-        if self.codex_tool_hook_sessions is None:
-            self.codex_tool_hook_sessions = set()
+        if self.codex_tool_hooks is None:
+            self.codex_tool_hooks = {}
+        if self.code_mode_cells is None:
+            self.code_mode_cells = {}
         if type(self.pairing_state_unknown) is not bool:
             raise ProtocolValueError("invalid_event_value_type")
         if self.stream_cursors is None:
@@ -2400,7 +2482,9 @@ def _copy_state(state: _WorkspaceState) -> _WorkspaceState:
         open_pre=dict(state.open_pre or {}),
         unpaired_scopes=set(state.unpaired_scopes or ()),
         unpaired_notices=dict(state.unpaired_notices or {}),
-        codex_tool_hook_sessions=set(state.codex_tool_hook_sessions or ()),
+        codex_tool_hooks=dict(state.codex_tool_hooks or {}),
+        code_mode_cells=dict(state.code_mode_cells or {}),
+        codex_tool_hook_clock=state.codex_tool_hook_clock,
         pairing_state_unknown=state.pairing_state_unknown,
         stream_cursors=dict(state.stream_cursors or {}),
         stream_partials=dict(state.stream_partials or {}),
@@ -4924,19 +5008,28 @@ class LocalObservationStore:
         """Queue one informational notice the first time an orphan scope appears (#917).
 
         Repeated orphans in a known scope add nothing. When the bounded map is
-        full, no notice is queued; the aggregate gap is still disclosed.
+        full, the oldest delivered notice is forgotten to make room; only when
+        every retained notice is still undelivered is no notice queued, and the
+        aggregate gap is still disclosed.
         """
 
-        assert state.unpaired_notices is not None
+        notices = state.unpaired_notices
+        assert notices is not None
         lane = _unpaired_notice_lane(
             source=source,
             session_commitment=session_commitment,
             source_generation=source_generation,
         )
-        if lane in state.unpaired_notices or len(state.unpaired_notices) >= _MAX_UNPAIRED_SCOPES:
+        if lane in notices:
             return
-        state.unpaired_notices[lane] = UnpairedScopeNotice(
-            lane, source.value, session_commitment, source_generation
+        if len(notices) >= _MAX_UNPAIRED_SCOPES:
+            delivered = [notice for notice in notices.values() if notice.delivered]
+            if not delivered:
+                return
+            del notices[min(delivered, key=lambda notice: (notice.ordinal, notice.lane)).lane]
+        ordinal = min(_MAX_SAFE_INTEGER, max((n.ordinal for n in notices.values()), default=0) + 1)
+        notices[lane] = UnpairedScopeNotice(
+            lane, source.value, session_commitment, source_generation, ordinal=ordinal
         )
 
     @_read_mostly
@@ -4947,10 +5040,12 @@ class LocalObservationStore:
 
         with self._reading():
             state = self._load(workspace)
-            for notice in (state.unpaired_notices or {}).values():
-                if notice.session_commitment == session_commitment and not notice.delivered:
-                    return notice
-            return None
+            pending = [
+                notice
+                for notice in (state.unpaired_notices or {}).values()
+                if notice.session_commitment == session_commitment and not notice.delivered
+            ]
+            return min(pending, key=lambda notice: (notice.ordinal, notice.lane), default=None)
 
     def commit_unpaired_notice_delivery(self, workspace: str, lane: str) -> None:
         """Mark one notice delivered after its bytes reached the host; it never repeats."""
@@ -5687,19 +5782,90 @@ class LocalObservationStore:
             state.monotonic_epoch = self._boot_epoch()
             self._save(workspace, state)
 
-    @_read_mostly
-    def codex_hook_observes_session(self, workspace: str, session_commitment: str) -> bool:
-        """Whether Codex tool hooks (``PreToolUse``/``PostToolUse``) fired for one host session.
+    @staticmethod
+    def _note_codex_tool_hook(state: _WorkspaceState, session_commitment: str) -> None:
+        """Count one Codex ``PreToolUse``/``PostToolUse`` hook for a host session (#917).
 
-        Lifecycle hooks alone do not count: they are registered even when no tool
-        hook fires. The durable set survives restart. The session-stream reader
-        uses it to keep a code-mode ``exec`` cell wrapper local only while the
-        cell's nested calls are hook-observed (#917).
+        Lifecycle hooks do not count: they are registered even when no tool hook
+        fires. The bounded map forgets the least recently active session, never
+        the new one; a forgotten session only makes its later cells deliverable.
         """
+
+        assert state.codex_tool_hooks is not None
+        state.codex_tool_hook_clock = min(_MAX_SAFE_INTEGER, state.codex_tool_hook_clock + 1)
+        count, _touched = state.codex_tool_hooks.pop(session_commitment, (0, 0))
+        state.codex_tool_hooks[session_commitment] = (
+            min(_MAX_SAFE_INTEGER, count + 1),
+            state.codex_tool_hook_clock,
+        )
+        while len(state.codex_tool_hooks) > _MAX_CODEX_TOOL_HOOK_ENTRIES:
+            oldest = min(state.codex_tool_hooks.items(), key=lambda item: item[1][1])[0]
+            del state.codex_tool_hooks[oldest]
+
+    @_read_mostly
+    def codex_tool_hook_count(self, workspace: str, session_commitment: str) -> int:
+        """How many Codex tool hooks this store has admitted for one host session."""
 
         with self._reading():
             state = self._load(workspace)
-            return session_commitment in (state.codex_tool_hook_sessions or ())
+            return (state.codex_tool_hooks or {}).get(session_commitment, (0, 0))[0]
+
+    def begin_code_mode_cell(self, workspace: str, session_commitment: str, call_id: str) -> bool:
+        """Note that the stream read a code-mode ``exec`` cell's call; return whether to hold it.
+
+        The call is held (kept local) when Codex tool hooks have already fired
+        in this session, so a hooked cell adds no second action. The first
+        answer for a cell is durable and replayed unchanged (#917).
+        """
+
+        with self._lock:
+            state = self._load(workspace)
+            assert state.code_mode_cells is not None
+            key = _code_mode_cell_key(session_commitment, call_id)
+            current = state.code_mode_cells.get(key)
+            if current is not None:
+                return current.pre_withheld
+            count = (state.codex_tool_hooks or {}).get(session_commitment, (0, 0))[0]
+            self._remember_code_mode_cell(state, key, _CodeModeCell(count, count > 0, None, 0))
+            self._save(workspace, state)
+            return count > 0
+
+    def finish_code_mode_cell(self, workspace: str, session_commitment: str, call_id: str) -> bool:
+        """Return whether a code-mode cell's output stays local (#917).
+
+        It stays local only when the cell's call was held and at least one
+        Codex tool hook fired in this session after the stream read that call:
+        the nested hook rows are then the cell's record. Otherwise the output is
+        delivered, so a cell whose tools fire no hook keeps its record. An
+        output whose call was never noted is delivered.
+        """
+
+        with self._lock:
+            state = self._load(workspace)
+            assert state.code_mode_cells is not None
+            key = _code_mode_cell_key(session_commitment, call_id)
+            current = state.code_mode_cells.get(key)
+            if current is None:
+                return False
+            if current.output_local is not None:
+                return current.output_local
+            count = (state.codex_tool_hooks or {}).get(session_commitment, (0, 0))[0]
+            local = current.pre_withheld and count > current.hooks_at_start
+            self._remember_code_mode_cell(
+                state, key, dataclasses.replace(current, output_local=local)
+            )
+            self._save(workspace, state)
+            return local
+
+    @staticmethod
+    def _remember_code_mode_cell(state: _WorkspaceState, key: str, cell: _CodeModeCell) -> None:
+        assert state.code_mode_cells is not None
+        state.codex_tool_hook_clock = min(_MAX_SAFE_INTEGER, state.codex_tool_hook_clock + 1)
+        state.code_mode_cells.pop(key, None)
+        state.code_mode_cells[key] = dataclasses.replace(cell, touched=state.codex_tool_hook_clock)
+        while len(state.code_mode_cells) > _MAX_CODEX_TOOL_HOOK_ENTRIES:
+            oldest = min(state.code_mode_cells.items(), key=lambda item: item[1].touched)[0]
+            del state.code_mode_cells[oldest]
 
     @_read_mostly
     def last_stream_reconcile_mono(self, workspace: str) -> float | None:
@@ -9381,13 +9547,11 @@ class LocalObservationStore:
                         state, evicted_session, ObservationGapCode.TRUNCATED_PAYLOAD.value
                     )
             state.cursors[cursor_key] = envelope.cursor
-            if (
-                envelope.source is ObservationSource.CODEX_HOOK
-                and envelope.event_kind in {"PreToolUse", "PostToolUse"}
-                and state.codex_tool_hook_sessions is not None
-                and len(state.codex_tool_hook_sessions) < _MAX_UNPAIRED_SCOPES
-            ):
-                state.codex_tool_hook_sessions.add(envelope.session_commitment)
+            if envelope.source is ObservationSource.CODEX_HOOK and envelope.event_kind in {
+                "PreToolUse",
+                "PostToolUse",
+            }:
+                self._note_codex_tool_hook(state, envelope.session_commitment)
             state.envelopes.append(envelope)
             if len(state.envelopes) > _MAX_ENVELOPES:
                 state.envelopes_truncated = True
@@ -10989,10 +11153,33 @@ class LocalObservationStore:
                     )
                 }
             )
-        if state.codex_tool_hook_sessions:
-            payload["codex_tool_hook_sessions"] = tuple(
-                sorted(state.codex_tool_hook_sessions, key=str.encode)
+        if state.codex_tool_hooks:
+            payload["codex_tool_hooks"] = JsonObject(
+                {
+                    session: JsonObject({"count": count, "touched": touched})
+                    for session, (count, touched) in sorted(
+                        state.codex_tool_hooks.items(), key=lambda item: item[0].encode()
+                    )
+                }
             )
+        if state.code_mode_cells:
+            payload["code_mode_cells"] = JsonObject(
+                {
+                    key: JsonObject(
+                        {
+                            "hooks_at_start": cell.hooks_at_start,
+                            "pre_withheld": cell.pre_withheld,
+                            "output_local": cell.output_local,
+                            "touched": cell.touched,
+                        }
+                    )
+                    for key, cell in sorted(
+                        state.code_mode_cells.items(), key=lambda item: item[0].encode()
+                    )
+                }
+            )
+        if state.codex_tool_hook_clock:
+            payload["codex_tool_hook_clock"] = state.codex_tool_hook_clock
         if state.stream_partial_dropped_sessions:
             payload["stream_partial_dropped_sessions"] = tuple(
                 sorted(state.stream_partial_dropped_sessions, key=str.encode)
@@ -11051,6 +11238,7 @@ class LocalObservationStore:
                             "session_commitment": notice.session_commitment,
                             "source_generation": notice.source_generation,
                             "delivered": notice.delivered,
+                            "ordinal": notice.ordinal,
                         }
                     )
                     for lane, notice in sorted(
@@ -11963,11 +12151,9 @@ class LocalObservationStore:
             open_pre=open_pre,
             unpaired_scopes=unpaired_scopes,
             unpaired_notices=_unpaired_notices_from_json(raw.get("unpaired_notices")),
-            codex_tool_hook_sessions={
-                value
-                for value in cast(tuple[JsonValue, ...], raw.get("codex_tool_hook_sessions") or ())
-                if type(value) is str and value
-            },
+            codex_tool_hooks=_codex_tool_hooks_from_json(raw.get("codex_tool_hooks")),
+            code_mode_cells=_code_mode_cells_from_json(raw.get("code_mode_cells")),
+            codex_tool_hook_clock=_bounded_counter(raw.get("codex_tool_hook_clock")),
             pairing_state_unknown=pairing_state_unknown,
             stream_cursors=stream_cursors,
             stream_partials=stream_partials,

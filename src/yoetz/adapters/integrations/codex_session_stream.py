@@ -1780,20 +1780,36 @@ def _code_mode_cell_wrapper(structural: Mapping[str, JsonValue]) -> bool:
     )
 
 
-def _codex_hook_observes_session(
-    store: LocalObservationStore, workspace_commitment: str, session_commitment: str
+def _code_mode_cell_held(
+    store: LocalObservationStore,
+    workspace_commitment: str,
+    session_commitment: str,
+    structural: Mapping[str, JsonValue],
 ) -> bool:
-    """Whether Codex tool hooks have admitted input for this host session.
+    """Whether one code-mode ``exec`` cell row stays in the local store only (#917).
 
-    A store without the read seam, or an unreadable one, answers ``False`` so
-    stream-only reconciliation keeps delivering every row as before.
+    The decision is per cell: its call is held once Codex tool hooks fire in the
+    session, and its output stays local only when tool hooks fired after the
+    call was read, so a cell whose tools fire no hook keeps its record. A store
+    without the seams, an unreadable one, or a row without a call id answers
+    ``False`` so the row is delivered as before.
     """
 
-    reader = getattr(store, "codex_hook_observes_session", None)
-    if not callable(reader):
+    if not _code_mode_cell_wrapper(structural):
+        return False
+    call_id = _token(structural.get("tool_call_id"))
+    if call_id is None:
+        return False
+    name = (
+        "begin_code_mode_cell"
+        if structural.get("action") == "custom_tool_call"
+        else "finish_code_mode_cell"
+    )
+    decide = getattr(store, name, None)
+    if not callable(decide):
         return False
     try:
-        return reader(workspace_commitment, session_commitment) is True
+        return decide(workspace_commitment, session_commitment, call_id) is True
     except AttributeError, OSError, ProtocolValueError, TypeError, ValueError:
         return False
 
@@ -2100,7 +2116,6 @@ def _reconcile_session_stream_path(
             delivery_blocked = True
 
     advance_classifications = advance.classifications
-    hook_observed = _codex_hook_observes_session(store, workspace_commitment, session_commitment)
     for index, unpaired_envelope in enumerate(advance.envelopes):
         if delivery_blocked:
             break
@@ -2240,11 +2255,14 @@ def _reconcile_session_stream_path(
                 )
 
         # A code-mode ``exec`` cell is a container: Codex fires no hook for it, and
-        # every host action inside it is a nested tool call that fires its own
-        # hooks. While Codex tool hooks fire for this session, the nested
-        # hook rows are the ledger's record of the cell, so the wrapper stays in
-        # the local store only instead of adding an independent action (#917).
-        cell_wrapper = hook_observed and _code_mode_cell_wrapper(envelope.structural_payload)
+        # a host action inside it is a nested tool call that may fire its own
+        # hooks. When the cell's nested calls are hook-observed, those hook rows
+        # are the ledger's record of the cell, so the wrapper stays in the local
+        # store only instead of adding an independent action; a cell whose tools
+        # fire no hook keeps its own record (#917).
+        cell_wrapper = _code_mode_cell_held(
+            store, workspace_commitment, session_commitment, envelope.structural_payload
+        )
         deliverable = not cell_wrapper and self_observation_deliverable(
             _stream_phase(envelope.structural_payload), envelope.structural_payload
         )
