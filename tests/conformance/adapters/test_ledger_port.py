@@ -21,6 +21,7 @@ from yoetz.adapters.sqlite.migrations import initialize_bundle
 from yoetz.adapters.sqlite.repository import SqliteLedger
 from yoetz.domain.events import (
     SEMANTIC_EVENT_SCHEMA_VERSION,
+    CheckChangePartialFile,
     CheckChangeShownFiles,
     CheckRecordedPayload,
     EventDraft,
@@ -1586,7 +1587,7 @@ async def test_check_change_shown_files_replay_to_the_same_raise_facts_in_both_l
 
     files = CheckChangeShownFiles(
         ("hmac-sha256:" + "1" * 64, "hmac-sha256:" + "2" * 64),
-        ("hmac-sha256:" + "3" * 64,),
+        (CheckChangePartialFile("hmac-sha256:" + "3" * 64, 2_048),),
         complete=True,
     )
     command = ledger_command()
@@ -1629,7 +1630,7 @@ async def test_check_change_shown_files_replay_to_the_same_raise_facts_in_both_l
         assert stored is not None and type(stored.state) is ProjectionState
         raised = stored.state.findings[selected[0].finding_id]
         assert raised.check_change_raising_check_event_id == checks[0].event_id
-        assert raised.check_change_raised_files == tuple(sorted(files.shown))
+        assert raised.check_change_raised_files == files
         assert stored.state.findings[selected[1].finding_id].check_change_raised_files is None
         snapshots.append(projection_snapshot(stored.state))
 

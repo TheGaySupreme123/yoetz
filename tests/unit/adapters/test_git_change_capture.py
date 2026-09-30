@@ -16,7 +16,9 @@ from yoetz.ports.change_capture import (
     CheckChangeCapture,
     TaskChangeBase,
     decode_check_change,
+    decode_task_change_base,
     encode_check_change,
+    encode_task_change_base,
 )
 
 _EMPTY_SHA1_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
@@ -536,3 +538,20 @@ def test_long_file_listing_never_overruns_the_object_bound(tmp_path: Path) -> No
 
     assert capture.truncated
     assert "more changed files are not listed" in text
+
+
+def test_first_check_base_is_labelled_with_its_commit_and_round_trips(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    adapter = GitChangeCaptureAdapter()
+    head = adapter.read_task_base(os.fspath(repository))
+    pinned = TaskChangeBase(head.object_format, head.commit, origin="first_check")
+    assert decode_task_change_base(encode_task_change_base(pinned)) == pinned
+    (repository / "selectors.ts").write_text("export const pinned = 1;\n", encoding="utf-8")
+    _commit(repository, "committed after the pin")
+
+    capture = adapter.capture(os.fspath(repository), pinned)
+    text = _text(capture)
+
+    assert capture.base == "first_check" and capture.base_commit == head.commit
+    assert f"Base: commit {head.commit[:12]}, HEAD at this task's first check" in text
+    assert "export const pinned = 1;" in text  # committed after the pin, still in the change

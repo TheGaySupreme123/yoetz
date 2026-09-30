@@ -16,6 +16,7 @@ import pytest
 
 from builders.policy_cases import clm, evt, finding_record, fnd, obl
 from yoetz.domain.events import (
+    CheckChangePartialFile,
     CheckChangeShownFiles,
     CheckMode,
     CheckRecordedPayload,
@@ -1177,8 +1178,19 @@ _RAISING_EVENT = evt(5)
 _REPAIR_EVENT = evt(9)
 
 
-def _files(full: tuple[str, ...] = (), partial: tuple[str, ...] = ()) -> CheckChangeShownFiles:
-    return CheckChangeShownFiles(full, partial, complete=True)
+def _files(
+    full: tuple[str, ...] = (),
+    partial: tuple[tuple[str, int], ...] = (),
+    *,
+    complete: bool = True,
+) -> CheckChangeShownFiles:
+    """A shown-files record; each partial entry is a commitment and its clean shown bytes."""
+
+    return CheckChangeShownFiles(
+        full,
+        tuple(CheckChangePartialFile(commitment, shown) for commitment, shown in partial),
+        complete=complete,
+    )
 
 
 def _raise_then_repair(
@@ -1215,14 +1227,14 @@ def _raise_then_repair(
 def test_large_change_truncated_on_both_checks_resolves_when_the_file_was_shown_in_both() -> None:
     findings = _raise_then_repair(
         raising_gaps=(CHECK_TIME_CHANGE_TRUNCATED_GAP,),
-        raising_files=_files(full=(_FILE_A,), partial=(_FILE_B,)),
+        raising_files=_files(full=(_FILE_A,), partial=((_FILE_B, 900),)),
         repair_gaps=(CHECK_TIME_CHANGE_TRUNCATED_GAP,),
-        repair_files=_files(full=(_FILE_A, _FILE_B), partial=(_FILE_C,)),
+        repair_files=_files(full=(_FILE_A, _FILE_B), partial=((_FILE_C, 10),)),
     )
 
     record = findings[fnd(1)]
     assert record.check_change_raising_check_event_id == _RAISING_EVENT
-    assert record.check_change_raised_files == (_FILE_A, _FILE_B)
+    assert record.check_change_raised_files == _files(full=(_FILE_A,), partial=((_FILE_B, 900),))
     assert record.resolved_by_check_event_id == _REPAIR_EVENT
     assert record.resolution_depends_on_check_event_id == _RAISING_EVENT
 
@@ -1230,19 +1242,19 @@ def test_large_change_truncated_on_both_checks_resolves_when_the_file_was_shown_
 @pytest.mark.parametrize(
     "repair_files",
     [
-        _files(full=(_FILE_B,), partial=(_FILE_A,)),  # the file arrived only in part
+        _files(full=(_FILE_B,), partial=((_FILE_A, 399),)),  # less of the file arrived
         _files(full=(_FILE_B,)),  # the file did not arrive at all
-        CheckChangeShownFiles((), (), complete=False),  # too many files to know
+        _files(full=(_FILE_B,), complete=False),  # a partial record without the file
         None,  # no record of which files arrived
     ],
-    ids=("partial", "absent", "incomplete", "unrecorded"),
+    ids=("shorter", "absent", "incomplete_without_it", "unrecorded"),
 )
 def test_file_the_raising_review_saw_but_the_repair_did_not_see_whole_blocks(
     repair_files: CheckChangeShownFiles | None,
 ) -> None:
     findings = _raise_then_repair(
         raising_gaps=(CHECK_TIME_CHANGE_TRUNCATED_GAP,),
-        raising_files=_files(partial=(_FILE_A,)),
+        raising_files=_files(partial=((_FILE_A, 400),)),
         repair_gaps=(CHECK_TIME_CHANGE_TRUNCATED_GAP,),
         repair_files=repair_files,
     )
@@ -1256,10 +1268,10 @@ def test_pre_upgrade_finding_resolves_under_a_truncated_repair() -> None:
     findings = _raise_then_repair(
         raising_conclusion=None,
         repair_gaps=(CHECK_TIME_CHANGE_TRUNCATED_GAP, CHECK_TIME_CHANGE_BASE_UNAVAILABLE_GAP),
-        repair_files=_files(full=(_FILE_C,), partial=(_FILE_A,)),
+        repair_files=_files(full=(_FILE_C,), partial=((_FILE_A, 5),)),
     )
 
-    assert findings[fnd(1)].check_change_raised_files == ()
+    assert findings[fnd(1)].check_change_raised_files == _files()
     assert findings[fnd(1)].resolved_by_check_event_id == _REPAIR_EVENT
 
 
@@ -1313,7 +1325,7 @@ def test_redacted_span_in_the_repairs_copy_of_the_file_blocks() -> None:
     findings = _raise_then_repair(
         raising_files=_files(full=(_FILE_A,)),
         repair_gaps=(CHECK_TIME_CHANGE_REDACTED_GAP,),
-        repair_files=_files(full=(_FILE_B,), partial=(_FILE_A,)),
+        repair_files=_files(full=(_FILE_B,), partial=((_FILE_A, 10_000),)),
     )
 
     assert findings[fnd(1)].resolved_by_check_event_id is None
@@ -1384,12 +1396,12 @@ def test_redacting_the_repair_check_reopens_as_before() -> None:
 
     record = findings[fnd(1)]
     assert record.resolved_by_check_event_id is None
-    assert record.check_change_raised_files == (_FILE_A,)
+    assert record.check_change_raised_files == _files(full=(_FILE_A,))
 
 
 def test_check_time_raise_facts_round_trip_through_the_projection_snapshot() -> None:
     findings = _raise_then_repair(
-        raising_files=_files(full=(_FILE_A,), partial=(_FILE_B,)),
+        raising_files=_files(full=(_FILE_A,), partial=((_FILE_B, 77),)),
         repair_gaps=(CHECK_TIME_CHANGE_TRUNCATED_GAP,),
         repair_files=_files(full=(_FILE_A, _FILE_B)),
     )
@@ -1398,4 +1410,72 @@ def test_check_time_raise_facts_round_trip_through_the_projection_snapshot() -> 
     decoded = projection_from_snapshot(projection_snapshot(state))
 
     assert decoded == state
-    assert decoded.findings[fnd(1)].check_change_raised_files == (_FILE_A, _FILE_B)
+    assert decoded.findings[fnd(1)].check_change_raised_files == _files(
+        full=(_FILE_A,), partial=((_FILE_B, 77),)
+    )
+
+
+@pytest.mark.parametrize(
+    ("repair_bytes", "resolved"), [(4_096, True), (4_095, True), (4_094, False)]
+)
+def test_file_straddling_the_packet_edge_on_both_checks_compares_shown_bytes(
+    repair_bytes: int, resolved: bool
+) -> None:
+    """A large change almost always cuts one file at the packet edge on both checks."""
+
+    findings = _raise_then_repair(
+        raising_gaps=(CHECK_TIME_CHANGE_TRUNCATED_GAP,),
+        raising_files=_files(full=(_FILE_A,), partial=((_FILE_B, 4_095),)),
+        repair_gaps=(CHECK_TIME_CHANGE_TRUNCATED_GAP,),
+        repair_files=_files(full=(_FILE_A,), partial=((_FILE_B, repair_bytes),)),
+    )
+
+    assert (findings[fnd(1)].resolved_by_check_event_id == _REPAIR_EVENT) is resolved
+
+
+def test_repair_record_past_its_file_bound_still_proves_the_files_it_holds() -> None:
+    """Only the shown files count; a repair may keep the first 128 and still cover R."""
+
+    findings = _raise_then_repair(
+        raising_gaps=(CHECK_TIME_CHANGE_TRUNCATED_GAP,),
+        raising_files=_files(full=(_FILE_A,)),
+        repair_gaps=(CHECK_TIME_CHANGE_TRUNCATED_GAP,),
+        repair_files=_files(full=(_FILE_A, _FILE_C), complete=False),
+    )
+
+    assert findings[fnd(1)].resolved_by_check_event_id == _REPAIR_EVENT
+
+
+def test_raising_record_past_its_file_bound_is_unknown_and_blocks() -> None:
+    findings = _raise_then_repair(
+        raising_gaps=(CHECK_TIME_CHANGE_TRUNCATED_GAP,),
+        raising_files=_files(full=(_FILE_A,), complete=False),
+        repair_gaps=(CHECK_TIME_CHANGE_TRUNCATED_GAP,),
+        repair_files=_files(full=(_FILE_A, _FILE_B, _FILE_C)),
+    )
+
+    assert findings[fnd(1)].check_change_raised_files is None
+    assert findings[fnd(1)].resolved_by_check_event_id is None
+
+
+def test_few_shown_files_of_a_change_with_many_changed_files_resolve() -> None:
+    """More than 128 changed files, a handful shown: the record holds only the shown ones."""
+
+    findings = _raise_then_repair(
+        raising_gaps=(CHECK_TIME_CHANGE_TRUNCATED_GAP,),
+        raising_files=_files(full=(_FILE_A,), partial=((_FILE_B, 2_000),)),
+        repair_gaps=(CHECK_TIME_CHANGE_TRUNCATED_GAP,),
+        repair_files=_files(full=(_FILE_A, _FILE_B)),
+    )
+
+    assert findings[fnd(1)].resolved_by_check_event_id == _REPAIR_EVENT
+
+
+def test_repair_that_saw_a_raising_partial_file_redacted_earlier_blocks() -> None:
+    findings = _raise_then_repair(
+        raising_files=_files(partial=((_FILE_A, 3_000),)),
+        repair_gaps=(CHECK_TIME_CHANGE_REDACTED_GAP,),
+        repair_files=_files(partial=((_FILE_A, 1_200),)),
+    )
+
+    assert findings[fnd(1)].resolved_by_check_event_id is None

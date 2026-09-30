@@ -21,7 +21,13 @@ from dataclasses import replace
 from typing import Final
 
 from yoetz.domain.coordination import CoordinationGapCode
-from yoetz.domain.events import CheckRecordedPayload, ClaimKind, LedgerRecord, RequestedItemKind
+from yoetz.domain.events import (
+    CheckChangeShownFiles,
+    CheckRecordedPayload,
+    ClaimKind,
+    LedgerRecord,
+    RequestedItemKind,
+)
 from yoetz.domain.findings import Finding, FindingKind, FindingOrigin, ResponseDisposition
 from yoetz.domain.receipts import (
     CHECK_TIME_CHANGE_GAPS,
@@ -378,7 +384,7 @@ def qualifying_check_resolves(
     returned_issue_keys: frozenset[IssueKey],
     *,
     proof_state: ProjectionState | None = None,
-    check_change_raised_files: frozenset[str] | None = None,
+    check_change_raised_files: CheckChangeShownFiles | None = None,
 ) -> bool:
     """True when *check* proves the issue *finding* reports is absent from the state it tested.
 
@@ -386,8 +392,8 @@ def qualifying_check_resolves(
     whose tested subject frontier is earlier never saw the finding, so it cannot speak to it.
     ``returned_issue_keys`` are the issue keys of every finding the check returned; a check that
     returned the same issue re-fired it rather than proving it gone.
-    ``check_change_raised_files`` are the check-time change files the review that raised an
-    AI-powered *finding* was shown (``None`` while unknown); see ``resolution_blockers``.
+    ``check_change_raised_files`` is what the review that raised an AI-powered *finding* saw of
+    the check-time change (``None`` while unknown); see ``check_change_limits_tolerated``.
     """
 
     if type(finding) is not Finding or type(check) is not CheckRecordedPayload:
@@ -404,27 +410,28 @@ def qualifying_check_resolves(
     )
 
 
-def _fully_shown_check_change_files(check: CheckRecordedPayload) -> frozenset[str]:
-    files = check.check_change_files
-    if files is None or not files.complete:
-        return frozenset()
-    return frozenset(files.fully_shown)
+_NO_CHECK_CHANGE_FILES: Final = CheckChangeShownFiles((), (), complete=True)
 
 
 def check_change_limits_tolerated(
-    check: CheckRecordedPayload, raised_files: frozenset[str] | None
+    check: CheckRecordedPayload, raised_files: CheckChangeShownFiles | None
 ) -> bool:
     """The shown-file rule for check-time change limits on an AI-powered repair review (ADR-031).
 
     A repair review's ``check_time_change_*`` codes say only that part of that one object did not
-    reach it. They are tolerated when every file the raising review was shown any of
-    (``raised_files``, R) reached the repair review whole, unredacted and untruncated (its fully
-    shown files, P): R ⊆ P. Commitments bind the change's base, so a file behind a HEAD that moved
-    does not match. An empty R (a raising review that carried no check-time change) is always
-    tolerated; an unknown R never is.
+    reach it. They are tolerated when the repair saw at least what the raising review saw of the
+    change: every file the raising review saw whole reached the repair whole, and every file the
+    raising review saw in part (a clean prefix of n bytes) reached the repair whole or in part
+    with at least n clean bytes. Commitments bind the change's base, which stays fixed for a task.
+    A raising review that carried no check-time change (an empty record) is always covered; an
+    unknown one (``None``) never is. The repair's record may be incomplete: each entry it holds
+    is still true.
     """
 
-    return raised_files is not None and raised_files <= _fully_shown_check_change_files(check)
+    if raised_files is None:
+        return False
+    repair = check.check_change_files
+    return (_NO_CHECK_CHANGE_FILES if repair is None else repair).covers(raised_files)
 
 
 def resolution_blockers(
@@ -434,7 +441,7 @@ def resolution_blockers(
     returned_issue_keys: frozenset[IssueKey],
     *,
     proof_state: ProjectionState | None = None,
-    check_change_raised_files: frozenset[str] | None = None,
+    check_change_raised_files: CheckChangeShownFiles | None = None,
 ) -> tuple[str, ...]:
     """Explain the exact qualification predicate without weakening its proof requirements."""
 
@@ -745,22 +752,22 @@ def _raised_by(check: CheckRecordedPayload, finding: Finding) -> bool:
     )
 
 
-def _raised_check_change_files(check: CheckRecordedPayload) -> tuple[str, ...] | None:
-    """R for findings *check* raised: its shown files, empty without a change, else unknown."""
+def _raised_check_change_files(check: CheckRecordedPayload) -> CheckChangeShownFiles | None:
+    """What *check*'s review saw of the change: its complete record, empty without one, else
+    unknown (an incomplete record, or parts carried without a record)."""
 
     files = check.check_change_files
     if files is not None:
-        return tuple(sorted(files.shown, key=str.encode)) if files.complete else None
+        return files if files.complete else None
     gaps = set(check.coverage.known_gaps)
     if CHECK_TIME_CHANGE_UNAVAILABLE_GAP not in gaps and gaps & _CHECK_TIME_CHANGE_CARRIED_GAPS:
         # Parts reached the packet but no record of which files did (0.3 development builds).
         return None
-    return ()
+    return _NO_CHECK_CHANGE_FILES
 
 
-def _record_raised_files(record: FindingProjectionRecord) -> frozenset[str] | None:
-    files = record.check_change_raised_files
-    return None if files is None else frozenset(files)
+def _record_raised_files(record: FindingProjectionRecord) -> CheckChangeShownFiles | None:
+    return record.check_change_raised_files
 
 
 def apply_check_resolution(

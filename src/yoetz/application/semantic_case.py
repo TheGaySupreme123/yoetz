@@ -446,15 +446,16 @@ def check_time_change_shown_files(
     capture: CheckChangeCapture,
     selection: ReviewSelectionPolicy,
     admitted_parts: int,
-) -> tuple[tuple[bytes, bool], ...]:
-    """Each changed file whose diff reached the packet, and whether it arrived whole (ADR-031).
+) -> tuple[tuple[bytes, bool, int], ...]:
+    """Each changed file whose diff reached the packet, whether whole, and how much (ADR-031).
 
     A file is its ``diff --git`` section of the stored change; its identity is that section's
     first line. It was shown when any of its bytes lie in the ``admitted_parts`` parts the packet
-    carried, and fully shown when the whole section did and it holds no redaction marker. Files
-    the change lists only in its header (not shown) are not returned. The answer is a pure
-    function of the stored object, the selection and the admitted part count, so a recovered job
-    derives the same files.
+    carried, and fully shown when the whole section did and it holds no redaction marker. The
+    third value is the clean prefix the packet carried: the section's bytes before the packet
+    ended or the first redaction marker began. Files the change lists only in its header (not
+    shown) are not returned. The answer is a pure function of the stored object, the selection and
+    the admitted part count, so a recovered job derives the same files.
     """
 
     if type(capture) is not CheckChangeCapture or type(admitted_parts) is not int:
@@ -465,15 +466,17 @@ def check_time_change_shown_files(
     shown_bytes = sum(len(chunk) for chunk in chunks[:admitted_parts])
     text = capture.text
     starts = [match.start() for match in _CHECK_TIME_CHANGE_FILE_START.finditer(text)]
-    files: list[tuple[bytes, bool]] = []
+    files: list[tuple[bytes, bool, int]] = []
     for index, start in enumerate(starts):
         if start >= shown_bytes:
             break
         end = starts[index + 1] if index + 1 < len(starts) else len(text)
         line_end = text.find(b"\n", start, end)
         identity = text[start : end if line_end < 0 else line_end]
-        whole = end <= shown_bytes and _REDACTION_MARKER not in text[start:end]
-        files.append((identity, whole))
+        visible_end = min(end, shown_bytes)
+        marker = text.find(_REDACTION_MARKER, start, end)
+        clean_end = visible_end if marker < 0 else min(visible_end, marker)
+        files.append((identity, marker < 0 and end <= shown_bytes, clean_end - start))
     return tuple(files)
 
 
@@ -1822,7 +1825,8 @@ def build_semantic_case(
         capture_gap_set.add(CHECK_TIME_CHANGE_UNAVAILABLE_GAP)
     if check_time_change is not None:
         change = check_time_change.capture
-        if change.base == "head":
+        if change.base in {"head", "first_check"}:
+            # Not the task-start commit: work committed before the base is not in the change.
             capture_gap_set.add(CHECK_TIME_CHANGE_BASE_UNAVAILABLE_GAP)
         if change.truncated:
             capture_gap_set.add(CHECK_TIME_CHANGE_TRUNCATED_GAP)

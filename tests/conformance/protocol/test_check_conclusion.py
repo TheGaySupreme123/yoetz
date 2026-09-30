@@ -57,20 +57,48 @@ def test_check_change_files_ride_only_a_recorded_conclusion_and_stay_closed() ->
     payload = decode_payload(EventSchema("check_recorded", "1.3.0"), freeze_json(wire))
     assert type(payload) is CheckRecordedPayload
     assert payload.check_change_files is not None
-    assert payload.check_change_files.shown == frozenset(
-        wire["check_change_files"]["fully_shown"] + wire["check_change_files"]["partially_shown"]
+    assert payload.check_change_files.fully_shown == tuple(
+        wire["check_change_files"]["fully_shown"]
     )
+    assert {
+        item.commitment: item.shown_bytes for item in payload.check_change_files.partially_shown
+    } == {
+        item["commitment"]: item["shown_bytes"]
+        for item in wire["check_change_files"]["partially_shown"]
+    }
     files = wire["check_change_files"]
     without_conclusion = {key: value for key, value in wire.items() if key != "semantic_conclusion"}
     invalid = [
         (EventSchema("check_recorded", "1.2.0"), without_conclusion),
         (
             EventSchema("check_recorded", "1.3.0"),
-            {**wire, "check_change_files": {**files, "partially_shown": files["fully_shown"][:1]}},
+            {
+                **wire,
+                "check_change_files": {
+                    **files,
+                    "partially_shown": [{"commitment": files["fully_shown"][0], "shown_bytes": 1}],
+                },
+            },
         ),
         (
             EventSchema("check_recorded", "1.3.0"),
-            {**wire, "check_change_files": {**files, "complete": False}},
+            {
+                **wire,
+                "check_change_files": {
+                    **files,
+                    "partially_shown": [{**files["partially_shown"][0], "shown_bytes": -1}],
+                },
+            },
+        ),
+        (
+            EventSchema("check_recorded", "1.3.0"),
+            {
+                **wire,
+                "check_change_files": {
+                    **files,
+                    "partially_shown": [files["partially_shown"][0]["commitment"]],
+                },
+            },
         ),
         (
             EventSchema("check_recorded", "1.3.0"),
@@ -84,3 +112,10 @@ def test_check_change_files_ride_only_a_recorded_conclusion_and_stay_closed() ->
     for schema, candidate in invalid:
         with pytest.raises(ProtocolValueError):
             decode_payload(schema, freeze_json(candidate))
+    # A record past its file bound keeps the files it holds: every entry is still true.
+    bounded = {**wire, "check_change_files": {**files, "complete": False}}
+    validate_schema_instance("check-recorded", "1.3.0", bounded)
+    decoded = decode_payload(EventSchema("check_recorded", "1.3.0"), freeze_json(bounded))
+    assert type(decoded) is CheckRecordedPayload and decoded.check_change_files is not None
+    assert decoded.check_change_files.complete is False
+    assert decoded.check_change_files.fully_shown == tuple(files["fully_shown"])

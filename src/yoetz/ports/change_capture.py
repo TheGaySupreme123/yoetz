@@ -56,8 +56,11 @@ MAX_CHECK_CHANGE_TEXT_BYTES: Final = 262_144
 _MAX_FILE_COUNT: Final = 1_000_000
 _HEX: Final = re.compile(r"^[0-9a-f]+$", re.ASCII)
 
-type ChangeBaseKind = Literal["task_start", "head", "empty"]
-_BASE_KINDS: Final = frozenset({"task_start", "head", "empty"})
+# ``first_check``: the task recorded no start commit (created before ADR-031, or recording
+# failed), so its first check pinned HEAD as the task's base for every later check.
+type ChangeBaseKind = Literal["task_start", "first_check", "head", "empty"]
+type TaskChangeBaseOrigin = Literal["task_start", "first_check"]
+_BASE_KINDS: Final = frozenset({"task_start", "first_check", "head", "empty"})
 
 # Closed diagnostic vocabulary. A capture that cannot run reports one of these tokens and never an
 # exception message, path, or Git output.
@@ -93,13 +96,21 @@ def _invalid() -> ValueError:
 
 @dataclass(frozen=True, slots=True)
 class TaskChangeBase:
-    """The commit HEAD named when a task was created; the check-time change starts here."""
+    """The commit a task's check-time change starts from, fixed for the life of the task.
+
+    ``task_start`` bases are HEAD when the task was created. A task without one gets a
+    ``first_check`` base: HEAD when its first check ran, pinned so every later check of the task
+    diffs from the same commit and commits made in between stay in the change.
+    """
 
     object_format: Literal["sha1", "sha256"]
     commit: str = field(repr=False)
+    origin: TaskChangeBaseOrigin = "task_start"
 
     def __post_init__(self) -> None:
         if self.object_format not in {"sha1", "sha256"}:
+            raise _invalid()
+        if self.origin not in {"task_start", "first_check"}:
             raise _invalid()
         length = 40 if self.object_format == "sha1" else 64
         if (
@@ -228,6 +239,7 @@ def encode_task_change_base(base: TaskChangeBase) -> bytes:
             {
                 "commit": base.commit,
                 "object_format": base.object_format,
+                "origin": base.origin,
                 "schema": _TASK_CHANGE_BASE_SCHEMA,
             },
         )
@@ -239,12 +251,14 @@ def decode_task_change_base(data: bytes) -> TaskChangeBase:
     if canonical_encode(parsed) != data or type(parsed) is not dict:
         raise _invalid()
     source = cast(dict[str, object], parsed)
-    if set(source) != {"commit", "object_format", "schema"}:
+    if set(source) - {"origin"} != {"commit", "object_format", "schema"}:
         raise _invalid()
     if source["schema"] != _TASK_CHANGE_BASE_SCHEMA:
         raise _invalid()
     return TaskChangeBase(
-        cast(Literal["sha1", "sha256"], source["object_format"]), cast(str, source["commit"])
+        cast(Literal["sha1", "sha256"], source["object_format"]),
+        cast(str, source["commit"]),
+        cast(TaskChangeBaseOrigin, source.get("origin", "task_start")),
     )
 
 

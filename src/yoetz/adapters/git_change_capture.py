@@ -282,7 +282,7 @@ class GitChangeCaptureAdapter:
             and base.object_format == object_format
             and self._rev(handle, base.commit + "^{tree}", deadline) is not None
         ):
-            base_kind, base_id = "task_start", base.commit
+            base_kind, base_id = base.origin, base.commit
         else:
             head = self._rev(handle, "HEAD^{commit}", deadline)
             if head is not None:
@@ -667,6 +667,7 @@ class GitChangeCaptureAdapter:
         omitted += unlisted_untracked
         header = _header(
             base,
+            base_id,
             sections,
             tracked=tracked,
             untracked=untracked,
@@ -688,6 +689,7 @@ class GitChangeCaptureAdapter:
 
 def _header(
     base: ChangeBaseKind,
+    base_id: str,
     sections: list[_Section],
     *,
     tracked: int,
@@ -701,6 +703,11 @@ def _header(
         "the agent did not supply it.",
         {
             "task_start": "Base: the commit HEAD named when this task started.",
+            "first_check": (
+                f"Base: commit {base_id[:12]}, HEAD at this task's first check after the upgrade "
+                "(the commit at task start was not recorded). Work committed before that check "
+                "is not part of this change."
+            ),
             "head": (
                 "Base: HEAD when this check ran. The commit at task start was not recorded or "
                 "is no longer available, so commits made during the task may be missing from "
@@ -710,7 +717,7 @@ def _header(
         }[base],
         "Scope: committed and uncommitted changes to tracked files since the base, plus "
         "untracked files Git does not ignore. Uncommitted or untracked work that already existed "
-        "when the task started is included too.",
+        "when the base was named is included too.",
     ]
     if not tracked and not untracked and not untracked_listing_truncated:
         lines.append("Changed files: none. The working tree matches the base.")

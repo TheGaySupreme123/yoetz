@@ -18,7 +18,11 @@ from dataclasses import dataclass, replace
 from typing import Final, cast
 
 from yoetz.application.semantic_case import CheckTimeChange, check_time_change_shown_files
-from yoetz.domain.events import MAX_CHECK_CHANGE_SHOWN_FILES, CheckChangeShownFiles
+from yoetz.domain.events import (
+    MAX_CHECK_CHANGE_SHOWN_FILES,
+    CheckChangePartialFile,
+    CheckChangeShownFiles,
+)
 from yoetz.domain.privacy import ReviewSelectionPolicy
 from yoetz.observability.logging import (
     record_bounded_event_without_raising,
@@ -112,26 +116,34 @@ async def check_change_shown_files(
 
     Each file is committed with the task bundle's own object commitment key over its base and its
     ``diff --git`` line, so no path is recorded, the same file under the same base commits the
-    same way in every check of the task, and a file under a different base (HEAD moved) does not
-    match. A recovered job derives the same commitments from its stored object.
+    same way in every check of the task, and a file under a different base does not match. A
+    file the packet carried in part keeps the length of its clean prefix. Only shown files count
+    toward the record's bound; past it the first files in change order are kept and the record
+    says it is incomplete. A recovered job derives the same commitments from its stored object.
     """
 
     files = check_time_change_shown_files(change.capture, selection, admitted_parts)
-    if len(files) > MAX_CHECK_CHANGE_SHOWN_FILES:
-        return CheckChangeShownFiles((), (), complete=False)
+    complete = len(files) <= MAX_CHECK_CHANGE_SHOWN_FILES
     base = change.capture.base_commit.encode("ascii")
     fully: set[str] = set()
-    partially: set[str] = set()
-    for identity, whole in files:
+    partially: dict[str, int] = {}
+    for identity, whole, clean_bytes in files[:MAX_CHECK_CHANGE_SHOWN_FILES]:
         commitment = await runtime.objects.commitment_for(
             _SHOWN_FILE_DOMAIN + base + b"\x00" + identity, ObjectKind.CHANGE_CAPTURE
         )
-        (fully if whole else partially).add(commitment)
-    partially -= fully
+        if whole:
+            fully.add(commitment)
+        else:
+            partially[commitment] = clean_bytes
+    for commitment in fully:
+        partially.pop(commitment, None)
     return CheckChangeShownFiles(
         tuple(sorted(fully, key=str.encode)),
-        tuple(sorted(partially, key=str.encode)),
-        complete=True,
+        tuple(
+            CheckChangePartialFile(commitment, partially[commitment])
+            for commitment in sorted(partially, key=str.encode)
+        ),
+        complete=complete,
     )
 
 
@@ -192,6 +204,56 @@ async def _load_task_base(runtime: TaskRuntime, request_id: str) -> TaskChangeBa
             request_id=request_id,
         )
         return None
+
+
+async def _pin_first_check_base(
+    runtime: TaskRuntime,
+    port: ChangeCapturePort,
+    workspace: str,
+    clock: ClockPort,
+    request_id: str,
+) -> TaskChangeBase | None:
+    """Pin HEAD as the base of a task that has none, through the task-start base seam.
+
+    A task created before ADR-031, or whose start base could not be recorded, would otherwise
+    diff every check against a HEAD that moves with each commit, so the files one review saw
+    could never match the next review's. The first check records HEAD once as a ``first_check``
+    base; every later check of the task diffs from it, keeping committed work in the change. The
+    case still discloses ``check_time_change_base_unavailable``: it is not the task-start commit.
+    When the pin cannot be recorded the check falls back to HEAD, exactly as before.
+    """
+
+    recorder = getattr(runtime.ledger, "record_task_change_base", None)
+    loader = getattr(runtime.ledger, "load_task_change_base", None)
+    if not callable(recorder) or not callable(loader):
+        return None
+    try:
+        head = await asyncio.to_thread(port.read_task_base, workspace)
+        if type(head) is not TaskChangeBase:
+            raise TypeError("task_change_base_invalid")
+        pinned = replace(head, origin="first_check")
+        ref = await _store(
+            runtime, encode_task_change_base(pinned), TASK_CHANGE_BASE_MEDIA_TYPE, clock
+        )
+        if await cast(Callable[[ObjectRef], Awaitable[bool]], recorder)(ref):
+            return pinned
+        # Another check of this task pinned first: use the base the task kept.
+        return await _load_task_base(runtime, request_id)
+    except ChangeCaptureUnavailable as exc:
+        record_bounded_event_without_raising(
+            component=_COMPONENT,
+            operation="check_time_change_base_not_pinned",
+            reason=exc.reason,
+            request_id=request_id,
+        )
+    except Exception as exc:
+        record_unexpected_exception_without_raising(
+            exc,
+            component=_COMPONENT,
+            operation="check_time_change_base_pin_failed",
+            request_id=request_id,
+        )
+    return None
 
 
 def _redacted(capture: CheckChangeCapture) -> CheckChangeCapture:
@@ -257,6 +319,8 @@ async def capture_check_time_change(
         )
         return CheckChangeOutcome(unavailable=True)
     base = await _load_task_base(runtime, request_id)
+    if base is None:
+        base = await _pin_first_check_base(runtime, port, source.workspace, clock, request_id)
     try:
         # Capture and every redaction pass run off the event loop: a parser-sized change needs
         # dozens of full scans, which would otherwise stall every other connection for seconds.

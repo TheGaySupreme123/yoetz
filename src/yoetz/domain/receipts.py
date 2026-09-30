@@ -166,7 +166,8 @@ SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP: Final = "semantic_case_finding_refs_o
 # subject). A check whose connection named no workspace has nothing to read and reports no code.
 CHECK_TIME_CHANGE_UNAVAILABLE_GAP: Final = "check_time_change_unavailable"
 # The commit recorded when the task started was absent or unresolvable, so the change is shown
-# against HEAD and commits made during the task may be missing from it.
+# against the commit the task's first check pinned (or, when no pin could be kept, HEAD): work
+# committed during the task before that commit is missing from it.
 CHECK_TIME_CHANGE_BASE_UNAVAILABLE_GAP: Final = "check_time_change_base_unavailable"
 # The capture, or its share of the packet, stopped early: the files and parts it names as not
 # shown never reached the reviewer.

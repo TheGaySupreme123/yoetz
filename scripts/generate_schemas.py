@@ -1296,12 +1296,26 @@ def _check_recorded_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         "type": "array",
         "uniqueItems": True,
     }
+    partial: dict[str, JsonValue] = {
+        "items": {
+            "additionalProperties": False,
+            "properties": {
+                "commitment": {"pattern": "^hmac-sha256:[0-9a-f]{64}$", "type": "string"},
+                "shown_bytes": {"maximum": 262144, "minimum": 0, "type": "integer"},
+            },
+            "required": ["commitment", "shown_bytes"],
+            "type": "object",
+        },
+        "maxItems": 128,
+        "type": "array",
+        "uniqueItems": True,
+    }
     properties["check_change_files"] = {
         "additionalProperties": False,
         "properties": {
             "complete": {"type": "boolean"},
             "fully_shown": commitments,
-            "partially_shown": json.loads(json.dumps(commitments)),
+            "partially_shown": partial,
         },
         "required": ["complete", "fully_shown", "partially_shown"],
         "type": "object",

@@ -138,9 +138,13 @@ __all__ = [
     "ActionRecordedPayload",
     "AssignmentRecordedPayload",
     "CheckMode",
+    "CheckChangePartialFile",
     "CheckChangeShownFiles",
     "CheckRecordedPayload",
+    "MAX_CHECK_CHANGE_SHOWN_BYTES",
     "MAX_CHECK_CHANGE_SHOWN_FILES",
+    "check_change_files_from_json",
+    "check_change_files_to_json",
     "ClaimKind",
     "ClaimRecordedPayload",
     "ClaimRecordedPayloadV1_1",
@@ -2196,6 +2200,28 @@ _VALID_POLICY_SELECTIONS: Final = frozenset(
 
 # At most this many changed files a check-time change showed are recorded on one check (ADR-031).
 MAX_CHECK_CHANGE_SHOWN_FILES: Final = 128
+# A shown length never exceeds the stored change's own bound.
+MAX_CHECK_CHANGE_SHOWN_BYTES: Final = 262_144
+
+
+@dataclass(frozen=True, slots=True)
+class CheckChangePartialFile:
+    """One changed file a review saw only in part: its commitment and how much it saw.
+
+    ``shown_bytes`` counts the bytes of the file's diff section the packet carried before the
+    packet ended or the first redacted span began. It is a length, never content.
+    """
+
+    commitment: str
+    shown_bytes: int
+
+    def __post_init__(self) -> None:
+        validate_commitment(self.commitment)
+        object.__setattr__(
+            self,
+            "shown_bytes",
+            _bounded_integer(self.shown_bytes, 0, MAX_CHECK_CHANGE_SHOWN_BYTES),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -2204,35 +2230,90 @@ class CheckChangeShownFiles:
 
     Each entry is a keyed commitment to one changed file under the change's base, never a path.
     ``fully_shown`` files reached the packet whole, unredacted and untruncated;
-    ``partially_shown`` files reached it only in part or with a redacted span. When more files
-    were shown than one record holds, ``complete`` is false and both sets are empty: nothing is
-    then known about which files were shown.
+    ``partially_shown`` files reached it only in part, each with the clean prefix length it
+    carried. At most ``MAX_CHECK_CHANGE_SHOWN_FILES`` files are recorded; when the packet showed
+    more, ``complete`` is false and the record holds a subset. Every entry is still true, so an
+    incomplete record may prove what a repair review saw, but never everything a review saw.
     """
 
     fully_shown: tuple[str, ...]
-    partially_shown: tuple[str, ...]
+    partially_shown: tuple[CheckChangePartialFile, ...]
     complete: bool
 
     def __post_init__(self) -> None:
         if type(self.complete) is not bool:
             raise ProtocolValueError("invalid_event_value_type")
-        for name in ("fully_shown", "partially_shown"):
-            raw = _array(getattr(self, name))
-            values = tuple(validate_commitment(cast(str, item)) for item in raw)
-            if values != tuple(sorted(set(values), key=str.encode)):
-                raise ProtocolValueError("duplicate_set_member")
-            object.__setattr__(self, name, values)
-        if set(self.fully_shown) & set(self.partially_shown):
+        full = tuple(validate_commitment(cast(str, item)) for item in _array(self.fully_shown))
+        if full != tuple(sorted(set(full), key=str.encode)):
             raise ProtocolValueError("duplicate_set_member")
-        count = len(self.fully_shown) + len(self.partially_shown)
-        if count > MAX_CHECK_CHANGE_SHOWN_FILES or (not self.complete and count):
+        partial = _array(self.partially_shown)
+        if any(type(item) is not CheckChangePartialFile for item in partial):
             raise ProtocolValueError("invalid_event_value_type")
+        partial_files = cast(tuple[CheckChangePartialFile, ...], partial)
+        keys = tuple(item.commitment for item in partial_files)
+        if keys != tuple(sorted(set(keys), key=str.encode)) or set(keys) & set(full):
+            raise ProtocolValueError("duplicate_set_member")
+        if len(full) + len(keys) > MAX_CHECK_CHANGE_SHOWN_FILES:
+            raise ProtocolValueError("invalid_event_value_type")
+        object.__setattr__(self, "fully_shown", full)
+        object.__setattr__(self, "partially_shown", partial_files)
 
-    @property
-    def shown(self) -> frozenset[str]:
-        """Every file the review saw any of; empty when the record is incomplete."""
+    def partial_bytes(self) -> Mapping[str, int]:
+        return {item.commitment: item.shown_bytes for item in self.partially_shown}
 
-        return frozenset(self.fully_shown) | frozenset(self.partially_shown)
+    def covers(self, raised: CheckChangeShownFiles) -> bool:
+        """Whether this (repair) record proves it saw at least what *raised* saw (ADR-031).
+
+        Every file *raised* saw whole is whole here; every file it saw in part (n bytes) is whole
+        here or seen in part with at least n bytes. *raised* must be complete; this record may be
+        incomplete, because each entry it holds is still true.
+        """
+
+        if not raised.complete:
+            return False
+        full = frozenset(self.fully_shown)
+        if not frozenset(raised.fully_shown) <= full:
+            return False
+        partial = self.partial_bytes()
+        return all(
+            item.commitment in full or partial.get(item.commitment, -1) >= item.shown_bytes
+            for item in raised.partially_shown
+        )
+
+
+def check_change_files_to_json(value: CheckChangeShownFiles) -> dict[str, object]:
+    if type(value) is not CheckChangeShownFiles:
+        raise ProtocolValueError("invalid_event_value_type")
+    return {
+        "complete": value.complete,
+        "fully_shown": value.fully_shown,
+        "partially_shown": tuple(
+            {"commitment": item.commitment, "shown_bytes": item.shown_bytes}
+            for item in value.partially_shown
+        ),
+    }
+
+
+def check_change_files_from_json(value: object) -> CheckChangeShownFiles:
+    source = _closed_object(
+        value, required=frozenset({"complete", "fully_shown", "partially_shown"})
+    )
+    partial: list[CheckChangePartialFile] = []
+    for raw in _array(_field(source, "partially_shown")):
+        item = _closed_object(raw, required=frozenset({"commitment", "shown_bytes"}))
+        commitment = _field(item, "commitment")
+        shown_bytes = _field(item, "shown_bytes")
+        if type(commitment) is not str or type(shown_bytes) is not int:
+            raise ProtocolValueError("invalid_event_value_type")
+        partial.append(CheckChangePartialFile(commitment, shown_bytes))
+    complete = _field(source, "complete")
+    if type(complete) is not bool:
+        raise ProtocolValueError("invalid_event_value_type")
+    return CheckChangeShownFiles(
+        fully_shown=cast(tuple[str, ...], _array(_field(source, "fully_shown"))),
+        partially_shown=tuple(partial),
+        complete=complete,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -2503,16 +2584,7 @@ def _optional(source: Mapping[str, JsonValue], key: str) -> JsonValue | None:
 
 
 def _decode_check_change_files(value: object | None) -> CheckChangeShownFiles | None:
-    if value is None:
-        return None
-    source = _closed_object(
-        value, required=frozenset({"complete", "fully_shown", "partially_shown"})
-    )
-    return CheckChangeShownFiles(
-        fully_shown=cast(tuple[str, ...], _array(_field(source, "fully_shown"))),
-        partially_shown=cast(tuple[str, ...], _array(_field(source, "partially_shown"))),
-        complete=cast(bool, _field(source, "complete")),
-    )
+    return None if value is None else check_change_files_from_json(value)
 
 
 def _array(value: object) -> tuple[object, ...]:
@@ -4007,11 +4079,7 @@ def encode_payload(payload: EventPayload) -> JsonValue:
         )
         _optional_value(result, "semantic_conclusion", value.semantic_conclusion)
         if value.check_change_files is not None:
-            result["check_change_files"] = {
-                "complete": value.check_change_files.complete,
-                "fully_shown": value.check_change_files.fully_shown,
-                "partially_shown": value.check_change_files.partially_shown,
-            }
+            result["check_change_files"] = check_change_files_to_json(value.check_change_files)
         return _json_object(result)
     if payload_type is ReceiptRecordedPayload:
         value = cast(ReceiptRecordedPayload, payload)

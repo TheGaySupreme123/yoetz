@@ -41,7 +41,11 @@ from yoetz.adapters.memory.ledger import MemoryLedgerAdapter
 from yoetz.adapters.privacy.local_enforcer import LocalPrivacyEnforcer, scan_exact_bytes
 from yoetz.adapters.sqlite.repository import SqliteLedger
 from yoetz.application.check import FinalSemanticEvaluation
-from yoetz.application.check_change import check_change_shown_files, record_task_change_base
+from yoetz.application.check_change import (
+    capture_check_time_change,
+    check_change_shown_files,
+    record_task_change_base,
+)
 from yoetz.application.egress import PrivacyCoordinator
 from yoetz.application.semantic_case import (
     CHECK_TIME_CHANGE_ITEM_PREFIX,
@@ -341,7 +345,9 @@ async def test_connection_for_another_repository_is_never_read(tmp_path: Path) -
 
 
 @pytest.mark.anyio
-async def test_task_without_a_recorded_base_discloses_the_head_base(tmp_path: Path) -> None:
+async def test_task_without_a_recorded_base_pins_its_first_check_and_discloses_it(
+    tmp_path: Path,
+) -> None:
     repository = _repository(tmp_path)
     frozen, runtime = await _durable_semantic_case(memory_adapter(append_command()))
     frozen = _with_claim(frozen)
@@ -351,10 +357,61 @@ async def test_task_without_a_recorded_base_discloses_the_head_base(tmp_path: Pa
     with check_workspace_source_scope(CheckWorkspaceSource(os.fspath(repository), _REPOSITORY)):
         waiting = await _evaluator(privacy, runtime)(frozen, (), runtime)
 
+    # Still not the task-start commit, so still disclosed as such.
     assert CHECK_TIME_CHANGE_BASE_UNAVAILABLE_GAP in waiting.case_content_gaps
     text = _change_text(privacy.candidates[0])
     assert "HEAD_BASE_MARKER" in text
-    assert "commits made during the task may be missing" in text
+    assert "HEAD at this task's first check after the upgrade" in text
+    assert await getattr(runtime.ledger, "load_task_change_base")() is not None
+
+
+def _all_parts(capture: CheckChangeCapture) -> int:
+    from yoetz.application import semantic_case as module
+
+    selection = ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED)
+    chunks = getattr(module, "_check_time_change_chunks")(
+        capture.text, getattr(module, "_check_time_change_part_limit")(selection)
+    )
+    return len(cast(tuple[bytes, ...], chunks))
+
+
+@pytest.mark.anyio
+async def test_legacy_task_keeps_its_pinned_base_across_a_repair_commit(tmp_path: Path) -> None:
+    """ADR-031: a task with no start base must not re-base on HEAD at every check."""
+
+    repository = _repository(tmp_path)
+    _, runtime = await _durable_semantic_case(memory_adapter(append_command()))
+    port = GitChangeCaptureAdapter()
+    source = CheckWorkspaceSource(os.fspath(repository), _REPOSITORY)
+    selection = ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED)
+
+    async def check(suffix: str) -> tuple[CheckChangeCapture, CheckChangeShownFiles]:
+        outcome = await capture_check_time_change(
+            runtime=runtime,
+            source=source,
+            route_repository_commitment=_REPOSITORY,
+            port=port,
+            clock=FixedClock(),
+            request_id=f"req_00000000-0000-4000-8000-0000000007{suffix}",
+        )
+        assert outcome.change is not None
+        capture = outcome.change.capture
+        files = await check_change_shown_files(
+            runtime, outcome.change, selection, _all_parts(capture)
+        )
+        return capture, files
+
+    _python_rewrite(repository, "String(key)", "`${typeof key}:${String(key)}`")
+    raising_capture, raised = await check("01")
+    _git(repository, "commit", "--quiet", "-am", "keep numeric and string keys apart")
+    _python_rewrite(repository, "dependencies.get", "dependencyMap.get")
+    repair_capture, repair = await check("02")
+
+    assert raising_capture.base == repair_capture.base == "first_check"
+    assert raising_capture.base_commit == repair_capture.base_commit
+    # The committed work is still part of the change, and the file matches across the commit.
+    assert b"`${typeof key}:${String(key)}`" in repair_capture.text
+    assert raised.fully_shown and repair.covers(raised)
 
 
 @pytest.mark.anyio

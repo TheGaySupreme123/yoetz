@@ -55,7 +55,7 @@ def document(root: Path) -> dict[str, Any]:
     check_change_files = {
         "complete": True,
         "fully_shown": ["hmac-sha256:" + "1" * 64, "hmac-sha256:" + "2" * 64],
-        "partially_shown": ["hmac-sha256:" + "3" * 64],
+        "partially_shown": [{"commitment": "hmac-sha256:" + "3" * 64, "shown_bytes": 1024}],
     }
     for conclusion, files in [
         (None, None),

@@ -13,6 +13,7 @@ from yoetz.domain.events import (
     PAYLOAD_TYPES,
     ActionRecordedPayload,
     AssignmentRecordedPayload,
+    CheckChangeShownFiles,
     ClaimRecordedPayload,
     ClaimRecordedPayloadV1_1,
     CoordinationContextRecordedPayload,
@@ -28,6 +29,8 @@ from yoetz.domain.events import (
     PlanRevisedPayload,
     ResponseRecordedPayload,
     ResultRecordedPayload,
+    check_change_files_from_json,
+    check_change_files_to_json,
     decode_payload,
     encode_payload,
 )
@@ -52,7 +55,6 @@ from yoetz.domain.values import (
     object_id,
     obligation_id,
     result_id,
-    validate_commitment,
     validate_sha256_digest,
 )
 from yoetz.domain.values import (
@@ -327,16 +329,17 @@ class FindingProjectionRecord(ProjectionRecord[Finding]):
     The check-time change facts (ADR-031) are replay-derived from recorded checks, never from the
     finding's own payload. ``check_change_raising_check_event_id`` names the ``check_recorded``
     event whose completed AI-powered review raised this finding; ``check_change_raised_files``
-    are the keyed commitments to every check-time change file that review was shown, empty when
-    it carried none, and ``None`` while unknown (a raising check that carried parts without a
-    readable record of them, or one since redacted). ``resolution_depends_on_check_event_id``
+    is that review's complete record of the check-time change files it was shown (keyed
+    commitments, with the clean prefix length of each file it saw in part), empty when it carried
+    none, and ``None`` while unknown (an incomplete record, parts carried without a record, or a
+    raising check since redacted). ``resolution_depends_on_check_event_id``
     names that raising check when the resolving check's check-time limits were tolerated only
     because of those files; redacting it reopens the finding.
     """
 
     resolved_by_check_event_id: EventId | None = None
     check_change_raising_check_event_id: EventId | None = None
-    check_change_raised_files: tuple[str, ...] | None = None
+    check_change_raised_files: CheckChangeShownFiles | None = None
     resolution_depends_on_check_event_id: EventId | None = None
 
     def __post_init__(self) -> None:
@@ -356,15 +359,12 @@ class FindingProjectionRecord(ProjectionRecord[Finding]):
             except ValueError as exc:
                 raise _invalid() from exc
         files = self.check_change_raised_files
-        if files is not None:
-            if self.check_change_raising_check_event_id is None or type(files) is not tuple:
-                raise _invalid()
-            try:
-                values = tuple(validate_commitment(item) for item in files)
-            except ValueError as exc:
-                raise _invalid() from exc
-            if values != tuple(sorted(set(values), key=str.encode)):
-                raise _invalid()
+        if files is not None and (
+            self.check_change_raising_check_event_id is None
+            or type(files) is not CheckChangeShownFiles
+            or not files.complete
+        ):
+            raise _invalid()
         if (
             self.resolution_depends_on_check_event_id is not None
             and self.resolved_by_check_event_id is None
@@ -939,7 +939,9 @@ def _record_snapshot(record: _ProjectionRecordLike) -> dict[str, JsonValue]:
                 record.check_change_raising_check_event_id
             )
         if record.check_change_raised_files is not None:
-            result["check_change_raised_files"] = list(record.check_change_raised_files)
+            result["check_change_raised_files"] = cast(
+                JsonValue, freeze_json(check_change_files_to_json(record.check_change_raised_files))
+            )
         if record.resolution_depends_on_check_event_id is not None:
             result["resolution_depends_on_check_event_id"] = (
                 record.resolution_depends_on_check_event_id
@@ -1318,8 +1320,10 @@ def _record_from_snapshot(
             if name in source and source[name] is None:
                 raise _invalid()
         raw_files = source.get("check_change_raised_files")
-        if raw_files is not None and type(raw_files) not in {list, tuple}:
-            raise _invalid()
+        try:
+            raised_files = None if raw_files is None else check_change_files_from_json(raw_files)
+        except ValueError as exc:
+            raise _invalid() from exc
         return FindingProjectionRecord(
             payload=cast(Finding | None, payload),
             payload_digest=payload_digest,
@@ -1332,9 +1336,7 @@ def _record_from_snapshot(
             check_change_raising_check_event_id=cast(
                 EventId | None, source.get("check_change_raising_check_event_id")
             ),
-            check_change_raised_files=(
-                None if raw_files is None else tuple(cast(list[str], raw_files))
-            ),
+            check_change_raised_files=raised_files,
             resolution_depends_on_check_event_id=cast(
                 EventId | None, source.get("resolution_depends_on_check_event_id")
             ),
