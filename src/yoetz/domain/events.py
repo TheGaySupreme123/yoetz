@@ -169,8 +169,6 @@ __all__ = [
     "EvidenceDigestSubject",
     "EvidenceRecordedPayload",
     "FindingRecordedPayload",
-    "FINDING_DIALOGUE_EVENT_SCHEMA_VERSION",
-    "CHECK_DIALOGUE_EVENT_SCHEMA_VERSION",
     "IntegrationKind",
     "LedgerChain",
     "LedgerRecord",
@@ -220,9 +218,7 @@ __all__ = [
     "accepted_record_digest_preimage",
     "accepted_record_to_json",
     "decode_payload",
-    "check_event_schema",
     "encode_payload",
-    "finding_event_schema",
     "media_type_for",
     "normalize_payload_json",
 ]
@@ -238,17 +234,15 @@ EVIDENCE_SCHEMA_VERSIONS: Final = (
     EVIDENCE_SCHEMA_VERSION,
 )
 CLAIM_SCHEMA_VERSION: Final = "1.1.0"
+# 1.3.0 (unreleased on the 0.3 line) also carries the optional per-finding reviewer rulings of
+# issue #905; a check without rulings keeps its earlier 1.3.0 bytes.
 CHECK_EVENT_SCHEMA_VERSION: Final = "1.3.0"
-# Additive per-finding reviewer verdicts (issue #905): written only when a succeeded review
-# returned at least one admitted verdict; every other check keeps its earlier version and bytes.
-CHECK_DIALOGUE_EVENT_SCHEMA_VERSION: Final = "1.4.0"
 SEMANTIC_EVENT_SCHEMA_VERSION: Final = "1.2.0"
 SEMANTIC_EVENT_SCHEMA_VERSIONS: Final = ("1.1.0", SEMANTIC_EVENT_SCHEMA_VERSION)
+# 1.3.0 (unreleased on the 0.3 line) also admits the optional review-dialogue fields of issue #905
+# (the persisted challenge fields and the ``relates_to`` link) on AI-powered findings; a finding
+# without them keeps its earlier 1.3.0 bytes.
 FINDING_EVENT_SCHEMA_VERSION: Final = "1.3.0"
-# The review-dialogue fields (persisted challenge fields and the ``relates_to`` link to earlier
-# findings, issue #905) are additive: only an AI-powered finding that carries them is written at
-# 1.4.0. Every local finding keeps the frozen 1.3.0 shape and bytes.
-FINDING_DIALOGUE_EVENT_SCHEMA_VERSION: Final = "1.4.0"
 COORDINATION_EVENT_SCHEMA_VERSION: Final = "1.0.0"
 SESSION_EVENT_SCHEMA_VERSION: Final = "1.1.0"
 # Lineage fields are additive to the original event families.  The old session-opened schema
@@ -792,14 +786,11 @@ def _locator_key_kind(schema: EventSchema) -> str:
             and (
                 schema.version in SEMANTIC_EVENT_SCHEMA_VERSIONS
                 or (
-                    schema.name == "check_recorded"
-                    and schema.version
-                    in {CHECK_EVENT_SCHEMA_VERSION, CHECK_DIALOGUE_EVENT_SCHEMA_VERSION}
+                    schema.name == "check_recorded" and schema.version == CHECK_EVENT_SCHEMA_VERSION
                 )
                 or (
                     schema.name == "finding_recorded"
-                    and schema.version
-                    in {FINDING_EVENT_SCHEMA_VERSION, FINDING_DIALOGUE_EVENT_SCHEMA_VERSION}
+                    and schema.version == FINDING_EVENT_SCHEMA_VERSION
                 )
             )
         )
@@ -2395,7 +2386,6 @@ PAYLOAD_TYPES: Final[Mapping[EventSchema, type[EventPayload]]] = MappingProxyTyp
         EventSchema("plan_revised", SCHEMA_VERSION): PlanRevisedPayload,
         EventSchema("finding_recorded", SCHEMA_VERSION): Finding,
         EventSchema("finding_recorded", FINDING_EVENT_SCHEMA_VERSION): Finding,
-        EventSchema("finding_recorded", FINDING_DIALOGUE_EVENT_SCHEMA_VERSION): Finding,
         **{
             EventSchema("finding_recorded", version): Finding
             for version in SEMANTIC_EVENT_SCHEMA_VERSIONS
@@ -2404,7 +2394,6 @@ PAYLOAD_TYPES: Final[Mapping[EventSchema, type[EventPayload]]] = MappingProxyTyp
         EventSchema("redaction_recorded", SCHEMA_VERSION): RedactionRecordedPayload,
         EventSchema("check_recorded", SCHEMA_VERSION): CheckRecordedPayload,
         EventSchema("check_recorded", CHECK_EVENT_SCHEMA_VERSION): CheckRecordedPayload,
-        EventSchema("check_recorded", CHECK_DIALOGUE_EVENT_SCHEMA_VERSION): CheckRecordedPayload,
         **{
             EventSchema("check_recorded", version): CheckRecordedPayload
             for version in SEMANTIC_EVENT_SCHEMA_VERSIONS
@@ -3158,29 +3147,6 @@ def _decode_prior_verdicts(value: JsonValue | None) -> tuple[PriorFindingVerdict
             )
         )
     return tuple(verdicts)
-
-
-def check_event_schema(semantic_conclusion: str | None, verdicts: tuple[object, ...]) -> str:
-    """The one ``check_recorded`` version a new check is written under."""
-
-    if verdicts:
-        return CHECK_DIALOGUE_EVENT_SCHEMA_VERSION
-    return (
-        CHECK_EVENT_SCHEMA_VERSION
-        if semantic_conclusion is not None
-        else SEMANTIC_EVENT_SCHEMA_VERSION
-    )
-
-
-def finding_event_schema(finding: Finding) -> EventSchema:
-    """The one ``finding_recorded`` schema a new finding is written under."""
-
-    return EventSchema(
-        "finding_recorded",
-        FINDING_DIALOGUE_EVENT_SCHEMA_VERSION
-        if finding_has_dialogue_fields(finding)
-        else FINDING_EVENT_SCHEMA_VERSION,
-    )
 
 
 def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
@@ -4084,18 +4050,11 @@ def _validate_event_schema_payload(
             raise ProtocolValueError("invalid_event_schema")
     if type(payload) is CheckRecordedPayload:
         if (payload.semantic_conclusion is not None) != (
-            schema.version in {CHECK_EVENT_SCHEMA_VERSION, CHECK_DIALOGUE_EVENT_SCHEMA_VERSION}
+            schema.version == CHECK_EVENT_SCHEMA_VERSION
         ):
             raise ProtocolValueError("invalid_event_schema")
-    if type(payload) is CheckRecordedPayload and (
-        bool(payload.prior_finding_verdicts)
-        != (schema.version == CHECK_DIALOGUE_EVENT_SCHEMA_VERSION)
-    ):
-        raise ProtocolValueError("invalid_event_schema")
     if type(payload) is Finding and schema.name == "finding_recorded":
-        if finding_has_dialogue_fields(payload) != (
-            schema.version == FINDING_DIALOGUE_EVENT_SCHEMA_VERSION
-        ):
+        if finding_has_dialogue_fields(payload) and schema.version != FINDING_EVENT_SCHEMA_VERSION:
             raise ProtocolValueError("invalid_event_schema")
     if schema.version == SCHEMA_VERSION:
         profile: RuntimeProfile | None = None

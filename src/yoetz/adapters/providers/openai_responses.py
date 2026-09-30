@@ -49,6 +49,7 @@ from yoetz.protocol.canonical import (
     strict_json_parse,
 )
 from yoetz.protocol.models import (
+    MAX_PRIOR_FINDING_VERDICTS,
     ProviderChallengeModel,
     ProviderJudgmentChallengesModel,
     ProviderJudgmentEnvelopeModel,
@@ -160,7 +161,8 @@ SEMANTIC_REVIEW_INSTRUCTION: Final = (
     "already done, unless material newer than that response shows the problem remains; then cite "
     "that newer material and the earlier finding's fnd_ id from citable_refs. "
     "For each earlier finding in review_packet.prior_finding_item_ids, return one "
-    "prior_finding_verdicts entry whatever the conclusion: fixed only when evidence or results "
+    "prior_finding_verdicts entry, with finding_id set to that row's finding_ref (never an "
+    "item_id), whatever the conclusion: fixed only when evidence or results "
     "recorded after the finding show the problem is gone, citing them; still_present or "
     "answered_not_fixed citing the material that shows it remains; withdrawn when the main "
     "agent's reasoned rejection holds; unassessable when the packet cannot settle it. A verdict "
@@ -170,6 +172,9 @@ _SYSTEM_INSTRUCTION: Final = SEMANTIC_REVIEW_INSTRUCTION
 
 _PROVIDER_JUDGMENT_ADAPTER: Final[TypeAdapter[ProviderJudgmentModel]] = TypeAdapter(
     ProviderJudgmentModel
+)
+_PRIOR_VERDICT_ADAPTER: Final[TypeAdapter[ProviderPriorFindingVerdictModel]] = TypeAdapter(
+    ProviderPriorFindingVerdictModel
 )
 _PROVIDER_JUDGMENT_ENVELOPE_ADAPTER: Final[TypeAdapter[ProviderJudgmentEnvelopeModel]] = (
     TypeAdapter(ProviderJudgmentEnvelopeModel)
@@ -871,19 +876,59 @@ def normalize_judgment(parsed: JsonValue) -> SemanticJudgment:
     # provider that flattens the wrapper is still returning output the contract can admit.
     model: ProviderJudgmentModel
     source: JsonValue = parsed
-    if type(parsed) is dict and "judgment" in parsed:
+    envelope = type(parsed) is dict and "judgment" in parsed
+    body: JsonValue = (
+        cast(dict[str, JsonValue], parsed)["judgment"] if envelope else cast(JsonValue, parsed)
+    )
+    kept, dropped = _separate_prior_verdicts(body)
+    if type(body) is dict:
+        body = {**cast(dict[str, JsonValue], body), "prior_finding_verdicts": kept}
+    if envelope:
         try:
-            model = _PROVIDER_JUDGMENT_ENVELOPE_ADAPTER.validate_python(parsed).judgment
+            model = _PROVIDER_JUDGMENT_ENVELOPE_ADAPTER.validate_python(
+                {**cast(dict[str, JsonValue], parsed), "judgment": body}
+            ).judgment
         except ValidationError as exc:
             raise JudgmentValidationError(_classify_rejected_judgment(source)) from exc
     else:
         try:
-            model = _PROVIDER_JUDGMENT_ADAPTER.validate_python(parsed)
+            model = _PROVIDER_JUDGMENT_ADAPTER.validate_python(body)
         except ValidationError as exc:
             raise JudgmentValidationError(_classify_rejected_judgment(source)) from exc
     challenges = tuple(_challenge_from_model(item) for item in model.reviewer_challenges)
     verdicts = tuple(_verdict_from_model(item) for item in model.prior_finding_verdicts)
-    return SemanticJudgment(model.conclusion, challenges, verdicts)
+    return SemanticJudgment(model.conclusion, challenges, verdicts, dropped)
+
+
+def _separate_prior_verdicts(body: JsonValue) -> tuple[list[JsonValue], int]:
+    """Keep well-formed per-finding rulings and count the rest, never failing the judgment.
+
+    A ruling is advisory about one earlier finding. A reply without the array (the 1.0.0 shape a
+    local model or prompt-only host may still return) carries no rulings, and a malformed or
+    surplus ruling is dropped and counted so the check can disclose it: neither may discard the
+    challenges beside it, and neither can ever become ``fixed``.
+    """
+
+    if type(body) is not dict:
+        return [], 0
+    raw = cast(dict[str, JsonValue], body).get("prior_finding_verdicts")
+    if raw is None:
+        return [], 0
+    if type(raw) is not list:
+        return [], 1
+    kept: list[JsonValue] = []
+    dropped = 0
+    for item in cast(list[JsonValue], raw):
+        if len(kept) >= MAX_PRIOR_FINDING_VERDICTS:
+            dropped += 1
+            continue
+        try:
+            _PRIOR_VERDICT_ADAPTER.validate_python(item)
+        except ValidationError:
+            dropped += 1
+            continue
+        kept.append(item)
+    return kept, dropped
 
 
 def normalize_response(

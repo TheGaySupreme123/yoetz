@@ -836,36 +836,47 @@ local receipt-blocking finding; the rejection is judged by the next review.
 thread would be provider-specific and unauditable, so the ledger carries the dialogue. An
 AI-powered finding records the reviewer's remaining challenge fields (`discrepancy`,
 `alternative_interpretation`, `requested_next_step`, `uncertainty`) and a `relates_to` link to the
-earlier recorded findings its challenge cited, in `finding_recorded/1.4.0`. Local findings and
-older rows keep 1.3.0 bytes; the public finding wire is unchanged.
+earlier recorded findings its challenge cited, as optional fields of the unreleased
+`finding_recorded/1.3.0` (extended in place). Local findings and rows written by earlier 0.3
+builds keep their bytes and still validate; the public finding wire is unchanged.
 
 **The prior-findings section.** The review packet (`outbound-case/1.2.0`) carries the newest
-unresolved AI-powered findings in their own `prior_finding` section, outside the 64-row timeline
-and ahead of it in envelope bounding: a structural row with what was asked, the latest answer
+unresolved AI-powered findings in their own `prior_finding` section, outside the 64-row timeline so
+hook rows never crowd it out. Under egress-envelope pressure its rows yield first, oldest finding
+first, so it never displaces work content: a structural row with what was asked, the latest answer
 (disposition, cited refs) and the evidence and results recorded after the finding, plus the prose
 rows the profile's finding-prose selection already permits. It is bounded (8 findings, 48 KiB,
 leftover case capacity only); what does not fit is named as `not_selected` omissions and discloses
 `semantic_prior_findings_over_limit`, a gap that stays on the receipt but does not veto absence
-proof. Findings recorded before 1.4.0 degrade to summary and message with a `not_recorded`
+proof. Findings recorded without challenge fields degrade to summary and message with a `not_recorded`
 omission. No new data category leaves the machine.
 
 **Per-finding rulings.** `provider-judgment/1.1.0` adds a required `prior_finding_verdicts`
 array (at most 8) to every conclusion branch: `{finding_id, verdict, cited_refs, note}` with
 `verdict` one of `fixed`, `still_present`, `answered_not_fixed`, `unassessable`, `withdrawn`.
-The note is turn-local reasoning and is never recorded. Post-validation admits a ruling only for a
-readable, unresolved AI-powered finding inside the frozen fence, once per finding, citing only refs
-inside it. What a ruling may claim is bounded by what it cites: `fixed` must cite evidence or a
-result recorded after the finding (a hallucinated `fixed` must not close a real defect);
-`still_present` and `answered_not_fixed` must cite material; `withdrawn` accepts only a readable
-`rejected` response. A ruling that fails its claim is kept as `unassessable` for that finding
-alone, and every dropped or reduced ruling adds `semantic_prior_verdicts_unsupported` (disclosed,
-not a veto on other findings). Admitted rulings are recorded on the check
-(`check_recorded/1.4.0`, written only when at least one ruling was admitted).
+The note is turn-local reasoning and is never recorded. A reply without the array reads as the 1.0.0
+shape with no rulings, so a local model or prompt-only host that has not adopted it still gets its
+challenges read, and a malformed or surplus ruling is dropped and counted rather than failing the
+review. Post-validation keeps a ruling only for a readable, unresolved AI-powered finding whose
+prior-findings row the packet actually carried, and trims its cited refs to the packet's
+`citable_refs`. What a ruling may claim is bounded by what it still cites: `fixed` must cite
+evidence or a result recorded after the finding (a hallucinated `fixed` must not close a real
+defect); `still_present` and `answered_not_fixed` must cite material; `withdrawn` accepts only a
+readable `rejected` response. A ruling that loses a cited ref or fails its claim is kept as
+`unassessable` for that finding, so a bad ruling can never leave its finding to close by silence;
+two different rulings on one finding, or `fixed` on a finding an admitted challenge of the same
+review re-raises, become `unassessable`. Every dropped, trimmed, reduced or repeated ruling adds
+`semantic_prior_verdicts_unsupported` (disclosed, not a veto on other findings). Admitted rulings
+are recorded on the check as the optional `prior_finding_verdicts` field of the unreleased
+`check_recorded/1.3.0` (extended in place), present only when at least one ruling was admitted.
 
 A `fixed` ruling lets that finding resolve on that check even when the packet as a whole concluded
 `insufficient_packet`: the whole-packet veto and its `semantic_packet_insufficient` marker no longer
 block a finding the reviewer judged on newer material. Every other rule still applies: completed
 review, the finding inside the tested frontier, no suppression, scope, readable freshness, the
-capture baseline, a material change after the finding, and the issue not returned again. Any other
-ruling blocks only its own finding by name (`reviewer_verdict_<verdict>`). Without a ruling the
-earlier rules are unchanged; silence is never read as `fixed`.
+capture baseline, a material change after the finding, and the issue not returned again.
+`withdrawn` keeps the earlier rules, under which a reasoned rejection an assessable review does not
+re-raise resolves over changed state, and never lifts the whole-packet veto. `still_present`,
+`answered_not_fixed` and `unassessable` block only their own finding by name
+(`reviewer_verdict_<verdict>`). Without a ruling the earlier rules are unchanged; silence is never
+read as `fixed`.

@@ -888,7 +888,7 @@ class Finding:
     """One recorded finding.
 
     ``challenge`` and ``related_finding_ids`` (the ``relates_to`` link to earlier findings the
-    reviewer cited) are recorded only on AI-powered findings from ``finding_recorded/1.4.0`` on
+    reviewer cited) are optional fields of ``finding_recorded/1.3.0``, only on AI-powered findings
     (issue #905). They are event facts, not part of the public ``finding`` wire: the public
     encoding (:func:`finding_to_json`) is unchanged, and :func:`finding_event_to_json` carries
     them on the ledger.
@@ -979,7 +979,7 @@ _REF_KINDS: Final[Mapping[str, IdKind]] = MappingProxyType(
 
 
 def finding_has_dialogue_fields(finding: Finding) -> bool:
-    """Whether the finding carries the ``finding_recorded/1.4.0`` dialogue fields."""
+    """Whether the finding carries the optional ``finding_recorded/1.3.0`` dialogue fields."""
 
     return finding.challenge is not None or bool(finding.related_finding_ids)
 
@@ -1590,7 +1590,7 @@ _FINDING_EVENT_ALLOWED_KEYS: Final = _FINDING_ALLOWED_KEYS | {"challenge", "rela
 def finding_event_from_json(value: JsonValue) -> Finding:
     """Decode one ``finding_recorded`` payload, including the optional dialogue fields.
 
-    The shape is the public finding object plus, from event version 1.4.0, ``challenge`` and
+    The shape is the public finding object plus, on event version 1.3.0, ``challenge`` and
     ``relates_to``. Which versions admit them is the event decoder's decision.
     """
 

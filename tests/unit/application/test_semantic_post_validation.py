@@ -446,3 +446,134 @@ def test_rulings_without_cited_material_or_a_rejection_to_accept_are_unassessabl
     ]
     # Two reduced, one outside the fence; an honest unassessable is not counted.
     assert review.verdicts_unsupported == 3
+
+
+_FOREIGN = "evd_99999999-9999-4999-8999-999999999999"
+
+
+def _review(judgment: SemanticJudgment, **fence: frozenset[str]) -> SemanticJudgmentReview:
+    case = _dialogue_case()
+    return validate_semantic_judgment(
+        case, (), judgment, _provenance(), expected_frontier=case.frontier, **fence
+    )
+
+
+def _rulings(review: SemanticJudgmentReview) -> list[tuple[str, str, tuple[str, ...]]]:
+    return [(str(item.finding_id), item.verdict, item.cited_refs) for item in review.verdicts]
+
+
+def test_a_ruling_that_loses_a_cited_ref_is_unassessable_never_silently_dropped() -> None:
+    """A dropped ruling would let its finding close by silence (review of #905)."""
+
+    review = _review(
+        SemanticJudgment(
+            "no_material_discrepancy",
+            (),
+            (
+                _verdict(1, "still_present", str(obl(1)), _FOREIGN),
+                _verdict(2, "fixed", str(res(2)), _FOREIGN),
+            ),
+        )
+    )
+
+    assert _rulings(review) == [
+        (str(fnd(1)), "unassessable", (str(obl(1)),)),
+        (str(fnd(2)), "unassessable", (str(res(2)),)),
+    ]
+    assert review.verdicts_unsupported == 2
+
+
+def test_repeated_rulings_on_one_finding_are_counted_and_conflicts_are_unassessable() -> None:
+    review = _review(
+        SemanticJudgment(
+            "insufficient_packet",
+            (),
+            (
+                _verdict(1, "fixed", str(res(2))),
+                _verdict(1, "still_present", str(obl(1))),
+                _verdict(2, "still_present", str(obl(2))),
+                _verdict(2, "still_present", str(obl(2))),
+            ),
+        )
+    )
+
+    assert _rulings(review) == [
+        (str(fnd(1)), "unassessable", ()),
+        (str(fnd(2)), "still_present", (str(obl(2)),)),
+    ]
+    assert review.verdicts_unsupported == 2
+
+
+def test_withdrawn_needs_a_rejection_not_an_acknowledgement() -> None:
+    acknowledged = ResponseRecordedPayload(
+        finding_id=fnd(1),
+        finding_frontier=FRONTIER,
+        disposition=ResponseDisposition.ACKNOWLEDGED,
+        evidence_refs=(res(2),),
+    )
+    base = _dialogue_case()
+    case = replace(
+        base,
+        projection=replace(
+            base.projection,
+            responses={**base.projection.responses, fnd(1): record(acknowledged, 10)},
+        ),
+    )
+    review = validate_semantic_judgment(
+        case,
+        (),
+        SemanticJudgment("no_material_discrepancy", (), (_verdict(1, "withdrawn"),)),
+        _provenance(),
+        expected_frontier=case.frontier,
+    )
+
+    assert _rulings(review) == [(str(fnd(1)), "unassessable", ())]
+    assert review.verdicts_unsupported == 1
+
+
+def test_rulings_are_fenced_to_the_packet_the_reviewer_was_shown() -> None:
+    """A finding the prior-findings section never carried cannot be ruled on, and a ref the
+    packet did not offer as citable cannot carry a ruling."""
+
+    judgment = SemanticJudgment(
+        "no_material_discrepancy",
+        (),
+        (_verdict(1, "fixed", str(res(2))), _verdict(2, "still_present", str(obl(2)))),
+    )
+    review = _review(
+        judgment,
+        prior_finding_refs=frozenset({str(fnd(1))}),
+        citable_refs=frozenset({str(fnd(1)), str(obl(2))}),
+    )
+
+    # fnd(2) was not carried; res(2) was not citable, so fnd(1)'s fixed has nothing left.
+    assert _rulings(review) == [(str(fnd(1)), "unassessable", ())]
+    assert review.verdicts_unsupported == 2
+
+
+def test_a_fixed_ruling_on_a_finding_the_same_review_re_raises_is_unassessable() -> None:
+    judgment = SemanticJudgment(
+        "challenges_returned",
+        (_challenge(str(fnd(1)), str(obl(1)), summary="The Map key collision remains"),),
+        (_verdict(1, "fixed", str(res(2))),),
+    )
+
+    review = _review(judgment)
+
+    assert [candidate.related_finding_ids for candidate in review.candidates] == [(fnd(1),)]
+    assert _rulings(review) == [(str(fnd(1)), "unassessable", ())]
+    assert review.verdicts_unsupported == 1
+
+
+def test_rulings_the_normalizer_dropped_are_disclosed_by_the_fence() -> None:
+    review = _review(
+        SemanticJudgment(
+            "no_material_discrepancy",
+            (),
+            (_verdict(1, "fixed", str(res(2))),),
+            prior_finding_verdicts_dropped=2,
+        )
+    )
+
+    assert _rulings(review) == [(str(fnd(1)), "fixed", (str(res(2)),))]
+    assert review.verdicts_unsupported == 2

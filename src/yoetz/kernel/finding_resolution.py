@@ -390,12 +390,15 @@ def _prior_verdict_effect(
     ``fixed`` is the reviewer judging this finding on material recorded after it, so a
     whole-packet ``insufficient_packet`` (and its coverage marker) no longer vetoes it; every
     other rule still applies, including freshness, material change and the issue not being
-    returned again. Any other ruling blocks this finding by name and speaks for no other finding.
-    Without a ruling nothing changes: silence is never read as ``fixed``.
+    returned again. ``withdrawn`` (the reviewer accepting the agent's rejection) keeps the
+    ordinary rules, under which an assessable review that does not re-raise a rejected finding
+    over changed state resolves it; it never lifts the ``insufficient_packet`` veto. Any other
+    ruling blocks this finding by name and speaks for no other finding. Without a ruling nothing
+    changes: silence is never read as ``fixed``.
     """
 
     verdict = prior_finding_verdict(check, finding)
-    if verdict is None:
+    if verdict is None or verdict == "withdrawn":
         return False, (), frozenset()
     if verdict == "fixed":
         return True, (), frozenset({SEMANTIC_PACKET_INSUFFICIENT_GAP})

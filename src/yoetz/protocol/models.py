@@ -2161,7 +2161,6 @@ _PUBLISH_SUMMARY_CATEGORY: Final[Mapping[tuple[str, str], DataCategory]] = Mappi
         ("finding_recorded", "1.1.0"): DataCategory.FINDING_SUMMARY,
         ("finding_recorded", "1.2.0"): DataCategory.FINDING_SUMMARY,
         ("finding_recorded", "1.3.0"): DataCategory.FINDING_SUMMARY,
-        ("finding_recorded", "1.4.0"): DataCategory.FINDING_SUMMARY,
     }
 )
 _PUBLISH_FIXED_SUMMARY: Final[Mapping[tuple[str, str], str]] = MappingProxyType(
@@ -2174,7 +2173,6 @@ _PUBLISH_FIXED_SUMMARY: Final[Mapping[tuple[str, str], str]] = MappingProxyType(
         ("check_recorded", "1.1.0"): "check_recorded",
         ("check_recorded", "1.2.0"): "check_recorded",
         ("check_recorded", "1.3.0"): "check_recorded",
-        ("check_recorded", "1.4.0"): "check_recorded",
         ("receipt_recorded", "1.0.0"): "receipt_recorded",
         ("coordination_context_recorded", "1.0.0"): "coordination_context_recorded",
         ("coordination_obligation_declared", "1.0.0"): "coordination_obligation_declared",
@@ -5250,7 +5248,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 1172:
+    if len(result) != 1170:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 

@@ -153,7 +153,7 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
-        "fixtures/canonical/review-dialogue-1.4.0.case.json",
+        "fixtures/canonical/review-dialogue-1.3.0.case.json",
         "canonical_vector",
         "application/json",
         True,
@@ -608,12 +608,6 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
-        "schemas/events/check-recorded-1.4.0.schema.json",
-        "json_schema",
-        "application/schema+json",
-        True,
-    ),
-    (
         "schemas/events/claim-recorded-1.0.0.schema.json",
         "json_schema",
         "application/schema+json",
@@ -675,12 +669,6 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     (
         "schemas/events/finding-recorded-1.3.0.schema.json",
-        "json_schema",
-        "application/schema+json",
-        True,
-    ),
-    (
-        "schemas/events/finding-recorded-1.4.0.schema.json",
         "json_schema",
         "application/schema+json",
         True,

@@ -130,6 +130,8 @@ __all__ = [
     "build_semantic_case",
     "review_selection_digest",
     "repair_evidence_refs",
+    "SemanticPacketView",
+    "semantic_case_packet_view",
     "semantic_case_to_candidate_context",
     "semantic_case_to_prepared_payload",
 ]
@@ -3217,6 +3219,54 @@ def _drop_catalog_row(envelope: dict[str, JsonValue]) -> bool:
     return True
 
 
+def _drop_prior_finding_rows(envelope: dict[str, JsonValue]) -> int:
+    """Remove prior-finding rows, oldest finding first, until the envelope fits (issue #905).
+
+    The dialogue section yields before any work content: every other row keeps exactly the
+    bounding it had without the section. A finding's rows leave together, its ids leave the
+    packet, and the packet coverage names the truncation.
+    """
+
+    rows = _catalog_rows(envelope)
+    order: list[str] = []
+    for row in rows:
+        source = row.get("source_ref")
+        if row.get("section") == "prior_finding" and type(source) is str and source not in order:
+            order.append(source)
+    dropped = 0
+    packet_obj = envelope.get("review_packet")
+    for source in order:
+        if len(canonical_encode(cast(JsonValue, envelope))) <= MAX_EGRESS_ENVELOPE_BYTES:
+            break
+        removed = {
+            cast(str, row.get("item_id"))
+            for row in rows
+            if row.get("section") == "prior_finding" and row.get("source_ref") == source
+        }
+        rows = [row for row in rows if row.get("item_id") not in removed]
+        envelope["item_catalog"] = cast(JsonValue, rows)
+        dropped += len(removed)
+        if isinstance(packet_obj, dict):
+            current = packet_obj.get("prior_finding_item_ids")
+            if type(current) is list:
+                packet_obj["prior_finding_item_ids"] = cast(
+                    JsonValue,
+                    [value for value in cast(list[object], current) if value not in removed],
+                )
+            coverage = packet_obj.get("coverage")
+            if isinstance(coverage, dict):
+                gaps = coverage.get("known_gaps")
+                if type(gaps) is list and SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP not in gaps:
+                    coverage["known_gaps"] = cast(
+                        JsonValue,
+                        sorted(
+                            [*cast(list[str], gaps), SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP],
+                            key=str.encode,
+                        ),
+                    )
+    return dropped
+
+
 def _fit_packet_section(
     envelope: dict[str, JsonValue],
     reductions: dict[str, int],
@@ -3330,6 +3380,13 @@ def bounded_case_envelope(case: SemanticCase) -> bytes:
     if len(encoded) <= MAX_EGRESS_ENVELOPE_BYTES:
         return encoded
 
+    # Earlier findings yield before any work content (issue #905).
+    reductions["catalog_dropped_count"] += _drop_prior_finding_rows(envelope)
+    _set_selection_accounting(envelope, reductions)
+    encoded = canonical_encode(cast(JsonValue, envelope))
+    if len(encoded) <= MAX_EGRESS_ENVELOPE_BYTES:
+        return encoded
+
     reductions["assessment_links_stripped_count"] += _strip_assessment_links(envelope)
     _set_selection_accounting(envelope, reductions)
     encoded = canonical_encode(cast(JsonValue, envelope))
@@ -3351,6 +3408,42 @@ def bounded_case_envelope(case: SemanticCase) -> bytes:
         if len(encoded) <= MAX_EGRESS_ENVELOPE_BYTES:
             return encoded
     raise SemanticCaseTooLarge("semantic_case_envelope_too_large")
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticPacketView:
+    """What the reviewer is actually shown, for fencing its per-finding rulings (issue #905)."""
+
+    prior_finding_refs: frozenset[str]
+    citable_refs: frozenset[str]
+    # Envelope bounding removed prior-finding rows the case had admitted.
+    prior_findings_trimmed: bool
+
+
+def semantic_case_packet_view(case: SemanticCase) -> SemanticPacketView:
+    """The earlier findings the reviewer's packet carries, and the refs it offers as citable.
+
+    A ruling may only speak for a finding whose prior-findings row survived envelope bounding,
+    and only cite what ``citable_refs`` listed.
+    """
+
+    if type(case) is not SemanticCase:
+        raise TypeError("semantic_case_invalid")
+    try:
+        catalogued = _catalog_item_ids(
+            cast(Mapping[str, JsonValue], strict_json_parse(bounded_case_envelope(case)))
+        )
+    except SemanticCaseTooLarge:
+        catalogued = frozenset(item.item_id for item in case.items)
+    carried = frozenset(
+        item.source_ref
+        for item in case.items
+        if item.section == "prior_finding" and item.item_id == f"prior-finding-{item.source_ref}"
+    )
+    prior = frozenset(ref for ref in carried if f"prior-finding-{ref}" in catalogued)
+    return SemanticPacketView(
+        prior, frozenset(case.frontier_refs | case.local_check_refs), prior != carried
+    )
 
 
 def semantic_case_to_candidate_context(

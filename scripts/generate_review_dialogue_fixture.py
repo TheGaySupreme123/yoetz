@@ -1,8 +1,9 @@
 """Generate the owned review-dialogue vectors without modifying earlier fixture members.
 
-Issue #905 records what the reviewer asked for on each AI-powered finding and the earlier finding a
-re-raise names. The vectors pin the exact bytes of the additive ``finding_recorded/1.4.0`` payload
-beside an unchanged 1.3.0 AI-powered finding, so a legacy ledger keeps its recorded bytes.
+Issue #905 records what the reviewer asked for on each AI-powered finding, the earlier finding a
+re-raise names, and the reviewer's per-finding rulings on a check. The vectors pin the exact bytes
+of the optional fields on the (unreleased) 1.3.0 events beside rows without them, so a row written
+by an earlier 0.3 build keeps its recorded bytes.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from yoetz.domain.events import EventSchema, decode_payload, encode_payload
 from yoetz.domain.values import freeze_json
 from yoetz.protocol.canonical import canonical_digest, canonical_encode
 
-_RELATIVE = "canonical/review-dialogue-1.4.0.case.json"
+_RELATIVE = "canonical/review-dialogue-1.3.0.case.json"
 _ID = "DLG-001"
 _OBLIGATION = "obl_828ab204-0000-4000-8000-000000000001"
 _FIRST = "fnd_fb333698-0000-4000-8000-000000000001"
@@ -88,8 +89,8 @@ def _check(root: Path) -> dict[str, Any]:
 
 def document(root: Path) -> dict[str, Any]:
     # numba-stencil-boundary-modes (DeepSWE v2): one environment-blocked obligation raised, then
-    # restated under a new id. The legacy row keeps 1.3.0; the restatement records the challenge
-    # fields and names the earlier finding it restates.
+    # restated under a new id. The earlier row has no dialogue fields; the restatement records the
+    # challenge fields and names the earlier finding it restates.
     legacy = _finding(
         root,
         _FIRST,
@@ -115,7 +116,7 @@ def document(root: Path) -> dict[str, Any]:
     link_only.pop("challenge")
     # kea-atomic-signal-selectors: the recheck after the repair rules the repaired finding fixed
     # (citing the regression result recorded after it) even though the packet as a whole was
-    # insufficient, and cannot assess a sibling. A check without rulings keeps 1.3.0.
+    # insufficient, and cannot assess a sibling. A check without rulings keeps its earlier bytes.
     check = _check(root)
     ruled = dict(check)
     ruled["semantic_conclusion"] = "insufficient_packet"
@@ -130,10 +131,10 @@ def document(root: Path) -> dict[str, Any]:
     vectors: list[dict[str, Any]] = []
     for family, version, wire in (
         ("finding_recorded", "1.3.0", legacy),
-        ("finding_recorded", "1.4.0", restated),
-        ("finding_recorded", "1.4.0", link_only),
+        ("finding_recorded", "1.3.0", restated),
+        ("finding_recorded", "1.3.0", link_only),
         ("check_recorded", "1.3.0", check),
-        ("check_recorded", "1.4.0", ruled),
+        ("check_recorded", "1.3.0", ruled),
     ):
         payload = decode_payload(EventSchema(family, version), freeze_json(wire))
         encoded = encode_payload(payload)

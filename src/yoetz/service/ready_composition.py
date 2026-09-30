@@ -143,6 +143,7 @@ from yoetz.application.semantic_case import (
     LineageSemanticCapacityExceeded,
     SemanticCaseTooLarge,
     build_semantic_case,
+    semantic_case_packet_view,
     semantic_case_to_candidate_context,
 )
 from yoetz.application.semantic_content import resolve_captured_semantic_content
@@ -3454,6 +3455,8 @@ def _judgment_to_response_json(judgment: object) -> dict[str, CanonicalJsonValue
             }
             for item in judgment.prior_finding_verdicts
         ]
+    if judgment.prior_finding_verdicts_dropped:
+        result["prior_finding_verdicts_dropped"] = judgment.prior_finding_verdicts_dropped
     return result
 
 
@@ -3534,9 +3537,13 @@ def _judgment_from_response_json(value: object) -> object:
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("semantic_response_judgment_invalid") from exc
+    dropped = source.get("prior_finding_verdicts_dropped", 0)
     try:
         return SemanticJudgment(
-            cast(SemanticConclusion, conclusion_raw), tuple(challenges), tuple(verdicts)
+            cast(SemanticConclusion, conclusion_raw),
+            tuple(challenges),
+            tuple(verdicts),
+            cast(int, dropped),
         )
     except ValueError as exc:
         raise ValueError("semantic_response_judgment_invalid") from exc
@@ -4364,9 +4371,20 @@ def _privacy_gated_semantic_evaluator(
             # The builder folds the gap into the packet coverage the reviewer sees; the check
             # result is a separate coverage fold, so carry the fact rather than re-deriving it.
             reference_scope_reduced = semantic_case.omitted_reference_count > 0
+            # What the reviewer is shown bounds what its per-finding rulings may speak for, and
+            # prior-finding rows envelope bounding removed are disclosed like any other cut.
+            packet_view = semantic_case_packet_view(semantic_case)
+            packet_prior_refs = packet_view.prior_finding_refs
+            packet_citable_refs = packet_view.citable_refs
+            trimmed_prior = (
+                {SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP}
+                if packet_view.prior_findings_trimmed
+                else set[str]()
+            )
             content_gaps = tuple(
                 sorted(
-                    set(semantic_case.packet.coverage.known_gaps)
+                    trimmed_prior
+                    | set(semantic_case.packet.coverage.known_gaps)
                     & {
                         "captured_object_unavailable",
                         "content_capture_unavailable",
@@ -4434,6 +4452,8 @@ def _privacy_gated_semantic_evaluator(
                     case_content_over_item_limit=over_item_limit,
                     case_reference_scope_reduced=reference_scope_reduced,
                     case_content_gaps=content_gaps,
+                    case_prior_finding_refs=packet_prior_refs,
+                    case_citable_refs=packet_citable_refs,
                 )
 
             # Build the packet before anything durable exists. A packet that cannot be built is a
@@ -4761,6 +4781,8 @@ def _privacy_gated_semantic_evaluator(
                     case_content_over_item_limit=over_item_limit,
                     case_reference_scope_reduced=reference_scope_reduced,
                     case_content_gaps=content_gaps,
+                    case_prior_finding_refs=packet_prior_refs,
+                    case_citable_refs=packet_citable_refs,
                     continuation=continuation,
                 )
 
