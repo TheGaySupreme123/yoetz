@@ -38,7 +38,7 @@ from yoetz.domain.events import (
     ResultOutcome,
     encode_payload,
 )
-from yoetz.domain.findings import Finding, FindingKind
+from yoetz.domain.findings import Finding, FindingKind, FindingOrigin
 from yoetz.domain.observation import (
     ObservationContentKind,
     ObservationContentManifest,
@@ -59,6 +59,7 @@ from yoetz.domain.privacy import (
 from yoetz.domain.receipts import (
     SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
     SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
+    SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP,
 )
 from yoetz.domain.values import (
     SubjectStateRelation,
@@ -70,6 +71,9 @@ from yoetz.domain.values import (
 from yoetz.domain.values import (
     evidence_id as validate_evidence_id,
 )
+from yoetz.domain.values import (
+    finding_id as finding_id_value,
+)
 from yoetz.kernel.claims import effective_claim_items
 from yoetz.kernel.deterministic_checks import (
     DeterministicAssessment,
@@ -77,9 +81,15 @@ from yoetz.kernel.deterministic_checks import (
     FrozenHistoryEvent,
 )
 from yoetz.kernel.lineage import LineageEvaluation
-from yoetz.kernel.projections import EvidenceProjectionRecord, ProjectionState
+from yoetz.kernel.projections import (
+    EvidenceProjectionRecord,
+    FindingProjectionRecord,
+    ProjectionState,
+)
 from yoetz.ports.objects import ObjectKind, ObjectRef
 from yoetz.ports.semantic import (
+    MAX_PRIOR_FINDING_ITEMS,
+    MAX_SEMANTIC_CASE_ITEMS,
     MAX_SEMANTIC_ITEM_SUBJECT_REFS,
     ChangeObservation,
     ExcerptDigestProvenance,
@@ -151,8 +161,14 @@ _PACKET_ID_LIST_KEYS: Final = (
     "obligation_item_ids",
     "claim_item_ids",
     "decision_item_ids",
+    "prior_finding_item_ids",
     "timeline_item_ids",
 )
+# The prior-findings section (issue #905) has its own bounds, outside the timeline's 64 rows.
+MAX_PRIOR_FINDINGS: Final = 8
+MAX_PRIOR_FINDING_SECTION_BYTES: Final = 48 * 1024
+# Refs listed per structural row; the full counts travel beside them.
+_MAX_PRIOR_FINDING_LISTED_REFS: Final = 8
 _CANONICAL_PACKS: Final = ("research-evidence/0.1.0", "work-integrity/0.1.0")
 _QUESTION_SET: Final = (
     "Does the supplied packet contain a material discrepancy against the goal and obligations?",
@@ -165,6 +181,7 @@ type _Section = Literal[
     "obligation",
     "claim",
     "decision",
+    "prior_finding",
     "timeline",
     "deterministic_summary",
     "deterministic_detail",
@@ -1880,6 +1897,203 @@ def _select_targeted_excerpts(
     )
 
 
+def _prior_finding_candidates(
+    projection: ProjectionState, allowed: frozenset[str]
+) -> list[tuple[str, FindingProjectionRecord]]:
+    """Readable, unresolved AI-powered findings inside the fence, newest first.
+
+    Local findings are proven by the local packs that raised them and reach the reviewer as this
+    check's assessments; resolved findings are history. Neither is a live question for the reviewer.
+    """
+
+    rows: list[tuple[str, FindingProjectionRecord]] = []
+    for key, record in projection.findings.items():
+        payload = record.payload
+        ref = str(key)
+        if (
+            payload is None
+            or record.redacted
+            or record.resolved_by_check_event_id is not None
+            or payload.origin is not FindingOrigin.SEMANTIC_MODEL_DERIVED
+            or ref not in allowed
+        ):
+            continue
+        rows.append((ref, record))
+    rows.sort(key=lambda pair: (-pair[1].source_frontier, pair[0].encode("ascii")))
+    return rows
+
+
+def _prior_finding_items(
+    ref: str,
+    record: FindingProjectionRecord,
+    projection: ProjectionState,
+    allowed: frozenset[str],
+    *,
+    include_prose: bool,
+) -> tuple[list[SemanticCaseItem], list[ReviewOmission]]:
+    """One earlier finding, what the reviewer asked, and how the main agent answered.
+
+    The structural row is always carried: kind, ids, recorded order, the requested next step, the
+    response disposition and cited refs, and the readable evidence and results recorded after the
+    finding (the material a repair would have produced). Prose rows follow the profile's finding
+    prose selection. A finding recorded before challenge fields were persisted degrades to its
+    summary and message with an explicit ``not_recorded`` omission.
+    """
+
+    payload = record.payload
+    assert payload is not None
+    items: list[SemanticCaseItem] = []
+    omissions: list[ReviewOmission] = []
+    response_record = projection.responses.get(finding_id_value(ref))
+    response = (
+        None if response_record is None or response_record.redacted else response_record.payload
+    )
+    newer = sorted(
+        (
+            (row.source_frontier, str(key))
+            for family in (projection.evidence, projection.results)
+            for key, row in family.items()
+            if row.payload is not None
+            and not row.redacted
+            and row.source_frontier > record.source_frontier
+            and str(key) in allowed
+        ),
+        key=lambda pair: (-pair[0], pair[1].encode("ascii")),
+    )
+    subjects: list[JsonValue] = [str(item) for item in payload.subject_refs if str(item) in allowed]
+    after: list[JsonValue] = [value for _order, value in newer]
+    body: dict[str, JsonValue] = {
+        "challenge_fields": "not_recorded" if payload.challenge is None else "recorded",
+        "finding_kind": payload.kind.value,
+        "finding_ref": ref,
+        "recorded_after_finding": after[:_MAX_PRIOR_FINDING_LISTED_REFS],
+        "recorded_after_finding_count": len(newer),
+        "recorded_sequence": record.source_frontier,
+        "schema": "yoetz.prior-finding/1",
+        "subject_ref_count": len(payload.subject_refs),
+        "subject_refs": subjects[:_MAX_PRIOR_FINDING_LISTED_REFS],
+    }
+    related: list[JsonValue] = [
+        str(item) for item in payload.related_finding_ids if str(item) in allowed
+    ]
+    if related:
+        body["relates_to"] = related
+    if payload.challenge is not None:
+        body["requested_next_step"] = payload.challenge.requested_next_step
+    if response_record is not None and response is None:
+        body["response"] = {"visibility": "redacted_never_send"}
+    elif response_record is not None and response is not None:
+        cited: list[JsonValue] = [
+            str(item) for item in response.evidence_refs if str(item) in allowed
+        ]
+        answer: dict[str, JsonValue] = {
+            "disposition": response.disposition.value,
+            "evidence_ref_count": len(response.evidence_refs),
+            "evidence_refs": cited[:_MAX_PRIOR_FINDING_LISTED_REFS],
+            "recorded_sequence": response_record.source_frontier,
+        }
+        if str(response_record.source_event_id) in allowed:
+            answer["response_event_ref"] = str(response_record.source_event_id)
+        body["response"] = answer
+    prose: list[tuple[str, str, int]] = []
+    if include_prose:
+        prose.append(("summary", payload.summary, record.source_frontier))
+        prose.append(("message", payload.detail, record.source_frontier))
+        if payload.challenge is None:
+            omissions.append(_omit(ref, DataCategory.FINDING_SUMMARY, "finding", "not_recorded"))
+        else:
+            prose.append(("discrepancy", payload.challenge.discrepancy, record.source_frontier))
+            prose.append(
+                (
+                    "alternative",
+                    payload.challenge.alternative_interpretation,
+                    record.source_frontier,
+                )
+            )
+            prose.append(("uncertainty", payload.challenge.uncertainty, record.source_frontier))
+        if response_record is not None and response is not None and response.reason is not None:
+            prose.append(("response", response.reason, response_record.source_frontier))
+        body["text_item_ids"] = {
+            field: f"prior-finding-{field}-{ref}" for field, _text, _order in prose
+        }
+    text, _omitted = _bounded_json(body)
+    items.append(
+        _content_item(
+            item_id=f"prior-finding-{ref}",
+            section="prior_finding",
+            category=DataCategory.BOUNDED_STRUCTURAL_METADATA,
+            source_kind="finding",
+            source_ref=ref,
+            linked_subject_refs=(ref,),
+            occurred_order=record.source_frontier,
+            text=text,
+        )
+    )
+    for field, value, order in prose:
+        items.append(
+            _content_item(
+                item_id=f"prior-finding-{field}-{ref}",
+                section="prior_finding",
+                category=DataCategory.FINDING_SUMMARY,
+                source_kind="finding",
+                source_ref=ref,
+                linked_subject_refs=(ref,),
+                occurred_order=order,
+                text=value,
+            )
+        )
+    return items, omissions
+
+
+def _prior_findings_section(
+    projection: ProjectionState,
+    allowed: frozenset[str],
+    *,
+    include_prose: bool,
+    remaining_items: int,
+    remaining_bytes: int,
+) -> tuple[list[SemanticCaseItem], list[ReviewOmission], bool]:
+    """Carry the dialogue so far, newest first, inside the section's own bounds.
+
+    A finding is carried whole or not at all; one that does not fit is named as a ``not_selected``
+    omission and the returned flag declares the truncation as a coverage gap.
+    """
+
+    items: list[SemanticCaseItem] = []
+    omissions: list[ReviewOmission] = []
+    truncated = False
+    item_budget = min(MAX_PRIOR_FINDING_ITEMS, remaining_items)
+    byte_budget = min(MAX_PRIOR_FINDING_SECTION_BYTES, remaining_bytes)
+    carried = 0
+    for ref, record in _prior_finding_candidates(projection, allowed):
+        rows, row_omissions = _prior_finding_items(
+            ref, record, projection, allowed, include_prose=include_prose
+        )
+        size = sum(item.content_bytes for item in rows)
+        if (
+            carried >= MAX_PRIOR_FINDINGS
+            or len(rows) > item_budget - len(items)
+            or size > byte_budget
+        ):
+            truncated = True
+            omissions.append(
+                _omit(
+                    ref,
+                    DataCategory.FINDING_SUMMARY
+                    if include_prose
+                    else DataCategory.BOUNDED_STRUCTURAL_METADATA,
+                    "finding",
+                    "not_selected",
+                )
+            )
+            continue
+        carried += 1
+        byte_budget -= size
+        items.extend(rows)
+        omissions.extend(row_omissions)
+    return items, omissions, truncated
+
+
 def build_semantic_case(
     *,
     case_id: str,
@@ -2717,16 +2931,45 @@ def _build_semantic_case_once(
         keep_ids.add(excerpt.excerpt_item_id)
 
     items = [item for item in items if item.item_id in keep_ids]
+
+    # --- Earlier AI-powered findings and the main agent's answers (issue #905) ---
+    # The reviewer has no memory between checks; this ledger-backed section is the channel. It
+    # rides the findings selection (never a new disclosure category): structural rows always,
+    # prose only where the profile already sends finding prose. Its own bounds keep it out of the
+    # 64-row timeline, and it takes only capacity the case bounds leave.
+    prior_finding_ids: list[str] = []
+    prior_findings_truncated = False
+    if "deterministic_assessments" in sections:
+        prior_items, prior_omissions, prior_findings_truncated = _prior_findings_section(
+            projection,
+            allowed,
+            include_prose=selection.include_finding_prose,
+            remaining_items=MAX_SEMANTIC_CASE_ITEMS - len(items),
+            remaining_bytes=MAX_SEMANTIC_CASE_BYTES - sum(item.content_bytes for item in items),
+        )
+        items.extend(prior_items)
+        prior_finding_ids = [item.item_id for item in prior_items]
+        if prior_omissions:
+            omissions = sorted(
+                set([*omissions, *prior_omissions]),
+                key=lambda item: (
+                    item.subject_ref.encode("ascii"),
+                    item.category.value.encode("ascii"),
+                    item.reason.encode("ascii"),
+                ),
+            )[: selection.max_omissions]
+
     # Sort items per SemanticCase order.
     _SECTION_ORDINAL = {
         "goal": 0,
         "obligation": 1,
         "claim": 2,
         "decision": 3,
-        "timeline": 4,
-        "deterministic_summary": 5,
-        "deterministic_detail": 6,
-        "excerpt": 7,
+        "prior_finding": 4,
+        "timeline": 5,
+        "deterministic_summary": 6,
+        "deterministic_detail": 7,
+        "excerpt": 8,
     }
     items.sort(
         key=lambda item: (
@@ -2812,6 +3055,23 @@ def _build_semantic_case_once(
                 )
             ),
         )
+    if prior_findings_truncated:
+        # Earlier findings the section could not carry are named as omissions above; coverage
+        # says the reviewer saw only part of the dialogue.
+        coverage = replace(
+            coverage,
+            ledger_freshness=(
+                LedgerFreshness.PARTIAL
+                if coverage.ledger_freshness is LedgerFreshness.CURRENT
+                else coverage.ledger_freshness
+            ),
+            known_gaps=tuple(
+                sorted(
+                    {*coverage.known_gaps, SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP},
+                    key=str.encode,
+                )
+            ),
+        )
     packet = ReviewPacket(
         goal_item_ids=tuple(goal_ids),
         obligation_item_ids=tuple(obligation_ids),
@@ -2823,6 +3083,7 @@ def _build_semantic_case_once(
         coverage=coverage,
         targeted_excerpts=tuple(targeted),
         omissions=tuple(omissions),
+        prior_finding_item_ids=tuple(prior_finding_ids),
     )
 
     # The local case owns the complete frontier. The reviewer needs the dependency
@@ -3060,6 +3321,7 @@ def _packet_to_json(packet: ReviewPacket) -> dict[str, JsonValue]:
             ],
             "goal_item_ids": list(packet.goal_item_ids),
             "obligation_item_ids": list(packet.obligation_item_ids),
+            "prior_finding_item_ids": list(packet.prior_finding_item_ids),
             "omissions": [
                 {
                     "category": item.category.value,

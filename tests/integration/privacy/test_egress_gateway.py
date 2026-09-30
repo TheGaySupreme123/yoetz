@@ -1429,7 +1429,13 @@ def test_local_model_dispatch_consumes_reservation_and_calls_evaluator_once() ->
     handle = _LocalSocketHandle(
         1,
         _DIGEST,
-        canonical_encode({"conclusion": "no_material_discrepancy", "reviewer_challenges": []}),
+        canonical_encode(
+            {
+                "conclusion": "no_material_discrepancy",
+                "reviewer_challenges": [],
+                "prior_finding_verdicts": [],
+            }
+        ),
     )
     resolver = _LocalResolver(handle)
     gateway = _gateway(

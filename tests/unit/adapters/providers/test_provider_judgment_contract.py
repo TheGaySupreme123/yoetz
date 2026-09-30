@@ -24,6 +24,7 @@ from yoetz.adapters.providers.openai_responses import (
     JUDGMENT_JSON_SCHEMA,
     MISSING_ITEM_FIELD_GLOSSARY,
     MISSING_ITEM_KIND_GLOSSARY,
+    VERDICT_FIELD_GLOSSARY,
     JudgmentValidationError,
     OpenAIProfile,
     build_judgment_json_schema,
@@ -102,6 +103,7 @@ def _judgment(
     body: dict[str, JsonValue] = {
         "conclusion": conclusion,
         "reviewer_challenges": cast(list[JsonValue], [] if challenges is None else challenges),
+        "prior_finding_verdicts": [],
     }
     if missing is not None:
         body["missing_for_assessment"] = cast(list[JsonValue], missing)
@@ -286,7 +288,11 @@ def test_request_schema_carries_no_docstring_commentary() -> None:
 
     assert _annotations(JUDGMENT_JSON_SCHEMA, "title") == []
 
-    curated = {*CHALLENGE_FIELD_GLOSSARY.values(), *MISSING_ITEM_FIELD_GLOSSARY.values()}
+    curated = (
+        set(CHALLENGE_FIELD_GLOSSARY.values())
+        | set(VERDICT_FIELD_GLOSSARY.values())
+        | set(MISSING_ITEM_FIELD_GLOSSARY.values())
+    )
     descriptions = _annotations(JUDGMENT_JSON_SCHEMA, "description")
     assert descriptions
     assert set(descriptions) <= curated
@@ -449,7 +455,7 @@ def test_provider_model_and_normalize_share_rejection_surface() -> None:
         ("", SemanticFailureClass.RESPONSE_SCHEMA),
         ("```json\n{}\n```", SemanticFailureClass.RESPONSE_SCHEMA),
         (
-            'prefix {"conclusion":"no_material_discrepancy","reviewer_challenges":[]}',
+            'prefix {"conclusion":"no_material_discrepancy","reviewer_challenges":[],"prior_finding_verdicts":[]}',
             SemanticFailureClass.RESPONSE_SCHEMA,
         ),
         (

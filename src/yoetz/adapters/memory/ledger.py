@@ -11,10 +11,6 @@ from enum import StrEnum
 from typing import Final, Literal, cast
 
 from yoetz.domain.events import (
-    CHECK_EVENT_SCHEMA_VERSION,
-    CHECK_MISSING_ITEMS_EVENT_SCHEMA_VERSION,
-    FINDING_EVENT_SCHEMA_VERSION,
-    SEMANTIC_EVENT_SCHEMA_VERSION,
     AcceptedEvent,
     ActionRecordedPayload,
     AssignmentRecordedPayload,
@@ -47,7 +43,9 @@ from yoetz.domain.events import (
     SessionOpenedPayload,
     UnknownEvent,
     WriterChain,
+    check_event_schema,
     encode_payload,
+    finding_event_schema,
     is_observation_authored,
     is_observation_authorship,
     media_type_for,
@@ -56,6 +54,7 @@ from yoetz.domain.events import (
     public_error_for_obligation_resolution_mismatch,
 )
 from yoetz.domain.findings import (
+    PriorFindingVerdictRecord,
     RankedFindings,
     RuntimeTokenUsage,
     SemanticProvenance,
@@ -3297,6 +3296,7 @@ class MemoryLedgerAdapter:
         *,
         scope: CheckScopeModel | None = None,
         semantic_conclusion: str | None = None,
+        prior_finding_verdicts: tuple[PriorFindingVerdictRecord, ...] = (),
         missing_for_assessment: tuple[MissingForAssessmentItem, ...] = (),
     ) -> CheckCommitResult:
         key = (frozen.lease.writer_id, frozen.lease.operation_id)
@@ -3407,6 +3407,7 @@ class MemoryLedgerAdapter:
             semantic_provenance=semantic_provenance,
             semantic_conclusion=semantic_conclusion,
             missing_for_assessment=missing_for_assessment,
+            prior_finding_verdicts=prior_finding_verdicts,
         )
         event_payloads.append((event_id(self._ids.new(IdKind.EVENT)), check_payload))
         accepted_at = _now(self._clock)
@@ -3432,15 +3433,15 @@ class MemoryLedgerAdapter:
                 ObjectSource(data=payload_bytes, declared_size=len(payload_bytes)), metadata
             )
             payload_ref = await self._objects.finalize(staged)
-            schema = EventSchema(
-                "finding_recorded" if type(payload) is FindingRecordedPayload else "check_recorded",
-                FINDING_EVENT_SCHEMA_VERSION
+            schema = (
+                finding_event_schema(payload)
                 if type(payload) is FindingRecordedPayload
-                else CHECK_MISSING_ITEMS_EVENT_SCHEMA_VERSION
-                if missing_for_assessment
-                else CHECK_EVENT_SCHEMA_VERSION
-                if semantic_conclusion is not None
-                else SEMANTIC_EVENT_SCHEMA_VERSION,
+                else EventSchema(
+                    "check_recorded",
+                    check_event_schema(
+                        semantic_conclusion, prior_finding_verdicts, missing_for_assessment
+                    ),
+                )
             )
             entries.append(
                 AppendEntry(

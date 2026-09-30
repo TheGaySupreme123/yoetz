@@ -206,6 +206,7 @@ from yoetz.domain.privacy import (
 from yoetz.domain.receipts import (
     SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
     SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
+    SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP,
     PolicyVersionEntry,
     ReceiptVersionSlice,
     SchemaVersionEntry,
@@ -3444,6 +3445,16 @@ def _judgment_to_response_json(judgment: object) -> dict[str, CanonicalJsonValue
         "conclusion": judgment.conclusion,
         "reviewer_challenges": challenges,
     }
+    # Emitted only when present, so a judgment without verdicts keeps its earlier stored bytes.
+    if judgment.prior_finding_verdicts:
+        body["prior_finding_verdicts"] = [
+            {
+                "cited_refs": list(item.cited_refs),
+                "finding_id": item.finding_id,
+                "verdict": item.verdict,
+            }
+            for item in judgment.prior_finding_verdicts
+        ]
     if judgment.missing_for_assessment:
         # Issue #907: the named missing items, reviewer reason included, live only in this
         # encrypted durable response object; the check record keeps the structural fields.
@@ -3461,6 +3472,8 @@ def _judgment_from_response_json(value: object) -> object:
     from yoetz.ports.semantic import (
         MissingForAssessment,
         MissingForAssessmentKind,
+        PriorFindingVerdict,
+        PriorFindingVerdictKind,
         ReviewerChallenge,
         ReviewerNextStep,
         SemanticConclusion,
@@ -3510,6 +3523,27 @@ def _judgment_from_response_json(value: object) -> object:
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("semantic_response_judgment_invalid") from exc
+    raw_verdicts = source.get("prior_finding_verdicts", [])
+    if type(raw_verdicts) is not list:
+        raise ValueError("semantic_response_judgment_invalid")
+    verdicts: list[PriorFindingVerdict] = []
+    for item in cast(list[object], raw_verdicts):
+        if type(item) is not dict:
+            raise ValueError("semantic_response_judgment_invalid")
+        row = cast(dict[str, object], item)
+        cited = row.get("cited_refs")
+        if type(cited) is not list:
+            raise ValueError("semantic_response_judgment_invalid")
+        try:
+            verdicts.append(
+                PriorFindingVerdict(
+                    cast(str, row["finding_id"]),
+                    cast(PriorFindingVerdictKind, row["verdict"]),
+                    tuple(cast(list[str], cited)),
+                )
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("semantic_response_judgment_invalid") from exc
     # Responses recorded before issue #907 carry no missing items and decode with none.
     missing: list[MissingForAssessment] = []
     raw_missing = source.get("missing_for_assessment", [])
@@ -3536,7 +3570,10 @@ def _judgment_from_response_json(value: object) -> object:
             raise ValueError("semantic_response_judgment_invalid") from exc
     try:
         return SemanticJudgment(
-            cast(SemanticConclusion, conclusion_raw), tuple(challenges), tuple(missing)
+            cast(SemanticConclusion, conclusion_raw),
+            tuple(challenges),
+            tuple(verdicts),
+            missing_for_assessment=tuple(missing),
         )
     except ValueError as exc:
         raise ValueError("semantic_response_judgment_invalid") from exc
@@ -4377,6 +4414,7 @@ def _privacy_gated_semantic_evaluator(
                         "content_redacted",
                         "truncated_payload",
                         SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
+                        SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP,
                     }
                 )
             )

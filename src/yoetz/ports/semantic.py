@@ -73,7 +73,12 @@ if TYPE_CHECKING:
     )
 
 __all__ = [
+    "MAX_PRIOR_FINDING_ITEMS",
+    "MAX_SEMANTIC_CASE_ITEMS",
     "MAX_SEMANTIC_ITEM_SUBJECT_REFS",
+    "PRIOR_FINDING_VERDICT_KINDS",
+    "PriorFindingVerdict",
+    "PriorFindingVerdictKind",
     "ChangeObservation",
     "Deadline",
     "ExcerptDigestProvenance",
@@ -109,6 +114,7 @@ type SemanticCaseSection = Literal[
     "obligation",
     "claim",
     "decision",
+    "prior_finding",
     "timeline",
     "deterministic_summary",
     "deterministic_detail",
@@ -175,6 +181,10 @@ _MAX_SUBJECT_REFS: Final = 16
 MAX_SEMANTIC_ITEM_SUBJECT_REFS: Final = _MAX_SUBJECT_REFS
 _MAX_INTERNAL_SUBJECT_REFS: Final = 64
 _MAX_CASE_ITEMS: Final = 256
+MAX_SEMANTIC_CASE_ITEMS: Final = _MAX_CASE_ITEMS
+# The prior-findings section (issue #905): at most eight earlier AI-powered findings, each one
+# structural row plus up to six prose rows (summary, message, three challenge fields, response).
+MAX_PRIOR_FINDING_ITEMS: Final = 56
 _OPAQUE_REF_PATTERN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$", re.ASCII)
 _IDENTITY_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9._-]*$", re.ASCII)
 _MODEL_IDENTITY_PATTERN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$", re.ASCII)
@@ -196,6 +206,7 @@ _SECTIONS: Final = frozenset(
         "obligation",
         "claim",
         "decision",
+        "prior_finding",
         "timeline",
         "deterministic_summary",
         "deterministic_detail",
@@ -210,6 +221,9 @@ _SECTION_ORDINAL: Final = {
             "obligation",
             "claim",
             "decision",
+            # Ahead of the timeline: envelope bounding drops catalog rows from the tail, and the
+            # dialogue record must never be crowded out by hook rows (issue #905).
+            "prior_finding",
             "timeline",
             "deterministic_summary",
             "deterministic_detail",
@@ -952,10 +966,17 @@ class ReviewPacket:
     coverage: Coverage
     targeted_excerpts: tuple[TargetedExcerptRef, ...]
     omissions: tuple[ReviewOmission, ...]
+    # Earlier AI-powered findings with the agent's answers, outside the timeline (issue #905).
+    prior_finding_item_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self, "goal_item_ids", _validated_item_ids(self.goal_item_ids, maximum=4)
+        )
+        object.__setattr__(
+            self,
+            "prior_finding_item_ids",
+            _validated_item_ids(self.prior_finding_item_ids, maximum=MAX_PRIOR_FINDING_ITEMS),
         )
         object.__setattr__(
             self,
@@ -1033,6 +1054,7 @@ class ReviewPacket:
             *self.obligation_item_ids,
             *self.claim_item_ids,
             *self.decision_item_ids,
+            *self.prior_finding_item_ids,
             *self.timeline_item_ids,
         ]
         for assessment in self.deterministic_assessments:
@@ -1134,6 +1156,7 @@ class SemanticCase:
             (packet.obligation_item_ids, "obligation"),
             (packet.claim_item_ids, "claim"),
             (packet.decision_item_ids, "decision"),
+            (packet.prior_finding_item_ids, "prior_finding"),
             (packet.timeline_item_ids, "timeline"),
         )
         for ids, section in expected_sections:
@@ -1191,6 +1214,7 @@ class SemanticCase:
             *packet.obligation_item_ids,
             *packet.claim_item_ids,
             *packet.decision_item_ids,
+            *packet.prior_finding_item_ids,
             *packet.timeline_item_ids,
             *(item.excerpt_item_id for item in packet.targeted_excerpts),
         }
@@ -1260,6 +1284,46 @@ class ReviewerChallenge:
             raise _invalid_judgment()
 
 
+type PriorFindingVerdictKind = Literal[
+    "fixed", "still_present", "answered_not_fixed", "unassessable", "withdrawn"
+]
+PRIOR_FINDING_VERDICT_KINDS: Final = frozenset(
+    {"fixed", "still_present", "answered_not_fixed", "unassessable", "withdrawn"}
+)
+_MAX_PRIOR_FINDING_VERDICTS: Final = 8
+
+
+@dataclass(frozen=True, slots=True)
+class PriorFindingVerdict:
+    """The reviewer's ruling on one earlier finding (issue #905), before post-validation.
+
+    The reviewer's free-text note is advisory reasoning for this turn only; it is never recorded.
+    """
+
+    finding_id: str
+    verdict: PriorFindingVerdictKind
+    cited_refs: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "finding_id", _snapshot_finding_id(self.finding_id, error=_invalid_judgment())
+        )
+        if type(self.verdict) is not str or self.verdict not in PRIOR_FINDING_VERDICT_KINDS:
+            raise _invalid_judgment()
+        object.__setattr__(
+            self,
+            "cited_refs",
+            _validated_ref_tuple(
+                self.cited_refs,
+                minimum=0,
+                maximum=_MAX_SUBJECT_REFS,
+                public_only=False,
+                error=_invalid_judgment(),
+                canonicalize=True,
+            ),
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class MissingForAssessment:
     """One item an ``insufficient_packet`` reviewer said it needed (issue #907).
@@ -1301,6 +1365,7 @@ class MissingForAssessment:
 class SemanticJudgment:
     conclusion: SemanticConclusion
     challenges: tuple[ReviewerChallenge, ...]
+    prior_finding_verdicts: tuple[PriorFindingVerdict, ...] = ()
     # Named by every provider-judgment 1.1.0 ``insufficient_packet``. A durable semantic response
     # recorded before issue #907 decodes with none, so the domain value admits an empty tuple;
     # the provider schema is what requires at least one.
@@ -1325,6 +1390,13 @@ class SemanticJudgment:
         ):
             raise _invalid_judgment()
         if self.missing_for_assessment and self.conclusion != "insufficient_packet":
+            raise _invalid_judgment()
+        verdicts = self.prior_finding_verdicts
+        if (
+            type(verdicts) is not tuple
+            or len(verdicts) > _MAX_PRIOR_FINDING_VERDICTS
+            or any(type(item) is not PriorFindingVerdict for item in verdicts)
+        ):
             raise _invalid_judgment()
 
 

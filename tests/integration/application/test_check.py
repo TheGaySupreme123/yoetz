@@ -169,6 +169,7 @@ class _Ledger:
         self.last_executions: tuple[CheckPolicyExecution, ...] | None = None
         self.last_missing: tuple[MissingForAssessmentItem, ...] = ()
         self.last_conclusion: str | None = None
+        self.last_verdicts: tuple[object, ...] = ()
         self.operation: OperationRecord | None = None
 
     async def load_events(
@@ -272,9 +273,11 @@ class _Ledger:
         *,
         scope: CheckScopeModel | None = None,
         semantic_conclusion: str | None = None,
+        prior_finding_verdicts: tuple[object, ...] = (),
         missing_for_assessment: tuple[MissingForAssessmentItem, ...] = (),
     ) -> CheckCommitResult:
         assert frozen == self.frozen
+        self.last_verdicts = prior_finding_verdicts
         self.last_missing = missing_for_assessment
         self.last_conclusion = semantic_conclusion
         if self.commit_failure is not None:
@@ -1350,7 +1353,7 @@ async def test_insufficient_packet_names_each_missing_item_as_a_check_limitation
     judgment = SemanticJudgment(
         "insufficient_packet",
         (),
-        (
+        missing_for_assessment=(
             MissingForAssessment("verification_output", (str(clm(1)),), "test output absent"),
             MissingForAssessment("command_identity", (), "which command ran is not shown"),
             MissingForAssessment("current_diff_for_path", (_OUTSIDE_REF,), "invented target"),
@@ -1424,7 +1427,9 @@ async def test_supplied_item_is_not_listed_again_unless_the_reviewer_cites_the_n
         SemanticJudgment(
             "insufficient_packet",
             (),
-            (MissingForAssessment("verification_output", targets, "still cannot assess"),),
+            missing_for_assessment=(
+                MissingForAssessment("verification_output", targets, "still cannot assess"),
+            ),
         )
     )
     checked = await execute_check_commit(app, _request("semantic_required"))
@@ -1451,7 +1456,9 @@ async def test_unanswered_prior_request_may_be_listed_again() -> None:
         SemanticJudgment(
             "insufficient_packet",
             (),
-            (MissingForAssessment("verification_output", (str(clm(1)),), "still absent"),),
+            missing_for_assessment=(
+                MissingForAssessment("verification_output", (str(clm(1)),), "still absent"),
+            ),
         )
     )
     checked = await execute_check_commit(app, _request("semantic_required"))

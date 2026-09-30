@@ -31,6 +31,7 @@ from yoetz.ports.secret_memory import ProviderAttemptAuthBinding, ProviderCreden
 from yoetz.ports.semantic import (
     Deadline,
     MissingForAssessment,
+    PriorFindingVerdict,
     ProviderAttemptProvenance,
     ReviewerChallenge,
     SemanticJudgment,
@@ -56,6 +57,7 @@ from yoetz.protocol.models import (
     ProviderJudgmentModel,
     ProviderJudgmentNoDiscrepancyModel,
     ProviderMissingItemModel,
+    ProviderPriorFindingVerdictModel,
     SemanticStatus,
 )
 
@@ -73,6 +75,7 @@ __all__ = [
     "OPENAI_MAX_OUTPUT_TOKENS",
     "OPENAI_MAX_RESPONSE_BODY_BYTES",
     "SEMANTIC_REVIEW_INSTRUCTION",
+    "VERDICT_FIELD_GLOSSARY",
     "JudgmentValidationError",
     "JudgmentValidationStage",
     "OneAttemptCredentialTransport",
@@ -150,7 +153,22 @@ SEMANTIC_REVIEW_INSTRUCTION: Final = (
     "or evidence attempt before state_unresolved_limitation; use that limitation response only "
     "when the packet records the attempt and its remaining limit, or a specific authority blocker. "
     "Do not offer accepting a limitation as an equivalent alternative to performing available "
-    "verification. Disclosure does not repair a defect or prove completion."
+    "verification. Disclosure does not repair a defect or prove completion. "
+    # Issue #905: the review is a dialogue that must converge. One challenge per round let a
+    # stale item hold the only slot while a real defect waited, and a reviewer blind to its own
+    # answered findings restated them under new ids. Kept as one self-contained paragraph.
+    "Return one challenge for each distinct material problem the readable material supports, up "
+    "to the challenge limit, never only the most important one and never two for one problem. "
+    "The packet records earlier findings and the main agent's responses to them. Do not raise "
+    "again a finding the main agent has answered, or request an action the packet shows was "
+    "already done, unless material newer than that response shows the problem remains; then cite "
+    "that newer material and the earlier finding's fnd_ id from citable_refs. "
+    "For each earlier finding in review_packet.prior_finding_item_ids, return one "
+    "prior_finding_verdicts entry whatever the conclusion: fixed only when evidence or results "
+    "recorded after the finding show the problem is gone, citing them; still_present or "
+    "answered_not_fixed citing the material that shows it remains; withdrawn when the main "
+    "agent's reasoned rejection holds; unassessable when the packet cannot settle it. A verdict "
+    "speaks only for its own finding."
 ) + (
     # Issue #907: packet order and the missing-item list. Kept as a separate appended sentence
     # group so the reviewer-role text above can change independently.
@@ -490,6 +508,25 @@ CHALLENGE_FIELD_GLOSSARY: Final[dict[str, str]] = {
 }
 
 
+VERDICT_FIELD_GLOSSARY: Final[dict[str, str]] = {
+    "finding_id": (
+        "The earlier finding this ruling is about: one finding_ref from the packet's "
+        "prior-finding rows (review_packet.prior_finding_item_ids)."
+    ),
+    "verdict": (
+        "Your ruling on that finding alone. fixed: cited material recorded after the finding "
+        "shows the problem is gone; still_present: newer material shows it remains; "
+        "answered_not_fixed: the main agent answered but the problem remains; withdrawn: you "
+        "accept the main agent's rejection; unassessable: the packet cannot settle it."
+    ),
+    "cited_refs": (
+        "The refs the ruling rests on, from citable_refs. fixed must cite evidence or a result "
+        "recorded after the finding, or it is treated as unassessable."
+    ),
+    "note": "One short sentence saying why, addressed to the main agent.",
+}
+
+
 MISSING_ITEM_KIND_GLOSSARY: Final[dict[str, str]] = {
     "command_identity": "which command produced an output the packet shows",
     "current_diff_for_path": "the current change to a file the packet shows only in part or stale",
@@ -579,6 +616,7 @@ def _apply_reviewer_glossary(schema: dict[str, JsonValue]) -> dict[str, JsonValu
     ):
         raise RuntimeError("provider_judgment_schema_invalid")
     _gloss_properties(definitions, "ProviderChallenge", CHALLENGE_FIELD_GLOSSARY)
+    _gloss_properties(definitions, "ProviderPriorFindingVerdict", VERDICT_FIELD_GLOSSARY)
     _gloss_properties(definitions, "ProviderMissingItem", MISSING_ITEM_FIELD_GLOSSARY)
     return schema
 
@@ -864,6 +902,10 @@ def _provenance(
     )
 
 
+def _verdict_from_model(verdict: ProviderPriorFindingVerdictModel) -> PriorFindingVerdict:
+    return PriorFindingVerdict(verdict.finding_id, verdict.verdict, verdict.cited_refs)
+
+
 def _challenge_from_model(challenge: ProviderChallengeModel) -> ReviewerChallenge:
     return ReviewerChallenge(
         FindingKind(challenge.finding_kind),
@@ -907,12 +949,13 @@ def normalize_judgment(parsed: JsonValue) -> SemanticJudgment:
         except ValidationError as exc:
             raise JudgmentValidationError(_classify_rejected_judgment(source)) from exc
     challenges = tuple(_challenge_from_model(item) for item in model.reviewer_challenges)
+    verdicts = tuple(_verdict_from_model(item) for item in model.prior_finding_verdicts)
     missing = (
         tuple(_missing_item_from_model(item) for item in model.missing_for_assessment)
         if type(model) is ProviderJudgmentInsufficientModel
         else ()
     )
-    return SemanticJudgment(model.conclusion, challenges, missing)
+    return SemanticJudgment(model.conclusion, challenges, verdicts, missing_for_assessment=missing)
 
 
 def normalize_response(

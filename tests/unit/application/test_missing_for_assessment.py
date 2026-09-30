@@ -7,7 +7,7 @@ from dataclasses import replace
 from yoetz.application.missing_for_assessment import unsuppliable_missing_kinds
 from yoetz.domain.privacy import ReviewContextProfile, ReviewSelectionPolicy
 from yoetz.mcp.summaries import summary_for_check
-from yoetz.ports.semantic import MissingForAssessment, SemanticJudgment
+from yoetz.ports.semantic import MissingForAssessment, PriorFindingVerdict, SemanticJudgment
 from yoetz.protocol.canonical import JsonValue
 from yoetz.service import ready_composition
 
@@ -71,10 +71,21 @@ def test_durable_semantic_response_keeps_named_items_and_reads_legacy_bytes() ->
     judgment = SemanticJudgment(
         "insufficient_packet",
         (),
-        (MissingForAssessment("verification_output", (_CLAIM,), "The jest summary is absent."),),
+        missing_for_assessment=(
+            MissingForAssessment("verification_output", (_CLAIM,), "The jest summary is absent."),
+        ),
     )
     encoded = ready_composition._judgment_to_response_json(judgment)  # pyright: ignore[reportPrivateUsage]
     assert ready_composition._judgment_from_response_json(encoded) == judgment  # pyright: ignore[reportPrivateUsage]
+    # Issue #905 rulings travel in the same durable response beside the named items.
+    ruled = replace(
+        judgment,
+        prior_finding_verdicts=(
+            PriorFindingVerdict("fnd_30000000-0000-4000-8000-000000000001", "unassessable", ()),
+        ),
+    )
+    encoded_ruled = ready_composition._judgment_to_response_json(ruled)  # pyright: ignore[reportPrivateUsage]
+    assert ready_composition._judgment_from_response_json(encoded_ruled) == ruled  # pyright: ignore[reportPrivateUsage]
     legacy: dict[str, JsonValue] = {"conclusion": "insufficient_packet", "reviewer_challenges": []}
     decoded = ready_composition._judgment_from_response_json(legacy)  # pyright: ignore[reportPrivateUsage]
     assert decoded == SemanticJudgment("insufficient_packet", ())

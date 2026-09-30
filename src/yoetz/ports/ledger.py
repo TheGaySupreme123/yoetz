@@ -21,6 +21,7 @@ from yoetz.domain.events import EventDraft, LedgerRecord, MissingForAssessmentIt
 from yoetz.domain.findings import (
     CheckVerdict,
     Finding,
+    PriorFindingVerdictRecord,
     RankedFindings,
     RuntimeTokenUsage,
     SemanticProvenance,
@@ -1897,6 +1898,7 @@ class LedgerPort(Protocol):
         *,
         scope: CheckScopeModel | None = None,
         semantic_conclusion: str | None = None,
+        prior_finding_verdicts: tuple[PriorFindingVerdictRecord, ...] = (),
         missing_for_assessment: tuple[MissingForAssessmentItem, ...] = (),
     ) -> CheckCommitResult: ...
 

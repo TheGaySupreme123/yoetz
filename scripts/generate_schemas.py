@@ -1292,78 +1292,6 @@ def _check_recorded_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     return document
 
 
-def _provider_judgment_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
-    """Generate the provider judgment catalog with the frozen finding-kind definition name.
-
-    The public protocol owns a fifteen-kind ``FindingKindWire`` while the provider alias keeps the
-    historical fourteen-kind wire under that same frozen definition key; the runtime request
-    schema applies the identical rename, so the catalog and the request stay shape-equivalent.
-    """
-
-    assert entry.loader is not None
-    raw_schema = cast(dict[str, object], TypeAdapter(entry.loader()).json_schema())
-    normalized = _normalize(raw_schema, entry)
-    rendered = json.dumps(normalized).replace(
-        '"#/$defs/ProviderFindingKindWire"', '"#/$defs/FindingKindWire"'
-    )
-    document = cast(dict[str, JsonValue], json.loads(rendered))
-    definitions = cast(dict[str, JsonValue], document["$defs"])
-    definitions["FindingKindWire"] = definitions.pop("ProviderFindingKindWire")
-    document["$defs"] = dict(sorted(definitions.items()))
-    return document
-
-
-def _check_recorded_v1_4_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
-    """Record what an ``insufficient_packet`` review named as missing (issue #907)."""
-
-    document = _simple_versioned_schema(entry, "events/check-recorded-1.3.0.schema.json", {})
-    properties = cast(dict[str, JsonValue], document["properties"])
-    properties["semantic_conclusion"] = {"const": "insufficient_packet", "type": "string"}
-    properties["missing_for_assessment"] = {
-        "items": {
-            "additionalProperties": False,
-            "properties": {
-                "availability": {
-                    "enum": ["agent_suppliable", "structurally_unavailable_on_this_host"],
-                    "type": "string",
-                },
-                "kind": {
-                    "enum": [
-                        "command_identity",
-                        "current_diff_for_path",
-                        "other",
-                        "plan_or_claim_text",
-                        "prior_finding_context",
-                        "task_statement",
-                        "verification_output",
-                    ],
-                    "type": "string",
-                },
-                "target_refs": {
-                    "items": {
-                        "pattern": (
-                            "^(act|clm|evd|evt|fnd|obl|res)_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}"
-                            "-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
-                        ),
-                        "type": "string",
-                    },
-                    "maxItems": 4,
-                    "type": "array",
-                    "uniqueItems": True,
-                },
-            },
-            "required": ["availability", "kind", "target_refs"],
-            "type": "object",
-        },
-        "maxItems": 8,
-        "minItems": 1,
-        "type": "array",
-        "uniqueItems": True,
-    }
-    cast(list[JsonValue], document["required"]).append("missing_for_assessment")
-    return document
-
-
 def _check_recorded_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     document = _load_versioned_template(
         entry,
@@ -1494,6 +1422,209 @@ def _finding_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         branches.append(priority)
     document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
     document["title"] = f"Yoetz finding {entry.schema_version}"
+    return document
+
+
+# Event pairs the converging review dialogue adds (issue #905). The event-draft and opaque
+# fallback schemas admit exactly these, so a known dialogue event never also matches the
+# opaque branch.
+_REVIEW_DIALOGUE_EVENT_PAIRS: Final[tuple[tuple[str, str], ...]] = (
+    ("check_recorded", "1.4.0"),
+    ("finding_recorded", "1.4.0"),
+)
+
+
+def _provider_judgment_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Freeze the exact constrained-output schema every provider cell sends (issue #905).
+
+    The runtime request schema is the owning source: it renames the provider kind alias to the
+    frozen ``FindingKindWire`` anchor and carries the curated reviewer glossary. Version 1.1.0
+    adds the required per-finding ``prior_finding_verdicts`` array to every conclusion branch
+    (issue #905) and the required ``missing_for_assessment`` list to ``insufficient_packet``
+    (issue #907).
+    """
+
+    from yoetz.adapters.providers.openai_responses import build_judgment_json_schema
+
+    document = cast(dict[str, JsonValue], dict(build_judgment_json_schema()))
+    ordered: dict[str, JsonValue] = {
+        "$id": SCHEMA_NAMESPACE + entry.relative_path,
+        "$schema": _DRAFT_2020_12,
+    }
+    ordered.update(document)
+    ordered["title"] = entry.schema_name
+    return ordered
+
+
+def _check_recorded_v1_4_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Record what a succeeded check's review settled for the next round (issues #905, #907).
+
+    Two additive fields, at least one present: the reviewer's admitted per-finding rulings
+    (issue #905) and what an ``insufficient_packet`` review named as missing, classified by Yoetz
+    (issue #907). Every other check keeps its earlier version. ``fixed`` is admitted only with
+    cited material recorded after the finding; missing items appear only on an
+    ``insufficient_packet`` conclusion.
+    """
+
+    from yoetz.domain.findings import MAX_RECORDED_VERDICTS, PRIOR_FINDING_VERDICTS
+    from yoetz.protocol.models import (
+        MAX_MISSING_FOR_ASSESSMENT,
+        MAX_MISSING_TARGET_REFS,
+        MISSING_FOR_ASSESSMENT_KINDS,
+        MISSING_ITEM_AVAILABILITIES,
+    )
+
+    packet_ref: dict[str, JsonValue] = {
+        "pattern": (
+            "^(act|clm|evd|evt|fnd|obl|res)_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}"
+            "-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        ),
+        "type": "string",
+    }
+    document = _load_versioned_template(entry, "events/check-recorded-1.3.0.schema.json")
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+    properties = cast(dict[str, JsonValue], document["properties"])
+    returned = cast(dict[str, JsonValue], properties["returned_finding_ids"])
+    finding_ref = cast(dict[str, JsonValue], returned["items"])
+    definitions["prior_finding_verdict"] = cast(
+        JsonValue,
+        {
+            "additionalProperties": False,
+            "properties": {
+                "cited_refs": {
+                    "items": dict(packet_ref),
+                    "maxItems": 16,
+                    "type": "array",
+                    "uniqueItems": True,
+                },
+                "finding_id": dict(finding_ref),
+                "verdict": {
+                    "enum": sorted(PRIOR_FINDING_VERDICTS, key=str.encode),
+                    "type": "string",
+                },
+            },
+            "required": ["cited_refs", "finding_id", "verdict"],
+            "type": "object",
+        },
+    )
+    definitions["missing_item"] = cast(
+        JsonValue,
+        {
+            "additionalProperties": False,
+            "properties": {
+                "availability": {
+                    "enum": sorted(MISSING_ITEM_AVAILABILITIES, key=str.encode),
+                    "type": "string",
+                },
+                "kind": {
+                    "enum": sorted(MISSING_FOR_ASSESSMENT_KINDS, key=str.encode),
+                    "type": "string",
+                },
+                "target_refs": {
+                    "items": dict(packet_ref),
+                    "maxItems": MAX_MISSING_TARGET_REFS,
+                    "type": "array",
+                    "uniqueItems": True,
+                },
+            },
+            "required": ["availability", "kind", "target_refs"],
+            "type": "object",
+        },
+    )
+    properties["prior_finding_verdicts"] = {
+        "items": {"$ref": "#/$defs/prior_finding_verdict"},
+        "maxItems": MAX_RECORDED_VERDICTS,
+        "minItems": 1,
+        "type": "array",
+    }
+    properties["missing_for_assessment"] = {
+        "items": {"$ref": "#/$defs/missing_item"},
+        "maxItems": MAX_MISSING_FOR_ASSESSMENT,
+        "minItems": 1,
+        "type": "array",
+        "uniqueItems": True,
+    }
+    document["$defs"] = dict(sorted(definitions.items()))
+    all_of = cast(list[JsonValue], document["allOf"])
+    all_of.append(
+        {
+            "anyOf": [
+                {
+                    "not": {"required": ["missing_for_assessment"]},
+                    "required": ["prior_finding_verdicts"],
+                },
+                {
+                    "properties": {"semantic_conclusion": {"const": "insufficient_packet"}},
+                    "required": ["missing_for_assessment"],
+                },
+            ]
+        }
+    )
+    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    return document
+
+
+def _finding_recorded_v1_4_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Record the reviewer's challenge fields and prior-finding links on AI-powered findings.
+
+    The public ``finding`` object stays at 1.3.0; this event payload is that object plus the
+    closed ``challenge`` record and the ``relates_to`` link (issue #905). The version is written
+    only when at least one of them is present, and only an AI-powered finding may carry them.
+    """
+
+    from yoetz.domain.findings import MAX_RELATED_FINDING_IDS, REVIEWER_NEXT_STEPS
+    from yoetz.protocol.models import MAX_REVIEW_TEXT_BYTES
+
+    document = _load_versioned_template(entry, "findings/finding-1.3.0.schema.json")
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+    properties = cast(dict[str, JsonValue], document["properties"])
+    # Code points never exceed UTF-8 bytes, so this admits every byte-bounded domain value.
+    review_text: dict[str, JsonValue] = {
+        "maxLength": MAX_REVIEW_TEXT_BYTES,
+        "minLength": 1,
+        "type": "string",
+    }
+    definitions["review_text"] = review_text
+    definitions["finding_challenge"] = cast(
+        JsonValue,
+        {
+            "additionalProperties": False,
+            "properties": {
+                "alternative_interpretation": {"$ref": "#/$defs/review_text"},
+                "discrepancy": {"$ref": "#/$defs/review_text"},
+                "requested_next_step": {
+                    "enum": sorted(REVIEWER_NEXT_STEPS, key=str.encode),
+                    "type": "string",
+                },
+                "uncertainty": {"$ref": "#/$defs/review_text"},
+            },
+            "required": [
+                "discrepancy",
+                "alternative_interpretation",
+                "requested_next_step",
+                "uncertainty",
+            ],
+            "type": "object",
+        },
+    )
+    properties["challenge"] = {"$ref": "#/$defs/finding_challenge"}
+    properties["relates_to"] = {
+        "items": {"$ref": "#/$defs/finding_id"},
+        "maxItems": MAX_RELATED_FINDING_IDS,
+        "minItems": 1,
+        "type": "array",
+        "uniqueItems": True,
+    }
+    all_of = cast(list[JsonValue], document["allOf"])
+    all_of.append(
+        {
+            "anyOf": [{"required": ["challenge"]}, {"required": ["relates_to"]}],
+            "properties": {"origin": {"const": "semantic_model_derived"}},
+            "required": ["origin"],
+        }
+    )
+    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    document["title"] = f"Yoetz finding recorded {entry.schema_version}"
     return document
 
 
@@ -3254,10 +3385,11 @@ def _event_draft_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
 
     add_branch("check_recorded", "1.2.0")
     add_branch("check_recorded", "1.3.0")
-    add_branch("check_recorded", "1.4.0")
     add_branch("session_opened", "1.2.0")
     add_branch("finding_recorded", "1.2.0")
     add_branch("finding_recorded", "1.3.0")
+    for family, version in _REVIEW_DIALOGUE_EVENT_PAIRS:
+        add_branch(family, version)
     for family in (
         "child_accepted",
         "child_dependencies_recorded",
@@ -3343,14 +3475,15 @@ def _opaque_unknown_event_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonVa
             "type": "object",
         }
     )
-    values.append(
-        {
-            "additionalProperties": False,
-            "properties": {"name": {"const": "check_recorded"}, "version": {"const": "1.4.0"}},
-            "required": ["name", "version"],
-            "type": "object",
-        }
-    )
+    for family, version in _REVIEW_DIALOGUE_EVENT_PAIRS:
+        values.append(
+            {
+                "additionalProperties": False,
+                "properties": {"name": {"const": family}, "version": {"const": version}},
+                "required": ["name", "version"],
+                "type": "object",
+            }
+        )
     for family in (
         "child_accepted",
         "child_dependencies_recorded",
@@ -3429,6 +3562,48 @@ def _outbound_case_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         "import_observed",
         "observation_captured",
     ]
+    return document
+
+
+def _outbound_case_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Add the prior-findings review section to outbound-case v1.2 (issue #905).
+
+    The section carries earlier AI-powered findings and the agent's answers under the existing
+    finding categories, so no new data category crosses egress; only the section name and the
+    packet's id list are new.
+    """
+
+    from yoetz.ports.semantic import MAX_PRIOR_FINDING_ITEMS
+
+    document = _load_versioned_template(entry, "privacy/outbound-case-1.1.0.schema.json")
+    try:
+        definitions = cast(dict[str, JsonValue], document["$defs"])
+        item = cast(dict[str, JsonValue], definitions["content_item"])
+        item_properties = cast(dict[str, JsonValue], item["properties"])
+        section = cast(dict[str, JsonValue], item_properties["section"])
+        sections = cast(list[JsonValue], section["enum"])
+        packet = cast(dict[str, JsonValue], definitions["review_packet"])
+        packet_properties = cast(dict[str, JsonValue], packet["properties"])
+        packet_required = cast(list[JsonValue], packet["required"])
+        properties = cast(dict[str, JsonValue], document["properties"])
+    except (KeyError, TypeError) as exc:
+        raise SchemaGenerationError(
+            "outbound_case_schema_template_invalid", entries=(entry.relative_path,)
+        ) from exc
+    if "prior_finding" not in sections:
+        sections.append("prior_finding")
+        sections.sort(key=lambda value: str(value).encode("ascii"))
+    packet_properties["prior_finding_item_ids"] = {
+        "items": {"$ref": "#/$defs/item_id"},
+        "maxItems": MAX_PRIOR_FINDING_ITEMS,
+        "minItems": 0,
+        "type": "array",
+        "uniqueItems": True,
+    }
+    if "prior_finding_item_ids" not in packet_required:
+        packet_required.append("prior_finding_item_ids")
+    properties["schema_version"] = {"const": entry.schema_version}
+    document["title"] = f"Yoetz outbound case {entry.schema_version}"
     return document
 
 
@@ -5853,6 +6028,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         lambda: __import__("yoetz.domain.findings", fromlist=["Finding"]).Finding,
     ),
     _RegistryEntry(
+        "events/finding-recorded-1.4.0.schema.json",
+        "finding-recorded",
+        "1.4.0",
+        "event",
+        "event-payload",
+        lambda: __import__("yoetz.domain.findings", fromlist=["Finding"]).Finding,
+    ),
+    _RegistryEntry(
         "events/obligation-published-1.0.0.schema.json",
         "obligation-published",
         "1.0.0",
@@ -6515,6 +6698,18 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         ),
     ),
     _RegistryEntry(
+        "privacy/outbound-case-1.2.0.schema.json",
+        "outbound-case",
+        "1.2.0",
+        "request_result",
+        "outbound-case",
+        lambda: (
+            __import__(
+                "yoetz.domain.privacy", fromlist=["ApprovedOutboundCase"]
+            ).ApprovedOutboundCase
+        ),
+    ),
+    _RegistryEntry(
         "privacy/privacy-policy-1.0.0.schema.json",
         "privacy-policy",
         "1.0.0",
@@ -7104,7 +7299,9 @@ _BUILDER_OWNED_SCHEMA_PATHS: Final[frozenset[str]] = frozenset(
         "events/delegation-declared-1.0.0.schema.json",
         "events/event-draft-1.2.0.schema.json",
         "events/finding-recorded-1.3.0.schema.json",
+        "events/finding-recorded-1.4.0.schema.json",
         "events/opaque-unknown-event-draft-1.2.0.schema.json",
+        "privacy/outbound-case-1.2.0.schema.json",
         "events/session-opened-1.2.0.schema.json",
         "events/work-abandoned-1.0.0.schema.json",
         "events/work-cancelled-1.0.0.schema.json",
@@ -7398,6 +7595,8 @@ def build_schema_documents(
                 "events/finding-recorded-1.2.0.schema.json",
                 {"finding-1.2.0": "finding-1.3.0"},
             )
+        elif entry.relative_path == "events/finding-recorded-1.4.0.schema.json":
+            normalized = _finding_recorded_v1_4_schema(entry)
         elif entry.relative_path in {
             "events/evidence-recorded-1.1.0.schema.json",
             "events/evidence-recorded-1.2.0.schema.json",
@@ -7556,6 +7755,8 @@ def build_schema_documents(
             normalized = _privacy_policy_v1_1_schema(entry)
         elif entry.relative_path == "privacy/outbound-case-1.1.0.schema.json":
             normalized = _outbound_case_schema(entry)
+        elif entry.relative_path == "privacy/outbound-case-1.2.0.schema.json":
+            normalized = _outbound_case_v1_2_schema(entry)
         else:
             try:
                 python_type = entry.loader()

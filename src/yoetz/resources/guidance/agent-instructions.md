@@ -192,5 +192,4 @@ unattempted. If authority or an unavailable dependency prevents the attempt, rec
 blocker instead of widening disclosure, credentials or runtime authority. Only then report the
 remaining limitation or narrow the claim. An acknowledgement or “limitation accepted” is not a
 repair, a verification result, or a finding resolution. Recheck after a material repair; after
-`insufficient_packet`, only once an `agent_suppliable` `missing_for_assessment` item is
-supplied, else report it.
+`insufficient_packet`, only once an `agent_suppliable` missing item is supplied.

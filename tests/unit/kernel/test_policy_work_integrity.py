@@ -48,6 +48,9 @@ from yoetz.domain.findings import (
     Finding,
     FindingKind,
     FindingOrigin,
+    SamplingParams,
+    SemanticDispatchKind,
+    SemanticProvenance,
 )
 from yoetz.domain.values import (
     SubjectStateRef,
@@ -61,6 +64,7 @@ from yoetz.kernel.deterministic_checks import (
 from yoetz.kernel.policies.work_integrity import WORK_INTEGRITY_POLICY_PACK
 from yoetz.kernel.projections import ContradictionKey, ContradictionRecord
 from yoetz.protocol.coverage import EvidenceImmutability
+from yoetz.protocol.models import SemanticReason, SemanticStatus
 
 _NOW = timestamp_from_string("2026-01-01T00:00:00.000Z")
 _DIGEST_A = "sha256:" + "1" * 64
@@ -602,6 +606,70 @@ def test_provenance_dispute_does_not_trigger_weak_response_penalty() -> None:
         extra_refs=(evt(99),),
     )
     assert FindingKind.WEAK_OR_STALE_RESPONSE not in _kinds(case)
+
+
+def test_ai_origin_rejection_without_evidence_mints_no_weak_response() -> None:
+    """Rejecting an AI-powered false positive must not add a local blocking finding (#905).
+
+    termenv shape: the reviewer asked for a tail the task text explicitly excludes, and the agent
+    rejected it by quoting the task, with no evidence ref. research-evidence already skipped
+    non-local findings; work integrity now applies the same origin filter, stale or not. The
+    local-origin trigger above is unchanged.
+    """
+
+    semantic = replace(
+        _recorded_finding(),
+        kind=FindingKind.EVIDENCE_DOES_NOT_SUPPORT_CLAIM,
+        policy_id="research-evidence",
+        origin=FindingOrigin.SEMANTIC_MODEL_DERIVED,
+        summary="Ascii Style.Truncate discards the requested tail",
+        detail="Please pass the stripped tail through the Ascii branch.",
+        provenance=_semantic_provenance(),
+    )
+    rejected = ResponseRecordedPayload(
+        finding_id=fnd(1),
+        finding_frontier=FRONTIER,
+        disposition=ResponseDisposition.REJECTED,
+        reason=(
+            "The user explicitly requires Ascii Style.Truncate to return plain text without a "
+            "tail; adding the tail would violate the task."
+        ),
+    )
+    for response in (
+        rejected,
+        replace(rejected, finding_frontier=replace(FRONTIER, sequence=FRONTIER.sequence - 1)),
+    ):
+        case = make_case(
+            findings={fnd(1): record(semantic, 1)},
+            responses={fnd(1): record(response, 2)},
+            extra_refs=(evt(99),),
+        )
+        assert FindingKind.WEAK_OR_STALE_RESPONSE not in _kinds(case)
+
+
+def _semantic_provenance() -> SemanticProvenance:
+    digest = "sha256:" + "1" * 64
+    return SemanticProvenance(
+        provider="fake",
+        endpoint_profile_id="fake",
+        endpoint_profile_version="1.0.0",
+        model="fake/model",
+        sdk_version="1.0.0",
+        prompt_digest=digest,
+        schema_digest=digest,
+        policy_digest=digest,
+        privacy_policy_digest=digest,
+        sampling_params=SamplingParams(128),
+        latency_ms=1,
+        semantic_attempt_id="att_00000000-0000-4000-8000-000000000001",
+        dispatch_kind=SemanticDispatchKind.EXTERNAL,
+        privacy_receipt_id="egr_00000000-0000-4000-8000-000000000001",
+        status=SemanticStatus.SUCCEEDED,
+        reason=SemanticReason.SEMANTIC_COMPLETED,
+        provider_request_id="fake-1",
+        egress_authorization_id="aut_00000000-0000-4000-8000-000000000001",
+        request_commitment="hmac-sha256:" + "b" * 64,
+    )
 
 
 def test_supported_rejection_at_the_findings_own_frontier_is_not_stale() -> None:
