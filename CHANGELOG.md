@@ -41,8 +41,9 @@ reverse-chronological released versions.
   same command commitment as its hook copy, so a passing rerun on either path retires the failure.
   Output text is never read as an outcome, and a result with no stated outcome stays `unknown`
   with `host_outcome_unavailable` on that record only. Unresolved-command advice now also reads
-  Codex `exec_command` and `local_shell` calls. Until #917 pairs hook and rollout copies, a
-  command seen on both can appear as two results (#910).
+  Codex `exec_command` and `local_shell` calls. While the session's tool hooks fire, the rollout's
+  copy of a hooked call stays local, so one command is one result; without tool hooks the rollout
+  items are delivered with their outcomes (#910).
 
 - Codex observation records each tool call once. A tool call's pre-event and its result now share
   one ledger action instead of two, and a code-mode `exec` cell no longer adds its own action next

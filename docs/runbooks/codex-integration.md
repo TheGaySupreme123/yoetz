@@ -982,14 +982,26 @@ completed tool call, and its `status` (`completed`, `failed`) and `exit_code` ar
 command item names no tool, so it is recorded as `command_execution` (a patch item as
 `file_change`). An `exit_code` of `null`, as on a declined command, states no outcome. When a
 hook call id equals the rollout item id, the stream fact appends a correction to an `unknown` hook
-result and never rewrites it (ADR-022 decision 15). Pairing hook and stream rows whose ids differ
-is issue #917. Until then a command observed on both paths can appear as two results. A
-`CommandExecution` item carries the hook's installation-keyed `command_commitment`, computed from
-its `command` argv with the shell wrapper stripped, so failure supersession (#909) treats both
-copies as the same command. The stream copy is recorded as tool `command_execution`, which the
-unresolved-command advice does not read: the hook copy alone drives that advice, so one run is
-not named twice. A command whose rollout text was redacted for a secret commits differently from
-its hook copy and relies on the edit rule.
+result and never rewrites it (ADR-022 decision 15).
+
+The rollout item is a second copy of a hooked call under a different id (`exec-<uuid>`), so it
+follows the same rule as a code-mode `exec` cell (#917). Once this session's tool hooks
+(`PreToolUse`/`PostToolUse`) have fired, the reader keeps completed command, MCP and patch items in
+the local store and does not deliver them: the hook row records the call and, since #910, its exit
+status. A session whose tool hooks never fired delivers the items with their outcomes, as the only
+record of those calls. One hooked command is therefore one action and one result, and a red-latest
+claim names it once. Like a retained cell, a retained item counts in `observed_count` without an
+admitted, summarized or intentionally omitted bucket. Two limits are disclosed. A call in a
+hook-observed session whose own hook did not fire (an unhooked tool or a hook timeout) is not
+recorded from the rollout. A hook result that stayed `unknown` because the process was still
+running is not completed from the rollout; it keeps `host_outcome_unavailable`. Both are owned by
+#910.
+
+A delivered `CommandExecution` item carries the hook's installation-keyed `command_commitment`,
+computed from its `command` argv with the shell wrapper stripped, so failure supersession (#909)
+treats hook and rollout runs of one command as the same command. The item is recorded as tool
+`command_execution`, which the unresolved-command advice does not read. A command whose rollout
+text was redacted for a secret commits differently from its hook copy and relies on the edit rule.
 
 These shapes are pinned by `fixtures/observations/codex-post-tool-outcomes-0.157.1.case.json`,
 which is derived from recorded Codex 0.157.1 rollouts. The benchmark that exposed the defect did not
@@ -1721,7 +1733,8 @@ delivered once this session's tool hooks (`PreToolUse`/`PostToolUse`) have fired
 `exec_command`, `apply_patch` and MCP calls are the ledger record. A session whose tool hooks never
 fired keeps delivering its cells. A cell whose only nested tool is unhooked, in a session where
 other tools are hooked, is not recorded, and a retained wrapper counts in `observed_count` without
-an accounting bucket. A replay of the #917 code-mode example holds one action and one
+an accounting bucket. The rollout's completed command, MCP and patch items follow the same rule
+(#910, see [Tool outcomes](#tool-outcomes-issue-910)). A replay of the #917 code-mode example holds one action and one
 result per nested call and at most four hook-observed events per shell command, down from about
 7.9. Sessions that started before the upgrade keep their historical second action per call.
 

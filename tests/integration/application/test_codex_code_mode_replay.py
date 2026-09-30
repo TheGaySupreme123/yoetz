@@ -28,6 +28,7 @@ import apsw
 import pytest
 
 from builders.ledger_adapters import FixedClock, FixedIds, MemoryObjects, ownership_fence
+from builders.observed_runs import ObservedLedger, omissions, omitted_results
 from yoetz.adapters.integrations.codex_lifecycle import LifecycleMapping
 from yoetz.adapters.integrations.observation_admission import build_routine_read_summary
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
@@ -43,6 +44,7 @@ from yoetz.domain.events import (
     AcceptedEvent,
     ActionKind,
     ActionRecordedPayload,
+    EventPayload,
     EvidenceRecordedPayload,
     ResultOutcome,
     ResultRecordedPayload,
@@ -462,7 +464,7 @@ def _code_mode_session(cell: _Replay) -> dict[str, int]:
     )
     cell.append(_exec_cell_output("call_cellRead", '{"exit_code":1}', "2026-09-29T17:59:37.000Z"))
     cell.hook("Stop", last_assistant_message="Typecheck rerun passed.", stop_hook_active=False)
-    return {"shell": 3, "patch": 1, "mcp": 2, "cells": 4}
+    return {"shell": 3, "patch": 1, "mcp": 2, "cells": 4, "stream_items": 3}
 
 
 def _facts(
@@ -552,15 +554,19 @@ async def test_code_mode_replay_records_one_action_per_host_call(replay: _Replay
     assert len(command_rows) / calls["shell"] <= 4, len(command_rows)
 
     # Nested tool hooks fired for this session, so the code-mode cell wrappers
-    # stay in the local store: retained, not dropped.
+    # stay in the local store: retained, not dropped. So do the rollout's
+    # completed command items (#910): each hook row states the same exit status.
     assert replay.store.codex_hook_observes_session(replay.commitment, replay.session)
     wrappers = [
         envelope
         for envelope in replay.store.list_envelopes(replay.commitment)
         if envelope.source is ObservationSource.CODEX_SESSION_STREAM
-        and envelope.structural_payload.get("tool_name") == "exec"
+        and (
+            envelope.structural_payload.get("tool_name") == "exec"
+            or envelope.event_kind == "item_completed"
+        )
     ]
-    assert len(wrappers) == 2 * calls["cells"]
+    assert len(wrappers) == 2 * calls["cells"] + calls["stream_items"]
     assert not {item.source_identity for item in wrappers} & {
         item.source_identity for item in recorder.delivered
     }
@@ -584,10 +590,10 @@ async def test_code_mode_replay_records_one_action_per_host_call(replay: _Replay
     before = _facts(before_actions, before_results, before_evidence)
     after = _facts(actions, results, evidence)
     assert before <= after, before - after
-    # The patch's stated exit code is one such fact. Shell outcomes stay
-    # ``unknown`` here until #910 parses them; this replay only proves that
-    # consolidating records drops none of the facts that are recorded.
+    # The stated exit codes are such facts: the patch's success and, since #910,
+    # the typecheck's failure and its passing rerun, each recorded once.
     assert ("outcome", "success", "0") in before
+    assert ("outcome", "failure", "2") in after
 
 
 @pytest.mark.anyio
@@ -643,3 +649,131 @@ async def test_cell_without_tool_hooks_is_still_recorded(replay: _Replay) -> Non
     accounting = replay.store.selection_accounting(replay.commitment)
     assert accounting["intentionally_omitted_input_count"] == 0
     assert accounting["observed_count"] == accounting["admitted_input_count"]
+
+
+async def _sweep_all(cell: _Replay) -> _Recorder:
+    recorder = _Recorder(_coordinator(cell))
+    sweeper = ObservationOutboxSweeper(cell.store, recorder)
+    try:
+        for _ in range(8):
+            if (await sweeper.sweep()).attempted == 0:
+                break
+    finally:
+        sweeper.close()
+    assert cell.store.list_pending_outbox_rows(cell.commitment) == ()
+    return recorder
+
+
+def _claim_ledger(cell: _Replay) -> ObservedLedger:
+    """The task ledger's observed actions/results, in order, ahead of a cooperative claim."""
+
+    ledger = ObservedLedger()
+    for row in cell.ledger._state.records:
+        if type(row) is AcceptedEvent and row.schema.name in {"action_recorded", "result_recorded"}:
+            ledger.append(row.schema, cast(EventPayload, row.payload), observed=True)
+    return ledger
+
+
+def _session_start(cell: _Replay) -> None:
+    cell.append(
+        _rollout_row(
+            "session_meta",
+            {
+                "cli_version": "0.157.1",
+                "cwd": str(cell.workspace),
+                "history_mode": "legacy",
+                "id": HOST,
+                "originator": "codex_exec",
+            },
+            "2026-09-29T17:54:00.000Z",
+        )
+    )
+    cell.hook("SessionStart", source="startup")
+
+
+def _hooked_run(cell: _Replay, call: str, item: str, exit_code: int, timestamp: str) -> None:
+    """One nested ``tools.exec_command``: its hooks and the rollout's own item for it."""
+
+    command = {"command": "npm run test-type"}
+    cell.hook("PreToolUse", tool_name="Bash", tool_use_id=call, tool_input=command)
+    cell.append(_command_execution(item, "npm run test-type", exit_code, timestamp))
+    cell.hook(
+        "PostToolUse",
+        tool_name="Bash",
+        tool_use_id=call,
+        tool_input=command,
+        tool_response=json.dumps(
+            {
+                "chunk_id": call[-6:],
+                "exit_code": exit_code,
+                "original_token_count": 12,
+                "output": "public synthetic output",
+                "wall_time_seconds": 2.5,
+            }
+        ),
+    )
+
+
+@pytest.mark.anyio
+async def test_hook_and_stream_copies_of_one_command_are_one_run(replay: _Replay) -> None:
+    """#910 with #917: the rollout's copy of a hooked call adds no second action or finding.
+
+    A red-latest claim names the one observed run exactly once; a passing rerun, seen by both
+    paths, leaves the claim clean.
+    """
+
+    _session_start(replay)
+    _hooked_run(replay, "call_red", "exec-910-red", 2, "2026-09-29T17:58:10.000Z")
+    recorder = await _sweep_all(replay)
+    actions = [cast(ActionRecordedPayload, row.payload) for row in replay.rows("action_recorded")]
+    results = [cast(ResultRecordedPayload, row.payload) for row in replay.rows("result_recorded")]
+    assert len(actions) == 1 and len(results) == 1
+    assert (results[0].outcome, results[0].exit_status) == (ResultOutcome.FAILURE, 2)
+    assert actions[0].command is not None and actions[0].command.startswith("omitted:hmac-")
+    held = [
+        envelope
+        for envelope in replay.store.list_envelopes(replay.commitment)
+        if envelope.event_kind == "item_completed"
+    ]
+    assert len(held) == 1
+    assert held[0].structural_payload["command_commitment"] == actions[0].command.removeprefix(
+        "omitted:"
+    )
+    assert held[0].source_identity not in {item.source_identity for item in recorder.delivered}
+    accounting = replay.store.selection_accounting(replay.commitment)
+    assert accounting["intentionally_omitted_input_count"] == 0
+
+    red_latest = _claim_ledger(replay)
+    red_latest.claim()
+    assert omitted_results(red_latest) == (results[0].result_id,)
+
+    _hooked_run(replay, "call_green", "exec-910-green", 0, "2026-09-29T17:59:10.000Z")
+    await _sweep_all(replay)
+    assert len(replay.rows("result_recorded")) == 2
+    green = _claim_ledger(replay)
+    green.claim(versioned=True)
+    assert omissions(green) == ()
+
+
+@pytest.mark.anyio
+async def test_stream_only_command_items_are_recorded_with_outcomes(replay: _Replay) -> None:
+    """Without tool hooks the rollout items are the only record, so they are delivered."""
+
+    _session_start(replay)
+    replay.append(
+        _command_execution("exec-910-a", "npm run test-type", 2, "2026-09-29T17:58:10.000Z"),
+        _command_execution("exec-910-b", "npm run  test-type", 0, "2026-09-29T17:59:10.000Z"),
+    )
+    replay.hook("Stop", last_assistant_message="Done.", stop_hook_active=False)
+    assert not replay.store.codex_hook_observes_session(replay.commitment, replay.session)
+    await _sweep_all(replay)
+    actions = [cast(ActionRecordedPayload, row.payload) for row in replay.rows("action_recorded")]
+    results = [cast(ResultRecordedPayload, row.payload) for row in replay.rows("result_recorded")]
+    assert [(item.outcome, item.exit_status) for item in results] == [
+        (ResultOutcome.FAILURE, 2),
+        (ResultOutcome.SUCCESS, 0),
+    ]
+    assert len({item.command for item in actions}) == 1
+    ledger = _claim_ledger(replay)
+    ledger.claim(versioned=True)
+    assert omissions(ledger) == ()

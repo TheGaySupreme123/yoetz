@@ -4964,7 +4964,13 @@ cell rows locally and does not deliver them, because the nested calls' own hook 
 record of the cell. A session whose tool hooks never fired keeps delivering its cells. Two limits
 remain disclosed: a cell whose only nested tool is unhooked, in a session where other tools are
 hooked, is not recorded in the ledger; and a retained wrapper counts in the local `observed_count`
-without an admitted, summarized or intentionally omitted bucket. The currently
+without an admitted, summarized or intentionally omitted bucket. The same gate holds back a rollout
+`event_msg`/`item_completed` `CommandExecution`, `McpToolCall` or `FileChange` row (event kind
+`item_completed`, issue #910): its id (`exec-<uuid>`) never joins the hook's call, and the hook post
+already states the call's outcome, so once tool hooks fire it stays local with the same accounting
+as a wrapper. Without tool hooks it is delivered with its `status`/`exit_code` outcome and its
+`command_commitment`. The same limits apply, plus one: a hook result left `unknown` by a still
+running process is not completed from the held rollout item. The currently
 installed Claude and Cursor native profiles are post-only carriers: their post observations never
 diagnose a missing pre-event. A post with an actual tool-call identity, such as Claude's
 `tool_use_id`, can materialize an observed action/result pair with a distinct post-only action

@@ -2913,9 +2913,10 @@ async def test_codex_recorded_outcome_shapes_reach_the_ledger(tmp_path: Path) ->
     """#910: Codex hook and rollout outcome facts become ledger results; none is invented.
 
     Every OUT-001 hook shape runs through the real hook handler, outbox, coordinator and SQLite
-    ledger. The rollout's completed tool items are ingested as the session stream delivers them,
-    and one of them shares its id with an outcome-less hook call so the stream failure corrects
-    that ``unknown`` result instead of being dropped.
+    ledger. The rollout's completed tool items are handed to the coordinator directly, as a
+    session whose tool hooks never fired delivers them (the hook-observed delivery gate is
+    covered in ``test_codex_code_mode_replay``), and one of them shares its id with an
+    outcome-less hook call so the stream failure corrects that ``unknown`` result.
     """
 
     from fixture_loader import load_fixture_json

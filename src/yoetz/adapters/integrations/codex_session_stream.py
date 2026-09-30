@@ -1829,6 +1829,20 @@ def _code_mode_cell_wrapper(structural: Mapping[str, JsonValue]) -> bool:
     )
 
 
+def _hooked_tool_item(envelope: ObservationEnvelope) -> bool:
+    """True for a rollout ``item_completed`` command, MCP or patch record (#910).
+
+    The same host call fires its own ``PostToolUse`` hook, and since #910 that hook row carries
+    the call's exit status itself; the rollout item is a second copy under a different id
+    (``exec-<uuid>``) that no pairing can join to the hook row.
+    """
+
+    return (
+        envelope.event_kind == "item_completed"
+        and envelope.structural_payload.get("action") in _STREAM_COMPLETED_TOOL_ITEMS
+    )
+
+
 def _codex_hook_observes_session(
     store: LocalObservationStore, workspace_commitment: str, session_commitment: str
 ) -> bool:
@@ -2293,7 +2307,13 @@ def _reconcile_session_stream_path(
         # hooks. While Codex tool hooks fire for this session, the nested
         # hook rows are the ledger's record of the cell, so the wrapper stays in
         # the local store only instead of adding an independent action (#917).
-        cell_wrapper = hook_observed and _code_mode_cell_wrapper(envelope.structural_payload)
+        # A completed command, MCP or patch item is the same rule's sibling (#910): while tool hooks
+        # fire for this session, the hook row already records that call and its exit status, so
+        # the rollout copy stays local instead of doubling the call. A session whose tool hooks
+        # never fired delivers the item, with its outcome, as the only record of the call.
+        cell_wrapper = hook_observed and (
+            _code_mode_cell_wrapper(envelope.structural_payload) or _hooked_tool_item(envelope)
+        )
         deliverable = not cell_wrapper and self_observation_deliverable(
             _stream_phase(envelope.structural_payload), envelope.structural_payload
         )

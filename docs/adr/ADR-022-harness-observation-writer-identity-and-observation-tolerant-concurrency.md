@@ -711,15 +711,20 @@ classifies the same facts, so a failed read cannot be summarized as a proven rou
 The session stream now names a rollout `event_msg`/`item_completed` command, MCP or patch item as
 the completed tool call it is (event kind `item_completed`). Its `status` and `exit_code` become a
 result instead of an opaque row, and `exit_code: null` states no outcome. Where the hook call id
-equals the rollout item id, decision 15's correction path applies unchanged. Pairing rows with
-different ids is #917. Mapping versions are unchanged. Already-stored envelopes keep their
+equals the rollout item id, decision 15's correction path applies unchanged. The item's id
+(`exec-<uuid>`) does not join the hook's call, so it follows #917's code-mode wrapper gate: once
+Codex tool hooks have admitted input for the session, the item stays in the local store with the
+wrapper's accounting, because the hook post already records the call and its outcome. A session
+without tool hooks delivers it, with its outcome, as the only record of the call. The disclosed
+limits are the wrapper's, plus a hook result left `unknown` by a still-running process, which the
+held item does not complete. Mapping versions are unchanged. Already-stored envelopes keep their
 recorded facts, so historical `unknown` rows and their gap are not re-materialized. Recording
 failures makes the failed-work rules reachable on Codex, so this change is sequenced after the
 failure-supersession change of #909. A stream `CommandExecution` item carries the same
 installation-keyed `command_commitment` as its hook copy, computed from its `command` argv with
 #909's normalization, so supersession spans both paths. Observation-advice policy `0.1.7` adds the
 Codex shell spellings `exec_command` and `local_shell` to the commands the unresolved-command rule
-reads, beside `Bash` and `shell`. The stream's `command_execution` copy stays out of the advice
-until #917 pairs it with the hook copy, so the advice never names one run twice. The shapes are
+reads, beside `Bash` and `shell`. A delivered stream `command_execution` row stays out of the
+advice, so the advice never names one run twice. The shapes are
 pinned by the OUT-001 fixture, which is derived from recorded 0.157.1 rollouts; a raw hook stdin
 capture is still owed on #910.
