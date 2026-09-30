@@ -1044,12 +1044,16 @@ are recorded on the check as the optional `prior_finding_verdicts` field of the 
 
 A `fixed` ruling lets that finding resolve on that check even when the packet as a whole concluded
 `insufficient_packet`: the whole-packet veto and its `semantic_packet_insufficient` marker no longer
-block a finding the reviewer judged on newer material. Every other rule still applies: completed
-review, the finding inside the tested frontier, no suppression, scope, readable freshness, the
-capture baseline, a material change after the finding, and the issue not returned again.
-`withdrawn` keeps the earlier rules, under which a reasoned rejection an assessable review does not
-re-raise resolves over changed state, and never lifts the whole-packet veto. `still_present`,
-`answered_not_fixed` and `unassessable` block only their own finding by name
+block a finding the reviewer judged on newer material. Since #907 it likewise tolerates
+`content_unselected` (excerpts the packet's count or byte budget cut, ledger or captured) on that
+finding: the reviewer affirmatively ruled the finding fixed, citing refs that are fenced to the
+packet's `citable_refs`, so it assessed the finding on material it was shown. Silence gets no such
+tolerance; a selection gap still blocks closing an AI-powered finding by not returning it. Every
+other rule still applies: completed review, the finding inside the tested frontier, no suppression,
+scope, readable freshness, the capture baseline, a material change after the finding, and the issue
+not returned again. `withdrawn` keeps the earlier rules, under which a reasoned rejection an
+assessable review does not re-raise resolves over changed state, and never lifts the whole-packet
+veto. `still_present`, `answered_not_fixed` and `unassessable` block only their own finding by name
 (`reviewer_verdict_<verdict>`). Without a ruling the earlier rules are unchanged; silence is never
 read as `fixed`. Silence also proves nothing when the finding may never have been assessed: on a
 check whose packet left prior findings out (`semantic_prior_findings_over_limit`, including a
@@ -1057,3 +1061,51 @@ selection without the assessments section) or dropped a ruling
 (`semantic_prior_verdicts_unsupported`), every AI-powered finding the check recorded no ruling for
 is blocked as `reviewer_assessment_incomplete`. The codes stay disclosures, never vetoes on ruled
 findings.
+
+### Most valuable review content and named missing items (2026-09-30, #907 Phase 1a)
+
+Decision: within the owner-approved count and byte budget, the packet reserves room for the current
+diff (newest captured edit per changed path), then the latest output per identified verification
+command (keeping the last failure beside a later pass), then repair evidence, then older hunks of a
+changed path; everything else follows by recency, then link class; superseded runs come last.
+Older hunks and runs are marked `superseded_by`. Deviation from the first Phase 1a cut, which
+ranked older hunks last: a captured edit is a hunk, so an older hunk of another region is often
+still current code, and ranking it below tool output would regress #883's diffs-first rule; the
+reviewer instruction says so rather than telling the reviewer to ignore superseded lines. A run is
+one recorded result, so its output and its failure summary never supersede each other. Items
+travel in recording order with `occurred_order` (`review-packet-case/2`). Excerpts honour the
+approved `max_excerpt_bytes` rather than the 4 KiB structural clip (open question 3); long output
+keeps head and tail, oversized structured prose is clipped rather than digest-replaced, and
+selection plans on the exact prepared document below the effective channel ceiling (the schema
+maximum narrowed by the policy's own `max_bytes` / `max_tokens`). One excerpt holds one recorded
+source or one part of one capture; the 16-slot count and the privacy-policy schema are unchanged
+(Phase 1b lifts the count). Every candidate the count or byte budget cuts (ledger evidence, exact
+commands and failed-result summaries as well as captured content) is a `not_selected` omission and
+adds `content_unselected`, the only trace once the omission list is capped; a relevance exclusion
+is a policy choice and adds no gap.
+
+`insufficient_packet` must name what was missing (`provider-judgment` 1.1.0,
+`missing_for_assessment`); a reply that names nothing is read backward, keeping its conclusion and
+#905 rulings, and discloses `semantic_missing_items_rejected`. Yoetz fences targets to the packet's
+`citable_refs`, drops a request the reviewer repeats without citing what the agent published since
+for every target it names (only new material directly tied to that target counts: a result of the
+named action or another run of the same command; content diffs at the target's own file paths or the
+paths a hook-captured edit records, together covering every such path; evidence naming the target's
+id; or a correction of a named claim citing material tied to its support, or any new material when
+the claim cited nothing Yoetz can relate; paths and commands compare normalized but exact, an
+absolute path only inside the session's workspace root, an artifact a command wrote only through
+that command's runs, and nothing is tied through shared obligations or other newer records; only an
+untargeted item matches by record family; hook-captured tool output never counts as supplied, and a
+result supplies verification output only when it carries output), classifies each item as
+`agent_suppliable` or `structurally_unavailable_on_this_host`, records the structural items as the
+optional `missing_for_assessment` field of the unreleased `check_recorded` 1.3.0 (extended in place,
+only beside `insufficient_packet`) and shows the prior request with `supplied_since` refs to the
+next reviewer; an `insufficient_packet` that recorded no item leaves that request standing. Items
+are check limitations with their own coverage gaps; `semantic_packet_insufficient` is unchanged and
+the outcome still blocks absence proof. Command identity for captured output waits on #910, an exact
+check-time diff on #883, and the task-statement section on #908.
+
+Both review changes share one version of each contract: the new `provider-judgment` 1.1.0
+carries `prior_finding_verdicts` (#905) and `missing_for_assessment`, and the unreleased
+`check_recorded` 1.3.0 carries either optional field, or both; a check with neither keeps its
+bytes.

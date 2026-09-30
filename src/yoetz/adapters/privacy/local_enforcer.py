@@ -123,7 +123,7 @@ def scan_exact_bytes(data: bytes) -> tuple[ForbiddenDataKind, ...]:
     return tuple(sorted(mapped, key=lambda value: value.value.encode()))
 
 
-_SEMANTIC_PACKET_SCHEMA = "yoetz.review-packet-case/1"
+_SEMANTIC_PACKET_SCHEMA = "yoetz.review-packet-case/2"
 
 
 def _assemble_semantic_review_payload(

@@ -1849,6 +1849,8 @@ AI-powered review absence/weakness codes
 semantic_relevance_review_not_run|optional_semantic_review_blocked_by_policy|
 optional_semantic_review_registration_drift|
 semantic_review_context_withheld|semantic_challenges_rejected|
+semantic_missing_agent_suppliable|semantic_missing_structurally_unavailable|
+semantic_missing_already_supplied|semantic_missing_items_rejected|
 semantic_case_content_over_item_limit|semantic_case_finding_refs_over_limit|
 semantic_prior_findings_over_limit|semantic_prior_verdicts_unsupported`) plus the evidence-strength
 codes
@@ -1862,7 +1864,8 @@ finding's original coverage to contain only the pre-existing AI-powered review, 
 host-observation tolerances and to have freshness outside
 `stale_after_material_change|redacted_gap|unknown`. For `semantic_model_derived` rows only the
 evidence-strength codes, `semantic_prior_findings_over_limit` and
-`semantic_prior_verdicts_unsupported` are tolerated, and the check must also record
+`semantic_prior_verdicts_unsupported` are tolerated (plus, for a row the check records a `fixed`
+ruling for, the insufficient-packet codes and `content_unselected`), and the check must also record
 `succeeded/semantic_completed`. Outside the narrow command-gap partition described below, any
 other gap — redacted or unavailable payloads, redacted objects,
 missing refs, unknown events, completion scope, import range, or a code not in the list — blocks
@@ -7145,6 +7148,103 @@ conclusion blocks semantic absence proof even if a producer omitted its coverage
 Failed and local-only attempts retain their existing version. The owning schema generator and
 `fixtures/canonical/check-conclusion-1.3.0.case.json` lock the new and legacy bytes.
 
+### Review packet selection and named missing items (issue #907, Phase 1a)
+
+The provider review packet is `yoetz.review-packet-case/2`. Every `items[]` row carries
+`occurred_order` (the source's ledger ingestion order) and rows are listed in case order (section,
+then recording order), never by opaque item id. An excerpt may carry `latest_for` (`path`: the
+newest applied or unconfirmed captured edit of each changed path; `command`: the newest recorded
+output of a command identity) or `superseded_by` (the source refs of the newer edit or run). The
+marks describe recording order only; they never claim what the working tree now contains.
+`review_packet` keeps its `outbound-case` 1.1.0 shape; `schemas/privacy/` is unchanged.
+
+Excerpt selection stays inside the approved count and byte budget. Reserved room comes first: the
+current diff, then the latest output per identified verification command (with the last failure
+beside a later pass, and the reserved run's exact command when the selection carries command
+text), then prior-finding repair evidence (#898), then older hunks of a changed path (a captured
+edit is a hunk, so an older one may still be current code; it is marked `superseded_by`);
+everything else follows by recency, then link class, and superseded runs come last. A run is one
+recorded result, so a run's output and its failure summary are never marked as superseding each
+other. A command identity is the digest of the command a
+recorded result answers; captured tool output is unidentified until #910. The task statement
+(#908) is its own section and never competes for an excerpt slot. Each excerpt holds one recorded
+source or one part of one capture. Excerpts honour the approved `max_excerpt_bytes` instead of the
+4 KiB structural item clip; long output keeps its head and tail with a marked elision; an
+oversized plan, obligation, claim or decision payload has its longest prose clipped the same way
+and falls back to `yoetz.bounded-content-omission/1` only when clipping cannot fit.
+A clipped structural payload is named by `semantic_case_content_over_item_limit`; an excerpt
+clipped at `max_excerpt_bytes` is named by `truncated_payload`. The builder measures the exact
+prepared document and drops lowest-ranked excerpts (`not_selected`, `content_unselected`) to stay
+below the effective channel ceiling: the schema maximum, narrowed by the effective policy's own
+`llm_inference` `max_bytes` and `max_tokens` (at the gateway's four bytes per token), so a narrower
+owner ceiling drops excerpts instead of denying the whole review. Every candidate the excerpt count
+or byte budget cuts (ledger evidence, exact commands and failed-result summaries as well as captured
+content; all compete in one admission loop) is a `not_selected` omission and adds
+`content_unselected`; past the omission list's own cap the gap is the trace. Items the
+selection's relevance rule excludes (Assisted's `linked_subjects_only`) are policy exclusions, not
+budget cuts: their `not_selected` omission rows state them and they add no gap.
+
+`provider-judgment` 1.1.0 requires `missing_for_assessment` (1–8 items of `kind`, up to four
+`target_refs` from `citable_refs`, and a short `reason`) on `insufficient_packet` and forbids it
+elsewhere; 1.0.0 stays frozen. Like the rulings, the list is read backward: a reply that omits it
+(or sends it empty) beside another conclusion reads as absent, and an `insufficient_packet` that
+names nothing (a local model or prompt-only host) keeps its conclusion and rulings with no items and
+discloses `semantic_missing_items_rejected`. A malformed item still rejects the reply. The check
+fence trims targets to the packet's `citable_refs`, as it trims a ruling's cited refs, dropping an
+item left with none (`semantic_missing_items_rejected`), and drops an item whose earlier request was
+answered by material recorded since unless the reviewer cites that material
+(`semantic_missing_already_supplied`). "Answered" is judged per named target: a repeat is dropped
+only when the earlier request named every one of its targets and each has new agent-published
+material directly tied to it. For an action, result or evidence target that is a result of the named
+action or of another run of the same command (text compared with whitespace collapsed; a hook run's
+`omitted:<digest>` matches only the same digest, `omitted:structural` nothing) and the new evidence
+that result cites; content `git diff` runs and new evidence at the target's paths, when together
+they cover every path the target records (a diff of one file never answers an edit of two); or new
+evidence whose `reference` is the target's id, which always ties it. A target's paths are the
+workspace-relative paths a hook-captured edit's authenticated bytes record, the pathspecs of a `git
+diff` behind it, and its own `reference` unless a command other than `git diff` wrote it (an
+artifact such as `reports/junit.xml` is answered only through that command's runs). Paths compare
+normalized but exact: `./`, `.` segments, repeated and trailing slashes are dropped, case is kept,
+`..` is not resolved. An absolute path counts only inside the workspace root the session opened with
+(the root as given and as `realpath` resolves it; the agent's path is compared lexically and never
+resolved), as the path relative to it; outside it, or when the root is unknown, it matches nothing,
+and a basename alone never matches. A single segment without a slash (`Makefile`, `.gitignore`, but
+also `stdout`) is a path only when the other side is certainly one (`./Makefile`, a captured path, a
+`git diff` argument). A content `git diff` is `git [--no-pager] [-C <workspace root>] diff [options]
+[revisions] [--] [paths]`; no path (or `.`) is the whole tree, and a directory covers the files
+beneath it; summary forms (`--stat`, `--name-only`, `--numstat` and the like) and `-C` naming
+another directory do not count. The workspace root and the captured paths are compared in process
+and never recorded, logged or sent. Re-citing the old target, a shared obligation, or a record that
+only cites other new material ties nothing. A claim is answered by material tied to what it cites,
+and by a correction that supersedes or disputes it together with the new material the correction
+cites when that material is tied to the claim's support, or when the claim cited nothing Yoetz can
+relate (the request was for the claim itself). A finding is answered by a response to it and what
+that cites, a plan by the version superseding it, an obligation by new actions, results, claims and
+plans naming it. A record related to the target only through another path, run or claim therefore
+never answers it. Only an item with no target is matched by record family alone, and
+`supplied_since` lists refs on the same rule. Only agent-published material answers a request, never
+hook-captured tool output: authorship is the service-stamped envelope fact, carried on the frozen
+case as `observation_event_ids`, the observation-authored events recorded after the request, emitted
+only when non-empty so other cases keep their bytes; and a result answers `verification_output` only
+when it carries output (linked evidence or a summary). Yoetz classifies each kept item as
+`agent_suppliable` or `structurally_unavailable_on_this_host` (a kind the effective review selection
+or channel can never carry, or a redacted target), adding `semantic_missing_agent_suppliable` and
+`semantic_missing_structurally_unavailable`. These are check limitations, never findings, and weigh
+on finding resolution exactly like the `semantic_packet_insufficient` they ride beside: a local
+issue is still proven absent, and a `fixed` ruling (#905) still resolves its own finding.
+
+The unreleased `check_recorded` 1.3.0 is extended in place with the optional
+`missing_for_assessment` (kind, target refs, availability; no reviewer prose; 1–8 items, only beside
+`insufficient_packet`), present only when at least one item survives, beside issue #905's optional
+`prior_finding_verdicts`; a check with neither keeps its bytes, and 1.0–1.2 keep their shapes.
+`provider-judgment` 1.1.0 likewise carries both lists. The projection keeps the latest request as
+`pending_missing_for_assessment` until an assessed review clears it (an `insufficient_packet` that
+recorded no item leaves it standing); snapshots omit the key when absent. The next packet carries it
+as the timeline item `prior-missing-for-assessment` with `supplied_since` refs. The check result's
+optional `missing_for_assessment` (check-result 1.3.0, unreleased, additive) and the MCP and CLI
+check text list each item and its availability; status, TUI and receipts carry the gap codes. The
+reviewer's reason stays in the encrypted durable semantic response object.
+
 `resolution_attempt_required` is the `respond` rejection for an `acknowledged` response to a
 `semantic_model_derived` finding whose `evidence_refs` cite no evidence or result recorded after
 the finding's own record (not after whichever later in-chain `finding_frontier` the caller named,
@@ -7288,7 +7388,8 @@ on a readable open finding the packet did not carry is recorded as `unassessable
 rulings are recorded as
 the optional `check_recorded` `1.3.0` field `prior_finding_verdicts` (`{finding_id, verdict,
 cited_refs}`, 1–8, ASCII-sorted by finding id, never the note; unreleased 1.3.0 extended in place),
-present only when at least one ruling was admitted, so a check without rulings keeps its bytes.
+present only when at least one ruling was admitted, so a check without rulings keeps its bytes
+(issue #907's optional `missing_for_assessment` shares the version the same way).
 `semantic_prior_verdicts_unsupported` discloses dropped or reduced rulings and, like
 `semantic_prior_findings_over_limit`, is tolerated by both proof classes. Tolerated means they never veto
 a ruled row: on a check carrying either code, a `semantic_model_derived` row the check recorded no
@@ -7297,7 +7398,11 @@ seen it (section limit, envelope trimming, or a selection without the assessment
 also adds `semantic_prior_findings_over_limit`) or its ruling may have been dropped. Such a row
 never resolves by silence on that check. For a
 `semantic_model_derived` row, a recorded `fixed` ruling on that row lifts the
-`insufficient_packet` veto and tolerates `semantic_packet_insufficient` for that row only;
+`insufficient_packet` veto and tolerates `semantic_packet_insufficient`, the named-missing-item
+codes and `content_unselected` (excerpts the packet's count or byte budget cut, ledger or captured;
+issue #907) for that row only: the reviewer affirmatively ruled the finding fixed, citing refs that
+are fenced to the packet's `citable_refs`, so it assessed the finding on material it was shown.
+Silence gets no such tolerance, so a selection gap still blocks closing a row by not returning it;
 `withdrawn` keeps the ordinary rules (an assessable review that does not re-raise a rejected finding
 over changed state resolves it) and never lifts the veto; `still_present`, `answered_not_fixed` and
 `unassessable` add the blocker `reviewer_verdict_<verdict>`. The resolution explanation names a

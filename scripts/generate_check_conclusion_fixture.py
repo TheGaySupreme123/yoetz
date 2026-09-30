@@ -70,13 +70,50 @@ def document(root: Path) -> dict[str, Any]:
                 "digest": canonical_digest(encoded),
             }
         )
+    # Issue #907: an unassessable review that named what it needed, on the same (unreleased)
+    # 1.3.0 payload with the optional list. Structural fields only.
+    missing_coverage = dict(coverage)
+    missing_coverage["known_gaps"] = [
+        "content_unselected",
+        "semantic_missing_agent_suppliable",
+        "semantic_missing_structurally_unavailable",
+        "semantic_packet_insufficient",
+    ]
+    missing: dict[str, Any] = {
+        **base,
+        "coverage": missing_coverage,
+        "semantic_conclusion": "insufficient_packet",
+        # Canonical (kind, target_refs) order, as the domain payload requires.
+        "missing_for_assessment": [
+            {
+                "availability": "structurally_unavailable_on_this_host",
+                "kind": "command_identity",
+                "target_refs": [],
+            },
+            {
+                "availability": "agent_suppliable",
+                "kind": "current_diff_for_path",
+                "target_refs": ["evd_20000000-0000-4000-8000-000000000011"],
+            },
+        ],
+    }
+    payload = decode_payload(EventSchema("check_recorded", "1.3.0"), freeze_json(missing))
+    encoded = encode_payload(payload)
+    vectors.append(
+        {
+            "schema_version": "1.3.0",
+            "payload": missing,
+            "canonical_hex": canonical_encode(encoded).hex(),
+            "digest": canonical_digest(encoded),
+        }
+    )
     return {
         "fixture_schema": "yoetz.fixture-case/1.0.0",
         "fixture_version": "1.0.0",
         "fixture_id": _ID,
         "purpose": "Distinguish legacy unknown review outcomes from recorded conclusions.",
         "minimum_versions": {"fixture_contract": "1.0.0", "protocol": "1.0"},
-        "owns_requirements": ["ISSUE-884/check-conclusion"],
+        "owns_requirements": ["ISSUE-884/check-conclusion", "ISSUE-907/missing-for-assessment"],
         "controls": {
             "clock": "fixture_supplied",
             "ids": "fixture_supplied",

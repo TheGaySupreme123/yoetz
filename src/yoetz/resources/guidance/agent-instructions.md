@@ -192,6 +192,6 @@ result; put exact requested items on an obligation in the effective plan and rec
 unattempted. If authority or an unavailable dependency prevents the attempt, record that exact
 blocker instead of widening disclosure, credentials or runtime authority. Only then report the
 remaining limitation or narrow the claim. An acknowledgement or “limitation accepted” is not a
-repair, a verification result, or a finding resolution. Recheck after a material repair, and
-avoid another identical check when the same content is still unavailable; otherwise go to the
-receipt, never a `deterministic_only` fallback.
+repair, a verification result, or a finding resolution. Recheck after a material repair; after
+`insufficient_packet`, only once an `agent_suppliable` missing item is supplied, otherwise go to
+the receipt, never a `deterministic_only` fallback.

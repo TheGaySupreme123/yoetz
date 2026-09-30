@@ -104,6 +104,10 @@ from yoetz.protocol.errors import (
     PublicOperationError,
 )
 from yoetz.protocol.models import (
+    MAX_MISSING_FOR_ASSESSMENT,
+    MAX_MISSING_TARGET_REFS,
+    MISSING_FOR_ASSESSMENT_KINDS,
+    MISSING_ITEM_AVAILABILITIES,
     CheckPolicyExecutionModel,
     CheckScopeModel,
     ClientKind,
@@ -141,6 +145,7 @@ __all__ = [
     "ActionRecordedPayload",
     "AssignmentRecordedPayload",
     "CheckMode",
+    "MissingForAssessmentItem",
     "CheckRecordedPayload",
     "ClaimKind",
     "ClaimRecordedPayload",
@@ -2200,6 +2205,59 @@ _VALID_POLICY_SELECTIONS: Final = frozenset(
 )
 
 
+_MISSING_TARGET_PREFIXES: Final[Mapping[str, Callable[[object], str]]] = MappingProxyType(
+    {
+        "act_": action_id,
+        "clm_": claim_id,
+        "evd_": evidence_id,
+        "evt_": event_id,
+        "fnd_": finding_id,
+        "obl_": obligation_id,
+        "res_": result_id,
+    }
+)
+
+
+def _missing_target_ref(value: object) -> str:
+    if type(value) is not str:
+        raise ProtocolValueError("invalid_event_value_type")
+    constructor = _MISSING_TARGET_PREFIXES.get(value[:4])
+    if constructor is None:
+        raise ProtocolValueError("invalid_event_value_type")
+    return str(constructor(value))
+
+
+@dataclass(frozen=True, slots=True)
+class MissingForAssessmentItem:
+    """One item an ``insufficient_packet`` review named as missing, as the check recorded it.
+
+    Structural only (issue #907): a closed kind, refs the frozen case contained, and Yoetz's own
+    availability classification. The reviewer's reason is not part of the check record.
+    """
+
+    kind: str
+    target_refs: tuple[str, ...]
+    availability: str
+
+    def __post_init__(self) -> None:
+        if type(self.kind) is not str or self.kind not in MISSING_FOR_ASSESSMENT_KINDS:
+            raise ProtocolValueError("invalid_event_value_type")
+        if type(self.availability) is not str or self.availability not in (
+            MISSING_ITEM_AVAILABILITIES
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+        object.__setattr__(
+            self,
+            "target_refs",
+            _id_tuple(
+                self.target_refs,
+                _missing_target_ref,
+                maximum=MAX_MISSING_TARGET_REFS,
+                field="target_refs",
+            ),
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class CheckRecordedPayload:
     mode: CheckMode
@@ -2219,6 +2277,8 @@ class CheckRecordedPayload:
     semantic_conclusion: str | None = None
     # Admitted reviewer rulings on earlier AI-powered findings, ASCII-ascending by finding id.
     prior_finding_verdicts: tuple[PriorFindingVerdictRecord, ...] = ()
+    # What an ``insufficient_packet`` review named as missing, classified by Yoetz (issue #907).
+    missing_for_assessment: tuple[MissingForAssessmentItem, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "mode", _exact_enum(self.mode, CheckMode))
@@ -2289,6 +2349,19 @@ class CheckRecordedPayload:
             or status is not SemanticStatus.SUCCEEDED
         ):
             raise ProtocolValueError("invalid_event_value_type")
+        missing = _tuple(self.missing_for_assessment, 0, MAX_MISSING_FOR_ASSESSMENT)
+        if any(type(item) is not MissingForAssessmentItem for item in missing):
+            raise ProtocolValueError("invalid_event_value_type")
+        missing_items = cast(tuple[MissingForAssessmentItem, ...], missing)
+        if missing_items and self.semantic_conclusion != "insufficient_packet":
+            raise ProtocolValueError("invalid_event_value_type")
+        keys = tuple(
+            (item.kind.encode("ascii"), tuple(ref.encode("ascii") for ref in item.target_refs))
+            for item in missing_items
+        )
+        if keys != tuple(sorted(set(keys))):
+            raise ProtocolValueError("duplicate_set_member")
+        object.__setattr__(self, "missing_for_assessment", missing_items)
         if type(self.engine_version) is not str or self.engine_version != "0.1.0":
             raise ProtocolValueError("invalid_event_value_type")
         if type(self.projection_version) is not str or self.projection_version != "yoetz/0.1.0":
@@ -2476,6 +2549,29 @@ def _array(value: object) -> tuple[object, ...]:
     if type(value) is list:
         return tuple(cast(list[object], value))
     raise ProtocolValueError("invalid_event_value_type")
+
+
+def _missing_items_from_json(value: JsonValue | None) -> tuple[MissingForAssessmentItem, ...]:
+    if value is None:
+        return ()
+    items: list[MissingForAssessmentItem] = []
+    for raw in _array(value):
+        source = _closed_object(
+            raw,
+            required=frozenset({"availability", "kind", "target_refs"}),
+            optional=frozenset(),
+        )
+        items.append(
+            MissingForAssessmentItem(
+                kind=cast(str, _field(source, "kind")),
+                target_refs=cast(tuple[str, ...], _array(_field(source, "target_refs"))),
+                availability=cast(str, _field(source, "availability")),
+            )
+        )
+    if not items:
+        # An emitted list is never empty; absence is how a check without items is recorded.
+        raise ProtocolValueError("invalid_event_value_type")
+    return tuple(items)
 
 
 def _decode_subject_state(value: object) -> SubjectStateRef:
@@ -3018,7 +3114,14 @@ _PAYLOAD_SHAPES: Final[Mapping[str, tuple[frozenset[str], frozenset[str]]]] = Ma
                     "projection_version",
                 }
             ),
-            frozenset({"semantic_provenance", "semantic_conclusion", "prior_finding_verdicts"}),
+            frozenset(
+                {
+                    "semantic_provenance",
+                    "semantic_conclusion",
+                    "prior_finding_verdicts",
+                    "missing_for_assessment",
+                }
+            ),
         ),
         "receipt_recorded": (
             frozenset(
@@ -3499,6 +3602,9 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
             semantic_conclusion=cast(str | None, _optional(source, "semantic_conclusion")),
             prior_finding_verdicts=_decode_prior_verdicts(
                 _optional(source, "prior_finding_verdicts")
+            ),
+            missing_for_assessment=_missing_items_from_json(
+                _optional(source, "missing_for_assessment")
             ),
             semantic_provenance=(
                 None
@@ -3996,6 +4102,20 @@ def encode_payload(payload: EventPayload) -> JsonValue:
                     "verdict": item.verdict,
                 }
                 for item in value.prior_finding_verdicts
+            ),
+        )
+        _optional_tuple(
+            result,
+            "missing_for_assessment",
+            tuple(
+                _json_object(
+                    {
+                        "availability": item.availability,
+                        "kind": item.kind,
+                        "target_refs": item.target_refs,
+                    }
+                )
+                for item in value.missing_for_assessment
             ),
         )
         return _json_object(result)

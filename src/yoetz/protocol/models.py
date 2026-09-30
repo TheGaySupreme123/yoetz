@@ -63,6 +63,9 @@ __all__ = [
     "MAX_FINDINGS_DEFAULT",
     "MAX_FINDINGS_LIMIT",
     "MAX_INTERNAL_PROJECTABLE_RESULT_BYTES",
+    "MAX_MISSING_FOR_ASSESSMENT",
+    "MAX_MISSING_REASON_BYTES",
+    "MAX_MISSING_TARGET_REFS",
     "MAX_OBJECT_PLAINTEXT_BYTES",
     "MAX_REVIEW_ASSESSMENTS",
     "MAX_REVIEW_CHALLENGES",
@@ -77,6 +80,8 @@ __all__ = [
     "MAX_PROJECTION_CONTENT_LEAVES",
     "MAX_PROJECTION_POINTER_BYTES",
     "MAX_REASON_BYTES",
+    "MISSING_FOR_ASSESSMENT_KINDS",
+    "MISSING_ITEM_AVAILABILITIES",
     "PROTOCOL_VERSION",
     "ActorAssertionModel",
     "ActorType",
@@ -130,6 +135,7 @@ __all__ = [
     "CheckChildPreviewItemModel",
     "CheckChildrenPreviewModel",
     "CheckAdvisoryNoteModel",
+    "CheckMissingItemModel",
     "StatusLineageChildModel",
     "StatusLineageAnnotationModel",
     "StatusLineagePageModel",
@@ -156,6 +162,7 @@ __all__ = [
     "ProviderJudgmentChallengesModel",
     "ProviderJudgmentEnvelopeModel",
     "ProviderJudgmentInsufficientModel",
+    "ProviderMissingItemModel",
     "ProviderJudgmentModel",
     "ProviderJudgmentNoDiscrepancyModel",
     "ProviderPriorFindingVerdictModel",
@@ -201,6 +208,26 @@ MAX_REVIEW_CHALLENGES: Final = 3
 # Unicode scalar value, so this conservative provider-facing limit guarantees that every string
 # admitted by the machine-enforced schema also fits the 4 KiB domain boundary.
 MAX_PROVIDER_REVIEW_TEXT_CHARS: Final = MAX_REVIEW_TEXT_BYTES // 4
+# ``insufficient_packet`` names what the reviewer needed (issue #907). Targets are refs already in
+# the packet; the short reason stays in the durable semantic response, never in structural records.
+MAX_MISSING_FOR_ASSESSMENT: Final = 8
+MAX_MISSING_TARGET_REFS: Final = 4
+MAX_MISSING_REASON_BYTES: Final = 1_024
+MAX_PROVIDER_MISSING_REASON_CHARS: Final = MAX_MISSING_REASON_BYTES // 4
+MISSING_FOR_ASSESSMENT_KINDS: Final = frozenset(
+    {
+        "command_identity",
+        "current_diff_for_path",
+        "other",
+        "plan_or_claim_text",
+        "prior_finding_context",
+        "task_statement",
+        "verification_output",
+    }
+)
+MISSING_ITEM_AVAILABILITIES: Final = frozenset(
+    {"agent_suppliable", "structurally_unavailable_on_this_host"}
+)
 GENESIS_PREDECESSOR_DIGEST: Final = "genesis"
 MAX_PROJECTION_CONTENT_LEAVES: Final = 512
 MAX_PROJECTION_POINTER_BYTES: Final = 256
@@ -1845,6 +1872,18 @@ type ReviewerNextStepWire = Literal[
     "dispute_with_evidence",
     "state_unresolved_limitation",
 ]
+type MissingForAssessmentKindWire = Literal[
+    "command_identity",
+    "current_diff_for_path",
+    "other",
+    "plan_or_claim_text",
+    "prior_finding_context",
+    "task_statement",
+    "verification_output",
+]
+type MissingItemAvailabilityWire = Literal[
+    "agent_suppliable", "structurally_unavailable_on_this_host"
+]
 
 ProviderReviewTextWire = Annotated[
     str,
@@ -1939,6 +1978,29 @@ class ProviderJudgmentChallengesModel(_ClosedModel):
     prior_finding_verdicts: PriorFindingVerdictsWire
 
 
+class ProviderMissingItemModel(_ClosedModel):
+    """One item the reviewer needed and the packet did not carry (issue #907)."""
+
+    kind: MissingForAssessmentKindWire
+    target_refs: Annotated[
+        tuple[SubjectIdWire, ...],
+        Field(
+            min_length=0,
+            max_length=MAX_MISSING_TARGET_REFS,
+            json_schema_extra={"uniqueItems": True},
+        ),
+    ]
+    reason: Annotated[str, Field(min_length=1, max_length=MAX_PROVIDER_MISSING_REASON_CHARS)]
+
+    @model_validator(mode="after")
+    def _validate_missing_item(self) -> ProviderMissingItemModel:
+        _require_unique(self.target_refs, limit=MAX_MISSING_TARGET_REFS)
+        encoded = self.reason.encode("utf-8", errors="strict")
+        if not 1 <= len(encoded) <= MAX_MISSING_REASON_BYTES:
+            raise ValueError("provider_review_text_invalid")
+        return self
+
+
 class ProviderJudgmentInsufficientModel(_ClosedModel):
     conclusion: Literal["insufficient_packet"]
     reviewer_challenges: Annotated[
@@ -1947,6 +2009,12 @@ class ProviderJudgmentInsufficientModel(_ClosedModel):
     # A whole-packet ``insufficient_packet`` may still rule on individual earlier findings the
     # reviewer could judge (issue #905); it vetoes only those it leaves without a verdict.
     prior_finding_verdicts: PriorFindingVerdictsWire
+    # Required from provider-judgment 1.1.0: an unassessable packet must say what was missing,
+    # or the agent can only add excerpts blind and recheck (issue #907).
+    missing_for_assessment: Annotated[
+        tuple[ProviderMissingItemModel, ...],
+        Field(min_length=1, max_length=MAX_MISSING_FOR_ASSESSMENT),
+    ]
 
 
 type ProviderJudgmentModel = (
@@ -2577,6 +2645,23 @@ class CheckAdvisoryNoteModel(_ClosedModel):
         return self
 
 
+class CheckMissingItemModel(_ClosedModel):
+    """One item an ``insufficient_packet`` review named, as the check recorded it (issue #907).
+
+    A check limitation, never a finding: its closed kind, the case refs it concerns, and whether
+    the agent can supply it. The reviewer's own reason is not part of the check result.
+    """
+
+    kind: MissingForAssessmentKindWire
+    target_refs: tuple[SubjectIdWire, ...]
+    availability: MissingItemAvailabilityWire
+
+    @model_validator(mode="after")
+    def _validate_check_missing_item(self) -> CheckMissingItemModel:
+        _require_unique(self.target_refs, limit=MAX_MISSING_TARGET_REFS)
+        return self
+
+
 class CheckVersionSliceModel(_ClosedModel):
     protocol_version: Literal["0.1"]
     engine_version: VersionWire
@@ -2691,7 +2776,7 @@ class CheckAwaitingHumanModel(_ClosedModel):
 
 
 class CheckSuccessModel(_ClosedModel):
-    optional_non_null_fields = frozenset({"children", "advisory_notes"})
+    optional_non_null_fields = frozenset({"children", "advisory_notes", "missing_for_assessment"})
 
     protocol_version: Literal["0.1"]
     schema_version: Literal["1.0.0"]
@@ -2714,6 +2799,7 @@ class CheckSuccessModel(_ClosedModel):
     semantic_provenance: JsonValue | None = None
     children: CheckChildrenPreviewModel | None = None
     advisory_notes: tuple[CheckAdvisoryNoteModel, ...] = ()
+    missing_for_assessment: tuple[CheckMissingItemModel, ...] = ()
     coverage: CoverageModel
     versions: CheckVersionSliceModel
     privacy_projection: PrivacyProjectionModel
@@ -2734,6 +2820,10 @@ class CheckSuccessModel(_ClosedModel):
         _require_unique(
             tuple((note.kind, note.project_id, note.task_ids) for note in self.advisory_notes),
             limit=64,
+        )
+        _require_unique(
+            tuple((item.kind, item.target_refs) for item in self.missing_for_assessment),
+            limit=MAX_MISSING_FOR_ASSESSMENT,
         )
         if not 1 <= len(self.policy_executions) <= 3 or len(set(self.policy_executions)) != len(
             self.policy_executions
@@ -4643,6 +4733,11 @@ _CHECK_STRUCTURAL_POINTERS: Final = (
         "/advisory_notes/*",
         ("count", "kind", "project_id", "task_ids/*"),
     )
+    # Issue #907: closed kind, case refs and Yoetz's availability class; no reviewer prose.
+    + _prefix_leaf_patterns(
+        "/missing_for_assessment/*",
+        ("availability", "kind", "target_refs/*"),
+    )
     + _prefix_leaf_patterns(
         "/policy_executions/*",
         ("outcome", "policy_id", "policy_version", "reason"),
@@ -5417,7 +5512,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 1181:
+    if len(result) != 1184:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 

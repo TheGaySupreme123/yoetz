@@ -91,7 +91,9 @@ CHAT_COMPLETIONS_JSON_SHAPE_SUFFIX: Final = (
     '"discrepancy", "alternative_interpretation", "message_to_main_agent", '
     '"requested_next_step", "uncertainty"; "prior_finding_verdicts": array of objects with '
     '"finding_id", "verdict" (one of "fixed" | "still_present" | "answered_not_fixed" | '
-    '"unassessable" | "withdrawn"), "cited_refs", "note"}.'
+    '"unassessable" | "withdrawn"), "cited_refs", "note"}. With "insufficient_packet" add '
+    '"missing_for_assessment": one to eight objects with "kind", "target_refs" (refs from '
+    'citable_refs only) and a short "reason".'
 )
 CHAT_COMPLETIONS_INSTRUCTION: Final = (
     f"{SEMANTIC_REVIEW_INSTRUCTION} {CHAT_COMPLETIONS_JSON_SHAPE_SUFFIX}"

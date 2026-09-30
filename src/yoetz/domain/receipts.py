@@ -93,6 +93,10 @@ __all__ = [
     "SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP",
     "SEMANTIC_PRIOR_VERDICTS_UNSUPPORTED_GAP",
     "SEMANTIC_CHALLENGES_REJECTED_GAP",
+    "SEMANTIC_MISSING_AGENT_SUPPLIABLE_GAP",
+    "SEMANTIC_MISSING_ALREADY_SUPPLIED_GAP",
+    "SEMANTIC_MISSING_ITEMS_REJECTED_GAP",
+    "SEMANTIC_MISSING_UNAVAILABLE_GAP",
     "SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP",
     "SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP",
     "SEMANTIC_PACKET_INSUFFICIENT_GAP",
@@ -142,6 +146,15 @@ SEMANTIC_PACKET_INSUFFICIENT_GAP: Final = "semantic_packet_insufficient"
 # post-validation fence. The reviewer said something the check did not carry; coverage says so
 # rather than letting the drop look like the reviewer having found nothing there.
 SEMANTIC_CHALLENGES_REJECTED_GAP: Final = "semantic_challenges_rejected"
+# An ``insufficient_packet`` review named what it needed (issue #907). These say, as a check
+# limitation, whether any named item is one the agent can supply, whether any cannot be carried on
+# this host or policy at all, whether the reviewer re-requested an item the agent had already
+# supplied without citing why that material was still insufficient, and whether a named item
+# pointed outside the packet and was dropped. None of them is a finding or a clean review.
+SEMANTIC_MISSING_AGENT_SUPPLIABLE_GAP: Final = "semantic_missing_agent_suppliable"
+SEMANTIC_MISSING_UNAVAILABLE_GAP: Final = "semantic_missing_structurally_unavailable"
+SEMANTIC_MISSING_ALREADY_SUPPLIED_GAP: Final = "semantic_missing_already_supplied"
+SEMANTIC_MISSING_ITEMS_REJECTED_GAP: Final = "semantic_missing_items_rejected"
 SEMANTIC_REVIEW_NOT_REQUESTED_GAP: Final = "semantic_review_not_requested"
 # Publish-side prose accepts twice what one AI-powered review case item can carry, so text that publishes
 # cleanly can still reach the reviewer shortened or replaced by a bounded-omission marker. The

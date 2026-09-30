@@ -1137,6 +1137,16 @@ input, or per-request selector, so the decision for this host is "supported, unc
 Recording a completion claim is the only way a check requests the final profile.
 
 
+### Review packet reserved room and named missing items (#907)
+
+Claude Code `Edit`, `MultiEdit` and `Write` captures carry workspace-relative paths, so the newest applied edit of each path is
+reserved as the current diff and older hunks for the same path are marked `superseded_by`. Shell
+rewrites without visible bytes are still uncaptured (#883). Verification output is reserved per
+command when the agent records the action, result and output; captured tool output has no command
+identity until #910. An `insufficient_packet` check lists `missing_for_assessment` items with
+their availability in the MCP and CLI check result; recheck only after supplying an
+`agent_suppliable` item.
+
 ### Large tasks and AI-powered review failure recovery (#674–#676)
 
 This host uses the shared service status snapshot cache and bounded AI-powered review reference

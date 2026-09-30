@@ -45,6 +45,9 @@ from yoetz.protocol.coverage import Coverage, EvidenceImmutability
 from yoetz.protocol.errors import ProtocolValueError
 from yoetz.protocol.ids import IdKind, validate_id
 from yoetz.protocol.models import (
+    MAX_MISSING_FOR_ASSESSMENT,
+    MAX_MISSING_REASON_BYTES,
+    MAX_MISSING_TARGET_REFS,
     MAX_REVIEW_ASSESSMENTS,
     MAX_REVIEW_CHALLENGES,
     MAX_REVIEW_CHANGE_OBSERVATIONS,
@@ -54,6 +57,7 @@ from yoetz.protocol.models import (
     MAX_REVIEW_TIMELINE_ITEMS,
     MAX_SEMANTIC_CASE_BYTES,
     MAX_SEMANTIC_ITEM_BYTES,
+    MISSING_FOR_ASSESSMENT_KINDS,
     VALID_SEMANTIC_REASONS,
     DataCategory,
     SemanticReason,
@@ -81,6 +85,7 @@ __all__ = [
     "ExcerptDigestProvenance",
     "ProviderAttemptProvenance",
     "ExternalRuntimeAuthority",
+    "MissingForAssessment",
     "RuntimeAttemptEvidence",
     "ReviewAssessment",
     "ReviewAssessmentSkipped",
@@ -132,6 +137,7 @@ type SemanticSourceKind = Literal[
     "repository",
 ]
 type ExcerptSourceKind = Literal["evidence", "test", "failure", "diff", "command", "repository"]
+type ExcerptLatestFor = Literal["path", "command"]
 type ContentVisibility = Literal[
     "available",
     "not_recorded",
@@ -150,6 +156,15 @@ type AssessmentLimitField = Literal[
 ]
 type SemanticConclusion = Literal[
     "no_material_discrepancy", "challenges_returned", "insufficient_packet"
+]
+type MissingForAssessmentKind = Literal[
+    "command_identity",
+    "current_diff_for_path",
+    "other",
+    "plan_or_claim_text",
+    "prior_finding_context",
+    "task_statement",
+    "verification_output",
 ]
 type ReviewerNextStep = Literal[
     "act",
@@ -239,6 +254,7 @@ _SOURCE_KINDS: Final = frozenset(
 _EXCERPT_SOURCE_KINDS: Final = frozenset(
     {"evidence", "test", "failure", "diff", "command", "repository"}
 )
+_EXCERPT_LATEST_FOR: Final = frozenset({"path", "command"})
 _CONTENT_VISIBILITIES: Final = frozenset(
     {
         "available",
@@ -480,12 +496,34 @@ class SemanticCaseItem:
     content: bytes
     content_bytes: int
     content_digest: str
+    # Freshness marks on an excerpt (issue #907). ``latest_for`` says this excerpt is the newest
+    # recorded edit of its changed path(s) or the newest output of its verification command;
+    # ``superseded_by`` names the newer source refs of the same path or command. Both describe
+    # recording order only; neither claims what the working tree contains now.
+    latest_for: ExcerptLatestFor | None = None
+    superseded_by: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self, "item_id", _snapshot_opaque_ref(self.item_id, error=_invalid_case())
         )
         if type(self.section) is not str or self.section not in _SECTIONS:
+            raise _invalid_case()
+        if self.latest_for is not None and (
+            type(self.latest_for) is not str or self.latest_for not in _EXCERPT_LATEST_FOR
+        ):
+            raise _invalid_case()
+        if type(self.superseded_by) is not tuple or len(self.superseded_by) > _MAX_SUBJECT_REFS:
+            raise _invalid_case()
+        superseded = tuple(
+            _snapshot_opaque_ref(ref, error=_invalid_case()) for ref in self.superseded_by
+        )
+        if superseded != tuple(sorted(set(superseded), key=_ascii)):
+            raise _invalid_case()
+        object.__setattr__(self, "superseded_by", superseded)
+        if (self.latest_for is not None or superseded) and self.section != "excerpt":
+            raise _invalid_case()
+        if self.latest_for is not None and superseded:
             raise _invalid_case()
         if type(self.category) is not DataCategory:
             raise _invalid_case()
@@ -1316,12 +1354,53 @@ class PriorFindingVerdict:
 
 
 @dataclass(frozen=True, slots=True)
+class MissingForAssessment:
+    """One item an ``insufficient_packet`` reviewer said it needed (issue #907).
+
+    ``target_refs`` are refs the reviewer cited from the packet; the check fence drops any that
+    the frozen case does not contain. ``reason`` is bounded reviewer prose: it stays in the
+    durable semantic response object and never enters a structural record or summary.
+    """
+
+    kind: MissingForAssessmentKind
+    target_refs: tuple[str, ...]
+    reason: str
+
+    def __post_init__(self) -> None:
+        if type(self.kind) is not str or self.kind not in MISSING_FOR_ASSESSMENT_KINDS:
+            raise _invalid_judgment()
+        object.__setattr__(
+            self,
+            "target_refs",
+            _validated_ref_tuple(
+                self.target_refs,
+                minimum=0,
+                maximum=MAX_MISSING_TARGET_REFS,
+                public_only=False,
+                error=_invalid_judgment(),
+                canonicalize=True,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "reason",
+            _snapshot_text(
+                self.reason, maximum_bytes=MAX_MISSING_REASON_BYTES, error=_invalid_judgment()
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class SemanticJudgment:
     conclusion: SemanticConclusion
     challenges: tuple[ReviewerChallenge, ...]
     prior_finding_verdicts: tuple[PriorFindingVerdict, ...] = ()
     # Rulings the reviewer returned that were malformed or over the cap and so were never read.
     prior_finding_verdicts_dropped: int = 0
+    # Named by every provider-judgment 1.1.0 ``insufficient_packet``. A durable semantic response
+    # recorded before issue #907 decodes with none, so the domain value admits an empty tuple;
+    # the provider schema is what requires at least one.
+    missing_for_assessment: tuple[MissingForAssessment, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.conclusion) is not str or self.conclusion not in _CONCLUSIONS:
@@ -1334,6 +1413,14 @@ class SemanticJudgment:
             if not self.challenges:
                 raise _invalid_judgment()
         elif self.challenges:
+            raise _invalid_judgment()
+        if (
+            type(self.missing_for_assessment) is not tuple
+            or len(self.missing_for_assessment) > MAX_MISSING_FOR_ASSESSMENT
+            or any(type(item) is not MissingForAssessment for item in self.missing_for_assessment)
+        ):
+            raise _invalid_judgment()
+        if self.missing_for_assessment and self.conclusion != "insufficient_packet":
             raise _invalid_judgment()
         verdicts = self.prior_finding_verdicts
         if (

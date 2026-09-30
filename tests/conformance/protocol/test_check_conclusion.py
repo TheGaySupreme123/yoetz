@@ -12,7 +12,7 @@ from yoetz.domain.events import CheckRecordedPayload, EventSchema, decode_payloa
 from yoetz.domain.values import freeze_json
 from yoetz.protocol.canonical import canonical_digest, canonical_encode
 from yoetz.protocol.errors import ProtocolValueError
-from yoetz.protocol.schemas import validate_schema_instance
+from yoetz.protocol.schemas import SchemaInstanceInvalid, validate_schema_instance
 
 
 def _vectors() -> list[dict[str, Any]]:
@@ -47,3 +47,42 @@ def test_conclusion_is_not_admitted_on_legacy_version_or_absent_on_new_version()
                 EventSchema("check_recorded", "1.3.0"),
                 freeze_json({**current, "semantic_conclusion": value}),
             )
+
+
+def test_rulings_and_named_missing_items_share_one_check_version() -> None:
+    """Issues #905 and #907 extend the unreleased ``check_recorded`` 1.3.0 in place."""
+
+    missing_only: dict[str, Any] = next(
+        vector["payload"]
+        for vector in _vectors()
+        if vector["schema_version"] == "1.3.0" and "missing_for_assessment" in vector["payload"]
+    )
+    rulings: list[dict[str, Any]] = [
+        {
+            "cited_refs": [],
+            "finding_id": "fnd_30000000-0000-4000-8000-000000000001",
+            "verdict": "unassessable",
+        }
+    ]
+    both: dict[str, Any] = {**missing_only, "prior_finding_verdicts": rulings}
+    validate_schema_instance("check-recorded", "1.3.0", both)
+    payload = decode_payload(EventSchema("check_recorded", "1.3.0"), freeze_json(both))
+    assert type(payload) is CheckRecordedPayload
+    assert payload.prior_finding_verdicts and payload.missing_for_assessment
+    # Named missing items belong only to an insufficient_packet conclusion, in schema and domain.
+    other: dict[str, Any] = {**both, "semantic_conclusion": "no_material_discrepancy"}
+    with pytest.raises(SchemaInstanceInvalid):
+        validate_schema_instance("check-recorded", "1.3.0", other)
+    with pytest.raises(ProtocolValueError):
+        decode_payload(EventSchema("check_recorded", "1.3.0"), freeze_json(other))
+    # Rulings alone may accompany any completed conclusion.
+    ruled: dict[str, Any] = {
+        key: value for key, value in other.items() if key != "missing_for_assessment"
+    }
+    validate_schema_instance("check-recorded", "1.3.0", ruled)
+    decode_payload(EventSchema("check_recorded", "1.3.0"), freeze_json(ruled))
+    # Neither field is ever carried by the released 1.2.0 payload.
+    for extended in (both, ruled, missing_only):
+        legacy = {key: value for key, value in extended.items() if key != "semantic_conclusion"}
+        with pytest.raises(ProtocolValueError):
+            decode_payload(EventSchema("check_recorded", "1.2.0"), freeze_json(legacy))

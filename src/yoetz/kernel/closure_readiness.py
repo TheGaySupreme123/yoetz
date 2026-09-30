@@ -171,6 +171,12 @@ GAP_CLASSIFICATION: Final[Mapping[str, GapClass]] = MappingProxyType(
         "semantic_relevance_review_not_run": _S,  # provider or evaluator failure
         "semantic_review_context_withheld": _S,
         "semantic_packet_insufficient": _S,  # agent-suppliable items arrive as findings (#907)
+        # #907: what an insufficient_packet review named as missing. Only an item the agent can
+        # supply is agent work; the rest disclose how the review was bounded.
+        "semantic_missing_agent_suppliable": _A,
+        "semantic_missing_structurally_unavailable": _S,
+        "semantic_missing_already_supplied": _S,
+        "semantic_missing_items_rejected": _S,
         "semantic_challenges_rejected": _S,  # reviewer output dropped by the validation fence
         "semantic_case_content_over_item_limit": _S,  # packet item bound (#907)
         "semantic_case_finding_refs_over_limit": _S,

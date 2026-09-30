@@ -25,6 +25,7 @@ from yoetz.domain.events import (
     EventDraft,
     EventPayload,
     EventSchema,
+    MissingForAssessmentItem,
     UnknownEvent,
 )
 from yoetz.domain.findings import (
@@ -49,6 +50,10 @@ from yoetz.domain.values import (
     object_id,
     obligation_id,
     parse_rfc3339_millis,
+)
+from yoetz.kernel.deterministic_checks import (
+    deterministic_case_from_json,
+    deterministic_case_to_json,
 )
 from yoetz.kernel.projections import ProjectionState
 from yoetz.kernel.ranking import CheckCompleteness, RankingContext, rank_findings
@@ -1572,6 +1577,211 @@ async def test_sqlite_reopen_replays_ranked_order_after_canonical_set_commit() -
     assert replayed.findings[0].provenance is not None
     assert replayed.semantic_status is SemanticStatus.SUCCEEDED
     assert replayed.semantic_provenance is not None
+
+
+@pytest.mark.anyio
+async def test_named_missing_items_commit_as_check_recorded_1_3_and_replay_after_restart() -> None:
+    """Issue #907: both ledgers record the structural items and a restart replays them."""
+
+    items = (
+        MissingForAssessmentItem("command_identity", (), "structurally_unavailable_on_this_host"),
+    )
+    for adapter_factory in (memory_ledger, sqlite_ledger):
+        command = ledger_command()
+        adapter = adapter_factory(command)
+        await adapter.append_batch(command)
+        frozen = await _ready_case(
+            adapter,
+            command,
+            "req_00000000-0000-4000-8000-00000000004d",
+            "sha256:" + "d" * 64,
+        )
+        provenance = _descending_rank_findings(
+            frozen.case.frontier, command.entries[0].coverage, semantic_lead=True
+        )[0].provenance
+        committed = await adapter.commit_check_if_current(
+            frozen,
+            RankedFindings((), 0, CheckVerdict.INSUFFICIENT_COVERAGE, command.entries[0].coverage),
+            (CheckPolicyExecution("work-integrity", "0.1.0", "run", "completed"),),
+            SemanticStatus.SUCCEEDED,
+            SemanticReason.SEMANTIC_COMPLETED,
+            provenance,
+            frozen.lease.operation_id,
+            semantic_conclusion="insufficient_packet",
+            missing_for_assessment=items,
+        )
+        assert committed.missing_for_assessment == items
+        events = [row async for row in adapter.load_events(command.session_id)]
+        assert [row.schema.version for row in events if row.schema.name == "check_recorded"] == [
+            "1.3.0"
+        ]
+        stored = await adapter.load_projection(
+            command.session_id, ProjectionView.CANDIDATE_FINDINGS
+        )
+        assert stored is not None and type(stored.state) is ProjectionState
+        pending = stored.state.pending_missing_for_assessment
+        assert pending is not None and pending.items == items
+    assert type(adapter) is SqliteLedger
+    restarted = SqliteLedger(
+        db=adapter._db,  # pyright: ignore[reportPrivateUsage]
+        task_id=command.task_id,
+        ownership_fence=_fence(),
+        clock=adapter._clock,  # pyright: ignore[reportPrivateUsage]
+        ids=adapter._ids,  # pyright: ignore[reportPrivateUsage]
+        objects=adapter._objects,  # pyright: ignore[reportPrivateUsage]
+    )
+    replayed = await restarted.freeze_case(
+        command.session_id,
+        command.writer_id,
+        1,
+        frozen.lease.operation_id,
+        "sha256:" + "d" * 64,
+    )
+    assert type(replayed) is CheckCommitResult
+    assert replayed.outcome == "replayed"
+    assert replayed.missing_for_assessment == items
+
+
+@pytest.mark.anyio
+async def test_frozen_case_names_hook_events_recorded_after_a_missing_item_request() -> None:
+    """Issue #907: hook capture after an ``insufficient_packet`` request is never the answer.
+
+    Authorship is a service-stamped envelope fact the projection does not keep, so the frozen
+    case carries the observation-authored events recorded after the pending request, in both
+    ledgers and through the persisted case JSON.
+    """
+
+    items = (MissingForAssessmentItem("verification_output", (), "agent_suppliable"),)
+    for adapter_factory in (memory_ledger, sqlite_ledger):
+        # The unknown-family vector freezes cleanly after a hook ingest in both test adapters.
+        command = ledger_command(unknown=True)
+        adapter = adapter_factory(command)
+        await adapter.append_batch(command)
+        frozen = await _ready_case(
+            adapter,
+            command,
+            "req_00000000-0000-4000-8000-00000000004e",
+            "sha256:" + "e" * 64,
+        )
+        assert frozen.case.observation_event_ids == frozenset()
+        provenance = _descending_rank_findings(
+            frozen.case.frontier, command.entries[0].coverage, semantic_lead=True
+        )[0].provenance
+        committed = await adapter.commit_check_if_current(
+            frozen,
+            RankedFindings((), 0, CheckVerdict.INSUFFICIENT_COVERAGE, command.entries[0].coverage),
+            (CheckPolicyExecution("work-integrity", "0.1.0", "run", "completed"),),
+            SemanticStatus.SUCCEEDED,
+            SemanticReason.SEMANTIC_COMPLETED,
+            provenance,
+            frozen.lease.operation_id,
+            semantic_conclusion="insufficient_packet",
+            missing_for_assessment=items,
+        )
+        hook = _observation_command(
+            request_suffix="5", expected_frontier=committed.result_frontier.sequence, seed="c"
+        )
+        drained = await adapter.append_batch(hook)
+        refrozen = await adapter.freeze_case(
+            command.session_id,
+            command.writer_id,
+            drained.result_frontier.sequence,
+            "req_00000000-0000-4000-8000-00000000004f",
+            "sha256:" + "f" * 64,
+        )
+        assert isinstance(refrozen, FrozenCase)
+        pending = refrozen.case.projection.pending_missing_for_assessment
+        assert pending is not None and pending.items == items
+        assert refrozen.case.observation_event_ids == frozenset({hook.entries[0].draft.event_id})
+        encoded = deterministic_case_to_json(refrozen.case)
+        assert encoded["observation_event_ids"] == [str(hook.entries[0].draft.event_id)]
+        assert deterministic_case_from_json(encoded) == refrozen.case
+
+
+@pytest.mark.anyio
+async def test_an_itemless_insufficient_packet_keeps_the_pending_request_on_both_ledgers() -> None:
+    """Greptile P1 on #940: a later insufficient_packet that recorded no item (a reply that named
+    nothing) assessed nothing, so both ledgers keep the earlier request, and SQLite replays it."""
+
+    items = (MissingForAssessmentItem("verification_output", (), "agent_suppliable"),)
+    pending_by_adapter: list[object] = []
+    for adapter_factory in (memory_ledger, sqlite_ledger):
+        command = ledger_command()
+        adapter = adapter_factory(command)
+        await adapter.append_batch(command)
+        coverage = command.entries[0].coverage
+        ranked = RankedFindings((), 0, CheckVerdict.INSUFFICIENT_COVERAGE, coverage)
+        executions = (CheckPolicyExecution("work-integrity", "0.1.0", "run", "completed"),)
+        first = await _ready_case(
+            adapter,
+            command,
+            "req_00000000-0000-4000-8000-000000000051",
+            "sha256:" + "5" * 64,
+        )
+        provenance = _descending_rank_findings(first.case.frontier, coverage, semantic_lead=True)[
+            0
+        ].provenance
+        requested = await adapter.commit_check_if_current(
+            first,
+            ranked,
+            executions,
+            SemanticStatus.SUCCEEDED,
+            SemanticReason.SEMANTIC_COMPLETED,
+            provenance,
+            first.lease.operation_id,
+            semantic_conclusion="insufficient_packet",
+            missing_for_assessment=items,
+        )
+        again = await adapter.freeze_case(
+            command.session_id,
+            command.writer_id,
+            requested.result_frontier.sequence,
+            "req_00000000-0000-4000-8000-000000000052",
+            "sha256:" + "6" * 64,
+        )
+        assert type(again) is FrozenCase
+        lease = await adapter.advance_check_phase(
+            again.lease,
+            CheckPhase.RESERVED,
+            CheckPhase.LOCAL_READY,
+            await _local_result_ref(adapter, command),
+        )
+        lease = await adapter.advance_check_phase(
+            lease, CheckPhase.LOCAL_READY, CheckPhase.READY_TO_FINALIZE
+        )
+        await adapter.commit_check_if_current(
+            FrozenCase(again.case, lease),
+            ranked,
+            executions,
+            SemanticStatus.SUCCEEDED,
+            SemanticReason.SEMANTIC_COMPLETED,
+            provenance,
+            again.lease.operation_id,
+            semantic_conclusion="insufficient_packet",
+        )
+        stored = await adapter.load_projection(
+            command.session_id, ProjectionView.CANDIDATE_FINDINGS
+        )
+        assert stored is not None and type(stored.state) is ProjectionState
+        pending = stored.state.pending_missing_for_assessment
+        assert pending is not None and pending.items == items
+        assert pending.source_frontier == requested.result_frontier.sequence
+        pending_by_adapter.append(pending)
+    assert pending_by_adapter[0] == pending_by_adapter[1]
+    assert type(adapter) is SqliteLedger
+    restarted = SqliteLedger(
+        db=adapter._db,  # pyright: ignore[reportPrivateUsage]
+        task_id=command.task_id,
+        ownership_fence=_fence(),
+        clock=adapter._clock,  # pyright: ignore[reportPrivateUsage]
+        ids=adapter._ids,  # pyright: ignore[reportPrivateUsage]
+        objects=adapter._objects,  # pyright: ignore[reportPrivateUsage]
+    )
+    replayed = await restarted.load_projection(
+        command.session_id, ProjectionView.CANDIDATE_FINDINGS
+    )
+    assert replayed is not None and type(replayed.state) is ProjectionState
+    assert replayed.state.pending_missing_for_assessment == pending_by_adapter[1]
 
 
 @pytest.mark.anyio

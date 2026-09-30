@@ -29,6 +29,10 @@ from yoetz.domain.receipts import (
     SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
     SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
     SEMANTIC_CHALLENGES_REJECTED_GAP,
+    SEMANTIC_MISSING_AGENT_SUPPLIABLE_GAP,
+    SEMANTIC_MISSING_ALREADY_SUPPLIED_GAP,
+    SEMANTIC_MISSING_ITEMS_REJECTED_GAP,
+    SEMANTIC_MISSING_UNAVAILABLE_GAP,
     SEMANTIC_PACKET_INSUFFICIENT_GAP,
     SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP,
     SEMANTIC_PRIOR_VERDICTS_UNSUPPORTED_GAP,
@@ -64,6 +68,17 @@ __all__ = [
 
 IssueKey = tuple[object, ...]
 
+# ``insufficient_packet`` and the named-missing-item disclosures that only ever ride beside it
+# (issue #907). They describe one whole-packet answer, so they tolerate and veto together.
+_INSUFFICIENT_PACKET_GAPS: Final = frozenset(
+    {
+        SEMANTIC_PACKET_INSUFFICIENT_GAP,
+        SEMANTIC_MISSING_AGENT_SUPPLIABLE_GAP,
+        SEMANTIC_MISSING_ALREADY_SUPPLIED_GAP,
+        SEMANTIC_MISSING_ITEMS_REJECTED_GAP,
+        SEMANTIC_MISSING_UNAVAILABLE_GAP,
+    }
+)
 # Coverage gaps that describe only the AI-powered review's own absence or weakness. A
 # local finding is proven absent by the local pack that owns it, so these gaps
 # do not weaken that proof; for an AI-powered finding they do, because the AI-powered review is the
@@ -78,7 +93,7 @@ _SEMANTIC_ONLY_GAPS: Final = frozenset(
         OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
         OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP,
         SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP,
-        SEMANTIC_PACKET_INSUFFICIENT_GAP,
+        *_INSUFFICIENT_PACKET_GAPS,
         SEMANTIC_CHALLENGES_REJECTED_GAP,
         SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
         SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
@@ -394,13 +409,23 @@ def prior_finding_verdict(check: CheckRecordedPayload, finding: Finding) -> str 
     return None
 
 
+# What an explicit, cited ``fixed`` ruling tolerates on its own finding (issues #905, #907). The
+# reviewer affirmatively ruled the finding fixed, citing refs fenced to the packet's
+# ``citable_refs``, so it assessed the finding on material it was shown: neither the whole-packet
+# ``insufficient_packet`` answer nor excerpts the count or byte budget cut (``content_unselected``,
+# ledger or captured) weaken that ruling. Silence never gets this tolerance, so a selection gap
+# still blocks closing an AI-powered finding by not returning it.
+_FIXED_RULING_TOLERATED_GAPS: Final = _INSUFFICIENT_PACKET_GAPS | frozenset({"content_unselected"})
+
+
 def _prior_verdict_effect(
     finding: Finding, check: CheckRecordedPayload
 ) -> tuple[bool, tuple[str, ...], frozenset[str]]:
     """How an explicit per-finding ruling bears on this finding's absence proof (issue #905).
 
     ``fixed`` is the reviewer judging this finding on material recorded after it, so a
-    whole-packet ``insufficient_packet`` (and its coverage marker) no longer vetoes it; every
+    whole-packet ``insufficient_packet`` (and its coverage marker) and excerpts the packet's
+    budget cut (``content_unselected``, issue #907) no longer veto it; every
     other rule still applies, including freshness, material change and the issue not being
     returned again. ``withdrawn`` (the reviewer accepting the agent's rejection) keeps the
     ordinary rules, under which an assessable review that does not re-raise a rejected finding
@@ -415,7 +440,7 @@ def _prior_verdict_effect(
     if verdict is None or verdict == "withdrawn":
         return False, (), frozenset()
     if verdict == "fixed":
-        return True, (), frozenset({SEMANTIC_PACKET_INSUFFICIENT_GAP})
+        return True, (), _FIXED_RULING_TOLERATED_GAPS
     return False, (f"reviewer_verdict_{verdict}",), frozenset()
 
 

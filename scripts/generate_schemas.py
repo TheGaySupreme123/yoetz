@@ -1282,6 +1282,12 @@ def _check_result_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
 
 def _check_recorded_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     from yoetz.domain.findings import MAX_RECORDED_VERDICTS, PRIOR_FINDING_VERDICTS
+    from yoetz.protocol.models import (
+        MAX_MISSING_FOR_ASSESSMENT,
+        MAX_MISSING_TARGET_REFS,
+        MISSING_FOR_ASSESSMENT_KINDS,
+        MISSING_ITEM_AVAILABILITIES,
+    )
 
     document = _simple_versioned_schema(entry, "events/check-recorded-1.2.0.schema.json", {})
     properties = cast(dict[str, JsonValue], document["properties"])
@@ -1329,6 +1335,57 @@ def _check_recorded_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         "minItems": 1,
         "type": "array",
     }
+    # Issue #907: what an ``insufficient_packet`` review named as missing, classified by Yoetz
+    # (kind, packet refs, availability; never reviewer prose). Optional for the same reason, and
+    # admitted only beside an ``insufficient_packet`` conclusion.
+    definitions["missing_item"] = cast(
+        JsonValue,
+        {
+            "additionalProperties": False,
+            "properties": {
+                "availability": {
+                    "enum": sorted(MISSING_ITEM_AVAILABILITIES, key=str.encode),
+                    "type": "string",
+                },
+                "kind": {
+                    "enum": sorted(MISSING_FOR_ASSESSMENT_KINDS, key=str.encode),
+                    "type": "string",
+                },
+                "target_refs": {
+                    "items": {
+                        "pattern": (
+                            "^(act|clm|evd|evt|fnd|obl|res)_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}"
+                            "-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                        ),
+                        "type": "string",
+                    },
+                    "maxItems": MAX_MISSING_TARGET_REFS,
+                    "type": "array",
+                    "uniqueItems": True,
+                },
+            },
+            "required": ["availability", "kind", "target_refs"],
+            "type": "object",
+        },
+    )
+    properties["missing_for_assessment"] = {
+        "items": {"$ref": "#/$defs/missing_item"},
+        "maxItems": MAX_MISSING_FOR_ASSESSMENT,
+        "minItems": 1,
+        "type": "array",
+        "uniqueItems": True,
+    }
+    cast(list[JsonValue], document["allOf"]).append(
+        {
+            "anyOf": [
+                {"not": {"required": ["missing_for_assessment"]}},
+                {
+                    "properties": {"semantic_conclusion": {"const": "insufficient_packet"}},
+                    "required": ["semantic_conclusion"],
+                },
+            ]
+        }
+    )
     return document
 
 
@@ -1470,7 +1527,9 @@ def _provider_judgment_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue
 
     The runtime request schema is the owning source: it renames the provider kind alias to the
     frozen ``FindingKindWire`` anchor and carries the curated reviewer glossary. Version 1.1.0
-    adds the required per-finding ``prior_finding_verdicts`` array to every conclusion branch.
+    adds the required per-finding ``prior_finding_verdicts`` array to every conclusion branch
+    (issue #905) and the required ``missing_for_assessment`` list to ``insufficient_packet``
+    (issue #907).
     """
 
     from yoetz.adapters.providers.openai_responses import build_judgment_json_schema
@@ -2437,6 +2496,43 @@ def _check_result_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     properties["advisory_notes"] = {
         "items": {"$ref": "#/$defs/advisory_note"},
         "maxItems": 64,
+        "type": "array",
+        "uniqueItems": True,
+    }
+    # Issue #907: what an insufficient_packet review named as missing, as a check limitation.
+    # Additive and optional on this unreleased version, like advisory_notes above.
+    definitions["missing_item"] = {
+        "additionalProperties": False,
+        "properties": {
+            "availability": {
+                "enum": ["agent_suppliable", "structurally_unavailable_on_this_host"],
+                "type": "string",
+            },
+            "kind": {
+                "enum": [
+                    "command_identity",
+                    "current_diff_for_path",
+                    "other",
+                    "plan_or_claim_text",
+                    "prior_finding_context",
+                    "task_statement",
+                    "verification_output",
+                ],
+                "type": "string",
+            },
+            "target_refs": {
+                "items": {"$ref": "#/$defs/subject_id"},
+                "maxItems": 4,
+                "type": "array",
+                "uniqueItems": True,
+            },
+        },
+        "required": ["availability", "kind", "target_refs"],
+        "type": "object",
+    }
+    properties["missing_for_assessment"] = {
+        "items": {"$ref": "#/$defs/missing_item"},
+        "maxItems": 8,
         "type": "array",
         "uniqueItems": True,
     }
@@ -7648,10 +7744,12 @@ def build_schema_documents(
             "events/check-recorded-1.0.0.schema.json",
             "events/finding-recorded-1.0.0.schema.json",
             "findings/finding-1.0.0.schema.json",
+            "findings/provider-judgment-1.0.0.schema.json",
             "findings/semantic-provenance-1.0.0.schema.json",
             "operations/check-result-1.0.0.schema.json",
             "operations/receipt-result-1.0.0.schema.json",
         }:
+            # Released contracts whose owning model has since moved on stay byte-frozen.
             normalized = _frozen_schema(entry)
         elif entry.relative_path == "observations/routine-read-summary-1.0.0.schema.json":
             normalized = _routine_read_summary_schema(entry)

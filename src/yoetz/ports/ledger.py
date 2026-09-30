@@ -17,7 +17,7 @@ from yoetz.domain.coordination import (
     SessionHealth,
     WorkState,
 )
-from yoetz.domain.events import EventDraft, LedgerRecord
+from yoetz.domain.events import EventDraft, LedgerRecord, MissingForAssessmentItem
 from yoetz.domain.findings import (
     CheckVerdict,
     Finding,
@@ -728,6 +728,8 @@ class CheckCommitResult:
     versions: CheckVersionSlice
     children: CheckChildrenPreview | None = None
     advisory_notes: tuple[CheckAdvisoryNote, ...] = ()
+    # Structural record of what an ``insufficient_packet`` review named as missing (issue #907).
+    missing_for_assessment: tuple[MissingForAssessmentItem, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.outcome) is not str or self.outcome not in {"committed", "replayed"}:
@@ -778,6 +780,10 @@ class CheckCommitResult:
             (item.kind, item.project_id, item.task_ids) for item in self.advisory_notes
         )
         if len(note_keys) != len(set(note_keys)):
+            raise _invalid()
+        if type(self.missing_for_assessment) is not tuple or any(
+            type(item) is not MissingForAssessmentItem for item in self.missing_for_assessment
+        ):
             raise _invalid()
 
 
@@ -1936,6 +1942,7 @@ class LedgerPort(Protocol):
         scope: CheckScopeModel | None = None,
         semantic_conclusion: str | None = None,
         prior_finding_verdicts: tuple[PriorFindingVerdictRecord, ...] = (),
+        missing_for_assessment: tuple[MissingForAssessmentItem, ...] = (),
     ) -> CheckCommitResult: ...
 
     async def fail_check_if_current(

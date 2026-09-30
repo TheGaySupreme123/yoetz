@@ -32,6 +32,7 @@ from yoetz.domain.events import (
     FindingRecordedPayload,
     LedgerChain,
     LedgerRecord,
+    MissingForAssessmentItem,
     PayloadRef,
     ProjectionLocator,
     RedactionState,
@@ -1042,6 +1043,7 @@ class SqliteLedger:
                                     f"{item.policy_id}/{item.policy_version}" for item in executions
                                 ),
                             ),
+                            missing_for_assessment=check_payload.missing_for_assessment,
                         )
                 else:
                     check_error = self._stored_check_error(cast(bytes, result_canonical))
@@ -2661,6 +2663,7 @@ class SqliteLedger:
         scope: CheckScopeModel | None = None,
         semantic_conclusion: str | None = None,
         prior_finding_verdicts: tuple[PriorFindingVerdictRecord, ...] = (),
+        missing_for_assessment: tuple[MissingForAssessmentItem, ...] = (),
     ) -> CheckCommitResult:
         await self._ensure_recovered()
         async with self._lock:
@@ -2687,6 +2690,7 @@ class SqliteLedger:
                     request_id,
                     scope=scope,
                     semantic_conclusion=semantic_conclusion,
+                    missing_for_assessment=missing_for_assessment,
                     prior_finding_verdicts=prior_finding_verdicts,
                 )
             except PublicOperationError:

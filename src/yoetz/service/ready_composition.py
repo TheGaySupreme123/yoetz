@@ -40,7 +40,10 @@ from yoetz.adapters.integrations.observation_local import (
 from yoetz.adapters.objects.encrypted_files import EncryptedFilesObjectStore
 from yoetz.adapters.privacy.catalog import CatalogPrivacyAudit, CatalogPrivacyPolicyStore
 from yoetz.adapters.privacy.gateway import PolicyEnforcingOutboundGateway
-from yoetz.adapters.privacy.local_enforcer import LocalPrivacyEnforcer
+from yoetz.adapters.privacy.local_enforcer import (
+    EGRESS_BYTES_PER_TOKEN_ESTIMATE,
+    LocalPrivacyEnforcer,
+)
 from yoetz.adapters.privacy.provenance import LedgerAuthorshipProvenanceResolver
 from yoetz.adapters.providers.codex_app_server import (
     CodexAppServerProfile,
@@ -101,6 +104,7 @@ from yoetz.application.lineage_recovery import (
     observed_activity_renewal,
     observed_host_session_binding,
 )
+from yoetz.application.missing_for_assessment import unsuppliable_missing_kinds
 from yoetz.application.observation_advice import (
     ObservationAdviceContextBuilder,
     stable_advice_finding_id,
@@ -147,6 +151,7 @@ from yoetz.application.semantic_case import (
     SemanticCaseTooLarge,
     SemanticPacketView,
     build_semantic_case,
+    captured_edit_paths,
     semantic_case_packet_view,
     semantic_case_to_candidate_context,
 )
@@ -2492,6 +2497,29 @@ def _bootstrap_seed_digest(installation_id: str, *, revision: str | None) -> str
     return canonical_digest(payload)
 
 
+def _semantic_prepared_byte_ceiling(policy: PrivacyPolicy) -> int | None:
+    """The effective AI-powered review channel ceiling, in prepared-payload bytes (issue #907).
+
+    The gateway blocks a prepared review packet over the channel's ``max_bytes`` or over its
+    ``max_tokens`` estimated at four bytes per token; the case builder plans below the narrower
+    of the two so a narrower owner ceiling drops the lowest-ranked excerpts instead of the whole
+    review. ``None`` (zero means unset) leaves the schema maximum.
+    """
+
+    llm = next(
+        (item for item in policy.channel_policies if item.channel is EgressChannel.LLM_INFERENCE),
+        None,
+    )
+    if llm is None:
+        return None
+    limits = [
+        limit
+        for limit in (llm.max_bytes, llm.max_tokens * EGRESS_BYTES_PER_TOKEN_ESTIMATE)
+        if limit > 0
+    ]
+    return min(limits) if limits else None
+
+
 def _disabled_channel_row(channel: EgressChannel) -> ChannelPolicy:
     return ChannelPolicy(
         channel=channel,
@@ -3482,13 +3510,13 @@ def _judgment_to_response_json(judgment: object) -> dict[str, CanonicalJsonValue
                 "uncertainty": item.uncertainty,
             }
         )
-    result: dict[str, CanonicalJsonValue] = {
+    body: dict[str, CanonicalJsonValue] = {
         "conclusion": judgment.conclusion,
         "reviewer_challenges": challenges,
     }
     # Emitted only when present, so a judgment without verdicts keeps its earlier stored bytes.
     if judgment.prior_finding_verdicts:
-        result["prior_finding_verdicts"] = [
+        body["prior_finding_verdicts"] = [
             {
                 "cited_refs": list(item.cited_refs),
                 "finding_id": item.finding_id,
@@ -3497,8 +3525,15 @@ def _judgment_to_response_json(judgment: object) -> dict[str, CanonicalJsonValue
             for item in judgment.prior_finding_verdicts
         ]
     if judgment.prior_finding_verdicts_dropped:
-        result["prior_finding_verdicts_dropped"] = judgment.prior_finding_verdicts_dropped
-    return result
+        body["prior_finding_verdicts_dropped"] = judgment.prior_finding_verdicts_dropped
+    if judgment.missing_for_assessment:
+        # Issue #907: the named missing items, reviewer reason included, live only in this
+        # encrypted durable response object; the check record keeps the structural fields.
+        body["missing_for_assessment"] = [
+            {"kind": item.kind, "target_refs": list(item.target_refs), "reason": item.reason}
+            for item in judgment.missing_for_assessment
+        ]
+    return body
 
 
 def _judgment_from_response_json(value: object) -> object:
@@ -3506,6 +3541,8 @@ def _judgment_from_response_json(value: object) -> object:
 
     from yoetz.domain.findings import FindingKind
     from yoetz.ports.semantic import (
+        MissingForAssessment,
+        MissingForAssessmentKind,
         PriorFindingVerdict,
         PriorFindingVerdictKind,
         ReviewerChallenge,
@@ -3579,12 +3616,37 @@ def _judgment_from_response_json(value: object) -> object:
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("semantic_response_judgment_invalid") from exc
     dropped = source.get("prior_finding_verdicts_dropped", 0)
+    # Responses recorded before issue #907 carry no missing items and decode with none.
+    missing: list[MissingForAssessment] = []
+    raw_missing = source.get("missing_for_assessment", [])
+    if type(raw_missing) is not list:
+        raise ValueError("semantic_response_judgment_invalid")
+    for item in cast(list[object], raw_missing):
+        if type(item) is not dict:
+            raise ValueError("semantic_response_judgment_invalid")
+        row = cast(dict[str, object], item)
+        targets = row.get("target_refs")
+        if type(targets) is not list or any(
+            type(ref) is not str for ref in cast(list[object], targets)
+        ):
+            raise ValueError("semantic_response_judgment_invalid")
+        try:
+            missing.append(
+                MissingForAssessment(
+                    cast(MissingForAssessmentKind, row["kind"]),
+                    tuple(cast(list[str], targets)),
+                    cast(str, row["reason"]),
+                )
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("semantic_response_judgment_invalid") from exc
     try:
         return SemanticJudgment(
             cast(SemanticConclusion, conclusion_raw),
             tuple(challenges),
             tuple(verdicts),
             cast(int, dropped),
+            missing_for_assessment=tuple(missing),
         )
     except ValueError as exc:
         raise ValueError("semantic_response_judgment_invalid") from exc
@@ -3682,6 +3744,25 @@ async def _recover_response_evaluation(
     if status is SemanticStatus.SUCCEEDED and (judgment is None or provenance is None):
         return None
     return FinalSemanticEvaluation(status, reason, judgment=judgment, provenance=provenance)
+
+
+async def _workspace_root_for_runtime(runtime: TaskRuntime | None) -> str | None:
+    """The absolute workspace path the task's session opened with, or ``None``.
+
+    Issue #907: a repeated missing-item request anchors absolute paths the agent names to this
+    root. It is compared in process only, never recorded, logged or sent.
+    """
+
+    if runtime is None:
+        return None
+    try:
+        async for record in runtime.ledger.load_events(runtime.session_id):
+            if isinstance(record.payload, SessionOpenedPayload):
+                root = record.payload.workspace_ref
+                return root if root is not None and os.path.isabs(root) else None
+    except Exception:
+        return None
+    return None
 
 
 def _observation_workspace_for_runtime(runtime: TaskRuntime) -> str | None:
@@ -4075,6 +4156,7 @@ def _privacy_gated_semantic_evaluator(
         over_item_limit = False
         reference_scope_reduced = False
         content_gaps: tuple[str, ...] = ()
+        unsuppliable: tuple[str, ...] = ()
 
         def _on_lease_renewed(renewed: object) -> None:
             assert type(renewed) is _OpLease
@@ -4289,6 +4371,8 @@ def _privacy_gated_semantic_evaluator(
             # material, yet still reports succeeded — so record it and carry it into coverage
             # rather than letting a hollow review read as a complete one.
             withheld = tuple(item.value for item in policy.withheld_review_categories)
+            # What no agent action can put in front of this reviewer (issue #907).
+            unsuppliable = unsuppliable_missing_kinds(review_selection, withheld)
             if withheld:
                 record_bounded_event_without_raising(
                     component="semantic_composition",
@@ -4342,6 +4426,7 @@ def _privacy_gated_semantic_evaluator(
                         )
                         captured_content_gaps = ("content_capture_unavailable",)
                         captured_local_fence_required = False
+            workspace_root = await _workspace_root_for_runtime(runtime)
             try:
                 semantic_case = build_semantic_case(
                     case_id=recovered_case_id or ids.new(IdKind.OUTBOUND_CASE),
@@ -4356,6 +4441,8 @@ def _privacy_gated_semantic_evaluator(
                     captured_content=captured_content,
                     captured_content_scope=captured_content_scope,
                     captured_content_gaps=captured_content_gaps,
+                    prepared_byte_ceiling=_semantic_prepared_byte_ceiling(policy),
+                    workspace_root=workspace_root,
                 )
             except LineageSemanticCapacityExceeded:
                 # Same pre-dispatch contract as an envelope that cannot be reduced: local
@@ -4417,6 +4504,11 @@ def _privacy_gated_semantic_evaluator(
             packet_view = semantic_case_packet_view(semantic_case)
             packet_prior_refs = packet_view.prior_finding_refs
             packet_citable_refs = packet_view.citable_refs
+            # Issue #907: which paths each captured edit records, compared in process only so a
+            # repeated request for a captured edit can converge on a fresh diff of that path.
+            packet_edit_paths = captured_edit_paths(
+                frozen.case, captured_content, captured_content_scope
+            )
             trimmed_prior = set(_packet_view_gaps(packet_view))
             content_gaps = tuple(
                 sorted(
@@ -4489,8 +4581,11 @@ def _privacy_gated_semantic_evaluator(
                     case_content_over_item_limit=over_item_limit,
                     case_reference_scope_reduced=reference_scope_reduced,
                     case_content_gaps=content_gaps,
+                    unsuppliable_missing_kinds=unsuppliable,
                     case_prior_finding_refs=packet_prior_refs,
                     case_citable_refs=packet_citable_refs,
+                    case_captured_edit_paths=packet_edit_paths,
+                    case_workspace_root=workspace_root,
                 )
 
             # Build the packet before anything durable exists. A packet that cannot be built is a
@@ -4519,6 +4614,7 @@ def _privacy_gated_semantic_evaluator(
                     case_content_over_item_limit=over_item_limit,
                     case_reference_scope_reduced=reference_scope_reduced,
                     case_content_gaps=content_gaps,
+                    unsuppliable_missing_kinds=unsuppliable,
                 )
 
             # One durable AI-powered review job per check: create/recover after freeze, before dispatch.
@@ -4806,6 +4902,7 @@ def _privacy_gated_semantic_evaluator(
                         case_content_over_item_limit=over_item_limit,
                         case_reference_scope_reduced=reference_scope_reduced,
                         case_content_gaps=content_gaps,
+                        unsuppliable_missing_kinds=unsuppliable,
                     )
                 return FinalSemanticEvaluation(
                     status,
@@ -4818,8 +4915,11 @@ def _privacy_gated_semantic_evaluator(
                     case_content_over_item_limit=over_item_limit,
                     case_reference_scope_reduced=reference_scope_reduced,
                     case_content_gaps=content_gaps,
+                    unsuppliable_missing_kinds=unsuppliable,
                     case_prior_finding_refs=packet_prior_refs,
                     case_citable_refs=packet_citable_refs,
+                    case_captured_edit_paths=packet_edit_paths,
+                    case_workspace_root=workspace_root,
                     continuation=continuation,
                 )
 
@@ -4865,6 +4965,7 @@ def _privacy_gated_semantic_evaluator(
                 case_content_over_item_limit=over_item_limit,
                 case_reference_scope_reduced=reference_scope_reduced,
                 case_content_gaps=content_gaps,
+                unsuppliable_missing_kinds=unsuppliable,
             )
 
     return _evaluate

@@ -213,6 +213,13 @@ def render_human_check(result: CheckSuccessModel) -> str:
                 f"- {note.kind}: {note.count}; project {note.project_id}; "
                 "tasks " + ", ".join(note.task_ids)
             )
+    if result.missing_for_assessment:
+        # Issue #907: a check limitation, never a finding. Recheck only after supplying an
+        # agent-suppliable item; otherwise report the limitation.
+        lines.append("Missing for assessment (the reviewer could not assess the packet):")
+        for item in result.missing_for_assessment:
+            refs = ", ".join(item.target_refs) if item.target_refs else "no packet ref"
+            lines.append(f"- {_token(item.kind)} ({refs}): {_token(item.availability)}")
     if result.coverage.known_gaps:
         lines.append("Coverage gaps: " + ", ".join(result.coverage.known_gaps))
         # The strict ceiling blocked this process while the last install applied the policy

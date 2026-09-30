@@ -30,6 +30,7 @@ from yoetz.ports.clock import ClockPort
 from yoetz.ports.secret_memory import ProviderAttemptAuthBinding, ProviderCredentialHandle
 from yoetz.ports.semantic import (
     Deadline,
+    MissingForAssessment,
     PriorFindingVerdict,
     ProviderAttemptProvenance,
     ReviewerChallenge,
@@ -57,6 +58,7 @@ from yoetz.protocol.models import (
     ProviderJudgmentInsufficientModel,
     ProviderJudgmentModel,
     ProviderJudgmentNoDiscrepancyModel,
+    ProviderMissingItemModel,
     ProviderPriorFindingVerdictModel,
     SemanticStatus,
 )
@@ -65,6 +67,8 @@ __all__ = [
     "ACCOUNT_GAP_GLOSSARY",
     "CHALLENGE_FIELD_GLOSSARY",
     "FINDING_KIND_GLOSSARY",
+    "MISSING_ITEM_FIELD_GLOSSARY",
+    "MISSING_ITEM_KIND_GLOSSARY",
     "JUDGMENT_JSON_SCHEMA",
     "OFFICIAL_OPENAI_HOST",
     "OFFICIAL_OPENAI_PATH",
@@ -296,6 +300,20 @@ SEMANTIC_REVIEW_INSTRUCTION: Final = (
     "answered_not_fixed citing the material that shows it remains; withdrawn when the main "
     "agent's reasoned rejection holds; unassessable when the packet cannot settle it. A verdict "
     "speaks only for its own finding."
+) + (
+    # Issue #907: packet order and the missing-item list. Kept as a separate appended sentence
+    # group so the reviewer-role text above can change independently.
+    " Items are listed in recorded order; occurred_order is that order. An excerpt with "
+    "latest_for is the newest recorded edit of its path or run of its command; one with "
+    "superseded_by has a newer recorded edit of the same path or run of the same command (the "
+    "named source). Judge results from the newest run, and code the newer edit changes from the "
+    "newer edit; an edit is a hunk, so lines of an older edit that the newer one does not touch "
+    "may still be current. With insufficient_packet, list each item you needed in "
+    "missing_for_assessment: its kind, the packet refs it concerns (only from citable_refs), and "
+    "a short reason. An item in a prior_missing_for_assessment timeline item lists in "
+    "supplied_since the material of that kind the agent recorded since for its target_refs "
+    "(any such material when it names none); list it again only if "
+    "you cite one of those refs and say why it is still insufficient."
 )
 _SYSTEM_INSTRUCTION: Final = SEMANTIC_REVIEW_INSTRUCTION
 
@@ -337,7 +355,14 @@ _JUDGMENT_STAGE_PRECEDENCE: Final[tuple[JudgmentValidationStage, ...]] = (
     "shape_invalid",
 )
 _REVIEW_TEXT_FIELDS: Final = frozenset(
-    {"summary", "discrepancy", "alternative_interpretation", "message_to_main_agent", "uncertainty"}
+    {
+        "summary",
+        "discrepancy",
+        "alternative_interpretation",
+        "message_to_main_agent",
+        "uncertainty",
+        "reason",
+    }
 )
 
 
@@ -359,11 +384,24 @@ def _stage_of_branch_error(error: Mapping[str, object]) -> JudgmentValidationSta
     kind = str(error.get("type", ""))
     message = str(error.get("msg", ""))
     leaf = loc[-1] if loc else ""
-    if kind == "literal_error" and leaf in {"conclusion", "finding_kind", "requested_next_step"}:
+    if kind == "literal_error" and leaf in {
+        "conclusion",
+        "finding_kind",
+        "requested_next_step",
+        "kind",
+    }:
         return "enum_invalid"
     if leaf == "reviewer_challenges" and kind in {"too_short", "too_long"}:
         return "conclusion_mismatch"
-    if "cited_refs" in loc:
+    if leaf == "missing_for_assessment" and kind in {
+        "too_short",
+        "too_long",
+        "missing",
+        "extra_forbidden",
+    }:
+        # An unassessable packet must name what was missing; no other conclusion may.
+        return "conclusion_mismatch"
+    if "cited_refs" in loc or "target_refs" in loc:
         if kind == "value_error" and "array_not_unique_or_bounded" in message:
             return "refs_duplicate"
         return "refs_invalid"
@@ -406,18 +444,17 @@ def _classify_rejected_judgment(parsed: JsonValue) -> JudgmentValidationStage:
         errors = [cast(Mapping[str, object], error) for error in exc.errors()]
         # A challenge that fails its own validation also makes pydantic report the tuple as
         # "too short after validation"; that derived count error is not a coupling failure.
-        item_failed = any(
-            len(cast(tuple[object, ...], error.get("loc", ()))) > 1
-            and cast(tuple[object, ...], error.get("loc", ()))[0] == "reviewer_challenges"
+        failed_lists = {
+            cast(tuple[object, ...], error.get("loc", ()))[0]
             for error in errors
-        )
+            if len(cast(tuple[object, ...], error.get("loc", ()))) > 1
+        } & {"reviewer_challenges", "missing_for_assessment"}
         stages = {
             _stage_of_branch_error(error)
             for error in errors
             if not (
-                item_failed
-                and tuple(cast(tuple[object, ...], error.get("loc", ())))
-                == ("reviewer_challenges",)
+                len(cast(tuple[object, ...], error.get("loc", ()))) == 1
+                and cast(tuple[object, ...], error.get("loc", ()))[0] in failed_lists
             )
         }
         return next(stage for stage in _JUDGMENT_STAGE_PRECEDENCE if stage in stages)
@@ -632,6 +669,69 @@ VERDICT_FIELD_GLOSSARY: Final[dict[str, str]] = {
 }
 
 
+MISSING_ITEM_KIND_GLOSSARY: Final[dict[str, str]] = {
+    "command_identity": "which command produced an output the packet shows",
+    "current_diff_for_path": "the current change to a file the packet shows only in part or stale",
+    "other": "anything else, named in the reason",
+    "plan_or_claim_text": "the full text of a plan or claim the packet shows clipped",
+    "prior_finding_context": "an earlier finding or the agent's answer to it",
+    "task_statement": "what the user asked for",
+    "verification_output": "the output of a test, build or lint run that a claim relies on",
+}
+
+MISSING_ITEM_FIELD_GLOSSARY: Final[dict[str, str]] = {
+    "kind": (
+        "What kind of material you needed. "
+        + "; ".join(
+            f"{kind}: {gloss}" for kind, gloss in sorted(MISSING_ITEM_KIND_GLOSSARY.items())
+        )
+        + "."
+    ),
+    "target_refs": (
+        "The packet refs this item concerns, only from citable_refs; empty when none applies. "
+        "Never name a path, command or ref the packet does not contain."
+    ),
+    "reason": "One short line saying why the packet could not be assessed without it.",
+}
+
+
+def _gloss_properties(
+    definitions: dict[str, JsonValue],
+    anchor: str,
+    glossary: Mapping[str, str],
+) -> None:
+    owner = definitions.get(anchor)
+    if type(owner) is not dict:
+        raise RuntimeError("provider_judgment_schema_invalid")
+    properties = cast(dict[str, JsonValue], owner).get("properties")
+    if type(properties) is not dict:
+        raise RuntimeError("provider_judgment_schema_invalid")
+    owned = cast(dict[str, JsonValue], properties)
+    # The glossary must describe exactly the shape the model owns. A field added or renamed there
+    # without a gloss fails the build rather than shipping a silently undefined field.
+    if set(owned) != set(glossary):
+        raise RuntimeError("provider_judgment_schema_invalid")
+    for name, gloss in glossary.items():
+        target = owned[name]
+        if type(target) is not dict:
+            raise RuntimeError("provider_judgment_schema_invalid")
+        source = cast(dict[str, JsonValue], target)
+        # A property that is a bare ``$ref`` carries its gloss on the referenced definition:
+        # annotations beside ``$ref`` are legal in 2020-12 but not uniformly honored, and the
+        # definition is the one place every use of that vocabulary sees it.
+        reference = source.get("$ref")
+        if type(reference) is str:
+            referenced_anchor = reference.removeprefix("#/$defs/")
+            referenced = definitions.get(referenced_anchor)
+            if type(referenced) is not dict:
+                raise RuntimeError("provider_judgment_schema_invalid")
+            definitions[referenced_anchor] = cast(
+                JsonValue, {**cast(dict[str, JsonValue], referenced), "description": gloss}
+            )
+            continue
+        owned[name] = cast(JsonValue, {**source, "description": gloss})
+
+
 def _apply_reviewer_glossary(schema: dict[str, JsonValue]) -> dict[str, JsonValue]:
     """Attach the curated reviewer definitions to the stripped schema.
 
@@ -644,56 +744,22 @@ def _apply_reviewer_glossary(schema: dict[str, JsonValue]) -> dict[str, JsonValu
         raise RuntimeError("provider_judgment_schema_invalid")
     definitions = cast(dict[str, JsonValue], defs)
     kinds = definitions.get("FindingKindWire")
-    challenge = definitions.get("ProviderChallenge")
-    if type(kinds) is not dict or type(challenge) is not dict:
-        raise RuntimeError("provider_judgment_schema_invalid")
-    properties = cast(dict[str, JsonValue], challenge).get("properties")
-    if type(properties) is not dict:
-        raise RuntimeError("provider_judgment_schema_invalid")
-    challenge_properties = cast(dict[str, JsonValue], properties)
-    # The glossary must describe exactly the shape the model owns. A field added or renamed there
-    # without a gloss fails the build rather than shipping a silently undefined field.
-    if set(challenge_properties) != set(CHALLENGE_FIELD_GLOSSARY):
+    missing_kinds = definitions.get("MissingForAssessmentKindWire")
+    if type(kinds) is not dict or type(missing_kinds) is not dict:
         raise RuntimeError("provider_judgment_schema_invalid")
     enum_values = cast(dict[str, JsonValue], kinds).get("enum")
     if type(enum_values) is not list or set(cast(list[JsonValue], enum_values)) != set(
         FINDING_KIND_GLOSSARY
     ):
         raise RuntimeError("provider_judgment_schema_invalid")
-    verdict = definitions.get("ProviderPriorFindingVerdict")
-    verdict_properties = (
-        cast(dict[str, JsonValue], verdict).get("properties") if type(verdict) is dict else None
-    )
-    if type(verdict_properties) is not dict or set(
-        cast(dict[str, JsonValue], verdict_properties)
-    ) != set(VERDICT_FIELD_GLOSSARY):
+    missing_values = cast(dict[str, JsonValue], missing_kinds).get("enum")
+    if type(missing_values) is not list or set(cast(list[JsonValue], missing_values)) != set(
+        MISSING_ITEM_KIND_GLOSSARY
+    ):
         raise RuntimeError("provider_judgment_schema_invalid")
-    glossed = (
-        *((challenge_properties, name, gloss) for name, gloss in CHALLENGE_FIELD_GLOSSARY.items()),
-        *(
-            (cast(dict[str, JsonValue], verdict_properties), name, gloss)
-            for name, gloss in VERDICT_FIELD_GLOSSARY.items()
-        ),
-    )
-    for owner, name, gloss in glossed:
-        target = owner[name]
-        if type(target) is not dict:
-            raise RuntimeError("provider_judgment_schema_invalid")
-        source = cast(dict[str, JsonValue], target)
-        # A property that is a bare ``$ref`` carries its gloss on the referenced definition:
-        # annotations beside ``$ref`` are legal in 2020-12 but not uniformly honored, and the
-        # definition is the one place every use of that vocabulary sees it.
-        reference = source.get("$ref")
-        if type(reference) is str:
-            anchor = reference.removeprefix("#/$defs/")
-            referenced = definitions.get(anchor)
-            if type(referenced) is not dict:
-                raise RuntimeError("provider_judgment_schema_invalid")
-            definitions[anchor] = cast(
-                JsonValue, {**cast(dict[str, JsonValue], referenced), "description": gloss}
-            )
-            continue
-        owner[name] = cast(JsonValue, {**source, "description": gloss})
+    _gloss_properties(definitions, "ProviderChallenge", CHALLENGE_FIELD_GLOSSARY)
+    _gloss_properties(definitions, "ProviderPriorFindingVerdict", VERDICT_FIELD_GLOSSARY)
+    _gloss_properties(definitions, "ProviderMissingItem", MISSING_ITEM_FIELD_GLOSSARY)
     return schema
 
 
@@ -995,6 +1061,10 @@ def _challenge_from_model(challenge: ProviderChallengeModel) -> ReviewerChalleng
     )
 
 
+def _missing_item_from_model(item: ProviderMissingItemModel) -> MissingForAssessment:
+    return MissingForAssessment(item.kind, item.target_refs, item.reason)
+
+
 def normalize_judgment(parsed: JsonValue) -> SemanticJudgment:
     """Validate a parsed judgment against the single provider judgment contract.
 
@@ -1015,8 +1085,28 @@ def normalize_judgment(parsed: JsonValue) -> SemanticJudgment:
         cast(dict[str, JsonValue], parsed)["judgment"] if envelope else cast(JsonValue, parsed)
     )
     kept, dropped = _separate_prior_verdicts(body)
+    unnamed = False
     if type(body) is dict:
-        body = {**cast(dict[str, JsonValue], body), "prior_finding_verdicts": kept}
+        fields: dict[str, JsonValue] = {
+            **cast(dict[str, JsonValue], body),
+            "prior_finding_verdicts": kept,
+        }
+        named = fields.get("missing_for_assessment")
+        if named is None or named == []:
+            # Backward read, like the rulings above (issue #907): a local model or prompt-only
+            # host may answer in the 1.0.0 shape. An empty list beside another conclusion is the
+            # absent list. An ``insufficient_packet`` that names nothing keeps its conclusion and
+            # its rulings; it is read through the same-shape no-discrepancy branch and the check
+            # discloses the unnamed request (``semantic_missing_items_rejected``).
+            fields.pop("missing_for_assessment", None)
+            if fields.get("conclusion") == "insufficient_packet":
+                fields["conclusion"] = "no_material_discrepancy"
+                unnamed = True
+        body = fields
+        if unnamed:
+            # Classify a rejection against the shape actually validated, so the absent list
+            # itself is never reported as the failure.
+            source = {**cast(dict[str, JsonValue], parsed), "judgment": body} if envelope else body
     if envelope:
         try:
             model = _PROVIDER_JUDGMENT_ENVELOPE_ADAPTER.validate_python(
@@ -1031,7 +1121,18 @@ def normalize_judgment(parsed: JsonValue) -> SemanticJudgment:
             raise JudgmentValidationError(_classify_rejected_judgment(source)) from exc
     challenges = tuple(_challenge_from_model(item) for item in model.reviewer_challenges)
     verdicts = tuple(_verdict_from_model(item) for item in model.prior_finding_verdicts)
-    return SemanticJudgment(model.conclusion, challenges, verdicts, dropped)
+    missing = (
+        tuple(_missing_item_from_model(item) for item in model.missing_for_assessment)
+        if type(model) is ProviderJudgmentInsufficientModel
+        else ()
+    )
+    return SemanticJudgment(
+        "insufficient_packet" if unnamed else model.conclusion,
+        challenges,
+        verdicts,
+        dropped,
+        missing_for_assessment=missing,
+    )
 
 
 def _separate_prior_verdicts(body: JsonValue) -> tuple[list[JsonValue], int]:

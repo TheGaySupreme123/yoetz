@@ -22,6 +22,8 @@ from yoetz.adapters.providers.openai_responses import (
     CHALLENGE_FIELD_GLOSSARY,
     FINDING_KIND_GLOSSARY,
     JUDGMENT_JSON_SCHEMA,
+    MISSING_ITEM_FIELD_GLOSSARY,
+    MISSING_ITEM_KIND_GLOSSARY,
     VERDICT_FIELD_GLOSSARY,
     JudgmentValidationError,
     OpenAIProfile,
@@ -56,6 +58,7 @@ _NOW = datetime(2026, 7, 28, tzinfo=UTC)
 _DIGEST = "sha256:" + "c" * 64
 _REPO = Path(__file__).resolve().parents[4]
 _FROZEN_SCHEMA = _REPO / "schemas" / "findings" / "provider-judgment-1.1.0.schema.json"
+_RELEASED_1_0_SCHEMA = _REPO / "schemas" / "findings" / "provider-judgment-1.0.0.schema.json"
 
 _REF_A = "clm_20000000-0000-4000-8000-000000000001"
 _REF_B = "act_10000000-0000-4000-8000-000000000001"
@@ -80,15 +83,33 @@ def _challenge(
     }
 
 
+def _missing(
+    kind: str = "verification_output",
+    refs: list[str] | None = None,
+    reason: str = "The test output that the completion claim cites is not in the packet.",
+) -> dict[str, JsonValue]:
+    return {
+        "kind": kind,
+        "target_refs": cast(list[JsonValue], [_REF_A] if refs is None else refs),
+        "reason": reason,
+    }
+
+
 def _judgment(
     conclusion: str = "no_material_discrepancy",
     challenges: list[dict[str, JsonValue]] | None = None,
+    missing: list[dict[str, JsonValue]] | None = None,
 ) -> dict[str, JsonValue]:
-    return {
+    body: dict[str, JsonValue] = {
         "conclusion": conclusion,
         "reviewer_challenges": cast(list[JsonValue], [] if challenges is None else challenges),
         "prior_finding_verdicts": [],
     }
+    if missing is not None:
+        body["missing_for_assessment"] = cast(list[JsonValue], missing)
+    elif conclusion == "insufficient_packet":
+        body["missing_for_assessment"] = [cast(JsonValue, _missing())]
+    return body
 
 
 def _provider_schema_accepts(value: JsonValue) -> bool:
@@ -267,7 +288,11 @@ def test_request_schema_carries_no_docstring_commentary() -> None:
 
     assert _annotations(JUDGMENT_JSON_SCHEMA, "title") == []
 
-    curated = set(CHALLENGE_FIELD_GLOSSARY.values()) | set(VERDICT_FIELD_GLOSSARY.values())
+    curated = (
+        set(CHALLENGE_FIELD_GLOSSARY.values())
+        | set(VERDICT_FIELD_GLOSSARY.values())
+        | set(MISSING_ITEM_FIELD_GLOSSARY.values())
+    )
     descriptions = _annotations(JUDGMENT_JSON_SCHEMA, "description")
     assert descriptions
     assert set(descriptions) <= curated
@@ -579,6 +604,135 @@ def test_rejected_judgments_carry_one_closed_validation_stage(
     assert info.value.stage == stage
     # Every stage token doubles as the ``judgment_<stage>`` runtime-evidence member.
     assert f"judgment_{stage}" in RUNTIME_FAILURE_STAGES
+
+
+# --- Issue #907: an unassessable packet must name what was missing -----------------------------
+
+
+def test_insufficient_packet_naming_nothing_is_read_backward_not_rejected() -> None:
+    """The request schema requires the list; a 1.0.0-shape reply still keeps its rulings.
+
+    A local model or prompt-only host may answer ``insufficient_packet`` without naming what was
+    missing. Rejecting the whole judgment would also discard #905's rulings, so the consumer reads
+    it with no items and the check discloses the unnamed request.
+    """
+
+    ruling: dict[str, JsonValue] = {
+        "finding_id": "fnd_866db2dd-0000-4000-8000-000000000001",
+        "verdict": "still_present",
+        "cited_refs": [_REF_C],
+        "note": "The failing lookup still has no regression result.",
+    }
+    bare = _judgment("insufficient_packet")
+    del bare["missing_for_assessment"]
+    bare["prior_finding_verdicts"] = [ruling]
+    empty = {**_judgment("insufficient_packet", missing=[]), "prior_finding_verdicts": [ruling]}
+    for value in (bare, empty):
+        assert not _provider_schema_accepts(cast(JsonValue, value))
+        for parsed in (value, {"judgment": value}):
+            judgment = normalize_judgment(cast(JsonValue, parsed))
+            assert judgment.conclusion == "insufficient_packet"
+            assert judgment.missing_for_assessment == ()
+            assert [item.verdict for item in judgment.prior_finding_verdicts] == ["still_present"]
+    assert _provider_schema_accepts(cast(JsonValue, _judgment("insufficient_packet")))
+    # Reading it backward never admits what the insufficient branch forbids.
+    with pytest.raises(JudgmentValidationError) as info:
+        normalize_judgment(
+            cast(JsonValue, {**bare, "reviewer_challenges": [cast(JsonValue, _challenge())]})
+        )
+    assert info.value.stage == "conclusion_mismatch"
+
+
+def test_an_empty_missing_list_beside_another_conclusion_is_the_absent_list() -> None:
+    for conclusion, challenges in (
+        ("no_material_discrepancy", []),
+        ("challenges_returned", [_challenge()]),
+    ):
+        judgment = normalize_judgment(
+            cast(JsonValue, _judgment(conclusion, challenges, missing=[]))
+        )
+        assert judgment.conclusion == conclusion
+        assert len(judgment.challenges) == len(challenges)
+        assert judgment.missing_for_assessment == ()
+
+
+def test_only_insufficient_packet_may_name_missing_items() -> None:
+    for conclusion, challenges in (
+        ("no_material_discrepancy", []),
+        ("challenges_returned", [_challenge()]),
+    ):
+        value = _judgment(conclusion, challenges, missing=[_missing()])
+        assert not _provider_schema_accepts(cast(JsonValue, value))
+        with pytest.raises(JudgmentValidationError) as info:
+            normalize_judgment(cast(JsonValue, value))
+        assert info.value.stage == "conclusion_mismatch"
+
+
+def test_missing_items_normalize_with_canonical_refs_and_bounded_reason() -> None:
+    judgment = normalize_judgment(
+        _judgment(
+            "insufficient_packet",
+            missing=[
+                _missing("current_diff_for_path", [_REF_C, _REF_A]),
+                _missing("task_statement", []),
+            ],
+        )
+    )
+    assert judgment.conclusion == "insufficient_packet"
+    assert [(item.kind, item.target_refs) for item in judgment.missing_for_assessment] == [
+        ("current_diff_for_path", tuple(sorted((_REF_C, _REF_A), key=str.encode))),
+        ("task_statement", ()),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("missing", "stage"),
+    [
+        (_missing("invented_kind"), "enum_invalid"),
+        (_missing(refs=["src/app.py"]), "refs_invalid"),
+        (_missing(refs=[_REF_A, _REF_A]), "refs_duplicate"),
+        (
+            _missing(
+                refs=[
+                    _REF_A,
+                    _REF_B,
+                    _REF_C,
+                    "clm_20000000-0000-4000-8000-000000000009",
+                    "evd_30000000-0000-4000-8000-000000000009",
+                ]
+            ),
+            "refs_invalid",
+        ),
+        (_missing(reason=""), "text_bounds"),
+        (_missing(reason="x" * 300), "text_bounds"),
+    ],
+)
+def test_malformed_missing_items_carry_one_closed_stage(
+    missing: dict[str, JsonValue], stage: str
+) -> None:
+    value = _judgment("insufficient_packet", missing=[missing])
+    assert not _provider_schema_accepts(cast(JsonValue, value))
+    with pytest.raises(JudgmentValidationError) as info:
+        normalize_judgment(cast(JsonValue, value))
+    assert info.value.stage == stage
+
+
+def test_every_missing_kind_and_field_has_a_reviewer_gloss() -> None:
+    definitions = cast(dict[str, Any], JUDGMENT_JSON_SCHEMA["$defs"])
+    kinds = cast(dict[str, Any], definitions["MissingForAssessmentKindWire"])
+    assert set(kinds["enum"]) == set(MISSING_ITEM_KIND_GLOSSARY)
+    for kind in MISSING_ITEM_KIND_GLOSSARY:
+        assert f"{kind}: " in kinds["description"]
+    item = cast(dict[str, Any], definitions["ProviderMissingItem"])
+    assert set(MISSING_ITEM_FIELD_GLOSSARY) == set(cast(dict[str, Any], item["properties"]))
+
+
+def test_released_provider_judgment_1_0_stays_frozen_beside_1_1() -> None:
+    released = cast(dict[str, Any], strict_json_parse(_RELEASED_1_0_SCHEMA.read_bytes()))
+    insufficient = released["$defs"]["ProviderJudgmentInsufficient"]
+    assert set(insufficient["properties"]) == {"conclusion", "reviewer_challenges"}
+    current = cast(dict[str, Any], strict_json_parse(_FROZEN_SCHEMA.read_bytes()))
+    assert "missing_for_assessment" in current["$defs"]["ProviderJudgmentInsufficient"]["required"]
 
 
 def _ruling(**overrides: JsonValue) -> dict[str, JsonValue]:

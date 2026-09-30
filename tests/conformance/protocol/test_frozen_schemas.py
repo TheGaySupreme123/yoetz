@@ -298,6 +298,7 @@ def test_schema_registry_is_complete() -> None:
                     "events/session-opened-1.1.0.schema.json",
                     "events/session-resumed-1.1.0.schema.json",
                     "findings/finding-1.1.0.schema.json",
+                    "findings/provider-judgment-1.1.0.schema.json",
                     "findings/semantic-provenance-1.1.0.schema.json",
                     "operations/check-request-1.1.0.schema.json",
                     "operations/check-result-1.1.0.schema.json",

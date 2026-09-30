@@ -115,7 +115,7 @@ def _version_slice_payload() -> dict[str, object]:
 # A new result model that joins the set without a row in this table fails the inventory test.
 _RESULT_OPTIONAL_NON_NULL: tuple[tuple[type[BaseModel], frozenset[str]], ...] = (
     (CheckContinuationModel, frozenset({"pending_id", "expires_at"})),
-    (CheckSuccessModel, frozenset({"children", "advisory_notes"})),
+    (CheckSuccessModel, frozenset({"children", "advisory_notes", "missing_for_assessment"})),
     (
         ChildDependencySnapshotModel,
         frozenset(
@@ -870,6 +870,8 @@ async def test_root_start_and_check_omit_unset_multi_agent_fields() -> None:
         )
         assert "children" not in projected_check
         assert "advisory_notes" not in projected_check
+        # Issue #907: only an insufficient_packet review that named items emits the list.
+        assert "missing_for_assessment" not in projected_check
     finally:
         await app.close()
 
@@ -1091,7 +1093,7 @@ def test_every_result_optional_non_null_field_has_an_unset_projection_case() -> 
         )
     for model, fields in (
         ("StartSuccessModel", ("attach_handle", "parent_task_id", "depth", "origin", "acceptance")),
-        ("CheckSuccessModel", ("children", "advisory_notes")),
+        ("CheckSuccessModel", ("children", "advisory_notes", "missing_for_assessment")),
     ):
         for field in fields:
             covered[model, field] = "test_root_start_and_check_omit_unset_multi_agent_fields"

@@ -34,6 +34,7 @@ from yoetz.kernel.projections import ProjectionState, projection_snapshot
 from yoetz.kernel.reducers import replay
 from yoetz.ports.ledger import CheckCommitResult, FrozenCase
 from yoetz.ports.semantic import (
+    MissingForAssessment,
     PriorFindingVerdict,
     ReviewerChallenge,
     SamplingParams,
@@ -104,6 +105,8 @@ class _Reviewer:
     answers: list[Callable[[FrozenCase], SemanticJudgment]]
     cases: list[SemanticCase] = field(default_factory=lambda: [])
     seed: int = 2600
+    # Case content gaps the composing evaluator reports per round (issue #907 budget cuts).
+    content_gaps: dict[int, tuple[str, ...]] = field(default_factory=lambda: {})
 
     async def __call__(
         self,
@@ -136,6 +139,7 @@ class _Reviewer:
             provenance=_provenance(self.seed + 10 * len(self.cases)),
             case_prior_finding_refs=view.prior_finding_refs,
             case_citable_refs=view.citable_refs,
+            case_content_gaps=self.content_gaps.get(len(self.cases) - 1, ()),
         )
 
 
@@ -350,10 +354,14 @@ def _rule_first_finding(
         )
         newest = max(projection.results.items(), key=lambda pair: pair[1].source_frontier)[0]
         refs = (str(newest),) if cite_repair else ()
+        # provider-judgment 1.1.0 requires every insufficient_packet to name what was missing.
         return SemanticJudgment(
             "insufficient_packet",
             (),
             (PriorFindingVerdict(str(finding), verdict, refs),),  # type: ignore[arg-type]
+            missing_for_assessment=(
+                MissingForAssessment("verification_output", (str(newest),), "run output absent"),
+            ),
         )
 
     return answer
@@ -394,5 +402,59 @@ async def test_a_cited_fixed_ruling_closes_a_repaired_finding_under_an_insuffici
     else:
         assert [item.verdict for item in recorded.prior_finding_verdicts] == ["unassessable"]
         assert "semantic_prior_verdicts_unsupported" in second.coverage.known_gaps
+        assert resolved_by is None
+    assert projection_snapshot(replay(_records(session.app))) == projection_snapshot(live)
+
+
+def _rule_first_finding_on_a_complete_packet(
+    verdict: str | None,
+) -> Callable[[FrozenCase], SemanticJudgment]:
+    def answer(frozen: FrozenCase) -> SemanticJudgment:
+        projection = frozen.case.projection
+        finding = next(
+            key
+            for key, row in projection.findings.items()
+            if row.payload is not None
+            and row.payload.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+        )
+        newest = max(projection.results.items(), key=lambda pair: pair[1].source_frontier)[0]
+        rulings = (
+            () if verdict is None else (PriorFindingVerdict(str(finding), verdict, (str(newest),)),)  # type: ignore[arg-type]
+        )
+        return SemanticJudgment("no_material_discrepancy", (), rulings)
+
+    return answer
+
+
+@pytest.mark.parametrize("verdict", ["fixed", None])
+async def test_budget_cut_excerpts_block_silence_but_not_a_cited_fixed_ruling(
+    verdict: str | None,
+) -> None:
+    """Issue #907: the repair check's packet cut excerpts (``content_unselected``).
+
+    The finding was raised before the cut, so its baseline lacks the gap. A cited ``fixed``
+    ruling assessed it on material the reviewer was shown and closes it; silence does not
+    (intentional: a selection gap still blocks closing an AI-powered finding by silence).
+    """
+
+    seed = 3000 + (0 if verdict == "fixed" else 100)
+    reviewer = _Reviewer(
+        [_challenge_obligation, _rule_first_finding_on_a_complete_packet(verdict)],
+        content_gaps={1: ("content_unselected",)},
+    )
+    session, frontier = await _session(reviewer, seed)
+    first = await _check(session, frontier, seed + 10)
+    raised = _semantic(first)
+    assert "content_unselected" not in raised.coverage.known_gaps
+    _result, repaired = await _repair(session, frontier_json(first.result_frontier), seed + 20)
+    second = await _check(session, repaired, seed + 40)
+
+    assert "content_unselected" in second.coverage.known_gaps
+    live = _live_projection(session.app)
+    resolved_by = live.findings[raised.finding_id].resolved_by_check_event_id
+    check_rows = [row for row in _records(session.app) if row.schema.name == "check_recorded"]
+    if verdict == "fixed":
+        assert resolved_by == check_rows[-1].event_id
+    else:
         assert resolved_by is None
     assert projection_snapshot(replay(_records(session.app))) == projection_snapshot(live)

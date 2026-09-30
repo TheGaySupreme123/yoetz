@@ -9,6 +9,10 @@ from pathlib import Path
 from typing import Final, Literal, Protocol, cast
 
 from yoetz.application.ledger_snapshot import projection_for_records
+from yoetz.application.missing_for_assessment import (
+    MissingItemsReview,
+    review_missing_for_assessment,
+)
 from yoetz.domain.coordination import CoordinationError, CoordinationErrorCode
 from yoetz.domain.events import LedgerRecord
 from yoetz.domain.findings import (
@@ -122,6 +126,7 @@ from yoetz.protocol.coverage import (
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind
 from yoetz.protocol.models import (
+    MISSING_FOR_ASSESSMENT_KINDS,
     CheckRequest,
     CheckScopeModel,
     SemanticReason,
@@ -257,6 +262,7 @@ _SEMANTIC_REJECTION_REASONS: Final = frozenset(
     }
 )
 _EMPTY_SEMANTIC_REVIEW: Final = SemanticJudgmentReview((), 0, ())
+_EMPTY_MISSING_ITEMS: Final = MissingItemsReview((), frozenset())
 
 
 def _projected_finding_json(finding: Finding) -> JsonValue:
@@ -399,6 +405,20 @@ def check_internal_json(result: CheckCommitResult) -> dict[str, JsonValue]:
             {}
             if not result.advisory_notes
             else {"advisory_notes": advisory_notes_json(result.advisory_notes)}
+        ),
+        **(
+            {}
+            if not result.missing_for_assessment
+            else {
+                "missing_for_assessment": tuple(
+                    {
+                        "availability": item.availability,
+                        "kind": item.kind,
+                        "target_refs": item.target_refs,
+                    }
+                    for item in result.missing_for_assessment
+                )
+            }
         ),
     }
 
@@ -969,10 +989,20 @@ class FinalSemanticEvaluation:
     case_content_over_item_limit: bool = False
     case_reference_scope_reduced: bool = False
     case_content_gaps: tuple[str, ...] = ()
+    # Missing-item kinds the effective review selection or channel can never carry (issue #907).
+    # Computed where the case is composed, so the check can classify what a reviewer names.
+    unsuppliable_missing_kinds: tuple[str, ...] = ()
     # The packet the reviewer was shown (issue #905): the earlier findings its prior-findings
     # section carried and its citable refs. ``None`` when the evaluator did not report them.
     case_prior_finding_refs: frozenset[str] | None = None
     case_citable_refs: frozenset[str] | None = None
+    # Issue #907: workspace-relative paths each hook-captured edit in the case records, keyed by
+    # evidence ref. In process only, to bind a fresh diff to a repeated missing-item request;
+    # never recorded, logged or sent. ``None`` when the evaluator did not resolve captures.
+    case_captured_edit_paths: Mapping[str, frozenset[str]] | None = None
+    # Issue #907: the absolute workspace root the session opened with, anchoring absolute paths
+    # an agent names; in process only, never recorded. ``None`` when it was not resolved.
+    case_workspace_root: str | None = None
     # Set only on the nonterminal awaiting_human branch: what the caller must do to resume this
     # exact request. Every terminal outcome leaves it None. A one-use disclosure wait keeps its
     # job and attempt open; a missing standing repository grant stops before either exists.
@@ -992,6 +1022,13 @@ class FinalSemanticEvaluation:
                 SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
                 SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP,
             }
+        ):
+            raise _invalid("semantic_judgment_invalid")
+        if (
+            type(self.unsuppliable_missing_kinds) is not tuple
+            or self.unsuppliable_missing_kinds
+            != tuple(sorted(set(self.unsuppliable_missing_kinds), key=str.encode))
+            or not set(self.unsuppliable_missing_kinds) <= MISSING_FOR_ASSESSMENT_KINDS
         ):
             raise _invalid("semantic_judgment_invalid")
         validate_semantic_outcome(self.status, self.reason)
@@ -2645,12 +2682,25 @@ async def execute_check_commit(
         }
         semantic_gap = semantic_coverage_gap_code(semantic_result.status, semantic_result.reason)
         declared_gaps: set[str] = set() if semantic_gap is None else {semantic_gap}
+        missing = _EMPTY_MISSING_ITEMS
         if (
             semantic_result.status is SemanticStatus.SUCCEEDED
             and semantic_result.judgment is not None
             and semantic_result.judgment.conclusion == "insufficient_packet"
         ):
             declared_gaps.add(SEMANTIC_PACKET_INSUFFICIENT_GAP)
+            # Issue #907: what the reviewer named, fenced to the case and classified by Yoetz.
+            # The gaps below are check limitations, never findings or a clean review.
+            missing = review_missing_for_assessment(
+                frozen.case,
+                deterministic,
+                semantic_result.judgment,
+                unsuppliable_kinds=frozenset(semantic_result.unsuppliable_missing_kinds),
+                citable_refs=semantic_result.case_citable_refs,
+                captured_edit_paths=semantic_result.case_captured_edit_paths,
+                workspace_root=semantic_result.case_workspace_root,
+            )
+            declared_gaps |= missing.gaps
         if (
             route_profile == "strict"
             and semantic_result.status is SemanticStatus.BLOCKED_BY_POLICY
@@ -2754,6 +2804,7 @@ async def execute_check_commit(
             prior_finding_verdicts=(
                 review.verdicts if semantic_result.status is SemanticStatus.SUCCEEDED else ()
             ),
+            missing_for_assessment=missing.items,
         )
         preview = _lineage_preview(lineage_evaluation, frozen.case.frontier)
         projected = committed if preview is None else replace(committed, children=preview)
