@@ -21,6 +21,7 @@ from yoetz.adapters.sqlite.migrations import initialize_bundle
 from yoetz.adapters.sqlite.repository import SqliteLedger
 from yoetz.domain.events import (
     SEMANTIC_EVENT_SCHEMA_VERSION,
+    CheckChangeShownFiles,
     CheckRecordedPayload,
     EventDraft,
     EventPayload,
@@ -50,7 +51,7 @@ from yoetz.domain.values import (
     obligation_id,
     parse_rfc3339_millis,
 )
-from yoetz.kernel.projections import ProjectionState
+from yoetz.kernel.projections import ProjectionState, projection_snapshot
 from yoetz.kernel.ranking import CheckCompleteness, RankingContext, rank_findings
 from yoetz.ports.change_capture import (
     TASK_CHANGE_BASE_MEDIA_TYPE,
@@ -1577,6 +1578,75 @@ async def test_sqlite_reopen_replays_ranked_order_after_canonical_set_commit() -
     assert replayed.findings[0].provenance is not None
     assert replayed.semantic_status is SemanticStatus.SUCCEEDED
     assert replayed.semantic_provenance is not None
+
+
+@pytest.mark.anyio
+async def test_check_change_shown_files_replay_to_the_same_raise_facts_in_both_ledgers() -> None:
+    """ADR-031: the raising check's shown files reach the finding row identically on replay."""
+
+    files = CheckChangeShownFiles(
+        ("hmac-sha256:" + "1" * 64, "hmac-sha256:" + "2" * 64),
+        ("hmac-sha256:" + "3" * 64,),
+        complete=True,
+    )
+    command = ledger_command()
+    snapshots: list[JsonValue] = []
+    memory = memory_ledger(command)
+    sqlite = sqlite_ledger(command)
+    for adapter in (memory, sqlite):
+        await adapter.append_batch(command)
+        frozen = await _ready_case(
+            adapter,
+            command,
+            "req_00000000-0000-4000-8000-00000000004d",
+            "sha256:" + "d" * 64,
+        )
+        selected = _descending_rank_findings(
+            frozen.case.frontier, command.entries[0].coverage, semantic_lead=True
+        )
+        await adapter.commit_check_if_current(
+            frozen,
+            RankedFindings(selected, 0, CheckVerdict.ACTION_REQUIRED, command.entries[0].coverage),
+            (CheckPolicyExecution("work-integrity", "0.1.0", "run", "completed"),),
+            SemanticStatus.SUCCEEDED,
+            SemanticReason.SEMANTIC_COMPLETED,
+            selected[0].provenance,
+            frozen.lease.operation_id,
+            semantic_conclusion="challenges_returned",
+            check_change_files=files,
+        )
+        checks = [
+            row
+            async for row in adapter.load_events(command.session_id)
+            if row.schema.name == "check_recorded"
+        ]
+        assert [row.schema.version for row in checks] == ["1.3.0"]
+        payload = checks[0].payload
+        assert isinstance(payload, CheckRecordedPayload) and payload.check_change_files == files
+        stored = await adapter.load_projection(
+            command.session_id, ProjectionView.CANDIDATE_FINDINGS
+        )
+        assert stored is not None and type(stored.state) is ProjectionState
+        raised = stored.state.findings[selected[0].finding_id]
+        assert raised.check_change_raising_check_event_id == checks[0].event_id
+        assert raised.check_change_raised_files == tuple(sorted(files.shown))
+        assert stored.state.findings[selected[1].finding_id].check_change_raised_files is None
+        snapshots.append(projection_snapshot(stored.state))
+
+    restarted = SqliteLedger(
+        db=sqlite._db,  # pyright: ignore[reportPrivateUsage]
+        task_id=command.task_id,
+        ownership_fence=_fence(),
+        clock=sqlite._clock,  # pyright: ignore[reportPrivateUsage]
+        ids=sqlite._ids,  # pyright: ignore[reportPrivateUsage]
+        objects=sqlite._objects,  # pyright: ignore[reportPrivateUsage]
+    )
+    replayed = await restarted.load_projection(
+        command.session_id, ProjectionView.CANDIDATE_FINDINGS
+    )
+    assert replayed is not None and type(replayed.state) is ProjectionState
+    snapshots.append(projection_snapshot(replayed.state))
+    assert snapshots[0] == snapshots[1] == snapshots[2]
 
 
 @pytest.mark.anyio

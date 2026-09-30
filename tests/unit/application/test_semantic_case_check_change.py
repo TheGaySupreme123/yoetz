@@ -28,6 +28,7 @@ from yoetz.application.semantic_case import (
     CapturedSemanticContent,
     CheckTimeChange,
     build_semantic_case,
+    check_time_change_shown_files,
     semantic_case_to_prepared_payload,
 )
 from yoetz.domain.events import (
@@ -318,3 +319,50 @@ def test_value_rejects_objects_that_are_not_check_change_captures() -> None:
         CheckTimeChange(wrong_kind, valid.capture)
     with pytest.raises(ValueError, match="semantic_case_check_change_invalid"):
         _build(_case_with_material(), change=valid, unavailable=True)
+
+
+def _section(path: str, lines: int, *, fill: str = "x") -> bytes:
+    head = f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1,{lines} @@\n"
+    return head.encode() + b"".join(f"+{fill * 60} {index}\n".encode() for index in range(lines))
+
+
+def test_shown_files_follow_the_admitted_parts_and_redaction() -> None:
+    """Whole, cut at the packet boundary, redacted, and never reached (ADR-031 resolution)."""
+
+    header = b"Yoetz check-time change: header\nFiles:\n  M listed-only.ts\nEnd of header.\n"
+    text = (
+        header
+        + _section("whole.ts", 3)
+        + _section("redacted.ts", 2).replace(b"x" * 60, b"[REDACTED]" + b"x" * 50, 1)
+        + _section("cut.ts", 1_500)
+        + _section("never.ts", 1_500)
+    )
+    change = _change(text)
+    case = _build(_case_with_material(), change=change)
+    admitted = len(_change_items(case))
+    selection = ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED)
+
+    files = check_time_change_shown_files(change.capture, selection, admitted)
+
+    assert [(identity.decode(), whole) for identity, whole in files][:3] == [
+        ("diff --git a/whole.ts b/whole.ts", True),
+        ("diff --git a/redacted.ts b/redacted.ts", False),
+        ("diff --git a/cut.ts b/cut.ts", False),
+    ]
+    assert all(b"never.ts" not in identity for identity, _ in files)
+    assert all(b"listed-only" not in identity for identity, _ in files)
+    # With every part admitted the whole unredacted change is fully shown.
+    everything = check_time_change_shown_files(
+        change.capture, selection, len(_check_time_change_chunks(text))
+    )
+    assert dict(everything)[b"diff --git a/never.ts b/never.ts"] is True
+    assert check_time_change_shown_files(change.capture, selection, 0) == ()
+
+
+def _check_time_change_chunks(text: bytes) -> tuple[bytes, ...]:
+    from yoetz.application import semantic_case as module
+
+    selection = ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED)
+    chunks = getattr(module, "_check_time_change_chunks")
+    limit = getattr(module, "_check_time_change_part_limit")(selection)
+    return cast(tuple[bytes, ...], chunks(text, limit))

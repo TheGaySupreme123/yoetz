@@ -10,7 +10,7 @@ from typing import Final, Literal, Protocol, cast
 
 from yoetz.application.ledger_snapshot import projection_for_records
 from yoetz.domain.coordination import CoordinationError, CoordinationErrorCode
-from yoetz.domain.events import LedgerRecord
+from yoetz.domain.events import CheckChangeShownFiles, LedgerRecord
 from yoetz.domain.findings import (
     FINDING_KIND_TRAITS,
     CandidateFinding,
@@ -953,6 +953,8 @@ class FinalSemanticEvaluation:
     case_content_over_item_limit: bool = False
     case_reference_scope_reduced: bool = False
     case_content_gaps: tuple[str, ...] = ()
+    # ADR-031: keyed commitments to the check-time change files the review packet carried.
+    check_change_files: CheckChangeShownFiles | None = None
     # Set only on the nonterminal awaiting_human branch: what the caller must do to resume this
     # exact request. Every terminal outcome leaves it None. A one-use disclosure wait keeps its
     # job and attempt open; a missing standing repository grant stops before either exists.
@@ -2477,6 +2479,12 @@ async def execute_check_commit(
                 CheckPhase.READY_TO_FINALIZE,
             )
             frozen = FrozenCase(frozen.case, lease)
+        semantic_conclusion = (
+            semantic_result.judgment.conclusion
+            if semantic_result.status is SemanticStatus.SUCCEEDED
+            and semantic_result.judgment is not None
+            else None
+        )
         committed = await runtime.ledger.commit_check_if_current(
             frozen,
             ranked,
@@ -2486,11 +2494,10 @@ async def execute_check_commit(
             semantic_result.provenance,
             request.request_id,
             scope=CheckScopeModel(claim_ids=scope.claim_ids, obligation_ids=scope.obligation_ids),
-            semantic_conclusion=(
-                semantic_result.judgment.conclusion
-                if semantic_result.status is SemanticStatus.SUCCEEDED
-                and semantic_result.judgment is not None
-                else None
+            semantic_conclusion=semantic_conclusion,
+            # Recorded only beside a conclusion: resolution reads it from completed reviews only.
+            check_change_files=(
+                None if semantic_conclusion is None else semantic_result.check_change_files
             ),
         )
         preview = _lineage_preview(lineage_evaluation, frozen.case.frontier)

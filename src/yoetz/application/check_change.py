@@ -17,7 +17,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from typing import Final, cast
 
-from yoetz.application.semantic_case import CheckTimeChange
+from yoetz.application.semantic_case import CheckTimeChange, check_time_change_shown_files
+from yoetz.domain.events import MAX_CHECK_CHANGE_SHOWN_FILES, CheckChangeShownFiles
 from yoetz.domain.privacy import ReviewSelectionPolicy
 from yoetz.observability.logging import (
     record_bounded_event_without_raising,
@@ -46,6 +47,7 @@ from yoetz.protocol.canonical import JsonValue
 __all__ = [
     "CheckChangeOutcome",
     "capture_check_time_change",
+    "check_change_shown_files",
     "check_time_change_selected",
     "record_task_change_base",
     "recover_check_time_change",
@@ -53,6 +55,9 @@ __all__ = [
 
 _COMPONENT: Final = "semantic_composition"
 _MAX_REDACTION_PASSES: Final = 64
+# Keyed per-file commitments share the change_capture commitment key with a message prefix that
+# no stored change_capture object (canonical JSON, starting with ``{``) can begin with.
+_SHOWN_FILE_DOMAIN: Final = b"yoetz/check-change-shown-file/v1\x00"
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +100,39 @@ class CheckChangeOutcome:
                 "unavailable": self.unavailable,
             },
         )
+
+
+async def check_change_shown_files(
+    runtime: TaskRuntime,
+    change: CheckTimeChange,
+    selection: ReviewSelectionPolicy,
+    admitted_parts: int,
+) -> CheckChangeShownFiles:
+    """Keyed commitments to the changed files one review packet carried (ADR-031).
+
+    Each file is committed with the task bundle's own object commitment key over its base and its
+    ``diff --git`` line, so no path is recorded, the same file under the same base commits the
+    same way in every check of the task, and a file under a different base (HEAD moved) does not
+    match. A recovered job derives the same commitments from its stored object.
+    """
+
+    files = check_time_change_shown_files(change.capture, selection, admitted_parts)
+    if len(files) > MAX_CHECK_CHANGE_SHOWN_FILES:
+        return CheckChangeShownFiles((), (), complete=False)
+    base = change.capture.base_commit.encode("ascii")
+    fully: set[str] = set()
+    partially: set[str] = set()
+    for identity, whole in files:
+        commitment = await runtime.objects.commitment_for(
+            _SHOWN_FILE_DOMAIN + base + b"\x00" + identity, ObjectKind.CHANGE_CAPTURE
+        )
+        (fully if whole else partially).add(commitment)
+    partially -= fully
+    return CheckChangeShownFiles(
+        tuple(sorted(fully, key=str.encode)),
+        tuple(sorted(partially, key=str.encode)),
+        complete=True,
+    )
 
 
 def check_time_change_selected(selection: ReviewSelectionPolicy) -> bool:

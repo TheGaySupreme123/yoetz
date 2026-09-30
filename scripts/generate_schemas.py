@@ -1289,6 +1289,23 @@ def _check_recorded_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     }
     cast(list[JsonValue], document["required"]).append("semantic_conclusion")
     properties["semantic_status"] = {"const": "succeeded", "type": "string"}
+    # ADR-031 (#883): keyed commitments to the check-time change files this review was shown.
+    commitments: dict[str, JsonValue] = {
+        "items": {"pattern": "^hmac-sha256:[0-9a-f]{64}$", "type": "string"},
+        "maxItems": 128,
+        "type": "array",
+        "uniqueItems": True,
+    }
+    properties["check_change_files"] = {
+        "additionalProperties": False,
+        "properties": {
+            "complete": {"type": "boolean"},
+            "fully_shown": commitments,
+            "partially_shown": json.loads(json.dumps(commitments)),
+        },
+        "required": ["complete", "fully_shown", "partially_shown"],
+        "type": "object",
+    }
     return document
 
 

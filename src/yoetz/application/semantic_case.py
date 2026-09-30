@@ -113,6 +113,7 @@ from yoetz.protocol.models import (
 
 __all__ = [
     "CHECK_TIME_CHANGE_ITEM_PREFIX",
+    "check_time_change_shown_files",
     "CapturedContentScope",
     "CapturedSemanticContent",
     "CheckTimeChange",
@@ -399,8 +400,23 @@ def _check_time_change_reservation(selection: ReviewSelectionPolicy) -> tuple[in
     return max(1, selection.max_excerpts // 2), selection.max_total_excerpt_bytes // 2
 
 
+def _check_time_change_part_limit(selection: ReviewSelectionPolicy) -> int:
+    return min(selection.max_excerpt_bytes, MAX_REVIEW_TEXT_BYTES, MAX_SEMANTIC_ITEM_BYTES)
+
+
 def _check_time_change_parts(text: bytes, part_limit: int) -> tuple[str, ...]:
     """Split the rendered change into self-describing parts, preferring line boundaries."""
+
+    chunks = _check_time_change_chunks(text, part_limit)
+    count = len(chunks)
+    return tuple(
+        _CHECK_TIME_CHANGE_MARKER.format(index=index + 1, count=count) + chunk.decode("utf-8")
+        for index, chunk in enumerate(chunks)
+    )
+
+
+def _check_time_change_chunks(text: bytes, part_limit: int) -> tuple[bytes, ...]:
+    """The raw byte slices of ``text`` each part carries, in order; they concatenate to ``text``."""
 
     marker_room = len(_CHECK_TIME_CHANGE_MARKER.format(index=999, count=999).encode("ascii"))
     chunk_limit = part_limit - marker_room
@@ -419,11 +435,46 @@ def _check_time_change_parts(text: bytes, part_limit: int) -> tuple[str, ...]:
             cut = len(window.decode("utf-8", errors="ignore").encode("utf-8"))
         chunks.append(rest[:cut])
         rest = rest[cut:]
-    count = len(chunks)
-    return tuple(
-        _CHECK_TIME_CHANGE_MARKER.format(index=index + 1, count=count) + chunk.decode("utf-8")
-        for index, chunk in enumerate(chunks)
-    )
+    return tuple(chunks)
+
+
+_CHECK_TIME_CHANGE_FILE_START: Final = re.compile(rb"^diff --git ", re.MULTILINE)
+_REDACTION_MARKER: Final = b"[REDACTED]"
+
+
+def check_time_change_shown_files(
+    capture: CheckChangeCapture,
+    selection: ReviewSelectionPolicy,
+    admitted_parts: int,
+) -> tuple[tuple[bytes, bool], ...]:
+    """Each changed file whose diff reached the packet, and whether it arrived whole (ADR-031).
+
+    A file is its ``diff --git`` section of the stored change; its identity is that section's
+    first line. It was shown when any of its bytes lie in the ``admitted_parts`` parts the packet
+    carried, and fully shown when the whole section did and it holds no redaction marker. Files
+    the change lists only in its header (not shown) are not returned. The answer is a pure
+    function of the stored object, the selection and the admitted part count, so a recovered job
+    derives the same files.
+    """
+
+    if type(capture) is not CheckChangeCapture or type(admitted_parts) is not int:
+        raise ValueError("semantic_case_check_change_invalid")
+    chunks = _check_time_change_chunks(capture.text, _check_time_change_part_limit(selection))
+    if not 0 <= admitted_parts <= len(chunks):
+        raise ValueError("semantic_case_check_change_invalid")
+    shown_bytes = sum(len(chunk) for chunk in chunks[:admitted_parts])
+    text = capture.text
+    starts = [match.start() for match in _CHECK_TIME_CHANGE_FILE_START.finditer(text)]
+    files: list[tuple[bytes, bool]] = []
+    for index, start in enumerate(starts):
+        if start >= shown_bytes:
+            break
+        end = starts[index + 1] if index + 1 < len(starts) else len(text)
+        line_end = text.find(b"\n", start, end)
+        identity = text[start : end if line_end < 0 else line_end]
+        whole = end <= shown_bytes and _REDACTION_MARKER not in text[start:end]
+        files.append((identity, whole))
+    return tuple(files)
 
 
 def _check_time_change_links(
@@ -1780,8 +1831,7 @@ def build_semantic_case(
         check_change_links = _check_time_change_links(projection, allowed)
         if check_change_links:
             check_change_parts = _check_time_change_parts(
-                change.text,
-                min(selection.max_excerpt_bytes, MAX_REVIEW_TEXT_BYTES, MAX_SEMANTIC_ITEM_BYTES),
+                change.text, _check_time_change_part_limit(selection)
             )
 
     def admit_check_time_change(slot_limit: int, byte_limit: int) -> None:

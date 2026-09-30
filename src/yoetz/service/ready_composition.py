@@ -75,6 +75,7 @@ from yoetz.application.check import FinalSemanticEvaluation
 from yoetz.application.check_change import (
     CheckChangeOutcome,
     capture_check_time_change,
+    check_change_shown_files,
     check_time_change_selected,
     recover_check_time_change,
 )
@@ -181,7 +182,7 @@ from yoetz.domain.coordination import (
     ProjectTextStore,
     WorkState,
 )
-from yoetz.domain.events import RuntimeProfile, SessionOpenedPayload
+from yoetz.domain.events import CheckChangeShownFiles, RuntimeProfile, SessionOpenedPayload
 from yoetz.domain.findings import (
     Finding,
     SemanticDispatchKind,
@@ -4006,6 +4007,7 @@ def _privacy_gated_semantic_evaluator(
         over_item_limit = False
         reference_scope_reduced = False
         content_gaps: tuple[str, ...] = ()
+        check_change_files: CheckChangeShownFiles | None = None
 
         def _on_lease_renewed(renewed: object) -> None:
             assert type(renewed) is _OpLease
@@ -4394,6 +4396,28 @@ def _privacy_gated_semantic_evaluator(
                 SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP
                 in semantic_case.packet.coverage.known_gaps
             )
+            if check_change.change is not None and runtime is not None:
+                # Which changed files this packet carried, as keyed commitments: AI-powered
+                # finding resolution compares them across checks (ADR-031). A record that cannot
+                # be computed says it is incomplete, which never tolerates a check-time limit.
+                try:
+                    check_change_files = await check_change_shown_files(
+                        runtime,
+                        check_change.change,
+                        review_selection,
+                        sum(
+                            item.excerpt_item_id.startswith(CHECK_TIME_CHANGE_ITEM_PREFIX)
+                            for item in semantic_case.packet.targeted_excerpts
+                        ),
+                    )
+                except Exception as exc:
+                    record_unexpected_exception_without_raising(
+                        exc,
+                        component="semantic_composition",
+                        operation="check_change_shown_files_failed",
+                        request_id=frozen.lease.operation_id,
+                    )
+                    check_change_files = CheckChangeShownFiles((), (), complete=False)
             if (
                 recovered_case_digest is not None
                 and semantic_case.case_digest != recovered_case_digest
@@ -4446,6 +4470,7 @@ def _privacy_gated_semantic_evaluator(
                     case_content_over_item_limit=over_item_limit,
                     case_reference_scope_reduced=reference_scope_reduced,
                     case_content_gaps=content_gaps,
+                    check_change_files=check_change_files,
                 )
 
             # Build the packet before anything durable exists. A packet that cannot be built is a
@@ -4774,6 +4799,7 @@ def _privacy_gated_semantic_evaluator(
                     case_content_over_item_limit=over_item_limit,
                     case_reference_scope_reduced=reference_scope_reduced,
                     case_content_gaps=content_gaps,
+                    check_change_files=check_change_files,
                     continuation=continuation,
                 )
 

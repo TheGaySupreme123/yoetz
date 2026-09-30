@@ -305,6 +305,7 @@ class GitChangeCaptureAdapter:
         sections.sort(key=lambda item: item.path)
         return self._render(
             base_kind,
+            base_id,
             sections,
             tracked=len(sections) - len(untracked_sections),
             untracked=untracked_total,
@@ -642,6 +643,7 @@ class GitChangeCaptureAdapter:
     def _render(
         self,
         base: ChangeBaseKind,
+        base_id: str,
         sections: list[_Section],
         *,
         tracked: int,
@@ -680,6 +682,7 @@ class GitChangeCaptureAdapter:
             untracked_files=untracked,
             omitted_files=omitted,
             truncated=omitted > 0 or untracked_listing_truncated,
+            base_commit=base_id,
         )
 
 

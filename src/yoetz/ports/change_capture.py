@@ -116,7 +116,10 @@ class CheckChangeCapture:
 
     ``truncated`` is set whenever a changed file or any of its bytes is missing from ``text``; the
     header names each file that is not shown. ``redacted`` is set by the service after it replaced
-    credential-like spans, never by the adapter.
+    credential-like spans, never by the adapter. ``base_commit`` is the object id the change was
+    taken against (the task-start commit, HEAD, or the empty tree); it keys the per-file
+    commitments a completed review records, and is empty only for an object written before it
+    existed.
     """
 
     base: ChangeBaseKind
@@ -126,6 +129,7 @@ class CheckChangeCapture:
     omitted_files: int
     truncated: bool
     redacted: bool = False
+    base_commit: str = field(default="", repr=False)
 
     def __post_init__(self) -> None:
         if self.base not in _BASE_KINDS:
@@ -144,6 +148,11 @@ class CheckChangeCapture:
         if type(self.truncated) is not bool or type(self.redacted) is not bool:
             raise _invalid()
         if self.omitted_files and not self.truncated:
+            raise _invalid()
+        if type(self.base_commit) is not str or (
+            self.base_commit
+            and (len(self.base_commit) not in {40, 64} or _HEX.fullmatch(self.base_commit) is None)
+        ):
             raise _invalid()
 
 
@@ -247,6 +256,7 @@ def encode_check_change(capture: CheckChangeCapture) -> bytes:
             JsonValue,
             {
                 "base": capture.base,
+                "base_commit": capture.base_commit,
                 "omitted_files": capture.omitted_files,
                 "redacted": capture.redacted,
                 "schema": _CHECK_CHANGE_SCHEMA,
@@ -264,7 +274,7 @@ def decode_check_change(data: bytes) -> CheckChangeCapture:
     if canonical_encode(parsed) != data or type(parsed) is not dict:
         raise _invalid()
     source = cast(dict[str, object], parsed)
-    if set(source) != {
+    if set(source) - {"base_commit"} != {
         "base",
         "omitted_files",
         "redacted",
@@ -285,4 +295,5 @@ def decode_check_change(data: bytes) -> CheckChangeCapture:
         omitted_files=cast(int, source["omitted_files"]),
         truncated=cast(bool, source["truncated"]),
         redacted=cast(bool, source["redacted"]),
+        base_commit=cast(str, source.get("base_commit", "")),
     )

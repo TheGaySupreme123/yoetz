@@ -32,6 +32,7 @@ from yoetz.application.service import VerificationPolicy
 from yoetz.domain.events import (
     ActionKind,
     ActionRecordedPayload,
+    CheckChangeShownFiles,
     ClaimKind,
     ClaimRecordedPayload,
     NoObligationsReason,
@@ -251,6 +252,7 @@ class _Ledger:
         *,
         scope: CheckScopeModel | None = None,
         semantic_conclusion: str | None = None,
+        check_change_files: CheckChangeShownFiles | None = None,
     ) -> CheckCommitResult:
         assert frozen == self.frozen
         if self.commit_failure is not None:

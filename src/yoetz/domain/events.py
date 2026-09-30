@@ -138,7 +138,9 @@ __all__ = [
     "ActionRecordedPayload",
     "AssignmentRecordedPayload",
     "CheckMode",
+    "CheckChangeShownFiles",
     "CheckRecordedPayload",
+    "MAX_CHECK_CHANGE_SHOWN_FILES",
     "ClaimKind",
     "ClaimRecordedPayload",
     "ClaimRecordedPayloadV1_1",
@@ -2192,6 +2194,47 @@ _VALID_POLICY_SELECTIONS: Final = frozenset(
 )
 
 
+# At most this many changed files a check-time change showed are recorded on one check (ADR-031).
+MAX_CHECK_CHANGE_SHOWN_FILES: Final = 128
+
+
+@dataclass(frozen=True, slots=True)
+class CheckChangeShownFiles:
+    """Which changed files of the ADR-031 check-time change reached this check's review packet.
+
+    Each entry is a keyed commitment to one changed file under the change's base, never a path.
+    ``fully_shown`` files reached the packet whole, unredacted and untruncated;
+    ``partially_shown`` files reached it only in part or with a redacted span. When more files
+    were shown than one record holds, ``complete`` is false and both sets are empty: nothing is
+    then known about which files were shown.
+    """
+
+    fully_shown: tuple[str, ...]
+    partially_shown: tuple[str, ...]
+    complete: bool
+
+    def __post_init__(self) -> None:
+        if type(self.complete) is not bool:
+            raise ProtocolValueError("invalid_event_value_type")
+        for name in ("fully_shown", "partially_shown"):
+            raw = _array(getattr(self, name))
+            values = tuple(validate_commitment(cast(str, item)) for item in raw)
+            if values != tuple(sorted(set(values), key=str.encode)):
+                raise ProtocolValueError("duplicate_set_member")
+            object.__setattr__(self, name, values)
+        if set(self.fully_shown) & set(self.partially_shown):
+            raise ProtocolValueError("duplicate_set_member")
+        count = len(self.fully_shown) + len(self.partially_shown)
+        if count > MAX_CHECK_CHANGE_SHOWN_FILES or (not self.complete and count):
+            raise ProtocolValueError("invalid_event_value_type")
+
+    @property
+    def shown(self) -> frozenset[str]:
+        """Every file the review saw any of; empty when the record is incomplete."""
+
+        return frozenset(self.fully_shown) | frozenset(self.partially_shown)
+
+
 @dataclass(frozen=True, slots=True)
 class CheckRecordedPayload:
     mode: CheckMode
@@ -2209,6 +2252,9 @@ class CheckRecordedPayload:
     projection_version: str
     semantic_provenance: SemanticProvenance | None = None
     semantic_conclusion: str | None = None
+    # ADR-031: set only on a completed review (``check_recorded`` 1.3.0) whose packet carried a
+    # check-time change. AI-powered finding resolution compares these sets across checks.
+    check_change_files: CheckChangeShownFiles | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "mode", _exact_enum(self.mode, CheckMode))
@@ -2277,6 +2323,11 @@ class CheckRecordedPayload:
             or self.semantic_conclusion
             not in {"no_material_discrepancy", "challenges_returned", "insufficient_packet"}
             or status is not SemanticStatus.SUCCEEDED
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+        if self.check_change_files is not None and (
+            type(self.check_change_files) is not CheckChangeShownFiles
+            or self.semantic_conclusion is None
         ):
             raise ProtocolValueError("invalid_event_value_type")
         if type(self.engine_version) is not str or self.engine_version != "0.1.0":
@@ -2449,6 +2500,19 @@ def _optional(source: Mapping[str, JsonValue], key: str) -> JsonValue | None:
     if value is None:
         raise ProtocolValueError("invalid_event_value_type")
     return value
+
+
+def _decode_check_change_files(value: object | None) -> CheckChangeShownFiles | None:
+    if value is None:
+        return None
+    source = _closed_object(
+        value, required=frozenset({"complete", "fully_shown", "partially_shown"})
+    )
+    return CheckChangeShownFiles(
+        fully_shown=cast(tuple[str, ...], _array(_field(source, "fully_shown"))),
+        partially_shown=cast(tuple[str, ...], _array(_field(source, "partially_shown"))),
+        complete=cast(bool, _field(source, "complete")),
+    )
 
 
 def _array(value: object) -> tuple[object, ...]:
@@ -2999,7 +3063,7 @@ _PAYLOAD_SHAPES: Final[Mapping[str, tuple[frozenset[str], frozenset[str]]]] = Ma
                     "projection_version",
                 }
             ),
-            frozenset({"semantic_provenance", "semantic_conclusion"}),
+            frozenset({"semantic_provenance", "semantic_conclusion", "check_change_files"}),
         ),
         "receipt_recorded": (
             frozenset(
@@ -3455,6 +3519,7 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
             engine_version=cast(str, _field(source, "engine_version")),
             projection_version=cast(str, _field(source, "projection_version")),
             semantic_conclusion=cast(str | None, _optional(source, "semantic_conclusion")),
+            check_change_files=_decode_check_change_files(_optional(source, "check_change_files")),
             semantic_provenance=(
                 None
                 if provenance_value is None
@@ -3941,6 +4006,12 @@ def encode_payload(payload: EventPayload) -> JsonValue:
             else semantic_provenance_to_json(value.semantic_provenance),
         )
         _optional_value(result, "semantic_conclusion", value.semantic_conclusion)
+        if value.check_change_files is not None:
+            result["check_change_files"] = {
+                "complete": value.check_change_files.complete,
+                "fully_shown": value.check_change_files.fully_shown,
+                "partially_shown": value.check_change_files.partially_shown,
+            }
         return _json_object(result)
     if payload_type is ReceiptRecordedPayload:
         value = cast(ReceiptRecordedPayload, payload)

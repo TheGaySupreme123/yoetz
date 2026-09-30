@@ -17,7 +17,7 @@ from yoetz.domain.coordination import (
     SessionHealth,
     WorkState,
 )
-from yoetz.domain.events import EventDraft, LedgerRecord
+from yoetz.domain.events import CheckChangeShownFiles, EventDraft, LedgerRecord
 from yoetz.domain.findings import (
     CheckVerdict,
     Finding,
@@ -1891,6 +1891,7 @@ class LedgerPort(Protocol):
         *,
         scope: CheckScopeModel | None = None,
         semantic_conclusion: str | None = None,
+        check_change_files: CheckChangeShownFiles | None = None,
     ) -> CheckCommitResult: ...
 
     async def fail_check_if_current(

@@ -47,3 +47,40 @@ def test_conclusion_is_not_admitted_on_legacy_version_or_absent_on_new_version()
                 EventSchema("check_recorded", "1.3.0"),
                 freeze_json({**current, "semantic_conclusion": value}),
             )
+
+
+def test_check_change_files_ride_only_a_recorded_conclusion_and_stay_closed() -> None:
+    """ADR-031 (#883): keyed shown-file commitments, never paths, only beside a conclusion."""
+
+    vector = _vectors()[-1]
+    wire = vector["payload"]
+    payload = decode_payload(EventSchema("check_recorded", "1.3.0"), freeze_json(wire))
+    assert type(payload) is CheckRecordedPayload
+    assert payload.check_change_files is not None
+    assert payload.check_change_files.shown == frozenset(
+        wire["check_change_files"]["fully_shown"] + wire["check_change_files"]["partially_shown"]
+    )
+    files = wire["check_change_files"]
+    without_conclusion = {key: value for key, value in wire.items() if key != "semantic_conclusion"}
+    invalid = [
+        (EventSchema("check_recorded", "1.2.0"), without_conclusion),
+        (
+            EventSchema("check_recorded", "1.3.0"),
+            {**wire, "check_change_files": {**files, "partially_shown": files["fully_shown"][:1]}},
+        ),
+        (
+            EventSchema("check_recorded", "1.3.0"),
+            {**wire, "check_change_files": {**files, "complete": False}},
+        ),
+        (
+            EventSchema("check_recorded", "1.3.0"),
+            {**wire, "check_change_files": {**files, "fully_shown": ["src/app.py"]}},
+        ),
+        (
+            EventSchema("check_recorded", "1.3.0"),
+            {**wire, "check_change_files": {**files, "extra": 1}},
+        ),
+    ]
+    for schema, candidate in invalid:
+        with pytest.raises(ProtocolValueError):
+            decode_payload(schema, freeze_json(candidate))

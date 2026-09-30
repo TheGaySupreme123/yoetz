@@ -26,6 +26,7 @@ from yoetz.adapters.memory.ledger import (
 from yoetz.adapters.sqlite.observation import SqliteObservationStore
 from yoetz.domain.events import (
     AcceptedEvent,
+    CheckChangeShownFiles,
     CheckRecordedPayload,
     EventSchema,
     EvidenceDigestProvenance,
@@ -2733,6 +2734,7 @@ class SqliteLedger:
         *,
         scope: CheckScopeModel | None = None,
         semantic_conclusion: str | None = None,
+        check_change_files: CheckChangeShownFiles | None = None,
     ) -> CheckCommitResult:
         await self._ensure_recovered()
         async with self._lock:
@@ -2759,6 +2761,7 @@ class SqliteLedger:
                     request_id,
                     scope=scope,
                     semantic_conclusion=semantic_conclusion,
+                    check_change_files=check_change_files,
                 )
             except PublicOperationError:
                 # The memory oracle terminalizes a frontier conflict before raising it. Preserve

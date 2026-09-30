@@ -13,6 +13,7 @@ import subprocess
 import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
@@ -40,13 +41,15 @@ from yoetz.adapters.memory.ledger import MemoryLedgerAdapter
 from yoetz.adapters.privacy.local_enforcer import LocalPrivacyEnforcer, scan_exact_bytes
 from yoetz.adapters.sqlite.repository import SqliteLedger
 from yoetz.application.check import FinalSemanticEvaluation
-from yoetz.application.check_change import record_task_change_base
+from yoetz.application.check_change import check_change_shown_files, record_task_change_base
 from yoetz.application.egress import PrivacyCoordinator
 from yoetz.application.semantic_case import (
     CHECK_TIME_CHANGE_ITEM_PREFIX,
     REVIEW_PACKET_ITEM_ID,
+    CheckTimeChange,
 )
 from yoetz.domain.events import (
+    CheckChangeShownFiles,
     ClaimKind,
     ClaimRecordedPayload,
     ObligationPublishedPayload,
@@ -63,6 +66,7 @@ from yoetz.domain.privacy import (
     PrivacyReason,
     ProviderBinding,
     ReviewContextProfile,
+    ReviewSelectionPolicy,
 )
 from yoetz.domain.receipts import (
     CHECK_TIME_CHANGE_BASE_UNAVAILABLE_GAP,
@@ -70,9 +74,14 @@ from yoetz.domain.receipts import (
     CHECK_TIME_CHANGE_TRUNCATED_GAP,
     CHECK_TIME_CHANGE_UNAVAILABLE_GAP,
 )
-from yoetz.ports.change_capture import CheckWorkspaceSource, check_workspace_source_scope
+from yoetz.ports.change_capture import (
+    CHECK_CHANGE_MEDIA_TYPE,
+    CheckChangeCapture,
+    CheckWorkspaceSource,
+    check_workspace_source_scope,
+)
 from yoetz.ports.ledger import FrozenCase
-from yoetz.ports.objects import ObjectKind
+from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef
 from yoetz.ports.privacy import EffectivePrivacyPolicy
 from yoetz.ports.runtime import TaskRuntime
 from yoetz.ports.start_catalog import StartCatalogPort
@@ -286,6 +295,11 @@ async def test_shell_rewrites_and_commits_reach_the_packet_and_survive_replay(
     assert all(scan_exact_bytes(item.plaintext) == () for item in candidate.items)
     assert CHECK_TIME_CHANGE_REDACTED_GAP in waiting.case_content_gaps
     assert CHECK_TIME_CHANGE_BASE_UNAVAILABLE_GAP not in waiting.case_content_gaps
+    # Keyed commitments to the files the packet carried: the rewritten file whole, the test file
+    # with its redacted fixture token only in part (ADR-031 resolution rule).
+    shown = waiting.check_change_files
+    assert shown is not None and shown.complete
+    assert len(shown.fully_shown) == 1 and len(shown.partially_shown) == 1
     objects = cast(MemoryObjects, getattr(adapter, "_objects"))
     assert len(objects.refs_for_kind(ObjectKind.CHANGE_CAPTURE)) == 2  # base + one change
 
@@ -300,6 +314,7 @@ async def test_shell_rewrites_and_commits_reach_the_packet_and_survive_replay(
     assert resumed.status is SemanticStatus.HUMAN_DENIED
     assert privacy.resume_calls == 1
     assert resumed.case_content_gaps == waiting.case_content_gaps
+    assert resumed.check_change_files == waiting.check_change_files
     assert len(objects.refs_for_kind(ObjectKind.CHANGE_CAPTURE)) == 2
 
 
@@ -459,3 +474,68 @@ async def test_channel_denying_repository_excerpts_never_sends_the_change_and_sa
         item_id.startswith(CHECK_TIME_CHANGE_ITEM_PREFIX) for item_id in decision.approved_item_ids
     )
     assert DataCategory.REPOSITORY_EXCERPT in decision.blocked_categories
+
+
+@pytest.mark.anyio
+async def test_shown_file_commitments_are_keyed_to_the_task_and_bound_to_the_base() -> None:
+    _, runtime = await _durable_semantic_case(memory_adapter(append_command()))
+    text = b"Header\nEnd of header.\ndiff --git a/atomic-selectors.ts b/atomic-selectors.ts\n+x\n"
+    stored = ObjectRef(
+        object_id="obj_00000000-0000-4000-8000-000000000901",
+        plaintext_size=len(text) + 100,
+        commitment="hmac-sha256:" + "9" * 64,
+        envelope_digest="sha256:" + "a" * 64,
+        encryption_format="yoetz-object/1",
+        key_slot="task",
+        metadata=ObjectMetadata(
+            ObjectKind.CHANGE_CAPTURE,
+            CHECK_CHANGE_MEDIA_TYPE,
+            runtime.task_id,
+            datetime(2026, 9, 29, tzinfo=UTC),
+        ),
+    )
+    selection = ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED)
+
+    async def commitments(base_commit: str) -> tuple[str, ...]:
+        capture = CheckChangeCapture(
+            base="head",
+            text=text,
+            tracked_files=1,
+            untracked_files=0,
+            omitted_files=0,
+            truncated=False,
+            base_commit=base_commit,
+        )
+        files = await check_change_shown_files(
+            runtime, CheckTimeChange(stored, capture), selection, 1
+        )
+        assert files.complete and not files.partially_shown
+        return files.fully_shown
+
+    first = await commitments("1" * 40)
+    assert first == await commitments("1" * 40)  # the same file under the same base
+    assert first != await commitments("2" * 40)  # HEAD moved: a different file identity
+    assert len(first) == 1 and first[0].startswith("hmac-sha256:")
+    assert "atomic" not in first[0]
+
+
+@pytest.mark.anyio
+async def test_shown_files_that_cannot_be_committed_are_recorded_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = _repository(tmp_path)
+    frozen, runtime = await _kea_case(memory_adapter(append_command()), repository)
+    _python_rewrite(repository, "String(key)", "`${typeof key}:${String(key)}`")
+
+    async def failing(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise RuntimeError("commitment key unavailable")
+
+    monkeypatch.setattr(ready_composition_module, "check_change_shown_files", failing)
+    privacy = _Privacy(task_id=runtime.task_id, profile=ReviewContextProfile.EXPANDED)
+    with check_workspace_source_scope(CheckWorkspaceSource(os.fspath(repository), _REPOSITORY)):
+        waiting = await _evaluator(privacy, runtime)(frozen, (), runtime)
+
+    # The review still proceeds; the record just never tolerates a check-time limit.
+    assert waiting.status is SemanticStatus.AWAITING_HUMAN
+    assert waiting.check_change_files == CheckChangeShownFiles((), (), complete=False)
