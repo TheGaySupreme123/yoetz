@@ -26,10 +26,11 @@ operation is pending; use the stored result if committed. Do not regenerate a re
 already have committed.
 
 Discover evidence before copying it: every evidence row in the inventory names its publication
-channel, and the evidence you published yourself is returned to you with its description. Native
-snapshots can be reused when a recorded result links them to the claim, unrelated snapshots must
-be excluded, and one clipped or unavailable item does not mean every excerpt is missing. A hidden
-description is a privacy setting, not missing evidence.
+channel, and the evidence you published yourself in the current session is returned to you with
+its description unless it contains credential-shaped text. Receipts and findings are not widened
+this way. Native snapshots can be reused when a recorded result links them to the claim, unrelated
+snapshots must be excluded, and one clipped or unavailable item does not mean every excerpt is
+missing. A hidden description is a privacy setting, not missing evidence.
 Command reconciliation distinguishes an observed attempt, a mismatch and unknown observation;
 it never proves command success. A substituted command needs a recorded obligation revision with
 rationale. An acknowledged finding can remain unresolved until a qualifying check proves absence.

@@ -14,7 +14,9 @@ reverse-chronological released versions.
   `publication_channel` of its source event (a cooperative writer can record only `cooperative_mcp`
   or `local_cli`; import and observation channels are service-only). Both are optional additions made in place to the unreleased 0.3 status
   request 1.2.0 and status result 1.4.0. The CLI human status and the MCP text summary show the
-  channel. Dogfood evidence per host remains tracked in #914.
+  channel. An evidence page now builds only the rows it returns (plus one to find the next
+  cursor), filtering before it builds them, instead of every row in the task. Dogfood evidence per
+  host remains tracked in #914.
 
 - Codex, Claude Code and Cursor session-start context can show a fresh repository-grant snapshot
   and name the owner's missing admission command. The notice leaves route and host approval

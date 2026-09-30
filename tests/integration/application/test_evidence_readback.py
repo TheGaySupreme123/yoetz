@@ -10,7 +10,7 @@ under the observation coordinator's own writer, as the observation drain does.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import cast
 
@@ -813,3 +813,103 @@ async def test_later_redaction_withdraws_self_authored_prose_from_pinned_reads()
     assert rows[diff_id]["reference"] == _OMITTED
     assert rows[test_id]["description"] == _TEST_DESCRIPTION
     assert _DIFF_DESCRIPTION.encode() not in canonical_encode(cast(JsonValue, dict(pinned)))
+
+
+async def test_evidence_pages_build_only_the_requested_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A page builds at most ``limit + 1`` rows, however many rows the task holds (#934 review).
+
+    The rows, their order, the cursor chain and ``author=mine`` stay exactly those of the full
+    materialization (``load_projection``), which builds every readable row.
+    """
+
+    from yoetz.ports.ledger import (
+        EvidenceProjectionFilter,
+        IdProjectionPosition,
+        ProjectionQuery,
+        ProjectionView,
+    )
+    from yoetz.protocol.models import StatusEvidenceItemModel
+
+    app, _policy = await build_projection_application(seed=9700)
+    started = await _start(app, 9701)
+    published, diff_id, test_id = await _publish_agent_evidence(app, started, 9710)
+    others = tuple(
+        _plain_evidence(9720 + offset, f"delegate row {offset}", strength=_MUTABLE_REFERENCE)
+        for offset in range(60)
+    )
+    head = await _append(
+        app,
+        started,
+        seed=9790,
+        expected_frontier=published.result_frontier.sequence,
+        writer=protocol_id("wri_", 9791),
+        author=_agent_actor("delegate-writer"),
+        channel=PublicationChannel.COOPERATIVE_MCP,
+        drafts=others,
+    )
+    ledger, _objects = _ledger(app, started.task_id)
+    stored = await ledger.load_projection(started.session_id, ProjectionView.EVIDENCE)
+    assert stored is not None and type(stored.state) is tuple
+    full = [item.model_dump() for item in stored.state if type(item) is StatusEvidenceItemModel]
+    assert len(full) == 62
+    own = {diff_id, test_id}
+
+    built = {"rows": 0}
+    construct: Callable[..., None] = StatusEvidenceItemModel.__init__
+
+    def counted(self: StatusEvidenceItemModel, /, **values: object) -> None:
+        built["rows"] += 1
+        construct(self, **values)
+
+    # Page items must stay exactly ``StatusEvidenceItemModel``; count its constructions instead.
+    monkeypatch.setattr(StatusEvidenceItemModel, "__init__", counted)
+
+    async def walk(
+        evidence_filter: EvidenceProjectionFilter | None, limit: int
+    ) -> list[dict[str, object]]:
+        rows: list[dict[str, object]] = []
+        position: IdProjectionPosition | None = None
+        while True:
+            built["rows"] = 0
+            page = await ledger.query_projection(
+                ProjectionQuery(
+                    started.session_id,
+                    "evidence",
+                    evidence_filter,
+                    head,
+                    limit,
+                    position,
+                    None,
+                    started.writer_id,
+                )
+            )
+            assert built["rows"] <= limit + 1
+            assert len(page.item_sources) == len(page.items)
+            rows.extend(cast(StatusEvidenceItemModel, item).model_dump() for item in page.items)
+            if page.next_position is None:
+                return rows
+            assert type(page.next_position) is IdProjectionPosition
+            assert page.next_position.last_id == rows[-1]["evidence_id"]
+            position = page.next_position
+
+    assert await walk(None, 7) == full
+    assert await walk(EvidenceProjectionFilter(None, None, True, "mine"), 1) == [
+        row for row in full if row["evidence_id"] in own
+    ]
+
+    # A prefix whose ``source_frontier`` indexes miss falls back to one scan with the same rows.
+    from yoetz.adapters.memory import ledger as ledger_module
+
+    state = ledger._state  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+    evidence_rows = ledger_module._evidence_rows  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+    indexed = [
+        (key, row.event_id) for key, _, row in evidence_rows(state.projection, state.records)
+    ]
+    scanned = [
+        (key, row.event_id)
+        for key, _, row in evidence_rows(state.projection, tuple(reversed(state.records)))
+    ]
+    assert scanned == indexed
+    assert [key for key, _ in indexed] == [row["evidence_id"] for row in full]
