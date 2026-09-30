@@ -91,16 +91,16 @@ Append-only history must remain intact, so mutation or erasure is not an accepta
    (`kernel/observed_failures.py`) retires such a result from the required set when, before the
    claim, either a later hook-observed run of the same command identity followed it (it passed:
    supersession; any other outcome: that later run is the one judged, so only the latest run of a
-   command can be live) or a later hook-observed edit completed (state scope). The command identity
-   is the installation-keyed `hmac-sha256:` commitment the hook computes and materialization stores
-   as `omitted:<commitment>`; rows without one (`omitted:structural`, every pre-#909 ledger) take
-   the state-scoped rule only, never "every failure is live". Only service-stamped observations take
-   part on either side: a cooperative failure keeps the exact duty above, and a cooperative success
-   or edit never retires an observed failure. A retired result stays authorable in
-   `limitation_refs`, and the receipt counts it once as history. `limitation_refs_complete`,
-   `failed_work_omitted`, research-evidence limitations, and observation advice all read this one
-   predicate, so admission and the packs cannot disagree. Loosening the required set cannot reject
-   any history that the stricter rule accepted.
+   command can be live) or a later hook-observed edit reported success (state scope). The command
+   identity is the installation-keyed `hmac-sha256:` commitment the hook computes and
+   materialization stores as `omitted:<commitment>`; rows without one (`omitted:structural`, every
+   pre-#909 ledger) take the state-scoped rule only, never "every failure is live". Only
+   service-stamped observations take part on either side: a cooperative failure keeps the exact duty
+   above, and a cooperative success or edit never retires an observed failure. A retired result
+   stays authorable in `limitation_refs`, and the receipt counts it once as history.
+   `limitation_refs_complete`, `failed_work_omitted`, research-evidence limitations, and observation
+   advice all read this one predicate, so admission and the packs cannot disagree. Loosening the
+   required set cannot reject any history that the stricter rule accepted.
 
 4. **Replay owns the revision invariants.** Missing, unreadable, already-superseded, wrong-kind, or
    disjoint targets; irrelevant or success limitations; non-success support; and incomplete

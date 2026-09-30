@@ -670,25 +670,27 @@ shared SQLite behavior applies to Codex, Claude Code and Cursor on macOS, Linux 
 ### Failed-command supersession and the keyed command identity (2026-09-30, #909)
 
 A rerun is a new host tool call, so keying "resolved" on the call id left every red -> green cycle
-unresolved. Observation-advice policy `0.1.6` makes `failed_command_unresolved` read the same
-kernel predicate the local packs and the ADR-025 claim invariant read
-(`kernel/observed_failures.py`): a failed command envelope is still reported only while no later
-post-event of the same *command identity* followed it (only the latest run of a command is
-judged), no later completed edit post-event (an edit tool whose post-event did not fail or get
-denied; a permission request or decision is not an edit) followed it, and the same host call did
-not later succeed. A later failure of the same identity is a new condition; it never revives an
-earlier one. Cursor's ordinary shell tool `Shell` is a command tool for this rule.
+unresolved. Observation-advice policy `0.1.6` makes `failed_command_unresolved` read the same kernel
+predicate the local packs and the ADR-025 claim invariant read (`kernel/observed_failures.py`): a
+failed command envelope is still reported only while no later post-event of the same *command
+identity* followed it (only the latest run of a command is judged), no later edit post-event that
+stated success followed it (a permission request or decision, a failed or denied edit, and a partial
+or outcome-less edit are not proof the workspace changed), and the same host call did not later
+succeed. A later failure of the same identity is a new condition; it never revives an earlier one.
+Cursor's ordinary shell tool `Shell` is a command tool for this rule.
 
-The command identity is a new structural envelope field, `command_commitment`: an
-installation-keyed `hmac-sha256:` value (domain `yoetz/observation-command-commitment/v1`, the
-local observation store's key material) over the host command argument (`tool_input.cmd`,
-`command`, or `argv`) of a shell/exec tool after light normalization: a host shell wrapper
-(`/bin/bash -lc`, `bash -lc` including the WSL 2 form, `sh -c`) is stripped and the command is
-re-joined from its shell words. The hook process computes it and discards the text; the text is
-never persisted, displayed, or sent, with or without content consent. Edit tools (for example
-`apply_patch`, whose `command` argument is a patch) never carry one. The value crosses the
-unreleased control-request `2.9.0` wire, materializes as the command action's
+The command identity is a new structural envelope field, `command_commitment`: an installation-keyed
+`hmac-sha256:` value (domain `yoetz/observation-command-commitment/v1`, the local observation
+store's key material) over the host command argument (`tool_input.cmd`, `command`, or `argv`) of a
+shell/exec tool after light, semantics-preserving normalization: unquoted runs of spaces and tabs
+collapse to one space, and a host shell wrapper (`/bin/bash -lc`, `bash -lc` including the WSL 2
+form, `sh -c`) is stripped when its argument is exact (an argv wrapper, or the canonical
+single-quoted string form). Quoting, expansions, escapes and line breaks are never rewritten, so
+commands with different shell meaning never share an identity. The hook process computes it and
+discards the text; the text is never persisted, displayed, or sent, with or without content consent.
+Edit tools (for example `apply_patch`, whose `command` argument is a patch) never carry one. The
+value crosses the unreleased control-request `2.9.0` wire, materializes as the command action's
 `omitted:<commitment>`, and the hook spool carries it for legacy replays. A plain `sha256` of a
 short command is dictionary-guessable and is never an identity. Legacy envelopes without the field
-still clear through the edit rule. The same predicate names only service-stamped observations,
-so a cooperative publication of a copied commitment proves nothing.
+still clear through the edit rule. The same predicate names only service-stamped observations, so a
+cooperative publication of a copied commitment proves nothing.

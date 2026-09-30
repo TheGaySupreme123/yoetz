@@ -66,7 +66,7 @@ def test_classification_is_one_backward_pass_over_identity_and_edits() -> None:
             _run(2, ResultOutcome.FAILURE, None),
             _run(3, ResultOutcome.FAILURE, None, edit=True),  # a failed edit changed nothing
             _run(4, ResultOutcome.FAILURE, _B),
-            _run(5, ResultOutcome.UNKNOWN, None, edit=True),  # an edit that did not fail
+            _run(5, ResultOutcome.SUCCESS, None, edit=True),  # an edit with a stated success
             _run(6, ResultOutcome.FAILURE, _A),
         )
     )
@@ -439,3 +439,25 @@ def test_a_failure_without_command_identity_never_promises_a_rerun_clears_it() -
     detail = finding.candidate.detail
     assert "a run without a command commitment is retired only by the edit" in detail
     assert "until it passes" not in detail and "is the latest" not in detail
+
+
+@pytest.mark.parametrize("outcome", [ResultOutcome.UNKNOWN, ResultOutcome.PARTIAL])
+def test_only_an_edit_with_a_stated_success_retires_a_failure(outcome: ResultOutcome) -> None:
+    """An edit whose outcome is unknown or partial is not proof the workspace changed as intended.
+
+    Retiring a failure on it would hide the failure; keeping it live only over-discloses.
+    """
+
+    states = classify_observed_runs(
+        (
+            _run(1, ResultOutcome.FAILURE, _A),
+            _run(2, outcome, None, edit=True),
+        )
+    )
+    assert states["r1"] is ObservedFailureState.LIVE
+    ledger = ObservedLedger()
+    failed = ledger.fail("npm test")
+    edit = ledger.edit(outcome)
+    ledger.claim()
+    expected = (failed, edit) if outcome is ResultOutcome.PARTIAL else (failed,)
+    assert omitted_results(ledger) == expected

@@ -991,15 +991,48 @@ def _shell_wrapped_command(argv: list[str]) -> str | None:
     return argv[2]
 
 
-def normalize_observed_command(value: object) -> str | None:
-    """Light, deterministic normalization of a host command argument, or ``None``.
+def _collapse_unquoted_blanks(text: str) -> str:
+    """Collapse runs of unquoted spaces and tabs to one space and trim them at both ends.
 
-    Accepts the command string (``tool_input.cmd`` / ``command``) or an argv list. A host shell
-    wrapper (``/bin/bash -lc '...'``, ``bash -lc``, ``sh -c``, including the WSL 2 ``bash -lc``
-    form) is stripped, then the command is re-joined from its shell words, which collapses
-    whitespace and quoting style while keeping quoted whitespace. A command that does not split
-    as shell words keeps its text with whitespace runs collapsed. The result exists only to be
-    committed; it is never stored, displayed, or sent.
+    Shell quoting and escapes are tracked so quoted or escaped blanks, quote characters, and line
+    breaks (command separators) are kept byte for byte: the result has the same shell meaning.
+    """
+
+    output: list[str] = []
+    quote: str | None = None
+    escaped = False
+    pending_blank = False
+    for char in text:
+        if quote is None and not escaped and char in " \t":
+            pending_blank = True
+            continue
+        if pending_blank and output:
+            output.append(" ")
+        pending_blank = False
+        output.append(char)
+        if escaped:
+            escaped = False
+        elif char == "\\" and quote != "'":
+            escaped = True
+        elif quote is None and char in "'\"":
+            quote = char
+        elif char == quote:
+            quote = None
+    return "".join(output)
+
+
+def normalize_observed_command(value: object) -> str | None:
+    """Light, semantics-preserving normalization of a host command argument, or ``None``.
+
+    Accepts the command string (``tool_input.cmd`` / ``command``) or an argv list. Only rewrites
+    that cannot change what the shell runs are applied: unquoted runs of spaces and tabs collapse
+    to one space, and a host shell wrapper (``/bin/bash -lc '...'``, ``bash -lc``, ``sh -c``,
+    including the WSL 2 ``bash -lc`` form) is stripped when its command argument is exact: an argv
+    wrapper always, a string wrapper only when it is the canonical single-quoted form, so an
+    outer shell cannot have expanded anything first. Quoting, expansions, escapes and line breaks
+    are never rewritten, so two commands with different meaning never share an identity; a missed
+    equivalence only keeps two identities apart. The result exists only to be committed; it is
+    never stored, displayed, or sent.
     """
 
     text: str | None = None
@@ -1018,15 +1051,16 @@ def normalize_observed_command(value: object) -> str | None:
     if text is None or "\x00" in text or len(text) > _MAX_OBSERVED_COMMAND_CHARS:
         return None
     for _ in range(3):
+        text = _collapse_unquoted_blanks(text)
         try:
             words = shlex.split(text, posix=True)
         except ValueError:
-            normalized = " ".join(text.split())
-            return normalized or None
+            return text or None
         inner = _shell_wrapped_command(words)
-        if inner is None:
-            normalized = shlex.join(words)
-            return normalized or None
+        # ``shlex.join`` single-quotes its argument, so equality proves the wrapper's command
+        # argument reached the inner shell literally, with nothing expanded by an outer shell.
+        if inner is None or shlex.join(words) != text:
+            return text or None
         text = inner
     return None
 

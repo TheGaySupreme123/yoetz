@@ -127,7 +127,7 @@ type PublicSubjectRef = EventId | ObligationId | ClaimId
 
 _MAX_SAFE_INTEGER: Final = 2**53 - 1
 # Work-integrity fact naming a hook-observed failure that is still live at the claim: the latest
-# observed run of its command identity failed and no completed observed edit followed it (#909).
+# observed run of its command identity failed and no successful observed edit followed it (#909).
 OBSERVED_FAILURE_LIVE_FACT: Final = "observed_failure_live"
 _CODE_PATTERN: Final = re.compile(r"^[a-z][a-z0-9_]{0,127}$", re.ASCII)
 _POLICY_PATTERN: Final = re.compile(r"^[a-z][a-z0-9-]{0,127}$", re.ASCII)
@@ -557,13 +557,13 @@ def render_deterministic_finding_text(
             named = f"result {run_results}" + (f" of action {run_actions}" if run_actions else "")
             detail = (
                 f"{detail} Observed run: {named} failed, and before the claim no later "
-                "hook-observed run of the same command identity followed it and no completed "
-                "observed workspace edit followed it. status view=results lists its tool, "
-                "occurrence, command commitment (when recorded) and exit status; command text is "
-                "never recorded. Either disclose it as above, or fix it and publish a replacement "
-                "claim once a later observed run of the same command passes or a completed "
-                "observed edit follows it (a run without a command commitment is retired only "
-                "by the edit)."
+                "hook-observed run of the same command identity followed it and no observed "
+                "workspace edit that reported success followed it. status view=results lists its "
+                "tool, occurrence, command commitment (when recorded) and exit status; command "
+                "text is never recorded. Either disclose it as above, or fix it and publish a "
+                "replacement claim once a later observed run of the same command passes or an "
+                "observed edit that reports success follows it (a run without a command "
+                "commitment is retired only by the edit)."
             )
     if kind is FindingKind.CONTRADICTORY_CLAIMS_UNRESOLVED:
         claim_refs = tuple(ref for ref in refs if ref.startswith("clm_"))
