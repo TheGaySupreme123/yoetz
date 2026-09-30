@@ -998,14 +998,28 @@ whose exit matches an unpaired stated hook post of the same command commitment i
 and stays local. Otherwise, while an outcome-less hook call of the same commitment is unpaired,
 the item records that call's exit as its own result. That run is then two actions, a disclosed
 trade-off, and #909 judges the later one. Because pairing is counted per call, a later call's
-stated outcome never withholds an earlier same-command call's only exit. A rollout item read
-before its own hook post was stored (parallel calls in one cell) pairs with whatever the reader
-has seen by then. A session whose tool hooks never fired
-delivers every item with its outcome, as the only record of those calls. One hooked command with
+stated outcome never withholds an earlier same-command call's only exit. A rollout item can be
+read before its own hook post is stored, for example when another call's hook reconciles the
+stream while the call is still finishing. Such an item stays local as pending. The first later
+hook post it pairs with (same call id, or same command commitment) decides it by the same rules:
+a stated post makes it that post's copy, and an outcome-less post makes it the call's only exit,
+delivered once on the next stream reconcile. Delivery and settlement commit together, and the
+item is delivered at the stream position where it was decided, so a later stream row already
+delivered cannot make the task refuse it as `cursor_stale`. The pending account is bounded
+(256 items per workspace) and, like the pairing replay, is limited to the local envelope ring. An
+item that is evicted, or that no later post pairs with, stays local only, as before. A session
+whose tool hooks never fired delivers every item with its outcome, as the only record of those
+calls. One hooked command with
 a stated outcome is therefore one action and one result, and a red-latest claim names it once. Like
 a retained cell, a retained item counts in `observed_count` without an admitted, summarized or
 intentionally omitted bucket. A call in a hook-observed session whose own hook did not fire (an
-unhooked tool or a lost hook) is not recorded from the rollout; this limit is owned by #910.
+unhooked tool or a lost hook) is not recorded from the rollout; this limit is owned by #910. An
+`McpToolCall` or `FileChange` item has no command commitment, so in a hook-observed session it
+pairs with a hook post only when its id equals the hook's call id. An item under a different id
+stays local, and its status is not delivered even when the hook post stated no outcome.
+Releasing such items at the end of a turn would record every hooked MCP or patch call twice,
+because the reader cannot tell a copy from an only carrier without a join key. This limit stays
+open on #910 until a native capture shows how Codex identifies those items.
 Outside code mode, a stream-only session records a direct `exec_command` twice, once from its
 `function_call` pair and once from its `item_completed` item, because their ids differ. #917 owns
 that pairing.

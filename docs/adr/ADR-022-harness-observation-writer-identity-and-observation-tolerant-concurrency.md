@@ -722,8 +722,14 @@ still running when its hook fired) is delivered and decision 15 corrects the hoo
 a command item whose exit matches an unpaired stated post of the same command commitment is that
 post's copy; otherwise, while an outcome-less call of that commitment is unpaired, the item is
 delivered as that call's exit, a second action for that run which #909 judges as the later run.
-Counting per call means one call's stated outcome never withholds another call's only exit. A session without tool hooks delivers every item, with its outcome, as the only record of the
-call. An `McpToolCall` item that names an `error` or a result `isError: true` fails whatever its
+Counting per call means one call's stated outcome never withholds another call's only exit. An
+item read before any hook post it pairs with is pending, not a copy: the first later post that
+pairs with it (call id, then command commitment) decides it by the same rules, and an item made
+the carrier is delivered once on the next stream reconcile, committed together with its
+settlement and stamped with the stream frontier where it was decided, since the task's
+per-source cursor refuses an older position. The pending account is bounded and limited to the
+local envelope ring; an evicted or never-paired item stays local. A session without tool hooks
+delivers every item, with its outcome, as the only record of the call. An `McpToolCall` item that names an `error` or a result `isError: true` fails whatever its
 `status`, and a `FileChange` item belongs to the edit family. The Codex outcome reader reads only
 Codex's own shell tools (`Bash`, `shell`, `exec_command`, `local_shell`), never a code-mode `exec`
 cell, and JSON text only when it carries an exec-result key and a string `output`. Mapping versions

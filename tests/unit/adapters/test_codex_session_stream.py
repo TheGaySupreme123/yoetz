@@ -51,7 +51,7 @@ from yoetz.domain.observation import (
     ObservationStatusQuery,
 )
 from yoetz.domain.observation_budget import ObservationMode
-from yoetz.domain.values import JsonObject
+from yoetz.domain.values import JsonObject, Timestamp
 
 
 def test_source_file_identity_bounds_large_filesystem_integers() -> None:
@@ -2797,3 +2797,94 @@ def test_stream_selection_rejection_replays_exact_input(
         locator=locator,
     )
     assert retried["event_position"] == 2
+
+
+_DECIDE_SESSION = "hmac-sha256:" + ("d" * 64)
+_CMD = "hmac-sha256:" + ("c" * 64)
+
+
+def _decide_row(
+    position: int,
+    *,
+    hook: bool,
+    identity: str,
+    call_id: str,
+    exit_status: int | None = None,
+    commitment: str | None = _CMD,
+) -> ObservationEnvelope:
+    structural: dict[str, Any] = {"tool_call_id": call_id, "tool_name": "Bash"}
+    if commitment is not None:
+        structural["command_commitment"] = commitment
+    if exit_status is not None:
+        structural["exit_status"] = exit_status
+    if not hook:
+        structural["action"] = "CommandExecution"
+    return ObservationEnvelope(
+        session_commitment=_DECIDE_SESSION,
+        event_kind="PostToolUse" if hook else "item_completed",
+        source_identity=identity,
+        source=ObservationSource.CODEX_HOOK if hook else ObservationSource.CODEX_SESSION_STREAM,
+        cursor=ObservationCursor(
+            source_generation=1,
+            byte_position=position,
+            event_position=position,
+            last_source_commitment=_EMPTY,
+            mapping_version=STREAM_MAPPING_VERSION,
+        ),
+        receipt_time=Timestamp("2026-09-29T18:00:00.000Z"),
+        structural_payload=JsonObject(structural),
+        content_object_refs=(),
+        gap_codes=(),
+    )
+
+
+def _decisions(*rows: ObservationEnvelope) -> dict[str, str]:
+    return stream_module._rollout_item_decisions(  # pyright: ignore[reportPrivateUsage]
+        rows, _DECIDE_SESSION
+    )
+
+
+def test_rollout_item_read_before_its_post_is_decided_by_that_post() -> None:
+    """#910: arrival order between a rollout item and its hook post never loses an exit."""
+
+    item = _decide_row(1, hook=False, identity="item-a", call_id="exec-a", exit_status=101)
+    unstated = _decide_row(2, hook=True, identity="post-a", call_id="call-a")
+    stated = _decide_row(2, hook=True, identity="post-a", call_id="call-a", exit_status=101)
+    assert _decisions(item) == {"item-a": "pending"}
+    # An outcome-less post makes the earlier item its only outcome; a stated one its copy.
+    assert _decisions(item, unstated) == {"item-a": "carrier"}
+    assert _decisions(item, stated) == {"item-a": "copy"}
+    # The same facts in the other arrival order decide the same way.
+    assert _decisions(unstated, item) == {"item-a": "carrier"}
+    assert _decisions(stated, item) == {"item-a": "copy"}
+
+
+def test_rollout_item_decisions_never_change_once_made() -> None:
+    """A later post pairs only with a still-pending item, never with one already decided."""
+
+    early = _decide_row(1, hook=True, identity="post-a", call_id="call-a", exit_status=0)
+    copy = _decide_row(2, hook=False, identity="item-a", call_id="exec-a", exit_status=0)
+    pending = _decide_row(3, hook=False, identity="item-b", call_id="exec-b", exit_status=2)
+    late = _decide_row(4, hook=True, identity="post-b", call_id="call-b")
+    assert _decisions(early, copy, pending, late) == {"item-a": "copy", "item-b": "carrier"}
+    # A stated post with a different exit is not this item's copy; it stays pending.
+    other = _decide_row(4, hook=True, identity="post-b", call_id="call-b", exit_status=1)
+    assert _decisions(early, copy, pending, other)["item-b"] == "pending"
+
+
+def test_pending_rollout_items_persist_until_settled(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    other = "hmac-sha256:" + ("e" * 64)
+    store.note_pending_rollout_item(workspace, _DECIDE_SESSION, "item-a")
+    store.note_pending_rollout_item(workspace, _DECIDE_SESSION, "item-b")
+    store.note_pending_rollout_item(workspace, other, "item-c")
+    reopened = LocalObservationStore(_state=tmp_path)
+    assert reopened.pending_rollout_items(workspace, _DECIDE_SESSION) == ("item-a", "item-b")
+    # Settling is per session and idempotent.
+    reopened.settle_pending_rollout_item(workspace, other, "item-a")
+    reopened.settle_pending_rollout_item(workspace, _DECIDE_SESSION, "item-a")
+    reopened.settle_pending_rollout_item(workspace, _DECIDE_SESSION, "item-a")
+    assert reopened.pending_rollout_items(workspace, _DECIDE_SESSION) == ("item-b",)
+    assert reopened.pending_rollout_items(workspace, other) == ("item-c",)

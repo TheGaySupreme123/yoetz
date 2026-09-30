@@ -44,7 +44,8 @@ reverse-chronological released versions.
   Codex `exec_command` and `local_shell` calls. While the session's tool hooks fire, the rollout's
   copy of a hooked call stays local when the hook already stated the outcome, so one command is one
   result; when the hook stated none (a still-running process) or no tool hooks fire, the rollout
-  item is delivered with its outcome (#910).
+  item is delivered with its outcome. This holds when the rollout item is read before its hook
+  result arrives: the item waits locally and the later hook result decides it (#910).
 
 - Codex observation records each tool call once. A tool call's pre-event and its result now share
   one ledger action instead of two, and a code-mode `exec` cell no longer adds its own action next

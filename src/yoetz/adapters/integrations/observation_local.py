@@ -200,6 +200,7 @@ _OPEN_PRE_TTL_MS: Final = 600_000
 # one of these conditions.
 _MAX_UNPAIRED_SCOPES: Final = 256
 _MAX_CODEX_TOOL_HOOK_ENTRIES: Final = 256
+_MAX_PENDING_ROLLOUT_TOKEN: Final = 128
 _MAX_OUTBOX: Final = 512
 # The largest selected profile is the hard local JSON ceiling.  Profile
 # specific limits come from the pure budget policy below; the standard value
@@ -1371,6 +1372,25 @@ def _codex_tool_hooks_from_json(raw: object) -> dict[str, tuple[int, int]]:
     return dict(sorted(hooks.items(), key=lambda item: item[1][1])[-_MAX_CODEX_TOOL_HOOK_ENTRIES:])
 
 
+def _pending_rollout_item_token(value: object) -> bool:
+    return type(value) is str and 0 < len(value) <= _MAX_PENDING_ROLLOUT_TOKEN
+
+
+def _pending_rollout_items_from_json(raw: object) -> dict[str, tuple[str, int]]:
+    items: dict[str, tuple[str, int]] = {}
+    if not isinstance(raw, Mapping):
+        return items
+    for identity, value in cast(Mapping[object, object], raw).items():
+        if not _pending_rollout_item_token(identity) or not isinstance(value, Mapping):
+            continue
+        entry = cast(Mapping[str, object], value)
+        session = entry.get("session")
+        if not _pending_rollout_item_token(session):
+            continue
+        items[cast(str, identity)] = (cast(str, session), _bounded_counter(entry.get("touched")))
+    return dict(sorted(items.items(), key=lambda item: item[1][1])[-_MAX_CODEX_TOOL_HOOK_ENTRIES:])
+
+
 def _code_mode_cells_from_json(raw: object) -> dict[str, _CodeModeCell]:
     cells: dict[str, _CodeModeCell] = {}
     if not isinstance(raw, Mapping):
@@ -1770,6 +1790,11 @@ class _WorkspaceState:
     codex_tool_hooks: dict[str, tuple[int, int]] | None = None
     code_mode_cells: dict[str, _CodeModeCell] | None = None
     codex_tool_hook_clock: int = 0
+    # Per rollout tool item read before any hook post it pairs with (#910): its
+    # source identity -> (host session, recency stamp on the clock above). A
+    # later hook post decides it; the bounded map forgets the least recently
+    # touched item, which then stays in the local store only, as before.
+    pending_rollout_items: dict[str, tuple[str, int]] | None = None
     # True when a state was written by a pre-/11 reader that could not retain
     # scoped pairing provenance. It is deliberately sticky: a later save must
     # not turn unknown history into proof that a gap was false.
@@ -1916,6 +1941,8 @@ class _WorkspaceState:
             self.codex_tool_hooks = {}
         if self.code_mode_cells is None:
             self.code_mode_cells = {}
+        if self.pending_rollout_items is None:
+            self.pending_rollout_items = {}
         if type(self.pairing_state_unknown) is not bool:
             raise ProtocolValueError("invalid_event_value_type")
         if self.stream_cursors is None:
@@ -2485,6 +2512,7 @@ def _copy_state(state: _WorkspaceState) -> _WorkspaceState:
         codex_tool_hooks=dict(state.codex_tool_hooks or {}),
         code_mode_cells=dict(state.code_mode_cells or {}),
         codex_tool_hook_clock=state.codex_tool_hook_clock,
+        pending_rollout_items=dict(state.pending_rollout_items or {}),
         pairing_state_unknown=state.pairing_state_unknown,
         stream_cursors=dict(state.stream_cursors or {}),
         stream_partials=dict(state.stream_partials or {}),
@@ -5856,6 +5884,62 @@ class LocalObservationStore:
             )
             self._save(workspace, state)
             return local
+
+    def note_pending_rollout_item(
+        self, workspace: str, session_commitment: str, source_identity: str
+    ) -> None:
+        """Remember a rollout tool item read before any hook post it pairs with (#910).
+
+        The item stays in the local store only until a later hook post of the same
+        session decides it: the stream reconciler then delivers it once when it is
+        the only carrier of that call's outcome, or settles it as the post's copy.
+        """
+
+        if not _pending_rollout_item_token(session_commitment) or not _pending_rollout_item_token(
+            source_identity
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+        with self._lock:
+            state = self._load(workspace)
+            assert state.pending_rollout_items is not None
+            state.codex_tool_hook_clock = min(_MAX_SAFE_INTEGER, state.codex_tool_hook_clock + 1)
+            state.pending_rollout_items.pop(source_identity, None)
+            state.pending_rollout_items[source_identity] = (
+                session_commitment,
+                state.codex_tool_hook_clock,
+            )
+            while len(state.pending_rollout_items) > _MAX_CODEX_TOOL_HOOK_ENTRIES:
+                oldest = min(state.pending_rollout_items.items(), key=lambda item: item[1][1])[0]
+                del state.pending_rollout_items[oldest]
+            self._save(workspace, state)
+
+    @_read_mostly
+    def pending_rollout_items(self, workspace: str, session_commitment: str) -> tuple[str, ...]:
+        """Source identities of one session's undecided rollout tool items, oldest first."""
+
+        with self._reading():
+            state = self._load(workspace)
+            return tuple(
+                identity
+                for identity, (session, _touched) in sorted(
+                    (state.pending_rollout_items or {}).items(), key=lambda item: item[1][1]
+                )
+                if session == session_commitment
+            )
+
+    def settle_pending_rollout_item(
+        self, workspace: str, session_commitment: str, source_identity: str
+    ) -> None:
+        """Forget one decided rollout tool item; an unknown identity is a no-op."""
+
+        with self._lock:
+            state = self._load(workspace)
+            assert state.pending_rollout_items is not None
+            current = state.pending_rollout_items.get(source_identity)
+            if current is None or current[0] != session_commitment:
+                return
+            del state.pending_rollout_items[source_identity]
+            self._save(workspace, state)
 
     @staticmethod
     def _remember_code_mode_cell(state: _WorkspaceState, key: str, cell: _CodeModeCell) -> None:
@@ -11180,6 +11264,15 @@ class LocalObservationStore:
             )
         if state.codex_tool_hook_clock:
             payload["codex_tool_hook_clock"] = state.codex_tool_hook_clock
+        if state.pending_rollout_items:
+            payload["pending_rollout_items"] = JsonObject(
+                {
+                    identity: JsonObject({"session": session, "touched": touched})
+                    for identity, (session, touched) in sorted(
+                        state.pending_rollout_items.items(), key=lambda item: item[0].encode()
+                    )
+                }
+            )
         if state.stream_partial_dropped_sessions:
             payload["stream_partial_dropped_sessions"] = tuple(
                 sorted(state.stream_partial_dropped_sessions, key=str.encode)
@@ -12154,6 +12247,9 @@ class LocalObservationStore:
             codex_tool_hooks=_codex_tool_hooks_from_json(raw.get("codex_tool_hooks")),
             code_mode_cells=_code_mode_cells_from_json(raw.get("code_mode_cells")),
             codex_tool_hook_clock=_bounded_counter(raw.get("codex_tool_hook_clock")),
+            pending_rollout_items=_pending_rollout_items_from_json(
+                raw.get("pending_rollout_items")
+            ),
             pairing_state_unknown=pairing_state_unknown,
             stream_cursors=stream_cursors,
             stream_partials=stream_partials,

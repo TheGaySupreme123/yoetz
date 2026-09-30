@@ -1005,3 +1005,148 @@ async def test_same_command_calls_each_keep_their_only_exit(
         if envelope.event_kind == "item_completed"
     ]
     assert len(delivered_items) == 1
+
+
+def _interleaved_pre(cell: _Replay) -> None:
+    """Another hooked call starts while the first is in flight; its hook reconciles the rollout."""
+
+    cell.hook(
+        "PreToolUse",
+        tool_name="Bash",
+        tool_use_id="call_parallel",
+        tool_input={"command": "git status"},
+    )
+
+
+def _interleaved_post(cell: _Replay) -> None:
+    cell.hook(
+        "PostToolUse",
+        tool_name="Bash",
+        tool_use_id="call_parallel",
+        tool_input={"command": "git status"},
+        tool_response=json.dumps(
+            {
+                "chunk_id": "paral",
+                "exit_code": 0,
+                "original_token_count": 1,
+                "output": "public synthetic output",
+                "wall_time_seconds": 0.1,
+            }
+        ),
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("later_row", [False, True])
+@pytest.mark.parametrize("item_id", ["call_before_post", "exec-910-before-post"])
+async def test_item_read_before_its_outcome_less_post_is_released_once(
+    replay: _Replay, item_id: str, later_row: bool
+) -> None:
+    """#910: a rollout item read ahead of its hook post is decided when that post lands.
+
+    The completed ``CommandExecution`` (exit 101) is read by another call's hook before this
+    call's ``PostToolUse`` is stored; the post then states no exit. The item is the only carrier
+    of the call's outcome, so it reaches the ledger exactly once, although the stream cursor
+    already moved past it and a later stream row may already have reached the task.
+    """
+
+    _session_start(replay)
+    command = {"command": "cargo test"}
+    replay.hook("PreToolUse", tool_name="Bash", tool_use_id="call_before_post", tool_input=command)
+    replay.append(_command_execution(item_id, "cargo test", 101, "2026-09-29T18:00:10.000Z"))
+    if later_row:
+        # A stream-only tool row after the item, delivered before the item is decided.
+        replay.append(
+            _rollout_row(
+                "response_item",
+                {
+                    "arguments": json.dumps({"command": ["ls"]}),
+                    "call_id": "call_stream_only",
+                    "name": "shell",
+                    "type": "function_call",
+                },
+                "2026-09-29T18:00:11.000Z",
+            ),
+            _rollout_row(
+                "response_item",
+                {"call_id": "call_stream_only", "output": "x", "type": "function_call_output"},
+                "2026-09-29T18:00:12.000Z",
+            ),
+        )
+    _interleaved_pre(replay)
+    if later_row:
+        await _sweep_all(replay)
+    replay.hook(
+        "PostToolUse",
+        tool_name="Bash",
+        tool_use_id="call_before_post",
+        tool_input=command,
+        tool_response=json.dumps(
+            {
+                "chunk_id": "before",
+                "original_token_count": 0,
+                "output": "public synthetic output",
+                "session_id": 3,
+                "wall_time_seconds": 10.0,
+            }
+        ),
+    )
+    _interleaved_post(replay)
+    replay.hook("Stop", last_assistant_message="Tests pass.", stop_hook_active=False)
+    recorder = await _sweep_all(replay)
+    replay.hook("Stop", last_assistant_message="Tests pass.", stop_hook_active=False)
+    recorder_again = await _sweep_all(replay)
+    results = [cast(ResultRecordedPayload, row.payload) for row in replay.rows("result_recorded")]
+    facts = [(item.outcome, item.exit_status) for item in results]
+    assert facts.count((ResultOutcome.FAILURE, 101)) == 1
+    assert (ResultOutcome.UNKNOWN, None) in facts
+    delivered_items = [
+        envelope
+        for envelope in (*recorder.delivered, *recorder_again.delivered)
+        if envelope.event_kind == "item_completed"
+    ]
+    assert len(delivered_items) == 1
+    assert replay.store.pending_rollout_items(replay.commitment, replay.session) == ()
+    # The released failure reaches the claim check: a completion claim names it.
+    failed = next(item.result_id for item in results if item.exit_status == 101)
+    ledger = _claim_ledger(replay)
+    ledger.claim()
+    assert failed in omitted_results(ledger)
+
+
+@pytest.mark.anyio
+async def test_item_read_before_its_stated_post_stays_one_run(replay: _Replay) -> None:
+    """The ordinary copy read ahead of its post settles as that post's copy, never delivered."""
+
+    _session_start(replay)
+    command = {"command": "npm run test-type"}
+    replay.hook("PreToolUse", tool_name="Bash", tool_use_id="call_red", tool_input=command)
+    replay.append(
+        _command_execution("exec-910-red", "npm run test-type", 2, "2026-09-29T17:58:10.000Z")
+    )
+    _interleaved_pre(replay)
+    assert len(replay.store.pending_rollout_items(replay.commitment, replay.session)) == 1
+    replay.hook(
+        "PostToolUse",
+        tool_name="Bash",
+        tool_use_id="call_red",
+        tool_input=command,
+        tool_response=json.dumps(
+            {
+                "chunk_id": "redred",
+                "exit_code": 2,
+                "original_token_count": 12,
+                "output": "public synthetic output",
+                "wall_time_seconds": 2.5,
+            }
+        ),
+    )
+    _interleaved_post(replay)
+    replay.hook("Stop", last_assistant_message="Done.", stop_hook_active=False)
+    recorder = await _sweep_all(replay)
+    results = [cast(ResultRecordedPayload, row.payload) for row in replay.rows("result_recorded")]
+    assert [(item.outcome, item.exit_status) for item in results].count(
+        (ResultOutcome.FAILURE, 2)
+    ) == 1
+    assert not any(envelope.event_kind == "item_completed" for envelope in recorder.delivered)
+    assert replay.store.pending_rollout_items(replay.commitment, replay.session) == ()
