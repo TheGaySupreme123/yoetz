@@ -79,6 +79,7 @@ from yoetz.kernel.deterministic_checks import (
     DeterministicCase,
     FrozenHistoryEvent,
 )
+from yoetz.kernel.finding_todo import FindingTodoState, finding_todo_state
 from yoetz.kernel.lineage import LineageEvaluation
 from yoetz.kernel.projections import (
     EvidenceProjectionRecord,
@@ -1061,10 +1062,12 @@ def repair_evidence_refs(projection: ProjectionState, allowed: frozenset[str]) -
 def _prior_finding_candidates(
     projection: ProjectionState, allowed: frozenset[str]
 ) -> list[tuple[str, FindingProjectionRecord]]:
-    """Readable, unresolved AI-powered findings inside the fence, newest first.
+    """Readable, open AI-powered findings inside the fence, newest first.
 
     Local findings are proven by the local packs that raised them and reach the reviewer as this
     check's assessments; resolved findings are history. Neither is a live question for the reviewer.
+    Nor is a terminal item (issue #905): ``acknowledged_not_done`` and ``rejection_accepted`` are
+    final and are never re-reviewed.
     """
 
     rows: list[tuple[str, FindingProjectionRecord]] = []
@@ -1077,6 +1080,7 @@ def _prior_finding_candidates(
             or record.resolved_by_check_event_id is not None
             or payload.origin is not FindingOrigin.SEMANTIC_MODEL_DERIVED
             or ref not in allowed
+            or finding_todo_state(projection, key) is not FindingTodoState.OPEN
         ):
             continue
         rows.append((ref, record))

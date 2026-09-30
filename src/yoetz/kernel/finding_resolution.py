@@ -16,12 +16,18 @@ projection checkpoint all read the same fact.
 
 from __future__ import annotations
 
-from collections.abc import MutableMapping
+from collections.abc import Mapping, MutableMapping
 from dataclasses import replace
 from typing import Final
 
 from yoetz.domain.coordination import CoordinationGapCode
-from yoetz.domain.events import CheckRecordedPayload, ClaimKind, LedgerRecord, RequestedItemKind
+from yoetz.domain.events import (
+    CheckRecordedPayload,
+    ClaimKind,
+    LedgerRecord,
+    RequestedItemKind,
+    ResponseRecordedPayload,
+)
 from yoetz.domain.findings import Finding, FindingKind, FindingOrigin, ResponseDisposition
 from yoetz.domain.receipts import (
     OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
@@ -40,14 +46,16 @@ from yoetz.domain.receipts import (
 from yoetz.domain.values import EventId, FindingId, ResultId
 from yoetz.kernel.claims import effective_claim_items
 from yoetz.kernel.plan_scope import current_plan_scope
-from yoetz.kernel.projections import FindingProjectionRecord, ProjectionState
+from yoetz.kernel.projections import FindingProjectionRecord, ProjectionRecord, ProjectionState
 from yoetz.protocol.coverage import LedgerFreshness
 from yoetz.protocol.models import SemanticReason, SemanticStatus
 
 __all__ = [
     "SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS",
     "IssueKey",
+    "OPEN_REVIEW_VERDICTS",
     "apply_check_resolution",
+    "apply_check_rulings",
     "finding_is_resolved",
     "issue_key",
     "prior_finding_verdict",
@@ -771,6 +779,8 @@ def apply_check_resolution(
         if (
             record.payload is None
             or record.resolved_by_check_event_id is not None
+            # A terminal ``rejection_accepted`` item never upgrades to resolved (issue #905).
+            or record.rejection_accepted_by_check_event_id is not None
             or current_id in check.returned_finding_ids
         ):
             continue
@@ -780,15 +790,75 @@ def apply_check_resolution(
             findings[current_id] = replace(record, resolved_by_check_event_id=check_event_id)
 
 
+OPEN_REVIEW_VERDICTS: Final = frozenset({"answered_not_fixed", "still_present", "unassessable"})
+
+
+def apply_check_rulings(
+    findings: dict[FindingId, FindingProjectionRecord],
+    responses: Mapping[FindingId, ProjectionRecord[ResponseRecordedPayload]],
+    check: CheckRecordedPayload,
+    check_event_id: EventId,
+) -> None:
+    """Fold one recorded check into the to-do facts of the findings it assessed (issue #905).
+
+    Runs after ``apply_check_resolution``. A readable finding the check left open gains one review
+    round: a local finding the check returned again over a later subject, or an AI-powered finding
+    the reviewer ruled ``still_present``, ``answered_not_fixed`` or ``unassessable``. A
+    ``withdrawn`` ruling on an AI-powered finding whose latest readable response is ``rejected``
+    latches ``rejection_accepted``; the reviewer accepted the agent's reasoned rejection. Resolved
+    and already-latched rows never change, and nothing here resolves or reopens a finding.
+    """
+
+    rulings = {item.finding_id: item.verdict for item in check.prior_finding_verdicts}
+    touched = frozenset(check.returned_finding_ids) | frozenset(rulings)
+    for current_id in sorted(touched, key=str.encode):
+        record = findings.get(current_id)
+        if (
+            record is None
+            or record.payload is None
+            or record.resolved_by_check_event_id is not None
+            or record.rejection_accepted_by_check_event_id is not None
+        ):
+            continue
+        finding = record.payload
+        verdict = rulings.get(current_id)
+        if finding.origin is FindingOrigin.DETERMINISTIC:
+            reassessed = (
+                current_id in check.returned_finding_ids
+                and check.subject_frontier.sequence > finding.subject_frontier.sequence
+            )
+            if reassessed:
+                findings[current_id] = replace(record, review_rounds=record.review_rounds + 1)
+            continue
+        if verdict in OPEN_REVIEW_VERDICTS:
+            findings[current_id] = replace(record, review_rounds=record.review_rounds + 1)
+        elif verdict == "withdrawn":
+            response = responses.get(current_id)
+            if (
+                response is not None
+                and response.payload is not None
+                and response.payload.disposition is ResponseDisposition.REJECTED
+            ):
+                findings[current_id] = replace(
+                    record, rejection_accepted_by_check_event_id=check_event_id
+                )
+
+
 def reopen_findings_resolved_by(
     findings: dict[FindingId, FindingProjectionRecord],
     event_ids: frozenset[EventId],
 ) -> None:
-    """Drop resolution whose proving check was redacted: unreadable proof is no proof."""
+    """Drop resolution whose proving check was redacted: unreadable proof is no proof.
+
+    The same holds for a ``rejection_accepted`` latch whose withdrawing check was redacted.
+    """
 
     for current_id, record in tuple(findings.items()):
         if record.resolved_by_check_event_id in event_ids:
-            findings[current_id] = replace(record, resolved_by_check_event_id=None)
+            record = replace(record, resolved_by_check_event_id=None)
+            findings[current_id] = record
+        if record.rejection_accepted_by_check_event_id in event_ids:
+            findings[current_id] = replace(record, rejection_accepted_by_check_event_id=None)
 
 
 def finding_is_resolved(state: ProjectionState, finding_id: FindingId) -> bool:
@@ -808,7 +878,12 @@ def finding_is_resolved(state: ProjectionState, finding_id: FindingId) -> bool:
         return True
     if response.payload is None:
         return False
-    return response.payload.disposition is not ResponseDisposition.PROVENANCE_DISPUTED
+    # ``acknowledged_not_done`` is terminal and never reads as resolved (issue #905): the agent
+    # said it will not do this, so a later absence proof must not turn it into a clean row.
+    return response.payload.disposition not in {
+        ResponseDisposition.ACKNOWLEDGED_NOT_DONE,
+        ResponseDisposition.PROVENANCE_DISPUTED,
+    }
 
 
 def resolved_finding_ids(state: ProjectionState) -> frozenset[FindingId]:

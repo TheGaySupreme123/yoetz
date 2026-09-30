@@ -141,3 +141,54 @@ def test_outbound_case_names_the_prior_findings_section_only_from_1_2_0() -> Non
     assert "prior_finding_item_ids" in after["$defs"]["review_packet"]["required"]
     # No new data category crosses egress with the section.
     assert before["$defs"]["data_category"] == after["$defs"]["data_category"]
+
+
+_ROOT = Path(__file__).resolve().parents[3] / "schemas"
+
+
+def _respond_wire(disposition: str, **extra: Any) -> dict[str, Any]:
+    wire: dict[str, Any] = {
+        "protocol_version": "0.1",
+        "schema_version": "1.0.0",
+        "request_id": "req_00000000-0000-4000-8000-000000000001",
+        "session_id": "ses_00000000-0000-4000-8000-000000000001",
+        "writer_id": "wri_00000000-0000-4000-8000-000000000001",
+        "expected_frontier": {"sequence": "2", "head_digest": "sha256:" + "a" * 64},
+        "finding_id": "fnd_00000000-0000-4000-8000-000000000001",
+        "finding_frontier": {"sequence": "2", "head_digest": "sha256:" + "a" * 64},
+        "disposition": disposition,
+        "actor": {"actor_id": "harness:test", "actor_type": "harness"},
+        "client": {"kind": "test_client", "version": "0.1.0", "integration": "local_cli"},
+    }
+    wire.update(extra)
+    return wire
+
+
+def test_acknowledged_not_done_needs_respond_1_1_0_and_an_old_service_refuses_it() -> None:
+    """The released respond 1.0.0 pair and control 2.8.0 never admit the new disposition."""
+
+    reason = {"reason": "Out of scope for this task."}
+    validate_schema_instance(
+        "respond-request", "1.1.0", _respond_wire("acknowledged_not_done", **reason)
+    )
+    with pytest.raises(SchemaInstanceInvalid):
+        validate_schema_instance("respond-request", "1.1.0", _respond_wire("acknowledged_not_done"))
+    with pytest.raises(SchemaInstanceInvalid):
+        validate_schema_instance(
+            "respond-request",
+            "1.1.0",
+            _respond_wire("acknowledged_not_done", waiver_scope="finding_only", **reason),
+        )
+    with pytest.raises(SchemaInstanceInvalid):
+        validate_schema_instance(
+            "respond-request", "1.0.0", _respond_wire("acknowledged_not_done", **reason)
+        )
+    # Every earlier disposition keeps validating under the new version.
+    validate_schema_instance("respond-request", "1.1.0", _respond_wire("acknowledged"))
+    control = {
+        version: (_ROOT / "service" / f"control-request-{version}.schema.json").read_text()
+        for version in ("2.8.0", "2.9.0")
+    }
+    assert "respond-request-1.0.0" in control["2.8.0"]
+    assert "respond-request-1.1.0" not in control["2.8.0"]
+    assert "respond-request-1.1.0" in control["2.9.0"]

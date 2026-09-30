@@ -57,7 +57,12 @@ class Selection(BaseModel):
     evidence_refs: tuple[str, ...] = ()
     result_ids: tuple[str, ...] = ()
     finding_id: str | None = None
-    disposition: Literal["acknowledged", "provenance_disputed", "rejected", "waived"] | None = None
+    disposition: (
+        Literal[
+            "acknowledged", "acknowledged_not_done", "provenance_disputed", "rejected", "waived"
+        ]
+        | None
+    ) = None
     reason: str | None = None
     supersedes_claim_refs: tuple[str, ...] = ()
     format: Literal["markdown", "text", "json"] = "markdown"

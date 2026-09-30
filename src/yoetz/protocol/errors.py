@@ -133,6 +133,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "finding_json_shape_invalid",
     "finding_priority_mismatch",
     "finding_resolution_mismatch",
+    "finding_terminal",
     "float_forbidden",
     "frame_invalid",
     "frame_too_large",
@@ -356,7 +357,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
 )
 
 _REASON_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
-assert len(_PROTOCOL_REASON_CODE_VALUES) == 299
+assert len(_PROTOCOL_REASON_CODE_VALUES) == 300
 assert len(_PROTOCOL_REASON_CODE_VALUES) == len(set(_PROTOCOL_REASON_CODE_VALUES))
 assert _PROTOCOL_REASON_CODE_VALUES == tuple(sorted(_PROTOCOL_REASON_CODE_VALUES, key=str.encode))
 assert all(_REASON_CODE_PATTERN.fullmatch(value) for value in _PROTOCOL_REASON_CODE_VALUES)

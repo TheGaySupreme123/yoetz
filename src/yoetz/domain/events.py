@@ -202,6 +202,7 @@ __all__ = [
     "ResultOutcome",
     "ResultRecordedPayload",
     "RuntimeProfile",
+    "RESPONSE_EVENT_SCHEMA_VERSION",
     "SESSION_EVENT_SCHEMA_VERSION",
     "SessionOpenedPayload",
     "SessionResumedPayload",
@@ -243,6 +244,10 @@ SEMANTIC_EVENT_SCHEMA_VERSIONS: Final = ("1.1.0", SEMANTIC_EVENT_SCHEMA_VERSION)
 # (the persisted challenge fields and the ``relates_to`` link) on AI-powered findings; a finding
 # without them keeps its earlier 1.3.0 bytes.
 FINDING_EVENT_SCHEMA_VERSION: Final = "1.3.0"
+# ``response_recorded`` 1.0.0 is released and frozen. 1.1.0 exists only to admit the terminal
+# ``acknowledged_not_done`` disposition (issue #905); every other disposition keeps 1.0.0 bytes,
+# so the version is a pure function of the payload and old ledgers replay unchanged.
+RESPONSE_EVENT_SCHEMA_VERSION: Final = "1.1.0"
 COORDINATION_EVENT_SCHEMA_VERSION: Final = "1.0.0"
 SESSION_EVENT_SCHEMA_VERSION: Final = "1.1.0"
 # Lineage fields are additive to the original event families.  The old session-opened schema
@@ -794,6 +799,7 @@ def _locator_key_kind(schema: EventSchema) -> str:
                 )
             )
         )
+        or schema == EventSchema("response_recorded", RESPONSE_EVENT_SCHEMA_VERSION)
     )
     if schema.version != SCHEMA_VERSION and not additive:
         return "none"
@@ -2141,6 +2147,7 @@ class ResponseRecordedPayload:
             _evidence_result_tuple(self.evidence_refs, field="evidence_refs"),
         )
         if disposition in {
+            ResponseDisposition.ACKNOWLEDGED_NOT_DONE,
             ResponseDisposition.PROVENANCE_DISPUTED,
             ResponseDisposition.REJECTED,
             ResponseDisposition.WAIVED,
@@ -2391,6 +2398,7 @@ PAYLOAD_TYPES: Final[Mapping[EventSchema, type[EventPayload]]] = MappingProxyTyp
             for version in SEMANTIC_EVENT_SCHEMA_VERSIONS
         },
         EventSchema("response_recorded", SCHEMA_VERSION): ResponseRecordedPayload,
+        EventSchema("response_recorded", RESPONSE_EVENT_SCHEMA_VERSION): ResponseRecordedPayload,
         EventSchema("redaction_recorded", SCHEMA_VERSION): RedactionRecordedPayload,
         EventSchema("check_recorded", SCHEMA_VERSION): CheckRecordedPayload,
         EventSchema("check_recorded", CHECK_EVENT_SCHEMA_VERSION): CheckRecordedPayload,
@@ -4055,6 +4063,11 @@ def _validate_event_schema_payload(
             raise ProtocolValueError("invalid_event_schema")
     if type(payload) is Finding and schema.name == "finding_recorded":
         if finding_has_dialogue_fields(payload) and schema.version != FINDING_EVENT_SCHEMA_VERSION:
+            raise ProtocolValueError("invalid_event_schema")
+    if type(payload) is ResponseRecordedPayload:
+        if (payload.disposition is ResponseDisposition.ACKNOWLEDGED_NOT_DONE) != (
+            schema.version == RESPONSE_EVENT_SCHEMA_VERSION
+        ):
             raise ProtocolValueError("invalid_event_schema")
     if schema.version == SCHEMA_VERSION:
         profile: RuntimeProfile | None = None

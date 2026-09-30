@@ -220,6 +220,7 @@ def test_nominal_public_enums_are_closed() -> None:
     assert tuple(WaiverScope) == (WaiverScope.FINDING_ONLY,)
     assert {member.value for member in ResponseDisposition} == {
         "acknowledged",
+        "acknowledged_not_done",
         "provenance_disputed",
         "rejected",
         "waived",

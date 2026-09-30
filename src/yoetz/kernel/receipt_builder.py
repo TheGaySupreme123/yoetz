@@ -53,6 +53,7 @@ from yoetz.domain.receipts import (
     ReceiptSection,
     ReceiptSectionKey,
     ReceiptVersionSlice,
+    receipt_document_carries_terminal_sections,
 )
 from yoetz.domain.values import (
     ClaimId,
@@ -144,13 +145,23 @@ def _sorted_unique[T: str](values: Iterable[T]) -> tuple[T, ...]:
 class ReceiptFindingState:
     finding_id: FindingId
     resolved: bool
+    # Issue #905 terminal states. ``acknowledged_not_done`` stays unresolved and blocking;
+    # ``rejection_accepted`` stays unresolved but no longer blocks a clean conclusion. Both are
+    # disclosed by id in their own receipt sections.
+    acknowledged_not_done: bool = False
+    rejection_accepted: bool = False
 
     def __post_init__(self) -> None:
         try:
             object.__setattr__(self, "finding_id", finding_id(self.finding_id))
         except ValueError as exc:
             raise ValueError(_CONTEXT_INVALID) from exc
-        if type(self.resolved) is not bool:
+        if (
+            type(self.resolved) is not bool
+            or type(self.acknowledged_not_done) is not bool
+            or type(self.rejection_accepted) is not bool
+            or self.resolved + self.acknowledged_not_done + self.rejection_accepted > 1
+        ):
             raise ValueError(_CONTEXT_INVALID)
 
 
@@ -735,6 +746,7 @@ def _apply_profile(
                     ] += 1
                 transformed_responses.append(replace(response, reason=None))
             elif response.disposition in {
+                ResponseDisposition.ACKNOWLEDGED_NOT_DONE,
                 ResponseDisposition.PROVENANCE_DISPUTED,
                 ResponseDisposition.REJECTED,
                 ResponseDisposition.WAIVED,
@@ -1375,7 +1387,9 @@ def build_receipt(
     unresolved_actionable = tuple(
         finding
         for finding in findings
-        if not states_by_id[finding.finding_id].resolved and FINDING_KIND_TRAITS[finding.kind][1]
+        if not states_by_id[finding.finding_id].resolved
+        and not states_by_id[finding.finding_id].rejection_accepted
+        and FINDING_KIND_TRAITS[finding.kind][1]
     )
     conclusion = _conclusion(context, unresolved_actionable)
     obligations = _select_obligations(context, findings)
@@ -1471,6 +1485,31 @@ def build_receipt(
     suppressed_count = (
         0 if context.applicable_check is None else context.applicable_check.suppressed_count
     )
+    terminal_sections = receipt_document_carries_terminal_sections(versions)
+    acknowledged_not_done_ids = tuple(
+        sorted(
+            (
+                state.finding_id
+                for state in context.finding_states
+                if state.acknowledged_not_done and state.finding_id in retained_ids
+            ),
+            key=_ascii_key,
+        )
+        if terminal_sections
+        else ()
+    )
+    rejection_accepted_ids = tuple(
+        sorted(
+            (
+                state.finding_id
+                for state in context.finding_states
+                if state.rejection_accepted and state.finding_id in retained_ids
+            ),
+            key=_ascii_key,
+        )
+        if terminal_sections
+        else ()
+    )
     return ReceiptDocument(
         receipt_id=receipt_id,
         task_id=task_id,
@@ -1495,4 +1534,6 @@ def build_receipt(
             if context.applicable_check is None
             else context.applicable_check.semantic_provenance
         ),
+        acknowledged_not_done_finding_ids=acknowledged_not_done_ids,
+        rejection_accepted_finding_ids=rejection_accepted_ids,
     )

@@ -2507,6 +2507,9 @@ def _status_request_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     for value in ("lineage", "project"):
         if value not in values:
             values.append(value)
+    findings_filter = cast(dict[str, JsonValue], definitions["findings_filter"])
+    filter_properties = cast(dict[str, JsonValue], findings_filter["properties"])
+    _admit_acknowledged_not_done(cast(dict[str, JsonValue], filter_properties["disposition"]))
     rules = cast(list[JsonValue], document["allOf"])
     # The no-filter branch in v1.1 also contains the previously-added results view.  Keep the
     # selector views explicitly filter-free in this successor.
@@ -2581,6 +2584,25 @@ def _status_result_v1_4_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     if "coordination_overlap" not in finding_kind_values:
         finding_kind_values.append("coordination_overlap")
         finding_kind_values.sort(key=lambda item: str(item).encode("ascii"))
+    finding_item = cast(dict[str, JsonValue], definitions["finding_item"])
+    finding_item_properties = cast(dict[str, JsonValue], finding_item["properties"])
+    _admit_acknowledged_not_done(cast(dict[str, JsonValue], finding_item_properties["disposition"]))
+    cast(list[JsonValue], finding_item["allOf"]).append(
+        {
+            "if": {
+                "properties": {"disposition": {"const": _ACKNOWLEDGED_NOT_DONE}},
+                "required": ["disposition"],
+            },
+            "then": {
+                "properties": {
+                    "reason": {"not": {"type": "null"}},
+                    "resolved": {"const": False},
+                    "waiver_expiry": {"type": "null"},
+                    "waiver_scope": {"type": "null"},
+                }
+            },
+        }
+    )
     for definition_name in ("candidate_finding_item", "finding_item"):
         finding_definition = cast(dict[str, JsonValue], definitions[definition_name])
         finding_properties = cast(dict[str, JsonValue], finding_definition["properties"])
@@ -3161,10 +3183,23 @@ def _receipt_document_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]
         "required": ["children"],
         "type": "object",
     }
+    receipt_response = cast(dict[str, JsonValue], definitions["receipt_response"])
+    response_properties = cast(dict[str, JsonValue], receipt_response["properties"])
+    _admit_acknowledged_not_done(cast(dict[str, JsonValue], response_properties["disposition"]))
+    cast(list[JsonValue], receipt_response["allOf"]).insert(1, _acknowledged_not_done_condition())
     properties = cast(dict[str, JsonValue], document["properties"])
     findings = cast(dict[str, JsonValue], properties["findings"])
     findings["items"] = {"$ref": SCHEMA_NAMESPACE + "findings/finding-1.3.0.schema.json"}
     properties["children"] = {"$ref": "#/$defs/receipt_children"}
+    # Issue #905 terminal states, disclosed by id; present only when non-empty.
+    for name in ("acknowledged_not_done_finding_ids", "rejection_accepted_finding_ids"):
+        properties[name] = {
+            "items": {"$ref": "#/$defs/finding_id"},
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": True,
+        }
     required = cast(list[JsonValue], document["required"])
     if "children" not in required:
         required.append("children")
@@ -3277,6 +3312,7 @@ def _event_draft_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     add_branch("session_opened", "1.2.0")
     add_branch("finding_recorded", "1.2.0")
     add_branch("finding_recorded", "1.3.0")
+    add_branch("response_recorded", "1.1.0")
     for family in (
         "child_accepted",
         "child_dependencies_recorded",
@@ -3358,6 +3394,14 @@ def _opaque_unknown_event_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonVa
         {
             "additionalProperties": False,
             "properties": {"name": {"const": "check_recorded"}, "version": {"const": "1.3.0"}},
+            "required": ["name", "version"],
+            "type": "object",
+        }
+    )
+    values.append(
+        {
+            "additionalProperties": False,
+            "properties": {"name": {"const": "response_recorded"}, "version": {"const": "1.1.0"}},
             "required": ["name", "version"],
             "type": "object",
         }
@@ -4298,6 +4342,28 @@ def _control_v2_9_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     )
     document = cast(dict[str, JsonValue], json.loads(source.read_bytes()))
     document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    # 2.9.0 is unreleased on the 0.3 line: it also carries the respond 1.1.0 pair that admits the
+    # terminal ``acknowledged_not_done`` disposition (#905).  2.8.0 keeps the frozen 1.0.0 pair,
+    # so an older service refuses the new disposition at its own schema boundary.
+    respond_replacements = {
+        SCHEMA_NAMESPACE + "operations/respond-request-1.0.0.schema.json": SCHEMA_NAMESPACE
+        + "operations/respond-request-1.1.0.schema.json",
+        SCHEMA_NAMESPACE + "operations/respond-result-1.0.0.schema.json": SCHEMA_NAMESPACE
+        + "operations/respond-result-1.1.0.schema.json",
+    }
+
+    def retarget_respond(node: JsonValue) -> None:
+        if isinstance(node, dict):
+            for key, value in tuple(node.items()):
+                if type(value) is str:
+                    node[key] = respond_replacements.get(value, value)
+                else:
+                    retarget_respond(value)
+        elif isinstance(node, list):
+            for value in node:
+                retarget_respond(value)
+
+    retarget_respond(document)
     if entry.schema_name == "control-result":
         definitions = cast(dict[str, JsonValue], document["$defs"])
         runtime = definitions.get("observation_selection_runtime")
@@ -5088,6 +5154,101 @@ def _respond_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         ) from exc
     disposition["enum"] = ["acknowledged", "provenance_disputed", "rejected", "waived"]
     _insert_provenance_dispute_condition(rules)
+    return document
+
+
+_ACKNOWLEDGED_NOT_DONE: Final = "acknowledged_not_done"
+
+
+def _no_waiver_fields() -> dict[str, JsonValue]:
+    return {"not": {"anyOf": [{"required": ["waiver_scope"]}, {"required": ["waiver_expiry"]}]}}
+
+
+def _admit_acknowledged_not_done(disposition: dict[str, JsonValue]) -> None:
+    """Add the terminal not-done disposition to one disposition enum (issue #905)."""
+
+    values = cast(list[JsonValue], disposition["enum"])
+    if _ACKNOWLEDGED_NOT_DONE not in values:
+        values.append(_ACKNOWLEDGED_NOT_DONE)
+        values.sort(key=lambda item: str(item).encode("ascii"))
+
+
+def _acknowledged_not_done_condition() -> dict[str, JsonValue]:
+    """``acknowledged_not_done`` requires a reason and accepts no waiver fields."""
+
+    return {
+        "if": {
+            "properties": {"disposition": {"const": _ACKNOWLEDGED_NOT_DONE}},
+            "required": ["disposition"],
+        },
+        "then": {**_no_waiver_fields(), "required": ["reason"]},
+    }
+
+
+def _response_recorded_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Admit the terminal ``acknowledged_not_done`` response on a new event version (#905)."""
+
+    document = _load_versioned_template(entry, "events/response-recorded-1.0.0.schema.json")
+    try:
+        properties = cast(dict[str, JsonValue], document["properties"])
+        disposition = cast(dict[str, JsonValue], properties["disposition"])
+        rules = cast(list[JsonValue], document["oneOf"])
+    except (KeyError, TypeError) as exc:
+        raise SchemaGenerationError(
+            "response_recorded_schema_template_invalid", entries=(entry.relative_path,)
+        ) from exc
+    _admit_acknowledged_not_done(disposition)
+    rules.insert(
+        1,
+        {
+            **_no_waiver_fields(),
+            "properties": {"disposition": {"const": _ACKNOWLEDGED_NOT_DONE}},
+            "required": ["reason"],
+        },
+    )
+    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    return document
+
+
+def _respond_request_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Add the terminal ``acknowledged_not_done`` disposition to ``respond`` (#905)."""
+
+    document = _load_versioned_template(entry, "operations/respond-request-1.0.0.schema.json")
+    try:
+        properties = cast(dict[str, JsonValue], document["properties"])
+        disposition = cast(dict[str, JsonValue], properties["disposition"])
+        rules = cast(list[JsonValue], document["allOf"])
+    except (KeyError, TypeError) as exc:
+        raise SchemaGenerationError(
+            "respond_request_schema_template_invalid", entries=(entry.relative_path,)
+        ) from exc
+    _admit_acknowledged_not_done(disposition)
+    rules.insert(1, _acknowledged_not_done_condition())
+    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    if "title" in document:
+        document["title"] = f"Yoetz respond request {entry.schema_version}"
+    return document
+
+
+def _respond_result_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Echo the terminal ``acknowledged_not_done`` disposition in the respond result (#905)."""
+
+    document = _load_versioned_template(entry, "operations/respond-result-1.0.0.schema.json")
+    try:
+        definitions = cast(dict[str, JsonValue], document["$defs"])
+        response = cast(dict[str, JsonValue], definitions["response"])
+        properties = cast(dict[str, JsonValue], response["properties"])
+        disposition = cast(dict[str, JsonValue], properties["disposition"])
+        rules = cast(list[JsonValue], response["allOf"])
+    except (KeyError, TypeError) as exc:
+        raise SchemaGenerationError(
+            "respond_result_schema_template_invalid", entries=(entry.relative_path,)
+        ) from exc
+    _admit_acknowledged_not_done(disposition)
+    rules.insert(1, _acknowledged_not_done_condition())
+    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    if "title" in document:
+        document["title"] = f"Yoetz respond result {entry.schema_version}"
     return document
 
 
@@ -5988,6 +6149,18 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         ),
     ),
     _RegistryEntry(
+        "events/response-recorded-1.1.0.schema.json",
+        "response-recorded",
+        "1.1.0",
+        "event",
+        "event-payload",
+        lambda: (
+            __import__(
+                "yoetz.domain.events", fromlist=["ResponseRecordedPayload"]
+            ).ResponseRecordedPayload
+        ),
+    ),
+    _RegistryEntry(
         "events/result-recorded-1.0.0.schema.json",
         "result-recorded",
         "1.0.0",
@@ -6403,6 +6576,28 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "operations/respond-result-1.0.0.schema.json",
         "respond-result",
         "1.0.0",
+        "request_result",
+        "MCP output",
+        lambda: (
+            __import__("yoetz.protocol.models", fromlist=["RespondResultModel"]).RespondResultModel
+        ),
+    ),
+    _RegistryEntry(
+        "operations/respond-request-1.1.0.schema.json",
+        "respond-request",
+        "1.1.0",
+        "request_result",
+        "MCP input",
+        lambda: (
+            __import__(
+                "yoetz.protocol.models", fromlist=["RespondRequestModel"]
+            ).RespondRequestModel
+        ),
+    ),
+    _RegistryEntry(
+        "operations/respond-result-1.1.0.schema.json",
+        "respond-result",
+        "1.1.0",
         "request_result",
         "MCP output",
         lambda: (
@@ -7157,6 +7352,7 @@ _BUILDER_OWNED_SCHEMA_PATHS: Final[frozenset[str]] = frozenset(
         "events/event-draft-1.2.0.schema.json",
         "events/finding-recorded-1.3.0.schema.json",
         "events/opaque-unknown-event-draft-1.2.0.schema.json",
+        "events/response-recorded-1.1.0.schema.json",
         "privacy/outbound-case-1.2.0.schema.json",
         "events/session-opened-1.2.0.schema.json",
         "events/work-abandoned-1.0.0.schema.json",
@@ -7168,6 +7364,8 @@ _BUILDER_OWNED_SCHEMA_PATHS: Final[frozenset[str]] = frozenset(
         "operations/check-request-1.1.0.schema.json",
         "operations/publish-work-request-1.2.0.schema.json",
         "operations/receipt-result-1.3.0.schema.json",
+        "operations/respond-request-1.1.0.schema.json",
+        "operations/respond-result-1.1.0.schema.json",
         "operations/start-request-1.1.0.schema.json",
         "operations/start-result-1.1.0.schema.json",
         "operations/status-request-1.2.0.schema.json",
@@ -7452,6 +7650,8 @@ def build_schema_documents(
             normalized = _claim_payload_schema(entry)
         elif entry.relative_path == "events/response-recorded-1.0.0.schema.json":
             normalized = _response_recorded_schema(entry)
+        elif entry.relative_path == "events/response-recorded-1.1.0.schema.json":
+            normalized = _response_recorded_v1_1_schema(entry)
         elif entry.relative_path in {
             "events/child-accepted-1.0.0.schema.json",
             "events/child-dependencies-recorded-1.0.0.schema.json",
@@ -7548,6 +7748,10 @@ def build_schema_documents(
             normalized = _respond_request_schema(entry)
         elif entry.relative_path == "operations/respond-result-1.0.0.schema.json":
             normalized = _respond_result_schema(entry)
+        elif entry.relative_path == "operations/respond-request-1.1.0.schema.json":
+            normalized = _respond_request_v1_1_schema(entry)
+        elif entry.relative_path == "operations/respond-result-1.1.0.schema.json":
+            normalized = _respond_result_v1_1_schema(entry)
         elif entry.relative_path in {
             "operations/status-request-1.0.0.schema.json",
             "operations/status-request-1.1.0.schema.json",

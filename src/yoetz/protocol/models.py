@@ -1567,7 +1567,9 @@ class RespondRequestModel(PublicRequestModel):
     expected_frontier: FrontierModel
     finding_id: FindingIdWire
     finding_frontier: FrontierModel
-    disposition: Literal["acknowledged", "provenance_disputed", "rejected", "waived"]
+    disposition: Literal[
+        "acknowledged", "acknowledged_not_done", "provenance_disputed", "rejected", "waived"
+    ]
     reason: String1To4096 | None = None
     waiver_scope: Literal["finding_only"] | None = None
     waiver_expiry: TimestampWire | None = None
@@ -1616,7 +1618,15 @@ class StatusFindingsFilterModel(_ClosedModel):
     optional_non_null_fields = frozenset({"disposition", "include_resolved", "origin", "priority"})
 
     disposition: (
-        Literal["acknowledged", "none", "provenance_disputed", "rejected", "waived"] | None
+        Literal[
+            "acknowledged",
+            "acknowledged_not_done",
+            "none",
+            "provenance_disputed",
+            "rejected",
+            "waived",
+        ]
+        | None
     ) = None
     include_resolved: bool | None = None
     origin: Literal["deterministic", "semantic_model_derived"] | None = None
@@ -2781,7 +2791,9 @@ class RespondResponseModel(_ClosedModel):
     response_event_id: EventIdWire
     finding_id: FindingIdWire
     finding_frontier: FrontierModel
-    disposition: Literal["acknowledged", "provenance_disputed", "rejected", "waived"]
+    disposition: Literal[
+        "acknowledged", "acknowledged_not_done", "provenance_disputed", "rejected", "waived"
+    ]
     evidence: tuple[RespondEvidenceSummaryModel, ...]
     reason: String1To4096 | OmittedContentModel | None = None
     waiver_scope: Literal["finding_only"] | None = None
@@ -2799,7 +2811,7 @@ class RespondResponseModel(_ClosedModel):
         if self.disposition == "acknowledged":
             if self.waiver_scope is not None or self.waiver_expiry is not None:
                 raise ValueError("response_fields_invalid")
-        elif self.disposition in {"provenance_disputed", "rejected"}:
+        elif self.disposition in {"acknowledged_not_done", "provenance_disputed", "rejected"}:
             if (
                 self.reason is None
                 or self.waiver_scope is not None
@@ -3117,7 +3129,14 @@ class StatusFindingItemModel(_ClosedModel):
     subject_frontier: FrontierModel
     coverage: CoverageModel
     provenance: JsonValue | None
-    disposition: Literal["acknowledged", "none", "provenance_disputed", "rejected", "waived"]
+    disposition: Literal[
+        "acknowledged",
+        "acknowledged_not_done",
+        "none",
+        "provenance_disputed",
+        "rejected",
+        "waived",
+    ]
     resolved: bool
     response_event_id: EventIdWire | None
     reason: String1To8192 | OmittedContentModel | None
@@ -3142,6 +3161,13 @@ class StatusFindingItemModel(_ClosedModel):
             or self.waiver_expiry is not None
         ):
             raise ValueError("provenance_disputed_finding_state_invalid")
+        if self.disposition == "acknowledged_not_done" and (
+            self.reason is None
+            or self.resolved
+            or self.waiver_scope is not None
+            or self.waiver_expiry is not None
+        ):
+            raise ValueError("acknowledged_not_done_finding_state_invalid")
         return self
 
 
@@ -4964,11 +4990,13 @@ _RECEIPT_STRUCTURAL_POINTERS: Final = (
     + _prefix_leaf_patterns(
         "/document",
         (
+            "acknowledged_not_done_finding_ids/*",
             "claim_refs/*",
             "conclusion",
             "evidence_refs/*",
             "generated_at",
             "receipt_id",
+            "rejection_accepted_finding_ids/*",
             "schema_version",
             "session_id",
             "suppressed_finding_count",
@@ -5248,7 +5276,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 1170:
+    if len(result) != 1172:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 

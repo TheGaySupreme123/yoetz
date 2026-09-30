@@ -597,10 +597,16 @@ def test_exact_schema_pair_dispatch_and_unknown_boundary() -> None:
             "claim_recorded",
             "evidence_recorded",
             "finding_recorded",
+            "response_recorded",
             "session_opened",
             "session_resumed",
         }
     )
+    # Issue #905: 1.1.0 exists only for the terminal ``acknowledged_not_done`` disposition.
+    assert {schema.version for schema in PAYLOAD_TYPES if schema.name == "response_recorded"} == {
+        SCHEMA_VERSION,
+        "1.1.0",
+    }
 
 
 def test_coordination_payloads_round_trip_with_closed_wire_shapes() -> None:

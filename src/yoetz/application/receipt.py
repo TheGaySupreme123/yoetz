@@ -46,7 +46,7 @@ from yoetz.domain.values import (
     timestamp_from_datetime,
 )
 from yoetz.kernel.deterministic_checks import CaseGap, build_deterministic_case, case_coverage
-from yoetz.kernel.finding_resolution import finding_is_resolved
+from yoetz.kernel.finding_todo import FindingTodoState, finding_todo_state
 from yoetz.kernel.lineage import evaluate_recorded_lineage
 from yoetz.kernel.projections import ProjectionState
 from yoetz.kernel.receipt_builder import (
@@ -436,10 +436,18 @@ def _finding_states(projection: object) -> tuple[ReceiptFindingState, ...]:
     # Resolution is proof-based: the projection carries which later qualifying check, if any,
     # proved each current issue absent, and a response disposition never sets it. Reading the
     # shared rule here is what keeps the receipt and ``receipt_blocking_finding_count`` equal.
-    return tuple(
-        ReceiptFindingState(item.finding_id, finding_is_resolved(projection, item.finding_id))
-        for item in current_receipt_findings(projection)
-    )
+    states: list[ReceiptFindingState] = []
+    for item in current_receipt_findings(projection):
+        todo = finding_todo_state(projection, item.finding_id)
+        states.append(
+            ReceiptFindingState(
+                item.finding_id,
+                todo is FindingTodoState.VERIFIED_RESOLVED,
+                acknowledged_not_done=todo is FindingTodoState.ACKNOWLEDGED_NOT_DONE,
+                rejection_accepted=todo is FindingTodoState.REJECTION_ACCEPTED,
+            )
+        )
+    return tuple(states)
 
 
 def _context(

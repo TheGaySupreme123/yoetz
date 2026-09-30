@@ -54,10 +54,16 @@ _HOST_PROFILES: Final[frozenset[str]] = frozenset({"generic", "codex", "claude",
 
 _SCHEMA_VERSION: Final = "1.0.0"
 _TOOL_INPUT_SCHEMA_VERSIONS: Final = MappingProxyType(
-    {"start": "1.1.0", "publish_work": "1.2.0", "check": "1.1.0", "status": "1.2.0"}
+    {
+        "start": "1.1.0",
+        "publish_work": "1.2.0",
+        "check": "1.1.0",
+        "respond": "1.1.0",
+        "status": "1.2.0",
+    }
 )
 _TOOL_OUTPUT_SCHEMA_VERSIONS: Final = MappingProxyType(
-    {"start": "1.1.0", "check": "1.3.0", "status": "1.4.0", "receipt": "1.3.0"}
+    {"start": "1.1.0", "check": "1.3.0", "respond": "1.1.0", "status": "1.4.0", "receipt": "1.3.0"}
 )
 
 
@@ -1284,10 +1290,11 @@ def _describe_presentation_schema(name: str, schema: dict[str, JsonValue]) -> No
         disposition = properties.get("disposition")
         if isinstance(disposition, dict):
             disposition["description"] = (
-                "Acknowledged accepts no waiver fields. Provenance_disputed contests the "
-                "finding's authorship or provenance premise rather than its conclusion; it "
-                "requires reason and accepts no waiver fields. Rejected requires reason and "
-                "accepts no waiver fields. Waived requires reason and waiver_scope."
+                "Acknowledged accepts no waiver fields. Acknowledged_not_done means you will "
+                "not do it and is final. Provenance_disputed contests the finding's authorship "
+                "or provenance premise rather than its conclusion. It, rejected and "
+                "acknowledged_not_done require reason and accept no waiver fields. Waived "
+                "requires reason and waiver_scope."
             )
         finding_frontier = properties.get("finding_frontier")
         if isinstance(finding_frontier, dict):
@@ -1918,7 +1925,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
                 "start": "sha256:3a2186a2db53b91fcf7a8f3117cb8ff6a2b8bad6bc78e3e796e5e611e8598405",
                 "publish_work": "sha256:5b7e151a4583762f500803165aa48d3c49ec61172a36945a6af92064ffc171ff",
                 "check": "sha256:9befe13b257acf10535009c1dd69d9a933f3d94f5cd2aaac1655d4867596f89e",
-                "respond": "sha256:8b5dc94f431a411ef332021af01050a4b0c248a800e46d5b3bdb567f770d25a5",
+                "respond": "sha256:ed3b6758e94ddc210b4f7dc1519754ad0ea834696cc8bde1aff30cb0de2156f8",
                 "status": "sha256:517eb05aa015834d98bd96ed59d4b647a95e6c42a13013803caf19b9b4b07875",
                 "receipt": "sha256:c7676e1ca9afd96d9d7e74503edd5b31a758a05d7e7e1cf0d62c763611ffcecb",
                 "read_guidance": "sha256:4198e5fd133f7b37cc25c0c1a63161657c5d4396a1718f1f4f1f3db7c302a13d",
@@ -1929,7 +1936,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
                 "start": "sha256:3a2186a2db53b91fcf7a8f3117cb8ff6a2b8bad6bc78e3e796e5e611e8598405",
                 "publish_work": "sha256:5b7e151a4583762f500803165aa48d3c49ec61172a36945a6af92064ffc171ff",
                 "check": "sha256:2bd9947abc7b60564474840a73d99a80bfa528b98af1a725d11fdfde5dac9795",
-                "respond": "sha256:8b5dc94f431a411ef332021af01050a4b0c248a800e46d5b3bdb567f770d25a5",
+                "respond": "sha256:ed3b6758e94ddc210b4f7dc1519754ad0ea834696cc8bde1aff30cb0de2156f8",
                 "status": "sha256:517eb05aa015834d98bd96ed59d4b647a95e6c42a13013803caf19b9b4b07875",
                 "receipt": "sha256:c7676e1ca9afd96d9d7e74503edd5b31a758a05d7e7e1cf0d62c763611ffcecb",
                 "read_guidance": "sha256:4198e5fd133f7b37cc25c0c1a63161657c5d4396a1718f1f4f1f3db7c302a13d",
@@ -1939,8 +1946,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:9c103a3fa8fdb85a6c2c20608bdde6294651e94b24407bca719c7e32a8c50722",
-        "strict": "sha256:e272d0216684ffa792ad0b10b55cdd4c436f1a8877cc03033b2fa14126a737b0",
+        "policy": "sha256:676af8d1560b2509ae0acd30c3ddd7ba88c7f63d0b42c46a8bb2aad4293771a0",
+        "strict": "sha256:a0741488f0d1d292aeb2c0946f5955d0a5e8803c22c0826af7bca4cc40d0f98a",
     }
 )
 

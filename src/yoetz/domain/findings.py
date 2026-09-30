@@ -170,6 +170,10 @@ class WaiverScope(str, Enum):  # noqa: UP042 - exact wire enum base
 
 class ResponseDisposition(str, Enum):  # noqa: UP042 - exact wire enum base
     ACKNOWLEDGED = "acknowledged"
+    # Issue #905: the agent states, with a required reason, that it will not do what the finding
+    # asks. Terminal: the item is never re-reviewed, never resolves, and never reads as clean.
+    # Recorded only on ``response_recorded`` 1.1.0.
+    ACKNOWLEDGED_NOT_DONE = "acknowledged_not_done"
     PROVENANCE_DISPUTED = "provenance_disputed"
     REJECTED = "rejected"
     WAIVED = "waived"

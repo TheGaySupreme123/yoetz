@@ -69,6 +69,7 @@ from yoetz.kernel.deterministic_checks import (
     render_deterministic_finding_text,
 )
 from yoetz.kernel.finding_resolution import SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS
+from yoetz.kernel.finding_todo import FindingTodoState, finding_todo_state
 from yoetz.kernel.lineage import LineageEvaluation, evaluate_recorded_lineage
 from yoetz.kernel.policies.research_evidence import research_evidence_findings
 from yoetz.kernel.policies.response_support import (
@@ -1947,6 +1948,9 @@ def _admit_prior_verdicts(
             or record.redacted
             or record.resolved_by_check_event_id is not None
             or record.payload.origin is not FindingOrigin.SEMANTIC_MODEL_DERIVED
+            # A terminal item is never re-reviewed, so no ruling on it is admitted.
+            or finding_todo_state(projection, record.payload.finding_id)
+            is not FindingTodoState.OPEN
         ):
             unsupported += 1
             continue

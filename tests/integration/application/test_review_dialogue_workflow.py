@@ -1,7 +1,7 @@
 """The review dialogue survives the real ledger and reaches the next review (issue #905).
 
 These cases run the real ready composition with a hermetic reviewer: a challenge becomes an
-AI-powered finding whose challenge fields are recorded on the ledger (``finding_recorded/1.4.0``),
+AI-powered finding whose challenge fields are recorded on the ledger (``finding_recorded/1.3.0``),
 the agent answers it, and the next check's review case carries that finding, what the reviewer
 asked, and the answer in the prior-findings section. A projection rebuilt from the recorded events
 reads exactly what the live projection holds.
@@ -30,7 +30,9 @@ from yoetz.domain.findings import (
 )
 from yoetz.domain.privacy import ReviewContextProfile, ReviewSelectionPolicy
 from yoetz.kernel.finding_resolution import finding_resolution_explanation
+from yoetz.kernel.finding_todo import FindingTodoState, finding_todo, finding_todo_state
 from yoetz.kernel.projections import ProjectionState, projection_snapshot
+from yoetz.kernel.receipt_capacity import receipt_blocking_finding_count
 from yoetz.kernel.reducers import replay
 from yoetz.ports.ledger import CheckCommitResult, FrozenCase
 from yoetz.ports.semantic import (
@@ -41,9 +43,11 @@ from yoetz.ports.semantic import (
     SemanticJudgment,
 )
 from yoetz.protocol.canonical import JsonValue, strict_json_parse
+from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.models import (
     CheckRequest,
     PublishWorkRequest,
+    ReceiptRequest,
     RespondRequest,
     SemanticReason,
     SemanticStatus,
@@ -162,6 +166,7 @@ class _Session:
     session_id: str
     writer_id: str
     obligation_id: str
+    task_id: str = ""
 
 
 async def _session(reviewer: _Reviewer, seed: int) -> tuple[_Session, JsonValue]:
@@ -198,7 +203,7 @@ async def _session(reviewer: _Reviewer, seed: int) -> tuple[_Session, JsonValue]
             }
         )
     )
-    session = _Session(app, started.session_id, started.writer_id, obligation_id)
+    session = _Session(app, started.session_id, started.writer_id, obligation_id, started.task_id)
     return session, frontier_json(published.result_frontier)
 
 
@@ -395,4 +400,226 @@ async def test_a_cited_fixed_ruling_closes_a_repaired_finding_under_an_insuffici
         assert [item.verdict for item in recorded.prior_finding_verdicts] == ["unassessable"]
         assert "semantic_prior_verdicts_unsupported" in second.coverage.known_gaps
         assert resolved_by is None
+    assert projection_snapshot(replay(_records(session.app))) == projection_snapshot(live)
+
+
+# Issue #905 slice 4: terminal states. ``acknowledged_not_done`` and ``rejection_accepted`` are final,
+# never re-reviewed, and reach the receipt in their own sections; ``respond`` records nothing more.
+
+
+def _respond_wire(
+    session: _Session,
+    frontier: JsonValue,
+    finding_frontier: JsonValue,
+    finding: Finding,
+    seed: int,
+    disposition: str,
+    reason: str | None,
+) -> dict[str, JsonValue]:
+    wire: dict[str, JsonValue] = {
+        **request_base(protocol_id("req_", seed)),
+        "session_id": session.session_id,
+        "writer_id": session.writer_id,
+        "expected_frontier": frontier,
+        "finding_id": finding.finding_id,
+        "finding_frontier": finding_frontier,
+        "disposition": disposition,
+    }
+    if reason is not None:
+        wire["reason"] = reason
+    return wire
+
+
+def _no_challenges(_frozen: FrozenCase) -> SemanticJudgment:
+    return SemanticJudgment("no_material_discrepancy", ())
+
+
+async def _receipt(session: _Session, frontier: JsonValue, seed: int, fmt: str) -> Any:
+    return await session.app.receipt(
+        ReceiptRequest.model_validate(
+            {
+                **request_base(protocol_id("req_", seed)),
+                "task_id": session.task_id,
+                "session_id": session.session_id,
+                "writer_id": session.writer_id,
+                "expected_frontier": frontier,
+                "format": fmt,
+                "include": "standard",
+                "redaction_profile": "full_local",
+            }
+        )
+    )
+
+
+async def test_acknowledged_not_done_is_final_never_rereviewed_and_never_clean() -> None:
+    """numba fnd_01c5aaf7: the agent says it will not do it, with a reason, and that is final."""
+
+    seed = 3000
+    reviewer = _Reviewer([_challenge_obligation, _no_challenges])
+    session, frontier = await _session(reviewer, seed)
+    first = await _check(session, frontier, seed + 10)
+    raised = _semantic(first)
+    at = frontier_json(first.result_frontier)
+
+    # A missing reason is refused by the request contract; a blank one by respond, typed.
+    with pytest.raises(ValueError):
+        RespondRequest.model_validate(
+            _respond_wire(session, at, at, raised, seed + 20, "acknowledged_not_done", None)
+        )
+    with pytest.raises(PublicOperationError) as blank:
+        await session.app.respond(
+            RespondRequest.model_validate(
+                _respond_wire(session, at, at, raised, seed + 21, "acknowledged_not_done", "   ")
+            )
+        )
+    assert blank.value.code is PublicErrorCode.INVALID_REQUEST
+    assert blank.value.safe_details is not None
+    assert blank.value.safe_details["reason_code"] == "response_fields_invalid"
+
+    reason = "llvmlite 0.46.0 is not installable in this sandbox; out of scope for this task."
+    wire = _respond_wire(session, at, at, raised, seed + 22, "acknowledged_not_done", reason)
+    recorded = await session.app.respond(RespondRequest.model_validate(wire))
+    assert recorded.response.disposition == "acknowledged_not_done"
+    response_rows = [row for row in _records(session.app) if row.schema.name == "response_recorded"]
+    assert [row.schema for row in response_rows] == [EventSchema("response_recorded", "1.1.0")]
+
+    # A replayed respond is a no-op: same answer, nothing appended.
+    count = len(_records(session.app))
+    replayed = await session.app.respond(RespondRequest.model_validate(wire))
+    assert replayed.accepted_event == recorded.accepted_event
+    assert len(_records(session.app)) == count
+
+    # Terminal is final: a later response records nothing and says why, typed.
+    after = frontier_json(recorded.result_frontier)
+    with pytest.raises(PublicOperationError) as terminal:
+        await session.app.respond(
+            RespondRequest.model_validate(
+                _respond_wire(session, after, at, raised, seed + 23, "rejected", "Changed mind.")
+            )
+        )
+    assert terminal.value.safe_details is not None
+    assert terminal.value.safe_details["reason_code"] == "finding_terminal"
+    assert len(_records(session.app)) == count
+
+    # The next review is not asked about it again, and the item stays not done.
+    second = await _check(session, after, seed + 30)
+    assert f"prior-finding-{raised.finding_id}" not in {
+        item.item_id for item in reviewer.cases[1].items
+    }
+    live = _live_projection(session.app)
+    assert finding_todo_state(live, raised.finding_id) is FindingTodoState.ACKNOWLEDGED_NOT_DONE
+    assert receipt_blocking_finding_count(live) >= 1
+
+    json_receipt = await _receipt(session, frontier_json(second.result_frontier), seed + 40, "json")
+    assert json_receipt.conclusion == "unresolved_findings_remain"
+    document = cast(Mapping[str, JsonValue], json_receipt.document)
+    assert document["acknowledged_not_done_finding_ids"] == [raised.finding_id]
+    for fmt in ("markdown", "text"):
+        rendered = await _receipt(
+            session, frontier_json(second.result_frontier), seed + 41 + len(fmt), fmt
+        )
+        assert "Acknowledged, not done" in cast(str, rendered.human_text)
+        assert raised.finding_id in cast(str, rendered.human_text)
+    assert projection_snapshot(replay(_records(session.app))) == projection_snapshot(
+        _live_projection(session.app)
+    )
+
+
+def _withdraw_first_finding(frozen: FrozenCase) -> SemanticJudgment:
+    projection = frozen.case.projection
+    finding = next(
+        key
+        for key, row in projection.findings.items()
+        if row.payload is not None and row.payload.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+    )
+    # ``insufficient_packet`` keeps the ordinary absence proof from resolving it, so only the
+    # withdrawal speaks.
+    return SemanticJudgment(
+        "insufficient_packet", (), (PriorFindingVerdict(str(finding), "withdrawn", ()),)
+    )
+
+
+async def test_a_withdrawn_reasoned_rejection_latches_rejection_accepted() -> None:
+    """termenv 34ddb7af: a reasoned rejection the reviewer withdraws stops blocking, disclosed."""
+
+    seed = 3100
+    reviewer = _Reviewer([_challenge_obligation, _withdraw_first_finding])
+    session, frontier = await _session(reviewer, seed)
+    first = await _check(session, frontier, seed + 10)
+    raised = _semantic(first)
+    at = frontier_json(first.result_frontier)
+    rejected = await session.app.respond(
+        RespondRequest.model_validate(
+            _respond_wire(
+                session, at, at, raised, seed + 20, "rejected", "The task statement excludes it."
+            )
+        )
+    )
+    blocking_before = receipt_blocking_finding_count(_live_projection(session.app))
+    second = await _check(session, frontier_json(rejected.result_frontier), seed + 30)
+
+    live = _live_projection(session.app)
+    check_row = [row for row in _records(session.app) if row.schema.name == "check_recorded"][-1]
+    record = live.findings[raised.finding_id]
+    assert record.resolved_by_check_event_id is None
+    assert record.rejection_accepted_by_check_event_id == check_row.event_id
+    assert finding_todo_state(live, raised.finding_id) is FindingTodoState.REJECTION_ACCEPTED
+    assert receipt_blocking_finding_count(live) == blocking_before - 1
+
+    after = frontier_json(second.result_frontier)
+    with pytest.raises(PublicOperationError) as terminal:
+        await session.app.respond(
+            RespondRequest.model_validate(
+                _respond_wire(session, after, at, raised, seed + 40, "acknowledged", None)
+            )
+        )
+    assert terminal.value.safe_details is not None
+    assert terminal.value.safe_details["reason_code"] == "finding_terminal"
+    json_receipt = await _receipt(session, after, seed + 50, "json")
+    document = cast(Mapping[str, JsonValue], json_receipt.document)
+    assert document["rejection_accepted_finding_ids"] == [raised.finding_id]
+    assert projection_snapshot(replay(_records(session.app))) == projection_snapshot(
+        _live_projection(session.app)
+    )
+
+
+def _still_present_first_finding(frozen: FrozenCase) -> SemanticJudgment:
+    projection = frozen.case.projection
+    finding = next(
+        key
+        for key, row in projection.findings.items()
+        if row.payload is not None and row.payload.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+    )
+    obligation = next(iter(projection.obligations))
+    return SemanticJudgment(
+        "no_material_discrepancy",
+        (),
+        (PriorFindingVerdict(str(finding), "still_present", (str(obligation),)),),
+    )
+
+
+async def test_review_rounds_count_toward_the_budget_and_never_close_or_throttle() -> None:
+    """Each later review that leaves an item open is one round; the budget only asks, never acts."""
+
+    seed = 3200
+    reviewer = _Reviewer(
+        [_challenge_obligation, _still_present_first_finding, _still_present_first_finding]
+    )
+    session, frontier = await _session(reviewer, seed)
+    first = await _check(session, frontier, seed + 10)
+    raised = _semantic(first)
+    second = await _check(session, frontier_json(first.result_frontier), seed + 20)
+    third = await _check(session, frontier_json(second.result_frontier), seed + 30)
+    assert len(reviewer.cases) == 3  # every check ran its review; nothing was throttled
+
+    live = _live_projection(session.app)
+    todo = finding_todo(live, raised.finding_id, attempt_budget=2)
+    assert todo.review_rounds == 2
+    assert todo.state is FindingTodoState.OPEN
+    assert todo.budget_reached
+    assert not finding_todo(live, raised.finding_id).budget_reached  # default budget 5
+    # Still open: the budget never closes or acknowledges anything on the agent's behalf.
+    assert live.findings[raised.finding_id].resolved_by_check_event_id is None
+    assert live.responses.get(raised.finding_id) is None
+    assert third.result_frontier.sequence > second.result_frontier.sequence
     assert projection_snapshot(replay(_records(session.app))) == projection_snapshot(live)

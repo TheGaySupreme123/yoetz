@@ -1651,19 +1651,24 @@ async def test_response_to_unreturned_finding_produces_check_not_applicable() ->
     assert type(rechecked) is CheckCommitResult, f"unexpected nonterminal check: {type(rechecked)}"
     assert stale_finding.finding_id not in tuple(item.finding_id for item in rechecked.findings)
 
-    responded = await app.respond(
-        RespondRequest.model_validate(
-            {
-                **_request_base(protocol_id("req_", 1311)),
-                "session_id": started.session_id,
-                "writer_id": started.writer_id,
-                "expected_frontier": _frontier(rechecked.result_frontier),
-                "finding_id": stale_finding.finding_id,
-                "finding_frontier": _frontier(checked.result_frontier),
-                "disposition": "acknowledged",
-            }
+    # The recheck proved that finding absent, so it is verified_resolved and final (issue #905):
+    # a response to it records nothing, and so cannot make the applicable check inapplicable.
+    with pytest.raises(PublicOperationError) as terminal:
+        await app.respond(
+            RespondRequest.model_validate(
+                {
+                    **_request_base(protocol_id("req_", 1311)),
+                    "session_id": started.session_id,
+                    "writer_id": started.writer_id,
+                    "expected_frontier": _frontier(rechecked.result_frontier),
+                    "finding_id": stale_finding.finding_id,
+                    "finding_frontier": _frontier(checked.result_frontier),
+                    "disposition": "acknowledged",
+                }
+            )
         )
-    )
+    assert terminal.value.safe_details is not None
+    assert terminal.value.safe_details["reason_code"] == "finding_terminal"
 
     receipt = await app.receipt(
         ReceiptRequest.model_validate(
@@ -1672,7 +1677,7 @@ async def test_response_to_unreturned_finding_produces_check_not_applicable() ->
                 "task_id": started.task_id,
                 "session_id": started.session_id,
                 "writer_id": started.writer_id,
-                "expected_frontier": _frontier(responded.result_frontier),
+                "expected_frontier": _frontier(rechecked.result_frontier),
                 "format": "json",
                 "include": "standard",
                 "redaction_profile": "full_local",
@@ -1680,7 +1685,7 @@ async def test_response_to_unreturned_finding_produces_check_not_applicable() ->
         )
     )
 
-    assert "check_not_applicable" in receipt.coverage.known_gaps
+    assert "check_not_applicable" not in receipt.coverage.known_gaps
     assert "check_current_as_of_earlier_frontier" not in receipt.coverage.known_gaps
 
 
@@ -4383,18 +4388,24 @@ async def test_command_gap_partition_preserves_receipt_coverage(
         if fmt != "json":
             assert receipt.human_text is not None
             assert "command_attempt_uncorroborated" in receipt.human_text
-    response = await app.respond(
-        RespondRequest.model_validate(
-            {
-                **base(),
-                "expected_frontier": _frontier(frontier),
-                "finding_id": target.finding_id,
-                "finding_frontier": _frontier(first.result_frontier),
-                "disposition": "acknowledged",
-                "reason": "Historical finding remains in the record.",
-            }
-        )
+    respond_request = RespondRequest.model_validate(
+        {
+            **base(),
+            "expected_frontier": _frontier(frontier),
+            "finding_id": target.finding_id,
+            "finding_frontier": _frontier(first.result_frontier),
+            "disposition": "acknowledged",
+            "reason": "Historical finding remains in the record.",
+        }
     )
+    if should_resolve:
+        # A verified_resolved finding is final (issue #905): the response records nothing.
+        with pytest.raises(PublicOperationError) as terminal:
+            await app.respond(respond_request)
+        assert terminal.value.safe_details is not None
+        assert terminal.value.safe_details["reason_code"] == "finding_terminal"
+        return
+    response = await app.respond(respond_request)
     frontier = response.result_frontier
     receipt = await app.receipt(
         ReceiptRequest.model_validate(

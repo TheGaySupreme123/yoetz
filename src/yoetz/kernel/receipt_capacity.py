@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Final
 
 from yoetz.domain.events import CheckRecordedPayload, LedgerRecord
-from yoetz.domain.findings import FINDING_KIND_TRAITS, Finding, rank_key
+from yoetz.domain.findings import Finding, rank_key
 from yoetz.domain.receipts import (
     CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP,
     semantic_coverage_gap_code,
@@ -15,7 +15,8 @@ from yoetz.kernel.deterministic_checks import (
     build_deterministic_case,
     healthy_storage_availability,
 )
-from yoetz.kernel.finding_resolution import finding_is_resolved, issue_key
+from yoetz.kernel.finding_resolution import issue_key
+from yoetz.kernel.finding_todo import finding_blocks_receipt
 from yoetz.kernel.projections import ProjectionState
 from yoetz.kernel.reducers import (
     ReplayIndex,
@@ -73,12 +74,13 @@ def receipt_blocking_finding_count(projection: ProjectionState) -> int:
     Responses record a disposition but never resolve a finding for receipt purposes; only a later
     qualifying check does (``kernel/finding_resolution.py``), and a resolved row stays visible as
     history without counting here. Non-actionable findings remain visible and can contribute
-    coverage gaps, but they do not by themselves select ``unresolved_findings_remain``.
+    coverage gaps, but they do not by themselves select ``unresolved_findings_remain``. A
+    terminal ``rejection_accepted`` row stops counting but stays disclosed; an
+    ``acknowledged_not_done`` row keeps counting (issue #905, ``kernel/finding_todo.py``).
     """
 
     return sum(
-        FINDING_KIND_TRAITS[finding.kind][1]
-        and not finding_is_resolved(projection, finding.finding_id)
+        finding_blocks_receipt(projection, finding.finding_id)
         for finding in current_receipt_findings(projection)
     )
 
