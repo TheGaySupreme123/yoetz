@@ -37,6 +37,11 @@ from yoetz.kernel.deterministic_checks import (
     policy_public_root,
     policy_source_availability,
 )
+from yoetz.kernel.observed_failures import (
+    ObservedFailureState,
+    observed_event_ids_from_coverage,
+    observed_failure_states,
+)
 from yoetz.kernel.policies.response_support import (
     BASE_RESPONSE_INADMISSIBLE_GAPS,
     RESEARCH_REJECTION_PRESENT_FACT,
@@ -265,6 +270,14 @@ def _limiting_refs(
     if claim_record.payload is None:
         return ()
     limitations: set[FindingBasisRef] = set()
+    # The same reading work integrity applies (#909): an observed failure that a later passing run
+    # of its command superseded, or that a completed observed edit made historical, no longer
+    # limits this claim. The receipt still counts it as history.
+    observed_states = observed_failure_states(
+        case.projection,
+        observed_event_ids_from_coverage(case.coverage_by_ref),
+        through=claim_record.source_frontier,
+    )
     for result_id, record in case.projection.results.items():
         if (
             record.payload is not None
@@ -275,6 +288,8 @@ def _limiting_refs(
                 ResultOutcome.UNKNOWN,
             }
             and not _observation_outcome_unavailable(case, result_id)
+            and observed_states.get(result_id, ObservedFailureState.LIVE)
+            is ObservedFailureState.LIVE
             and result_is_relevant_to_claim(case.projection, claim_record, result_id)
         ):
             limitations.add(result_id)

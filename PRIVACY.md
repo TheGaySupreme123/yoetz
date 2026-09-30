@@ -211,6 +211,13 @@ Semantic review receives only minimized approved packets. Secret-like command ou
 in status, logs, hook advice, or semantic packets. Live observation uses local control methods, not
 a seventh MCP tool; advice surfaces through nonblocking hooks and ordinary `status`.
 
+To tell a rerun of the same command from a different one, the hook computes an installation-keyed
+commitment (`hmac-sha256:`) to the lightly normalized command of a shell tool call and discards the
+command text in the hook process. Only that keyed value is stored, shown in `status`, or sent to
+the local service; the command text itself is never persisted, displayed, or sent for this
+purpose, with or without content consent. A plain hash is never used, because a short command
+would be guessable from it, and the same command yields a different value on another installation.
+
 The enforceable technical contract, setup behavior, schemas, fixtures, and remaining empirical or
 independent-review release gates are specified in:
 

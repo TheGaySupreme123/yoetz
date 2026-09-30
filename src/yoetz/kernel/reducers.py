@@ -66,6 +66,11 @@ from yoetz.kernel.finding_resolution import (
     apply_check_resolution,
     reopen_findings_resolved_by,
 )
+from yoetz.kernel.observed_failures import (
+    ObservedFailureState,
+    is_observed_run_record,
+    observed_failure_states_from_records,
+)
 from yoetz.kernel.plan_scope import current_plan_scope
 from yoetz.kernel.projections import (
     ClaimProjectionRecord,
@@ -260,6 +265,9 @@ class ReplayIndex:
     payload_event_by_object: Mapping[ObjectId, EventId]
     evidence_sources_by_object: Mapping[ObjectId, tuple[EvidenceObjectSource, ...]]
     redaction_root_by_object: Mapping[ObjectId, EventId]
+    # Service-stamped hook-observed action/result events. Authorship lives on the envelope, not
+    # the projection, so the claim-revision invariant reads provenance here (#909).
+    observed_event_ids: frozenset[EventId] = frozenset()
 
     def __post_init__(self) -> None:
         if type(self.frontier) is not int or not 0 <= self.frontier <= _MAX_SQLITE_SIGNED_INTEGER:
@@ -299,6 +307,10 @@ class ReplayIndex:
                     raise _corrupt()
                 seen_associations.add(association)
         if any(root not in accepted_event_ids for root in roots.values()):
+            raise _corrupt()
+        if type(self.observed_event_ids) is not frozenset or not (
+            self.observed_event_ids <= accepted_event_ids
+        ):
             raise _corrupt()
         object.__setattr__(self, "payload_event_by_object", MappingProxyType(payloads))
         object.__setattr__(self, "evidence_sources_by_object", MappingProxyType(evidence))
@@ -446,6 +458,11 @@ def extend_replay_index(index: ReplayIndex, event: LedgerRecord) -> ReplayIndex:
         for target in targets:
             redaction_roots.setdefault(target, event.event_id)
 
+    observed = (
+        index.observed_event_ids | {event.event_id}
+        if is_observed_run_record(event)
+        else index.observed_event_ids
+    )
     token = _TRUSTED_PRIOR_INDEX.set(index)
     try:
         return ReplayIndex(
@@ -454,6 +471,7 @@ def extend_replay_index(index: ReplayIndex, event: LedgerRecord) -> ReplayIndex:
             payload_event_by_object=payload_owners,
             evidence_sources_by_object=evidence_sources,
             redaction_root_by_object=redaction_roots,
+            observed_event_ids=observed,
         )
     finally:
         _TRUSTED_PRIOR_INDEX.reset(token)
@@ -674,6 +692,7 @@ def _apply_claim(
     actions: Mapping[ActionId, ProjectionRecord[ActionRecordedPayload]],
     results: Mapping[ResultId, ProjectionRecord[ResultRecordedPayload]],
     event: AcceptedEvent,
+    observed_event_ids: frozenset[EventId] = frozenset(),
 ) -> None:
     key = _locator_id(event, claim_id)
     # A v1.0 claim id may be re-published, and an unreadable payload tombstones the row in place.
@@ -718,11 +737,22 @@ def _apply_claim(
                 "supporting_refs_must_exclude_limitations",
                 event.event_id,
             )
+        # A hook-observed failure that a later passing run of the same command superseded, or
+        # that a completed observed edit made historical, is no longer required (#909). It stays
+        # nameable below, and the receipt counts it as history.
+        observed_states = observed_failure_states_from_records(
+            results,
+            actions,
+            observed_event_ids,
+            through=event.ledger.ingestion_sequence,
+        )
         required = frozenset(
             result_id_value
             for result_id_value, record in results.items()
             if record.payload is not None
             and record.payload.outcome in _TYPED_LIMITING_OUTCOMES
+            and observed_states.get(result_id_value, ObservedFailureState.LIVE)
+            is ObservedFailureState.LIVE
             and _result_is_relevant_to_claim(
                 payload,
                 record,
@@ -1211,7 +1241,7 @@ def reduce_event(
                 source_frontier=accepted.ledger.ingestion_sequence,
             )
         elif family == "claim_recorded":
-            _apply_claim(claims, actions, results, accepted)
+            _apply_claim(claims, actions, results, accepted, replay_index.observed_event_ids)
         elif family == "finding_recorded":
             key = _locator_id(accepted, finding_id)
             findings[key] = _finding_record(
@@ -1429,8 +1459,11 @@ def build_replay_index(events: tuple[LedgerRecord, ...]) -> ReplayIndex:
     payload_event_by_object: dict[ObjectId, EventId] = {}
     evidence_sources_by_object: dict[ObjectId, tuple[EvidenceObjectSource, ...]] = {}
     redaction_root_by_object: dict[ObjectId, EventId] = {}
+    observed_event_ids: set[EventId] = set()
     for event in events:
         _next_record(frontier, head_digest, event)
+        if is_observed_run_record(event):
+            observed_event_ids.add(event.event_id)
         payload_object = event.payload_ref.object_id
         if payload_object in payload_event_by_object:
             raise _corrupt()
@@ -1489,6 +1522,7 @@ def build_replay_index(events: tuple[LedgerRecord, ...]) -> ReplayIndex:
         payload_event_by_object=payload_event_by_object,
         evidence_sources_by_object=evidence_sources_by_object,
         redaction_root_by_object=redaction_root_by_object,
+        observed_event_ids=frozenset(observed_event_ids),
     )
 
 

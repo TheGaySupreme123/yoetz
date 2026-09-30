@@ -67,6 +67,13 @@ to be disclosed; naming it there does not call it a partial or a failure. Read
 `status view=candidate_findings`, `history`, and `results` first, then dry-run the exact replacement;
 the original claim remains immutable history.
 
+A failed run that Yoetz observed through a host hook stops needing disclosure once a later observed
+run of the same command passes, or a later observed edit completes, before the claim. The receipt's
+limitations still name it once as history. For every observed run, `status view=results` shows the
+tool, its occurrence number, a keyed identity of the command, and its exit status, so you can find
+a run that is still red and name its result in `limitation_refs`. The command text itself is never
+stored or shown.
+
 Yoetz does not watch your workspace. What is published is what exists.
 
 Authoring help for MCP: tool descriptions name `yoetz://guidance/publication-policy.md`; invalid

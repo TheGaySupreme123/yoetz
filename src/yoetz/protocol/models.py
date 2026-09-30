@@ -3353,13 +3353,39 @@ class StatusObligationItemModel(_ClosedModel):
         return self
 
 
+ObservedToolNameWire = Annotated[
+    str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$")
+]
+
+
+class StatusObservedRunModel(_ClosedModel):
+    """Structural facts that let an agent recognize one hook-observed run (issue #909).
+
+    ``occurrence`` is the 1-based position among the task's hook-observed results in ledger
+    order; ``command_commitment`` is the installation-keyed identity a later passing run of the
+    same command shares. No command text or finer time is exposed. The runner class belongs to
+    #910 and is not part of this contract yet.
+    """
+
+    optional_non_null_fields = frozenset({"tool_name", "command_commitment", "exit_status"})
+
+    occurrence: CanonicalPositiveUInt64Wire
+    tool_name: ObservedToolNameWire | None = None
+    command_commitment: HmacSha256Commitment | None = None
+    exit_status: Annotated[int, Field(strict=True, ge=-(2**31), le=2**31 - 1)] | None = None
+
+
 class StatusResultItemModel(_ClosedModel):
+    optional_non_null_fields = frozenset({"observed_run"})
+
     result_id: ResultIdWire
     source_event_id: EventIdWire
     payload_available: bool
     outcome: Literal["success", "failure", "partial", "unknown"] | None
     action_id: ActionIdWire | None
     evidence_refs: tuple[EvidenceIdWire, ...]
+    # Present only for a readable, service-stamped hook-observed result.
+    observed_run: StatusObservedRunModel | None = None
 
     @model_validator(mode="after")
     def _validate_result_item(self) -> StatusResultItemModel:
@@ -3369,6 +3395,8 @@ class StatusResultItemModel(_ClosedModel):
             raise ValueError("result_payload_availability_mismatch")
         if not self.payload_available and self.evidence_refs:
             raise ValueError("result_unavailable_evidence_refs")
+        if not self.payload_available and self.observed_run is not None:
+            raise ValueError("result_unavailable_observed_run")
         return self
 
 
@@ -4732,6 +4760,10 @@ _STATUS_RESULTS_STRUCTURAL_POINTERS: Final = ("/page/next_cursor",) + _prefix_le
     (
         "action_id",
         "evidence_refs/*",
+        "observed_run/command_commitment",
+        "observed_run/exit_status",
+        "observed_run/occurrence",
+        "observed_run/tool_name",
         "outcome",
         "payload_available",
         "result_id",
@@ -5199,7 +5231,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 1170:
+    if len(result) != 1174:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 
