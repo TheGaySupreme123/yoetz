@@ -45,6 +45,7 @@ from yoetz.domain.privacy import (
     RequestCommitment,
     ReviewContextProfile,
     ReviewSelectionPolicy,
+    review_selection_policy_schema_version,
 )
 from yoetz.domain.values import (
     format_rfc3339_millis,
@@ -109,7 +110,11 @@ _MAX_DISCLOSURE_ATTEMPT_LOOKUP_ROWS: Final = 16
 # One bounded startup sweep never terminalizes more parked attempts than this.
 _MAX_RECONCILE_STARTED_ATTEMPTS: Final = 256
 
-_PRIVACY_POLICY_WIRE_SCHEMA_VERSION: Final = "1.1.0"
+# The newest privacy-policy wire version. A policy is encoded at the oldest version that can
+# express it exactly (``review_selection_policy_schema_version``), so every policy approved before
+# a newer review vocabulary existed keeps its historical 1.1.0 bytes.
+_PRIVACY_POLICY_WIRE_SCHEMA_VERSION: Final = "1.2.0"
+_PRIVACY_POLICY_WIRE_SCHEMA_VERSIONS: Final = frozenset({"1.0.0", "1.1.0", "1.2.0"})
 _WIRE_CHANNEL_ORDER: Final = (
     EgressChannel.CAPABILITY_TESTING,
     EgressChannel.CRASH_DIAGNOSTICS,
@@ -482,7 +487,7 @@ def _policy_from_wire_mapping(source: dict[str, JsonValue]) -> PrivacyPolicy:
     # The frozen schema makes both of these required, and never_send is a const deny list.
     # Treating either as optional would decode an incomplete or future document as a valid
     # 1.0.0 policy, which on this boundary means silently accepting a weaker deny list.
-    if source.get("schema_version") not in {"1.0.0", _PRIVACY_POLICY_WIRE_SCHEMA_VERSION}:
+    if source.get("schema_version") not in _PRIVACY_POLICY_WIRE_SCHEMA_VERSIONS:
         raise ValueError("privacy_policy_row_corrupt")
     channels = source["channel_policies"]
     if type(channels) is not list:
@@ -490,6 +495,13 @@ def _policy_from_wire_mapping(source: dict[str, JsonValue]) -> PrivacyPolicy:
     if source.get("schema_version") == "1.0.0" and any(
         "fallback_provider_binding" in _mapping(channel) for channel in channels
     ):
+        raise ValueError("privacy_policy_row_corrupt")
+    review_selection = _review_from_json(source["review_selection"])
+    if source.get("schema_version") in {"1.0.0", "1.1.0"} and (
+        review_selection_policy_schema_version(review_selection) != "1.1.0"
+    ):
+        # An older document cannot name a section its schema never had. Reading one as valid
+        # would let a forged or mis-stamped row widen what an older approval covered.
         raise ValueError("privacy_policy_row_corrupt")
     never_send = source.get("never_send")
     if never_send is None or tuple(_strings(never_send)) != _NEVER_SEND_WIRE:
@@ -504,7 +516,7 @@ def _policy_from_wire_mapping(source: dict[str, JsonValue]) -> PrivacyPolicy:
         cast(str, source["policy_digest"]),
         PrivacyProfile(cast(str, source["profile"])),
         ReviewContextProfile(cast(str, source["review_context_profile"])),
-        _review_from_json(source["review_selection"]),
+        review_selection,
         cast(bool, source["require_current_provider_data_use_evidence"]),
         cast(bool, source["network_egress_permitted"]),
         _scope_from_json(source["effective_scope"]),
@@ -536,7 +548,7 @@ def decode_privacy_policy_canonical(data: bytes) -> PrivacyPolicy:
 
 
 def encode_privacy_policy_json(policy: PrivacyPolicy) -> dict[str, JsonValue]:
-    """Encode a privacy policy as the wire ``privacy-policy-1.1.0`` JSON object.
+    """Encode a privacy policy as its wire ``privacy-policy`` JSON object (1.1.0 or 1.2.0).
 
     Catalog rows stay domain-shaped; ordinary-control / CLI results must match the frozen
     schema (``local_sink_category_ceilings``, const ``never_send``, decimal counters).
@@ -547,7 +559,7 @@ def encode_privacy_policy_json(policy: PrivacyPolicy) -> dict[str, JsonValue]:
     if set(by_channel) != set(EgressChannel):
         raise ValueError("privacy_policy_channel_set_invalid")
     encoded: dict[str, JsonValue] = {
-        "schema_version": _PRIVACY_POLICY_WIRE_SCHEMA_VERSION,
+        "schema_version": review_selection_policy_schema_version(policy.review_selection),
         "policy_id": policy.policy_id,
         "version": str(policy.version),
         "policy_digest": policy.policy_digest,

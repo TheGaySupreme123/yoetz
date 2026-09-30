@@ -471,6 +471,25 @@ def test_a_weakened_semantic_review_cannot_resolve_a_semantic_finding(gap: str) 
     assert _resolves(_finding(), _check(semantic=_SEMANTIC_OK, coverage=coverage)) is True
 
 
+@pytest.mark.parametrize(
+    "gap",
+    ("task_statement_unavailable", "task_statement_not_authorized", "task_statement_not_supplied"),
+)
+def test_a_review_without_the_task_statement_never_newly_resolves_a_semantic_finding(
+    gap: str,
+) -> None:
+    """Issue #908: a missing statement is a semantic-only limit.
+
+    A local issue is still proven absent by its pack; a semantic issue raised with the statement
+    in hand cannot be closed by a review that lacked it.
+    """
+
+    finding = _finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED)
+    coverage = _coverage(gaps=(gap,), semantic=True)
+    assert _resolves(finding, _check(semantic=_SEMANTIC_OK, coverage=coverage)) is False
+    assert _resolves(_finding(), _check(semantic=_SEMANTIC_OK, coverage=coverage)) is True
+
+
 def test_apply_marks_the_qualifying_row_and_reopens_returned_rows() -> None:
     proven_earlier = finding_record(
         _finding(2, subject_refs=(obl(2),)), 5, resolved_by_check_event_id=evt(6)

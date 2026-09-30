@@ -1296,6 +1296,47 @@ def test_selection_summary_and_input_loss_remain_distinct_in_all_receipt_formats
         assert "new time and state only" in rendered
 
 
+@pytest.mark.parametrize(
+    ("gaps", "sentences"),
+    [
+        (
+            ("task_statement_not_authorized", "task_statement_unavailable"),
+            (
+                "did not receive the task statement",
+                "does not list the task_statement review section",
+            ),
+        ),
+        (("task_statement_not_supplied",), ("start.task_statement",)),
+    ],
+)
+def test_task_statement_limitation_is_disclosed_in_every_receipt_format(
+    gaps: tuple[str, ...], sentences: tuple[str, ...]
+) -> None:
+    """Criterion 1 (issue #908): JSON, markdown and text receipts all say it in words."""
+
+    coverage = _coverage(gaps=gaps)
+    receipt = _build(
+        _context(
+            coverage=coverage,
+            gaps=tuple(CaseGap(code, code, ()) for code in gaps),
+            check=_check(CheckVerdict.NO_ISSUE_DETECTED, coverage),
+        )
+    )
+    assert receipt.conclusion is ReceiptConclusion.INSUFFICIENT_COVERAGE
+    assert {gap.code for gap in receipt.gaps} >= set(gaps)
+    assert all(gap.detail for gap in receipt.gaps if gap.code in gaps)
+    serialized = str(receipt_document_to_json(receipt))
+    for rendered in (
+        serialized,
+        render_receipt_human(receipt, markdown=True),
+        render_receipt_human(receipt, markdown=False),
+    ):
+        for code in gaps:
+            assert code in rendered
+        for sentence in sentences:
+            assert sentence in rendered
+
+
 def test_child_receipt_retains_provider_usage_under_the_combined_contract() -> None:
     from yoetz.domain.receipts import ReceiptChildOutcome, ReceiptChildren
     from yoetz.protocol.canonical import JsonValue

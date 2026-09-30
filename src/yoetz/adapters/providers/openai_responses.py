@@ -69,6 +69,7 @@ __all__ = [
     "OPENAI_MAX_OUTPUT_TOKENS",
     "OPENAI_MAX_RESPONSE_BODY_BYTES",
     "SEMANTIC_REVIEW_INSTRUCTION",
+    "TASK_STATEMENT_REVIEW_INSTRUCTION",
     "JudgmentValidationError",
     "JudgmentValidationStage",
     "OneAttemptCredentialTransport",
@@ -121,6 +122,20 @@ _HOSTNAME_PATTERN: Final = re.compile(
     re.ASCII,
 )
 
+# How to read the task-statement and agent-plan sections (issue #908). Kept as one separate
+# constant so the reviewer-role text around it can change without touching this rule.
+TASK_STATEMENT_REVIEW_INSTRUCTION: Final = (
+    "The task_statement section, when present, is the specification: what the user asked for. "
+    "Items in the goal section are the agent plan (the agent's own summary), never the user's "
+    "request. When they differ, the task statement wins over the plan. A plan or diff that omits "
+    "or contradicts a stated requirement is a material discrepancy; cite the task statement's "
+    "source ref when it is citable. Never request behaviour the task statement excludes, and do "
+    "not fill a gap in the statement with general expectations it does not state. Weigh a "
+    "statement whose source is agent_transcribed as the agent's account of the request, and one "
+    "whose source is task_title_only as a title, not a specification. Without a task statement, "
+    "say that the user's request was unavailable rather than treating the plan as the request."
+)
+
 SEMANTIC_REVIEW_INSTRUCTION: Final = (
     "You are a bounded reviewer helping the main agent complete the user's stated goal. Review "
     "only the supplied packet. Distinguish agent claims, deterministic observations, and "
@@ -146,7 +161,8 @@ SEMANTIC_REVIEW_INSTRUCTION: Final = (
     "or evidence attempt before state_unresolved_limitation; use that limitation response only "
     "when the packet records the attempt and its remaining limit, or a specific authority blocker. "
     "Do not offer accepting a limitation as an equivalent alternative to performing available "
-    "verification. Disclosure does not repair a defect or prove completion."
+    "verification. Disclosure does not repair a defect or prove completion. "
+    + TASK_STATEMENT_REVIEW_INSTRUCTION
 )
 _SYSTEM_INSTRUCTION: Final = SEMANTIC_REVIEW_INSTRUCTION
 

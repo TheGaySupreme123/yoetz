@@ -44,6 +44,7 @@ from yoetz.domain.privacy import (
     ReviewContextProfile,
     ReviewSelectionPolicy,
 )
+from yoetz.domain.task_statement import task_statement_disclosure_text
 from yoetz.domain.values import JsonObject, validate_sha256_digest
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 from yoetz.protocol.consent import RepositoryPrivacyRecipe
@@ -982,6 +983,28 @@ async def _warn_if_agent_route_cannot_dispatch(policy: PrivacyPolicy) -> None:
     )
 
 
+def policy_task_statement_disclosure(policy: PrivacyPolicy) -> str:
+    """Whether ``policy`` sends the agent's transcription of the user's request (issue #908)."""
+
+    llm = next(
+        channel
+        for channel in policy.channel_policies
+        if channel.channel is EgressChannel.LLM_INFERENCE
+    )
+    profile = policy.review_context_profile
+    return task_statement_disclosure_text(
+        section_selected="task_statement" in policy.review_selection.sections,
+        channel_sends_task_description=(
+            llm.enabled and DataCategory.TASK_DESCRIPTION in llm.allowed_categories
+        ),
+        predates_section=(
+            profile not in {ReviewContextProfile.CUSTOM, ReviewContextProfile.STRUCTURAL}
+            and policy.review_selection
+            == ReviewSelectionPolicy.for_profile(profile, preset_version="1.1.0")
+        ),
+    )
+
+
 def _render_review(candidate: PrivacyPolicy) -> None:
     llm = next(
         policy
@@ -1015,6 +1038,7 @@ def _render_review(candidate: PrivacyPolicy) -> None:
         "  Allowed data classes: "
         + (", ".join(item.value for item in llm.allowed_data_classes) or "none")
     )
+    typer.echo("  Task statement: " + policy_task_statement_disclosure(candidate))
     typer.echo("  Allowed purposes: " + (", ".join(llm.allowed_purposes) or "none"))
     typer.echo(f"  Authorization ceiling: {llm.scope_ceiling.value}")
     typer.echo(f"  Per-request confirmation: {'yes' if llm.preview_required else 'no'}")
@@ -1188,6 +1212,10 @@ def _confirmed_candidate(
 def _render_repository_authority(snapshot: PrivacySetupSnapshot) -> None:
     """Describe repository authority without rendering its commitment or local path."""
 
+    typer.echo(
+        "Current task statement disclosure: "
+        + policy_task_statement_disclosure(snapshot.composed_policy)
+    )
     typer.echo("Repository privacy authority:")
     if snapshot.grant_state == "missing":
         typer.echo("  External model review is off for this repository until you approve a grant.")

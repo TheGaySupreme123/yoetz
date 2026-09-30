@@ -150,7 +150,9 @@ def test_the_fallback_field_is_in_the_change_vocabulary_right_after_the_primary(
 def test_wire_omits_the_fallback_when_absent_so_existing_digests_are_unchanged() -> None:
     single = encode_privacy_policy_json(minimal_external_policy())
     assert "fallback_provider_binding" not in _channel_json(single)
-    validate_schema_instance("privacy-policy", "1.1.0", single)
+    # The current Assisted preset names the task_statement section, so it encodes at 1.2.0.
+    assert single["schema_version"] == "1.2.0"
+    validate_schema_instance("privacy-policy", "1.2.0", single)
     assert decode_privacy_policy_canonical(canonical_encode(single)) == minimal_external_policy()
 
 
@@ -165,7 +167,7 @@ def test_wire_round_trips_the_fallback_binding_when_present() -> None:
         "endpoint_profile_version": "1.0.0",
         "transport": "external",
     }
-    validate_schema_instance("privacy-policy", "1.1.0", wire)
+    validate_schema_instance("privacy-policy", "1.2.0", wire)
     decoded = decode_privacy_policy_canonical(canonical_encode(wire))
     assert decoded == policy
     assert llm_channel(decoded).authorized_provider_bindings == (

@@ -54,6 +54,12 @@ from yoetz.domain.receipts import (
     ReceiptSectionKey,
     ReceiptVersionSlice,
 )
+from yoetz.domain.task_statement import (
+    TASK_STATEMENT_NOT_AUTHORIZED_GAP,
+    TASK_STATEMENT_NOT_SUPPLIED_GAP,
+    TASK_STATEMENT_UNAVAILABLE_GAP,
+    task_statement_gap_detail,
+)
 from yoetz.domain.values import (
     ClaimId,
     EventId,
@@ -587,7 +593,7 @@ def _select_gaps(context: ReceiptBuildContext) -> tuple[ReceiptGap, ...]:
                 plan_scope.no_obligations_reason.value
                 if gap.code == COMPLETION_SCOPE_DECLARED_NONE_GAP
                 and plan_scope.no_obligations_reason is not None
-                else scope_detail(gap.code)
+                else scope_detail(gap.code) or task_statement_gap_detail(gap.code)
             ),
         )
         for gap in sorted(
@@ -1314,6 +1320,15 @@ def _sections(
                 "loss remains a limitation after queue recovery; rerunning a read supplies "
                 "evidence for its new time and state only."
             )
+        # What the AI-powered reviewer knew of the user's request (issue #908), in fixed words.
+        for code in (
+            TASK_STATEMENT_UNAVAILABLE_GAP,
+            TASK_STATEMENT_NOT_AUTHORIZED_GAP,
+            TASK_STATEMENT_NOT_SUPPLIED_GAP,
+        ):
+            detail = task_statement_gap_detail(code)
+            if code in gap_codes and detail is not None:
+                gap_body += " " + detail
         bodies[ReceiptSectionKey.LIMITATIONS_AND_COVERAGE] = gap_body
         items[ReceiptSectionKey.LIMITATIONS_AND_COVERAGE] = gap_codes
     elif redactions:

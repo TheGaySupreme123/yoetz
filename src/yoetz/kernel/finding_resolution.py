@@ -35,6 +35,7 @@ from yoetz.domain.receipts import (
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
     SEMANTIC_REVIEW_NOT_REQUESTED_GAP,
 )
+from yoetz.domain.task_statement import TASK_STATEMENT_GAPS
 from yoetz.domain.values import EventId, FindingId, ResultId
 from yoetz.kernel.claims import effective_claim_items
 from yoetz.kernel.plan_scope import current_plan_scope
@@ -73,6 +74,8 @@ _SEMANTIC_ONLY_GAPS: Final = frozenset(
         SEMANTIC_CHALLENGES_REJECTED_GAP,
         SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
         SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
+        # The reviewer's missing task statement (issue #908) says nothing about a local pack.
+        *TASK_STATEMENT_GAPS,
     }
 )
 # Evidence-strength gaps: the cited evidence was readable but its content was not captured or
@@ -118,8 +121,13 @@ _SEMANTIC_PROOF_TOLERATED_GAPS: Final = _EVIDENCE_STRENGTH_GAPS
 # already-recorded limit must not make a repaired issue permanently unresolvable. They never
 # tolerate a new limitation, hidden ledger payloads, withheld review categories, dropped
 # challenges, or an insufficient-packet answer.
-SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS: Final = _HOST_OBSERVATION_GAPS | frozenset(
-    {"content_capture_unavailable", SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP}
+# The task-statement gaps (issue #908) join them on the same terms: a review that lacked the
+# user's request may prove absence only for an issue raised by a review that lacked it the same
+# way, never for one raised with the statement in hand.
+SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS: Final = (
+    _HOST_OBSERVATION_GAPS
+    | frozenset({"content_capture_unavailable", SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP})
+    | TASK_STATEMENT_GAPS
 )
 _SEMANTIC_BASELINE_CAPTURE_GAPS: Final = SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS
 _UNPROVEN_FRESHNESS: Final = frozenset(

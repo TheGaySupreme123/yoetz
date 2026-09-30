@@ -209,6 +209,7 @@ from yoetz.domain.receipts import (
     ReceiptVersionSlice,
     SchemaVersionEntry,
 )
+from yoetz.domain.task_statement import TASK_STATEMENT_GAPS
 from yoetz.domain.values import (
     Frontier,
     JsonObject,
@@ -4334,6 +4335,9 @@ def _privacy_gated_semantic_evaluator(
                         "content_redacted",
                         "truncated_payload",
                         SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
+                        # A missing or title-only task statement is a packet fact the check
+                        # result and its receipt must disclose too (issue #908).
+                        *TASK_STATEMENT_GAPS,
                     }
                 )
             )

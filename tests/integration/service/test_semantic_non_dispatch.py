@@ -1533,3 +1533,58 @@ async def test_wide_finding_prose_dispatches_one_bounded_case(
     envelope = next(item.plaintext for item in candidate.items if item.item_id == "review-packet")
     assert wide_ref in envelope
     assert SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP.encode("ascii") in envelope
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("approval", ["current", "predates_section"])
+async def test_task_statement_gap_or_item_reaches_the_final_evaluation(
+    approval: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Criteria 1 and 7 (issue #908) through the real composition.
+
+    A recorded statement travels as its own ``task_description`` candidate only under a policy
+    that names the section; an approval that predates the section sends no statement at all and
+    the final evaluation carries ``task_statement_unavailable`` with ``not_authorized``.
+    """
+
+    from yoetz.domain.task_statement import RecordedTaskStatement
+    from yoetz.domain.values import event_id
+
+    monkeypatch.setattr(diagnostics_module, "log_dir", lambda: tmp_path)
+    privacy = _Privacy(profile=ReviewContextProfile.EXPANDED)
+    privacy.terminal_provider_result = True
+    if approval == "predates_section":
+        store = privacy.policy_application.policy_store
+        effective = store._effective  # pyright: ignore[reportPrivateUsage]
+        legacy = replace(
+            effective.policy,
+            review_selection=ReviewSelectionPolicy.for_profile(
+                ReviewContextProfile.EXPANDED, preset_version="1.1.0"
+            ),
+        )
+        store._effective = replace(effective, policy=legacy)  # pyright: ignore[reportPrivateUsage]
+    statement_event = event_id("evt_53000000-0000-4000-8000-000000000908")
+    statement = "Under Ascii, Style.Truncate returns plain text without tail."
+    base = _frozen()
+    case = replace(
+        make_case(extra_refs=(statement_event,)),
+        task_statement=RecordedTaskStatement(statement, statement_event, "session_opened", 1),
+        task_title="termenv",
+    )
+    frozen = replace(base, case=case)
+
+    result = await _evaluator(privacy, lambda: _PROVIDER, _route())(frozen, ())
+
+    assert privacy.calls == 1
+    [candidate] = privacy.candidates
+    carried = [item for item in candidate.items if item.item_id == "task-statement"]
+    if approval == "current":
+        assert [item.category for item in carried] == [DataCategory.TASK_DESCRIPTION]
+        assert statement.encode() in carried[0].plaintext
+        assert not {gap for gap in result.case_content_gaps if gap.startswith("task_statement")}
+    else:
+        assert carried == []
+        assert all(statement.encode() not in item.plaintext for item in candidate.items)
+        assert {"task_statement_not_authorized", "task_statement_unavailable"} <= set(
+            result.case_content_gaps
+        )

@@ -46,7 +46,8 @@ product source. This holds when something goes wrong too: Yoetz's own SQLite dat
 files, and source tree are never the way to work out what a result meant. Every recoverable fact is
 reachable through `status`. The schema is authority for field shapes; the guidance is authority for which call
 to make and when. `start` takes `mode` as exactly one of `create`, `attach`, `create_or_attach`,
-or `delegate`.
+or `delegate`. Pass the user's request verbatim as `task_statement`, never a paraphrase or your
+plan: AI-powered review reads it as the specification when the privacy policy allows it.
 
 Start identity is pair-scoped: an identical `workspace_ref` + `external_ref` resumes and rotates
 the same task, while a different complete pair on `mode=create_or_attach` creates independent work

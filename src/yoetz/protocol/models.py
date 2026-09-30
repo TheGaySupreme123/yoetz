@@ -69,6 +69,7 @@ __all__ = [
     "MAX_REVIEW_EXCERPTS",
     "MAX_REVIEW_OMISSIONS",
     "MAX_REVIEW_TEXT_BYTES",
+    "MAX_TASK_STATEMENT_BYTES",
     "MAX_REVIEW_TIMELINE_ITEMS",
     "MAX_SEMANTIC_CASE_BYTES",
     "MAX_SEMANTIC_ITEM_BYTES",
@@ -186,6 +187,10 @@ MAX_OBJECT_PLAINTEXT_BYTES: Final = 4_194_304
 MAX_SEMANTIC_ITEM_BYTES: Final = 16_384
 MAX_SEMANTIC_CASE_BYTES: Final = 262_144
 MAX_REVIEW_TEXT_BYTES: Final = 4_096
+# The agent-transcribed task statement (issue #908), bounded by UTF-8 bytes. It is recorded whole
+# far above what one review item carries (16 KiB): the packet keeps its head and tail and marks
+# the elision, so the ledger never has to shorten the user's words to fit the reviewer.
+MAX_TASK_STATEMENT_BYTES: Final = 65_536
 MAX_REVIEW_TIMELINE_ITEMS: Final = 64
 MAX_REVIEW_ASSESSMENTS: Final = 64
 MAX_REVIEW_CHANGE_OBSERVATIONS: Final = 32
@@ -894,6 +899,7 @@ String1To4096 = Annotated[str, Field(min_length=1, max_length=4096)]
 String1To8192 = Annotated[str, Field(min_length=1, max_length=8192)]
 String0To1024 = Annotated[str, Field(max_length=1024)]
 String1To32768 = Annotated[str, Field(min_length=1, max_length=32768)]
+TaskStatementWire = Annotated[str, Field(min_length=1, max_length=MAX_TASK_STATEMENT_BYTES)]
 CursorWire = Annotated[str, Field(min_length=1, max_length=4096, pattern=r"^[A-Za-z0-9_-]+$")]
 SchemaNameWire = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")]
 SubjectIdWire = Annotated[
@@ -1487,12 +1493,16 @@ class StartRequestModel(PublicRequestModel):
             "subagent_id",
             "parent_tool_call_id",
             "correlation_id",
+            "task_statement",
         }
     )
 
     mode: Literal["attach", "create", "create_or_attach", "delegate"]
     task_title: String1To8192
     requested_view: Literal["compact"]
+    # The user's request, verbatim, as the agent transcribed it (issue #908). Recorded in the task
+    # ledger; the AI-powered review sends it only under a policy that names the section.
+    task_statement: TaskStatementWire | None = None
     session_id: SessionIdWire | None = None
     external_ref: String1To8192 | None = None
     workspace_ref: String1To8192 | None = None
@@ -1513,6 +1523,11 @@ class StartRequestModel(PublicRequestModel):
             raise ValueError("selector_conflict")
         if self.parent_session_id is not None and self.mode not in {"create", "create_or_attach"}:
             raise ValueError("selector_conflict")
+        if (
+            self.task_statement is not None
+            and len(self.task_statement.encode("utf-8")) > MAX_TASK_STATEMENT_BYTES
+        ):
+            raise ValueError("task_statement_too_large")
         _validate_model_against_schema(self, "start-request")
         return self
 

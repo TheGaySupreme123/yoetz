@@ -101,6 +101,7 @@ from yoetz.protocol.errors import (
     PublicOperationError,
 )
 from yoetz.protocol.models import (
+    MAX_TASK_STATEMENT_BYTES,
     CheckPolicyExecutionModel,
     CheckScopeModel,
     ClientKind,
@@ -121,6 +122,7 @@ __all__ = [
     "MAX_REASON_BYTES",
     "MAX_REF_LIST",
     "MAX_REQUESTED_ITEMS",
+    "MAX_TASK_STATEMENT_BYTES",
     "MAX_TEXT_BYTES",
     "OBSERVATION_COORDINATOR_ACTOR_ID",
     "PAYLOAD_TYPES",
@@ -200,6 +202,10 @@ __all__ = [
     "ResultRecordedPayload",
     "RuntimeProfile",
     "SESSION_EVENT_SCHEMA_VERSION",
+    "TASK_STATEMENT_EVENT_SCHEMAS",
+    "TASK_STATEMENT_PLAN_SCHEMA_VERSION",
+    "TASK_STATEMENT_SESSION_OPENED_SCHEMA_VERSION",
+    "TASK_STATEMENT_SESSION_RESUMED_SCHEMA_VERSION",
     "SessionOpenedPayload",
     "SessionResumedPayload",
     "ChildAcceptedPayload",
@@ -242,6 +248,13 @@ SESSION_EVENT_SCHEMA_VERSION: Final = "1.1.0"
 # metadata.  The lifecycle and manifest families are new 1.0.0 contracts.
 LINEAGE_SESSION_EVENT_SCHEMA_VERSION: Final = "1.2.0"
 LINEAGE_EVENT_SCHEMA_VERSION: Final = "1.0.0"
+# The agent-transcribed task statement (issue #908) is additive to the session and plan families.
+# Every older schema stays frozen; the newer version is selected only when a statement is present,
+# so a ledger that never carries one keeps its exact historical bytes. The session-opened version
+# is a superset of the lineage 1.2.0 payload.
+TASK_STATEMENT_SESSION_OPENED_SCHEMA_VERSION: Final = "1.3.0"
+TASK_STATEMENT_SESSION_RESUMED_SCHEMA_VERSION: Final = "1.2.0"
+TASK_STATEMENT_PLAN_SCHEMA_VERSION: Final = "1.1.0"
 LINEAGE_SERVICE_STAMPED_FAMILIES: Final = frozenset(
     {
         "coordination_context_recorded",
@@ -428,6 +441,15 @@ def _bounded_text(value: object, maximum: int, *, minimum: int = 0) -> str:
         raise ProtocolValueError("event_text_out_of_bounds")
     freeze_json(value)
     return str.__getitem__(value, slice(None))
+
+
+def _task_statement(value: object) -> str:
+    """Bound one recorded task statement by UTF-8 bytes, never by characters."""
+
+    text = _bounded_text(value, MAX_TASK_STATEMENT_BYTES, minimum=1)
+    if len(text.encode("utf-8")) > MAX_TASK_STATEMENT_BYTES:
+        raise ProtocolValueError("event_text_out_of_bounds")
+    return text
 
 
 def _exact_enum[T: Enum](value: object, enum_type: type[T]) -> T:
@@ -772,6 +794,12 @@ def _locator_key_kind(schema: EventSchema) -> str:
         return "none"
     additive = (
         schema == EventSchema("claim_recorded", CLAIM_SCHEMA_VERSION)
+        # A plan carrying a revised task statement projects as the same plan (issue #908).
+        or schema
+        in {
+            EventSchema("plan_published", TASK_STATEMENT_PLAN_SCHEMA_VERSION),
+            EventSchema("plan_revised", TASK_STATEMENT_PLAN_SCHEMA_VERSION),
+        }
         or (schema.name == "evidence_recorded" and schema.version in EVIDENCE_SCHEMA_VERSIONS)
         or (
             schema.name in {"check_recorded", "finding_recorded"}
@@ -881,11 +909,16 @@ class SessionOpenedPayload:
     origin: LineageOrigin | None = None
     project_id: str | None = None
     membership_generation: int | None = None
+    # The user's request as the agent transcribed it on ``start`` (issue #908). Optional and
+    # separate from ``task_title``: the title names the task, the statement is the specification.
+    task_statement: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self, "task_title", _bounded_text(self.task_title, MAX_TEXT_BYTES, minimum=1)
         )
+        if self.task_statement is not None:
+            object.__setattr__(self, "task_statement", _task_statement(self.task_statement))
         object.__setattr__(self, "client_kind", _exact_enum(self.client_kind, ClientKind))
         object.__setattr__(
             self,
@@ -939,6 +972,9 @@ class SessionResumedPayload:
     integration: IntegrationKind
     profile: RuntimeProfile
     resumed_frontier: Frontier
+    # A statement supplied when ``start`` reattaches revises the task's current statement; the
+    # earlier one stays in the ledger history (issue #908).
+    task_statement: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "client_kind", _exact_enum(self.client_kind, ClientKind))
@@ -950,6 +986,8 @@ class SessionResumedPayload:
         object.__setattr__(self, "integration", _exact_enum(self.integration, IntegrationKind))
         object.__setattr__(self, "profile", _exact_enum(self.profile, RuntimeProfile))
         object.__setattr__(self, "resumed_frontier", _frontier(self.resumed_frontier))
+        if self.task_statement is not None:
+            object.__setattr__(self, "task_statement", _task_statement(self.task_statement))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1397,6 +1435,9 @@ class PlanPublishedPayload:
     obligation_refs: tuple[ObligationId, ...]
     scope_exclusions: tuple[str, ...] = ()
     no_obligations_reason: NoObligationsReason | None = None
+    # A revised statement of the user's request, kept apart from ``summary`` (the agent's own
+    # plan). The AI-powered review never reads it as part of the plan (issue #908).
+    task_statement: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -1404,6 +1445,8 @@ class PlanPublishedPayload:
             "plan_version",
             _bounded_integer(self.plan_version, 1, _MAX_SAFE_INTEGER),
         )
+        if self.task_statement is not None:
+            object.__setattr__(self, "task_statement", _task_statement(self.task_statement))
         object.__setattr__(self, "summary", _bounded_text(self.summary, MAX_TEXT_BYTES))
         object.__setattr__(
             self,
@@ -2066,6 +2109,7 @@ class PlanRevisedPayload:
     summary: str
     obligation_changes: tuple[ObligationChange, ...]
     no_obligations_reason: NoObligationsReason | None = None
+    task_statement: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -2073,6 +2117,8 @@ class PlanRevisedPayload:
             "plan_version",
             _bounded_integer(self.plan_version, 2, _MAX_SAFE_INTEGER),
         )
+        if self.task_statement is not None:
+            object.__setattr__(self, "task_statement", _task_statement(self.task_statement))
         object.__setattr__(
             self,
             "supersedes_plan_version",
@@ -2350,9 +2396,16 @@ PAYLOAD_TYPES: Final[Mapping[EventSchema, type[EventPayload]]] = MappingProxyTyp
         EventSchema("session_opened", SCHEMA_VERSION): SessionOpenedPayload,
         EventSchema("session_opened", SESSION_EVENT_SCHEMA_VERSION): SessionOpenedPayload,
         EventSchema("session_opened", LINEAGE_SESSION_EVENT_SCHEMA_VERSION): SessionOpenedPayload,
+        EventSchema(
+            "session_opened", TASK_STATEMENT_SESSION_OPENED_SCHEMA_VERSION
+        ): SessionOpenedPayload,
         EventSchema("session_resumed", SCHEMA_VERSION): SessionResumedPayload,
         EventSchema("session_resumed", SESSION_EVENT_SCHEMA_VERSION): SessionResumedPayload,
+        EventSchema(
+            "session_resumed", TASK_STATEMENT_SESSION_RESUMED_SCHEMA_VERSION
+        ): SessionResumedPayload,
         EventSchema("plan_published", SCHEMA_VERSION): PlanPublishedPayload,
+        EventSchema("plan_published", TASK_STATEMENT_PLAN_SCHEMA_VERSION): PlanPublishedPayload,
         EventSchema("obligation_published", SCHEMA_VERSION): ObligationPublishedPayload,
         EventSchema("assignment_recorded", SCHEMA_VERSION): AssignmentRecordedPayload,
         EventSchema("decision_recorded", SCHEMA_VERSION): DecisionRecordedPayload,
@@ -2365,6 +2418,7 @@ PAYLOAD_TYPES: Final[Mapping[EventSchema, type[EventPayload]]] = MappingProxyTyp
         EventSchema("claim_recorded", SCHEMA_VERSION): ClaimRecordedPayload,
         EventSchema("claim_recorded", CLAIM_SCHEMA_VERSION): ClaimRecordedPayloadV1_1,
         EventSchema("plan_revised", SCHEMA_VERSION): PlanRevisedPayload,
+        EventSchema("plan_revised", TASK_STATEMENT_PLAN_SCHEMA_VERSION): PlanRevisedPayload,
         EventSchema("finding_recorded", SCHEMA_VERSION): Finding,
         EventSchema("finding_recorded", FINDING_EVENT_SCHEMA_VERSION): Finding,
         **{
@@ -2403,6 +2457,16 @@ PAYLOAD_TYPES: Final[Mapping[EventSchema, type[EventPayload]]] = MappingProxyTyp
         EventSchema("work_abandoned", LINEAGE_EVENT_SCHEMA_VERSION): WorkAbandonedPayload,
         EventSchema("work_cancelled", LINEAGE_EVENT_SCHEMA_VERSION): WorkCancelledPayload,
         EventSchema("work_written_off", LINEAGE_EVENT_SCHEMA_VERSION): WorkWrittenOffPayload,
+    }
+)
+
+# The one schema per family that may carry a task statement, and must (issue #908).
+TASK_STATEMENT_EVENT_SCHEMAS: Final = frozenset(
+    {
+        EventSchema("session_opened", TASK_STATEMENT_SESSION_OPENED_SCHEMA_VERSION),
+        EventSchema("session_resumed", TASK_STATEMENT_SESSION_RESUMED_SCHEMA_VERSION),
+        EventSchema("plan_published", TASK_STATEMENT_PLAN_SCHEMA_VERSION),
+        EventSchema("plan_revised", TASK_STATEMENT_PLAN_SCHEMA_VERSION),
     }
 )
 
@@ -2870,6 +2934,7 @@ def _decode_session_opened(source: Mapping[str, JsonValue]) -> SessionOpenedPayl
             if _optional(source, "membership_generation") is None
             else _lineage_revision(_field(source, "membership_generation"))
         ),
+        task_statement=cast(str | None, _optional(source, "task_statement")),
     )
 
 
@@ -2880,6 +2945,7 @@ def _decode_session_resumed(source: Mapping[str, JsonValue]) -> SessionResumedPa
         integration=_enum_from_json(_field(source, "integration"), IntegrationKind),
         profile=_enum_from_json(_field(source, "profile"), RuntimeProfile),
         resumed_frontier=frontier_from_json(_field(source, "resumed_frontier")),
+        task_statement=cast(str | None, _optional(source, "task_statement")),
     )
 
 
@@ -2896,6 +2962,7 @@ _PAYLOAD_SHAPES: Final[Mapping[str, tuple[frozenset[str], frozenset[str]]]] = Ma
                     "origin",
                     "project_id",
                     "membership_generation",
+                    "task_statement",
                 }
             ),
         ),
@@ -2903,11 +2970,11 @@ _PAYLOAD_SHAPES: Final[Mapping[str, tuple[frozenset[str], frozenset[str]]]] = Ma
             frozenset(
                 {"client_kind", "client_version", "integration", "profile", "resumed_frontier"}
             ),
-            frozenset(),
+            frozenset({"task_statement"}),
         ),
         "plan_published": (
             frozenset({"plan_version", "summary", "obligation_refs"}),
-            frozenset({"scope_exclusions", "no_obligations_reason"}),
+            frozenset({"scope_exclusions", "no_obligations_reason", "task_statement"}),
         ),
         "obligation_published": (
             frozenset({"obligation_id", "description", "evidence_expectation", "status"}),
@@ -2962,7 +3029,7 @@ _PAYLOAD_SHAPES: Final[Mapping[str, tuple[frozenset[str], frozenset[str]]]] = Ma
                     "obligation_changes",
                 }
             ),
-            frozenset({"no_obligations_reason"}),
+            frozenset({"no_obligations_reason", "task_statement"}),
         ),
         "response_recorded": (
             frozenset({"finding_id", "finding_frontier", "disposition"}),
@@ -3185,7 +3252,7 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
     if schema.name == "plan_published":
         exclusions = _optional(source, "scope_exclusions")
         no_obligations_reason = _optional(source, "no_obligations_reason")
-        return PlanPublishedPayload(
+        published = PlanPublishedPayload(
             plan_version=cast(int, _field(source, "plan_version")),
             summary=cast(str, _field(source, "summary")),
             obligation_refs=cast(
@@ -3199,7 +3266,10 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
                 if no_obligations_reason is None
                 else _enum_from_json(no_obligations_reason, NoObligationsReason)
             ),
+            task_statement=cast(str | None, _optional(source, "task_statement")),
         )
+        _validate_event_schema_payload(schema, published)
+        return published
     if schema.name == "obligation_published":
         status = _enum_from_json(_field(source, "status"), ObligationStatus)
         resolution_refs = _optional(source, "resolution_evidence_refs")
@@ -3377,7 +3447,7 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
         )
     if schema.name == "plan_revised":
         no_obligations_reason = _optional(source, "no_obligations_reason")
-        return PlanRevisedPayload(
+        revised = PlanRevisedPayload(
             plan_version=cast(int, _field(source, "plan_version")),
             supersedes_plan_version=cast(int, _field(source, "supersedes_plan_version")),
             reason=cast(str, _field(source, "reason")),
@@ -3391,7 +3461,10 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
                 if no_obligations_reason is None
                 else _enum_from_json(no_obligations_reason, NoObligationsReason)
             ),
+            task_statement=cast(str | None, _optional(source, "task_statement")),
         )
+        _validate_event_schema_payload(schema, revised)
+        return revised
     if schema.name == "response_recorded":
         evidence = _optional(source, "evidence_refs")
         waiver_scope_value = _optional(source, "waiver_scope")
@@ -3700,18 +3773,19 @@ def encode_payload(payload: EventPayload) -> JsonValue:
         _optional_value(result, "project_id", value.project_id)
         if value.membership_generation is not None:
             result["membership_generation"] = render_wire_sequence(value.membership_generation)
+        _optional_value(result, "task_statement", value.task_statement)
         return _json_object(result)
     if payload_type is SessionResumedPayload:
         value = cast(SessionResumedPayload, payload)
-        return _json_object(
-            {
-                "client_kind": value.client_kind.value,
-                "client_version": value.client_version,
-                "integration": value.integration.value,
-                "profile": value.profile.value,
-                "resumed_frontier": value.resumed_frontier.as_wire(),
-            }
-        )
+        result = {
+            "client_kind": value.client_kind.value,
+            "client_version": value.client_version,
+            "integration": value.integration.value,
+            "profile": value.profile.value,
+            "resumed_frontier": value.resumed_frontier.as_wire(),
+        }
+        _optional_value(result, "task_statement", value.task_statement)
+        return _json_object(result)
     if payload_type is PlanPublishedPayload:
         value = cast(PlanPublishedPayload, payload)
         result = {
@@ -3727,6 +3801,7 @@ def encode_payload(payload: EventPayload) -> JsonValue:
             "no_obligations_reason",
             None if value.no_obligations_reason is None else value.no_obligations_reason.value,
         )
+        _optional_value(result, "task_statement", value.task_statement)
         return _json_object(result)
     if payload_type is ObligationPublishedPayload:
         value = cast(ObligationPublishedPayload, payload)
@@ -3878,6 +3953,7 @@ def encode_payload(payload: EventPayload) -> JsonValue:
             "no_obligations_reason",
             None if value.no_obligations_reason is None else value.no_obligations_reason.value,
         )
+        _optional_value(result, "task_statement", value.task_statement)
         return _json_object(result)
     if payload_type is ResponseRecordedPayload:
         value = cast(ResponseRecordedPayload, payload)
@@ -3983,13 +4059,30 @@ def _validate_event_schema_payload(
         has_project_lineage = any(
             value is not None for value in (payload.project_id, payload.membership_generation)
         )
-        if has_lineage and schema != EventSchema(
-            "session_opened", LINEAGE_SESSION_EVENT_SCHEMA_VERSION
-        ):
+        lineage_schemas = {
+            EventSchema("session_opened", LINEAGE_SESSION_EVENT_SCHEMA_VERSION),
+            EventSchema("session_opened", TASK_STATEMENT_SESSION_OPENED_SCHEMA_VERSION),
+        }
+        if has_lineage and schema not in lineage_schemas:
             raise ProtocolValueError("invalid_event_schema")
-        if has_project_lineage and schema != EventSchema(
-            "session_opened", LINEAGE_SESSION_EVENT_SCHEMA_VERSION
-        ):
+        if has_project_lineage and schema not in lineage_schemas:
+            raise ProtocolValueError("invalid_event_schema")
+    if type(payload) in {
+        SessionOpenedPayload,
+        SessionResumedPayload,
+        PlanPublishedPayload,
+        PlanRevisedPayload,
+    }:
+        # Exactly one schema per family carries a statement, and it always does: an older
+        # schema never admits the field, and the newer one is never chosen without it.
+        statement = cast(
+            SessionOpenedPayload
+            | SessionResumedPayload
+            | PlanPublishedPayload
+            | PlanRevisedPayload,
+            payload,
+        ).task_statement
+        if (statement is not None) != (schema in TASK_STATEMENT_EVENT_SCHEMAS):
             raise ProtocolValueError("invalid_event_schema")
     if type(payload) is CheckRecordedPayload:
         if (payload.semantic_conclusion is not None) != (

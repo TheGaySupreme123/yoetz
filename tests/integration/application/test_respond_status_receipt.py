@@ -4774,6 +4774,9 @@ def _scripted_semantic_evaluator(
         (("content_unselected",), False),
         (("captured_object_unavailable", "content_capture_unavailable"), False),
         ((), True),
+        # A review without the task statement (issue #908) is an unchanged recorded limit.
+        (("task_statement_not_authorized", "task_statement_unavailable"), False),
+        (("task_statement_not_supplied",), False),
     ],
 )
 async def test_semantic_finding_resolves_within_its_recorded_capture_baseline(

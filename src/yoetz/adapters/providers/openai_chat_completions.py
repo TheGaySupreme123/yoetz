@@ -28,6 +28,7 @@ from yoetz.adapters.providers.openai_responses import (
     JUDGMENT_JSON_SCHEMA,
     OPENAI_MAX_OUTPUT_TOKENS,
     OPENAI_MAX_RESPONSE_BODY_BYTES,
+    TASK_STATEMENT_REVIEW_INSTRUCTION,
     OneAttemptCredentialTransport,
     normalize_judgment,
 )
@@ -90,7 +91,8 @@ _SYSTEM_INSTRUCTION: Final = (
     "items[] is not citable, and a challenge citing anything outside citable_refs is discarded "
     "unread. Do not invent repository facts, fetch more context, overrule deterministic results, "
     "waive findings, or claim stronger coverage than the packet. "
-    "Reply with one JSON object and nothing else: no "
+    + TASK_STATEMENT_REVIEW_INSTRUCTION
+    + " Reply with one JSON object and nothing else: no "
     'prose, no code fence, no explanation outside it. Its exact shape is {"conclusion": one of '
     '"no_material_discrepancy" | "challenges_returned" | "insufficient_packet", '
     '"reviewer_challenges": array of objects with "finding_kind", "summary", "cited_refs", '

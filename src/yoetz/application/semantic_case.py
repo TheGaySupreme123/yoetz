@@ -59,6 +59,13 @@ from yoetz.domain.receipts import (
     SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
     SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
 )
+from yoetz.domain.task_statement import (
+    TASK_STATEMENT_NOT_AUTHORIZED_GAP,
+    TASK_STATEMENT_NOT_SUPPLIED_GAP,
+    TASK_STATEMENT_SECTION,
+    TASK_STATEMENT_UNAVAILABLE_GAP,
+    TaskStatementSource,
+)
 from yoetz.domain.values import (
     SubjectStateRelation,
     session_id,
@@ -107,6 +114,8 @@ from yoetz.protocol.models import (
 )
 
 __all__ = [
+    "MAX_TASK_STATEMENT_ITEM_BYTES",
+    "TASK_STATEMENT_ITEM_ID",
     "CapturedContentScope",
     "CapturedSemanticContent",
     "MAX_CAPTURED_SEMANTIC_CONTENT_BYTES",
@@ -130,6 +139,7 @@ SEMANTIC_REVIEW_PURPOSE: Final = "semantic-review"
 OVER_CASE_ITEM_LIMIT_REASON: Final = "over_case_item_limit"
 _PACKET_SCHEMA: Final = "yoetz.review-packet-case/1"
 _PACKET_ID_LIST_KEYS: Final = (
+    "task_statement_item_ids",
     "goal_item_ids",
     "obligation_item_ids",
     "claim_item_ids",
@@ -144,6 +154,7 @@ _QUESTION_SET: Final = (
 )
 
 type _Section = Literal[
+    "task_statement",
     "goal",
     "obligation",
     "claim",
@@ -169,6 +180,22 @@ type _SourceKind = Literal[
     "repository",
 ]
 type _ExcerptKind = Literal["evidence", "test", "failure", "diff", "command", "repository"]
+
+# Fixed labels the provider packet carries beside each item of these sections. The plan item is
+# the agent's own summary; only the task statement is the user's request (issue #908). A plan item
+# is never labelled as the task statement, whatever its content.
+_SECTION_LABELS: Final[Mapping[str, str]] = {
+    TASK_STATEMENT_SECTION: (
+        "task statement: what the user asked for; the source field says who supplied the text"
+    ),
+    "goal": "agent plan (the agent's own summary)",
+}
+TASK_STATEMENT_ITEM_ID: Final = "task-statement"
+_TASK_STATEMENT_CONTENT_SCHEMA: Final = "yoetz.task-statement/1"
+# One statement item is bounded like one excerpt: 16 KiB of canonical JSON. A longer statement
+# keeps its head and tail and marks what was elided in between.
+MAX_TASK_STATEMENT_ITEM_BYTES: Final = MAX_SEMANTIC_ITEM_BYTES
+_PLAN_FAMILIES: Final = frozenset({"plan_published", "plan_revised"})
 type _OmissionReason = Literal[
     "not_recorded", "not_selected", "withheld_by_policy", "redacted_never_send"
 ]
@@ -470,6 +497,104 @@ def _bounded_json(value: Mapping[str, JsonValue]) -> tuple[str, bool]:
         "schema": "yoetz.bounded-content-omission/1",
     }
     return _structural_json(marker), True
+
+
+def _without_task_statement(value: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+    """A plan payload with any revised task statement removed.
+
+    The statement travels only in its own consented section; a plan item or timeline row that
+    carried it would both mislabel the user's words as the agent's plan and send them under a
+    policy that never approved the ``task_statement`` section (issue #908).
+    """
+
+    payload = dict(value)
+    payload.pop("task_statement", None)
+    return payload
+
+
+def _task_statement_content(text: str, source: TaskStatementSource) -> tuple[str, bool]:
+    """Canonical statement item content within ``MAX_TASK_STATEMENT_ITEM_BYTES``.
+
+    Returns the content and whether an elision was needed. The head and tail are kept because a
+    request usually states its goal first and its constraints last; the elided middle is named by
+    byte count both in the text and in ``elided_bytes`` so the reviewer never reads a shortened
+    request as the whole one.
+    """
+
+    raw = text.encode("utf-8")
+
+    def encode(statement: str, elided: int) -> str:
+        return _structural_json(
+            {
+                "elided_bytes": elided,
+                "schema": _TASK_STATEMENT_CONTENT_SCHEMA,
+                "source": source.value,
+                "statement": statement,
+                "statement_bytes": len(raw),
+            }
+        )
+
+    whole = encode(text, 0)
+    if len(whole.encode("utf-8")) <= MAX_TASK_STATEMENT_ITEM_BYTES:
+        return whole, False
+    # Budget in encoded bytes, so escaping (a quote or newline costs two) shortens the kept text
+    # rather than the other end of it.
+    budget = MAX_TASK_STATEMENT_ITEM_BYTES - len(encode("", 0).encode("utf-8")) - 64
+    while budget > 0:
+        head = _encoded_prefix(text, budget // 2)
+        tail = _encoded_prefix(text[::-1], budget - budget // 2)[::-1]
+        elided = len(raw) - len(head.encode("utf-8")) - len(tail.encode("utf-8"))
+        content = encode(f"{head}\n[... {elided} bytes elided ...]\n{tail}", elided)
+        excess = len(content.encode("utf-8")) - MAX_TASK_STATEMENT_ITEM_BYTES
+        if excess <= 0:
+            return content, True
+        budget -= excess
+    raise ValueError("semantic_case_content_invalid")
+
+
+def _encoded_prefix(text: str, budget: int) -> str:
+    """The longest prefix of ``text`` whose canonical JSON string encoding fits ``budget``."""
+
+    used = 0
+    for index, character in enumerate(text):
+        code = ord(character)
+        if character in {'"', "\\"} or character in "\b\t\n\f\r":
+            cost = 2
+        elif code < 0x20:
+            cost = 6
+        else:
+            cost = len(character.encode("utf-8"))
+        if used + cost > budget:
+            return text[:index]
+        used += cost
+    return text
+
+
+def _task_statement_item(
+    text: str,
+    source: TaskStatementSource,
+    *,
+    source_ref: str,
+    linked_subject_refs: tuple[str, ...],
+    occurred_order: int,
+) -> tuple[SemanticCaseItem, bool]:
+    content_text, elided = _task_statement_content(text, source)
+    content = content_text.encode("utf-8")
+    return (
+        SemanticCaseItem(
+            item_id=TASK_STATEMENT_ITEM_ID,
+            section=TASK_STATEMENT_SECTION,
+            category=DataCategory.TASK_DESCRIPTION,
+            source_kind="task",
+            source_ref=source_ref,
+            linked_subject_refs=linked_subject_refs,
+            occurred_order=occurred_order,
+            content=content,
+            content_bytes=len(content),
+            content_digest="sha256:" + hashlib.sha256(content).hexdigest(),
+        ),
+        elided,
+    )
 
 
 class LineageSemanticCapacityExceeded(ValueError):
@@ -780,6 +905,8 @@ def _history_json(
         payload = dict(cast(Mapping[str, JsonValue], item.payload))
         if item.schema_name == "action_recorded" and not include_exact_command_text:
             payload.pop("command", None)
+        if item.schema_name in _PLAN_FAMILIES:
+            payload = _without_task_statement(payload)
         body["payload"] = cast(JsonValue, payload)
     return _bounded_json(body)
 
@@ -1137,6 +1264,8 @@ def build_semantic_case(
     # an author-visible fact rather than a silent shortening (issue #177).
     over_limit: set[str] = set()
     omissions: list[ReviewOmission] = []
+    task_statement_ids: list[str] = []
+    task_statement_gaps: set[str] = set()
     goal_ids: list[str] = []
     obligation_ids: list[str] = []
     claim_ids: list[str] = []
@@ -1145,14 +1274,54 @@ def build_semantic_case(
     targeted: list[TargetedExcerptRef] = []
     changes: list[ChangeObservation] = []
 
-    # --- Goal (latest plan summary) ---
+    # --- Task statement (what the user asked for; never the agent's plan) ---
+    # Source order: the agent-supplied statement, then the task title. The host-captured prompt
+    # is a reserved third source that no path records yet, so captured prompt text never enters
+    # this section. Nothing is built unless the approved policy names the section: an approval
+    # given before the section existed never covers the user's words (issue #908).
+    recorded_statement = frozen_case.task_statement
+    if recorded_statement is None:
+        task_statement_gaps.add(TASK_STATEMENT_NOT_SUPPLIED_GAP)
+    if TASK_STATEMENT_SECTION not in sections:
+        task_statement_gaps.update(
+            {TASK_STATEMENT_UNAVAILABLE_GAP, TASK_STATEMENT_NOT_AUTHORIZED_GAP}
+        )
+    elif recorded_statement is not None:
+        statement_ref = str(recorded_statement.source_event_id)
+        item, elided = _task_statement_item(
+            recorded_statement.text,
+            recorded_statement.source,
+            source_ref=statement_ref,
+            linked_subject_refs=(statement_ref,) if statement_ref in allowed else (),
+            occurred_order=recorded_statement.ingestion_sequence,
+        )
+        items.append(item)
+        task_statement_ids.append(item.item_id)
+        if elided:
+            over_limit.add(item.item_id)
+    elif frozen_case.task_title is not None:
+        item, elided = _task_statement_item(
+            frozen_case.task_title,
+            TaskStatementSource.TASK_TITLE_ONLY,
+            source_ref="task-title",
+            linked_subject_refs=(),
+            occurred_order=0,
+        )
+        items.append(item)
+        task_statement_ids.append(item.item_id)
+        if elided:
+            over_limit.add(item.item_id)
+    else:
+        task_statement_gaps.add(TASK_STATEMENT_UNAVAILABLE_GAP)
+
+    # --- Agent plan (latest plan summary; the agent's own account, not the user's request) ---
     if projection.plans:
         latest_version = max(projection.plans)
         plan = projection.plans[latest_version]
         plan_ref = str(plan.source_event_id)
         if "goal" in sections and plan.payload is not None and not plan.redacted:
             text, content_omitted = _bounded_json(
-                cast(Mapping[str, JsonValue], encode_payload(plan.payload))
+                _without_task_statement(cast(Mapping[str, JsonValue], encode_payload(plan.payload)))
             )
             item = _content_item(
                 item_id=f"goal-{latest_version}",
@@ -2139,6 +2308,7 @@ def build_semantic_case(
             )
 
     # Cap lists per selection.
+    task_statement_ids = task_statement_ids[:1]
     goal_ids = goal_ids[:4]
     obligation_ids = obligation_ids[:32]
     claim_ids = claim_ids[:32]
@@ -2193,7 +2363,12 @@ def build_semantic_case(
 
     # Keep only items that remain referenced after caps.
     keep_ids = (
-        set(goal_ids) | set(obligation_ids) | set(claim_ids) | set(decision_ids) | set(timeline_ids)
+        set(task_statement_ids)
+        | set(goal_ids)
+        | set(obligation_ids)
+        | set(claim_ids)
+        | set(decision_ids)
+        | set(timeline_ids)
     )
     for assessment in review_assessments:
         if assessment.summary_item_id is not None and assessment.detail_item_id is not None:
@@ -2205,6 +2380,7 @@ def build_semantic_case(
     items = [item for item in items if item.item_id in keep_ids]
     # Sort items per SemanticCase order.
     _SECTION_ORDINAL = {
+        TASK_STATEMENT_SECTION: -1,
         "goal": 0,
         "obligation": 1,
         "claim": 2,
@@ -2254,6 +2430,18 @@ def build_semantic_case(
 
     capture_gaps = tuple(sorted(capture_gap_set, key=str.encode))
     coverage = case_coverage(frozen_case, semantic=True)
+    if task_statement_gaps:
+        # The reviewer is told, in the packet it reads, that it has no statement of the user's
+        # request (or only the title) and why. The check result carries the same codes.
+        coverage = replace(
+            coverage,
+            ledger_freshness=(
+                LedgerFreshness.PARTIAL
+                if coverage.ledger_freshness is LedgerFreshness.CURRENT
+                else coverage.ledger_freshness
+            ),
+            known_gaps=tuple(sorted({*coverage.known_gaps, *task_statement_gaps}, key=str.encode)),
+        )
     if capture_gaps:
         coverage = replace(
             coverage,
@@ -2299,6 +2487,7 @@ def build_semantic_case(
             ),
         )
     packet = ReviewPacket(
+        task_statement_item_ids=tuple(task_statement_ids),
         goal_item_ids=tuple(goal_ids),
         obligation_item_ids=tuple(obligation_ids),
         claim_item_ids=tuple(claim_ids),
@@ -2543,6 +2732,7 @@ def _packet_to_json(packet: ReviewPacket) -> dict[str, JsonValue]:
                 _assessment_to_json(item) for item in packet.deterministic_assessments
             ],
             "goal_item_ids": list(packet.goal_item_ids),
+            "task_statement_item_ids": list(packet.task_statement_item_ids),
             "obligation_item_ids": list(packet.obligation_item_ids),
             "omissions": [
                 {
@@ -2590,6 +2780,11 @@ def _item_catalog_json(items: Sequence[SemanticCaseItem]) -> list[dict[str, Json
                 "section": item.section,
                 "source_kind": item.source_kind,
                 "source_ref": item.source_ref,
+                **(
+                    {"label": _SECTION_LABELS[item.section]}
+                    if item.section in _SECTION_LABELS
+                    else {}
+                ),
             },
         )
         for item in items
@@ -2664,6 +2859,7 @@ def assemble_filtered_review_packet(
         source_kind = meta.get("source_kind")
         source_ref = meta.get("source_ref")
         section = meta.get("section")
+        label = meta.get("label")
         linked_raw = meta.get("linked_subject_refs")
         linked = (
             [ref for ref in cast(list[object], linked_raw) if type(ref) is str]
@@ -2689,6 +2885,14 @@ def assemble_filtered_review_packet(
                         "section": section if type(section) is str else "timeline",
                         "source_kind": source_kind if type(source_kind) is str else "task",
                         "source_ref": source_ref if type(source_ref) is str else item_id,
+                        # Only the fixed section label the builder catalogued, never caller text.
+                        **(
+                            {"label": _SECTION_LABELS[section]}
+                            if type(section) is str
+                            and section in _SECTION_LABELS
+                            and label == _SECTION_LABELS[section]
+                            else {}
+                        ),
                     },
                 )
             )

@@ -54,7 +54,7 @@ _HOST_PROFILES: Final[frozenset[str]] = frozenset({"generic", "codex", "claude",
 
 _SCHEMA_VERSION: Final = "1.0.0"
 _TOOL_INPUT_SCHEMA_VERSIONS: Final = MappingProxyType(
-    {"start": "1.1.0", "publish_work": "1.2.0", "check": "1.1.0", "status": "1.2.0"}
+    {"start": "1.2.0", "publish_work": "1.3.0", "check": "1.1.0", "status": "1.2.0"}
 )
 _TOOL_OUTPUT_SCHEMA_VERSIONS: Final = MappingProxyType(
     {"start": "1.1.0", "check": "1.3.0", "status": "1.4.0", "receipt": "1.3.0"}
@@ -120,9 +120,9 @@ _COMMON_INLINE_SCHEMA_IDS: Final[frozenset[str]] = frozenset(
         f"{SCHEMA_NAMESPACE}common/frontier-1.0.0.schema.json",
     }
 )
-_EVENT_DRAFT_SCHEMA_ID: Final = f"{SCHEMA_NAMESPACE}events/event-draft-1.2.0.schema.json"
+_EVENT_DRAFT_SCHEMA_ID: Final = f"{SCHEMA_NAMESPACE}events/event-draft-1.3.0.schema.json"
 _OPAQUE_EVENT_DRAFT_SCHEMA_ID: Final = (
-    f"{SCHEMA_NAMESPACE}events/opaque-unknown-event-draft-1.2.0.schema.json"
+    f"{SCHEMA_NAMESPACE}events/opaque-unknown-event-draft-1.3.0.schema.json"
 )
 
 # Reviewed keyword budgets for tools/list presentation schemas (agent-usability guardrails).
@@ -139,15 +139,17 @@ PRESENTATION_INPUT_SCHEMA_BUDGETS: Final[Mapping[str, Mapping[str, int]]] = Mapp
                 "max_encoded_bytes": 5_000,
             }
         ),
+        # Issue #908 adds the plan_published/plan_revised 1.1.0 branches that carry a revised
+        # task statement: two branches, two payload definitions, about 2.4 KB.
         "publish-work-request": MappingProxyType(
             {
                 "max_oneof_nodes": 8,
-                "max_oneof_branches": 36,
+                "max_oneof_branches": 38,
                 "max_ref_nodes": 0,
                 "max_conditional_nodes": 0,
-                "max_defs_count": 21,
+                "max_defs_count": 23,
                 "max_defs_nest_depth": 1,
-                "max_encoded_bytes": 49_000,
+                "max_encoded_bytes": 52_000,
             }
         ),
         "check-request": MappingProxyType(
@@ -283,15 +285,18 @@ CLAUDE_CODE_INITIALIZE_INSTRUCTIONS: Final = (
 # The 0.3 surface retains the 18 ordinary lifecycle/coordination event families and the expanded
 # current-main initialize guidance, including the #789 late-start rule carried from the 0.2 line.
 # That makes the measured generic-host packaged surface about 221 KB; the reviewed 224 KB ceiling
-# leaves bounded headroom without dropping an admitted family, example, or startup rule. Claude
-# Code receives the compact initialize body instead and is bounded separately above.
+# left bounded headroom without dropping an admitted family, example, or startup rule. Issue #908
+# adds the statement-bearing plan_published/plan_revised 1.1.0 branches (the only way an agent
+# revises the task statement through publish_work) and start.task_statement: about 227 KB, so the
+# ceiling is 228 KB. Claude Code receives the compact initialize body instead and is bounded
+# separately above.
 # The aggregate likewise carries the packaged bound plus one disclosure allowance per advertised
 # tool, because the host that inlines the instructions inlines the disclosure with them.
 ADVERTISED_SURFACE_BUDGET: Final[Mapping[str, int]] = MappingProxyType(
     {
         "instructions_copies_per_tool": 1,
-        "packaged_max_encoded_bytes": 224_000,
-        "max_encoded_bytes": 224_000
+        "packaged_max_encoded_bytes": 228_000,
+        "max_encoded_bytes": 228_000
         + len(YOETZ_WORKFLOW_TOOL_NAMES) * MAX_DISCLOSURE_ENCODED_BYTES,
     }
 )
@@ -423,6 +428,7 @@ _INPUT_SCHEMA_EXAMPLES: Final[Mapping[str, tuple[dict[str, JsonValue], ...]]] = 
                 "request_id": _example_id("request", 1),
                 "mode": "create",
                 "task_title": "Example task",
+                "task_statement": "The user's request, verbatim.",
                 "requested_view": "compact",
                 "actor": dict(_EXAMPLE_ACTOR),
                 "client": dict(_EXAMPLE_CLIENT),
@@ -1677,7 +1683,9 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "record occurred. Each new operation uses a fresh req_ prefixed random UUID; recover an "
         "unknown write outcome with the same request_id before any sibling. "
         "workspace_ref and external_ref are admitted only as a pair. Call it once per "
-        "task. task_title and requested_view are required. Attach selectors are exactly one of: "
+        "task. task_title and requested_view are required. Pass the user's request verbatim as "
+        "task_statement: AI-powered review reads it as the specification, apart from your plan. "
+        "Attach selectors are exactly one of: "
         "(1) session_id for the session you hold, or "
         "(2) workspace_ref + external_ref as a pair with no session_id — mode=create_or_attach "
         "creates on first use and attaches on later conversations. task_id is not an accepted "
@@ -1915,8 +1923,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
     {
         "policy": MappingProxyType(
             {
-                "start": "sha256:3a2186a2db53b91fcf7a8f3117cb8ff6a2b8bad6bc78e3e796e5e611e8598405",
-                "publish_work": "sha256:5b7e151a4583762f500803165aa48d3c49ec61172a36945a6af92064ffc171ff",
+                "start": "sha256:54fe13c09b3900dd8a9ac185e7d4fe383310e6818b75f8af6f4aa439ad4a0622",
+                "publish_work": "sha256:1a66d8959e9ec756cedc6aef3c0f84c29830b6848d27f3149fa9b3d9f4c36dd6",
                 "check": "sha256:9befe13b257acf10535009c1dd69d9a933f3d94f5cd2aaac1655d4867596f89e",
                 "respond": "sha256:8b5dc94f431a411ef332021af01050a4b0c248a800e46d5b3bdb567f770d25a5",
                 "status": "sha256:517eb05aa015834d98bd96ed59d4b647a95e6c42a13013803caf19b9b4b07875",
@@ -1926,8 +1934,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         ),
         "strict": MappingProxyType(
             {
-                "start": "sha256:3a2186a2db53b91fcf7a8f3117cb8ff6a2b8bad6bc78e3e796e5e611e8598405",
-                "publish_work": "sha256:5b7e151a4583762f500803165aa48d3c49ec61172a36945a6af92064ffc171ff",
+                "start": "sha256:54fe13c09b3900dd8a9ac185e7d4fe383310e6818b75f8af6f4aa439ad4a0622",
+                "publish_work": "sha256:1a66d8959e9ec756cedc6aef3c0f84c29830b6848d27f3149fa9b3d9f4c36dd6",
                 "check": "sha256:2bd9947abc7b60564474840a73d99a80bfa528b98af1a725d11fdfde5dac9795",
                 "respond": "sha256:8b5dc94f431a411ef332021af01050a4b0c248a800e46d5b3bdb567f770d25a5",
                 "status": "sha256:517eb05aa015834d98bd96ed59d4b647a95e6c42a13013803caf19b9b4b07875",
@@ -1939,8 +1947,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:9c103a3fa8fdb85a6c2c20608bdde6294651e94b24407bca719c7e32a8c50722",
-        "strict": "sha256:e272d0216684ffa792ad0b10b55cdd4c436f1a8877cc03033b2fa14126a737b0",
+        "policy": "sha256:4fc3f878b1a5e94a883e423c3424f427f5300d06289207437b0ee25b5057099b",
+        "strict": "sha256:54f2761ad859a0ed5207a12e1b9c019e720c76c9038ee11e428843becc3f8b23",
     }
 )
 

@@ -32,6 +32,11 @@ from yoetz.domain.receipts import (
     COMPLETION_SCOPE_DECLARED_NONE_GAP,
     COMPLETION_SCOPE_UNDECLARED_GAP,
 )
+from yoetz.domain.task_statement import (
+    RecordedTaskStatement,
+    current_task_statement,
+    recorded_task_title,
+)
 from yoetz.domain.values import (
     ActionId,
     ClaimId,
@@ -777,6 +782,10 @@ class DeterministicCase:
     history: tuple[FrozenHistoryEvent, ...] = ()
     history_availability: Literal["available", "not_recorded"] = "not_recorded"
     history_omitted_before_count: int = 0
+    # The task's current statement and title at this frontier (issue #908). Local facts only:
+    # whether either may leave the machine is the review selection's decision, never the case's.
+    task_statement: RecordedTaskStatement | None = None
+    task_title: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -845,6 +854,16 @@ class DeterministicCase:
             or history_bytes > MAX_FROZEN_HISTORY_BYTES
         ):
             raise _invalid_case()
+        if self.task_statement is not None and (
+            type(self.task_statement) is not RecordedTaskStatement
+            or self.task_statement.ingestion_sequence > self.frontier.sequence
+            or self.task_statement.source_event_id not in allowed
+        ):
+            raise _invalid_case()
+        if self.task_title is not None and (
+            type(self.task_title) is not str or not self.task_title
+        ):
+            raise _invalid_case()
         object.__setattr__(self, "allowed_ids", allowed)
         object.__setattr__(self, "coverage_by_ref", MappingProxyType(coverage))
 
@@ -855,6 +874,49 @@ _LEGACY_CASE_JSON_KEYS: Final = frozenset(
 _CASE_JSON_KEYS: Final = _LEGACY_CASE_JSON_KEYS | frozenset(
     {"history", "history_availability", "history_omitted_before_count"}
 )
+# Emitted only when the prefix records a title or statement, so every case frozen before issue
+# #908 keeps its exact bytes.
+_TASK_CONTEXT_CASE_JSON_KEYS: Final = _CASE_JSON_KEYS | frozenset({"task_context"})
+
+
+def _task_context_to_json(case: DeterministicCase) -> dict[str, JsonValue]:
+    statement = case.task_statement
+    return {
+        "task_statement": (
+            None
+            if statement is None
+            else {
+                "ingestion_sequence": statement.ingestion_sequence,
+                "source_event_id": statement.source_event_id,
+                "source_family": statement.source_family,
+                "text": statement.text,
+            }
+        ),
+        "task_title": case.task_title,
+    }
+
+
+def _task_context_from_json(value: JsonValue) -> tuple[RecordedTaskStatement | None, str | None]:
+    source = _case_json_object(value, required=frozenset({"task_statement", "task_title"}))
+    title = source["task_title"]
+    if title is not None and type(title) is not str:
+        raise _invalid_case()
+    raw_statement = source["task_statement"]
+    if raw_statement is None:
+        return None, title
+    statement = _case_json_object(
+        raw_statement,
+        required=frozenset({"ingestion_sequence", "source_event_id", "source_family", "text"}),
+    )
+    return (
+        RecordedTaskStatement(
+            text=cast(str, statement["text"]),
+            source_event_id=cast(EventId, statement["source_event_id"]),
+            source_family=cast(str, statement["source_family"]),
+            ingestion_sequence=cast(int, statement["ingestion_sequence"]),
+        ),
+        title,
+    )
 
 
 def _case_json_object(
@@ -1042,6 +1104,11 @@ def deterministic_case_to_json(case: DeterministicCase) -> dict[str, JsonValue]:
         ],
         "history_availability": case.history_availability,
         "history_omitted_before_count": case.history_omitted_before_count,
+        **(
+            {"task_context": cast(JsonValue, _task_context_to_json(case))}
+            if case.task_statement is not None or case.task_title is not None
+            else {}
+        ),
     }
 
 
@@ -1052,7 +1119,11 @@ def deterministic_case_from_json(value: JsonValue) -> DeterministicCase:
         frozen = freeze_json(value)
         source = _case_json_object(frozen)
         source_keys = frozenset(source)
-        if source_keys not in {_CASE_JSON_KEYS, _LEGACY_CASE_JSON_KEYS}:
+        if source_keys not in {
+            _CASE_JSON_KEYS,
+            _LEGACY_CASE_JSON_KEYS,
+            _TASK_CONTEXT_CASE_JSON_KEYS,
+        }:
             raise _invalid_case()
         availability_source = _case_json_object(
             source["availability"],
@@ -1104,7 +1175,11 @@ def deterministic_case_from_json(value: JsonValue) -> DeterministicCase:
         history: list[FrozenHistoryEvent] = []
         history_availability: Literal["available", "not_recorded"] = "not_recorded"
         history_omitted_before_count = 0
-        if source_keys == _CASE_JSON_KEYS:
+        task_statement: RecordedTaskStatement | None = None
+        task_title: str | None = None
+        if source_keys == _TASK_CONTEXT_CASE_JSON_KEYS:
+            task_statement, task_title = _task_context_from_json(source["task_context"])
+        if source_keys != _LEGACY_CASE_JSON_KEYS:
             for raw_item in _case_json_array(source["history"]):
                 item = _case_json_object(raw_item)
                 legacy_history_keys = frozenset(
@@ -1172,6 +1247,8 @@ def deterministic_case_from_json(value: JsonValue) -> DeterministicCase:
             history=tuple(history),
             history_availability=history_availability,
             history_omitted_before_count=history_omitted_before_count,
+            task_statement=task_statement,
+            task_title=task_title,
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise _invalid_case() from exc
@@ -1713,6 +1790,11 @@ def build_deterministic_case(
         add_event_ref(record.source_event_id)
     for item in history:
         add_event_ref(item.event_id)
+    # The event that recorded the current task statement is a citable source, so a reviewer can
+    # name the stated requirement a plan or diff omits (issue #908).
+    task_statement = current_task_statement(accepted_prefix)
+    if task_statement is not None:
+        add_event_ref(task_statement.source_event_id)
     if projection.latest_tested_state is not None:
         add_event_ref(projection.latest_tested_state.source_check_event_id)
     for contradiction in projection.contradictions.values():
@@ -1804,6 +1886,8 @@ def build_deterministic_case(
         history=history,
         history_availability="available",
         history_omitted_before_count=history_omitted_before_count,
+        task_statement=task_statement,
+        task_title=recorded_task_title(accepted_prefix),
     )
 
 

@@ -1312,7 +1312,12 @@ async def test_ordinary_native_hook_content_reaches_prepared_semantic_packet(
     )
     assert captured_coverage.evidence_immutability is EvidenceImmutability.IMMUTABLE_SNAPSHOT
     assert PublicationChannel.HOOK_OBSERVED in captured_coverage.publication_channels
-    assert semantic.packet.coverage.known_gaps == ()
+    # This synthetic ledger records no session or statement, so the only packet limits are the
+    # disclosed missing task statement (issue #908); captured content itself adds none.
+    assert semantic.packet.coverage.known_gaps == (
+        "task_statement_not_supplied",
+        "task_statement_unavailable",
+    )
     assert semantic.packet.coverage.check_types
     excerpt = next(
         item
