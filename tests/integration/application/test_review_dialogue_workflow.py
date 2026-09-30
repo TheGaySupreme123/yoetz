@@ -664,3 +664,40 @@ async def test_review_rounds_count_toward_the_budget_and_never_close_or_throttle
     assert live.responses.get(raised.finding_id) is None
     assert third.result_frontier.sequence > second.result_frontier.sequence
     assert projection_snapshot(replay(_records(session.app))) == projection_snapshot(live)
+
+
+async def test_three_restatements_become_one_item() -> None:
+    """numba x3: the same challenge on unchanged material is seen again and suppressed."""
+
+    seed = 3300
+    reviewer = _Reviewer([_challenge_obligation] * 3)
+    session, frontier = await _session(reviewer, seed)
+    first = await _check(session, frontier, seed + 10)
+    raised = _semantic(first)
+    second = await _check(session, frontier_json(first.result_frontier), seed + 20)
+    third = await _check(session, frontier_json(second.result_frontier), seed + 30)
+
+    semantic_rows = [
+        row
+        for row in _records(session.app)
+        if row.schema.name == "finding_recorded"
+        and isinstance(row.payload, Finding)
+        and row.payload.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+    ]
+    assert [cast(Finding, row.payload).finding_id for row in semantic_rows] == [raised.finding_id]
+    for later in (second, third):
+        assert "semantic_restatements_suppressed" in later.coverage.known_gaps
+        assert "semantic_challenges_rejected" not in later.coverage.known_gaps
+    live = _live_projection(session.app)
+    assert finding_todo_state(live, raised.finding_id) is FindingTodoState.OPEN
+    # Each suppressed restatement is recorded on the one item as still present: two rounds.
+    assert live.findings[raised.finding_id].review_rounds == 2
+    checks = [row for row in _records(session.app) if row.schema.name == "check_recorded"]
+    assert [
+        [
+            (str(item.finding_id), item.verdict)
+            for item in cast(Any, row.payload).prior_finding_verdicts
+        ]
+        for row in checks[1:]
+    ] == [[(raised.finding_id, "still_present")]] * 2
+    assert projection_snapshot(replay(_records(session.app))) == projection_snapshot(live)

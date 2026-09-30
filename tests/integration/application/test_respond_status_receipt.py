@@ -4963,9 +4963,15 @@ async def test_a_defect_the_review_still_finds_after_repair_stays_current() -> N
     view = await _findings_view(app, started, seed + 41, include_resolved=True)
     by_id = {item.finding_id: item for item in view.items}
     assert by_id[finding.finding_id].resolved is False
+    # Issue #905: the unchanged restatement is seen again and suppressed rather than minted as a
+    # second row, and it is recorded on the open item as ``still_present`` so the later review
+    # still speaks for it: suppression never reads as absence.
     refired = [
         item
         for item in rechecked.findings
         if item.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED and item.kind is finding.kind
     ]
-    assert refired and all(not by_id[item.finding_id].resolved for item in refired)
+    assert refired == []
+    assert "semantic_restatements_suppressed" in rechecked.coverage.known_gaps
+    assert by_id[finding.finding_id].todo_state == "open"
+    assert by_id[finding.finding_id].review_rounds == "1"

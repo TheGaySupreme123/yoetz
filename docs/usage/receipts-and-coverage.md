@@ -185,7 +185,9 @@ reviewed again; a later `respond` to it records nothing and answers `finding_ter
 evidence about the same problem comes back as a new finding. `acknowledged_not_done` is an honest
 "not done": it keeps the receipt from reading clean and appears in its own "Acknowledged, not done"
 section. `rejection_accepted` no longer blocks the receipt's conclusion but is listed in its own
-"Rejection accepted" section. Both sections name finding ids only.
+"Rejection accepted" section. Both sections name finding ids only. A review that restates a
+recorded AI-powered finding without anything recorded since does not add a second item: it is seen
+again and suppressed, and the check discloses `semantic_restatements_suppressed`.
 
 The check result's `finding_checklist` and `status` with the `findings` view show each item's state
 and how many later reviews left it open, against the owner's budget

@@ -1754,7 +1754,8 @@ semantic_relevance_review_not_run|optional_semantic_review_blocked_by_policy|
 optional_semantic_review_registration_drift|
 semantic_review_context_withheld|semantic_challenges_rejected|
 semantic_case_content_over_item_limit|semantic_case_finding_refs_over_limit|
-semantic_prior_findings_over_limit|semantic_prior_verdicts_unsupported`) plus the evidence-strength
+semantic_prior_findings_over_limit|semantic_prior_verdicts_unsupported|
+semantic_restatements_suppressed`) plus the evidence-strength
 codes
 (`evidence_content_digest_only|evidence_content_withheld|evidence_digest_subject_legacy_unknown`)
 and the host-observation codes (`captured_object_unavailable|content_unselected|
@@ -1765,8 +1766,9 @@ pack re-fires the issue or returns its own coverage finding. The exception also 
 finding's original coverage to contain only the pre-existing AI-powered review, evidence, and
 host-observation tolerances and to have freshness outside
 `stale_after_material_change|redacted_gap|unknown`. For `semantic_model_derived` rows only the
-evidence-strength codes, `semantic_prior_findings_over_limit` and
-`semantic_prior_verdicts_unsupported` are tolerated, and the check must also record
+evidence-strength codes, `semantic_prior_findings_over_limit`,
+`semantic_prior_verdicts_unsupported` and `semantic_restatements_suppressed` are tolerated, and the
+check must also record
 `succeeded/semantic_completed`. Outside the narrow command-gap partition described below, any
 other gap — redacted or unavailable payloads, redacted objects,
 missing refs, unknown events, completion scope, import range, or a code not in the list — blocks
@@ -7014,6 +7016,18 @@ Wire (all additive, unreleased versions changed in place):
   markdown and text renderings add "Acknowledged, not done" and "Rejection accepted" sections that
   name finding ids only. The redacted-share profile drops `acknowledged_not_done` responses like
   other reasoned dispositions and counts the redaction.
+- Stable identity: a challenge whose kind matches a recorded AI-powered finding, whose subjects
+  lie within that finding's subjects, and none of whose subjects was recorded after that finding
+  (the evidence fingerprint) is a restatement. It is "seen again, suppressed": no second row is
+  minted, the check adds `semantic_restatements_suppressed` (tolerated by both proof classes, like
+  the other dialogue disclosures), and the `semantic_review_accounting` diagnostic counts it as
+  `semantic_restatements_suppressed` so returned = accepted + rejected + suppressed. Suppression
+  never reads as absence: on an open item the check records a `still_present` ruling citing the
+  restated subjects (at most 16), an explicit `fixed` or `withdrawn` ruling on the same item
+  becomes `unassessable`, and a terminal item needs nothing recorded. When the check's 8-ruling
+  bound is already full, the restatement is minted as before instead. A challenge
+  that cites newer material is a new item, linked through `relates_to` when it cites the earlier
+  finding.
 - MCP text summaries count items by state with closed tokens only (`to-do: open N (M at budget
   B), verified V, not done A, rejection accepted R; next: <token>`); the CLI renders
   `[ ] F-1 fnd_… open (2/5)`, `[x]` verified, `[~]` not done, `[-]` rejection accepted, and one

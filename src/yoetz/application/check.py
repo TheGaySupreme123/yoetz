@@ -13,6 +13,7 @@ from yoetz.domain.coordination import CoordinationError, CoordinationErrorCode
 from yoetz.domain.events import LedgerRecord
 from yoetz.domain.findings import (
     FINDING_KIND_TRAITS,
+    MAX_RECORDED_VERDICTS,
     CandidateFinding,
     Finding,
     FindingChallenge,
@@ -38,6 +39,7 @@ from yoetz.domain.receipts import (
     SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP,
     SEMANTIC_PRIOR_VERDICTS_UNSUPPORTED_GAP,
     SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
+    SEMANTIC_RESTATEMENTS_SUPPRESSED_GAP,
     SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP,
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
     semantic_coverage_gap_code,
@@ -233,6 +235,8 @@ class SemanticJudgmentReview:
     # reviewer returned that the fence dropped or reduced to ``unassessable``.
     verdicts: tuple[PriorFindingVerdictRecord, ...] = ()
     verdicts_unsupported: int = 0
+    # Challenges that restated a recorded AI-powered finding with nothing newer (issue #905).
+    restatements_suppressed: int = 0
 
     def __post_init__(self) -> None:
         if (
@@ -244,15 +248,20 @@ class SemanticJudgmentReview:
             raise _invalid("semantic_judgment_review_invalid")
         if any(type(pair) is not tuple or len(pair) != 2 for pair in self.rejected_by_reason):
             raise _invalid("semantic_judgment_review_invalid")
+        if type(self.restatements_suppressed) is not int or self.restatements_suppressed < 0:
+            raise _invalid("semantic_judgment_review_invalid")
         if any(
             reason not in _SEMANTIC_REJECTION_REASONS or type(count) is not int or count < 1
             for reason, count in self.rejected_by_reason
         ):
             raise _invalid("semantic_judgment_review_invalid")
-        # The diagnostic this value feeds claims that returned == accepted + rejected. Owning the
-        # invariant here turns any future accounting drift into an immediate failure rather than a
-        # durable count that quietly does not add up.
-        if self.challenges_returned != len(self.candidates) + self.challenges_rejected:
+        # The diagnostic this value feeds claims that returned == accepted + rejected + suppressed
+        # restatements. Owning the invariant here turns any future accounting drift into an
+        # immediate failure rather than a durable count that quietly does not add up.
+        if (
+            self.challenges_returned
+            != len(self.candidates) + self.challenges_rejected + self.restatements_suppressed
+        ):
             raise _invalid("semantic_judgment_review_invalid")
 
     @property
@@ -946,8 +955,12 @@ async def _attach_finding_checklist(
     budget = getattr(policy, "finding_attempt_budget", DEFAULT_FINDING_ATTEMPT_BUDGET)
     if type(budget) is not int:
         budget = DEFAULT_FINDING_ATTEMPT_BUDGET
+    # A ledger seam without projection reads (a narrow test double) simply has no list to add.
+    query_projection = getattr(runtime.ledger, "query_projection", None)
+    if query_projection is None:
+        return result
     try:
-        page = await runtime.ledger.query_projection(
+        page = await query_projection(
             ProjectionQuery(
                 result.session_id,
                 "findings",
@@ -2141,6 +2154,7 @@ def validate_semantic_judgment(
         )
     candidates: list[CandidateFinding] = []
     rejections: dict[str, int] = {}
+    restatements = 0
     for challenge in judgment.challenges:
         resolution = _resolve_challenge_refs(case, deterministic, challenge)
         if resolution is None:
@@ -2154,6 +2168,16 @@ def validate_semantic_judgment(
                 rejections.get(SEMANTIC_REJECTED_SUBJECTS_OVER_LIMIT, 0) + 1
             )
             continue
+        restated = _restated_finding(case, challenge.finding_kind, refs)
+        if restated is not None:
+            suppressed, reduced = _record_restatement(case, admitted, restated, refs)
+            verdicts_unsupported += reduced
+            if suppressed:
+                # Seen again, suppressed (issue #905): the recorded item already carries this
+                # problem and its state; a second row would only restart it. Disclosed on the
+                # check, and recorded on the open item so it can never close by silence.
+                restatements += 1
+                continue
         if _claims_unchanged_over_hidden_source(case, challenge):
             rejections[SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM] = (
                 rejections.get(SEMANTIC_REJECTED_HIDDEN_SOURCE_CLAIM, 0) + 1
@@ -2205,7 +2229,112 @@ def validate_semantic_judgment(
         tuple(sorted(rejections.items(), key=lambda item: item[0].encode("ascii"))),
         _sorted_verdicts(admitted),
         verdicts_unsupported,
+        restatements,
     )
+
+
+def _ref_sequence(case: DeterministicCase, ref: str) -> int | None:
+    """The ledger sequence that last recorded ``ref`` in the frozen case, when it is known."""
+
+    projection = case.projection
+    sources: tuple[Mapping[object, object], ...]
+    if ref.startswith("obl_"):
+        sources = (cast(Mapping[object, object], projection.obligations),)
+    elif ref.startswith("clm_"):
+        sources = (cast(Mapping[object, object], projection.claims),)
+    elif ref.startswith("evd_"):
+        sources = (cast(Mapping[object, object], projection.evidence),)
+    elif ref.startswith("res_"):
+        sources = (cast(Mapping[object, object], projection.results),)
+    elif ref.startswith("act_"):
+        sources = (cast(Mapping[object, object], projection.actions),)
+    elif ref.startswith("evt_"):
+        for event in case.history:
+            if str(event.event_id) == ref:
+                return event.ingestion_sequence
+        sources = (
+            cast(Mapping[object, object], projection.decisions),
+            cast(Mapping[object, object], projection.assignments),
+        )
+    else:
+        return None
+    for rows in sources:
+        for key, row in rows.items():
+            sequence = getattr(row, "source_frontier", None)
+            if str(key) == ref and type(sequence) is int:
+                return sequence
+    return None
+
+
+_MAX_RULING_CITED_REFS: Final = 16
+
+
+def _record_restatement(
+    case: DeterministicCase,
+    admitted: dict[str, PriorFindingVerdictRecord],
+    restated: FindingId,
+    refs: tuple[str, ...],
+) -> tuple[bool, bool]:
+    """Carry a suppressed restatement onto the earlier item it restates (issue #905).
+
+    Returns whether the restatement is suppressed and whether an explicit ruling was reduced.
+
+    Suppression must never read as absence: a restatement of an open item records that the
+    reviewer still finds it (``still_present``, citing what the challenge cited), so the check
+    cannot resolve it by silence. A restatement contradicts an explicit ``fixed`` or
+    ``withdrawn`` ruling on the same item, which becomes ``unassessable``. A terminal item is
+    final and needs nothing recorded. When no ruling can be recorded (the check's ruling bound
+    is full) the restatement is not suppressed and is minted as before.
+    """
+
+    if finding_todo_state(case.projection, restated) is not FindingTodoState.OPEN:
+        return True, False
+    key = str(restated)
+    earlier = admitted.get(key)
+    if earlier is None:
+        if len(admitted) >= MAX_RECORDED_VERDICTS:
+            return False, False
+        cited = tuple(sorted(refs, key=str.encode))[:_MAX_RULING_CITED_REFS]
+        admitted[key] = PriorFindingVerdictRecord(restated, "still_present", cited)
+        return True, False
+    if earlier.verdict in {"fixed", "withdrawn"}:
+        admitted[key] = PriorFindingVerdictRecord(restated, "unassessable", ())
+        return True, True
+    return True, False
+
+
+def _restated_finding(
+    case: DeterministicCase, kind: FindingKind, refs: tuple[str, ...]
+) -> FindingId | None:
+    """The recorded AI-powered finding a challenge restates, if any (issue #905).
+
+    The stable key is the finding kind and its subjects; the evidence fingerprint is what the
+    challenge rests on. A restatement has the same kind, subjects within the recorded finding's
+    subjects, and nothing among them recorded after that finding. A challenge with newer material
+    is a new, linked item, never a restatement. The newest match wins.
+    """
+
+    wanted = frozenset(refs)
+    if not wanted:
+        return None
+    best: tuple[int, FindingId] | None = None
+    for key, record in case.projection.findings.items():
+        payload = record.payload
+        if (
+            payload is None
+            or record.redacted
+            or payload.origin is not FindingOrigin.SEMANTIC_MODEL_DERIVED
+            or payload.kind is not kind
+            or not wanted <= frozenset(str(ref) for ref in payload.subject_refs)
+        ):
+            continue
+        if all(
+            (sequence := _ref_sequence(case, ref)) is not None
+            and sequence <= record.source_frontier
+            for ref in wanted
+        ) and (best is None or record.source_frontier > best[0]):
+            best = (record.source_frontier, key)
+    return None if best is None else best[1]
 
 
 def _sorted_verdicts(
@@ -2347,6 +2476,7 @@ def _record_semantic_review_accounting(
             "semantic_challenges_returned": review.challenges_returned,
             "semantic_candidates_accepted": len(review.candidates),
             "semantic_challenges_rejected": review.challenges_rejected,
+            "semantic_restatements_suppressed": review.restatements_suppressed,
             "semantic_findings_selected": selected,
             "semantic_findings_suppressed": len(semantic) - selected,
         },
@@ -2723,6 +2853,9 @@ async def execute_check_commit(
         # A per-finding ruling the fence dropped or reduced: disclosed, never read as agreement.
         if review.verdicts_unsupported:
             declared_gaps.add(SEMANTIC_PRIOR_VERDICTS_UNSUPPORTED_GAP)
+        # A restated finding was suppressed rather than minted twice: disclosed, never silent.
+        if review.restatements_suppressed:
+            declared_gaps.add(SEMANTIC_RESTATEMENTS_SUPPRESSED_GAP)
         # Recorded prose the case could not carry whole. The reviewer answered on a fragment, and
         # the author has no other signal that the text they published never arrived (issue #177).
         declared_gaps.update(semantic_result.case_content_gaps)

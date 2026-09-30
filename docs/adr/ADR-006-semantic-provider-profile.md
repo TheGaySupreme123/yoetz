@@ -916,6 +916,16 @@ agent's behalf. The check result's `finding_checklist` and the status findings v
 item's state and rounds, and a closed `next` token, for a checklist such as
 `[ ] F-3 open (2/5) | [x] F-1 verified_resolved | [~] F-2 acknowledged_not_done`.
 
+**Stable identity: seen again, suppressed.** An item's key is its origin, kind and subjects; its
+evidence fingerprint is what it rests on. A challenge with the kind of a recorded AI-powered finding,
+subjects within that finding's subjects, and nothing among them recorded after that finding restates
+it: no second row is minted and the check discloses `semantic_restatements_suppressed`, so three
+identical re-raises remain one item with one state. Suppression must never read as absence, so on an
+open item the check records the restatement as a `still_present` ruling (a contradicting `fixed` or
+`withdrawn` becomes `unassessable`), which also counts a review round. A challenge that cites newer material is a new
+item, linked to the earlier one when it cites it. This is the ledger-side half of "no re-raise
+without new material"; the prompt asks for the same.
+
 **Compatibility.** `response_recorded` 1.0.0 and `respond-request`/`respond-result` 1.0.0 are
 released, so the new disposition rides new 1.1.0 versions (every other disposition keeps 1.0.0
 bytes). Control 2.9.0 (unreleased) moves to the respond 1.1.0 pair in place; the released control
