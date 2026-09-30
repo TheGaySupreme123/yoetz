@@ -806,3 +806,26 @@ This changes relevance, not proof: every capture still requires authentication, 
 obeys the selected privacy profile and byte/count limits, and a response never clears a finding.
 An insufficient packet or a deterministic-only recheck still cannot resolve a semantic defect.
 The same selection applies to all hosts and supported OSes.
+
+### Task statement apart from the agent plan (2026-09-30, issue #908)
+
+The reviewer was told to judge "the user's stated goal" but received only the agent's latest plan
+summary under `task_description`, so it asked for behaviour the user had excluded and could not see
+a requirement both plan and diff omitted.
+
+- `start.task_statement` records the user's request as the agent transcribed it on the task's
+  lifecycle event; a `plan_published`/`plan_revised` 1.1.0 payload or a reattaching `start` can
+  revise it, and earlier statements stay in history. The newest readable statement is frozen with
+  the check case, and its source event is citable.
+- The packet carries it as its own `task_statement` section, before the plan, with a `source`
+  label: `agent_transcribed`, or `task_title_only` when only the title exists. The plan item is
+  labelled `agent plan (the agent's own summary)` and never carries the statement; nor do timeline
+  rows. `host_captured_user_prompt` is reserved and unused.
+- Absence is never silent: `task_statement_unavailable` with `task_statement_not_supplied` or
+  `task_statement_not_authorized` travels on the packet, check, finding baseline and receipt
+  coverage. These codes do not weaken deterministic absence proof, and they tolerate semantic
+  absence proof only when the finding was raised under the same limit.
+- `TASK_STATEMENT_REVIEW_INSTRUCTION` is appended to the system instruction: the task statement is
+  the specification and wins over the plan; a plan or diff that omits a stated requirement is a
+  discrepancy citing the statement; never request behaviour the statement excludes; weigh
+  `agent_transcribed` as the agent's account.

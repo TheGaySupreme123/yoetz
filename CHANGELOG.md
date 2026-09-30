@@ -8,6 +8,19 @@ reverse-chronological released versions.
 
 ### Added
 
+- AI-powered review now receives the task statement: what the user asked for, apart from the
+  agent's plan. Agents pass the request verbatim as `start.task_statement` (or `yoetz start
+  --task-statement-file`) and may revise it in a `plan_revised` 1.1.0 payload; history is kept. The
+  packet carries a source-labelled `task_statement` section (`agent_transcribed`, or
+  `task_title_only`), bounded to 16 KiB with head and tail kept, and labels the plan item
+  "agent plan (the agent's own summary)". The reviewer is told the statement wins over the plan and
+  never to ask for behaviour it excludes. Sending it needs the new `task_statement` review section
+  in privacy policy 1.2.0 (Goal-aware, Assisted and Expanded presets; never Structural). Existing
+  approvals are not widened: checks and receipts say `task_statement_unavailable` /
+  `task_statement_not_authorized` until you approve a current recipe with `yoetz --privacy`, and
+  the approval screen, `yoetz --privacy` and `yoetz privacy show` say whether it is sent.
+  Host-captured prompts are not used. Local control schema moves to 2.10.0 (#908).
+
 - Codex, Claude Code and Cursor session-start context can show a fresh repository-grant snapshot
   and name the owner's missing admission command. The notice leaves route and host approval
   unconfirmed, preserves existing context and spends only spare hook time. No cross-session

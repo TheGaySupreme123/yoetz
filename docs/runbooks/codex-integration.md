@@ -1704,3 +1704,19 @@ and `writer_id` (`safe_details.state` is the probed state), or replay the unchan
 under that same request ID. Never mint a replacement write ID to recover an unknown outcome.
 A lost first `start` still uses exact same-body replay because session/writer IDs may be absent.
 This behavior is identical on macOS, Linux and Windows via WSL 2. CLI callers may set `--deadline-ms`.
+
+## Task statement for AI-powered review (issue #908)
+
+Decision for Codex: supported through the agent-supplied field, identical on every host and OS.
+The agent passes the user's request verbatim as `start.task_statement` (MCP `start` or
+`yoetz start --task-statement-file`) and may revise it with a `plan_revised` 1.1.0 payload. The
+review packet carries it as the `task_statement` section labelled `agent_transcribed`, apart from
+the plan, only when the approved privacy policy names that section (privacy policy 1.2.0 presets
+Goal-aware, Assisted and Expanded; never Structural). Otherwise the check and receipt carry
+`task_statement_unavailable` with `task_statement_not_supplied` or `task_statement_not_authorized`.
+
+Codex renders a `UserPromptSubmit` hook, but whether `codex exec` fires it for the initial prompt is **unverified** in this repository (not exercised by the dogfood or capability suites). Yoetz does not read captured prompt text for review in any case; see below.
+
+Host-captured prompts (`host_captured_user_prompt`) are not used on any host in this version:
+captured prompt text never enters the packet, and the Expanded-only, explicit prompt-capture
+choice that would allow it is still open on issue #908.
