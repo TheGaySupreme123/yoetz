@@ -779,7 +779,9 @@ def apply_check_resolution(
             continue
         returned_keys.add(issue_key(payload))
         if record.resolved_by_check_event_id is not None:
-            record = replace(record, resolved_by_check_event_id=None)
+            record = replace(
+                record, resolved_by_check_event_id=None, resolution_raising_check_event_id=None
+            )
         if record.reduced_scope_raising_check_event_id is None and _raises_under_reduced_scope(
             check, payload
         ):
@@ -795,30 +797,56 @@ def apply_check_resolution(
             or current_id in check.returned_finding_ids
         ):
             continue
-        if qualifying_check_resolves(
+        raising = record.reduced_scope_raising_check_event_id
+        if not qualifying_check_resolves(
             record.payload,
             record.source_frontier,
             check,
             frozen_keys,
             proof_state=proof_state,
-            raised_under_reduced_scope=record.reduced_scope_raising_check_event_id is not None,
+            raised_under_reduced_scope=raising is not None,
         ):
-            findings[current_id] = replace(record, resolved_by_check_event_id=check_event_id)
+            continue
+        # A proof that qualified only through the raising check's recorded scope also reads that
+        # check, so redacting it must reopen the row just as redacting this check would (#904).
+        relied_on = (
+            raising
+            if raising is not None
+            and not qualifying_check_resolves(
+                record.payload,
+                record.source_frontier,
+                check,
+                frozen_keys,
+                proof_state=proof_state,
+            )
+            else None
+        )
+        findings[current_id] = replace(
+            record,
+            resolved_by_check_event_id=check_event_id,
+            resolution_raising_check_event_id=relied_on,
+        )
 
 
 def reopen_findings_resolved_by(
     findings: dict[FindingId, FindingProjectionRecord],
     event_ids: frozenset[EventId],
 ) -> None:
-    """Drop resolution whose proving check was redacted: unreadable proof is no proof.
+    """Drop resolution whose proof was redacted: unreadable proof is no proof.
 
-    A redacted raising check likewise no longer supplies the reduced-scope fallback (issue #904),
-    matching a rebuild that cannot read that check's coverage.
+    The proof is the proving check and, for a resolution that qualified only through it, the
+    raising check whose recorded reduced scope supplied the baseline (issue #904). A redacted
+    raising check also no longer supplies that fallback to any later check.
     """
 
     for current_id, record in tuple(findings.items()):
-        if record.resolved_by_check_event_id in event_ids:
-            record = replace(record, resolved_by_check_event_id=None)
+        if (
+            record.resolved_by_check_event_id in event_ids
+            or record.resolution_raising_check_event_id in event_ids
+        ):
+            record = replace(
+                record, resolved_by_check_event_id=None, resolution_raising_check_event_id=None
+            )
         if record.reduced_scope_raising_check_event_id in event_ids:
             record = replace(record, reduced_scope_raising_check_event_id=None)
         findings[current_id] = record

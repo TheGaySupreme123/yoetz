@@ -1735,17 +1735,19 @@ folds every readable `check_recorded` event into each finding's projection recor
 so pre-existing snapshots stay byte-identical). The same record carries
 `reduced_scope_raising_check_event_id`, emitted only when set, when the check whose completed
 AI-powered review raised the row (same tested frontier and review attempt) recorded
-`semantic_reference_scope_reduced` (#904); redacting that check clears it. A check resolves a
-current row only when all of these hold: its recorded `subject_frontier` is at or after the
-finding's ingestion sequence; every finding it returned is readable and none shares the row's issue
-key; `suppressed_count` is zero; the execution for the row's `(policy_id, policy_version)` is
-`run/completed`; its normalized `scope` is whole-case or names one of the row's `subject_refs`; its
-coverage `ledger_freshness` is not `stale_after_material_change|unknown`; and its `known_gaps` lie
-within the proof class's closed tolerated set. `redacted_gap` also blocks by default. One
-local-only exception admits it when the finding's own recorded coverage was readable and the
-check-wide gap set contains only tolerated codes including at least one host-observation code; this
-keeps unrelated host capture limits from making a structured-ledger repair permanently unprovable.
-For local rows the tolerated set is the AI-powered review absence/weakness codes
+`semantic_reference_scope_reduced` (#904); redacting that check clears it. When a resolution
+qualified only through that recorded scope, `resolution_raising_check_event_id` (also emitted only
+when set) names the same check, and redacting it reopens the row like redacting the proving check.
+A check resolves a current row only when all of these hold: its recorded `subject_frontier` is at or
+after the finding's ingestion sequence; every finding it returned is readable and none shares the
+row's issue key; `suppressed_count` is zero; the execution for the row's `(policy_id,
+policy_version)` is `run/completed`; its normalized `scope` is whole-case or names one of the row's
+`subject_refs`; its coverage `ledger_freshness` is not `stale_after_material_change|unknown`; and
+its `known_gaps` lie within the proof class's closed tolerated set. `redacted_gap` also blocks by
+default. One local-only exception admits it when the finding's own recorded coverage was readable
+and the check-wide gap set contains only tolerated codes including at least one host-observation
+code; this keeps unrelated host capture limits from making a structured-ledger repair permanently
+unprovable. For local rows the tolerated set is the AI-powered review absence/weakness codes
 (`semantic_review_not_requested|semantic_review_not_configured|
 semantic_relevance_review_not_run|optional_semantic_review_blocked_by_policy|
 optional_semantic_review_registration_drift|

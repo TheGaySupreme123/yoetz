@@ -816,7 +816,8 @@ a bounded scope. Its effect on resolution is now decided (interim step, by maint
   and same AI-powered review attempt. The reducer folds this into the projection as
   `reduced_scope_raising_check_event_id`, so a replay or projection rebuild gives the same answer.
   A finding's recorded coverage is never rewritten. Redacting the raising check removes the
-  fallback.
+  fallback, and it reopens a resolution that qualified only through that check's recorded scope
+  (`resolution_raising_check_event_id`), exactly as redacting the proving check does.
 - **A limitation outside the baseline.** A finding raised under a gap outside the baseline set
   (for example `completion_plan_not_claimed`, `content_redacted` or
   `command_attempt_uncorroborated`) gets a readable baseline on the first later check that carries

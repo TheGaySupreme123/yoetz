@@ -28,6 +28,7 @@ from yoetz.application.check import FinalSemanticEvaluation
 from yoetz.application.egress import PrivacyCoordinator
 from yoetz.application.observation_materialize import observation_author
 from yoetz.application.publish_work import PublishWorkInternalResult
+from yoetz.application.receipt import ReceiptInternalResult
 from yoetz.application.service import Application, VerificationPolicy
 from yoetz.application.start import StartInternalResult
 from yoetz.domain.events import (
@@ -5136,14 +5137,24 @@ async def test_semantic_finding_resolves_under_its_recorded_reduced_reference_sc
     await _assert_reduced_scope_disclosed(app, started, seed + 50, repaired.result_frontier)
 
 
-async def test_pre_upgrade_semantic_finding_resolves_through_its_raising_checks_scope(
+async def _resolve_pre_upgrade_finding(
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Lifecycle fallback: a finding raised before the stamp is never rewritten, and resolves.
+    *,
+    seed: int,
+    ledger_backend: Literal["memory", "sqlite"] = "memory",
+) -> tuple[
+    Application,
+    _WorkflowRuntime,
+    StartInternalResult,
+    CheckCommitResult,
+    Finding,
+    CheckCommitResult,
+]:
+    """Raise a finding without the scope stamp, as a pre-upgrade service did, then resolve it.
 
-    The raising check is recorded by a service that did not stamp the reduced scope onto the
-    findings it raised. The upgraded service reads that check's recorded coverage instead, and a
-    projection rebuild over the same ledger gives the same answer.
+    The raising check records the reduced scope the finding does not carry. The upgraded service
+    reads that check's recorded coverage, so a repair and a completed review under the same bound
+    resolve the finding.
     """
 
     import yoetz.application.check as check_module
@@ -5153,11 +5164,11 @@ async def test_pre_upgrade_semantic_finding_resolves_through_its_raising_checks_
     def pre_upgrade_stamp(result: FinalSemanticEvaluation) -> frozenset[str]:
         return stamp(result) - {_SCOPE_REDUCED}
 
-    seed = 5700
     conclusions = ["challenges_returned", "no_material_discrepancy"]
     app, runtime, _ = _build_app(
-        seed_offset=57,
+        seed_offset=seed // 100,
         semantic="optional",
+        ledger_backend=ledger_backend,
         semantic_evaluator=_scripted_semantic_evaluator(
             protocol_id("clm_", seed + 5),
             conclusions,
@@ -5184,7 +5195,22 @@ async def test_pre_upgrade_semantic_finding_resolves_through_its_raising_checks_
     view = await _findings_view(app, started, seed + 41, include_resolved=True)
     row = next(item for item in view.items if item.finding_id == finding.finding_id)
     assert row.resolved is True, row.detail
+    assert conclusions == []
+    return app, runtime, started, checked, finding, repaired
 
+
+async def test_pre_upgrade_semantic_finding_resolves_through_its_raising_checks_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lifecycle fallback: a finding raised before the stamp is never rewritten, and resolves.
+
+    A projection rebuild over the same ledger gives the same answer.
+    """
+
+    seed = 5700
+    app, runtime, started, _checked, finding, repaired = await _resolve_pre_upgrade_finding(
+        monkeypatch, seed=seed
+    )
     ledger, _objects = next(iter(runtime.resources.values()))
     records = tuple([row async for row in ledger.load_events(started.session_id)])
     rebuilt = replay(records)
@@ -5198,6 +5224,169 @@ async def test_pre_upgrade_semantic_finding_resolves_through_its_raising_checks_
         projection_from_snapshot(projection_snapshot(rebuilt)), finding.finding_id
     )
     await _assert_reduced_scope_disclosed(app, started, seed + 50, repaired.result_frontier)
+
+
+async def _append_local_redaction(
+    app: Application,
+    runtime: _WorkflowRuntime,
+    started: StartInternalResult,
+    *,
+    seed: int,
+    expected_frontier: int,
+    target: str,
+) -> None:
+    """Append a local human's logical redaction of *target*, shaped like the recorded fixture."""
+
+    from yoetz.domain.events import (
+        RedactionMethod,
+        RedactionReasonCategory,
+        RedactionRecordedPayload,
+    )
+    from yoetz.domain.values import Actor, ActorType, actor_id
+
+    ledger, objects = next(iter(runtime.resources.values()))
+    now = app.clock.now_utc()
+    payload = RedactionRecordedPayload(
+        (event_id(target),),
+        (),
+        RedactionMethod.LOGICAL_REDACTION,
+        RedactionReasonCategory.OTHER,
+        actor_id("human.test.local"),
+        "The raising check is redacted.",
+    )
+    encoded = canonical_encode(encode_payload(payload))
+    metadata = ObjectMetadata(
+        ObjectKind.EVENT_PAYLOAD, media_type_for("redaction_recorded"), started.task_id, now
+    )
+    staged = await objects.stage(ObjectSource(data=encoded, declared_size=len(encoded)), metadata)
+    payload_ref = await objects.finalize(staged)
+    channel = PublicationChannel.LOCAL_CLI
+    await ledger.append_batch(
+        AppendCommand(
+            started.task_id,
+            started.session_id,
+            started.writer_id,
+            protocol_id("req_", seed),
+            OperationKind.PUBLISH_WORK,
+            _DIGEST,
+            expected_frontier,
+            (
+                AppendEntry(
+                    EventDraft(
+                        event_id(protocol_id("evt_", seed + 1)),
+                        EventSchema("redaction_recorded", "1.0.0"),
+                        timestamp_from_datetime(now),
+                        (),
+                        payload,
+                        (),
+                        (),
+                    ),
+                    Actor(
+                        actor_id("human.test.local"),
+                        ActorType.HUMAN,
+                        AuthorshipAssurance.LOCALLY_AUTHENTICATED,
+                    ),
+                    payload_ref,
+                    payload_ref.commitment,
+                    metadata.media_type,
+                    payload_ref.plaintext_size,
+                    channel,
+                    coverage_for_channel(channel),
+                    "projected",
+                ),
+            ),
+            None,
+        )
+    )
+
+
+async def _resolved_in_json_receipt(
+    app: Application,
+    started: StartInternalResult,
+    seed: int,
+    frontier: Frontier | FrontierModel,
+) -> tuple[frozenset[str], ReceiptInternalResult]:
+    receipt = await app.receipt(
+        ReceiptRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed)),
+                "task_id": started.task_id,
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(frontier),
+                "format": "json",
+                "include": "standard",
+                "redaction_profile": "full_local",
+            }
+        )
+    )
+    document = cast(Mapping[str, JsonValue], receipt.document)
+    sections = cast(tuple[Mapping[str, JsonValue], ...], document["sections"])
+    summary = next(section for section in sections if section["key"] == "summary")
+    items = cast(tuple[str, ...], summary["items"])
+    return frozenset(item for item in items if item.startswith("fnd_")), receipt
+
+
+@pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))
+async def test_redacting_the_raising_check_reopens_a_resolution_that_read_it(
+    monkeypatch: pytest.MonkeyPatch, ledger_backend: Literal["memory", "sqlite"]
+) -> None:
+    """Unreadable proof is no proof (#904 review): the fallback's source check is proof input.
+
+    A pre-upgrade finding resolved only through its raising check's recorded reduced scope. Once
+    that check is redacted, status and receipts report it current again, and a projection rebuild
+    over the same ledger agrees.
+    """
+
+    seed = 5900
+    app, runtime, started, checked, finding, repaired = await _resolve_pre_upgrade_finding(
+        monkeypatch, seed=seed, ledger_backend=ledger_backend
+    )
+    resolved_ids, receipt = await _resolved_in_json_receipt(
+        app, started, seed + 50, repaired.result_frontier
+    )
+    assert finding.finding_id in resolved_ids
+
+    ledger, _objects = next(iter(runtime.resources.values()))
+    records = tuple([row async for row in ledger.load_events(started.session_id)])
+    raising = next(
+        row
+        for row in records
+        if isinstance(row.payload, CheckRecordedPayload)
+        and finding.finding_id in row.payload.returned_finding_ids
+        and row.payload.subject_frontier.sequence == checked.subject_frontier.sequence
+    )
+    record = replay(records).findings[finding.finding_id]
+    assert record.resolution_raising_check_event_id == raising.event_id
+
+    await _append_local_redaction(
+        app,
+        runtime,
+        started,
+        seed=seed + 60,
+        expected_frontier=receipt.result_frontier.sequence,
+        target=raising.event_id,
+    )
+    view = await _findings_view(app, started, seed + 62, include_resolved=True)
+    row = next(item for item in view.items if item.finding_id == finding.finding_id)
+    assert row.resolved is False
+    head = await ledger.load_projection(started.session_id, ProjectionView.CANDIDATE_FINDINGS)
+    assert head is not None
+    resolved_ids, _receipt = await _resolved_in_json_receipt(app, started, seed + 63, head.frontier)
+    assert finding.finding_id not in resolved_ids
+
+    records = tuple([row async for row in ledger.load_events(started.session_id)])
+    rebuilt = replay(records)
+    assert not finding_is_resolved(rebuilt, finding.finding_id)
+    assert rebuilt.findings[finding.finding_id].reduced_scope_raising_check_event_id is None
+    stored = await ledger.load_projection(started.session_id, ProjectionView.CANDIDATE_FINDINGS)
+    assert stored is not None and stored.state == rebuilt
+    assert (
+        finding_is_resolved(
+            projection_from_snapshot(projection_snapshot(rebuilt)), finding.finding_id
+        )
+        is False
+    )
 
 
 async def test_a_newly_reduced_reference_scope_still_blocks_semantic_resolution() -> None:

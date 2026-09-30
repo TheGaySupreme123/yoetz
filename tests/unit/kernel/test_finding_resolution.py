@@ -1352,10 +1352,58 @@ def test_the_recorded_raising_scope_resolves_through_the_fold_until_redacted() -
 
     apply_check_resolution(findings, later, evt(9), proof_state=_changed_state(later))
     assert findings[fnd(1)].resolved_by_check_event_id == evt(9)
-    # Redacting the raising check after resolution leaves that proof intact.
+    assert findings[fnd(1)].resolution_raising_check_event_id == evt(5), "proof read the raiser"
+    # Redacting the raising check after resolution reopens the row: that proof read the raising
+    # check's recorded scope, and unreadable proof is no proof.
+    reopen_findings_resolved_by(findings, frozenset({evt(5)}))
+    assert findings[fnd(1)].resolved_by_check_event_id is None
+    assert findings[fnd(1)].resolution_raising_check_event_id is None
+    assert findings[fnd(1)].reduced_scope_raising_check_event_id is None
+    # The reopened row now meets later reviews without the fallback: the scope code blocks.
+    again = _review_check(*_LONG_SESSION_REVIEW_GAPS, tested=10)
+    apply_check_resolution(findings, again, evt(11), proof_state=_changed_state(again))
+    assert findings[fnd(1)].resolved_by_check_event_id is None
+
+
+@pytest.mark.parametrize("independent", ["stamped_finding", "unreduced_proving_check"])
+def test_redacting_the_raising_check_keeps_a_proof_that_never_read_it(independent: str) -> None:
+    """Only a resolution that needed the raising check's scope reopens when it is redacted."""
+
+    gaps = ["content_unselected", "host_outcome_unavailable", "unpaired_event"]
+    later_gaps = list(_LONG_SESSION_REVIEW_GAPS)
+    if independent == "stamped_finding":
+        gaps.append(_SCOPE_REDUCED)  # Post-upgrade: the finding's own coverage carries it.
+    else:
+        later_gaps.remove(_SCOPE_REDUCED)  # The proving review was not reduced at all.
+    findings = {fnd(1): finding_record(_semantic_finding(*gaps), 4)}
+    raising = replace(_raising_check(*_LONG_SESSION_REVIEW_GAPS), returned_finding_ids=(fnd(1),))
+    apply_check_resolution(findings, raising, evt(5))
+    assert findings[fnd(1)].reduced_scope_raising_check_event_id == evt(5)
+    later = _review_check(*later_gaps)
+    apply_check_resolution(findings, later, evt(9), proof_state=_changed_state(later))
+    assert findings[fnd(1)].resolved_by_check_event_id == evt(9)
+    assert findings[fnd(1)].resolution_raising_check_event_id is None
+
     reopen_findings_resolved_by(findings, frozenset({evt(5)}))
     assert findings[fnd(1)].resolved_by_check_event_id == evt(9)
     assert findings[fnd(1)].reduced_scope_raising_check_event_id is None
+    # Redacting the proving check still reopens it.
+    reopen_findings_resolved_by(findings, frozenset({evt(9)}))
+    assert findings[fnd(1)].resolved_by_check_event_id is None
+
+
+def test_a_returned_row_drops_the_raising_check_its_old_proof_relied_on() -> None:
+    record = replace(
+        finding_record(_semantic_finding("content_unselected"), 4),
+        resolved_by_check_event_id=evt(9),
+        reduced_scope_raising_check_event_id=evt(5),
+        resolution_raising_check_event_id=evt(5),
+    )
+    findings = {fnd(1): record}
+    apply_check_resolution(findings, _check(returned=(fnd(1),)), evt(11))
+    assert findings[fnd(1)].resolved_by_check_event_id is None
+    assert findings[fnd(1)].resolution_raising_check_event_id is None
+    assert findings[fnd(1)].reduced_scope_raising_check_event_id == evt(5)
 
 
 def test_snapshot_round_trips_the_raising_scope_and_omits_it_when_absent() -> None:
@@ -1380,6 +1428,23 @@ def test_snapshot_round_trips_the_raising_scope_and_omits_it_when_absent() -> No
     rows[fnd(1)]["reduced_scope_raising_check_event_id"] = None  # type: ignore[index]
     with pytest.raises(ValueError, match="invalid_projection_state"):
         projection_from_snapshot(snapshot)
+
+    relied = replace(
+        recorded, resolved_by_check_event_id=evt(9), resolution_raising_check_event_id=evt(6)
+    )
+    relied_state = replace(state, findings={fnd(1): relied, fnd(2): plain})
+    relied_snapshot = projection_snapshot(relied_state)
+    relied_rows = relied_snapshot["findings"]
+    assert isinstance(relied_rows, dict)
+    assert "resolution_raising_check_event_id" not in relied_rows[fnd(2)]  # type: ignore[operator]
+    assert relied_rows[fnd(1)]["resolution_raising_check_event_id"] == evt(6)  # type: ignore[index]
+    assert projection_from_snapshot(relied_snapshot) == relied_state
+    # A relied-on raising check without the resolution it supported is not a valid record.
+    with pytest.raises(ValueError, match="invalid_projection_state"):
+        replace(relied, resolved_by_check_event_id=None)
+    del relied_rows[fnd(1)]["resolved_by_check_event_id"]  # type: ignore[attr-defined]
+    with pytest.raises(ValueError, match="invalid_projection_state"):
+        projection_from_snapshot(relied_snapshot)
 
 
 # drizzle ``fnd_8d68fbc3``: raised by a review whose coverage carried a gap outside the baseline.
