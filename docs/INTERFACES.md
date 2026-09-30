@@ -1780,6 +1780,14 @@ policies/frontier/returned IDs alone cannot prove applicability.
 
 `include_resolved` absent/false adds `resolved=false`, while true removes only that predicate;
 `include_unavailable` has the identical rule for `available=true`. Filters are otherwise ANDed.
+The evidence filter's `author` accepts only `mine` (status request 1.3.0): it keeps rows whose
+source event the requesting writer published in its current session at or before the page frontier
+through `cooperative_mcp` or `local_cli`, decided per request from ledger authorship by the same
+rule as `self_authored` provenance; hook-observed, other-writer, engine and import rows never
+match, and a reattached session matches none of its predecessor's rows. Every evidence row carries
+the service-stamped `publication_channel` of its source event (status result 1.5.0; control
+2.10.0 envelopes reference both). Omitting `author` keeps the pre-1.3.0 filter digest, so an
+earlier cursor still binds.
 Assignment/obligation/evidence IDs sort ascending; findings use the complete mixed-direction
 ten-part rank order; history uses ingestion sequence. The repository selects at most `limit + 1`
 indexed structural candidates and hydrates only the first `limit`; an unreadable selected row is
@@ -3186,13 +3194,13 @@ whose canonical owner is `yoetz.domain.privacy`'s wider `^[a-z][a-z0-9_-]{0,127}
 agent-projection purpose `client_result_projection` is one of these: it is fixed by the
 `agent_projection` CHECK in `migrations/catalog/0001.sql` and is part of every stored receipt's
 canonical bytes and digest, so it cannot be renamed. Control result `2.6.1` (the 0.2.3 repair)
-and every later result envelope, including the 0.3 line's `2.7.0`, `2.8.0` and `2.9.0`, therefore
+and every later result envelope, including the 0.3 line's `2.7.0` through `2.10.0`, therefore
 validate `local_disclosure_receipt.purpose` against their own `local_disclosure_purpose` definition,
 mirroring that domain grammar, while network egress keeps the stricter external reference. Before
 `2.6.1` the local branch reused the external grammar, so every ordinary local receipt failed the
 result envelope and `privacy receipts list`/`get` answered `read_projection_failed` (issue #732);
 the frozen `2.6.0` and earlier envelopes keep their released bytes. Hello envelopes stayed `2.6.0`
-on the 0.2 line; the 0.3 line's `2.7.0`, `2.8.0` and `2.9.0` request and result envelopes derive
+on the 0.2 line; the 0.3 line's `2.7.0` through `2.10.0` request and result envelopes derive
 from `2.6.1` and add no second grammar. CLI JSON, terminal output and the prompt-loop menu render
 decoded UTC receipt timestamps in canonical millisecond RFC3339 form (issues #731 and #732). The
 0.2.3 schema inventory is reported by version-manifest `2.2.1`, the 0.2.4 inventory by `2.2.2`,
@@ -6670,7 +6678,7 @@ generation, subject-state digest, and protected-read reference. Selection route 
 all present or all absent. Routine summaries use the existing closed summary schema; individual
 observations remain closed to unknown fields. Domain and service route/authority validation
 remain mandatory. Released request 2.6.0 bytes and the hello contract remain unchanged. The 0.3
-line's request contracts (`2.7.0`, `2.8.0`, `2.9.0`) derive from `2.6.1` and carry the same fields
+line's request contracts (`2.7.0` through `2.10.0`) derive from `2.6.1` and carry the same fields
 and summary branch, so an envelope the 0.2.3 service admits is admitted unchanged after upgrade.
 
 Routine-read classification persists its proven success bit when the native outcome was nested.

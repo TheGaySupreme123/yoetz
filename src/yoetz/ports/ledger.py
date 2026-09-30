@@ -1434,6 +1434,9 @@ class EvidenceProjectionFilter:
         | None
     )
     include_unavailable: bool | None
+    # ``mine``: only rows whose source event the querying writer published in its own session,
+    # decided from ledger authorship (``ProjectionQuery.writer_id``), never from caller input.
+    author: Literal["mine"] | None = None
 
     def __post_init__(self) -> None:
         if self.strength is not None and (
@@ -1447,6 +1450,8 @@ class EvidenceProjectionFilter:
                 "independently_reproduced",
             }
         ):
+            raise _invalid()
+        if self.author is not None and (type(self.author) is not str or self.author != "mine"):
             raise _invalid()
         if self.freshness is not None and (
             type(self.freshness) is not str
@@ -1554,9 +1559,19 @@ class ProjectionQuery:
     limit: int
     position: ProjectionPosition | None
     expected_projection_version: str | None
+    # The authenticated requesting writer; required only by writer-relative filters.
+    writer_id: str | None = None
 
     def __post_init__(self) -> None:
         _id(IdKind.SESSION, self.session_id)
+        if self.writer_id is not None:
+            _id(IdKind.WRITER, self.writer_id)
+        if (
+            type(self.filter) is EvidenceProjectionFilter
+            and self.filter.author is not None
+            and self.writer_id is None
+        ):
+            raise _invalid()
         if type(self.view) is not str or self.view not in {
             "compact",
             "assignment",

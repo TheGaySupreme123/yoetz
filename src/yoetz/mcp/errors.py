@@ -77,6 +77,8 @@ _SAFE_LOCATION_SEGMENTS: Final = frozenset(
         "assignee_actor_id",
         "at_frontier",
         "attempted_items",
+        # Evidence filter selector (status ``filter.author``, issue #914).
+        "author",
         "authority",
         "byte_count",
         "captured_object_id",

@@ -78,7 +78,11 @@ def test_discovery_procedure_uses_published_ids_filters_and_structural_links(nam
     for phrase in (
         "Cite the `evidence_id`s you already published",
         "they are in your own `publish_work` requests",
-        "Find native captures with `status view=evidence` and `filter.strength=immutable_snapshot`",
+        "`status view=evidence` with `filter.author=mine` lists exactly the items you published",
+        "with their descriptions returned to you",
+        "Find native captures with `filter.strength=immutable_snapshot`",
+        "every row names its `publication_channel`",
+        "Host-observed and other writers' descriptions stay omitted unless the owner grants",
         "Preserve the view, filter, frontier and original `limit` with each cursor",
         "Cite a native capture only when a structural link you can read ties it to the claim",
         "a `status view=results` row whose `evidence_refs` names it",
@@ -100,6 +104,7 @@ def test_evidence_first_closure_keeps_the_check_and_makes_it_satisfiable(path: P
     section = _section(path, _EVIDENCE_FIRST)
     for phrase in (
         "cite the evidence IDs your own `publish_work` requests carry",
+        "`status view=evidence` with `filter.author=mine` lists them",
         "`filter.strength=immutable_snapshot`",
         "Reuse only native IDs a structural link ties to the claim",
         "do not author duplicate digest-only placeholders",
@@ -124,9 +129,10 @@ def test_agent_instructions_floor_names_the_filtered_discovery() -> None:
 def test_tool_descriptions_name_published_ids_and_the_snapshot_filter() -> None:
     status = descriptor_for("status").description
     assert "cite IDs you published" in status
-    assert "view=evidence filter.strength=immutable_snapshot" in status
+    assert "view=evidence filter.author=mine" in status
+    assert "filter.strength=immutable_snapshot" in status
     assert "results row's evidence_refs" in status
-    assert "Omitted descriptions (a privacy setting)" in status
+    assert "Omitted descriptions (privacy)" in status
     assert "cite IDs you published" in descriptor_for("publish_work").description
 
 
@@ -137,6 +143,7 @@ def test_tool_descriptions_name_published_ids_and_the_snapshot_filter() -> None:
 def test_every_host_runbook_records_the_filtered_discovery(runbook: str) -> None:
     section = _section(_REPO_ROOT / "docs" / "runbooks" / runbook, "### Evidence-first closure")
     assert "`filter.strength=immutable_snapshot`" in section
+    assert "`filter.author=mine`" in section
     assert "It no longer asks for an unfiltered walk that matches on descriptions" in section
     for pattern in _RETIRED:
         assert pattern.search(section) is None, pattern.pattern

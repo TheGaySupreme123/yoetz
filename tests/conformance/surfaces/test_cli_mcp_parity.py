@@ -108,12 +108,23 @@ def test_human_summary_is_weaker_than_structured_output() -> None:
 
     # An evidence row's `freshness` describes that evidence, not the ledger, so it must never be
     # promoted into the ledger-freshness slot of the summary.
+    # Rows are counted per closed publication channel (#914); an unknown channel value is caller
+    # text and is counted as a row without ever being rendered.
     status["view"] = "evidence"
-    status["page"] = {"items": [{"freshness": "stale_after_material_change"}], "next_cursor": None}
-    assert render_safe_compact_summary(status) == (
+    status["page"] = {
+        "items": [
+            {"freshness": "stale_after_material_change", "publication_channel": "hook_observed"},
+            {"publication_channel": secret},
+        ],
+        "next_cursor": None,
+    }
+    evidence_summary = render_safe_compact_summary(status)
+    assert evidence_summary == (
         "Status view: evidence; frontier: 9; freshness: current; open obligations: 0; "
+        "evidence rows: 2 (hook_observed 1); "
         "unanswered findings: 0; receipt-blocking findings: 2; reported gaps: 2."
     )
+    assert secret not in evidence_summary
 
     receipt = {
         "ok": True,

@@ -8,6 +8,13 @@ reverse-chronological released versions.
 
 ### Added
 
+- `status view=evidence` accepts `filter.author=mine`, which lists exactly the evidence the
+  requesting writer published in its current session (decided by the service from ledger
+  authorship, never a caller flag), and every evidence row now names its service-stamped
+  `publication_channel`. Wire: status request 1.3.0, status result 1.5.0, local control 2.10.0;
+  both peers must run the 2.10.0 manifest. The CLI human status and the MCP text summary show the
+  channel. Dogfood evidence per host remains tracked in #914.
+
 - Codex, Claude Code and Cursor session-start context can show a fresh repository-grant snapshot
   and name the owner's missing admission command. The notice leaves route and host approval
   unconfirmed, preserves existing context and spends only spare hook time. No cross-session
@@ -22,6 +29,15 @@ reverse-chronological released versions.
   separate. Live acceptance and the remaining cross-host work stay tracked in #857.
 
 ### Fixed
+
+- An agent can read back the evidence it published: production now composes the privacy
+  enforcer with its ledger-authorship provenance resolver, so under the default policy the
+  requester's own evidence descriptions and references are returned instead of
+  `local_disclosure_not_authorized`. Other writers', host-observed and imported rows stay omitted
+  without a grant; the never-send scan, absolute data classes and per-projection receipt are
+  unchanged. Guidance no longer asks agents to page every evidence item and match on descriptions
+  the projection omits; it names published IDs, `filter.author=mine`,
+  `filter.strength=immutable_snapshot` and structural links instead (#914).
 
 - With the Codex subscription evaluator bound, the service no longer re-hashes the retained Codex
   runtime (about 359 MB on Linux) on the event loop for every observation advice cycle. Structural

@@ -1590,8 +1590,11 @@ class StatusCandidateFindingsFilterModel(_ClosedModel):
 
 
 class StatusEvidenceFilterModel(_ClosedModel):
-    optional_non_null_fields = frozenset({"freshness", "include_unavailable", "strength"})
+    optional_non_null_fields = frozenset({"author", "freshness", "include_unavailable", "strength"})
 
+    # ``mine`` keeps only rows whose source event this writer published in this session, decided
+    # by the service from ledger authorship; the caller cannot assert it for any other row.
+    author: Literal["mine"] | None = None
     freshness: (
         Literal["current", "partial", "redacted_gap", "stale_after_material_change", "unknown"]
         | None
@@ -3018,6 +3021,15 @@ class StatusStructuralSubjectStateModel(_ClosedModel):
 
 class StatusEvidenceItemModel(_ClosedModel):
     evidence_id: EvidenceIdWire
+    # Service-stamped channel of the row's source event (structural, never caller-asserted).
+    publication_channel: Literal[
+        "codex_jsonl_import",
+        "cooperative_mcp",
+        "engine_derived",
+        "hook_observed",
+        "human_import",
+        "local_cli",
+    ]
     strength: Literal[
         "content_digest",
         "immutable_snapshot",
@@ -4644,6 +4656,7 @@ _STATUS_EVIDENCE_STRUCTURAL_POINTERS: Final = (
             "content_digest",
             "evidence_id",
             "freshness",
+            "publication_channel",
             "strength",
             "subject_state",
         ),
@@ -5199,7 +5212,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 1170:
+    if len(result) != 1171:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 

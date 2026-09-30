@@ -143,7 +143,8 @@ async def prepare_closure(
         "notes": [
             "Nothing was published or judged. Review one phase and explicitly submit its request.",
             "After a committed write, prepare the next phase from its new frontier.",
-            "Evidence availability is per item. Match identity and state before selecting an ID.",
+            "Evidence availability is per item and each row names its publication_channel. "
+            "Select IDs you published or captures a recorded result links to the claim.",
             "Requested-item accounting is asserted; command_attempts separately reports observed reconciliation.",
             "GitHub workflow evidence uses the API run id, never run_number; this tool does not manufacture it.",
         ],

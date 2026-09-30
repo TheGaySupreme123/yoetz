@@ -1390,3 +1390,57 @@ def test_v29_changes_only_the_selection_runtime_and_keeps_frozen_v28() -> None:
         assert budget["additionalProperties"] is False
         assert set(budget["required"]) == set(budget["properties"])
         assert budget["properties"]["no_cap"]["properties"]["available"] == {"const": False}
+
+
+def test_v210_only_retargets_status_and_admits_the_evidence_author_filter() -> None:
+    """2.10 moves the frozen 2.9 envelopes onto status request 1.3.0 / result 1.5.0 (#914)."""
+
+    retarget = {
+        "operations/status-request-1.2.0.schema.json": "operations/status-request-1.3.0.schema.json",
+        "operations/status-result-1.4.0.schema.json": "operations/status-result-1.5.0.schema.json",
+    }
+    for name in ("control-hello", "control-hello-result", "control-request", "control-result"):
+        v29_bytes = (_ROOT / f"{name}-2.9.0.schema.json").read_bytes().decode()
+        v210_bytes = (_ROOT / f"{name}-2.10.0.schema.json").read_bytes()
+        expected = v29_bytes.replace(f"{name}-2.9.0.schema.json", f"{name}-2.10.0.schema.json")
+        for before, after in retarget.items():
+            expected = expected.replace(before, after)
+        assert v210_bytes.decode() == expected
+        assert v210_bytes == _PACKAGE_ROOT.joinpath(f"{name}-2.10.0.schema.json").read_bytes()
+
+    request = cast(
+        JsonValue,
+        {
+            "kind": "call",
+            "protocol_version": "1.0",
+            "rpc_id": _RPC_ID,
+            "service_instance_id": _INSTANCE_ID,
+            "service_generation": "1",
+            "method": "status",
+            "body": {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "request_id": _REQUEST_ID,
+                "session_id": "ses_00000000-0000-4000-8000-000000000004",
+                "writer_id": "wri_00000000-0000-4000-8000-000000000005",
+                "view": "evidence",
+                "limit": "100",
+                "filter": {"author": "mine", "strength": "content_digest"},
+                "actor": {"actor_id": "harness:test", "actor_type": "harness"},
+                "client": {
+                    "kind": "test_client",
+                    "version": "0.3.0",
+                    "integration": "cooperative_mcp",
+                },
+            },
+        },
+    )
+    validate_schema_instance("control-request", "2.10.0", request)
+    with pytest.raises(ProtocolValueError):
+        validate_schema_instance("control-request", "2.9.0", request)
+    body = cast(dict[str, Any], request)["body"]
+    for rejected in ("theirs", "all", True):
+        invalid = deepcopy(request)
+        cast(dict[str, Any], invalid)["body"]["filter"] = {**body["filter"], "author": rejected}
+        with pytest.raises(ProtocolValueError):
+            validate_schema_instance("control-request", "2.10.0", invalid)

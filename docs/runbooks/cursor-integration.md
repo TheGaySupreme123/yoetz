@@ -1240,9 +1240,10 @@ These shared-path regressions do not certify a fresh installed native-host sessi
 
 ### Evidence-first closure
 
-The shared guidance instructs this host to cite the evidence IDs it published and to find native
-captures with a filtered `status view=evidence` read (`filter.strength=immutable_snapshot`) before
-publishing replacement evidence, reusing only IDs a structural link (a `view=results` row's
+The shared guidance instructs this host to cite the evidence IDs it published (listed with
+`filter.author=mine`, descriptions returned to their writer) and to find native captures with a
+filtered `status view=evidence` read (`filter.strength=immutable_snapshot`) before publishing
+replacement evidence, reusing only IDs a structural link (a `view=results` row's
 `evidence_refs`, or a matching digest) ties to the claim. It no longer asks for an unfiltered walk
 that matches on descriptions: under the default `agent_context` ceiling, other writers' and
 host-observed descriptions are omitted (`local_disclosure_not_authorized`), which is a privacy
@@ -1252,7 +1253,9 @@ and reuse do not prove native capture coverage or command success. Read `command
 obligation rows: this profile may omit command text, in which case reconciliation is `unknown`.
 Only service-stamped, explicitly linked observations can support a match or mismatch. The optional
 CLI closure composer uses the same projected status inputs; it does not grant capture or egress.
-These shared regressions are synthetic contract evidence, not live-host certification.
+These shared regressions are synthetic contract evidence, not live-host certification. A dogfood
+transcript showing this host citing its own or filtered evidence IDs without an unfiltered walk,
+and dogfood CI across macOS, Linux and WSL 2, are not yet recorded; that gap is owned by #914.
 
 ### Bounded workflow recovery examples (#613)
 

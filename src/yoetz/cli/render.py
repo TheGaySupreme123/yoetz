@@ -17,6 +17,7 @@ from yoetz.protocol.models import (
     ReceiptSuccessModel,
     StatusAdvicePageModel,
     StatusCheckAdmissionModel,
+    StatusEvidencePageModel,
     StatusFindingsPageModel,
     StatusLineagePageModel,
     StatusObligationsPageModel,
@@ -366,6 +367,17 @@ def render_human_status(result: StatusSuccessModel) -> str:
             lines.append(f"- {receipt.task_id}: {receipt.conclusion} ({receipt.receipt_id})")
         if page.next_cursor is not None:
             lines.append(f"Next page: {page.next_cursor}")
+    if isinstance(result.page, StatusEvidencePageModel):
+        # One line per row: the service-stamped channel lets a reader tell their own published
+        # evidence from host-observed captures without reading any prose.
+        for item in result.page.items:
+            availability = "" if item.available else ", unavailable"
+            lines.append(
+                f"{item.evidence_id} {item.publication_channel} {item.strength}"
+                f"{availability}: {_projected_text(item.description)}"
+            )
+        if result.page.next_cursor is not None:
+            lines.append(f"Next page: {result.page.next_cursor}")
     if isinstance(result.page, StatusFindingsPageModel):
         for finding in result.page.items:
             lines.append(

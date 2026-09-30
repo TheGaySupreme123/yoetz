@@ -407,7 +407,12 @@ def _task_snapshot_page(
 def _filter_json(value: StatusFilter | None) -> JsonValue:
     if value is None:
         return None
-    return cast(JsonValue, value.model_dump(mode="json", exclude_none=False))
+    dumped = cast(dict[str, JsonValue], value.model_dump(mode="json", exclude_none=False))
+    if type(value) is StatusEvidenceFilterModel and value.author is None:
+        # The later ``author`` selector is omitted when unset so a cursor minted before it
+        # existed keeps binding to the same filter digest.
+        del dumped["author"]
+    return cast(JsonValue, dumped)
 
 
 def _filter_digest(request: StatusRequest) -> str:
@@ -577,7 +582,9 @@ def _port_filter(value: StatusFilter | None) -> ProjectionFilter | None:
             value.origin, value.priority, value.disposition, value.include_resolved
         )
     if type(value) is StatusEvidenceFilterModel:
-        return EvidenceProjectionFilter(value.strength, value.freshness, value.include_unavailable)
+        return EvidenceProjectionFilter(
+            value.strength, value.freshness, value.include_unavailable, value.author
+        )
     if type(value) is StatusHistoryFilterModel:
         return HistoryProjectionFilter(
             value.schema_name,
@@ -1589,6 +1596,7 @@ async def execute_status(
                     int(request.limit),
                     cast(ProjectionPosition | None, position),
                     expected_version,
+                    runtime.writer_id,
                 )
             except (TypeError, ValueError) as exc:
                 # The one remaining caller-shape stage: this view, filter, and cursor position do

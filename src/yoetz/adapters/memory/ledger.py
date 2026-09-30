@@ -60,7 +60,7 @@ from yoetz.domain.findings import (
     rank_key,
     semantic_provenance_to_json,
 )
-from yoetz.domain.privacy import SourceAuthorship
+from yoetz.domain.privacy import DisclosureProvenance, SourceAuthorship, authorship_provenance
 from yoetz.domain.receipts import CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP
 from yoetz.domain.values import (
     Actor,
@@ -1205,6 +1205,24 @@ def _evidence_source_authorship(
     return found
 
 
+def _authored_by_requester(
+    source: SourceAuthorship | None, query: ProjectionQuery, frontier: Frontier
+) -> bool:
+    """Apply the ``DisclosureProvenance`` self-authorship rule for ``author=mine``."""
+
+    return (
+        source is not None
+        and query.writer_id is not None
+        and authorship_provenance(
+            (source,),
+            writer_id=query.writer_id,
+            session_id=query.session_id,
+            frontier_sequence=frontier.sequence,
+        )
+        is DisclosureProvenance.SELF_AUTHORED
+    )
+
+
 def _projection_items(
     view: ProjectionView,
     projection: ProjectionState,
@@ -1314,12 +1332,16 @@ def _projection_items(
         )
     if view is ProjectionView.EVIDENCE:
         evidence_items: list[ProjectionItem] = []
+        channels = _evidence_source_authorship(projection, records)
         for evidence, record in sorted(
             projection.evidence.items(), key=lambda item: item[0].encode()
         ):
             payload = record.payload
             if payload is None:
                 continue
+            source = channels.get(evidence)
+            if source is None:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT)
             state = payload.subject_state
             subject_state = None
             if state is not None and (
@@ -1341,6 +1363,7 @@ def _projection_items(
             evidence_items.append(
                 StatusEvidenceItemModel(
                     evidence_id=evidence,
+                    publication_channel=source.publication_channel.value,
                     strength=payload.strength.value,
                     freshness=freshness,
                     available=record.object_available,
@@ -2280,6 +2303,13 @@ class MemoryLedgerAdapter:
                 session=query.session_id,
             )
         )
+        # Ledger authorship is read per query, never from the row cache: ``author=mine`` and the
+        # disclosure provenance both depend on the requesting writer and this exact prefix.
+        evidence_sources = (
+            _evidence_source_authorship(effective_projection, prefix)
+            if view is ProjectionView.EVIDENCE
+            else {}
+        )
         filtered_items: list[ProjectionItem] = []
         for item in all_items:
             keep = True
@@ -2313,6 +2343,12 @@ class MemoryLedgerAdapter:
                     (query.filter.strength is None or item.strength == query.filter.strength)
                     and (query.filter.freshness is None or item.freshness == query.filter.freshness)
                     and (query.filter.include_unavailable is True or item.available)
+                    and (
+                        query.filter.author is None
+                        or _authored_by_requester(
+                            evidence_sources.get(item.evidence_id), query, effective
+                        )
+                    )
                 )
             elif type(query.filter) is HistoryProjectionFilter:
                 assert type(item) is StatusHistoryItemModel
@@ -2357,9 +2393,8 @@ class MemoryLedgerAdapter:
         selected = tuple(filtered_items[: query.limit])
         item_sources: tuple[tuple[SourceAuthorship, ...], ...] = ()
         if view is ProjectionView.EVIDENCE and selected:
-            sources = _evidence_source_authorship(effective_projection, prefix)
             item_sources = tuple(
-                () if (source := sources.get(item.evidence_id)) is None else (source,)
+                () if (source := evidence_sources.get(item.evidence_id)) is None else (source,)
                 for item in selected
                 if type(item) is StatusEvidenceItemModel
             )

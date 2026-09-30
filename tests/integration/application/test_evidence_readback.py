@@ -81,6 +81,7 @@ from yoetz.protocol.coverage import (
     PublicationChannel,
     coverage_for_channel,
 )
+from yoetz.protocol.errors import PublicOperationError
 from yoetz.protocol.models import FrontierModel, PublishWorkRequest, StatusRequest
 
 pytestmark = pytest.mark.anyio
@@ -650,3 +651,111 @@ async def test_provenance_is_recomputed_per_session_and_frontier() -> None:
     rows = _rows(successor)
     assert rows[protocol_id("evd_", 9551)]["description"] == "Successor rerun: 2036 passed."
     assert rows[diff_id]["description"] == _OMITTED
+
+
+async def test_author_mine_returns_exactly_the_callers_items_across_pages() -> None:
+    """``filter.author=mine`` is decided from ledger authorship and survives pagination."""
+
+    app, _policy = await build_projection_application(seed=9600)
+    started = await _start(app, 9601)
+    published, diff_id, test_id = await _publish_agent_evidence(app, started, 9610)
+    captured, captured_coverage = _captured_observation(started.task_id)
+    head = await _append(
+        app,
+        started,
+        seed=9620,
+        expected_frontier=published.result_frontier.sequence,
+        writer=observation_writer_id(started.task_id, started.session_id),
+        author=observation_author(),
+        channel=PublicationChannel.HOOK_OBSERVED,
+        drafts=captured,
+        coverage=captured_coverage,
+    )
+    head = await _append(
+        app,
+        started,
+        seed=9630,
+        expected_frontier=head.sequence,
+        writer=started.writer_id,
+        author=observation_author(),
+        channel=PublicationChannel.HOOK_OBSERVED,
+        drafts=(_plain_evidence(9631, "hook row under the agent", strength=_MUTABLE_REFERENCE),),
+    )
+    head = await _append(
+        app,
+        started,
+        seed=9640,
+        expected_frontier=head.sequence,
+        writer=protocol_id("wri_", 9641),
+        author=_agent_actor("delegate-writer"),
+        channel=PublicationChannel.COOPERATIVE_MCP,
+        drafts=(_plain_evidence(9642, "another writer's row", strength=_MUTABLE_REFERENCE),),
+    )
+    third = await _publish(
+        app,
+        started,
+        9650,
+        head,
+        (
+            _evidence_draft(
+                9652,
+                kind="test_result",
+                subject="test_stdout",
+                description="Targeted rerun: 12 passed.",
+                reference="pytest tests/test_tz.py -q",
+            ),
+        ),
+    )
+    own = {diff_id, test_id, protocol_id("evd_", 9652)}
+    mine: dict[str, JsonValue] = {"author": "mine"}
+
+    pages: list[Mapping[str, Mapping[str, JsonValue]]] = []
+    cursor: str | None = None
+    for offset in range(4):
+        _internal, projected = await _status(
+            app, started, 9660 + 2 * offset, evidence_filter=mine, limit=2, cursor=cursor
+        )
+        pages.append(_rows(projected))
+        next_cursor = cast(Mapping[str, JsonValue], projected["page"])["next_cursor"]
+        if next_cursor is None:
+            break
+        cursor = cast(str, next_cursor)
+    assert [len(page) for page in pages] == [2, 1]
+    listed = {key: row for page in pages for key, row in page.items()}
+    assert set(listed) == own
+    assert {str(row["publication_channel"]) for row in listed.values()} == {"cooperative_mcp"}
+    assert listed[protocol_id("evd_", 9652)]["description"] == "Targeted rerun: 12 passed."
+
+    # The cursor is bound to its filter: reusing it without ``author`` is refused, not widened.
+    with pytest.raises(PublicOperationError):
+        await _status(app, started, 9680, limit=2, cursor=cast(str, cursor))
+
+    # Filters compose; every row in the unfiltered view names its service-stamped channel.
+    _internal, digests = await _status(
+        app, started, 9690, evidence_filter={"author": "mine", "strength": "content_digest"}
+    )
+    assert set(_rows(digests)) == own
+    _internal, everything = await _status(
+        app, started, 9692, at_frontier=third.result_frontier.sequence
+    )
+    channels = {key: str(row["publication_channel"]) for key, row in _rows(everything).items()}
+    hook_row, other_row = protocol_id("evd_", 9631), protocol_id("evd_", 9642)
+    assert {channels[key] for key in own} == {"cooperative_mcp"}
+    assert channels[hook_row] == "hook_observed"
+    assert channels[other_row] == "cooperative_mcp"
+    captured_rows = set(channels) - own - {hook_row, other_row}
+    assert captured_rows
+    assert {channels[key] for key in captured_rows} == {"hook_observed"}
+
+    # A reattached session owns none of the predecessor's rows.
+    attached = await app.start(start_request(9695, title="Evidence read-back", refs=True))
+    assert type(attached) is StartInternalResult
+    _internal, successor = await _status(
+        app,
+        started,
+        9696,
+        session=attached.session_id,
+        writer=attached.writer_id,
+        evidence_filter=mine,
+    )
+    assert _rows(successor) == {}

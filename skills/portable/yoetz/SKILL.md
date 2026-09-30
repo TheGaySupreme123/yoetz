@@ -40,7 +40,7 @@ The normal sequence is:
 1. Start or attach once with stable workspace and external references.
 2. Publish a bounded plan and explicit obligations before substantive work.
 3. Read status before publishing replacement evidence or a completion claim: cite the evidence IDs
-   you published and find native captures with `status view=evidence` and
+   you published (`status view=evidence` with `filter.author=mine`) and find native captures with
    `filter.strength=immutable_snapshot`; preserve the cursor-bound filter and original `limit` and
    reuse only IDs a structural link ties to the claim. An omitted description is a privacy setting,
    not missing evidence. A feedback obligation is in effective scope only after a supported plan

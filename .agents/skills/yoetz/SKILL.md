@@ -220,8 +220,9 @@ advertises no tested harness version or hook.
 ## Evidence-first closure
 
 Before a material evidence publication or completion claim, cite the evidence IDs your own
-`publish_work` requests carry, and find native captures with `status view=evidence` and
-`filter.strength=immutable_snapshot`, preserving the cursor-bound filter and limit. Reuse only
+`publish_work` requests carry (`status view=evidence` with `filter.author=mine` lists them), and
+find native captures with `filter.strength=immutable_snapshot`, preserving the cursor-bound filter
+and limit. Reuse only
 native IDs a structural link ties to the claim (a `view=results` row's `evidence_refs`, or a
 matching digest); do not author duplicate digest-only placeholders. An omitted description
 (`local_disclosure_not_authorized`) is a privacy setting, not missing evidence: do not page through
