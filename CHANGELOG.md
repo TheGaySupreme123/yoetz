@@ -39,10 +39,12 @@ reverse-chronological released versions.
   saw at least as much of every file the raising review saw; each check records which files it
   showed, and how much of each partly shown one, as keyed commitments, never paths. A task started
   before this version takes its base from its first check, so commits between checks stay in the
-  change. The read is pinned to the validated repository directory, never shows a tracked or
-  untracked file that is a link or has a second name, verifies every Git object it shows against
-  its name, and retakes the change (up to three times, then `changed_during_capture`) when the
-  working tree moves while it is read. A custom recipe whose half-share is smaller than one part
+  change. The read is pinned to the validated repository directory and its own `.git` (a
+  `core.worktree` redirection is refused), never shows a tracked or untracked file that is a link
+  or has a second name, refuses an object store shared with another repository (including packs a
+  local `git clone` hard-linked), verifies every Git object it shows against its name, and retakes
+  the change (up to three times, then `changed_during_capture`) when the working tree or object
+  store moves while it is read. A custom recipe whose half-share is smaller than one part
   still carries the first part, and the files a review is recorded as having seen are counted from
   the packet the reviewer actually received.
 - With the Codex subscription evaluator bound, the service no longer re-hashes the retained Codex

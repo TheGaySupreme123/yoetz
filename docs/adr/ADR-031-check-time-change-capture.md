@@ -72,34 +72,53 @@ content-returning read needed its own decision. This is that decision, for exact
    separate Git calls, so a filter written into the repository config between them would run; only
    a process of the same user can do that, and that user can already run code as itself, so this
    window is low severity. The read has these fences:
-   - **The validated root, and only it.** Git can only be given a pathname, so the root is pinned by
-     identity: before and after every Git call the root pathname and its `.git` must still be the
-     device and inode that were validated, or the capture is `unsafe_root`. A directory renamed
-     away and replaced at the same path, even by a clone of the same base, is never read. A swap
-     made and undone entirely within one Git call is the residual this cannot see.
-   - **No link is read, tracked or untracked.** Untracked files honour `.gitignore`,
-     `.git/info/exclude`, a repository-level `core.excludesFile` and the owner's global Git ignore
-     file. They are opened one path component at a time beneath the validated root descriptor
-     without following links; only regular files owned by the service user with a single link, at
-     most 64 KiB each and 500 in all, are read. A changed tracked file whose working copy is a
-     link, a special file, another user's, multiply linked, or reachable only through a linked
-     directory is named with `not_regular_file`, and neither its diff nor its line counts are
-     shown, because Git would read what it points at.
-   - **Every object read is the one its name commits to.** Git trusts each object file it opens.
-     `.git/objects`, its `info` and `pack` directories and every pack entry must be real
-     directories and files (otherwise `unsafe_root`), and a `.git/commondir` that borrows another
-     repository's store is `unsupported_repository`. Every blob a shown diff reads (the base side,
-     and the index side Git uses for a file it did not re-read from the working tree) must be
-     packed or a loose object that is not a link, and must hash to its own name; each is read once
-     with `git cat-file` (at most 8 MiB each and 64 MiB in all). A blob that does not verify
-     withholds that file's diff and line counts as `object_unverified`; one over the bound is
-     `too_large`. So neither a link nor a hard link, in the working tree or the object store, puts
-     bytes from outside the workspace in the change.
-   - **One state, not a mix.** After assembling the change the adapter reads again the changed-file
-     list, the identity (inode, size, modification and change times, link count) of every working
-     copy and untracked file it read, the untracked listing, HEAD and the index, and each untracked
-     file is re-checked on its open descriptor after it is read. If anything moved, the whole
-     capture is taken again, at most three times in all; a tree that never holds still is
+   - **The validated root, and only it.** Discovery accepts a directory only when the repository
+     Git finds for it has its `.git` directly beneath the top level it reports and the directory
+     lies inside that top level, so a `core.worktree` that points one repository's metadata at
+     another directory is `unsafe_root`. Every capture Git call then names the validated `.git`
+     and working tree explicitly (`--git-dir`, `--work-tree`), Git must report exactly those two
+     paths before anything is read, and an effective `core.worktree` at any level is refused as
+     `unsupported_repository`. The runner's environment is fixed, so no `GIT_DIR`-style variable
+     reaches Git. Git can still only be given pathnames, so the root is also pinned by identity:
+     before and after every Git call the root pathname and its `.git` must be the device and inode
+     that were validated, or the capture is `unsafe_root`. A directory renamed away and replaced at
+     the same path between Git calls, even by a clone of the same base, is never read. The residual
+     is a replacement made and undone entirely within one Git call, which no check outside that
+     call can observe.
+   - **No link content enters the change, tracked or untracked.** Untracked files honour
+     `.gitignore`, `.git/info/exclude`, a repository-level `core.excludesFile` and the owner's
+     global Git ignore file. They are opened one path component at a time beneath the validated
+     root descriptor without following links; only regular files owned by the service user with a
+     single link, at most 64 KiB each and 500 in all, are read. A changed tracked file whose working
+     copy is a link, a special file, another user's, multiply linked, or reachable only through a
+     linked directory is named with `not_regular_file`, and neither its diff nor its line counts
+     are shown. Git reads tracked files itself, so it may still open such a file's target while it
+     produces the counts or the patch; that output is discarded and never enters the change. Each
+     working copy's identity is taken after the raw file list (which reads no file or blob content)
+     and before the counts, the patch and verification read anything, and is compared again at the
+     end, so a link swapped in only while Git reads and then put back retakes the capture.
+   - **Every object read is the one its name commits to.** Git trusts each blob it opens.
+     `.git/objects` and its `info` and `pack` directories must be real directories of the service
+     user and every fan-out directory a real directory, every pack-directory entry (packs, indexes and the rest) a
+     regular file of the service user, not group- or world-writable, with a single link; a link is
+     `unsafe_root`, and a pack shared with another repository (as a local `git clone` hard-links
+     them) is `unsupported_repository`, as are `.git/commondir`, `objects/info/alternates` and
+     `objects/info/http-alternates`. Every blob a shown diff reads (the base side, and the index
+     side Git uses for a file it did not re-read from the working tree) is verified: a loose object
+     must meet the same file fence and still have the identity taken before the diff, and is
+     inflated and hashed from that same open descriptor; and the blob is read again the way the
+     diff read it (`git cat-file`, packs first) and hashed. Each must hash to its own name (at most
+     8 MiB each and 64 MiB in all). A blob that does not verify withholds that file's diff and line
+     counts as `object_unverified`; one over the bound is `too_large`. Git itself rejects a tree or
+     commit whose bytes do not match its name. The verification buffers the adapter owns are
+     overwritten after use; the runner's returned bytes are immutable and are only dropped.
+   - **One state, not a mix.** After assembling the change the adapter reads again the raw
+     changed-file list; the identity (inode, size, modification and change times, link count) of
+     every working copy, every loose blob a diff reads, every untracked file it read, every object
+     directory (whose times move whenever an object file is created, renamed or removed in it) and
+     every pack-directory entry; the untracked listing; HEAD; and the index. Each untracked file is
+     also re-checked on its open descriptor after it is read. If anything moved, the whole capture
+     is taken again, at most three times in all; a tree that never holds still is
      `changed_during_capture`.
    - **Credential names.** Files whose names follow common credential conventions (`.env`,
      `.env.*`, `.netrc`, `.npmrc`, `id_rsa`, `*.pem`, `*.key`, `*.tfvars` and similar), tracked or
@@ -198,9 +217,11 @@ it came from, within the existing per-item, count and total caps; #907 owns lift
 The capture is unavailable, and says so, for linked Git worktrees (whose `.git` is a file),
 group- or world-writable roots, repositories whose effective config defines a filter or an include
 (for example a repository-local Git LFS or git-crypt setup), partial clones, Git older than 2.26,
-an object store reached through a link or shared through `commondir` (for example some `repo`
-tool checkouts), a root replaced while it was read, and a working tree that kept changing through
-every attempt. Tracked files that are links or multiply linked are named but not shown.
+an object store reached through a link or shared with another repository (through `commondir`,
+alternates, or packs hard-linked by a local `git clone`; a clone made with `--no-hardlinks` or
+`--no-local` has its own), a `core.worktree` redirection, a root replaced between Git calls, and a
+working tree or object store that kept changing through every attempt. Tracked files that are links
+or multiply linked, and files whose loose blob is hard-linked, are named but not shown.
 Submodule changes appear as commit ids and binary files as a one-line description.
 
 This decision does not add an MCP tool, a repository browser or an `ArtifactInspectionPort`, and

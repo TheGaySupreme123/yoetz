@@ -6965,20 +6965,34 @@ stability check, the capture is unavailable. Before any diff the adapter lists t
 with `git config --list --name-only --includes --show-scope -z` and refuses any non-`command` scope
 key `filter.*`, `include.*`, `includeIf.*`, `extensions.partialClone`, `remote.*.promisor` or
 `remote.*.partialCloneFilter` (`unsupported_repository`); a Git that rejects `--show-scope` fails
-as `git_failed`. Every Git call runs as `git --no-replace-objects -c core.quotePath=true -c
-protocol.allow=never ...` through `run_read_only_git`, and before and after each one the root
-pathname and its `.git` must still `lstat` to the device and inode recorded from the validated
-descriptor (`unsafe_root` otherwise). The object store must be real directories and pack files
-(`.git/objects`, `objects/info`, `objects/pack` and each pack entry; a link is `unsafe_root`,
-more than 4096 pack entries `unsupported_repository`), and a `.git/commondir` is
-`unsupported_repository`. The tracked list is `git diff --raw -z --no-abbrev <base> --`; each
-changed working copy is `lstat`ed beneath the root descriptor without following any component and
-must be a regular, single-link file of the service user unless the entry is a deletion or a
-submodule, otherwise it is omitted as `not_regular_file` with its line counts. Every blob a shown
-section reads (`src`, and a non-zero `dst`, of mode 100644, 100755 or 120000) is read once with
-`git cat-file blob` (at most 8 MiB each, 64 MiB in all) and must hash to its id, with its loose
-object and fan-out directory, when present, not links; otherwise the section is omitted as
-`object_unverified` (or `too_large` / `capture_limit` at the bounds), line counts withheld.
+as `git_failed`; an effective `core.worktree` is `unsupported_repository` too. `discover_workspace_root`
+runs `rev-parse --path-format=absolute --show-toplevel --git-dir` and raises `unsafe_root` unless the
+git dir is `<top>/.git` and the candidate lies inside `<top>`. Every capture Git call runs as
+`git --no-replace-objects -c core.quotePath=true -c protocol.allow=never --git-dir=<root>/.git
+--work-tree=<root> ...` through `run_read_only_git` (whose environment is a fixed dict, so no
+`GIT_*` variable is inherited); `_open` requires that invocation's
+`rev-parse --path-format=absolute --show-toplevel --git-dir` to print exactly `<root>` and
+`<root>/.git`. Before and after each call the root pathname and its `.git` must still `lstat` to the
+device and inode recorded from the validated descriptor (`unsafe_root` otherwise).
+`_refuse_unsafe_object_store` requires `.git/objects`, `objects/info` and `objects/pack` to be real
+directories of the service user and each fan-out directory a real directory, and every
+pack-directory entry a regular file of the service user, not group- or world-writable, with
+`st_nlink == 1` (a link is `unsafe_root`; a multiply linked entry or more than 4096 entries is
+`unsupported_repository`); `.git/commondir`, `objects/info/alternates` and
+`objects/info/http-alternates` are `unsupported_repository`. It returns the identities of the object
+directories, fan-out directories and pack entries, taken at the start of each attempt and compared
+by the closing check. The tracked list is `git diff --raw -z --no-abbrev <base> --`, which reads no
+file or blob content; immediately after it, before `--numstat`, the patch or verification, the
+adapter records the no-follow identity of each changed working copy and of each loose blob path
+(and its fan-out directory) the diff names. Each changed working copy must be a regular,
+single-link file of the service user unless the entry is a deletion or a submodule, otherwise it is
+omitted as `not_regular_file` with its line counts (Git's output for it is discarded). Every blob a
+shown section reads (`src`, and a non-zero `dst`, of mode 100644, 100755 or 120000) is verified: a
+loose object must be a regular, owner-only, single-link file whose descriptor still has the recorded
+identity before and after it is read, and is inflated (`zlib`) and hashed from that descriptor; the
+blob is also read with `git cat-file blob` (at most 8 MiB each, 64 MiB in all) and hashed. Either
+mismatch omits the section as `object_unverified` (or `too_large` / `capture_limit` at the bounds),
+line counts withheld. The adapter overwrites the compressed and inflated buffers it owns.
 Tracked and untracked files whose base name is on the adapter's credential-name list are listed by
 name only (`credential_name`). The untracked listing uses
 `run_read_only_git(..., keep_prefix_on_limit=True)`: past 8 MiB the hardened runner raises
@@ -6986,8 +7000,9 @@ name only (`credential_name`). The untracked listing uses
 and the header says the untracked count is a lower bound. Each untracked file read must still have
 the identity its path had just before (mode, device, inode, size, mtime and ctime in ns, link count,
 owner) when opened and after it is read, with exactly `st_size` bytes read. The closing stability
-check re-reads the raw tracked list, every recorded working-copy and untracked identity, the
-untracked listing, `HEAD^{commit}` and the identity of `.git/index`; any difference retakes the
+check re-reads the object-store snapshot, the raw tracked list, every recorded working-copy,
+loose-object and untracked identity, the untracked listing, `HEAD^{commit}` and the identity of
+`.git/index`; any difference retakes the
 whole capture, at most `_CAPTURE_ATTEMPTS` (3) times while the assembly share lasts.
 `discover_workspace_root` and `open_local_workspace` take an optional `timeout_seconds`.
 `ChangeCaptureUnavailable.reason` is one of `git_unavailable`, `not_git`, `unsafe_root`,
