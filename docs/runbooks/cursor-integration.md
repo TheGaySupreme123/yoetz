@@ -1545,7 +1545,8 @@ resume and interval settings. The setting gates recovered pending work as well a
 explicit checks and deterministic advice retain their independent behavior.
 
 Background review is also admitted only while a provider is usable: an endpoint bound, the machine
-policy admitting `llm_inference`, and the configured credential present (issue #923). Without one
+policy admitting `llm_inference`, the configured credential present, and an ACTIVE task route
+whose repository authority is granted and admits `llm_inference` (issue #923). Without them
 the service writes no advice rows and reports `advice_semantic_unavailable`, not
 `advice_semantic_pending`; rows queued earlier close as `provider_unavailable` without provider
 work. A foreground-cancelled call that may have started names its provider on the `cancelled` row

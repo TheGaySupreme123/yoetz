@@ -1175,8 +1175,13 @@ def test_more_evidence_for_the_same_rule_reuses_the_reviewed_identity() -> None:
     assert only.status == "succeeded"
 
 
-def test_authorization_missing_retries_after_backoff_or_once_route_is_active() -> None:
-    """Review P1 (#890): a non-success row is not sticky for an unchanged condition."""
+def test_authorization_missing_backs_off_instead_of_retrying_on_every_build() -> None:
+    """A non-success row is not sticky (#890), but never re-admitted hot (#923).
+
+    ``authorization_missing`` now only arises when authority was lost between the route probe
+    and the dispatch, so it waits the base backoff like any pre-provider failure; an
+    unreachable route writes nothing at all.
+    """
 
     db, repository = _repository()
     store = _Store(repository)
@@ -1188,7 +1193,7 @@ def test_authorization_missing_retries_after_backoff_or_once_route_is_active() -
         ),
         at="2026-09-08T21:00:01.000Z",
     )
-    # Inside the backoff with the route still inactive: no new row, truthful reason, revisit.
+    # The route cannot reach a provider: no row, no revisit, disclosed as unavailable.
     revisits: list[tuple[str, str, float]] = []
     held = asyncio.run(
         _scheduler_builder("2026-09-08T21:01:00.000Z", revisits, route_ready=False).build(
@@ -1199,11 +1204,24 @@ def test_authorization_missing_retries_after_backoff_or_once_route_is_active() -
     )
     assert held is not None
     assert ADVICE_SEMANTIC_UNAVAILABLE_GAP in held.confidence_coverage.known_gaps
+    assert ADVICE_SEMANTIC_PENDING_GAP not in held.confidence_coverage.known_gaps
     assert len(_rows(db, repository)) == 1
-    assert revisits == [(_COMMITMENT, _SESSION, pytest.approx(121.0))]
-    # The route became active: retry at once. Pre-provider failures consume no rate limit.
+    assert revisits == []
+    # Reachable again, but inside the base backoff: still no new row; the revisit waits it out.
+    backing_off = asyncio.run(
+        _scheduler_builder("2026-09-08T21:01:30.000Z", revisits, route_ready=True).build(
+            _COMMITMENT,
+            store,
+            yoetz_session_id=_SESSION,  # type: ignore[arg-type]
+        )
+    )
+    assert backing_off is not None
+    assert ADVICE_SEMANTIC_UNAVAILABLE_GAP in backing_off.confidence_coverage.known_gaps
+    assert len(_rows(db, repository)) == 1
+    assert revisits == [(_COMMITMENT, _SESSION, pytest.approx(91.0))]
+    # The backoff elapsed: retried once. Pre-provider failures consume no rate limit.
     asyncio.run(
-        _scheduler_builder("2026-09-08T21:01:30.000Z", route_ready=True).build(
+        _scheduler_builder("2026-09-08T21:03:01.000Z", route_ready=True).build(
             _COMMITMENT,
             store,
             yoetz_session_id=_SESSION,  # type: ignore[arg-type]
@@ -1213,7 +1231,7 @@ def test_authorization_missing_retries_after_backoff_or_once_route_is_active() -
     assert first.failure_reason == "authorization_missing"
     assert retry.basis_digest == first.basis_digest + "#1"
     assert retry.status == "pending"
-    retried = _complete_next(repository, _SUCCEEDED, at="2026-09-08T21:01:40.000Z")
+    retried = _complete_next(repository, _SUCCEEDED, at="2026-09-08T21:03:10.000Z")
     assert retried.attempt_id == retry.attempt_id
     ready = asyncio.run(
         _scheduler_builder("2026-09-08T21:30:00.000Z").build(
@@ -1224,6 +1242,58 @@ def test_authorization_missing_retries_after_backoff_or_once_route_is_active() -
     )
     assert ready is not None and ready.semantic_attempt_state == "ready"
     assert len(_rows(db, repository)) == 2
+
+
+def test_route_that_cannot_reach_a_provider_writes_no_row() -> None:
+    """An inactive route, or one without a granted repository authority, enqueues nothing."""
+
+    db, repository = _repository()
+    store = _ManyFailuresStore(repository)
+    revisits: list[tuple[str, str, float]] = []
+    for failures in range(1, 6):
+        store.failures = failures
+        snapshot = asyncio.run(
+            _scheduler_builder("2026-09-08T21:00:00.000Z", revisits, route_ready=False).build(
+                _COMMITMENT,
+                store,
+                yoetz_session_id=_SESSION,  # type: ignore[arg-type]
+            )
+        )
+        assert snapshot is not None
+        gaps = snapshot.confidence_coverage.known_gaps
+        assert gaps.count(ADVICE_SEMANTIC_UNAVAILABLE_GAP) == 1
+        assert ADVICE_SEMANTIC_PENDING_GAP not in gaps
+        assert snapshot.semantic_attempt_state == "disabled"
+    assert _rows(db, repository) == ()
+    assert revisits == []
+
+
+def test_probe_and_dispatch_disagreeing_never_loops() -> None:
+    """Authority lost after the probe: one row per backoff, never one per hook or drain."""
+
+    db, repository = _repository()
+    store = _Store(repository)
+    revisits: list[tuple[str, str, float]] = []
+    missing = ObservationAdviceSemanticOutcome(
+        status="unavailable", failure_reason="authorization_missing"
+    )
+    snapshot = None
+    for _ in range(12):
+        # A hook build, then the drain and its post-attempt rebuild, all within one second.
+        snapshot = asyncio.run(
+            _scheduler_builder("2026-09-08T21:00:00.500Z", revisits, route_ready=True).build(
+                _COMMITMENT,
+                store,
+                yoetz_session_id=_SESSION,  # type: ignore[arg-type]
+            )
+        )
+        if repository.list_pending_workspaces():
+            _complete_next(repository, missing, at="2026-09-08T21:00:00.000Z")
+    assert snapshot is not None
+    assert ADVICE_SEMANTIC_PENDING_GAP not in snapshot.confidence_coverage.known_gaps
+    assert ADVICE_SEMANTIC_UNAVAILABLE_GAP in snapshot.confidence_coverage.known_gaps
+    (only,) = _rows(db, repository)
+    assert only.failure_reason == "authorization_missing"
 
 
 def test_provider_failure_backs_off_exponentially_then_retries_without_a_new_hook() -> None:

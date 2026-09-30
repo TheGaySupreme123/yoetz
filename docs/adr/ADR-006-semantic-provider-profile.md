@@ -735,8 +735,10 @@ Background advice is admitted only while a provider is usable now: review is not
 endpoint is bound, the current machine privacy policy admits network egress on the
 `llm_inference` channel, and the configured credential is present. These are the same live facts
 that decide standing `provider_not_ready` advice; they are read on every advice build and every
-background dispatch, never from the READY snapshot. The owner switches above still decide whether
-background advice exists at all.
+background dispatch, never from the READY snapshot. Admission also requires the route leg: the
+session's task route is ACTIVE and its repository authority, read from the privacy policy store
+without the coordinator admission lock, is granted and admits `llm_inference`. The owner switches
+above still decide whether background advice exists at all.
 
 Without a usable provider the scheduler writes no attempt row, contacts no provider and schedules
 no revisit. The advice snapshot carries `advice_semantic_unavailable` once and semantic state
@@ -748,6 +750,13 @@ channel disabled, or a row an older service queued without a provider) is closed
 it is not re-attempted on every restart and does not consume the session interval. Storing a
 credential or enabling the channel admits the next eligible condition in the same service
 generation; binding or removing a provider recomposes the service, not the host session.
+
+The route leg replaces the #888 shortcut that re-admitted an `authorization_missing` identity at
+once when the route became ACTIVE. That shortcut read only the route, so an ACTIVE route without a
+repository grant re-admitted a row on every build and on the drain's own post-attempt rebuild. An
+`authorization_missing` row can now arise only when authority was lost between admission and
+dispatch; it waits the base backoff like any other pre-provider failure and stays disclosed as
+`advice_semantic_unavailable`.
 
 A background dispatch cancelled by a foreground rebind after it minted its provider request now
 names `provider_identity` on its `cancelled` row unless the privacy audit proves the request's

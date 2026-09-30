@@ -4069,7 +4069,9 @@ Shared closed types:
   `cancelled`, `interrupted`). An admission refused by the per-session interval writes no row and
   adds `advice_semantic_deferred` (semantic state `unavailable`). The scheduler first reads live
   provider readiness (review not disabled, an endpoint bound, the machine policy admitting
-  `llm_inference` egress, the configured credential present; ADR-006 issue #923): without it no row
+  `llm_inference` egress, the configured credential present) and route readiness (an ACTIVE task
+  route whose repository authority is granted and admits `llm_inference`, read from the policy
+  store without the privacy admission lock; ADR-006 issue #923): without both no row
   is written, no provider is contacted, and the snapshot adds `advice_semantic_unavailable` once
   with semantic state `disabled`, never `advice_semantic_pending`; only a completed review of the
   same identity is still reused. Only a `succeeded` row with validated finding ids adds
