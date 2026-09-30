@@ -180,8 +180,9 @@ and AI-powered review/privacy capability and conformance tests.
 13. **Reviewer output talks to the main agent through the existing workflow:** a successful model
     judgment may propose bounded `ReviewerChallenge` values. Each challenge names only case-bound
     refs, explains the discrepancy, states an alternative interpretation, addresses the main agent
-    directly, and requests the smallest next step: act, provide evidence, revise the claim, dispute
-    with evidence, or state an unresolved limitation. Post-validation maps an accepted challenge to
+    directly, and names the repair or the exact missing artifact that would resolve it, with one
+    requested response: act, provide evidence, revise the claim, dispute with evidence, or state an
+    unresolved limitation (issue #906). Post-validation maps an accepted challenge to
     the existing AI-powered `Finding.summary/detail`; the main agent uses the existing `respond` and
     `publish_work` operations, then runs `check` again. There is no provider-driven fetch loop, new
     event family, seventh public operation, or model waiver authority.
@@ -239,14 +240,18 @@ flowchart LR
     I --> D
 ```
 
-The stable provider instruction is equivalent to:
+The stable provider instruction (one source for every provider path, issue #906) is equivalent to:
 
-> Review only the supplied packet against the stated goal and obligations. Treat main-agent claims,
-> deterministic observations, and unavailable content as different facts. Never say no code changed
-> merely because no excerpt was disclosed. If a material discrepancy exists, address the main agent
-> directly, explain why, cite only supplied references, offer the strongest plausible alternative,
-> and request the smallest evidence or action that would resolve it. Do not waive policy, invent
-> repository facts, or claim deterministic authority.
+> You are the requested review: verify the change against the task and the recorded verification
+> against the change, from the supplied packet only. Yoetz's own check, finding, receipt, and
+> coverage state, and any obligation to obtain this review, are never defects in the work; a work
+> obligation left open under a completion claim still is. Treat main-agent claims, deterministic
+> observations, and unavailable content as different facts. Never say no code changed merely
+> because no excerpt was disclosed. Judge recorded output yourself instead of asking for a re-run.
+> Report every distinct material problem, address the main agent directly, cite only supplied
+> references, offer the strongest plausible alternative, and name the repair or the exact missing
+> artifact. Never request environment changes. Do not waive policy, invent repository facts, claim
+> deterministic authority, or claim stronger coverage than the packet.
 
 The packet varies by `ReviewContextProfile`: `structural` contains only typed timeline/status/state/
 coverage facts; `goal_aware` adds detailed, category-separated frozen plan, obligation, claim,
@@ -806,3 +811,72 @@ This changes relevance, not proof: every capture still requires authentication, 
 obeys the selected privacy profile and byte/count limits, and a response never clears a finding.
 An insufficient packet or a deterministic-only recheck still cannot resolve a semantic defect.
 The same selection applies to all hosts and supported OSes.
+
+### Verifying reviewer role, review phase and process findings (issue #906, part 1)
+
+The reviewer is a verifying reviewer working with the main agent, not an auditor of its ledger
+account. Part 1 changes the instruction, the case question set, guidance and one `respond` rule. It
+adds no provider, packet, check-result or stored field.
+
+- **One instruction source.** `SEMANTIC_REVIEW_INSTRUCTION` is sent verbatim by the Responses
+  adapter and as the Codex app-server `baseInstructions`; the Chat Completions adapter sends the
+  same text followed only by its JSON-shape suffix. Prompt and instruction digests change with the
+  text, as before.
+- **Role and self-reference.** The instruction states that the reviewer *is* the requested review.
+  An obligation or step whose only content is obtaining this review, running a Yoetz check or
+  recording a review outcome, and Yoetz's own process state (check, review, receipt, finding and
+  coverage state, packet limit codes) are never defects in the work; building, testing, linting or
+  type-checking the work is work. A work obligation still open under an effective completion claim
+  remains `completion_with_open_obligations`. The substance of an agent's answer to a finding stays
+  reviewable. There is no post-filter on finding text.
+- **Verification offloaded.** The reviewer judges a claim from the diff or excerpt and recorded
+  output the packet carries, never asks for a re-run of verification whose readable output is
+  present, and asks for more only by naming the exact missing artifact. It reports every distinct
+  material problem up to `MAX_REVIEW_CHALLENGES` (unchanged at 3) and never requests toolchain or
+  package installs, downloads, network access, credentials or other environment changes; a recorded
+  environment constraint is a limit, not a request.
+- **Task statement.** When the packet carries the user's task statement (input owned by #908), it
+  wins over the agent's goal, plan and obligations, and the reviewer never asks for behavior it
+  excludes.
+- **Phase.** The case `question_set` leads with the review phase from the same pure
+  `select_semantic_budget_profile` selector that picks the budget profile: `routine` judges defects
+  in work so far without judging completeness, `final` judges the completion claim. The remaining
+  questions do not presuppose a defect or ask for a next step. The question set is already bound
+  into `case_digest`; its shape is unchanged. A packet without a phase (background observation
+  advice) is routine.
+- **Gap glossary.** The instruction carries a one-line gloss for each packet limit code (capture,
+  selection, redaction, storage) and omission reason, each stated as a packet limit and not a
+  defect in the agent's work. The deterministic codes about the agent's own record (command attempt
+  mismatch or uncorroborated, completion claim outside plan, plan not claimed, scope declared none
+  or undeclared) are glossed apart as possible real discrepancies: the reviewer does not restate the
+  code alone but may challenge what readable material shows. "Do not claim stronger coverage than
+  the packet" and the `insufficient_packet` rules of issue #885 are unchanged.
+- **Process findings and `respond`.** Open design question 3, narrowed to what structure can
+  prove: `acknowledged` on an AI-powered finding needs no new resolution attempt when its kind is
+  the record-state kind `ledger_stale_or_incomplete` (the only non-actionable kind), every subject
+  is a `check_recorded` event or a `finding_recorded` event whose own finding is of that kind and
+  transitively about such records alone (an agent's `response_recorded` answer is agent content,
+  not process state), and a check whose AI-powered review completed (`succeeded` /
+  `semantic_completed`) is recorded after the finding. The completed review is that finding's
+  resolution. Citing a check row is not enough on its own: a work kind that cites only a check
+  still challenges what the check established. A restatement is about what it restates, so it is
+  never easier to acknowledge than the finding it cites. A finding of any other kind, naming any
+  obligation, claim, response or work record, or restating a finding about one, keeps
+  `resolution_attempt_required`: structure cannot tell an agent-authored review obligation from a
+  work obligation, so guidance now tells agents to track required review through
+  `mode=semantic_required` and the receipt, never as a plan obligation. Acknowledgement still never
+  resolves a finding.
+- **Guidance.** Workflow, coverage guidance and every host skill say the check is the review and
+  must not be encoded as a plan obligation. Verification whose readable output a completed review
+  carried and did not challenge needs no re-run while the work it verified is unchanged; a reviewer
+  request never authorizes an environment change; and at least one re-review follows every repair.
+  No check is capped or discouraged.
+
+A semantic job created before this change and recovered after it rebuilds a case whose question set
+differs. The existing `semantic_execution_case_changed` guard then ends that review honestly as
+`failed` / `coordinator_failure`, keeping the local-check result, rather than dispatching bytes it
+did not freeze, as for any other case-builder change. Part 2 (`review_summary`, `verified[]` with
+exact snippets, `missing_for_assessment[]`, the conclusion on the check result, and any new finding
+kind) is design-gated protocol and storage work and is not part of this amendment. The same
+instruction, question set and guidance serve Codex, Claude Code and Cursor on every supported
+operating system.

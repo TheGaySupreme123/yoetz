@@ -145,8 +145,10 @@ review mandatory. Omit `mode` when relying on the configured default. Use `seman
 only when review is known to be optional. Use `deterministic_only` for explicitly local/structural
 work, a policy with AI-powered review disabled, or a deliberate no-egress choice, with the coverage
 limitation disclosed; do not choose it merely because a change is small or a follow-up is slow.
-Explicit modes are honored by the runtime; when review is required, select `semantic_required` and
-preserve that requirement in subsequent calls.
+Explicit modes are honored by the runtime; when review is required, select `semantic_required` in
+every subsequent check. Track that requirement only through `mode` and the receipt's AI-powered
+review status, never as a plan obligation or requested item: the check is the review, and an open
+obligation to obtain it reads to the reviewer as unfinished work.
 
 If required AI-powered review is unavailable, report independently completed implementation and
 verification separately from the unmet review requirement. Do not claim overall completion or
@@ -512,3 +514,15 @@ AI-powered review finding unless `evidence_refs` cites evidence or a result reco
 finding (`resolution_attempt_required`); a recorded blocked result counts. An acknowledgement or
 “limitation accepted” is not a repair, a verification result, or a finding resolution. Recheck after a material repair, and
 avoid another identical check when the same content is still unavailable.
+
+The reviewer verifies from what its packet carries. When a completed review other than
+`insufficient_packet` raised nothing about verification whose readable output the packet carried,
+do not re-run or re-publish it while the work it verified is unchanged; answer a finding by
+repairing the defect or supplying the exact artifact it names. A reviewer request never authorizes
+installing or downloading a toolchain or package, network access, or another environment change:
+record the unavailable runtime or package as the blocker. A `ledger_stale_or_incomplete` finding
+whose only subjects are Yoetz check records, or earlier findings of that kind only about such
+records, is answered by the completed review recorded after it, so `acknowledged` needs no new
+attempt; any other kind, even one citing only a check, and a finding naming any obligation, claim,
+response, or work record, or restating a finding about the work, still does. After repairing a
+finding, run at least one re-review in the same mode before the receipt.

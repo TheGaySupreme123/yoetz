@@ -48,6 +48,7 @@ from yoetz.protocol.canonical import (
     strict_json_parse,
 )
 from yoetz.protocol.models import (
+    MAX_REVIEW_CHALLENGES,
     ProviderChallengeModel,
     ProviderJudgmentChallengesModel,
     ProviderJudgmentEnvelopeModel,
@@ -58,6 +59,7 @@ from yoetz.protocol.models import (
 )
 
 __all__ = [
+    "ACCOUNT_GAP_GLOSSARY",
     "CHALLENGE_FIELD_GLOSSARY",
     "FINDING_KIND_GLOSSARY",
     "JUDGMENT_JSON_SCHEMA",
@@ -68,6 +70,7 @@ __all__ = [
     "OPENAI_CREDENTIAL_MIN_BYTES",
     "OPENAI_MAX_OUTPUT_TOKENS",
     "OPENAI_MAX_RESPONSE_BODY_BYTES",
+    "PACKET_GAP_GLOSSARY",
     "SEMANTIC_REVIEW_INSTRUCTION",
     "JudgmentValidationError",
     "JudgmentValidationStage",
@@ -121,32 +124,156 @@ _HOSTNAME_PATTERN: Final = re.compile(
     re.ASCII,
 )
 
+# One plain-language gloss per packet limit code and omission reason a reviewer meets in a review
+# packet (issue #906): every omission reason, the capture, selection, redaction and storage codes the
+# deterministic and review case builders stamp on a packet, and the host-observation codes
+# materialization stamps on recorded events. Each names a limit on what this packet could carry,
+# never a defect in the agent's work: a bare code otherwise reads as something the agent must fix,
+# and the reviewer asked the agent to disclose or repair Yoetz's own coverage state. Codes that can
+# point at a real discrepancy in the agent's own record are glossed apart, in
+# ``ACCOUNT_GAP_GLOSSARY``, so the reviewer is never told to dismiss them.
+PACKET_GAP_GLOSSARY: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "captured_object_unavailable": "a captured object could not be read back for this packet",
+        "content_capture_unavailable": "host content capture was unavailable for that input",
+        "content_redacted": "retained content was redacted before it could be sent",
+        "content_unselected": "retained content was not selected into this packet",
+        "event_payload_unavailable": "a ledger event's payload could not be read",
+        "evidence_content_digest_only": "an evidence record kept its digest but not its bytes",
+        "evidence_content_withheld": "the publisher withheld an evidence record's bytes",
+        "evidence_digest_subject_legacy_unknown": (
+            "an older digest record does not say which bytes were hashed"
+        ),
+        "host_outcome_unavailable": "the host did not report whether an observed call succeeded",
+        "missing_ref": "a referenced ledger event is absent from this ledger",
+        "not_recorded": "the referenced record's content is not available to this packet",
+        "not_selected": "the selection policy did not carry the item",
+        "observation_input_loss": "at least one host observation was lost before it was recorded",
+        "over_case_item_limit": "the case admitted the item but could not carry it whole",
+        "payload_content_omitted": "a host event row kept its identity but not its content",
+        "redacted_event": "a ledger event was redacted at its source",
+        "redacted_never_send": "policy forbids sending the item",
+        "redacted_object": "a stored object was redacted at its source",
+        "routine_read_detail_omitted": "routine reads were summarized without per-read detail",
+        "semantic_case_content_over_item_limit": "an item was clipped to the per-item size limit",
+        "semantic_case_finding_refs_over_limit": (
+            "a finding cites more refs than the packet can carry"
+        ),
+        "semantic_reference_scope_reduced": (
+            "references were left out to fit the packet's reference limit"
+        ),
+        "truncated_payload": "a payload was cut to a bounded prefix",
+        "unknown_event": "an event of a schema this version cannot read was kept unread",
+        "unknown_event_schema_preserved": (
+            "an event of an unrecognized schema was preserved without being read"
+        ),
+        "unpaired_event": "a host tool event arrived without its matching start or end",
+        "unsupported_event": "a host event of an unmapped type kept only its metadata",
+        "withheld_by_policy": "the privacy policy withheld the item",
+    }
+)
+
+# Coverage codes the deterministic case builder stamps from checks of the agent's own record. They
+# are not packet limits: each can point at a real discrepancy (a recorded command that differs from
+# the observed one, a completion claim beyond the plan), so the reviewer may challenge what readable
+# material shows, while the code itself stays a deterministic coverage gap it does not restate.
+ACCOUNT_GAP_GLOSSARY: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "command_attempt_mismatch": (
+            "a recorded command attempt differs from the command the host observed"
+        ),
+        "command_attempt_uncorroborated": (
+            "no host observation corroborates a recorded command attempt"
+        ),
+        "completion_claim_outside_plan": (
+            "a completion claim names scope the current plan does not list"
+        ),
+        "completion_plan_not_claimed": "the current plan lists scope no completion claim names",
+        "completion_scope_declared_none": (
+            "the plan declares that no obligations apply, so completion has no bound scope"
+        ),
+        "completion_scope_undeclared": (
+            "the plan declares no obligations and no reason, so completion has no bound scope"
+        ),
+    }
+)
+
+# The reviewer's standing instruction and its single source: the Responses request below, the Chat
+# Completions request (which appends only its JSON-shape suffix), and the Codex app-server
+# ``baseInstructions`` all send these exact bytes. Each rule keeps its own lines so a later
+# amendment stays local to the rule it changes.
 SEMANTIC_REVIEW_INSTRUCTION: Final = (
-    "You are a bounded reviewer helping the main agent complete the user's stated goal. Review "
-    "only the supplied packet. Distinguish agent claims, deterministic observations, and "
-    "unavailable content. Never say no code changed merely because no source excerpt was "
-    "disclosed. Compare the completion claim with the goal, obligations, decisions, ordered "
-    "timeline, deterministic finding bases, state/change observations, evidence freshness, "
-    "failures, limitations, and selected excerpts. If a material discrepancy exists, address the "
-    "main agent directly, explain the discrepancy and strongest plausible alternative, cite only "
-    "supplied refs, and request the smallest resolving action or evidence. Every value in "
-    "cited_refs must come from the packet's citable_refs array and nothing else: an item_id from "
-    "items[] is not citable, and a challenge citing anything outside citable_refs is discarded "
-    "unread. Do not invent repository facts, fetch more context, overrule deterministic results, "
-    "waive findings, or claim stronger coverage than the packet. "
+    # Role (issue #906): verify the work against the task, not audit the ledger account.
+    "You are a verifying reviewer working with a coding agent. Check the change the packet "
+    "shows against the task and the recorded verification against the change, then conclude. "
+    "Your conclusion and challenges are your whole report: open a challenge only for a material "
+    "problem, never merely to report what you verified. Review only the supplied packet. "
+    # Self-reference (issue #906): the review never asks for itself or for Yoetz state.
+    "You are the requested review: when the user, a policy, the plan, or an obligation asks for "
+    "an AI-powered, semantic, or independent review, this running review is that review. Never "
+    "raise as a problem a step or obligation whose only content is obtaining this review, "
+    "running a Yoetz check, or recording a review's outcome; building, testing, linting, or "
+    "type-checking the work is work, not process. Never raise Yoetz's own process state "
+    "either: that a Yoetz check, review, or receipt is pending, running, or recorded; that a "
+    "finding is open, unanswered, or unresolved; coverage levels; or a packet limit code. None of "
+    "these is a defect in the work, though the substance of an agent's answer to a finding stays "
+    "reviewable. A work obligation still open while completion is claimed remains a real "
+    "discrepancy: raise it as completion_with_open_obligations. "
+    # Phase (issue #906): the budget selector's routine/final profile, named in the packet.
+    "The packet's question_set names the review phase. Review phase: routine means work is in "
+    "progress; report material defects in the work so far and do not judge completeness. Review "
+    "phase: final means a completion claim is in effect; judge whether the change and its "
+    "recorded verification support that claim. A packet that names no phase is routine. "
+    # Task statement (issue #906; the task-statement input itself belongs to #908).
+    "When the packet carries the user's task statement, it wins over the agent's goal, plan, "
+    "and obligations: a plan that omits or contradicts a stated requirement is a discrepancy, "
+    "and you never ask for behavior the task statement excludes. "
+    "Distinguish agent claims, deterministic observations, and unavailable content. Never say "
+    "no code changed merely because no source excerpt was disclosed. "
+    # Verification is the reviewer's work, not handed back to the agent (issue #906).
+    "Verify from the supplied material: where a diff or excerpt and recorded test, lint, or "
+    "command output bear on a claim, judge the claim from them yourself. Never ask the agent to "
+    "re-run or re-publish verification whose readable output the packet already carries. Ask "
+    "for more only when a specific artifact is missing, and name it exactly: the diff hunk or "
+    "path, the test or doctest, or the command output, each named in the packet or justified by "
+    "the changed files shown. Never invent a path or command absent from the packet. "
+    # Every distinct problem (issue #906). Never lower the challenge cap to shorten the loop.
+    f"Report every distinct material problem you find, up to {MAX_REVIEW_CHALLENGES} "
+    "challenges, in this one review: do not stop at the first, merge restatements of one "
+    "problem, and never spend a challenge on process state. For each problem, address the main "
+    "agent directly, explain the discrepancy and the strongest plausible alternative, cite only "
+    "supplied refs, and state the repair or the exact missing artifact that would resolve it. "
+    "Every value in cited_refs must come from the packet's citable_refs array and nothing else: "
+    "an item_id from items[] is not citable, and a challenge citing anything outside "
+    "citable_refs is discarded unread. "
+    # Environment (issue #906): an advisory reviewer never drives environment mutation.
+    "Never request toolchain or package installs, downloads, upgrades, network access, "
+    "credentials, or other environment changes. An environment constraint the packet records, "
+    "such as an unavailable runtime or package version, is a recorded limit: judge what the "
+    "readable material allows and state what the limit leaves unverified. "
+    "Do not invent repository facts, fetch more context, overrule deterministic results, waive "
+    "findings, or claim stronger coverage than the packet. "
+    # Unassessable content and repair-first feedback (issue #885).
     "Use insufficient_packet with reviewer_challenges=[] when missing or withheld content "
     "prevents assessment and the readable material establishes no separate discrepancy. This "
     "means unassessable, not no_material_discrepancy. A digest-only diff or a recorded capture "
     "gap alone is not evidence of an unsupported claim. Do not re-raise a coverage gap already "
     "recorded by deterministic assessment as a new semantic defect. Preserve concrete problems "
-    "supported by readable material even when other content is missing. For each such problem, "
-    "name the specific supplied artifact or verification target that would resolve it: relevant "
-    "diff hunks, a test or doctest, or a lint check justified by the changed files shown. Never "
-    "invent a path or command absent from the packet. Request one authorized concrete repair "
-    "or evidence attempt before state_unresolved_limitation; use that limitation response only "
-    "when the packet records the attempt and its remaining limit, or a specific authority blocker. "
-    "Do not offer accepting a limitation as an equivalent alternative to performing available "
-    "verification. Disclosure does not repair a defect or prove completion."
+    "supported by readable material even when other content is missing. Request one authorized "
+    "concrete repair or evidence attempt before state_unresolved_limitation; use that limitation "
+    "response only when the packet records the attempt and its remaining limit, or a specific "
+    "authority or environment blocker. Do not offer accepting a limitation as an equivalent "
+    "alternative to performing available verification. Disclosure does not repair a defect or "
+    "prove completion. "
+    # Gap glossaries (issue #906): packet limits apart from codes about the agent's own record.
+    "Packet limit codes and omission reasons name limits of what this packet could carry, never "
+    "defects in the agent's work; an item they hide is not assessable. "
+    + "; ".join(f"{code}: {gloss}" for code, gloss in sorted(PACKET_GAP_GLOSSARY.items()))
+    + ". Account codes come from Yoetz's deterministic checks of the agent's own record, are not "
+    "packet limits, and may point at a real discrepancy. "
+    + "; ".join(f"{code}: {gloss}" for code, gloss in sorted(ACCOUNT_GAP_GLOSSARY.items()))
+    + ". Do not restate an account code alone as a finding; challenge the discrepancy it points to "
+    "when readable material shows it in the work or the claim."
 )
 _SYSTEM_INSTRUCTION: Final = SEMANTIC_REVIEW_INSTRUCTION
 
@@ -386,7 +513,9 @@ FINDING_KIND_GLOSSARY: Final[dict[str, str]] = {
         "or an already recorded capture gap alone makes content unassessable, not a new defect"
     ),
     "completion_with_open_obligations": (
-        "work is presented as finished while obligations it was meant to satisfy remain open"
+        "work is presented as finished while work obligations it was meant to satisfy remain "
+        "open; an obligation only to obtain this review or run a Yoetz check is not one, but one "
+        "to build, test, lint, or type-check the work is"
     ),
     "contradictory_claims_unresolved": (
         "two claims in the packet cannot both be true and neither has been withdrawn or reconciled"
@@ -401,7 +530,8 @@ FINDING_KIND_GLOSSARY: Final[dict[str, str]] = {
         "a recorded failure, error, or abandoned attempt is missing from the account given"
     ),
     "ledger_stale_or_incomplete": (
-        "the record itself is behind or missing entries, so the packet cannot settle the question"
+        "the record of the work is behind or missing entries, so the packet cannot settle the "
+        "question; Yoetz coverage levels and packet limit codes are not this"
     ),
     "material_limitation_omitted": (
         "a limitation that changes how the result should be read was not disclosed"
@@ -439,15 +569,17 @@ CHALLENGE_FIELD_GLOSSARY: Final[dict[str, str]] = {
         "your own challenge, not a weak version of it."
     ),
     "message_to_main_agent": (
-        "What you are telling the agent, addressed to it directly, including the smallest action "
-        "or piece of evidence that would resolve this."
+        "What you are telling the agent, addressed to it directly: what you checked, what does "
+        "not hold, and the repair or the exact missing artifact that would resolve it."
     ),
     "requested_next_step": (
         "The single kind of response you are asking the agent for. act: do the missing work; "
-        "provide_evidence: record evidence that already exists; revise_claim: correct or withdraw "
-        "what was claimed; dispute_with_evidence: rebut this challenge if you believe it is wrong; "
-        "state_unresolved_limitation: disclose what remains after a recorded concrete resolution "
-        "attempt, or name the specific authority blocker preventing that attempt."
+        "provide_evidence: record a named artifact that already exists but is not in the packet, "
+        "never a re-run of verification whose output the packet already carries; revise_claim: "
+        "correct or withdraw what was claimed; dispute_with_evidence: rebut this challenge if you "
+        "believe it is wrong; state_unresolved_limitation: disclose what remains after a recorded "
+        "concrete resolution attempt, or name the specific authority or environment blocker "
+        "preventing that attempt."
     ),
     "uncertainty": (
         "What you could not determine from the packet and what would settle it. Say so plainly "

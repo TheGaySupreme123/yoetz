@@ -14,6 +14,7 @@ import hashlib
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
+from types import MappingProxyType
 from typing import Final, Literal, cast
 
 from yoetz.application.check import (
@@ -91,6 +92,11 @@ from yoetz.ports.semantic import (
     TargetedExcerptRef,
     project_review_assessment,
 )
+from yoetz.ports.semantic_budget import (
+    SemanticBudgetProfile,
+    parse_semantic_budget_profile,
+    select_semantic_budget_profile,
+)
 from yoetz.protocol.canonical import (
     JsonValue,
     canonical_digest,
@@ -115,9 +121,11 @@ __all__ = [
     "LineageSemanticCapacityExceeded",
     "OVER_CASE_ITEM_LIMIT_REASON",
     "REVIEW_PACKET_ITEM_ID",
+    "REVIEW_PHASE_QUESTIONS",
     "SEMANTIC_REVIEW_PURPOSE",
     "assemble_filtered_review_packet",
     "build_semantic_case",
+    "review_question_set",
     "review_selection_digest",
     "repair_evidence_refs",
     "semantic_case_to_candidate_context",
@@ -137,11 +145,36 @@ _PACKET_ID_LIST_KEYS: Final = (
     "timeline_item_ids",
 )
 _CANONICAL_PACKS: Final = ("research-evidence/0.1.0", "work-integrity/0.1.0")
-_QUESTION_SET: Final = (
-    "Does the supplied packet contain a material discrepancy against the goal and obligations?",
-    "If so, which case-bound refs support the discrepancy?",
-    "What is the smallest next step the main agent should take?",
+# The question set leads with the review phase, taken from the same pure selector that picks the
+# check's budget profile, so the reviewer judges in-progress work as in progress and a completion
+# claim as a completion claim (issue #906). No question presupposes a defect or asks for the
+# agent's next step: the reviewer reports what it verified, every distinct problem it found, and the
+# exact artifact any unassessable item lacks.
+REVIEW_PHASE_QUESTIONS: Final[Mapping[SemanticBudgetProfile, str]] = MappingProxyType(
+    {
+        "routine": (
+            "Review phase: routine. Work is in progress and no completion claim is in effect: "
+            "report material defects in the work so far without judging completeness."
+        ),
+        "final": (
+            "Review phase: final. A completion claim is in effect: judge whether the change and "
+            "its recorded verification support it."
+        ),
+    }
 )
+_REVIEW_QUESTIONS: Final = (
+    "What did you verify against the task and the change, and with what result?",
+    "Which distinct material problems, if any, does the readable material show, and which "
+    "case-bound refs support each?",
+    "For anything you could not assess, which exact artifact is missing?",
+)
+
+
+def review_question_set(phase: SemanticBudgetProfile) -> tuple[str, ...]:
+    """Return the closed question set for one review phase."""
+
+    return (REVIEW_PHASE_QUESTIONS[parse_semantic_budget_profile(phase)], *_REVIEW_QUESTIONS)
+
 
 type _Section = Literal[
     "goal",
@@ -2384,6 +2417,8 @@ def build_semantic_case(
         )
 
     selection_digest = review_selection_digest(selection)
+    # A pure function of the frozen projection, so recovery rebuilds the same phase and digest.
+    question_set = review_question_set(select_semantic_budget_profile(frozen_case.projection))
     # Bind assessments/omissions/packet lists into the digest so provenance covers the full case.
     case_digest = canonical_digest(
         cast(
@@ -2403,7 +2438,7 @@ def build_semantic_case(
                 "local_check_refs": sorted(local_check_refs),
                 "policy_id": policy_id,
                 "policy_version": policy_version,
-                "question_set": list(_QUESTION_SET),
+                "question_set": list(question_set),
                 "review_context_profile": review_context_profile.value,
                 "review_packet": _packet_to_json(packet),
                 "review_selection_digest": selection_digest,
@@ -2461,7 +2496,7 @@ def build_semantic_case(
         policy_version=policy_version,
         packet=packet,
         items=tuple(items),
-        question_set=_QUESTION_SET,
+        question_set=question_set,
         case_digest=case_digest,
         omitted_reference_count=omitted_reference_count,
     )

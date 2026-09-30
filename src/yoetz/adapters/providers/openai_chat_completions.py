@@ -28,6 +28,7 @@ from yoetz.adapters.providers.openai_responses import (
     JUDGMENT_JSON_SCHEMA,
     OPENAI_MAX_OUTPUT_TOKENS,
     OPENAI_MAX_RESPONSE_BODY_BYTES,
+    SEMANTIC_REVIEW_INSTRUCTION,
     OneAttemptCredentialTransport,
     normalize_judgment,
 )
@@ -56,6 +57,8 @@ from yoetz.protocol.models import SemanticStatus
 
 __all__ = [
     "CHAT_COMPLETIONS_ALLOWED_BASE_PATH_PREFIXES",
+    "CHAT_COMPLETIONS_INSTRUCTION",
+    "CHAT_COMPLETIONS_JSON_SHAPE_SUFFIX",
     "ChatCompletionsEvaluator",
     "ChatCompletionsProfile",
     "RenderedChatCompletionsRequest",
@@ -77,19 +80,10 @@ _HOSTNAME_PATTERN: Final = re.compile(
 # an endpoint capability fact recorded per profile, never a guess made at dispatch time.
 type StructuredOutputEnforcement = Literal["provider_enforced", "prompt_only"]
 
-_SYSTEM_INSTRUCTION: Final = (
-    "You are a bounded reviewer helping the main agent complete the user's stated goal. Review "
-    "only the supplied packet. Distinguish agent claims, deterministic observations, and "
-    "unavailable content. Never say no code changed merely because no source excerpt was "
-    "disclosed. Compare the completion claim with the goal, obligations, decisions, ordered "
-    "timeline, deterministic finding bases, state/change observations, evidence freshness, "
-    "failures, limitations, and selected excerpts. If a material discrepancy exists, address the "
-    "main agent directly, explain the discrepancy and strongest plausible alternative, cite only "
-    "supplied refs, and request the smallest resolving action or evidence. Every value in "
-    "cited_refs must come from the packet's citable_refs array and nothing else: an item_id from "
-    "items[] is not citable, and a challenge citing anything outside citable_refs is discarded "
-    "unread. Do not invent repository facts, fetch more context, overrule deterministic results, "
-    "waive findings, or claim stronger coverage than the packet. "
+# The only Chat Completions-specific part of the instruction. Everything before it is the shared
+# reviewer instruction owned by the Responses adapter (issue #906: one source). A hand copy here
+# once silently missed every #891 rule; deriving it makes that drift impossible.
+CHAT_COMPLETIONS_JSON_SHAPE_SUFFIX: Final = (
     "Reply with one JSON object and nothing else: no "
     'prose, no code fence, no explanation outside it. Its exact shape is {"conclusion": one of '
     '"no_material_discrepancy" | "challenges_returned" | "insufficient_packet", '
@@ -97,6 +91,10 @@ _SYSTEM_INSTRUCTION: Final = (
     '"discrepancy", "alternative_interpretation", "message_to_main_agent", '
     '"requested_next_step", "uncertainty"}.'
 )
+CHAT_COMPLETIONS_INSTRUCTION: Final = (
+    f"{SEMANTIC_REVIEW_INSTRUCTION} {CHAT_COMPLETIONS_JSON_SHAPE_SUFFIX}"
+)
+_SYSTEM_INSTRUCTION: Final = CHAT_COMPLETIONS_INSTRUCTION
 
 _PROMPT_DIGEST: Final = "sha256:" + hashlib.sha256(_SYSTEM_INSTRUCTION.encode("utf-8")).hexdigest()
 _SCHEMA_DIGEST: Final = canonical_digest(JUDGMENT_JSON_SCHEMA)

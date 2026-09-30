@@ -1,0 +1,347 @@
+"""The reviewer's standing instruction: one source, a verifying role, no self-flagging (issue #906).
+
+The instruction is prose, so these tests pin the exact sentences each requirement rests on rather
+than a digest: a reworded rule should fail here with the rule's name, not as an opaque hash change.
+They also pin what must *not* change: the honesty rules (#885/#891) stay, the challenge cap stays,
+and an open work obligation is still raised.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from typing import cast
+
+from yoetz.adapters.providers import openai_chat_completions, openai_responses
+from yoetz.adapters.providers.openai_chat_completions import (
+    CHAT_COMPLETIONS_INSTRUCTION,
+    CHAT_COMPLETIONS_JSON_SHAPE_SUFFIX,
+    ChatCompletionsProfile,
+)
+from yoetz.adapters.providers.openai_responses import (
+    ACCOUNT_GAP_GLOSSARY,
+    CHALLENGE_FIELD_GLOSSARY,
+    FINDING_KIND_GLOSSARY,
+    PACKET_GAP_GLOSSARY,
+    SEMANTIC_REVIEW_INSTRUCTION,
+    owner_declared_data_use_profile,
+)
+from yoetz.application.semantic_case import OVER_CASE_ITEM_LIMIT_REASON, REVIEW_PHASE_QUESTIONS
+from yoetz.domain.findings import EXTERNAL_SEMANTIC_FINDING_KINDS, FindingKind
+from yoetz.domain.observation import ObservationGapCode
+from yoetz.domain.privacy import ApprovedOutboundCase, DataCategory, ProviderBinding
+from yoetz.domain.receipts import (
+    COMPLETION_CLAIM_OUTSIDE_PLAN_GAP,
+    COMPLETION_PLAN_NOT_CLAIMED_GAP,
+    COMPLETION_SCOPE_DECLARED_NONE_GAP,
+    COMPLETION_SCOPE_UNDECLARED_GAP,
+    SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
+    SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
+)
+from yoetz.kernel.finding_resolution import SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS
+from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
+from yoetz.protocol.models import MAX_REVIEW_CHALLENGES
+
+_NOW = datetime(2026, 9, 30, tzinfo=UTC)
+_DIGEST = "sha256:" + "c" * 64
+
+
+def _collapsed(text: str) -> str:
+    return " ".join(text.split())
+
+
+_TEXT = _collapsed(SEMANTIC_REVIEW_INSTRUCTION)
+
+
+def _case(provider_id: str, model: str, endpoint_profile_id: str) -> ApprovedOutboundCase:
+    body = canonical_encode(cast(JsonValue, {"goal": "ship the adapter", "obligations": []}))
+    return ApprovedOutboundCase(
+        case_id="cas_90600000-0000-4000-8000-000000000001",
+        request_id="req_90600000-0000-4000-8000-000000000001",
+        payload=body,
+        media_type="application/json",
+        schema_id="yoetz-semantic-case-1.0.0",
+        included_item_ids=("goal-1",),
+        approved_categories=(DataCategory.TASK_DESCRIPTION,),
+        blocked_categories=(),
+        byte_count=len(body),
+        token_count=16,
+        provider_binding=ProviderBinding(
+            provider_id=provider_id,
+            model_id=model,
+            endpoint_profile_id=endpoint_profile_id,
+            endpoint_profile_version="1.0.0",
+            transport="external",
+        ),
+        purpose="semantic-review",
+        authorization_id="aut_90600000-0000-4000-8000-000000000001",
+        policy_digest=_DIGEST,
+        case_digest="sha256:" + "d" * 64,
+    )
+
+
+def _system_content(body: bytes, key: str) -> str:
+    document = cast(dict[str, JsonValue], strict_json_parse(body))
+    first = cast(dict[str, JsonValue], cast(list[JsonValue], document[key])[0])
+    assert first["role"] == "system"
+    return cast(str, first["content"])
+
+
+def test_responses_and_chat_completions_send_one_instruction_source() -> None:
+    """Chat Completions is the shared instruction plus its JSON-shape suffix, never a hand copy."""
+
+    responses = openai_responses.render_case(
+        _case("openai", "gpt-5.2", "openai-responses"),
+    )
+    assert _system_content(responses.body, "input") == SEMANTIC_REVIEW_INSTRUCTION
+
+    profile = ChatCompletionsProfile(
+        provider_id="openrouter",
+        model="openai/gpt-5.2",
+        endpoint_profile_id="openrouter-openai-chat-completions",
+        endpoint_profile_version="1.0.0",
+        timeout_seconds=60,
+        structured_output_enforcement="prompt_only",
+        data_use_profile=owner_declared_data_use_profile(
+            reviewed_at=_NOW, expires_at=_NOW + timedelta(days=30), evidence_digest=_DIGEST
+        ),
+        host="openrouter.ai",
+        base_path_prefix="/api/v1",
+    )
+    chat = openai_chat_completions.render_case(
+        _case("openrouter", "openai/gpt-5.2", "openrouter-openai-chat-completions"), profile
+    )
+    sent = _system_content(chat.body, "messages")
+    assert sent == CHAT_COMPLETIONS_INSTRUCTION
+    assert sent == f"{SEMANTIC_REVIEW_INSTRUCTION} {CHAT_COMPLETIONS_JSON_SHAPE_SUFFIX}"
+    # The suffix only adds the reply shape; it restates no reviewer rule of its own.
+    assert CHAT_COMPLETIONS_JSON_SHAPE_SUFFIX.startswith(
+        "Reply with one JSON object and nothing else"
+    )
+    assert "You are" not in CHAT_COMPLETIONS_JSON_SHAPE_SUFFIX
+    assert "cited_refs must" not in CHAT_COMPLETIONS_JSON_SHAPE_SUFFIX
+
+
+def test_role_is_a_verifying_reviewer_not_a_ledger_auditor() -> None:
+    assert _TEXT.startswith("You are a verifying reviewer working with a coding agent.")
+    assert (
+        "Check the change the packet shows against the task and the recorded verification "
+        "against the change, then conclude." in _TEXT
+    )
+    # The old account-audit framing and the "smallest next step" hand-back are gone.
+    assert "bounded reviewer helping the main agent" not in _TEXT
+    assert "Compare the completion claim with the goal" not in _TEXT
+    assert "smallest resolving action" not in _TEXT
+    # A challenge is for a material problem; the model is not invited to report through one.
+    assert "open a challenge only for a material problem, never merely to report" in _TEXT
+
+
+def test_reviewer_is_told_it_is_the_requested_review_and_never_flags_process_state() -> None:
+    """dateutil/kea/tengo/drizzle (Example 1): the review must not ask for itself."""
+
+    assert "You are the requested review:" in _TEXT
+    assert "this running review is that review" in _TEXT
+    assert (
+        "Never raise as a problem a step or obligation whose only content is obtaining this "
+        "review, running a Yoetz check, or recording a review's outcome;" in _TEXT
+    )
+    # "Check" alone would also cover a test, lint, or type check: those stay work.
+    assert "building, testing, linting, or type-checking the work is work, not process." in _TEXT
+    assert "running a check," not in _TEXT
+    assert "Never raise Yoetz's own process state either:" in _TEXT
+    for state in (
+        "that a Yoetz check, review, or receipt is pending, running, or recorded",
+        "that a finding is open, unanswered, or unresolved",
+        "coverage levels",
+        "a packet limit code",
+    ):
+        assert state in _TEXT, state
+    # Only packet limits are dismissed wholesale; codes about the agent's own record are not.
+    assert "coverage levels; or gap codes" not in _TEXT
+    assert "never spend a challenge on process state" in _TEXT
+
+
+def test_open_work_obligations_are_still_raised() -> None:
+    """The guard against over-correction: only the review obligation is off limits."""
+
+    assert (
+        "A work obligation still open while completion is claimed remains a real discrepancy: "
+        "raise it as completion_with_open_obligations." in _TEXT
+    )
+    assert FindingKind.COMPLETION_WITH_OPEN_OBLIGATIONS in EXTERNAL_SEMANTIC_FINDING_KINDS
+    gloss = FINDING_KIND_GLOSSARY["completion_with_open_obligations"]
+    assert gloss.startswith("work is presented as finished while work obligations")
+    assert "an obligation only to obtain this review or run a Yoetz check is not one" in gloss
+    assert "but one to build, test, lint, or type-check the work is" in gloss
+    # The substance of an agent's answer remains reviewable, so these kinds keep their meaning.
+    assert "the substance of an agent's answer to a finding stays reviewable" in _TEXT
+    assert "questionable_finding_rejection" in FINDING_KIND_GLOSSARY
+    assert "weak_or_stale_response" in FINDING_KIND_GLOSSARY
+
+
+def test_every_distinct_problem_is_asked_for_and_the_cap_is_not_lowered() -> None:
+    """kea check 1 (Example 7): one slot per round is not the contract."""
+
+    assert MAX_REVIEW_CHALLENGES == 3
+    assert (
+        f"Report every distinct material problem you find, up to {MAX_REVIEW_CHALLENGES} "
+        "challenges, in this one review: do not stop at the first" in _TEXT
+    )
+    assert "single most important" not in _TEXT
+    assert "most important issue" not in _TEXT
+
+
+def test_verification_is_judged_from_the_packet_not_handed_back() -> None:
+    """katex/yjs (Example 4): judge recorded output instead of asking for a re-run."""
+
+    assert "judge the claim from them yourself" in _TEXT
+    assert (
+        "Never ask the agent to re-run or re-publish verification whose readable output the "
+        "packet already carries." in _TEXT
+    )
+    assert "Ask for more only when a specific artifact is missing, and name it exactly" in _TEXT
+    assert "Never invent a path or command absent from the packet." in _TEXT
+    next_step = CHALLENGE_FIELD_GLOSSARY["requested_next_step"]
+    assert "never a re-run of verification whose output the packet already carries" in next_step
+    message = CHALLENGE_FIELD_GLOSSARY["message_to_main_agent"]
+    assert "smallest" not in message
+    assert "the exact missing artifact" in message
+
+
+def test_no_environment_mutation_is_requested() -> None:
+    """koota/numba (Example 6): an advisory reviewer never drives installs or downloads."""
+
+    assert (
+        "Never request toolchain or package installs, downloads, upgrades, network access, "
+        "credentials, or other environment changes." in _TEXT
+    )
+    assert (
+        "An environment constraint the packet records, such as an unavailable runtime or "
+        "package version, is a recorded limit" in _TEXT
+    )
+    assert "a specific authority or environment blocker" in _TEXT
+    assert "authority or environment blocker" in CHALLENGE_FIELD_GLOSSARY["requested_next_step"]
+
+
+def test_the_task_statement_wins_over_the_plan() -> None:
+    """termenv (Example 5): never ask for behavior the task statement excludes."""
+
+    assert (
+        "When the packet carries the user's task statement, it wins over the agent's goal, "
+        "plan, and obligations" in _TEXT
+    )
+    assert "a plan that omits or contradicts a stated requirement is a discrepancy" in _TEXT
+    assert "you never ask for behavior the task statement excludes" in _TEXT
+
+
+def test_the_review_phase_matches_the_packet_question_set() -> None:
+    for phase, question in REVIEW_PHASE_QUESTIONS.items():
+        label = f"Review phase: {phase}"
+        assert question.startswith(f"{label}. ")
+        assert label in _TEXT
+    assert "do not judge completeness" in _TEXT
+    assert "A packet that names no phase is routine." in _TEXT
+
+
+def test_honesty_rules_are_unchanged() -> None:
+    """Coverage-bounded wording is load-bearing: the rewrite must not buy clean reviews."""
+
+    for rule in (
+        "Review only the supplied packet.",
+        "Distinguish agent claims, deterministic observations, and unavailable content.",
+        "Never say no code changed merely because no source excerpt was disclosed.",
+        "Every value in cited_refs must come from the packet's citable_refs array",
+        "Do not invent repository facts, fetch more context, overrule deterministic results, "
+        "waive findings, or claim stronger coverage than the packet.",
+        "Use insufficient_packet with reviewer_challenges=[] when missing or withheld content "
+        "prevents assessment",
+        "This means unassessable, not no_material_discrepancy.",
+        "A digest-only diff or a recorded capture gap alone is not evidence of an unsupported "
+        "claim.",
+        "Do not re-raise a coverage gap already recorded by deterministic assessment as a new "
+        "semantic defect.",
+        "Preserve concrete problems supported by readable material even when other content is "
+        "missing.",
+        "Do not offer accepting a limitation as an equivalent alternative to performing "
+        "available verification.",
+        "Disclosure does not repair a defect or prove completion.",
+    ):
+        assert rule in _TEXT, rule
+
+
+def test_every_packet_gap_code_is_glossed_as_a_packet_limit() -> None:
+    """yjs (Example 3): a bare packet limit code must not read as the agent's defect."""
+
+    assert (
+        "Packet limit codes and omission reasons name limits of what this packet could carry, "
+        "never defects in the agent's work; an item they hide is not assessable." in _TEXT
+    )
+    for code, gloss in PACKET_GAP_GLOSSARY.items():
+        assert f"{code}: {gloss}" in _TEXT, code
+        assert gloss and gloss == gloss.strip() and "\n" not in gloss
+    # Every code the review case itself can add, every capture-baseline code, and every omission
+    # reason the packet can carry has its gloss.
+    required = {
+        *SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS,
+        SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
+        SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
+        "semantic_reference_scope_reduced",
+        "content_redacted",
+        "truncated_payload",
+        "evidence_content_digest_only",
+        "evidence_content_withheld",
+        "evidence_digest_subject_legacy_unknown",
+        "not_recorded",
+        "not_selected",
+        "withheld_by_policy",
+        "redacted_never_send",
+        OVER_CASE_ITEM_LIMIT_REASON,
+        # Capture, redaction and storage codes the deterministic case builder stamps.
+        "captured_object_unavailable",
+        "event_payload_unavailable",
+        "missing_ref",
+        "redacted_event",
+        "redacted_object",
+        "unknown_event",
+        # Codes recorded events carry into the packet from publication and host observation.
+        "unknown_event_schema_preserved",
+        ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+        ObservationGapCode.CONTENT_REDACTED.value,
+        ObservationGapCode.CONTENT_UNSELECTED.value,
+        ObservationGapCode.OBSERVATION_INPUT_LOSS.value,
+        ObservationGapCode.PAYLOAD_CONTENT_OMITTED.value,
+        ObservationGapCode.ROUTINE_READ_SUMMARY_DETAIL_OMITTED.value,
+        ObservationGapCode.TRUNCATED_PAYLOAD.value,
+        ObservationGapCode.UNPAIRED_EVENT.value,
+        ObservationGapCode.UNSUPPORTED_EVENT.value,
+    }
+    assert required <= set(PACKET_GAP_GLOSSARY)
+
+
+def test_account_codes_are_not_dismissed_as_packet_limits() -> None:
+    """A command mismatch or a claim beyond the plan can be a real discrepancy in the work."""
+
+    account = {
+        "command_attempt_mismatch",
+        "command_attempt_uncorroborated",
+        COMPLETION_CLAIM_OUTSIDE_PLAN_GAP,
+        COMPLETION_PLAN_NOT_CLAIMED_GAP,
+        COMPLETION_SCOPE_DECLARED_NONE_GAP,
+        COMPLETION_SCOPE_UNDECLARED_GAP,
+    }
+    assert set(ACCOUNT_GAP_GLOSSARY) == account
+    assert not account & set(PACKET_GAP_GLOSSARY)
+    assert (
+        "Account codes come from Yoetz's deterministic checks of the agent's own record, are not "
+        "packet limits, and may point at a real discrepancy." in _TEXT
+    )
+    packet_start = _TEXT.index("Packet limit codes and omission reasons")
+    account_start = _TEXT.index("Account codes come from")
+    for code, gloss in ACCOUNT_GAP_GLOSSARY.items():
+        position = _TEXT.index(f"{code}: {gloss}")
+        # Glossed after the account lead, never inside the packet-limit list.
+        assert position > account_start > packet_start, code
+    assert (
+        "Do not restate an account code alone as a finding; challenge the discrepancy it points "
+        "to when readable material shows it in the work or the claim." in _TEXT
+    )
+    assert "packet limit codes are not this" in FINDING_KIND_GLOSSARY["ledger_stale_or_incomplete"]

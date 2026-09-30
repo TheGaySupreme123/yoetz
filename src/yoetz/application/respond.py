@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Literal, Protocol, cast
+from typing import Final, Literal, Protocol, cast
 
 from yoetz.application.ledger_snapshot import projection_for_records
 from yoetz.application.unit_of_work import PreparedMutation, run_prepared_append
 from yoetz.domain.events import (
+    CheckRecordedPayload,
     EventDraft,
     EventSchema,
     LedgerRecord,
@@ -16,7 +17,13 @@ from yoetz.domain.events import (
     encode_payload,
     media_type_for,
 )
-from yoetz.domain.findings import FindingOrigin, ResponseDisposition, WaiverScope
+from yoetz.domain.findings import (
+    Finding,
+    FindingKind,
+    FindingOrigin,
+    ResponseDisposition,
+    WaiverScope,
+)
 from yoetz.domain.values import (
     Actor,
     ActorType,
@@ -64,6 +71,8 @@ from yoetz.protocol.models import (
     RespondEvidenceSummaryModel,
     RespondRequest,
     RespondResponseModel,
+    SemanticReason,
+    SemanticStatus,
 )
 
 __all__ = ["Application", "RespondInternalResult", "execute_respond"]
@@ -250,6 +259,71 @@ async def _preflight(
         PublicErrorCode.OPERATION_PENDING,
         "The response operation is pending.",
         retryable=True,
+    )
+
+
+# Yoetz's own check and finding records (issue #906, open design question 3). A reviewer finding
+# whose every subject is one of these is about Yoetz's process state, never about the work itself.
+# ``response_recorded`` is deliberately absent: an agent's answer to a finding is the agent's own
+# content, and a finding about its substance keeps the resolution-attempt gate.
+_PROCESS_RECORD_SCHEMAS: Final = frozenset({"check_recorded", "finding_recorded"})
+# The only finding kind that describes the state of the record rather than the work, and the only
+# one that never blocks a receipt (``FINDING_KIND_TRAITS`` marks it non-actionable). A reviewer can
+# cite an earlier check row while challenging what that check established about the work, so the
+# cited rows alone never make a finding process-only: the kind has to say so too.
+_PROCESS_FINDING_KINDS: Final = frozenset({FindingKind.LEDGER_STALE_OR_INCOMPLETE})
+
+
+def _process_finding_answered_by_completed_review(
+    records: tuple[LedgerRecord, ...], finding: FindingProjectionRecord
+) -> bool:
+    """Whether a completed later review is the resolution of a finding about Yoetz process state.
+
+    A finding that asks for the review that already ran, or that is about check or finding
+    records, has nothing to repair: requiring a fresh resolution attempt before
+    ``acknowledged`` only produced a filler publish round (issue #906). The exception is structural
+    and deliberately narrow. The finding's kind must describe record state
+    (``_PROCESS_FINDING_KINDS``), every subject must be an event whose recorded schema is a Yoetz
+    process record, and an AI-powered review that completed must be recorded after the finding.
+    Citing a check row is not enough on its own: a work kind such as ``diff_does_not_match_account``
+    that cites only a check still challenges the work. A cited finding record counts only when that
+    earlier finding is itself, transitively, of a process kind and about process records alone: a
+    restatement of a finding about the work is about the work, so it can never be easier to
+    acknowledge than the finding it restates. A finding naming any obligation, claim, or work
+    record keeps the ``resolution_attempt_required`` gate, because structure alone cannot tell an
+    obligation to obtain a review from a work obligation.
+    """
+
+    payload = finding.payload
+    if payload is None or payload.kind not in _PROCESS_FINDING_KINDS or not payload.subject_refs:
+        return False
+    by_event = {str(record.event_id): record for record in records}
+    pending = [str(ref) for ref in payload.subject_refs]
+    seen: set[str] = set()
+    while pending:
+        ref = pending.pop()
+        if ref in seen:
+            continue
+        seen.add(ref)
+        subject = by_event.get(ref) if ref.startswith("evt_") else None
+        if subject is None or subject.schema.name not in _PROCESS_RECORD_SCHEMAS:
+            return False
+        if subject.schema.name == "finding_recorded":
+            # An unreadable, redacted or unknown-version finding record cannot prove its subject.
+            cited = subject.payload
+            if (
+                type(cited) is not Finding
+                or cited.kind not in _PROCESS_FINDING_KINDS
+                or not cited.subject_refs
+            ):
+                return False
+            pending.extend(str(item) for item in cited.subject_refs)
+    return any(
+        type(record.payload) is CheckRecordedPayload
+        and record.payload.semantic_status is SemanticStatus.SUCCEEDED
+        and record.payload.semantic_reason is SemanticReason.SEMANTIC_COMPLETED
+        and record.ledger.ingestion_sequence > finding.source_frontier
+        for record in records
     )
 
 
@@ -458,6 +532,9 @@ async def execute_respond(app: Application, request: RespondRequest) -> RespondI
                 request.disposition == "acknowledged"
                 and finding_record.payload.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
                 and not attempted
+                and not _process_finding_answered_by_completed_review(
+                    current_records, finding_record
+                )
             ):
                 # Issue #885: accepting a reviewer finding (including as an unresolved limitation)
                 # needs one recorded concrete resolution attempt after the finding. A recorded

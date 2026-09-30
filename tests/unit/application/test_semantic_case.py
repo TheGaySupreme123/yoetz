@@ -34,10 +34,12 @@ from yoetz.application.check import (
 from yoetz.application.semantic_case import (
     OVER_CASE_ITEM_LIMIT_REASON,
     REVIEW_PACKET_ITEM_ID,
+    REVIEW_PHASE_QUESTIONS,
     CapturedContentScope,
     CapturedSemanticContent,
     bounded_case_envelope,
     build_semantic_case,
+    review_question_set,
     review_selection_digest,
     semantic_case_to_candidate_context,
     semantic_case_to_prepared_payload,
@@ -81,6 +83,7 @@ from yoetz.kernel.projections import EvidenceProjectionRecord
 from yoetz.kernel.reducers import replay
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef
 from yoetz.ports.semantic import ExcerptDigestProvenance, SemanticCase
+from yoetz.ports.semantic_budget import SemanticBudgetProfile, select_semantic_budget_profile
 from yoetz.protocol.canonical import JsonValue, strict_json_parse
 from yoetz.protocol.coverage import EvidenceImmutability, LedgerFreshness
 from yoetz.protocol.ids import IdKind, new_id
@@ -1731,3 +1734,90 @@ def test_code_chunk_selection_keeps_utf8_and_reports_unselected_suffix(
     assert len(excerpts) <= max_excerpts
     delivered.decode("utf-8")
     assert {"truncated_payload", "content_unselected"}.issubset(semantic.packet.coverage.known_gaps)
+
+
+def _routine_case() -> DeterministicCase:
+    """The same plan and open obligation as ``_case_with_material`` with no completion claim."""
+
+    base = _case_with_material(with_evidence=False)
+    return make_case(
+        plans=base.projection.plans,
+        obligations=base.projection.obligations,
+        extra_refs=(obl(1),),
+    )
+
+
+def test_question_set_names_the_phase_the_budget_selector_picks() -> None:
+    """Issue #906: routine work is not judged as a completion claim, and vice versa."""
+
+    final_case = _case_with_material()
+    routine_case = _routine_case()
+    assert select_semantic_budget_profile(final_case.projection) == "final"
+    assert select_semantic_budget_profile(routine_case.projection) == "routine"
+
+    cases: tuple[tuple[DeterministicCase, SemanticBudgetProfile], ...] = (
+        (final_case, "final"),
+        (routine_case, "routine"),
+    )
+    for case, phase in cases:
+        semantic = _build(case, ReviewContextProfile.GOAL_AWARE)
+        assert semantic.question_set == review_question_set(phase)
+        assert semantic.question_set[0] == REVIEW_PHASE_QUESTIONS[phase]
+        assert semantic.question_set[0].startswith(f"Review phase: {phase}. ")
+        document = cast(
+            Mapping[str, JsonValue],
+            strict_json_parse(
+                semantic_case_to_prepared_payload(
+                    semantic, {item.item_id for item in semantic.items}
+                )
+            ),
+        )
+        # The reviewer reads the phase in the packet it is sent.
+        assert document["question_set"] == list(review_question_set(phase))
+
+    final = _build(final_case, ReviewContextProfile.GOAL_AWARE)
+    routine = _build(routine_case, ReviewContextProfile.GOAL_AWARE)
+    assert final.question_set[1:] == routine.question_set[1:]
+    # The phase is bound into the case digest like the rest of the question set.
+    assert final.case_digest != routine.case_digest
+
+
+def test_no_review_question_presupposes_a_defect_or_hands_back_the_next_step() -> None:
+    phases: tuple[SemanticBudgetProfile, ...] = ("routine", "final")
+    for phase in phases:
+        questions = review_question_set(phase)
+        assert len(questions) == len(set(questions))
+        joined = " ".join(questions)
+        assert "smallest next step" not in joined
+        assert "next step" not in joined
+        assert "If so" not in joined
+        assert "What did you verify against the task and the change, and with what result?" in (
+            questions
+        )
+        assert any("if any" in question for question in questions)
+    with pytest.raises(ValueError, match="semantic_budget_profile_invalid"):
+        review_question_set(cast(SemanticBudgetProfile, "completion"))
+
+
+def test_recorded_history_packet_keeps_process_rows_and_the_final_phase() -> None:
+    """dateutil shape: earlier check and finding rows sit beside a completion claim.
+
+    The reviewer still sees Yoetz's own check/finding rows (they are history, and a response to a
+    finding stays reviewable); the instruction, not a packet filter, tells it they are process
+    state. The recorded replay vector supplies real event shapes rather than normalized envelopes.
+    """
+
+    records = replay_records("all-event-families")
+    case = build_deterministic_case(replay(records), records, CaseAvailabilityFacts())
+    semantic = _build(case, ReviewContextProfile.GOAL_AWARE)
+    phase = select_semantic_budget_profile(case.projection)
+    assert semantic.question_set == review_question_set(phase)
+    kinds: set[str] = set()
+    for item in semantic.items:
+        if item.item_id in semantic.packet.timeline_item_ids and item.item_id.startswith(
+            "history-"
+        ):
+            document = strict_json_parse(item.content)
+            assert isinstance(document, Mapping)
+            kinds.add(cast(str, cast(Mapping[str, JsonValue], document)["kind"]))
+    assert {"check_recorded", "finding_recorded", "response_recorded"} <= kinds

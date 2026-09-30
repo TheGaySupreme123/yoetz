@@ -48,7 +48,8 @@ The normal sequence is:
 5. Resolve older response work before the final check. Select `semantic_required` for an explicit
    user, policy, or acceptance requirement; omit `mode` when relying on the configured default; use
    `semantic_if_configured` only when review is known optional; and reserve `deterministic_only` for
-   explicit local/structural work or a deliberate no-egress choice.
+   explicit local/structural work or a deliberate no-egress choice. Track required review through
+   `mode` and the receipt, never as a plan obligation: the check is the review.
 6. Respond to findings returned by the check at its result frontier, then read
    `status view=findings` with `filter.include_resolved: true` and actual `resolved` state. “Not
    returned” is not “resolved.” If an older
