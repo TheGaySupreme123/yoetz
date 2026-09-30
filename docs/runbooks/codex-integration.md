@@ -1720,9 +1720,13 @@ has a second name is listed but neither its content nor its line counts are show
 local `git clone` hard-linked are read normally, because every Git object a shown diff uses must
 match its own name. Beside `check_time_change_unavailable` the check records a reason code such as
 `check_time_change_unavailable_changed_during_capture`, and the check result, `yoetz status` and the
-receipt each state that reason in one plain sentence. A replayed or resumed check reviews the change
-captured when it first ran, not the tree as it is later. `yoetz service diagnostics` counts the
-parts that reached the packet as `semantic_check_change_parts_selected`.
+receipt each state that reason in one plain sentence. A later review clears an AI-powered finding
+despite these limits only when it saw each file the raising review saw, whole or through an
+identical view; for a file shown in part each check records a keyed commitment to where its
+redactions and hunks lay, never its content, so a moved redaction or hunk keeps the finding open. A
+replayed or resumed check reviews the change captured when it first ran, not the tree as it is
+later. `yoetz service diagnostics` counts the parts that reached the packet as
+`semantic_check_change_parts_selected`.
 
 ## Background semantic advice controls
 

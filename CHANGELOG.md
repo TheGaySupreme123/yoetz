@@ -36,8 +36,12 @@ reverse-chronological released versions.
   `check_time_change_unavailable`, `check_time_change_base_unavailable`,
   `check_time_change_truncated` and `check_time_change_redacted` coverage gaps (#883, ADR-031).
   Those limits on a later review still let it clear an AI-powered finding when the later review
-  saw at least as much of every file the raising review saw; each check records which files it
-  showed, and how much of each partly shown one, as keyed commitments, never paths. A task started
+  saw every file the raising review saw, whole or through the identical view; each check records
+  which files it showed and, for each partly shown one, how much and a keyed commitment to where
+  its redactions and hunks lay, never paths or content, so a moved redaction or hunk no longer
+  clears a finding (maintainer decision 2026-09-30). A resolution relying on a raising record from
+  before those view commitments is disclosed on the receipt as
+  `check_time_change_resolution_unverified`. A task started
   before this version takes its base from its first check, so commits between checks stay in the
   change. The read is pinned to the validated repository directory and its own `.git` (a
   `core.worktree` redirection is refused), never shows a tracked or untracked file that is a link

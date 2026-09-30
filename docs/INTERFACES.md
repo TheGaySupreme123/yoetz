@@ -6837,37 +6837,44 @@ otherwise). No ADR-031 check-time change code is a capture baseline. A semantic 
 `check_time_change_*` codes are tolerated for a finding only by the shown-file rule
 (`check_change_limits_tolerated`, `CheckChangeShownFiles.covers`): every file the raising reviews
 (R) need whole is in the repair check's `fully_shown`, and every file R saw in part (`shown_bytes`
-n, `redactions` k) is in the repair's `fully_shown` or has a repair partial entry q with
-(`q.shown_bytes >= n` or `q.section_admitted`) and (`q.redactions <= k` or `q.clean_bytes >= n`).
-The repair record may be incomplete; an empty R is always tolerated and an unknown R never.
-`FindingProjectionRecord` carries the replay-derived `check_change_raising_check_event_ids` (every
-contributing check, in fold order), `check_change_raised_files` (R as a complete
+n, `redactions` k, `view_commitment` v) is in the repair's `fully_shown` or has a repair partial
+entry q with `q.view_commitment == v` (maintainer decision 2026-09-30, R945-02). A raising partial
+entry without `view_commitment` (written before the field existed) falls back to (`q.shown_bytes >=
+n` or `q.section_admitted`) and (`q.redactions <= k` or `q.clean_bytes >= n`);
+`check_change_resolution_unverified(record)` is true for a resolution that tolerated check-time
+limits while R held such an entry, and the receipt then adds the gap
+`check_time_change_resolution_unverified` (marker `check_change_resolution_unverified:<finding id>`,
+with its fixed sentence). A repair entry without `view_commitment` never matches a raising entry
+that has one. The repair record may be incomplete; an empty R is always tolerated and an unknown R
+never. `FindingProjectionRecord` carries the replay-derived `check_change_raising_check_event_ids`
+(every contributing check, in fold order), `check_change_raised_files` (R as a complete
 `CheckChangeShownFiles`; `None` while unknown) and `resolution_depends_on_check_event_ids` (the
 contributors, when a resolution needed that tolerance). A check contributes to each semantic finding
 it returns when it recorded a conclusion or is the finding's raising check (same subject frontier
 and AI-powered review attempt). A contribution is the check's complete record, unknown for an
 incomplete record or carried-part codes without one, and empty otherwise; contributions merge with
-`CheckChangeShownFiles.merged` (union of whole files, per-file larger length and fewer redactions,
-unknown past `MAX_CHECK_CHANGE_RAISED_FILES` = 1024 files or when either side is unknown); past
-`MAX_CHECK_CHANGE_RAISING_CHECKS` = 64 contributors R is unknown. Redacting any contributor sets R
-unknown and reopens a resolution that depended on it; all three fields are emitted in projection
-snapshots only when set.
+`CheckChangeShownFiles.merged` (union of whole files; a file seen in part through one view keeps it,
+through two different views (or one legacy and one committed) it must be seen whole, and two legacy
+views keep the larger length and fewer redactions; unknown past `MAX_CHECK_CHANGE_RAISED_FILES` =
+1024 files or when either side is unknown); past `MAX_CHECK_CHANGE_RAISING_CHECKS` = 64 contributors
+R is unknown. Redacting any contributor sets R unknown and reopens a resolution that depended on it;
+all three fields are emitted in projection snapshots only when set.
 
 
 `check_recorded` version `1.3.0` adds required `semantic_conclusion` on succeeded attempts. The
 closed values are `no_material_discrepancy`, `challenges_returned`, and `insufficient_packet`.
-Versions 1.0–1.2 keep their frozen payload shapes and read without a recorded conclusion. Only
-an explicitly assessable conclusion enables capture-baseline resolution. An unassessable
-conclusion blocks semantic absence proof even if a producer omitted its coverage-gap marker.
-Failed and local-only attempts retain their existing version. Version `1.3.0` (unreleased, so
-edited in place) also admits optional `check_change_files`,
-`{"complete": bool, "fully_shown": [commitment], "partially_shown": [{"clean_bytes",
-"commitment", "redactions", "section_admitted", "shown_bytes"}]}`, only beside a conclusion:
-disjoint `hmac-sha256` commitments sorted by commitment, counts in `0..262144` with
-`clean_bytes <= shown_bytes`, at most 128 files in all;
-`complete` false means more files were shown and the record holds the first 128 in change order
-(ADR-031 decision 9). Rows written by the branch-only builds of this field before its final
-shape no longer decode. The owning schema generator and
+Versions 1.0–1.2 keep their frozen payload shapes and read without a recorded conclusion. Only an
+explicitly assessable conclusion enables capture-baseline resolution. An unassessable conclusion
+blocks semantic absence proof even if a producer omitted its coverage-gap marker. Failed and
+local-only attempts retain their existing version. Version `1.3.0` (unreleased, so edited in place)
+also admits optional `check_change_files`, `{"complete": bool, "fully_shown": [commitment],
+"partially_shown": [{"clean_bytes", "commitment", "redactions", "section_admitted", "shown_bytes",
+"view_commitment"?}]}`, only beside a conclusion (`view_commitment` is optional only so a record
+written before it existed still decodes; every new record carries it): disjoint `hmac-sha256`
+commitments sorted by commitment, counts in `0..262144` with `clean_bytes <= shown_bytes`, at most
+128 files in all; `complete` false means more files were shown and the record holds the first 128 in
+change order (ADR-031 decision 9). Rows written by the branch-only builds of this field before its
+final shape no longer decode. The owning schema generator and
 `fixtures/canonical/check-conclusion-1.3.0.case.json` lock the new and legacy bytes.
 
 `resolution_attempt_required` is the `respond` rejection for an `acknowledged` response to a
@@ -7059,17 +7066,21 @@ is withheld whole), recorded as a bounded `semantic_composition/check_time_chang
   check summary appends when it fits the 512-byte bound.
 - **Shown files.** `check_time_change_shown_files(capture, selection, admitted_parts)` returns each
   `diff --git` section of the stored change that reached the admitted parts, whether it arrived
-  whole and without a `[REDACTED]` marker, the section bytes that arrived, the markers among
-  them, whether the whole section arrived, and where the first shown marker starts. The identity
-  is the section's first line plus `\0binary` for a `Binary files ` line and `\0deleted` for a
-  `deleted file mode ` line. `admitted_parts` is
-  `check_time_change_parts_carried(case, withheld_categories=)`: the unbroken run of parts from
-  the first whose catalog rows `bounded_case_envelope(case)` kept, or 0 when the policy withholds
-  `repository_excerpt`. `check_change_shown_files(runtime, change, selection, admitted_parts)`
-  commits each through `runtime.objects.commitment_for(...,
-  CHANGE_CAPTURE)` over the domain `yoetz/check-change-shown-file/v1`, the base commit and that
-  identity.
-  `CheckChangeCapture` and `yoetz.check-change/1` carry `base_commit`. The composition passes it to
+  whole and without a `[REDACTED]` marker, the section bytes that arrived, the markers among them,
+  whether the whole section arrived, and where the first shown marker starts. The identity is the
+  section's first line plus `\0binary` for a `Binary files ` line and `\0deleted` for a `deleted
+  file mode ` line. `admitted_parts` is `check_time_change_parts_carried(case,
+  withheld_categories=)`: the unbroken run of parts from the first whose catalog rows
+  `bounded_case_envelope(case)` kept, or 0 when the policy withholds `repository_excerpt`.
+  `check_change_shown_files(runtime, change, selection, admitted_parts)` commits each through
+  `runtime.objects.commitment_for(..., CHANGE_CAPTURE)` over the domain
+  `yoetz/check-change-shown-file/v1`, the base commit and that identity. Each partially shown file
+  also gets `view_commitment`, the same key over `yoetz/check-change-shown-view/v1`, the base
+  commit, the identity and `CheckTimeChangeShownFile.view`: the length-prefixed shown length, the
+  whole-section flag, every marker offset, and every hunk's offset and header line within the shown
+  bytes. The view is never stored; it is derived from the same `admitted_parts`, so envelope
+  minimization cannot desynchronize it from the accounting. `CheckChangeCapture` and
+  `yoetz.check-change/1` carry `base_commit`. The composition passes it to
   `FinalSemanticEvaluation.check_change_files`, and `commit_check_if_current(...,
   check_change_files=)` records it only beside a conclusion.
 - **Consent.** `ReviewSelectionPolicy.carries_check_time_change` (targeted excerpts, a positive

@@ -187,41 +187,45 @@ content-returning read needed its own decision. This is that decision, for exact
    whole diff, unredacted and untruncated) and `partially_shown` (the rest it carried any of), each
    with `shown_bytes` (the bytes of the file's diff section that reached the packet, redaction
    markers included), `redactions` (the redacted spans among them), `section_admitted` (the whole
-   section reached the packet, so only redaction made it partial) and `clean_bytes` (where the first
-   shown redaction marker starts; `shown_bytes` without one). Each commitment is the task bundle's
-   object commitment key over the change's base commit, the file's `diff --git` line and its change
-   kind (binary, deleted), so no path is recorded, the same file under the task's fixed base commits
-   the same way in every check of the task, and a file that turned binary or was deleted never
-   stands in for the text diff it replaced. Only shown files count toward the 128-file bound; past
-   it the record keeps the first 128 in change order and says it is incomplete. Replay folds, onto
-   the finding's projection row, the record of every completed review that raised or re-raised an
-   AI-powered finding (R): whole files are united, a file any of them saw whole must be seen whole,
-   and a file they saw in part keeps the largest n (`shown_bytes`) and the smallest k
-   (`redactions`). At most 64 contributing checks and 1024 files are kept on the finding's row (one
-   event row still holds at most 128); past either bound R is unknown. A later repair review's
-   `check_time_change_truncated`, `_redacted`, `_base_unavailable` and `_unavailable` codes are
-   tolerated for that finding exactly when the repair saw at least what R requires. Every file R
-   needs whole reached the repair whole. Every file R saw in part (n, k) reached the repair whole,
-   or in part with (the repair showed at least n bytes, or its whole current section) and (it showed
-   at most k redacted spans, or its first n bytes held no marker). Each arm is sound on its own: a
-   repair that admitted its whole section saw the file's entire current diff apart from its redacted
-   spans; a repair with at least n bytes saw at least as long a view; at most k spans hides no more
-   than the raising review had hidden; and `clean_bytes` at least n means the repair saw the first n
-   bytes with nothing hidden. So a view cut at the packet edge before a marker is covered by a
-   longer repair whose first n bytes are clean, a whole section whose diff the fix shrank is covered
-   while its redaction persists, and a new redaction or a shorter cut view still blocks. The
-   repair's record may be incomplete, since each entry it holds is still true. An empty R (reviews
-   that carried no change, including every review from before this decision) is always tolerated. R
-   is also unknown, which never tolerates, when a raising record is incomplete or when a raising
-   review carried parts without a readable record (0.3 development builds). None of these codes is a
-   capture baseline stamped on the finding. Redacting any contributing check makes R unknown and
-   reopens a resolution that depended on it; redacting the resolving check reopens it as before. The
-   relation is a pure fold over recorded checks, so the memory and SQLite ledgers replay it
-   identically. Residual limits: the rule compares lengths and counts, not content. A redacted span
-   that moved while the count stayed the same could hide the region the finding was about, and for a
-   repair view cut at the packet edge (not the whole section) a hunk that moved past the m bytes it
-   saw could too; a repair review that stays silent about either could clear the finding. Explicit
-   `fixed` rulings (#905) are the long-term guard.
+   section reached the packet, so only redaction made it partial), `clean_bytes` (where the first
+   shown redaction marker starts; `shown_bytes` without one) and `view_commitment`. Each commitment
+   is the task bundle's object commitment key over the change's base commit, the file's `diff --git`
+   line and its change kind (binary, deleted), so no path is recorded, the same file under the
+   task's fixed base commits the same way in every check of the task, and a file that turned binary
+   or was deleted never stands in for the text diff it replaced. `view_commitment` is the same key
+   over the view's structure: its shown length, whether its whole section was admitted, the offset
+   of every redaction marker it showed, and the offset and header line of every hunk it showed. It
+   is derived from exactly the parts the bounded envelope carried (the same count that decides which
+   files were shown), and records no content, only the keyed digest. Only shown files count toward
+   the 128-file bound; past it the record keeps the first 128 in change order and says it is
+   incomplete. Replay folds, onto the finding's projection row, the record of every completed review
+   that raised or re-raised an AI-powered finding (R): whole files are united, a file any of them
+   saw whole must be seen whole, a file they saw in part through one view keeps that view, and a
+   file they saw in part through two different views must be seen whole. At most 64 contributing
+   checks and 1024 files are kept on the finding's row (one event row still holds at most 128); past
+   either bound R is unknown. A later repair review's `check_time_change_*` codes are tolerated for
+   that finding exactly when the repair saw at least what R requires: every file R needs whole
+   reached the repair whole, and every file R saw in part reached the repair whole or in part with
+   the same `view_commitment`, so with the same length, the same redactions at the same offsets and
+   the same hunks at the same offsets. A redaction that moved, or a packet-edge hunk that moved, is
+   therefore not covered even when every count is equal. **Maintainer decision (2026-09-30,
+   R945-02):** this replaces the earlier length-and-count rule, whose residual let a moved span or
+   hunk clear a finding. The accepted liveness cost is that a finding whose raising review saw a
+   file in part stays open until a repair shows that file whole (its redaction gone and within the
+   packet) or with an identical view; a repair that changed that file's diff, or saw a longer or
+   shorter cut of it, does not clear it. Backward compatibility: a raising partial view recorded
+   before `view_commitment` existed is still compared by the earlier rule (at least n bytes or the
+   whole section, and at most k redactions or a clean first n bytes), and a resolution that relied
+   on such a view is disclosed on the receipt as `check_time_change_resolution_unverified`, never
+   presented as verified; a repair record without a view commitment never covers a raising view that
+   has one. The repair's record may be incomplete, since each entry it holds is still true. An empty
+   R (reviews that carried no change, including every review from before this decision) is always
+   tolerated. R is also unknown, which never tolerates, when a raising record is incomplete or when
+   a raising review carried parts without a readable record (0.3 development builds). None of these
+   codes is a capture baseline stamped on the finding. Redacting any contributing check makes R
+   unknown and reopens a resolution that depended on it; redacting the resolving check reopens it as
+   before. The relation is a pure fold over recorded checks, so the memory and SQLite ledgers replay
+   it identically.
 
 ## Consequences
 
@@ -239,6 +243,12 @@ working tree or object store that kept changing through every attempt. Tracked f
 links or multiply linked are named but not shown. Hard-linked object files (a local `git clone`)
 are read, because every blob shown is verified against its name.
 Submodule changes appear as commit ids and binary files as a one-line description.
+
+AI-powered finding resolution compares where each review's redactions and hunks lay, not only how
+much it saw (decision 9, maintainer decision 2026-09-30). A finding whose raising review saw a file
+only in part therefore stays open until a repair review shows that file whole or through an
+identical view; a resolution that relied on a raising view recorded before view commitments is
+disclosed as `check_time_change_resolution_unverified`.
 
 This decision does not add an MCP tool, a repository browser or an `ArtifactInspectionPort`, and
 does not change ADR-011's content-withholding structural capture. No content-returning read exists

@@ -218,7 +218,10 @@ working tree or object store keeps changing while the change is read, Yoetz read
 three times, and otherwise reports the change as unavailable rather than send a mix of two states.
 Whenever the change is unavailable, the check result, `yoetz status` and the receipt say why in one
 plain sentence (for example, that the working tree kept changing, or that the repository failed a
-safety check). A change larger than the packet is cut and says so.
+safety check). A later review clears an AI-powered finding despite these limits only when it saw
+each file the raising review saw, whole or through an identical view; for a file shown in part each
+check records a keyed commitment to where its redactions and hunks lay, never its content, so a
+moved redaction or hunk keeps the finding open. A change larger than the packet is cut and says so.
 
 The change travels as **repository excerpts**. If your policy's AI-powered review channel does not
 allow repository excerpts, the change is never sent, and the check result says the review ran with
