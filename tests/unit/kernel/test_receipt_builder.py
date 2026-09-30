@@ -55,6 +55,7 @@ from yoetz.domain.receipts import (
 )
 from yoetz.domain.values import (
     ActorType,
+    EventId,
     FindingId,
     Frontier,
     event_id,
@@ -384,25 +385,48 @@ def test_digest_provenance_limitation_is_retained_in_receipt() -> None:
     )
 
 
+_WITHHELD_EVENT_ID = event_id("evt_00000000-0000-4000-8000-000000000009")
+_SECOND_DIGEST_EVENT_ID = event_id("evt_00000000-0000-4000-8000-00000000000a")
+_DIGEST_ONLY_CLAUSE = "the digest was recorded but the bytes were not retained"
+_WITHHELD_CLAUSE = "the publisher recorded the bytes as withheld"
+
+
+def _digest_gap(code: str, root: EventId) -> CaseGap:
+    return CaseGap(f"{code}:{root}", code, (root,))
+
+
 @pytest.mark.parametrize(
-    ("gaps", "expected", "per_item"),
+    ("gaps", "expected", "per_item", "absent"),
     (
         pytest.param(
             (
-                CaseGap(
-                    f"evidence_content_digest_only:{_SOURCE_EVENT_ID}",
-                    "evidence_content_digest_only",
-                    (_SOURCE_EVENT_ID,),
-                ),
-                CaseGap(
-                    "evidence_content_withheld:evt_00000000-0000-4000-8000-000000000009",
-                    "evidence_content_withheld",
-                    (event_id("evt_00000000-0000-4000-8000-000000000009"),),
-                ),
+                _digest_gap("evidence_content_digest_only", _SOURCE_EVENT_ID),
+                _digest_gap("evidence_content_withheld", _WITHHELD_EVENT_ID),
             ),
-            "2 cited evidence items carry caller-asserted digests that Yoetz did not verify",
+            "2 cited evidence items carry caller-asserted digests that Yoetz did not verify: "
+            f"1 is digest-only ({_DIGEST_ONLY_CLAUSE}) and 1 is withheld ({_WITHHELD_CLAUSE}).",
             True,
-            id="two-items",
+            (),
+            id="mixed-retention",
+        ),
+        pytest.param(
+            (
+                _digest_gap("evidence_content_digest_only", _SOURCE_EVENT_ID),
+                _digest_gap("evidence_content_digest_only", _SECOND_DIGEST_EVENT_ID),
+            ),
+            "2 cited evidence items carry caller-asserted digests that Yoetz did not verify: "
+            f"{_DIGEST_ONLY_CLAUSE}.",
+            True,
+            (_WITHHELD_CLAUSE, "withheld"),
+            id="digest-only",
+        ),
+        pytest.param(
+            (_digest_gap("evidence_content_withheld", _WITHHELD_EVENT_ID),),
+            "One cited evidence item carries a caller-asserted digest that Yoetz did not "
+            f"verify: {_WITHHELD_CLAUSE}.",
+            True,
+            ("not retained", "digest-only"),
+            id="withheld-only",
         ),
         pytest.param(
             (
@@ -415,18 +439,22 @@ def test_digest_provenance_limitation_is_retained_in_receipt() -> None:
             "Recorded check or finding coverage names caller-asserted digests that Yoetz did not "
             "verify; no currently cited evidence item carries one.",
             False,
+            (),
             id="check-coverage-only",
         ),
     ),
 )
 def test_caller_digest_label_is_named_once_with_its_count(
-    gaps: tuple[CaseGap, ...], expected: str, per_item: bool
+    gaps: tuple[CaseGap, ...], expected: str, per_item: bool, absent: tuple[str, ...]
 ) -> None:
     """Issue #912 fallback (a): the receipt, not a finding, discloses unverified caller digests.
 
     Without a per-item gap root the code comes only from recorded check or finding coverage, so
     the label describes that recorded limitation and never implies currently cited items or
-    permanence (a later check of the current record may drop it). Every format carries it.
+    permanence (a later check of the current record may drop it). Digest-only and withheld items
+    keep their distinct retention wording (review finding PR925-F3): a withheld item is never
+    described as merely not retained, nor a digest-only item as withheld. Every format carries
+    it.
     """
 
     codes = tuple(sorted({gap.code for gap in gaps}))
@@ -456,8 +484,13 @@ def test_caller_digest_label_is_named_once_with_its_count(
         cast(dict[str, object], section)["body"] == limitations
         for section in cast(list[object], wire["sections"])
     )
+    for fragment in absent:
+        assert fragment not in limitations
     for markdown in (True, False):
-        assert expected in render_receipt_human(receipt, markdown=markdown)
+        rendered = render_receipt_human(receipt, markdown=markdown)
+        assert expected in rendered
+        for fragment in absent:
+            assert fragment not in rendered
 
 
 def test_resolved_history_no_longer_lowers_receipt_coverage() -> None:

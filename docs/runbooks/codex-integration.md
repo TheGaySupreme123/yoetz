@@ -1686,12 +1686,19 @@ shared controls.
 A `content_digest` the agent publishes through ordinary publication is recorded as `caller_asserted`
 with `digest_only` (or `withheld`) availability. On this host, as on every host, it raises no local
 finding; the receipt's limitations name once, with a count, the cited evidence items whose
-caller-asserted digests Yoetz did not verify. The service-side binding that would upgrade a caller
-digest matching captured bytes to verified provenance (#912 part (b)) is not implemented yet, so
+caller-asserted digests Yoetz did not verify, keeping digest-only items (the bytes were not
+retained) apart from withheld items (the publisher recorded the bytes as withheld). The
+service-side binding that would upgrade a caller digest matching captured bytes to verified
+provenance (#912 part (b)) is not implemented yet, so
 every caller digest keeps that unverified label here. When it lands, the captures it can bind to on
 this host are Codex `apply_patch` workspace-diff captures (a whole patch or a hunk-sized byte range
 of it), heredoc and `git apply <<EOF` captures, and captured tool output. The follow-up owner is
 issue #912.
+
+Native dogfood of this path on this host (macOS, Linux and Windows through WSL 2) has not been
+run yet: the behavior is service-side and host-independent by construction, and only kernel and
+application tests cover it. Parity is not claimed until that dogfood runs; the follow-up owner
+is issue #912.
 
 ## Background semantic advice controls
 

@@ -26,7 +26,8 @@ reverse-chronological released versions.
 - Publishing a change the way the guidance recommends no longer traps agents in a finding they
   cannot clear. A digest-only (or withheld) `caller_asserted` evidence digest now raises no
   `ledger_stale_or_incomplete` finding; the receipt's limitations name once, with a count, the
-  cited evidence items whose caller-asserted digests Yoetz did not verify, and the coverage gap
+  cited evidence items whose caller-asserted digests Yoetz did not verify, keeping digest-only
+  items (bytes not retained) apart from withheld ones, and the coverage gap
   stays. A legacy digest's finding text now names only actions an agent can take, and the
   publication and coverage guidance no longer promise "content-bearing evidence". A resolved
   finding stays on the receipt as history but its coverage no longer lowers the receipt's.

@@ -5045,7 +5045,13 @@ _ISSUE_912_OPEN_OBLIGATION: dict[str, JsonValue] = {
 }
 
 
-def _caller_digest_excerpt_draft(seed: int, hunk: str, *, subject: str) -> dict[str, JsonValue]:
+def _caller_digest_excerpt_draft(
+    seed: int,
+    hunk: str,
+    *,
+    subject: str,
+    availability: Literal["digest_only", "withheld"] = "digest_only",
+) -> dict[str, JsonValue]:
     data = hunk.encode("utf-8")
     return {
         "event_id": protocol_id("evt_", seed),
@@ -5061,7 +5067,7 @@ def _caller_digest_excerpt_draft(seed: int, hunk: str, *, subject: str) -> dict[
             "description": hunk,
             "digest_binding": {
                 "subject": subject,
-                "content_availability": "digest_only",
+                "content_availability": availability,
                 "byte_count": len(data),
                 "provenance": "caller_asserted",
             },
@@ -5174,7 +5180,7 @@ async def _receipt_912(
     started: StartInternalResult,
     frontier: Frontier | FrontierModel,
     seed: int,
-    receipt_format: Literal["json", "text"],
+    receipt_format: Literal["json", "markdown", "text"],
 ):
     return await app.receipt(
         ReceiptRequest.model_validate(
@@ -5292,8 +5298,9 @@ async def test_growing_caller_digest_excerpts_mint_no_finding_and_one_receipt_la
     assert body.count("caller-asserted digest") == 1
     assert (
         f"{len(_ISSUE_912_HUNKS)} cited evidence items carry caller-asserted digests that Yoetz "
-        "did not verify"
+        "did not verify: the digest was recorded but the bytes were not retained."
     ) in body
+    assert "withheld" not in body
     document = cast(dict[str, JsonValue], receipt.document)
     assert not any(
         str(cast(dict[str, JsonValue], gap)["code"]).startswith("retained_finding_coverage")
@@ -5303,6 +5310,71 @@ async def test_growing_caller_digest_excerpts_mint_no_finding_and_one_receipt_la
     assert text.human_text is not None
     assert "cited evidence items carry caller-asserted digests" in text.human_text
     assert "content-bearing" not in text.human_text
+
+
+@pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))
+async def test_receipt_label_keeps_digest_only_and_withheld_retention_apart(
+    ledger_backend: Literal["memory", "sqlite"],
+) -> None:
+    """Review finding PR925-F3: the count-bearing label must not merge two retention facts.
+
+    A ``digest_only`` item kept its digest but the bytes were never retained; a ``withheld`` item
+    records that the publisher withheld the bytes. One cited item of each kind yields one label
+    with a total and a per-kind breakdown, identically in the JSON, markdown and text receipts.
+    """
+
+    app, _runtime, _ = _build_app(seed_offset=41, ledger_backend=ledger_backend)
+    started = await app.start(start_request(9700, title="Mixed caller-digest retention"))
+    obligation_id = protocol_id("obl_", 9701)
+    opened = await _publish_912(
+        app, started, started.frontier, 9702, (_obligation_draft_912(9703, obligation_id),)
+    )
+    digest_only = _caller_digest_excerpt_draft(9710, _ISSUE_912_HUNKS[0], subject="source_diff")
+    withheld = _caller_digest_excerpt_draft(
+        9720, _ISSUE_912_HUNKS[1], subject="bounded_excerpt", availability="withheld"
+    )
+    refs = tuple(
+        cast(str, cast(dict[str, JsonValue], draft["payload"])["evidence_id"])
+        for draft in (digest_only, withheld)
+    )
+    published = await _publish_912(
+        app,
+        started,
+        opened.result_frontier,
+        9730,
+        (
+            digest_only,
+            withheld,
+            _obligation_draft_912(9731, obligation_id, resolved_by=refs),
+            _completion_claim_draft_912(9732, protocol_id("clm_", 9733), obligation_id, refs),
+        ),
+    )
+    checked = await _check_912(app, started, published.result_frontier, 9734)
+    assert _provenance_findings(checked.findings) == ()
+    assert {"evidence_content_digest_only", "evidence_content_withheld"} <= set(
+        checked.coverage.known_gaps
+    )
+
+    expected = (
+        "2 cited evidence items carry caller-asserted digests that Yoetz did not verify: "
+        "1 is digest-only (the digest was recorded but the bytes were not retained) and "
+        "1 is withheld (the publisher recorded the bytes as withheld)."
+    )
+    receipt = await _receipt_912(app, started, checked.result_frontier, 9740, "json")
+    body = _limitations_body(receipt.document)
+    assert body.count("caller-asserted digest") == 1
+    assert expected in body
+    frontier = receipt.result_frontier
+    human_formats: tuple[tuple[int, Literal["markdown", "text"]], ...] = (
+        (9741, "markdown"),
+        (9742, "text"),
+    )
+    for seed, receipt_format in human_formats:
+        rendered = await _receipt_912(app, started, frontier, seed, receipt_format)
+        assert rendered.human_text is not None
+        assert rendered.human_text.count("caller-asserted digest") == 1
+        assert expected in rendered.human_text
+        frontier = rendered.result_frontier
 
 
 async def _append_native_tool_output_capture(

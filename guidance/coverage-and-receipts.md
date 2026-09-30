@@ -42,8 +42,9 @@ in the ledger.
 `evidence_content_digest_only` and `evidence_content_withheld` are disclosed provenance labels, not
 findings. Ordinary publication cannot record captured content, so no response, recheck, or further
 publication changes them. They raise no local finding; the receipt names once, with a count, the
-cited evidence items whose caller-asserted digests Yoetz did not verify. A historical digest without
-a binding (`evidence_digest_subject_legacy_unknown`) still raises `ledger_stale_or_incomplete`,
+cited evidence items whose caller-asserted digests Yoetz did not verify, and keeps the two retention
+facts apart: a digest-only item's bytes were not retained, while a withheld item records that the
+publisher withheld them. A historical digest without a binding (`evidence_digest_subject_legacy_unknown`) still raises `ledger_stale_or_incomplete`,
 whose text names only what an agent can do.
 
 ## Freshness, redaction, and unknown input

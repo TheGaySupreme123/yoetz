@@ -1312,7 +1312,11 @@ coverage.
   service producer records `captured` availability, so these bindings are always
   `caller_asserted`; no response, recheck, or ordinary publication can change them. The receipt
   instead names them once as a provenance label whose count is the number of distinct per-item gap
-  roots (a code carried only by check coverage is named without a count).
+  roots (a code carried only by check coverage is named without a count); when both codes are
+  counted, the label breaks the total into digest-only items (bytes not retained) and withheld
+  items (the publisher recorded the bytes as withheld) so the two retention semantics stay
+  distinguishable. The service-side binding of a caller digest to a matching captured object or
+  byte range is not implemented; issue #912 owns it.
   `evidence_digest_subject_legacy_unknown` still roots that finding, and the finding's
   provenance addendum names only agent-performable actions.
 - `FindingBasisRef` is exactly

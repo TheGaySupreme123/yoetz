@@ -893,46 +893,88 @@ def _resolved_history_sentence(resolved_count: int) -> str:
     )
 
 
-def _caller_digest_count(context: ReceiptBuildContext) -> int:
+@dataclass(frozen=True, slots=True)
+class _CallerDigestCounts:
+    """Distinct cited evidence items per caller-digest retention semantic (issue #912).
+
+    ``digest_only`` and ``withheld`` mean different things for what the owner can recover: a
+    digest-only record kept the digest but never retained the bytes, while a withheld record
+    records that the publisher withheld them. The receipt keeps the two apart.
+    """
+
+    digest_only: int = 0
+    withheld: int = 0
+
+    @property
+    def total(self) -> int:
+        return self.digest_only + self.withheld
+
+
+_NO_CALLER_DIGESTS: Final = _CallerDigestCounts()
+
+
+def _caller_digest_counts(context: ReceiptBuildContext) -> _CallerDigestCounts:
     """Count cited evidence items whose caller-asserted digest Yoetz did not verify.
 
     The case records one per-item gap, rooted at the evidence's source event, for each cited
-    ``digest_only`` or ``withheld`` binding. A code carried only by check coverage or a retained
+    ``digest_only`` or ``withheld`` binding; one evidence record carries exactly one availability,
+    so the two counts never share an item. A code carried only by check coverage or a retained
     finding has no per-item root and is named without a count.
     """
 
-    return len(
-        {
-            gap.subject_refs
-            for gap in context.gaps
-            if gap.code in CALLER_DIGEST_PROVENANCE_GAPS and gap.subject_refs
-        }
+    def distinct(code: str) -> int:
+        return len(
+            {gap.subject_refs for gap in context.gaps if gap.code == code and gap.subject_refs}
+        )
+
+    return _CallerDigestCounts(
+        digest_only=distinct("evidence_content_digest_only"),
+        withheld=distinct("evidence_content_withheld"),
     )
 
 
-def _caller_digest_sentence(count: int) -> str:
+def _caller_digest_retention_clause(counts: _CallerDigestCounts) -> str:
+    """Say what was retained for the counted items without merging the two retention facts."""
+
+    digest_only = "the digest was recorded but the bytes were not retained"
+    withheld = "the publisher recorded the bytes as withheld"
+    if counts.withheld == 0:
+        return digest_only
+    if counts.digest_only == 0:
+        return withheld
+    only_verb = "is" if counts.digest_only == 1 else "are"
+    withheld_verb = "is" if counts.withheld == 1 else "are"
+    return (
+        f"{counts.digest_only} {only_verb} digest-only ({digest_only}) and "
+        f"{counts.withheld} {withheld_verb} withheld ({withheld})"
+    )
+
+
+def _caller_digest_sentence(counts: _CallerDigestCounts) -> str:
     """Name the caller-asserted digest provenance limitation once, with a count (issue #912).
 
     This is the fallback provenance label: an unverified caller digest raises no finding, yet
-    the receipt must still say that Yoetz did not verify those bytes. Nothing an agent publishes
+    the receipt must still say that Yoetz did not verify those bytes. The retention clause keeps
+    digest-only items (bytes never retained) apart from withheld items (the publisher withheld
+    the bytes), because the two differ in what the owner can recover. Nothing an agent publishes
     changes the recorded provenance, so the sentence names no remedy. Without a per-item root the
     code comes only from recorded check or finding coverage; the sentence then describes that
     recorded limitation instead of implying currently cited items, and makes no permanence claim
     because a later check of the current record may no longer carry it.
     """
 
-    if count == 0:
+    if counts.total == 0:
         return (
             "Recorded check or finding coverage names caller-asserted digests that Yoetz did not "
             "verify; no currently cited evidence item carries one."
         )
-    if count == 1:
+    if counts.total == 1:
         subject = "One cited evidence item carries a caller-asserted digest"
     else:
-        subject = f"{count} cited evidence items carry caller-asserted digests"
+        subject = f"{counts.total} cited evidence items carry caller-asserted digests"
     return (
-        f"{subject} that Yoetz did not verify: the bytes were not retained, so this provenance "
-        "limitation stays disclosed here and no response or recheck changes it."
+        f"{subject} that Yoetz did not verify: {_caller_digest_retention_clause(counts)}. "
+        "This provenance limitation stays disclosed here and no response or recheck changes it."
     )
 
 
@@ -1163,7 +1205,7 @@ def _sections(
     check_suffix: CheckSuffixClass | None = None,
     engine_derived_suffix: str | None = None,
     host_observation_suffix: bool = False,
-    caller_digest_count: int = 0,
+    caller_digest_counts: _CallerDigestCounts = _NO_CALLER_DIGESTS,
 ) -> tuple[ReceiptSection, ...]:
     gap_codes = coverage.known_gaps
     bodies: dict[ReceiptSectionKey, str] = {}
@@ -1367,7 +1409,7 @@ def _sections(
                 "evidence for its new time and state only."
             )
         if CALLER_DIGEST_PROVENANCE_GAPS & set(gap_codes):
-            gap_body += " " + _caller_digest_sentence(caller_digest_count)
+            gap_body += " " + _caller_digest_sentence(caller_digest_counts)
         bodies[ReceiptSectionKey.LIMITATIONS_AND_COVERAGE] = gap_body
         items[ReceiptSectionKey.LIMITATIONS_AND_COVERAGE] = gap_codes
     elif redactions:
@@ -1521,7 +1563,7 @@ def build_receipt(
         check_suffix=context.check_suffix,
         engine_derived_suffix=engine_derived_suffix,
         host_observation_suffix=host_observation_suffix,
-        caller_digest_count=_caller_digest_count(context),
+        caller_digest_counts=_caller_digest_counts(context),
     )
     suppressed_count = (
         0 if context.applicable_check is None else context.applicable_check.suppressed_count

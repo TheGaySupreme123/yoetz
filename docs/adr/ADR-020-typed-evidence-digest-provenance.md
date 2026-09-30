@@ -139,7 +139,9 @@ ordinary cooperative publication cannot claim.
     unchanged: they still make the conclusion coverage-incomplete), but they are never subjects of
     the work-integrity ledger finding. The receipt's limitations section names them once, with the
     number of cited items, as caller-asserted digests Yoetz did not verify, and says no response or
-    recheck changes that. `evidence_digest_subject_legacy_unknown` still raises the finding; its
+    recheck changes that. It keeps the two retention facts apart: a digest-only item's bytes were
+    not retained, while a withheld item records that the publisher withheld them, and a mixed
+    count names how many items are of each kind. `evidence_digest_subject_legacy_unknown` still raises the finding; its
     text names only agent-performable actions (cite captured or typed evidence in a replacement
     claim). When provenance is the finding's only gap it says no repair or recheck is needed and
     one acknowledged response answers it; when other gaps remain it says an acknowledgement does

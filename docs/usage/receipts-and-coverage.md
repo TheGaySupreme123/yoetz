@@ -133,8 +133,9 @@ Forbidden after a candidate read: "I checked and found nothing."
   stored it.
 - A digest. It records identity, not content inspection. A digest your agent publishes stays
   caller-asserted: it raises no finding, and the receipt's limitations say once, with a count,
-  how many cited evidence items carry caller-asserted digests Yoetz did not verify. No response,
-  recheck, or further publication changes that.
+  how many cited evidence items carry caller-asserted digests Yoetz did not verify, keeping
+  digest-only items (the bytes were not retained) apart from withheld items (your agent recorded
+  the bytes as withheld). No response, recheck, or further publication changes that.
 - Constructing TOML, a path, or metadata. That is not proof of wire dispatch or AI-powered review.
 
 Only a capability-proven, consented observation arm with real observation evidence earns
