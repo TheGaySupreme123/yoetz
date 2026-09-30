@@ -99,6 +99,12 @@ _BOUNDARY_TERMS: Final = re.compile(
 # Presentation keeps ordinary families through schema 1.1.0. Additive ``evidence_recorded/1.2.0``
 # (``observation_captured``) is authored only by the observation coordinator, not MCP/CLI publish.
 ORDINARY_MCP_PRESENTATION_SCHEMA_VERSIONS: Final[frozenset[str]] = frozenset({"1.0.0", "1.1.0"})
+# The statement-bearing plan 1.1.0 schemas (issue #908) stay out of the advertised draft so the
+# reviewed budgets hold; the catalog admission schema still accepts them, and an agent revises the
+# task statement through a reattaching ``start``.
+_MCP_PRESENTATION_EXCLUDED_EVENT_SCHEMAS: Final[frozenset[tuple[str, str]]] = frozenset(
+    {("plan_published", "1.1.0"), ("plan_revised", "1.1.0")}
+)
 ORDINARY_MCP_PUBLISH_EVENT_FAMILIES: Final[frozenset[str]] = frozenset(
     {
         "plan_published",
@@ -991,6 +997,7 @@ def _project_event_draft_for_ordinary_mcp(
         if (
             family in ORDINARY_MCP_PUBLISH_EVENT_FAMILIES
             and version in ORDINARY_MCP_PRESENTATION_SCHEMA_VERSIONS
+            and (family, version) not in _MCP_PRESENTATION_EXCLUDED_EVENT_SCHEMAS
         ):
             kept.append(_mutable_json(branch_map))
             kept_families.add(family)
@@ -1749,7 +1756,8 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "record occurred. Each new operation uses a fresh req_ prefixed random UUID; recover an "
         "unknown write outcome with the same request_id before any sibling. "
         "workspace_ref and external_ref are admitted only as a pair. Call it once per "
-        "task. task_title and requested_view are required. Attach selectors are exactly one of: "
+        "task. task_title and requested_view are required; task_statement is the user's request "
+        "verbatim. Attach selectors are exactly one of: "
         "(1) session_id for the session you hold, or "
         "(2) workspace_ref + external_ref as a pair with no session_id — mode=create_or_attach "
         "creates on first use and attaches on later conversations. task_id is not an accepted "
@@ -1991,7 +1999,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
     {
         "policy": MappingProxyType(
             {
-                "start": "sha256:3a2186a2db53b91fcf7a8f3117cb8ff6a2b8bad6bc78e3e796e5e611e8598405",
+                "start": "sha256:4c6c687e3dc3666c2a248f8a23f504b3f22bb7258df2c608ed557165ea3af78a",
                 "publish_work": "sha256:a8dd06954e2f2ff65d3fb269a143b13745342e973e270179dc8b952fde7df115",
                 "check": "sha256:9befe13b257acf10535009c1dd69d9a933f3d94f5cd2aaac1655d4867596f89e",
                 "respond": "sha256:191f69e1592bd6bb23f7173725645dc339441b12eaa91c08cc3da4e9feaf0b85",
@@ -2002,7 +2010,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         ),
         "strict": MappingProxyType(
             {
-                "start": "sha256:3a2186a2db53b91fcf7a8f3117cb8ff6a2b8bad6bc78e3e796e5e611e8598405",
+                "start": "sha256:4c6c687e3dc3666c2a248f8a23f504b3f22bb7258df2c608ed557165ea3af78a",
                 "publish_work": "sha256:a8dd06954e2f2ff65d3fb269a143b13745342e973e270179dc8b952fde7df115",
                 "check": "sha256:2bd9947abc7b60564474840a73d99a80bfa528b98af1a725d11fdfde5dac9795",
                 "respond": "sha256:191f69e1592bd6bb23f7173725645dc339441b12eaa91c08cc3da4e9feaf0b85",
@@ -2015,8 +2023,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:2e65cf4976999623a3323248fbe5981f49be0254ee3d6860940c0b453184a055",
-        "strict": "sha256:2b3d3c703966eba20a6175a075f2e59d18cfcc52bb80134c84284703d3bcb5b9",
+        "policy": "sha256:8b4e83ef0514c7beba506b4c53443eac681dca8dac4a2cd76b8ee2e22225b026",
+        "strict": "sha256:3075d77a13af76ad8c8e0ff3f62de849f99a22f8bba415f98ebd609618289dbd",
     }
 )
 

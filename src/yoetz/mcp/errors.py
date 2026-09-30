@@ -177,6 +177,7 @@ _SAFE_LOCATION_SEGMENTS: Final = frozenset(
         "supersedes_plan_version",
         "supporting_refs",
         "task_id",
+        "task_statement",
         "task_title",
         "tree_digest",
         "value",

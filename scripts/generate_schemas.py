@@ -311,6 +311,166 @@ def _privacy_policy_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     return document
 
 
+# The agent-transcribed task statement (issue #908). JSON Schema bounds characters; the owning
+# domain and request models also bound its UTF-8 encoding to the same 65,536 bytes.
+_TASK_STATEMENT_SCHEMA: Final[dict[str, JsonValue]] = {
+    "maxLength": 65536,
+    "minLength": 1,
+    "type": "string",
+}
+
+
+def _with_required_task_statement(
+    entry: _RegistryEntry, source_relative_path: str, *, title: str | None = None
+) -> dict[str, JsonValue]:
+    """Copy one frozen event payload and require the task statement its new version carries.
+
+    Each family's statement-bearing version exists only to carry the statement, so the field is
+    required there and absent from every earlier version (issue #908).
+    """
+
+    document = _load_versioned_template(entry, source_relative_path)
+    properties = cast(dict[str, JsonValue], document["properties"])
+    properties["task_statement"] = dict(_TASK_STATEMENT_SCHEMA)
+    required = cast(list[JsonValue], document.setdefault("required", []))
+    if "task_statement" not in required:
+        required.append("task_statement")
+    if title is not None:
+        document["title"] = f"{title} {entry.schema_version}"
+    return document
+
+
+# The statement-bearing versions of released families (issue #908). ``session_opened`` 1.2.0 is
+# unreleased and carries the optional statement in place, so its existing branch already admits it.
+_TASK_STATEMENT_EVENT_PAIRS: Final[tuple[tuple[str, str], ...]] = (
+    ("session_resumed", "1.2.0"),
+    ("plan_published", "1.1.0"),
+    ("plan_revised", "1.1.0"),
+)
+
+
+def _privacy_policy_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Add the ``task_statement`` review section without widening any 1.1.0 approval.
+
+    Goal-aware, Assisted and Expanded presets include the section from this version on;
+    Structural never does, and Custom only when its owner lists it. A 1.1.0 document can never
+    name the section, so an approval given before it existed is never read as covering the
+    user's request (issue #908).
+    """
+
+    document = _simple_versioned_schema(entry, "privacy/privacy-policy-1.1.0.schema.json", {})
+    document["title"] = f"Yoetz privacy policy {entry.schema_version}"
+    properties = cast(dict[str, JsonValue], document["properties"])
+    properties["schema_version"] = {"const": entry.schema_version}
+    definitions = cast(dict[str, dict[str, JsonValue]], document["$defs"])
+    section_enum = cast(list[JsonValue], definitions["review_section"]["enum"])
+    section_enum.append("task_statement")
+    section_enum.sort(key=lambda value: cast(str, value).encode("ascii"))
+    selection_properties = cast(
+        dict[str, JsonValue], definitions["review_selection_policy"]["properties"]
+    )
+    sections = cast(dict[str, JsonValue], selection_properties["sections"])
+    sections["maxItems"] = len(section_enum)
+    for rule in cast(list[JsonValue], document["allOf"]):
+        if not isinstance(rule, dict):
+            continue
+        condition = rule.get("if")
+        then = rule.get("then")
+        if not isinstance(condition, dict) or not isinstance(then, dict):
+            continue
+        profile = cast(dict[str, JsonValue], condition.get("properties", {})).get(
+            "review_context_profile"
+        )
+        if not isinstance(profile, dict) or profile.get("const") not in {
+            "goal_aware",
+            "assisted",
+            "expanded",
+        }:
+            continue
+        preset = cast(
+            dict[str, JsonValue],
+            cast(
+                dict[str, JsonValue],
+                cast(dict[str, JsonValue], then["properties"])["review_selection"],
+            )["const"],
+        )
+        preset_sections = cast(list[JsonValue], preset["sections"])
+        preset_sections.append("task_statement")
+        preset_sections.sort(key=lambda value: cast(str, value).encode("ascii"))
+    return document
+
+
+def _add_task_statement_to_outbound_case(document: dict[str, JsonValue]) -> None:
+    """Carry the source-labelled task statement section in outbound-case 1.2.0 (issue #908).
+
+    Applied on top of the #905 prior-findings additions, so the one unreleased 1.2.0 contract
+    requires both ``prior_finding_refs`` and ``task_statement_item_ids``.
+    """
+
+    definitions = cast(dict[str, dict[str, JsonValue]], document["$defs"])
+    item_properties = cast(dict[str, JsonValue], definitions["content_item"]["properties"])
+    section = cast(dict[str, JsonValue], item_properties["section"])
+    section_enum = cast(list[JsonValue], section["enum"])
+    section_enum.append("task_statement")
+    section_enum.sort(key=lambda value: cast(str, value).encode("ascii"))
+    item_properties["label"] = {
+        "enum": [
+            "agent plan (the agent's own summary)",
+            "task statement: what the user asked for; the source field says who supplied the text",
+        ],
+        "type": "string",
+    }
+    definitions["item_id_list_1"] = {
+        "items": {"$ref": "#/$defs/item_id"},
+        "maxItems": 1,
+        "minItems": 0,
+        "type": "array",
+        "uniqueItems": True,
+    }
+    packet = definitions["review_packet"]
+    cast(dict[str, JsonValue], packet["properties"])["task_statement_item_ids"] = {
+        "$ref": "#/$defs/item_id_list_1"
+    }
+    cast(list[JsonValue], packet["required"]).append("task_statement_item_ids")
+
+
+def _admit_privacy_policy_v1_2(document: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    """Let the unreleased 2.9 control boundary carry the 1.2.0 privacy-policy wire (issue #908).
+
+    Every privacy-policy document the boundary carries may be the 1.2.0 wire that names the
+    ``task_statement`` review section; a 1.1.0 policy stays valid unchanged, and recipe review
+    selections use the 1.2.0 section vocabulary (a superset of 1.0.0).
+    """
+
+    policy_v11 = SCHEMA_NAMESPACE + "privacy/privacy-policy-1.1.0.schema.json"
+    policy_v12 = SCHEMA_NAMESPACE + "privacy/privacy-policy-1.2.0.schema.json"
+    replacements = {
+        SCHEMA_NAMESPACE
+        + "privacy/privacy-policy-1.0.0.schema.json#/$defs/review_selection_policy": policy_v12
+        + "#/$defs/review_selection_policy",
+    }
+
+    def rewrite(value: JsonValue, *, union_member: bool = False) -> JsonValue:
+        if isinstance(value, list):
+            items = [rewrite(item, union_member=True) for item in value]
+            refs = [item.get("$ref") for item in items if isinstance(item, dict)]
+            if policy_v11 in refs and policy_v12 not in refs:
+                # A union that already admits the 1.1.0 document also admits 1.2.0.
+                items.append({"$ref": policy_v12})
+            return cast(JsonValue, items)
+        if isinstance(value, dict):
+            ref = value.get("$ref")
+            if isinstance(ref, str) and ref in replacements:
+                return cast(JsonValue, {**value, "$ref": replacements[ref]})
+            if ref == policy_v11 and len(value) == 1 and not union_member:
+                # A lone 1.1.0 policy document becomes either wire version.
+                return cast(JsonValue, {"anyOf": [{"$ref": policy_v11}, {"$ref": policy_v12}]})
+            return cast(JsonValue, {key: rewrite(item) for key, item in value.items()})
+        return value
+
+    return cast(dict[str, JsonValue], rewrite(document))
+
+
 def _frozen_version_manifest_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     """Preserve the released v2.0 version report while newer reports append."""
 
@@ -2140,6 +2300,8 @@ def _lineage_session_opened_schema(entry: _RegistryEntry) -> dict[str, JsonValue
                 "type": "string",
             },
             "project_id": _lineage_id_schema("project_id"),
+            # Optional in place while 1.2.0 is unreleased (issue #908).
+            "task_statement": dict(_TASK_STATEMENT_SCHEMA),
         }
     )
     all_of = cast(list[JsonValue], document.setdefault("allOf", []))
@@ -2216,6 +2378,9 @@ def _start_request_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
             "parent_tool_call_id": {"$ref": "#/$defs/host_correlation"},
             "session_id": {"$ref": "#/$defs/session_id"},
             "subagent_id": {"$ref": "#/$defs/host_correlation"},
+            # The optional agent-transcribed task statement (issue #908), added in place while
+            # 1.1.0 is unreleased; absent requests keep their exact shape.
+            "task_statement": dict(_TASK_STATEMENT_SCHEMA),
         }
     )
     rules = cast(list[JsonValue], document.setdefault("allOf", []))
@@ -3627,6 +3792,8 @@ def _event_draft_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     add_branch("finding_recorded", "1.2.0")
     add_branch("finding_recorded", "1.3.0")
     add_branch("response_recorded", "1.1.0")
+    for family, version in _TASK_STATEMENT_EVENT_PAIRS:
+        add_branch(family, version)
     for family in (
         "child_accepted",
         "child_dependencies_recorded",
@@ -3720,6 +3887,15 @@ def _opaque_unknown_event_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonVa
             "type": "object",
         }
     )
+    for family, version in _TASK_STATEMENT_EVENT_PAIRS:
+        values.append(
+            {
+                "additionalProperties": False,
+                "properties": {"name": {"const": family}, "version": {"const": version}},
+                "required": ["name", "version"],
+                "type": "object",
+            }
+        )
     for family in (
         "child_accepted",
         "child_dependencies_recorded",
@@ -3848,6 +4024,7 @@ def _outbound_case_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     }
     if "prior_finding_refs" not in packet_required:
         packet_required.append("prior_finding_refs")
+    _add_task_statement_to_outbound_case(document)
     properties["schema_version"] = {"const": entry.schema_version}
     document["title"] = f"Yoetz outbound case {entry.schema_version}"
     return document
@@ -4738,7 +4915,7 @@ def _control_v2_9_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         required.extend(["selected_capacity_label", "effective_capacity_label", "effective_budget"])
         definitions["observation_effective_budget"] = _observation_effective_budget_schema(token)
         _admit_privacy_audit_unreadable(entry, definitions)
-    return document
+    return _admit_privacy_policy_v1_2(document)
 
 
 # The largest page ``privacy_receipts_list`` answers; a partial page cannot skip more rows than it
@@ -6518,9 +6695,31 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         ),
     ),
     _RegistryEntry(
+        "events/plan-published-1.1.0.schema.json",
+        "plan-published",
+        "1.1.0",
+        "event",
+        "event-payload",
+        lambda: (
+            __import__(
+                "yoetz.domain.events", fromlist=["PlanPublishedPayload"]
+            ).PlanPublishedPayload
+        ),
+    ),
+    _RegistryEntry(
         "events/plan-revised-1.0.0.schema.json",
         "plan-revised",
         "1.0.0",
+        "event",
+        "event-payload",
+        lambda: (
+            __import__("yoetz.domain.events", fromlist=["PlanRevisedPayload"]).PlanRevisedPayload
+        ),
+    ),
+    _RegistryEntry(
+        "events/plan-revised-1.1.0.schema.json",
+        "plan-revised",
+        "1.1.0",
         "event",
         "event-payload",
         lambda: (
@@ -6639,6 +6838,18 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "events/session-resumed-1.1.0.schema.json",
         "session-resumed",
         "1.1.0",
+        "event",
+        "event-payload",
+        lambda: (
+            __import__(
+                "yoetz.domain.events", fromlist=["SessionResumedPayload"]
+            ).SessionResumedPayload
+        ),
+    ),
+    _RegistryEntry(
+        "events/session-resumed-1.2.0.schema.json",
+        "session-resumed",
+        "1.2.0",
         "event",
         "event-payload",
         lambda: (
@@ -7194,6 +7405,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         lambda: __import__("yoetz.domain.privacy", fromlist=["PrivacyPolicy"]).PrivacyPolicy,
     ),
     _RegistryEntry(
+        "privacy/privacy-policy-1.2.0.schema.json",
+        "privacy-policy",
+        "1.2.0",
+        "request_result",
+        "privacy-policy",
+        lambda: __import__("yoetz.domain.privacy", fromlist=["PrivacyPolicy"]).PrivacyPolicy,
+    ),
+    _RegistryEntry(
         "privacy/setup-wizard-contract-1.0.0.schema.json",
         "setup-wizard-contract",
         "1.0.0",
@@ -7744,6 +7963,12 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
 # regenerating them would silently rewrite frozen history.
 _BUILDER_OWNED_SCHEMA_PATHS: Final[frozenset[str]] = frozenset(
     {
+        # The task-statement contracts (issue #908).
+        "events/plan-published-1.1.0.schema.json",
+        "events/plan-revised-1.1.0.schema.json",
+        "events/session-resumed-1.2.0.schema.json",
+        "privacy/outbound-case-1.2.0.schema.json",
+        "privacy/privacy-policy-1.2.0.schema.json",
         "events/check-recorded-1.3.0.schema.json",
         "findings/provider-judgment-1.1.0.schema.json",
         "consent/status-7.0.0.schema.json",
@@ -8220,6 +8445,20 @@ def build_schema_documents(
             normalized = _control_result_v2_6_1_schema(entry)
         elif entry.relative_path == "privacy/privacy-policy-1.1.0.schema.json":
             normalized = _privacy_policy_v1_1_schema(entry)
+        elif entry.relative_path == "privacy/privacy-policy-1.2.0.schema.json":
+            normalized = _privacy_policy_v1_2_schema(entry)
+        elif entry.relative_path == "events/session-resumed-1.2.0.schema.json":
+            normalized = _with_required_task_statement(
+                entry, "events/session-resumed-1.1.0.schema.json"
+            )
+        elif entry.relative_path == "events/plan-published-1.1.0.schema.json":
+            normalized = _with_required_task_statement(
+                entry, "events/plan-published-1.0.0.schema.json", title="Yoetz plan published"
+            )
+        elif entry.relative_path == "events/plan-revised-1.1.0.schema.json":
+            normalized = _with_required_task_statement(
+                entry, "events/plan-revised-1.0.0.schema.json", title="Yoetz plan revised"
+            )
         elif entry.relative_path == "privacy/outbound-case-1.1.0.schema.json":
             normalized = _outbound_case_schema(entry)
         elif entry.relative_path == "privacy/outbound-case-1.2.0.schema.json":

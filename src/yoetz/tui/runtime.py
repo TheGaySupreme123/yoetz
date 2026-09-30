@@ -133,6 +133,44 @@ def _mapping(value: object) -> Mapping[str, object]:
     return {}
 
 
+def _task_statement_posture(policy_map: Mapping[str, object]) -> tuple[bool | None, str | None]:
+    """Whether the composed policy sends the task statement, in ``privacy show`` words (#908).
+
+    The same derivation ``yoetz privacy show`` applies to the effective policy document, so the
+    two surfaces cannot disagree. ``(None, None)`` when the document is not the expected shape:
+    the interface says unknown rather than guessing.
+    """
+
+    from yoetz.domain.task_statement import TASK_STATEMENT_SECTION, task_statement_disclosure_text
+
+    sections = _mapping(policy_map.get("review_selection")).get("sections")
+    channels = policy_map.get("channel_policies")
+    if not isinstance(sections, (list, tuple)) or not isinstance(channels, (list, tuple)):
+        return None, None
+    llm = next(
+        (
+            row
+            for row in (_mapping(item) for item in cast("Sequence[object]", channels))
+            if row.get("channel") == "llm_inference"
+        ),
+        None,
+    )
+    categories = None if llm is None else llm.get("allowed_categories")
+    if llm is None or not isinstance(categories, (list, tuple)):
+        return None, None
+    selected = TASK_STATEMENT_SECTION in cast("Sequence[object]", sections)
+    channel_sends = llm.get("enabled") is True and "task_description" in cast(
+        "Sequence[object]", categories
+    )
+    text = task_statement_disclosure_text(
+        section_selected=selected,
+        channel_sends_task_description=channel_sends,
+        predates_section=policy_map.get("schema_version") in {"1.0.0", "1.1.0"}
+        and policy_map.get("review_context_profile") in {"goal_aware", "assisted", "expanded"},
+    )
+    return selected and channel_sends, text
+
+
 class RuntimeError_(Exception):
     """A bounded operation failure carrying a code the interface may show."""
 
@@ -1033,6 +1071,7 @@ class YoetzRuntime:
         )
         network_raw = policy_map.get("network_egress_permitted")
         network_egress = network_raw if type(network_raw) is bool else None
+        task_statement_sent, task_statement_disclosure = _task_statement_posture(policy_map)
         return PrivacyPosture(
             profile=profile if isinstance(profile, str) else None,
             llm_inference_enabled=llm_enabled,
@@ -1040,6 +1079,8 @@ class YoetzRuntime:
             never_send=never_send,
             enabled_channels=tuple(enabled),
             network_egress_permitted=network_egress,
+            task_statement_sent=task_statement_sent,
+            task_statement_disclosure=task_statement_disclosure,
             repository_grant_state=cast(
                 Literal["granted", "missing"] | None,
                 response.get("grant_state")
@@ -1700,6 +1741,20 @@ class YoetzRuntime:
                     else LayerState.NOT_CONFIGURED
                 ),
                 detail=privacy.summary,
+            ),
+            # What the reviewer may learn of the user's request (issue #908). Policy-level only:
+            # which task holds a statement, and its source, is on that task's receipt.
+            ReadinessLayer(
+                "task_statement_review",
+                "Privacy sends the task statement",
+                LayerState.UNKNOWN
+                if privacy.task_statement_sent is None
+                else (
+                    LayerState.VERIFIED
+                    if privacy.task_statement_sent
+                    else LayerState.NOT_CONFIGURED
+                ),
+                detail=privacy.task_statement_disclosure or "",
             ),
             ReadinessLayer(
                 "semantic_review_ready",

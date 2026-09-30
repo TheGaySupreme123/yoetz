@@ -63,6 +63,7 @@ from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_pa
 from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode
 from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.models import (
+    MAX_TASK_STATEMENT_BYTES,
     CheckAwaitingHumanModel,
     CheckRequest,
     CheckResult,
@@ -732,6 +733,43 @@ type WorkflowResult = (
 )
 
 
+def _read_task_statement_file(path: str) -> str:
+    """Read the user's request verbatim for ``start.task_statement`` (issue #908).
+
+    The file is UTF-8 text, never parsed or trimmed: the agent transcribes the request and the
+    reviewer receives exactly those words.
+    """
+
+    if path == "-":
+        raw = sys.stdin.buffer.read(MAX_TASK_STATEMENT_BYTES + 1)
+    else:
+        with Path(path).open("rb") as stream:
+            raw = stream.read(MAX_TASK_STATEMENT_BYTES + 1)
+    if not raw or len(raw) > MAX_TASK_STATEMENT_BYTES:
+        raise ProtocolValueError("invalid_event_value_type")
+    return raw.decode("utf-8", errors="strict")
+
+
+def _start_request_model(
+    input_path: str | None, inline: str | None, task_statement_file: str | None
+) -> BaseModel:
+    if task_statement_file is None:
+        return _request_model(StartRequest, input_path, inline)
+    # One source per field: two stdin readers, or a request that already carries a statement,
+    # is ambiguous rather than something to merge.
+    if task_statement_file == "-" and input_path == "-":
+        raise ProtocolValueError("invalid_event_value_type")
+    parsed = _bounded_input(input_path, inline)
+    if not isinstance(parsed, Mapping) or "task_statement" in parsed:
+        raise ProtocolValueError("invalid_event_value_type")
+    return StartRequest.model_validate(
+        {
+            **cast(Mapping[str, JsonValue], parsed),
+            "task_statement": _read_task_statement_file(task_statement_file),
+        }
+    )
+
+
 async def _call_workflow(
     method: str,
     request_type: type[BaseModel],
@@ -739,9 +777,18 @@ async def _call_workflow(
     inline: str | None,
     json_output: bool,
     deadline_ms: int | None,
+    *,
+    task_statement_file: str | None = None,
 ) -> int:
     try:
-        request = cast(WorkflowRequest, _request_model(request_type, input_path, inline))
+        request = cast(
+            WorkflowRequest,
+            (
+                _start_request_model(input_path, inline, task_statement_file)
+                if method == "start"
+                else _request_model(request_type, input_path, inline)
+            ),
+        )
         client = await build_service_client()
         try:
             call = getattr(client, method)
@@ -1439,7 +1486,41 @@ def _workflow_command(method: str, request_type: type[BaseModel]) -> Callable[..
     return command
 
 
-app.command("start")(_workflow_command("start", StartRequest))
+_TASK_STATEMENT_FILE = Annotated[
+    str | None,
+    typer.Option(
+        "--task-statement-file",
+        help=(
+            "UTF-8 file (or - for stdin) holding the user's request verbatim; recorded as "
+            "task_statement."
+        ),
+    ),
+]
+
+
+@app.command("start")
+def start_command(
+    input_path: _INPUT = None,
+    request: _INLINE = None,
+    task_statement_file: _TASK_STATEMENT_FILE = None,
+    json_output: _JSON = False,
+    deadline_ms: _DEADLINE = None,
+) -> None:
+    _finish(
+        run_async(
+            lambda: _call_workflow(
+                "start",
+                StartRequest,
+                input_path,
+                request,
+                json_output,
+                deadline_ms,
+                task_statement_file=task_statement_file,
+            )
+        )
+    )
+
+
 app.command("publish-work")(_workflow_command("publish_work", PublishWorkRequest))
 app.command("check")(_workflow_command("check", CheckRequest))
 app.command("respond")(_workflow_command("respond", RespondRequest))
@@ -1599,11 +1680,46 @@ async def _call_support(
         finally:
             await client.close()
         _human_or_json(result, json_output=json_output)
+        if method == "privacy_get_effective" and not json_output and sys.stdout.isatty():
+            line = _effective_task_statement_line(_plain_json(result))
+            if line is not None:
+                typer.echo(line)
         return 0
     except OSError, ProtocolValueError, ValidationError, ValueError:
         return _usage_failure()
     except ControlError as error:
         return _control_failure(error)
+
+
+def _effective_task_statement_line(value: JsonValue) -> str | None:
+    """Say plainly whether the effective policy sends the task statement (issue #908).
+
+    Read from the structural policy document only; ``None`` when its shape is not the expected
+    effective-policy body, so the terminal never guesses.
+    """
+
+    from yoetz.domain.task_statement import task_statement_disclosure_text
+
+    try:
+        policy = cast(Mapping[str, JsonValue], cast(Mapping[str, JsonValue], value)["policy"])
+        selection = cast(Mapping[str, JsonValue], policy["review_selection"])
+        sections = cast(list[JsonValue], selection["sections"])
+        llm = next(
+            cast(Mapping[str, JsonValue], row)
+            for row in cast(list[JsonValue], policy["channel_policies"])
+            if cast(Mapping[str, JsonValue], row)["channel"] == "llm_inference"
+        )
+        categories = cast(list[JsonValue], llm["allowed_categories"])
+        text = task_statement_disclosure_text(
+            section_selected="task_statement" in sections,
+            channel_sends_task_description=llm["enabled"] is True
+            and "task_description" in categories,
+            predates_section=policy["schema_version"] in {"1.0.0", "1.1.0"}
+            and policy["review_context_profile"] in {"goal_aware", "assisted", "expanded"},
+        )
+    except KeyError, StopIteration, TypeError:
+        return None
+    return "Task statement: " + text
 
 
 def _support_command(method: str) -> Callable[..., None]:

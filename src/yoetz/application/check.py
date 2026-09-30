@@ -48,6 +48,7 @@ from yoetz.domain.receipts import (
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
     semantic_coverage_gap_code,
 )
+from yoetz.domain.task_statement import TASK_STATEMENT_GAPS
 from yoetz.domain.values import (
     REPOSITORY_GRANT_CONTINUATION_KIND,
     ClaimId,
@@ -1152,6 +1153,7 @@ class FinalSemanticEvaluation:
                 "content_redacted",
                 SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
                 SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP,
+                *TASK_STATEMENT_GAPS,
             }
         ):
             raise _invalid("semantic_judgment_invalid")

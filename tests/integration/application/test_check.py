@@ -1279,6 +1279,27 @@ async def test_wide_finding_prose_gap_reaches_the_committed_check_coverage() -> 
 
 
 @pytest.mark.anyio
+async def test_task_statement_gaps_reach_the_committed_check_coverage() -> None:
+    """Criteria 1 and 7 (issue #908): a review without the task statement is never silent.
+
+    Composition carries the packet's task-statement codes as case-content gaps; the committed
+    check result is what the MCP response, CLI, status and receipt all render.
+    """
+
+    app = _App(semantic=True)
+    app.semantic_result = replace(
+        _succeeded(SemanticJudgment("no_material_discrepancy", ())),
+        case_content_gaps=("task_statement_not_authorized", "task_statement_unavailable"),
+    )
+    result = await execute_check_commit(app, _request("semantic_required"))
+    assert result.semantic_status is SemanticStatus.SUCCEEDED
+    assert {"task_statement_not_authorized", "task_statement_unavailable"} <= set(
+        result.coverage.known_gaps
+    )
+    assert result.coverage.ledger_freshness.value == "partial"
+
+
+@pytest.mark.anyio
 async def test_native_resolution_omission_survives_successful_semantic_check() -> None:
     app = _App(semantic=True)
     app.semantic_result = replace(

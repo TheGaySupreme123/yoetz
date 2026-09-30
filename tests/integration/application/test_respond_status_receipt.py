@@ -541,24 +541,41 @@ async def _bootstrap_finding(
     mode: str = "deterministic_only",
     refs: bool = False,
     max_findings: str = "3",
+    task_statement: str | None = None,
 ) -> tuple[StartInternalResult, CheckCommitResult, str]:
     """Publish one open obligation plus an unsupported completion claim about it, then check.
 
     This reuses the exact scenario already proven (in ``test_full_workflow.py``) to yield one
     actionable ``completion_with_open_obligations`` finding, so the finding-triggering mechanics
-    themselves are not re-derived here.
+    themselves are not re-derived here. ``task_statement`` records one through a reattaching
+    ``start`` before anything is published (issue #908).
     """
 
     started = await app.start(
         start_request(seed, title="Respond/status/receipt exercise", refs=refs)
     )
+    first_frontier = started.frontier
+    if task_statement is not None:
+        attached = await app.start(
+            StartRequest.model_validate(
+                {
+                    **_request_base(protocol_id("req_", seed + 25)),
+                    "mode": "attach",
+                    "session_id": started.session_id,
+                    "task_title": "Respond/status/receipt exercise",
+                    "requested_view": "compact",
+                    "task_statement": task_statement,
+                }
+            )
+        )
+        first_frontier = attached.frontier
     obligation_id = protocol_id("obl_", seed + 1)
     obligation_event_id = protocol_id("evt_", seed + 2)
     publish_wire: dict[str, JsonValue] = {
         **_request_base(protocol_id("req_", seed + 3)),
         "session_id": started.session_id,
         "writer_id": started.writer_id,
-        "expected_frontier": _frontier(started.frontier),
+        "expected_frontier": _frontier(first_frontier),
         "event_drafts": (
             {
                 "event_id": obligation_event_id,
@@ -5185,6 +5202,9 @@ def _scripted_semantic_evaluator(
         (("content_unselected",), False),
         (("captured_object_unavailable", "content_capture_unavailable"), False),
         ((), True),
+        # A review without the task statement (issue #908) is an unchanged recorded limit.
+        (("task_statement_not_authorized", "task_statement_unavailable"), False),
+        (("task_statement_not_supplied",), False),
     ],
 )
 async def test_semantic_finding_resolves_within_its_recorded_capture_baseline(
@@ -6896,3 +6916,109 @@ async def test_a_final_local_finding_returned_again_gains_no_review_round(
     ledger, _ = next(iter(runtime.resources.values()))
     records = tuple([item async for item in ledger.load_events(started.session_id)])
     assert replay(records).findings[finding.finding_id].review_rounds == 0
+
+
+@pytest.mark.parametrize("statement", ["never", "after_finding", "before_finding"])
+async def test_a_finding_raised_before_the_task_statement_is_not_trapped_by_its_gaps(
+    statement: str,
+) -> None:
+    """Issue #908: an AI-powered finding recorded before any review could carry a statement.
+
+    Its own coverage names no task-statement code (the raising review predates the feature), and
+    every later review under a pre-section approval carries ``task_statement_unavailable`` and
+    ``task_statement_not_authorized``. After material work, a completed later review that does not
+    return the issue resolves it, the codes stay on the receipt, and the conclusion stays bounded.
+    A finding raised after a statement-capable event gets no such tolerance and stays open.
+    """
+
+    seed = 5600
+    conclusions = ["challenges_returned", "no_material_discrepancy"]
+    gaps_by_call = [(), ("task_statement_not_authorized", "task_statement_unavailable")]
+    raised = _scripted_semantic_evaluator(
+        protocol_id("clm_", seed + 5), conclusions, case_gaps=(), over_item_limit=False
+    )
+
+    async def evaluate(
+        frozen: object,
+        findings: object,
+        runtime: object | None = None,
+        lineage_evaluation: object | None = None,
+    ) -> object:
+        result = cast(FinalSemanticEvaluation, await raised(frozen, findings))
+        return replace(result, case_content_gaps=gaps_by_call.pop(0))
+
+    app, _runtime, _ = _build_app(seed_offset=56, semantic="optional", semantic_evaluator=evaluate)
+    started, checked, _obligation = await _bootstrap_finding(
+        app,
+        seed=seed,
+        mode="semantic_if_configured",
+        task_statement="The user's request, verbatim." if statement == "before_finding" else None,
+    )
+    finding = next(
+        item for item in checked.findings if item.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+    )
+    assert not {gap for gap in finding.coverage.known_gaps if gap.startswith("task_statement")}
+    frontier: object = checked.result_frontier
+    if statement == "after_finding":
+        attached = await app.start(
+            StartRequest.model_validate(
+                {
+                    **_request_base(protocol_id("req_", seed + 25)),
+                    "mode": "attach",
+                    "session_id": started.session_id,
+                    "task_title": "Respond/status/receipt exercise",
+                    "requested_view": "compact",
+                    "task_statement": "The user's request, verbatim.",
+                }
+            )
+        )
+        frontier = attached.frontier
+    published = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 31)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(cast(Frontier, frontier)),
+                "event_drafts": (
+                    {
+                        "event_id": protocol_id("evt_", seed + 32),
+                        "schema": {"name": "evidence_recorded", "version": "1.0.0"},
+                        "occurred_at": "2026-07-19T12:00:03.000Z",
+                        "causal_parents": (),
+                        "payload": {
+                            "evidence_id": protocol_id("evd_", seed + 30),
+                            "evidence_kind": "artifact",
+                            "strength": "mutable_reference",
+                            "observed_at": "2026-07-19T12:00:03.000Z",
+                            "reference": "repair-evidence",
+                        },
+                        "artifact_refs": (),
+                        "evidence_refs": (),
+                    },
+                ),
+            }
+        )
+    )
+    repaired = await app.check(
+        CheckRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 40)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(published.result_frontier),
+                "mode": "semantic_if_configured",
+                "max_findings": "8",
+            }
+        )
+    )
+    assert type(repaired) is CheckCommitResult
+    assert {"task_statement_not_authorized", "task_statement_unavailable"} <= set(
+        repaired.coverage.known_gaps
+    )
+    view = await _findings_view(app, started, seed + 41, include_resolved=True)
+    resolved = next(item for item in view.items if item.finding_id == finding.finding_id).resolved
+    # Raised after a statement-capable event, the finding had its chance at the statement, so a
+    # later review that lacks it proves nothing new and the issue stays open.
+    assert resolved is (statement != "before_finding")
+    assert conclusions == [] and gaps_by_call == []

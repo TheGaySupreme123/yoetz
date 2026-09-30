@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import Enum
@@ -34,6 +35,10 @@ __all__ = [
     "NEVER_SEND_KINDS",
     "PRIVACY_CHANGE_AREAS",
     "PRIVACY_CHANGE_FIELDS",
+    "PRIVACY_POLICY_PRESET_VERSIONS",
+    "CURRENT_PRIVACY_POLICY_PRESET_VERSION",
+    "PrivacyPolicyPresetVersion",
+    "review_selection_policy_schema_version",
     "AgentProjectionAuditSubject",
     "ApprovedLocalDisclosureCase",
     "ApprovedLocalItem",
@@ -451,9 +456,47 @@ _SECTIONS: Final = frozenset(
         "coverage",
         "targeted_excerpts",
         "omissions",
+        # The user's request as transcribed by the agent, or the task title when none was
+        # supplied (issue #908). Its own section so no approval given for the agent's plan
+        # (``goal``) is ever read as covering it.
+        "task_statement",
     }
 )
 _EXCERPT_KINDS: Final = frozenset({"evidence", "test", "failure", "diff", "command", "repository"})
+# Review-selection presets are versioned with the privacy-policy wire schema that introduced them.
+# A stored policy keeps the exact preset its owner approved: a newer preset never widens an older
+# approval, it only becomes what the next approval ceremony offers. Each later version is a
+# superset of the one before, so a newer preset always reads as a widening that needs approval.
+type PrivacyPolicyPresetVersion = Literal["1.1.0", "1.2.0"]
+PRIVACY_POLICY_PRESET_VERSIONS: Final[tuple[PrivacyPolicyPresetVersion, ...]] = ("1.1.0", "1.2.0")
+CURRENT_PRIVACY_POLICY_PRESET_VERSION: Final[PrivacyPolicyPresetVersion] = "1.2.0"
+# Sections a wire document can carry only from the named schema version on.
+_SECTION_MINIMUM_SCHEMA_VERSION: Final[Mapping[str, PrivacyPolicyPresetVersion]] = {
+    "task_statement": "1.2.0",
+}
+
+
+def review_selection_policy_schema_version(
+    selection: ReviewSelectionPolicy,
+) -> PrivacyPolicyPresetVersion:
+    """The oldest privacy-policy wire schema that can express ``selection`` exactly.
+
+    Encoding a selection at its minimum version keeps every policy approved before a newer
+    vocabulary existed byte-identical, digest included.
+    """
+
+    if type(selection) is not ReviewSelectionPolicy:
+        raise _invalid()
+    version: PrivacyPolicyPresetVersion = "1.1.0"
+    for section in selection.sections:
+        required = _SECTION_MINIMUM_SCHEMA_VERSION.get(section)
+        if required is not None and _preset_rank(required) > _preset_rank(version):
+            version = required
+    return version
+
+
+def _preset_rank(version: PrivacyPolicyPresetVersion) -> int:
+    return PRIVACY_POLICY_PRESET_VERSIONS.index(version)
 
 
 @dataclass(frozen=True, slots=True)
@@ -499,9 +542,16 @@ class ReviewSelectionPolicy:
             raise _invalid()
 
     @classmethod
-    def for_profile(cls, profile: ReviewContextProfile) -> ReviewSelectionPolicy:
+    def for_profile(
+        cls,
+        profile: ReviewContextProfile,
+        *,
+        preset_version: PrivacyPolicyPresetVersion = CURRENT_PRIVACY_POLICY_PRESET_VERSION,
+    ) -> ReviewSelectionPolicy:
         _enum(profile, ReviewContextProfile)
         if profile is ReviewContextProfile.CUSTOM:
+            raise _invalid()
+        if preset_version not in PRIVACY_POLICY_PRESET_VERSIONS:
             raise _invalid()
         sections = {
             "timeline",
@@ -518,6 +568,10 @@ class ReviewSelectionPolicy:
         if profile is not ReviewContextProfile.STRUCTURAL:
             sections.update({"goal", "obligations", "claims", "decisions"})
             finding = True
+            if _preset_rank(preset_version) >= _preset_rank("1.2.0"):
+                # Goal-aware, Assisted and Expanded send the task statement from 1.2.0 on;
+                # Structural never does (issue #908).
+                sections.add("task_statement")
         if profile in {ReviewContextProfile.ASSISTED, ReviewContextProfile.EXPANDED}:
             sections.add("targeted_excerpts")
             kinds = set(_EXCERPT_KINDS)
@@ -542,6 +596,20 @@ class ReviewSelectionPolicy:
             max_total_excerpt_bytes=max_total_excerpt_bytes,
         )
 
+    @classmethod
+    def is_profile_preset(
+        cls, profile: ReviewContextProfile, selection: ReviewSelectionPolicy
+    ) -> bool:
+        """Whether ``selection`` is exactly one versioned preset of the named profile."""
+
+        _enum(profile, ReviewContextProfile)
+        if profile is ReviewContextProfile.CUSTOM or type(selection) is not ReviewSelectionPolicy:
+            return False
+        return any(
+            selection == cls.for_profile(profile, preset_version=version)
+            for version in PRIVACY_POLICY_PRESET_VERSIONS
+        )
+
     def required_categories(self) -> frozenset[DataCategory]:
         """Categories the selected sections will actually produce case items in.
 
@@ -553,6 +621,7 @@ class ReviewSelectionPolicy:
         """
 
         by_section: dict[str, DataCategory] = {
+            "task_statement": DataCategory.TASK_DESCRIPTION,
             "goal": DataCategory.TASK_DESCRIPTION,
             "obligations": DataCategory.OBLIGATION_TEXT,
             "claims": DataCategory.CLAIM_TEXT,
@@ -842,8 +911,10 @@ class PrivacyPolicy:
         if type(self.review_selection) is not ReviewSelectionPolicy:
             raise _invalid()
         if self.review_context_profile is not ReviewContextProfile.CUSTOM:
-            if self.review_selection != ReviewSelectionPolicy.for_profile(
-                self.review_context_profile
+            # Any versioned preset of the profile is valid: an approval made under an older
+            # preset stays exactly what its owner approved (issue #908).
+            if not ReviewSelectionPolicy.is_profile_preset(
+                self.review_context_profile, self.review_selection
             ):
                 raise _invalid()
         if type(self.require_current_provider_data_use_evidence) is not bool:
@@ -1003,7 +1074,7 @@ class PrivacyPolicy:
             item for item, rank in _REVIEW_CONTEXT_OPENNESS.items() if rank == review_rank
         )
         if review_context is not ReviewContextProfile.CUSTOM:
-            if review_selection != ReviewSelectionPolicy.for_profile(review_context):
+            if not ReviewSelectionPolicy.is_profile_preset(review_context, review_selection):
                 review_context = ReviewContextProfile.CUSTOM
 
         local_enabled = self.local_model_enabled and other.local_model_enabled

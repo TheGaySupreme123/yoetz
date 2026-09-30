@@ -56,6 +56,15 @@ from yoetz.domain.receipts import (
     ReceiptVersionSlice,
     receipt_document_carries_terminal_sections,
 )
+from yoetz.domain.task_statement import (
+    TASK_STATEMENT_NOT_AUTHORIZED_GAP,
+    TASK_STATEMENT_NOT_SUPPLIED_GAP,
+    TASK_STATEMENT_UNAVAILABLE_GAP,
+    TaskStatementSource,
+    current_task_statement,
+    may_carry_task_statement,
+    task_statement_gap_detail,
+)
 from yoetz.domain.values import (
     ClaimId,
     EventId,
@@ -96,7 +105,7 @@ from yoetz.kernel.plan_scope import CurrentPlanScope, current_plan_scope
 from yoetz.kernel.projections import ObligationProjectionRecord, ProjectionRecord, ProjectionState
 from yoetz.kernel.reducers import is_material_event_family
 from yoetz.protocol.coverage import LEDGER_FRESHNESS_ORDER, Coverage, weakest
-from yoetz.protocol.models import ReceiptInclude, ReceiptRedactionProfile
+from yoetz.protocol.models import ReceiptInclude, ReceiptRedactionProfile, SemanticStatus
 
 __all__ = [
     "CheckSuffixClass",
@@ -616,7 +625,7 @@ def _select_gaps(context: ReceiptBuildContext) -> tuple[ReceiptGap, ...]:
                 plan_scope.no_obligations_reason.value
                 if gap.code == COMPLETION_SCOPE_DECLARED_NONE_GAP
                 and plan_scope.no_obligations_reason is not None
-                else scope_detail(gap.code)
+                else scope_detail(gap.code) or task_statement_gap_detail(gap.code)
             ),
         )
         for gap in sorted(
@@ -1269,6 +1278,46 @@ def _semantic_endpoint_sentence(check: CheckRecordedPayload | None) -> str:
     )
 
 
+def _task_statement_source_sentence(
+    check: CheckRecordedPayload | None, records: tuple[LedgerRecord, ...]
+) -> str:
+    """Say what the AI-powered reviewer had of the user's request (issue #908, review 942-G4).
+
+    A title standing in adds no gap, so without this sentence a title-only review reads like one
+    that had the request. Fixed words only, derived from the ledger prefix the check tested. It
+    says nothing when no AI-powered review completed, when the check already carries the
+    task-statement gaps (their own prose explains it), when the receipt has no history to read,
+    or when a statement-bearing event is no longer readable and the source cannot be shown.
+    """
+
+    if (
+        check is None
+        or check.semantic_provenance is None
+        or check.semantic_status is not SemanticStatus.SUCCEEDED
+        or TASK_STATEMENT_UNAVAILABLE_GAP in check.coverage.known_gaps
+        or not records
+    ):
+        return ""
+    tested = tuple(
+        record
+        for record in records
+        if record.ledger.ingestion_sequence <= check.subject_frontier.sequence
+    )
+    statement = current_task_statement(tested)
+    if statement is not None:
+        return (
+            " The AI-powered reviewer received the agent's transcription of the user's request "
+            f"as the task statement (source {statement.source.value}), not a host-captured prompt."
+        )
+    if any(may_carry_task_statement(record) for record in tested):
+        return ""
+    return (
+        " No task statement was recorded before the AI-powered review, so the reviewer had at "
+        "most the task title in place of the user's request (source "
+        f"{TaskStatementSource.TASK_TITLE_ONLY.value})."
+    )
+
+
 def _semantic_usage_sentence(provenance: SemanticProvenance | None) -> str:
     """Render only bounded token counters retained by AI-powered review provenance.
 
@@ -1330,6 +1379,7 @@ def _sections(
     resolved_finding_ids: tuple[FindingId, ...] = (),
     semantic_endpoint_sentence: str = "",
     semantic_usage_sentence: str = "",
+    task_statement_source_sentence: str = "",
     resolution_explanations: tuple[str, ...] = (),
     attempt_explanations: tuple[str, ...] = (),
     check_suffix: CheckSuffixClass | None = None,
@@ -1543,6 +1593,15 @@ def _sections(
             )
         if CALLER_DIGEST_PROVENANCE_GAPS & set(gap_codes):
             gap_body += " " + _caller_digest_sentence(caller_digest_counts)
+        # What the AI-powered reviewer knew of the user's request (issue #908), in fixed words.
+        for code in (
+            TASK_STATEMENT_UNAVAILABLE_GAP,
+            TASK_STATEMENT_NOT_AUTHORIZED_GAP,
+            TASK_STATEMENT_NOT_SUPPLIED_GAP,
+        ):
+            detail = task_statement_gap_detail(code)
+            if code in gap_codes and detail is not None:
+                gap_body += " " + detail
         bodies[ReceiptSectionKey.LIMITATIONS_AND_COVERAGE] = gap_body
         items[ReceiptSectionKey.LIMITATIONS_AND_COVERAGE] = gap_codes
     elif redactions:
@@ -1557,6 +1616,7 @@ def _sections(
         items[ReceiptSectionKey.LIMITATIONS_AND_COVERAGE] = ()
     if observed_failure_sentence:
         bodies[ReceiptSectionKey.LIMITATIONS_AND_COVERAGE] += " " + observed_failure_sentence
+    bodies[ReceiptSectionKey.LIMITATIONS_AND_COVERAGE] += task_statement_source_sentence
 
     policy_rows = "; ".join(
         f"{entry.policy_id} {entry.policy_version}" for entry in versions.policy_versions
@@ -1675,6 +1735,9 @@ def build_receipt(
         ),
         resolved_finding_ids=resolved_finding_ids,
         semantic_endpoint_sentence=_semantic_endpoint_sentence(context.applicable_check),
+        task_statement_source_sentence=_task_statement_source_sentence(
+            context.applicable_check, context.records
+        ),
         semantic_usage_sentence=_semantic_usage_sentence(
             None
             if context.applicable_check is None

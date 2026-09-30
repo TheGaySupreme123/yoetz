@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
@@ -12,6 +13,7 @@ from yoetz.adapters.privacy.catalog import (
     decode_privacy_policy_canonical,
     encode_privacy_policy_json,
 )
+from yoetz.domain.privacy import ReviewSelectionPolicy
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.schemas import validate_schema_instance
 
@@ -42,7 +44,9 @@ def test_encode_local_only_matches_wire_schema() -> None:
 def test_wire_round_trip_preserves_domain_policy() -> None:
     original = minimal_external_policy()
     wire = encode_privacy_policy_json(original)
-    validate_schema_instance("privacy-policy", "1.1.0", wire)
+    # The current Assisted preset names the task_statement section, a 1.2.0-only field.
+    assert wire["schema_version"] == "1.2.0"
+    validate_schema_instance("privacy-policy", "1.2.0", wire)
     decoded = decode_privacy_policy_canonical(canonical_encode(wire))
     assert decoded == original
 
@@ -84,7 +88,14 @@ def test_wire_decode_rejects_an_unsupported_schema_version() -> None:
 
 
 def test_released_wire_policy_still_decodes() -> None:
-    original = minimal_external_policy()
+    # A released 1.0.0 document carries the preset of its time, without task_statement.
+    policy = minimal_external_policy()
+    original = replace(
+        policy,
+        review_selection=ReviewSelectionPolicy.for_profile(
+            policy.review_context_profile, preset_version="1.1.0"
+        ),
+    )
     wire = encode_privacy_policy_json(original)
     wire["schema_version"] = "1.0.0"
     validate_schema_instance("privacy-policy", "1.0.0", wire)

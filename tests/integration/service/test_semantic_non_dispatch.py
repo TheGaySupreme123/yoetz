@@ -1533,3 +1533,132 @@ async def test_wide_finding_prose_dispatches_one_bounded_case(
     envelope = next(item.plaintext for item in candidate.items if item.item_id == "review-packet")
     assert wide_ref in envelope
     assert SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP.encode("ascii") in envelope
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("approval", ["current", "predates_section"])
+async def test_task_statement_gap_or_item_reaches_the_final_evaluation(
+    approval: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Criteria 1 and 7 (issue #908) through the real composition.
+
+    A recorded statement travels as its own ``task_description`` candidate only under a policy
+    that names the section; an approval that predates the section sends no statement at all and
+    the final evaluation carries ``task_statement_unavailable`` with ``not_authorized``.
+    """
+
+    from yoetz.domain.task_statement import RecordedTaskStatement
+    from yoetz.domain.values import event_id
+
+    monkeypatch.setattr(diagnostics_module, "log_dir", lambda: tmp_path)
+    privacy = _Privacy(profile=ReviewContextProfile.EXPANDED)
+    privacy.terminal_provider_result = True
+    if approval == "predates_section":
+        store = privacy.policy_application.policy_store
+        effective = store._effective  # pyright: ignore[reportPrivateUsage]
+        legacy = replace(
+            effective.policy,
+            review_selection=ReviewSelectionPolicy.for_profile(
+                ReviewContextProfile.EXPANDED, preset_version="1.1.0"
+            ),
+        )
+        store._effective = replace(effective, policy=legacy)  # pyright: ignore[reportPrivateUsage]
+    statement_event = event_id("evt_53000000-0000-4000-8000-000000000908")
+    statement = "Under Ascii, Style.Truncate returns plain text without tail."
+    base = _frozen()
+    case = replace(
+        make_case(extra_refs=(statement_event,)),
+        task_statement=RecordedTaskStatement(statement, statement_event, "session_opened", 1),
+        task_title="termenv",
+    )
+    frozen = replace(base, case=case)
+
+    result = await _evaluator(privacy, lambda: _PROVIDER, _route())(frozen, ())
+
+    assert privacy.calls == 1
+    [candidate] = privacy.candidates
+    carried = [item for item in candidate.items if item.item_id == "task-statement"]
+    if approval == "current":
+        assert [item.category for item in carried] == [DataCategory.TASK_DESCRIPTION]
+        assert statement.encode() in carried[0].plaintext
+        assert not {gap for gap in result.case_content_gaps if gap.startswith("task_statement")}
+    else:
+        assert carried == []
+        assert all(statement.encode() not in item.plaintext for item in candidate.items)
+        assert {"task_statement_not_authorized", "task_statement_unavailable"} <= set(
+            result.case_content_gaps
+        )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("recorded", ["statement", "title_only"])
+async def test_a_channel_that_withholds_task_description_says_the_statement_was_not_sent(
+    recorded: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #908: the section is selected but the LLM channel will not let task_description out.
+
+    The statement (or the title standing in) would be built and then filtered at egress, so a
+    review could succeed without the user's request and say only that some context was withheld.
+    The packet and the final evaluation name it instead: ``task_statement_unavailable`` with
+    ``task_statement_not_authorized``, and no statement item is offered at all.
+    """
+
+    from builders.privacy_policies import minimal_external_policy
+    from yoetz.domain.task_statement import RecordedTaskStatement
+    from yoetz.domain.values import event_id
+
+    monkeypatch.setattr(diagnostics_module, "log_dir", lambda: tmp_path)
+    privacy = _Privacy(profile=ReviewContextProfile.EXPANDED)
+    privacy.terminal_provider_result = True
+    store = privacy.policy_application.policy_store
+    effective = store._effective  # pyright: ignore[reportPrivateUsage]
+    base = minimal_external_policy()
+    blocked = replace(
+        base,
+        review_context_profile=ReviewContextProfile.EXPANDED,
+        review_selection=ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED),
+        effective_scope=effective.policy.effective_scope,
+        channel_policies=tuple(
+            replace(
+                channel,
+                allowed_categories=tuple(
+                    item
+                    for item in channel.allowed_categories
+                    if item is not DataCategory.TASK_DESCRIPTION
+                ),
+            )
+            if channel.channel is EgressChannel.LLM_INFERENCE
+            else channel
+            for channel in base.channel_policies
+        ),
+    )
+    assert "task_statement" in blocked.review_selection.sections
+    assert DataCategory.TASK_DESCRIPTION in blocked.withheld_review_categories
+    store._effective = EffectivePrivacyPolicy(  # pyright: ignore[reportPrivateUsage]
+        blocked, effective.generation, blocked.policy_digest
+    )
+    statement_event = event_id("evt_53000000-0000-4000-8000-000000000909")
+    statement = "Under Ascii, Style.Truncate returns plain text without tail."
+    case = replace(
+        make_case(extra_refs=(statement_event,)),
+        task_statement=(
+            RecordedTaskStatement(statement, statement_event, "session_opened", 1)
+            if recorded == "statement"
+            else None
+        ),
+        task_title="termenv",
+    )
+
+    result = await _evaluator(privacy, lambda: _PROVIDER, _route())(
+        replace(_frozen(), case=case), ()
+    )
+
+    assert privacy.calls == 1
+    [candidate] = privacy.candidates
+    assert [item for item in candidate.items if item.item_id == "task-statement"] == []
+    assert {"task_statement_unavailable", "task_statement_not_authorized"} <= set(
+        result.case_content_gaps
+    )
+    assert "task_statement_not_supplied" not in result.case_content_gaps
+    envelope = next(item.plaintext for item in candidate.items if item.item_id == "review-packet")
+    assert b"task_statement_not_authorized" in envelope

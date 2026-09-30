@@ -609,6 +609,31 @@ def _privacy_policy_change_text(preview: PrivacyPolicyDecisionPreview) -> str:
     return "\n".join(lines)
 
 
+def _task_statement_change_note(change: PrivacyPolicyChange) -> str | None:
+    """Plain words for adding or removing the ``task_statement`` review section (issue #908).
+
+    An approval given for the agent's plan never covers the user's own words, so the ceremony
+    names this content explicitly instead of leaving it to one token in a section list.
+    """
+
+    if (change.area, change.field) != ("review", "sections"):
+        return None
+    before = "task_statement" in change.before.labels
+    after = "task_statement" in change.after.labels
+    if after and not before:
+        return (
+            "task_statement: the agent's transcription of the user's request (or the task "
+            "title when none was supplied) will be sent to the reviewer. The host-captured "
+            "user prompt is not used."
+        )
+    if before and not after:
+        return (
+            "task_statement: the agent's transcription of the user's request will stop being "
+            "sent; it stays in the local task record."
+        )
+    return None
+
+
 def _append_privacy_change_lines(
     lines: list[str], changes: tuple[PrivacyPolicyChange, ...]
 ) -> None:
@@ -625,6 +650,9 @@ def _append_privacy_change_lines(
             before = _change_value_text(change, change.before)
             after = _change_value_text(change, change.after)
             lines.append(f"  {marker} {_change_line_label(change)}: {before}{_ARROW}{after}")
+            note = _task_statement_change_note(change)
+            if note is not None:
+                lines.append(f"      {note}")
     if len(placed) != len(changes):
         # A field the service is allowed to send but this screen has no group for would be
         # silently dropped, which is the exact defect this renderer exists to close.

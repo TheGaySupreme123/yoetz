@@ -33,6 +33,8 @@ from yoetz.domain.events import (
     LINEAGE_SESSION_EVENT_SCHEMA_VERSION,
     OBSERVATION_COORDINATOR_ACTOR_ID,
     SESSION_EVENT_SCHEMA_VERSION,
+    TASK_STATEMENT_SESSION_OPENED_SCHEMA_VERSION,
+    TASK_STATEMENT_SESSION_RESUMED_SCHEMA_VERSION,
     DelegationDeclaredPayload,
     EventDraft,
     EventSchema,
@@ -348,8 +350,17 @@ def _storage_unsafe() -> PublicOperationError:
 def _request_digest(request: StartRequest, command: StartCommand) -> str:
     commitments = command.identity_commitments
     attach_handle = request.attach_handle
+    # The statement is part of request identity, so a retry with the same request_id and the
+    # same statement replays and a different statement conflicts (issue #908). Present only when
+    # supplied, so every earlier request keeps its exact digest.
+    statement: dict[str, JsonValue] = (
+        {}
+        if request.task_statement is None
+        else {"task_statement_digest": canonical_digest(request.task_statement)}
+    )
     return canonical_digest(
         {
+            **statement,
             "actor": cast(
                 JsonValue,
                 request.actor.model_dump(mode="json", exclude_none=False),
@@ -597,22 +608,33 @@ async def _lifecycle_append(
             ),
             depth=None if lineage_snapshot is None else lineage_snapshot.depth,
             origin=None if lineage_snapshot is None else lineage_snapshot.origin,
+            task_statement=request.task_statement,
         )
         schema = EventSchema(
             "session_opened",
-            LINEAGE_SESSION_EVENT_SCHEMA_VERSION
+            TASK_STATEMENT_SESSION_OPENED_SCHEMA_VERSION
+            if request.task_statement is not None
+            else LINEAGE_SESSION_EVENT_SCHEMA_VERSION
             if lineage_snapshot is not None
             else SESSION_EVENT_SCHEMA_VERSION,
         )
     else:
+        # A statement supplied on reattach revises the task's current statement; the earlier
+        # one stays in the ledger history (issue #908).
         payload = SessionResumedPayload(
             client_kind=request.client.kind,
             client_version=request.client.version,
             integration=request.client.integration,
             profile=app.profile,
             resumed_frontier=current,
+            task_statement=request.task_statement,
         )
-        schema = EventSchema("session_resumed", SESSION_EVENT_SCHEMA_VERSION)
+        schema = EventSchema(
+            "session_resumed",
+            SESSION_EVENT_SCHEMA_VERSION
+            if request.task_statement is None
+            else TASK_STATEMENT_SESSION_RESUMED_SCHEMA_VERSION,
+        )
     payload_bytes = canonical_encode(encode_payload(payload))
     metadata = ObjectMetadata(
         ObjectKind.EVENT_PAYLOAD,

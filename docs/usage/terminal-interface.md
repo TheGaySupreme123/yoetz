@@ -138,6 +138,7 @@ Structural hooks installed          Credential stored
 Project consent active              Provider connection tested
 Approved-check policy trusted       Deeper-review evaluator composed
                                     Privacy permits external review
+                                    Privacy sends the task statement
                                     Deeper review ready
                                     Codex agent route permits deeper review
                                     Host auto-review admits the AI-powered check
@@ -149,6 +150,10 @@ The last five are deliberately separate lines, because each can be true while th
 - **Privacy permits external review** — the effective privacy policy for this repository allows
   external LLM inference. Unknown when the policy could not be read; its detail line carries the
   policy summary.
+- **Privacy sends the task statement** — whether the policy lets your request, as the agent
+  transcribed it, reach the reviewer. The detail is the sentence `yoetz privacy show` prints;
+  unknown when the policy could not be read. Whether a given task recorded a statement, and what
+  the reviewer had in its place, is on that task's receipt.
 - **Deeper review ready** — the installation reports `semantic_ready`: AI-powered review enabled, a
   bound provider with a stored credential, a policy that permits inference, and an exact grant for
   this repository. Configured, not proven working. Otherwise the detail says external review is
@@ -187,8 +192,8 @@ offered as a change.
 
 The posture is for the repository derived by the service from the interface session's actual working
 directory. Branches and linked worktrees share the Git common root; independent clones do not. The
-screen shows machine ceiling, exact repository grant, and legacy migration state separately. It
-never uses task `workspace_ref` as privacy scope.
+screen shows machine ceiling, exact repository grant, and legacy migration state separately, and
+whether the task statement is sent. It never uses task `workspace_ref` as privacy scope.
 
 This screen selects; it never authorizes. Choosing anything but *Keep current* suspends the
 interface and hands the controlling terminal to `yoetz privacy setup`, and that trusted ceremony is

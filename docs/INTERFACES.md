@@ -1197,6 +1197,8 @@ Four further codes describe a review that did run but could not deliver everythi
   (`finding_summary` and `bounded_structural_metadata`) and this gap names the capacity reason.
   References are never sliced to fit; a partial subject list presented as the finding's own would
   be a different finding. The review still dispatches once with the other findings.
+- `task_statement_unavailable`, `task_statement_not_supplied`, `task_statement_not_authorized` —
+  what the reviewer knew of the user's request (issue #908; see "Task statement" below).
 
 Post-validation fences each challenge independently: a rejected challenge costs only itself, the
 challenges beside it still become findings, and the drop is declared through this gap. A judgment
@@ -7512,3 +7514,83 @@ Wire (all additive, unreleased versions changed in place):
   on the page only. The TUI `/findings` command reads the open task's `findings` status view
   with `include_resolved` and renders it through the same CLI lines, so every item shows its one
   state there too.
+
+### Task statement (issue #908)
+
+The reviewer judges the change against what the user asked for, kept apart from the agent's own
+plan. Names and contracts:
+
+- `start.task_statement` (optional in the unreleased start-request 1.1.0): the user's request as the agent
+  transcribed it, 1..`MAX_TASK_STATEMENT_BYTES` (65,536) UTF-8 bytes. It is part of start request
+  identity: a retry with the same `request_id` and statement replays; different words under the
+  same `request_id` conflict. `yoetz start --task-statement-file PATH|-` reads it verbatim. A
+  request without it keeps its exact historical digest.
+- Ledger: the unreleased `session_opened` 1.2.0 carries an optional `task_statement` beside the
+  lineage metadata (on create; a statement alone selects 1.2.0, and a create with neither stays on
+  1.1.0). The released families gain new versions that require it: `session_resumed` 1.2.0 (on
+  reattach) and `plan_published`/`plan_revised` 1.1.0, which the unreleased event-draft 1.2.0 and
+  publish-work-request 1.2.0 admit in place. Each released version stays frozen and never admits
+  the field, and a version minted for the statement is never chosen without one. The advertised
+  MCP `publish_work` presentation leaves the plan 1.1.0 branches out to hold the reviewed surface
+  budget, so an MCP agent revises the statement with a reattaching `start`; the catalog schema,
+  the CLI and the service still accept the plan branches. `domain/task_statement.current_task_statement`
+  returns the newest readable statement in ledger order; earlier ones stay in history, and a
+  redacted event contributes nothing.
+- `DeterministicCase.task_statement` (`RecordedTaskStatement`) and `task_title` are frozen from
+  the accepted prefix; the statement's source event joins `allowed_ids`, so it is citable. The
+  frozen-case JSON gains a `task_context` key only when either is present.
+- `TaskStatementSource`: `agent_transcribed` (every recorded statement), `host_captured_user_prompt`
+  (reserved: no path records it and captured prompt text never enters a packet), and
+  `task_title_only` (fallback).
+- Packet: section `task_statement` (ordinal before `goal`), one item `task-statement`, category
+  `task_description`, source kind `task`, content `yoetz.task-statement/1`
+  (`source`, `statement`, `statement_bytes`, `elided_bytes`). Content is at most
+  `MAX_TASK_STATEMENT_ITEM_BYTES` (16 KiB) of canonical JSON: a longer statement keeps its head and
+  tail, marks `[... N bytes elided ...]`, and adds `semantic_case_content_over_item_limit`.
+  `ReviewPacket.task_statement_item_ids` (max 1) and outbound-case 1.2.0 carry it. Catalog and
+  provider rows for `goal` carry the fixed label `agent plan (the agent's own summary)`; the
+  statement row carries its own fixed label. Plan payloads in the goal item and in timeline rows
+  never include `task_statement`.
+- Source order: agent statement, then task title (`task_title_only`), else no item. The item is
+  built only when the effective review selection names `task_statement`. Composition builds from
+  `review_selection_for_delivery(policy)`, which drops the section when the LLM channel withholds
+  `task_description`, so a statement egress would filter is never offered and the packet names
+  its absence.
+- Gaps (packet, check, finding baseline and receipt coverage): `task_statement_unavailable`
+  (nothing carried) always travels with exactly one reason: `task_statement_not_authorized` (the
+  selection lacks the section, or the LLM channel's `allowed_categories` lack `task_description`,
+  whether or not a statement is recorded) or
+  `task_statement_not_supplied` (the section is selected but neither a statement nor a readable
+  title is recorded). A title standing in adds no gap; its `task_title_only` source label is the
+  disclosure. Receipts add fixed prose for each code. Without those codes, a receipt whose
+  applicable check completed an AI-powered review also names the source in its limitations
+  section, read from the ledger prefix that check tested: `agent_transcribed` when a statement
+  preceded it, `task_title_only` ("had at most the task title") when none did, and nothing when a
+  statement-bearing event there is no longer readable. They are semantic-only for deterministic
+  absence proof and join `SEMANTIC_FINDING_CAPTURE_BASELINE_GAPS` for semantic findings. A
+  finding that carries none of them and was raised before the ledger's first statement-capable
+  event (`ReplayIndex.first_task_statement_sequence`: a statement-bearing schema version whose
+  readable payload carries a statement, or whose payload is no longer readable) tolerates them
+  on a later check, so an AI-powered finding recorded before the upgrade can still clear: the
+  review that raised it had at most the task title (`task_title_only`), never the user's request.
+- Privacy: review section `task_statement` in privacy-policy 1.2.0. `ReviewSelectionPolicy
+  .for_profile(profile, preset_version="1.1.0"|"1.2.0")`; the 1.2.0 goal-aware, Assisted and
+  Expanded presets include the section, Structural never does, Custom only when listed.
+  `PrivacyPolicy` accepts any versioned preset of its profile. Wire encoding picks
+  `review_selection_policy_schema_version` (1.1.0 unless a 1.2.0-only section is selected), so an
+  approval made before the section keeps its bytes and digest; a 1.0.0/1.1.0 row that names the
+  section is `privacy_policy_row_corrupt`.
+- The unreleased local control 2.9.0 carries the fields in place and admits either
+  privacy-policy wire version. A newer client meets an older running service at the schema-manifest
+  digest in `control-hello` (`manifest_mismatch`, superseded through `yoetz service restart`), and a
+  released 0.2.5 boundary's closed start-request 1.0.0 schema refuses the field rather than
+  dropping it.
+- Golden vectors: `fixtures/canonical/task-statement.case.json` (TSK-001, owned by
+  `scripts/generate_task_statement_fixture.py` through the resource ripple) pins every
+  statement-bearing event version beside its frozen predecessor, the statement-free start request
+  digest (equal to the digest before the field existed) and the privacy-policy 1.1.0 and 1.2.0
+  wires of one approval.
+- `TASK_STATEMENT_REVIEW_INSTRUCTION` (appended to the Responses and Chat Completions system
+  instructions): the task statement is the specification and wins over the plan; an omitted or
+  contradicted stated requirement is a discrepancy citing the statement's source ref; never request
+  behaviour it excludes; weigh `agent_transcribed` as the agent's account.

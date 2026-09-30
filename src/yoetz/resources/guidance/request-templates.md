@@ -41,6 +41,17 @@ host-context `session_id`; never use a bare `task_id` as an attach selector. A l
 recover a prior `request_id` with `status view=operation` from the successor session. Intentional
 siblings use a different complete pair with `create_or_attach`, or explicit `mode=create`.
 
+Pass the user's request verbatim in `task_statement`: the whole request as the user wrote it, not
+a paraphrase and not your plan. It is recorded in the task ledger and labelled as your
+transcription (`agent_transcribed`). AI-powered review reads it as the specification, apart from
+your plan, only when the approved privacy policy lists the `task_statement` section; otherwise the
+check and receipt say `task_statement_not_authorized`. When the user amends the request, call
+`start` again with a fresh `request_id`, `mode=attach`, the `session_id` you hold, and the whole
+amended request in `task_statement` (a CLI publisher may instead carry it in a `plan_revised`
+1.1.0 payload). On a resume that does not change the request, omit `task_statement`; the recorded
+statement stays current. The newest statement is current and earlier ones stay in history. Never
+put the statement in a plan `summary`, and never infer it from commit messages or files.
+
 ```json
 {
   "protocol_version": "0.1",
@@ -48,8 +59,38 @@ siblings use a different complete pair with `create_or_attach`, or explicit `mod
   "request_id": "req_00000000-0000-4000-8000-000000000001",
   "mode": "create_or_attach",
   "task_title": "Replace with the bounded task title",
+  "task_statement": "Replace with the user's request, verbatim",
   "workspace_ref": "/workspace/project",
   "external_ref": "issue-128",
+  "requested_view": "compact",
+  "actor": {
+    "actor_id": "harness:mcp-template",
+    "actor_type": "harness"
+  },
+  "client": {
+    "kind": "cooperative_agent",
+    "version": "0.1.0",
+    "integration": "cooperative_mcp"
+  }
+}
+```
+
+### `start`: revise the task statement
+
+The ordinary `publish_work` tool does not list the plan shapes that carry `task_statement`, so over
+MCP revise the statement with this reattaching `start`. It records the whole amended request on a
+`session_resumed` event, and that newest statement becomes current. Continue with the ids it
+returns.
+
+```json
+{
+  "protocol_version": "0.1",
+  "schema_version": "1.0.0",
+  "request_id": "req_00000000-0000-4000-8000-000000000020",
+  "mode": "attach",
+  "session_id": "ses_00000000-0000-4000-8000-000000000001",
+  "task_title": "Replace with the bounded task title",
+  "task_statement": "Replace with the whole amended request, verbatim",
   "requested_view": "compact",
   "actor": {
     "actor_id": "harness:mcp-template",

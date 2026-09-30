@@ -41,7 +41,10 @@ not a second wire authority.
 
 ### `start`
 Opens a task, or attaches to an existing one, and issues a session and a distinct logical writer
-identity. Create-vs-attach is explicit in the request — Yoetz does not guess.
+identity. Create-vs-attach is explicit in the request — Yoetz does not guess. Agents pass your
+request verbatim as `task_statement` (on the command line, `yoetz start --task-statement-file`);
+it is recorded with the task and, when your privacy policy allows it, the AI-powered reviewer
+reads it as the specification.
 
 ### `publish_work`
 Records bounded, participant-published facts: plan, requested outcomes, obligations, claims,

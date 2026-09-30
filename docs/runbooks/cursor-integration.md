@@ -1732,3 +1732,33 @@ control and bridge path decides schema validity without rebuilding diagnostics f
 with byte-identical pages and receipts. This host uses that path unchanged. Its per-host dogfood
 timing on macOS, Linux and WSL 2 is not yet measured; issue #916 owns it. See
 [status render performance](status-render-performance.md).
+
+## Task statement for AI-powered review (issue #908)
+
+Decision for Cursor: supported through the agent-supplied field, identical on every host and OS.
+The agent passes the user's request verbatim as `start.task_statement` (MCP `start` or
+`yoetz start --task-statement-file`). To revise it, the agent calls `start` again with
+`mode=attach`, the `session_id` it holds, a fresh `request_id` and the whole amended request; a CLI
+publisher may instead carry it in a `plan_revised` 1.1.0 payload. A resume that does not change the
+request omits the field, and the recorded statement stays current. The review packet carries it as
+the `task_statement` section labelled `agent_transcribed`, apart from the plan, only when the
+approved privacy policy names that section (privacy policy 1.2.0 presets Goal-aware, Assisted and
+Expanded; never Structural). With no statement recorded the task title stands in, labelled
+`task_title_only`, and no gap is added. When the policy withholds the section, or its review channel
+does not allow `task_description`, the check and receipt
+carry `task_statement_unavailable` with `task_statement_not_authorized`; with neither a statement
+nor a readable title they carry `task_statement_unavailable` with `task_statement_not_supplied`.
+
+Cursor's structural adapter discards prompt text before local storage, and Yoetz does not keep `beforeSubmitPrompt` text. This is the parity path: Cursor uses the agent-supplied statement exactly like Codex and Claude Code. Keeping `beforeSubmitPrompt` text under the same consent rules (Expanded profile plus an explicit, off-by-default prompt-capture choice) is a follow-up owned by the Cursor adapter, tracked from issue #908.
+
+Host-captured prompts (`host_captured_user_prompt`) are not used on any host in this version:
+captured prompt text never enters the packet, and the Expanded-only, explicit prompt-capture
+choice that would allow it is still open on issue #908.
+
+Automatic attach does not record a task statement. The shared observation hook opens the task
+with a generic title and no `task_statement`, so until the agent calls `start` with the user's
+request the reviewer sees at most that title (`task_title_only`), and the receipt says so.
+Recording hook text there would label it `agent_transcribed`, which it is not, and would bypass
+the prompt-capture consent still open on issue #908.
+For Cursor the structural adapter discards prompt text before local storage, so an attach has
+no prompt to record.

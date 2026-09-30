@@ -43,6 +43,7 @@ from yoetz.domain.events import (
     obligation_meaning_field_diffs,
 )
 from yoetz.domain.findings import Finding, ResponseDisposition
+from yoetz.domain.task_statement import may_carry_task_statement
 from yoetz.domain.values import (
     ActionId,
     ClaimId,
@@ -318,9 +319,16 @@ class ReplayIndex:
     # Service-stamped hook-observed action/result events. Authorship lives on the envelope, not
     # the projection, so the claim-revision invariant reads provenance here (#909).
     observed_event_ids: frozenset[EventId] = frozenset()
+    # The ingestion sequence of the first event that may have carried a task statement
+    # (``may_carry_task_statement``, issue #908); ``None`` while the prefix has none. Finding resolution uses it to recognize an
+    # AI-powered finding raised before any review could have received a statement.
+    first_task_statement_sequence: int | None = None
 
     def __post_init__(self) -> None:
         if type(self.frontier) is not int or not 0 <= self.frontier <= _MAX_SQLITE_SIGNED_INTEGER:
+            raise _corrupt()
+        first = self.first_task_statement_sequence
+        if first is not None and (type(first) is not int or not 1 <= first <= self.frontier):
             raise _corrupt()
         try:
             if self.frontier == 0:
@@ -549,6 +557,12 @@ def extend_replay_index(index: ReplayIndex, event: LedgerRecord) -> ReplayIndex:
             redaction_root_by_object=redaction_roots,
             observed_event_ids=observed,
             observation_finding_event_ids=observation_findings,
+            first_task_statement_sequence=(
+                index.first_task_statement_sequence
+                if index.first_task_statement_sequence is not None
+                or not may_carry_task_statement(event)
+                else event.ledger.ingestion_sequence
+            ),
         )
     finally:
         _TRUSTED_PRIOR_INDEX.reset(token)
@@ -1395,7 +1409,13 @@ def reduce_event(
                 # Resolution is a fold over every recorded check, not a property of the latest
                 # one: a finding proven absent stays resolved when a later weaker check adds
                 # nothing, and is re-fired only when a check returns the same issue again.
-                apply_check_resolution(findings, check, accepted.event_id, proof_state=state)
+                apply_check_resolution(
+                    findings,
+                    check,
+                    accepted.event_id,
+                    proof_state=state,
+                    first_task_statement_sequence=replay_index.first_task_statement_sequence,
+                )
                 apply_check_rulings(findings, responses, check, accepted.event_id)
                 # Issue #907: the latest assessed review decides what is still named missing. A
                 # local-only or failed check leaves the prior request standing, and so does an
@@ -1565,6 +1585,7 @@ def build_replay_index(events: tuple[LedgerRecord, ...]) -> ReplayIndex:
         raise _corrupt()
     frontier = 0
     head_digest = "genesis"
+    first_task_statement_sequence: int | None = None
     payload_event_by_object: dict[ObjectId, EventId] = {}
     evidence_sources_by_object: dict[ObjectId, tuple[EvidenceObjectSource, ...]] = {}
     redaction_root_by_object: dict[ObjectId, EventId] = {}
@@ -1628,6 +1649,8 @@ def build_replay_index(events: tuple[LedgerRecord, ...]) -> ReplayIndex:
 
         frontier = event.ledger.ingestion_sequence
         head_digest = event.entry_digest
+        if first_task_statement_sequence is None and may_carry_task_statement(event):
+            first_task_statement_sequence = frontier
 
     return ReplayIndex(
         frontier=frontier,
@@ -1637,6 +1660,7 @@ def build_replay_index(events: tuple[LedgerRecord, ...]) -> ReplayIndex:
         redaction_root_by_object=redaction_root_by_object,
         observed_event_ids=frozenset(observed_event_ids),
         observation_finding_event_ids=frozenset(observation_finding_event_ids),
+        first_task_statement_sequence=first_task_statement_sequence,
     )
 
 

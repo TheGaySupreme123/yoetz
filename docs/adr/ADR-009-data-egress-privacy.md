@@ -648,3 +648,27 @@ attempt owes. Accordingly:
 
 The invariant is unchanged and now holds: a consumed authorization ends in exactly one terminal
 receipt. Local-sink (`local_disclosure_pending`) cancellation is not covered by this amendment.
+
+## Task statement review section amendment (2026-09-30, issue #908)
+
+The agent-transcribed task statement is different content from the agent's plan summary even
+though both are `task_description`, so an approval given for the plan (`goal`) never covers it.
+
+- Privacy-policy wire 1.2.0 adds the review section `task_statement` (the agent's transcription
+  of the user's request, or the task title when none was supplied). Review presets are versioned
+  with the wire: from 1.2.0 the `goal_aware`, `assisted` and `expanded` presets include it,
+  `structural` never does, and `custom` only when its owner lists it.
+- No silent widening: a policy approved under the 1.1.0 presets stays valid, keeps its exact
+  1.1.0 bytes and digest, and sends no statement. Checks under it carry
+  `task_statement_unavailable` with `task_statement_not_authorized`. Moving to a 1.2.0 preset is a
+  `sections` widening, so it needs the trusted approval ceremony, whose screen says in fixed words
+  that the agent's transcription of the user's request will be sent and that the host-captured
+  prompt is not used. A 1.0.0/1.1.0 document that names the section is corrupt.
+- `yoetz --privacy` and the policy draft print whether the current and proposed policies send
+  the task statement; `yoetz privacy show` on a terminal adds the same sentence after the policy.
+- The statement item passes the same classifier and never-send scanner as every other item and is
+  bounded like one excerpt (16 KiB of canonical JSON, head and tail kept, elision marked).
+- The host-captured user prompt (`host_captured_user_prompt`) is a reserved source. No path
+  records it, captured prompt text never enters a packet, and the explicit, off-by-default
+  prompt-capture choice under Expanded that it would need is not implemented yet; it remains on
+  issue #908.

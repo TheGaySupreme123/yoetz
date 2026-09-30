@@ -24,7 +24,7 @@ _MANIFEST_PATH = "manifest.json"
 _SCHEMA_NAMESPACE = "https://schemas.yoetz.dev/0.1/"
 _EXPECTED_SCHEMA_MANIFEST_SCHEMA = "yoetz.schema-manifest/1.0.0"
 _EXPECTED_SCHEMA_MANIFEST_VERSION = "1.0.0"
-_EXPECTED_MEMBER_COUNT = 212
+_EXPECTED_MEMBER_COUNT = 216
 _EXPECTED_REQUEST_RESULT_VERSION_COUNT = 51
 _EXPECTED_EVENT_VERSION_COUNT = 29
 
@@ -271,12 +271,15 @@ def test_schema_registry_is_complete() -> None:
                 "findings/semantic-provenance-1.2.0.schema.json",
                 "events/opaque-unknown-event-draft-1.2.0.schema.json",
                 "events/session-opened-1.2.0.schema.json",
+                "events/session-resumed-1.2.0.schema.json",
                 "findings/finding-1.2.0.schema.json",
                 "operations/check-result-1.2.0.schema.json",
                 "operations/publish-work-request-1.2.0.schema.json",
                 "operations/receipt-result-1.2.0.schema.json",
                 "operations/status-request-1.2.0.schema.json",
                 "operations/status-result-1.2.0.schema.json",
+                "privacy/outbound-case-1.2.0.schema.json",
+                "privacy/privacy-policy-1.2.0.schema.json",
                 "receipts/receipt-document-1.2.0.schema.json",
             }
             else (
@@ -295,6 +298,8 @@ def test_schema_registry_is_complete() -> None:
                     "events/evidence-recorded-1.1.0.schema.json",
                     "events/finding-recorded-1.1.0.schema.json",
                     "events/opaque-unknown-event-draft-1.1.0.schema.json",
+                    "events/plan-published-1.1.0.schema.json",
+                    "events/plan-revised-1.1.0.schema.json",
                     "events/session-opened-1.1.0.schema.json",
                     "events/session-resumed-1.1.0.schema.json",
                     "findings/finding-1.1.0.schema.json",
@@ -516,7 +521,11 @@ def test_live_version_manifest_2_3_tracks_the_current_inventory() -> None:
     events = _version_manifest_consts(document, "event_schema_versions")
     assert events["claim_recorded"] == "1.1.0"
     requests = _version_manifest_consts(document, "request_result_schema_versions")
+    # The task-statement contracts (issue #908).
     assert requests["publish-work-request"] == "1.2.0"
+    assert requests["start-request"] == "1.1.0"
+    assert requests["privacy-policy"] == "1.2.0"
+    assert events["session_opened"] == "1.2.0"
 
 
 def test_released_version_manifest_2_2_2_retains_the_0_2_4_inventory() -> None:

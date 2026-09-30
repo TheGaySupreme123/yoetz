@@ -174,6 +174,8 @@ def test_frozen_history_is_bounded_and_legacy_cases_remain_distinct(
     legacy.pop("history")
     legacy.pop("history_availability")
     legacy.pop("history_omitted_before_count")
+    # Cases frozen before history existed also predate the task context (issue #908).
+    legacy.pop("task_context")
     decoded = deterministic_case_from_json(legacy)
     assert decoded.history == ()
     assert decoded.history_availability == "not_recorded"

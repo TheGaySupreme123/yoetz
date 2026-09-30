@@ -183,6 +183,11 @@ GAP_CLASSIFICATION: Final[Mapping[str, GapClass]] = MappingProxyType(
         "semantic_prior_findings_over_limit": _S,  # prior-findings packet bound (#905)
         "semantic_prior_verdicts_unsupported": _S,  # reviewer rulings dropped by the fence (#905)
         "semantic_restatements_suppressed": _S,  # duplicate re-raises folded into one item (#905)
+        # #908: what the reviewer knew of the user's request. Withholding is the owner's policy;
+        # a missing statement is agent work (a reattaching ``start`` with ``task_statement``).
+        "task_statement_unavailable": _S,
+        "task_statement_not_authorized": _S,
+        "task_statement_not_supplied": _A,
         "semantic_case_capacity_exceeded": _S,
         "semantic_reference_scope_reduced": _S,  # deliberate selection: bounded review scope (#904)
         "optional_semantic_review_blocked_by_policy": _S,
