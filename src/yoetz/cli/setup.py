@@ -366,6 +366,37 @@ def _append_next_step(next_steps: list[JsonValue], step: str) -> None:
         next_steps.append(step)
 
 
+_ADVICE_UNREADABLE_NOTE: Final = "background_advice_unreadable"
+_ADVICE_UNREADABLE_TEXT: Final = (
+    "not demonstrated (the background-advice setting could not be read)"
+)
+
+
+def _semantic_advice_readiness(status: Mapping[str, object]) -> tuple[bool, str]:
+    """Background-advice readiness and its closed note from a provider status report.
+
+    Background advice is its own switch, off by default where explicit checks run (#888): a ready
+    provider alone is not ready background advice. An absent, malformed or unrecognized advice fact
+    (for example from a status that predates the switch) is unreadable, never a raw reason token.
+    """
+
+    from yoetz.cli.provider_status import background_advice_human_line
+
+    if status.get("semantic_ready") is not True:
+        return False, "semantic_configuration_incomplete"
+    advice = status.get("background_advice")
+    facts: Mapping[str, object] = (
+        cast(Mapping[str, object], advice) if isinstance(advice, Mapping) else {}
+    )
+    enabled = facts.get("enabled")
+    reason = facts.get("reason")
+    if enabled is True:
+        return True, "configured_and_composed; live_provider_dispatch_not_tested"
+    if enabled is False and type(reason) is str and background_advice_human_line(facts):
+        return False, "background_advice_off:" + reason
+    return False, _ADVICE_UNREADABLE_NOTE
+
+
 def _semantic_status_next_steps(status: Mapping[str, object]) -> tuple[str, ...]:
     """Translate authoritative provider-status blockers into wizard recovery guidance."""
 
@@ -2882,24 +2913,9 @@ async def run_setup_wizard(
         codex_home=selected_codex_home,
     )
     if semantic_status is not None:
-        semantic_ready = semantic_status.get("semantic_ready") is True
-        # Background advice is its own switch, off by default where explicit checks run (#888):
-        # a ready provider alone is not ready background advice.
-        advice = semantic_status.get("background_advice")
-        advice_facts: Mapping[str, JsonValue] = (
-            cast(Mapping[str, JsonValue], advice) if isinstance(advice, Mapping) else {}
-        )
-        advice_on = advice_facts.get("enabled") is True
-        advice_reason: JsonValue = advice_facts.get("reason")
-        readiness["semantic_advice_ready"] = semantic_ready and advice_on
-        readiness["semantic_advice_note"] = (
-            "semantic_configuration_incomplete"
-            if not semantic_ready
-            else "configured_and_composed; live_provider_dispatch_not_tested"
-            if advice_on
-            else "background_advice_off:"
-            + (advice_reason if type(advice_reason) is str else "unknown")
-        )
+        advice_ready, advice_note = _semantic_advice_readiness(semantic_status)
+        readiness["semantic_advice_ready"] = advice_ready
+        readiness["semantic_advice_note"] = advice_note
     recommendations = await _refresh_setup_recommendations(
         binary=chosen,
         codex_home=selected_codex_home,
@@ -3040,12 +3056,18 @@ def _emit_human_report(report: dict[str, JsonValue]) -> None:
         )
         advice_note = readiness.get("semantic_advice_note")
         advice_text: str | None = None
-        if type(advice_note) is str and advice_note.startswith("background_advice_off:"):
-            # Fixed text only; the closed reason token never renders raw (#888).
+        if advice_note == _ADVICE_UNREADABLE_NOTE:
+            advice_text = _ADVICE_UNREADABLE_TEXT
+        elif type(advice_note) is str and advice_note.startswith("background_advice_off:"):
+            # Fixed text only; the closed reason token never renders raw, and a reason this
+            # client does not recognize renders as unreadable (#888).
             from yoetz.cli.provider_status import background_advice_human_line
 
-            advice_text = background_advice_human_line(
-                {"reason": advice_note.removeprefix("background_advice_off:")}
+            advice_text = (
+                background_advice_human_line(
+                    {"reason": advice_note.removeprefix("background_advice_off:")}
+                )
+                or _ADVICE_UNREADABLE_TEXT
             )
         typer.echo(
             "  AI-powered advice readiness: "

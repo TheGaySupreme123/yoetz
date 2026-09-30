@@ -203,3 +203,31 @@ def test_unset_switch_is_never_persisted_and_turning_it_back_on_round_trips(
     loaded = load_config({}, {}, path)
     assert loaded == enabled
     assert background_advice_setting(loaded) == BackgroundAdviceSetting(True, "owner_enabled")
+
+
+@pytest.mark.parametrize("semantic", ["required", "optional"])
+def test_upgraded_config_without_the_switch_turns_advice_off_and_an_explicit_true_keeps_it(
+    tmp_path: Path, semantic: str
+) -> None:
+    """Upgrade shape (#888): a stored config that never named the switch resolves to the default.
+
+    Both ``optional`` and ``required`` resolve off while the owner's recorded choice on #888 is
+    pending; a config written by a 0.3 development build carries an explicit ``true`` and keeps
+    advice on.
+    """
+
+    config = YoetzConfig(verification=VerificationConfig(semantic=semantic))  # type: ignore[arg-type]
+    unset = write_config_toml(config, path=tmp_path / "unset.toml")
+    assert "semantic_advice_enabled" not in unset.read_text(encoding="utf-8")
+    assert background_advice_setting(load_config({}, {}, unset)) == BackgroundAdviceSetting(
+        False, "explicit_checks_default"
+    )
+
+    kept = write_config_toml(
+        config.model_copy(update={"observation": ObservationConfig(semantic_advice_enabled=True)}),
+        path=tmp_path / "kept.toml",
+    )
+    assert "semantic_advice_enabled = true" in kept.read_text(encoding="utf-8")
+    assert background_advice_setting(load_config({}, {}, kept)) == BackgroundAdviceSetting(
+        True, "owner_enabled"
+    )

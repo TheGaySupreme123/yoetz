@@ -227,3 +227,82 @@ def test_setup_summary_explains_background_advice_off_in_fixed_words(
     assert "AI-powered advice readiness: off by default" in out
     assert "semantic_advice_enabled = true" in out
     assert "background_advice_off:" not in out
+
+
+@pytest.mark.parametrize(
+    "note",
+    [
+        "background_advice_off:unknown",
+        "background_advice_off:a_reason_this_client_does_not_know",
+        "background_advice_off:",
+    ],
+)
+def test_setup_summary_never_renders_an_unreadable_background_advice_token(
+    capsys: pytest.CaptureFixture[str], note: str
+) -> None:
+    """Issue #888: an absent or unrecognized advice reason renders fixed words, not the token."""
+
+    setup._emit_human_report(  # pyright: ignore[reportPrivateUsage]
+        {
+            "registration": {},
+            "service": {"reachable": True, "state": "ready"},
+            "provider": {},
+            "integration": {},
+            "readiness": {
+                "observation_ready": True,
+                "semantic_advice_ready": False,
+                "semantic_advice_note": note,
+            },
+            "next_steps": [],
+        }
+    )
+
+    out = capsys.readouterr().out
+    assert "background_advice_off" not in out
+    assert "a_reason_this_client_does_not_know" not in out
+    assert "AI-powered advice readiness: not demonstrated" in out
+    assert "background-advice setting could not be read" in out
+
+
+@pytest.mark.parametrize(
+    "advice",
+    [
+        None,
+        "on",
+        {},
+        {"enabled": False},
+        {"enabled": False, "reason": 7},
+        {"enabled": False, "reason": "a_reason_this_client_does_not_know"},
+    ],
+)
+def test_setup_readiness_marks_absent_or_malformed_background_advice_unreadable(
+    advice: object,
+) -> None:
+    """Issue #888: a status without a known advice fact is unreadable, never a raw reason."""
+
+    status: dict[str, object] = {"semantic_ready": True}
+    if advice is not None:
+        status["background_advice"] = advice
+
+    ready, note = setup._semantic_advice_readiness(status)  # pyright: ignore[reportPrivateUsage]
+
+    assert ready is False
+    assert note == "background_advice_unreadable"
+
+
+def test_setup_readiness_keeps_known_background_advice_reasons() -> None:
+    status = {
+        "semantic_ready": True,
+        "background_advice": {"enabled": False, "reason": "explicit_checks_default"},
+    }
+
+    assert setup._semantic_advice_readiness(status) == (  # pyright: ignore[reportPrivateUsage]
+        False,
+        "background_advice_off:explicit_checks_default",
+    )
+    assert setup._semantic_advice_readiness(  # pyright: ignore[reportPrivateUsage]
+        {"semantic_ready": True, "background_advice": {"enabled": True, "reason": "owner_enabled"}}
+    ) == (True, "configured_and_composed; live_provider_dispatch_not_tested")
+    assert setup._semantic_advice_readiness(  # pyright: ignore[reportPrivateUsage]
+        {"semantic_ready": False}
+    ) == (False, "semantic_configuration_incomplete")

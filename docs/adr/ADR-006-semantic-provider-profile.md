@@ -786,14 +786,21 @@ this change carry an explicit `true` and keep advice on until that line is remov
 (`facts.background_advice`) and the terminal interface status layer show the effective state and
 reason with fixed text; setting `true` is the way back. The setup wizard reports
 `semantic_advice_ready` only when the provider is ready and background advice is on, and its
-human summary renders the same fixed text for `background_advice_off:<reason>` otherwise. While
+human summary renders the same fixed text for `background_advice_off:<reason>` otherwise. A
+status whose advice fact is absent, malformed or carries a reason this client does not recognize
+is `background_advice_unreadable` and renders as not demonstrated because the setting could not be
+read, never as a raw token. While
 the switch resolves off, the service still wires a closing dispatch: startup rediscovery closes a
 row an earlier service left `pending` as `cancelled` / `cancelled` with no provider identity and
 no route, authority or provider work, so it neither stays pending nor is replayed if the owner
 later turns advice back on. This supersedes the #888 statement that re-enabling lets such work
 drain. This records the recommended option B of
 #923 pending the owner's recorded choice on #888; a dedicated advice purpose and prompt (option
-A) remains open. The same resolution applies to Codex, Claude Code and Cursor on macOS, Linux and
+A) remains open. That choice has two parts not yet recorded: whether to adopt the default at all,
+and whether it covers `optional` as well as `required`. #923 named `required` or `policy`, but
+`policy` is a route profile, not a `verification.semantic` value; this change treats `optional`
+as an explicit-check route, so an owner whose optional checks do not run on a change also gets no
+background advice for it unless they set `true`. The same resolution applies to Codex, Claude Code and Cursor on macOS, Linux and
 Windows through WSL 2.
 
 ### Unassessable content and repair-first feedback (issue #885)
