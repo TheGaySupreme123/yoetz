@@ -713,5 +713,11 @@ equals the rollout item id, decision 15's correction path applies unchanged. Pai
 different ids is #917. Mapping versions are unchanged. Already-stored envelopes keep their
 recorded facts, so historical `unknown` rows and their gap are not re-materialized. Recording
 failures makes the failed-work rules reachable on Codex, so this change is sequenced after the
-failure-supersession change of #909. The shapes are pinned by the OUT-001 fixture, which is derived
-from recorded 0.157.1 rollouts; a raw hook stdin capture is still owed on #910.
+failure-supersession change of #909. A stream `CommandExecution` item carries the same
+installation-keyed `command_commitment` as its hook copy, computed from its `command` argv with
+#909's normalization, so supersession spans both paths. Observation-advice policy `0.1.7` adds the
+Codex shell spellings `exec_command` and `local_shell` to the commands the unresolved-command rule
+reads, beside `Bash` and `shell`. The stream's `command_execution` copy stays out of the advice
+until #917 pairs it with the hook copy, so the advice never names one run twice. The shapes are
+pinned by the OUT-001 fixture, which is derived from recorded 0.157.1 rollouts; a raw hook stdin
+capture is still owed on #910.

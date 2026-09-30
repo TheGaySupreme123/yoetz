@@ -1536,6 +1536,8 @@ def test_0_150_1_stream_admits_from_header_and_envelopes_carry_no_content(
         "exit_status",
         "tool_call_id",
         "subagent_id",
+        # A completed command's installation-keyed identity (#909, #910), never its text.
+        "command_commitment",
     }
     for envelope in advance.envelopes:
         assert set(envelope.structural_payload) <= allowed, envelope.structural_payload

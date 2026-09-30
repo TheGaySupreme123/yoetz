@@ -541,7 +541,8 @@ A successful Codex `shell` call is a command outcome, not a check. Deterministic
 verification baseline only on a current `passed` approved-check fact or an explicit success from a
 dedicated verification tool, and a routine read never moves it — including in Detailed mode, where
 a routine read keeps its `function_call_output` action and carries no routine marker (issue #681).
-Unresolved-command advice reads the outcome Codex states for each `Bash`/`shell` call, as
+Unresolved-command advice (policy `0.1.7`) reads the outcome Codex states for each `Bash`,
+`exec_command`, `local_shell` or `shell` call, as
 described in [Tool outcomes](#tool-outcomes-issue-910) below. Before issue #910 no Codex shell call
 had a recorded outcome, so this advice never fired on Codex. A call whose outcome Codex did not
 state is `unknown`: it neither opens nor resolves a failed command.
@@ -554,10 +555,11 @@ still names it once as history. The hook commits to the command inside the hook 
 (`tool_input.cmd` for `exec_command`, the `command` argv for `shell`, with `/bin/bash -lc` and
 `bash -lc` wrappers stripped) using the installation key and forwards only the `hmac-sha256:`
 `command_commitment`; the command text is never stored or sent. `apply_patch` carries none.
-Decision: supported on the hook path. **Gap:** until #910 records Codex shell outcomes, Codex
-results stay `unknown`, so the rule has nothing to retire on Codex yet; the session-stream
-`CommandExecution` path computes no commitment, so a call that reaches the ledger only through the
-stream keeps `omitted:structural` and relies on the edit rule (owner: #910/#917). `status
+Decision: supported on the hook and stream paths. With #910 the Codex hook records each shell
+outcome, and a rollout `CommandExecution` item commits to its `command` argv with the same
+normalization and key, so a passing rerun seen on either path retires a failure seen on either
+path. A command observed on both paths is still two results until #917 pairs them; a red-latest
+run observed on both is then named twice. `status
 view=results` shows each observed run's tool, occurrence, commitment, and exit status.
 Native dogfood acceptance of this path on macOS, Linux and WSL 2 is not yet recorded
 (owner: #909).
@@ -980,7 +982,13 @@ command item names no tool, so it is recorded as `command_execution` (a patch it
 `file_change`). An `exit_code` of `null`, as on a declined command, states no outcome. When a
 hook call id equals the rollout item id, the stream fact appends a correction to an `unknown` hook
 result and never rewrites it (ADR-022 decision 15). Pairing hook and stream rows whose ids differ
-is issue #917. Until then a command observed on both paths can appear as two results.
+is issue #917. Until then a command observed on both paths can appear as two results. A
+`CommandExecution` item carries the hook's installation-keyed `command_commitment`, computed from
+its `command` argv with the shell wrapper stripped, so failure supersession (#909) treats both
+copies as the same command. The stream copy is recorded as tool `command_execution`, which the
+unresolved-command advice does not read: the hook copy alone drives that advice, so one run is
+not named twice. A command whose rollout text was redacted for a secret commits differently from
+its hook copy and relies on the edit rule.
 
 These shapes are pinned by `fixtures/observations/codex-post-tool-outcomes-0.157.1.case.json`,
 which is derived from recorded Codex 0.157.1 rollouts. The benchmark that exposed the defect did not

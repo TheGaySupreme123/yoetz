@@ -41,6 +41,8 @@ from yoetz.domain.observation import (
     ObservationEnvelope,
     ObservationGapCode,
     ObservationSource,
+    normalize_observed_command,
+    observed_command_commitment,
     stream_line_commitment,
 )
 from yoetz.domain.observation_budget import ObservationMode
@@ -1094,11 +1096,14 @@ def structural_from_stream_record(
     record: CodexParsedRecord,
     *,
     profile: CodexCapabilityProfile | None = None,
+    key_material: bytes | None = None,
 ) -> tuple[JsonObject, tuple[str, ...]]:
     """Map a parsed stream record to allowlisted structural fields + opaque gaps.
 
     ``profile`` is the exact profile that admitted the record; without it the union of every
     supported vocabulary decides which ``type`` tokens are semantic rather than tool names.
+    ``key_material`` is the local observation store key: with it, a completed command item carries
+    the same installation-keyed ``command_commitment`` its hook copy carries (#909, #910).
     """
 
     item_types = _ROLLOUT_ITEM_TYPES if profile is None else frozenset(profile.item_types)
@@ -1139,6 +1144,13 @@ def structural_from_stream_record(
         # ``SubAgentActivity.id`` identifies the rollout item itself, not the
         # parent tool call.  Keep it out of the parent correlation family; only
         # an explicit call alias may identify that parent.
+        if key_material is not None and item_type == "CommandExecution":
+            # The rollout names the command as the argv Codex ran (``/bin/bash -lc <cmd>``). Commit
+            # to it with the hook's normalization and key so a passing rerun seen here supersedes
+            # a failure seen by either path; the text itself is dropped here (#909, #910).
+            normalized = normalize_observed_command(body.get("command"))
+            if normalized is not None:
+                fields["command_commitment"] = observed_command_commitment(key_material, normalized)
         if item_type != "SubAgentActivity":
             call_id = _token(body.get("id")) or _token(body.get("call_id"))
             if call_id is not None:
@@ -1193,8 +1205,11 @@ def envelope_from_stream_record(
     session_commitment: str,
     cursor: ObservationCursor,
     profile: CodexCapabilityProfile | None = None,
+    key_material: bytes | None = None,
 ) -> ObservationEnvelope:
-    structural, gaps = structural_from_stream_record(record, profile=profile)
+    structural, gaps = structural_from_stream_record(
+        record, profile=profile, key_material=key_material
+    )
     host_ids: dict[str, JsonValue] = {}
     body = _structural_body(record)
     if body is not None:
@@ -1738,6 +1753,7 @@ class SessionStreamReader:
                     session_commitment=self.session_commitment,
                     cursor=abs_cursor,
                     profile=self.profile,
+                    key_material=self.key_material,
                 )
             )
             structural, _structural_gaps = structural_from_stream_record(

@@ -14,11 +14,17 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import cast
 
+from builders.codex_rollout import encode_lines, item_completed, session_meta
 from builders.observed_runs import ObservedLedger, omissions, omitted_results, receipt_limitations
-from yoetz.adapters.integrations.observation_local import LocalObservationStore
+from yoetz.adapters.integrations.codex_session_stream import SessionStreamReader
+from yoetz.adapters.integrations.observation_local import (
+    STREAM_MAPPING_VERSION,
+    LocalObservationStore,
+)
 from yoetz.application.observation_materialize import materialize_observation_envelope
 from yoetz.cli import observe_hooks
 from yoetz.domain.events import ActionRecordedPayload, EventPayload, ResultRecordedPayload
+from yoetz.domain.observation import ObservationCursor, ObservationSource
 from yoetz.domain.observation_profiles import (
     CLAUDE_CODE_ORDINARY_OBSERVATION_PROFILE_ID,
     CURSOR_ORDINARY_OBSERVATION_PROFILE_ID,
@@ -38,6 +44,20 @@ def _host(tmp_path: Path, host: str) -> tuple[_Emit, Callable[[], ObservedLedger
     store.grant_consent(workspace)
 
     def emit(event: str, payload: Mapping[str, object]) -> None:
+        if host == "codex":
+            assert (
+                observe_hooks.handle_observe(
+                    event_name=event,
+                    stdin_bytes=canonical_encode(cast(JsonValue, payload)),
+                    stdout=io.BytesIO(),
+                    workspace=str(tmp_path),
+                    _state=state,
+                    skip_service=True,
+                    source=ObservationSource.CODEX_HOOK,
+                )
+                == 0
+            )
+            return
         handler = (
             observe_hooks.handle_claude_observe
             if host == "claude"
@@ -205,3 +225,111 @@ def test_cursor_red_green_rerun_is_clean_and_different_command_is_not(tmp_path: 
     lint_failure = list(_results(ledger))[2]
     ledger.claim()
     assert omitted_results(ledger) == (lint_failure,)
+
+
+def _codex_exec(emit: _Emit, call: str, command: str, *, exit_code: int) -> None:
+    """A code-mode ``tools.exec_command`` hook pair in the recorded 0.157.1 shape (OUT-001)."""
+
+    base = {"session_id": "codex-909-910", "turn_id": "turn-1", "tool_name": "Bash"}
+    tool_input = {"command": command}
+    emit(
+        "PreToolUse",
+        {**base, "hook_event_name": "PreToolUse", "tool_use_id": call, "tool_input": tool_input},
+    )
+    emit(
+        "PostToolUse",
+        {
+            **base,
+            "hook_event_name": "PostToolUse",
+            "tool_use_id": call,
+            "tool_input": tool_input,
+            # The exit is stated only inside tool_response; no top-level exit_status (#910).
+            "tool_response": (
+                '{"chunk_id":"d74c6f","wall_time_seconds":23.226037979,'
+                f'"exit_code":{exit_code},"original_token_count":1919,"output":"{_CANARY}"}}'
+            ),
+        },
+    )
+
+
+def test_codex_red_green_rerun_is_clean_and_red_latest_is_one_finding(tmp_path: Path) -> None:
+    """#910 with #909: Codex's recorded outcomes feed the same supersession rule."""
+
+    emit, build = _host(tmp_path, "codex")
+    _codex_exec(emit, "call-red", f"npm run test-type -- {_CANARY}", exit_code=2)
+    _codex_exec(emit, "call-green", f"npm run  test-type -- {_CANARY}", exit_code=0)
+    clean = build()
+    results = _results(clean)
+    assert len(results) == 2
+    red, green = results.values()
+    assert red.command == green.command
+    assert red.command is not None and red.command.startswith("omitted:hmac-sha256:")
+    assert red.description == "Observed command via Codex hook (tool Bash)"
+    clean.claim(versioned=True)
+    assert omissions(clean) == ()
+    assert "1 was later passed by the same command" in receipt_limitations(clean)
+
+    _codex_exec(emit, "call-red-latest", "cargo test", exit_code=101)
+    red_latest = build()
+    red_result = list(_results(red_latest))[-1]
+    red_latest.claim()
+    assert omitted_results(red_latest) == (red_result,)
+
+
+def test_codex_stream_rerun_carries_the_hook_command_identity(tmp_path: Path) -> None:
+    """A rollout ``CommandExecution`` commits to the same identity as its hook copy (#910).
+
+    Until #917 pairs the two paths, a command observed on both is two results; the shared identity
+    lets a passing rerun seen on either path supersede a failure seen on either path.
+    """
+
+    emit, build = _host(tmp_path, "codex")
+    command = f"npm run test-type -- {_CANARY}"
+    _codex_exec(emit, "call-red", command, exit_code=2)
+    _codex_exec(emit, "call-green", command, exit_code=0)
+    ledger = build()
+    store = LocalObservationStore(_state=tmp_path / "state")
+    lines = [
+        session_meta(cli_version="0.157.1", history_mode="paginated"),
+        *(
+            item_completed(
+                {
+                    "command": ["/bin/bash", "-lc", command],
+                    "cwd": "file:///app",
+                    "exit_code": exit_code,
+                    "id": f"exec-{index:08x}-0000-4000-8000-000000000910",
+                    "source": "unified_exec_startup",
+                    "status": "failed" if exit_code else "completed",
+                    "stdout": _CANARY,
+                    "type": "CommandExecution",
+                }
+            )
+            for index, exit_code in ((1, 2), (2, 0))
+        ),
+    ]
+    path = tmp_path / "rollout.jsonl"
+    path.write_bytes(encode_lines(*lines))
+    reader = SessionStreamReader(
+        session_commitment="hmac-sha256:" + "5" * 64,
+        profile=None,
+        cursor=ObservationCursor(
+            source_generation=1,
+            byte_position=0,
+            event_position=0,
+            last_source_commitment="hmac-sha256:" + "0" * 64,
+            mapping_version=STREAM_MAPPING_VERSION,
+        ),
+        key_material=store.key_material(),
+    )
+    stream = [e for e in reader.advance(path).envelopes if e.event_kind == "item_completed"]
+    assert len(stream) == 2
+    assert _CANARY not in repr([dict(item.structural_payload) for item in stream])
+    for envelope in stream:
+        batch = materialize_observation_envelope(envelope, task_id=_TASK)
+        for item in batch.drafts:
+            ledger.append(item.draft.schema, cast(EventPayload, item.draft.payload), observed=True)
+    actions = list(_results(ledger).values())
+    assert len(actions) == 4
+    assert len({action.command for action in actions}) == 1
+    ledger.claim(versioned=True)
+    assert omissions(ledger) == ()

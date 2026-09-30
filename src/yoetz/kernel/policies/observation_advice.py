@@ -33,7 +33,7 @@ __all__ = [
 ]
 
 OBSERVATION_ADVICE_POLICY_ID: Final = "observation-advice"
-OBSERVATION_ADVICE_POLICY_VERSION: Final = "0.1.6"
+OBSERVATION_ADVICE_POLICY_VERSION: Final = "0.1.7"
 
 OBSERVATION_ADVICE_FACT_CODES: Final = frozenset(
     {
@@ -115,8 +115,13 @@ _VERIFICATION_TOOLS: Final = frozenset(
     }
 )
 # Generic host shells.  A successful envelope here proves only that the host
-# tool returned; it never proves that a verification check ran.
-_SHELL_TOOLS: Final = frozenset({"shell", "Bash", "bash"})
+# tool returned; it never proves that a verification check ran.  Codex hooks name a
+# shell call ``Bash`` (including code-mode ``tools.exec_command``) and its direct tools
+# ``exec_command``/``local_shell``; each now states its exit status (#910), so each is a
+# command whose failure the unresolved-command rule reads.  A session-stream
+# ``command_execution`` row is deliberately absent: it is a second copy of a hook call
+# until #917 pairs them, and advice must not name one run twice.
+_SHELL_TOOLS: Final = frozenset({"shell", "Bash", "bash", "exec_command", "local_shell"})
 # Tools whose envelopes carry command outcomes at all, used by the failed and
 # unresolved-command rules, which reason about outcomes rather than checks.
 _COMMAND_TOOLS: Final = _VERIFICATION_TOOLS | _SHELL_TOOLS

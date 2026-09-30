@@ -32,8 +32,17 @@ reverse-chronological released versions.
   Hooks commit to the command with an installation-keyed `hmac-sha256:` value and discard the
   text, so no command text is stored, shown or sent. `status view=results` adds each observed
   run's tool, occurrence, command commitment and exit status. Older ledgers without a command
-  identity use the observed-edit rule only. Cooperative results keep their disclosure duty.
-  Codex outcomes are still `unknown` until #910 lands (#909).
+  identity use the observed-edit rule only. Cooperative results keep their disclosure duty (#909).
+
+- Codex shell, exec, `apply_patch` and MCP results now record the outcome Codex states instead of
+  `unknown`: the exit code nested in the hook's tool result, the `Exit code: N` or
+  `Process exited with code N` header, or MCP's `isError`. A completed command, MCP or patch item
+  in the session rollout is recorded as a result with its status and exit code, and carries the
+  same command commitment as its hook copy, so a passing rerun on either path retires the failure.
+  Output text is never read as an outcome, and a result with no stated outcome stays `unknown`
+  with `host_outcome_unavailable` on that record only. Unresolved-command advice now also reads
+  Codex `exec_command` and `local_shell` calls. Until #917 pairs hook and rollout copies, a
+  command seen on both can appear as two results (#910).
 
 - With the Codex subscription evaluator bound, the service no longer re-hashes the retained Codex
   runtime (about 359 MB on Linux) on the event loop for every observation advice cycle. Structural

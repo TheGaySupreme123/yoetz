@@ -526,3 +526,62 @@ def test_codex_command_error_bit_only_ever_fails_a_result(
     )
     assert envelope.structural_payload.get("success") is success
     assert envelope.structural_payload.get("exit_status") == exit_status
+
+
+def _advice_unresolved(envelopes: tuple[ObservationEnvelope, ...]) -> list[tuple[str, ...]]:
+    from yoetz.domain.observation import ObservationLifecycle
+    from yoetz.kernel.policies.observation_advice import (
+        ObservationAdviceContext,
+        observation_advice_findings,
+    )
+
+    return [
+        item.evidence_refs
+        for item in observation_advice_findings(
+            ObservationAdviceContext(
+                envelopes=envelopes, lifecycle=ObservationLifecycle.ACTIVE, gaps=()
+            )
+        )
+        if item.rule_code == "failed_command_unresolved"
+    ]
+
+
+@pytest.mark.parametrize("tool_name", ["Bash", "exec_command", "local_shell"])
+def test_codex_shell_failure_reaches_the_unresolved_command_advice(tool_name: str) -> None:
+    """Every Codex shell spelling is a command the advice reads; a rerun clears it (#909)."""
+
+    session = "hmac-sha256:" + "8" * 64
+    argument = "command" if tool_name == "Bash" else "cmd"
+
+    def run(ordinal: int, call: str, exit_code: int) -> ObservationEnvelope:
+        return map_hook_payload_to_envelope(
+            "PostToolUse",
+            {
+                "hook_event_name": "PostToolUse",
+                "tool_name": tool_name,
+                "tool_use_id": call,
+                "tool_input": {argument: "npm run test-type"},
+                "tool_response": "Chunk ID: 4b\nWall time: 2.5 seconds\n"
+                f"Process exited with code {exit_code}\nOriginal token count: 7\nOutput:\n",
+            },
+            session_commitment=session,
+            event_ordinal=ordinal,
+            key_material=_KEY,
+        )
+
+    red = run(1, "call-red", 2)
+    assert (
+        red.structural_payload["command_commitment"]
+        == run(9, "x", 0).structural_payload["command_commitment"]
+    )
+    assert len(_advice_unresolved((red,))) == 1
+    assert _advice_unresolved((red, run(2, "call-green", 0))) == []
+
+
+def test_codex_stream_copy_of_a_command_is_not_a_second_advice_subject(tmp_path: Path) -> None:
+    """Until #917 pairs hook and stream copies, only the hook copy drives the advice."""
+
+    session = "hmac-sha256:" + "7" * 64
+    stream = _rollout_envelopes(tmp_path, session)[1]
+    assert stream.structural_payload["tool_name"] == "command_execution"
+    assert _advice_unresolved((stream,)) == []
