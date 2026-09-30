@@ -6958,7 +6958,12 @@ the optional `check_recorded` `1.3.0` field `prior_finding_verdicts` (`{finding_
 cited_refs}`, 1–8, ASCII-sorted by finding id, never the note; unreleased 1.3.0 extended in place),
 present only when at least one ruling was admitted, so a check without rulings keeps its bytes.
 `semantic_prior_verdicts_unsupported` discloses dropped or reduced rulings and, like
-`semantic_prior_findings_over_limit`, is tolerated by both proof classes. For a
+`semantic_prior_findings_over_limit`, is tolerated by both proof classes. Tolerated means they never veto
+a ruled row: on a check carrying either code, a `semantic_model_derived` row the check recorded no
+ruling for gets the blocker `reviewer_assessment_incomplete`, because the review may not have
+seen it (section limit, envelope trimming, or a selection without the assessments section, which
+also adds `semantic_prior_findings_over_limit`) or its ruling may have been dropped. Such a row
+never resolves by silence on that check. For a
 `semantic_model_derived` row, a recorded `fixed` ruling on that row lifts the
 `insufficient_packet` veto and tolerates `semantic_packet_insufficient` for that row only;
 `withdrawn` keeps the ordinary rules (an assessable review that does not re-raise a rejected finding

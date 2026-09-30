@@ -880,7 +880,12 @@ capture baseline, a material change after the finding, and the issue not returne
 re-raise resolves over changed state, and never lifts the whole-packet veto. `still_present`,
 `answered_not_fixed` and `unassessable` block only their own finding by name
 (`reviewer_verdict_<verdict>`). Without a ruling the earlier rules are unchanged; silence is never
-read as `fixed`.
+read as `fixed`. Silence also proves nothing when the finding may never have been assessed: on a
+check whose packet left prior findings out (`semantic_prior_findings_over_limit`, including a
+selection without the assessments section) or dropped a ruling
+(`semantic_prior_verdicts_unsupported`), every AI-powered finding the check recorded no ruling for
+is blocked as `reviewer_assessment_incomplete`. The codes stay disclosures, never vetoes on ruled
+findings.
 
 **Terminal states: findings as a to-do list that ends.** Every recorded finding is in exactly one
 to-do state, read from replayed projection facts only (`kernel/finding_todo.py`, transition table

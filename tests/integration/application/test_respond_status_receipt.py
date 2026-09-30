@@ -4975,3 +4975,135 @@ async def test_a_defect_the_review_still_finds_after_repair_stays_current() -> N
     assert "semantic_restatements_suppressed" in rechecked.coverage.known_gaps
     assert by_id[finding.finding_id].todo_state == "open"
     assert by_id[finding.finding_id].review_rounds == "1"
+
+
+def _unassessed_recheck_evaluator(
+    claim_ref: str, source: Literal["unshown", "dropped", "complete"]
+) -> Callable[..., Awaitable[object]]:
+    """Raise one AI-powered finding, then recheck with a review that did not assess it.
+
+    ``unshown``: the prior-findings section left it out (section limit or envelope trimming).
+    ``dropped``: the reviewer's ruling was malformed and the normalizer dropped it.
+    ``complete``: the control, a complete review that is silent about it.
+    """
+
+    calls: list[int] = []
+
+    async def evaluate(
+        frozen: object,
+        findings: object,
+        runtime: object | None = None,
+        lineage_evaluation: object | None = None,
+    ) -> object:
+        raised = cast(
+            FinalSemanticEvaluation,
+            await _semantic_challenge_evaluator(claim_ref)(frozen, findings),
+        )
+        calls.append(1)
+        if len(calls) == 1:
+            return replace(raised, case_content_gaps=())
+        return replace(
+            raised,
+            judgment=SemanticJudgment(
+                "no_material_discrepancy",
+                (),
+                prior_finding_verdicts_dropped=1 if source == "dropped" else 0,
+            ),
+            case_content_gaps=(
+                ("semantic_prior_findings_over_limit",) if source == "unshown" else ()
+            ),
+        )
+
+    return evaluate
+
+
+@pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))
+@pytest.mark.parametrize("source", ("unshown", "dropped", "complete"))
+async def test_an_ai_finding_the_recheck_did_not_assess_never_resolves_by_silence(
+    ledger_backend: Literal["memory", "sqlite"],
+    source: Literal["unshown", "dropped", "complete"],
+) -> None:
+    """Greptile P1 on #905 through the real check, replay and status path, on both ledgers.
+
+    After material work, a completed recheck that never showed the finding to the reviewer, or
+    dropped the reviewer's ruling on it, must not resolve it: the finding was not assessed. The
+    packet gap stays disclosed. A complete review that is merely silent keeps the ordinary rule.
+    """
+
+    seed = 5600 + {"unshown": 0, "dropped": 100, "complete": 200}[source]
+    app, runtime, _ = _build_app(
+        seed_offset=56,
+        semantic="optional",
+        ledger_backend=ledger_backend,
+        semantic_evaluator=_unassessed_recheck_evaluator(protocol_id("clm_", seed + 5), source),
+    )
+    started, checked, _obligation = await _bootstrap_finding(
+        app, seed=seed, mode="semantic_if_configured"
+    )
+    finding = next(
+        item for item in checked.findings if item.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+    )
+    published = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 31)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(checked.result_frontier),
+                "event_drafts": (
+                    {
+                        "event_id": protocol_id("evt_", seed + 32),
+                        "schema": {"name": "evidence_recorded", "version": "1.0.0"},
+                        "occurred_at": "2026-07-19T12:00:03.000Z",
+                        "causal_parents": (),
+                        "payload": {
+                            "evidence_id": protocol_id("evd_", seed + 30),
+                            "evidence_kind": "artifact",
+                            "strength": "mutable_reference",
+                            "observed_at": "2026-07-19T12:00:03.000Z",
+                            "reference": "unrelated-evidence",
+                        },
+                        "artifact_refs": (),
+                        "evidence_refs": (),
+                    },
+                ),
+            }
+        )
+    )
+    rechecked = await app.check(
+        CheckRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 40)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(published.result_frontier),
+                "mode": "semantic_if_configured",
+                "max_findings": "8",
+            }
+        )
+    )
+    assert type(rechecked) is CheckCommitResult
+    assert finding.finding_id not in {item.finding_id for item in rechecked.findings}
+    disclosed = {
+        "unshown": "semantic_prior_findings_over_limit",
+        "dropped": "semantic_prior_verdicts_unsupported",
+    }.get(source)
+    if disclosed is not None:
+        assert disclosed in rechecked.coverage.known_gaps
+
+    view = await _findings_view(app, started, seed + 41, include_resolved=True)
+    row = next(item for item in view.items if item.finding_id == finding.finding_id)
+    assert row.resolved is (source == "complete")
+    if source != "complete":
+        assert "reviewer_assessment_incomplete" in _projected_detail(row.detail)
+
+    # Replay from the recorded events reaches the same answer on this ledger backend.
+    ledger, _ = next(iter(runtime.resources.values()))
+    records = tuple([item async for item in ledger.load_events(started.session_id)])
+    from yoetz.kernel.finding_resolution import finding_is_resolved
+
+    assert finding_is_resolved(replay(records), finding.finding_id) is (source == "complete")
+
+
+def _projected_detail(detail: object) -> str:
+    return detail if type(detail) is str else ""
