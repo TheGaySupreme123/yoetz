@@ -32,8 +32,9 @@ from yoetz.domain.findings import (
     SemanticDispatchKind,
     SemanticProvenance,
     WaiverScope,
-    finding_from_json,
-    finding_to_json,
+    finding_event_from_json,
+    finding_event_to_json,
+    finding_has_dialogue_fields,
     semantic_provenance_from_json,
     semantic_provenance_to_json,
 )
@@ -166,6 +167,7 @@ __all__ = [
     "EvidenceDigestSubject",
     "EvidenceRecordedPayload",
     "FindingRecordedPayload",
+    "FINDING_DIALOGUE_EVENT_SCHEMA_VERSION",
     "IntegrationKind",
     "LedgerChain",
     "LedgerRecord",
@@ -216,6 +218,7 @@ __all__ = [
     "accepted_record_to_json",
     "decode_payload",
     "encode_payload",
+    "finding_event_schema",
     "media_type_for",
     "normalize_payload_json",
 ]
@@ -235,6 +238,10 @@ CHECK_EVENT_SCHEMA_VERSION: Final = "1.3.0"
 SEMANTIC_EVENT_SCHEMA_VERSION: Final = "1.2.0"
 SEMANTIC_EVENT_SCHEMA_VERSIONS: Final = ("1.1.0", SEMANTIC_EVENT_SCHEMA_VERSION)
 FINDING_EVENT_SCHEMA_VERSION: Final = "1.3.0"
+# The review-dialogue fields (persisted challenge fields and the ``relates_to`` link to earlier
+# findings, issue #905) are additive: only an AI-powered finding that carries them is written at
+# 1.4.0. Every local finding keeps the frozen 1.3.0 shape and bytes.
+FINDING_DIALOGUE_EVENT_SCHEMA_VERSION: Final = "1.4.0"
 COORDINATION_EVENT_SCHEMA_VERSION: Final = "1.0.0"
 SESSION_EVENT_SCHEMA_VERSION: Final = "1.1.0"
 # Lineage fields are additive to the original event families.  The old session-opened schema
@@ -782,7 +789,8 @@ def _locator_key_kind(schema: EventSchema) -> str:
                 )
                 or (
                     schema.name == "finding_recorded"
-                    and schema.version == FINDING_EVENT_SCHEMA_VERSION
+                    and schema.version
+                    in {FINDING_EVENT_SCHEMA_VERSION, FINDING_DIALOGUE_EVENT_SCHEMA_VERSION}
                 )
             )
         )
@@ -2367,6 +2375,7 @@ PAYLOAD_TYPES: Final[Mapping[EventSchema, type[EventPayload]]] = MappingProxyTyp
         EventSchema("plan_revised", SCHEMA_VERSION): PlanRevisedPayload,
         EventSchema("finding_recorded", SCHEMA_VERSION): Finding,
         EventSchema("finding_recorded", FINDING_EVENT_SCHEMA_VERSION): Finding,
+        EventSchema("finding_recorded", FINDING_DIALOGUE_EVENT_SCHEMA_VERSION): Finding,
         **{
             EventSchema("finding_recorded", version): Finding
             for version in SEMANTIC_EVENT_SCHEMA_VERSIONS
@@ -3107,6 +3116,17 @@ _PAYLOAD_SHAPES: Final[Mapping[str, tuple[frozenset[str], frozenset[str]]]] = Ma
 )
 
 
+def finding_event_schema(finding: Finding) -> EventSchema:
+    """The one ``finding_recorded`` schema a new finding is written under."""
+
+    return EventSchema(
+        "finding_recorded",
+        FINDING_DIALOGUE_EVENT_SCHEMA_VERSION
+        if finding_has_dialogue_fields(finding)
+        else FINDING_EVENT_SCHEMA_VERSION,
+    )
+
+
 def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
     """Decode one exact known schema pair into its immutable domain payload."""
 
@@ -3116,7 +3136,7 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
         raise ProtocolValueError("unknown_event_schema")
     frozen = freeze_json(payload)
     if schema.name == "finding_recorded":
-        finding = finding_from_json(frozen)
+        finding = finding_event_from_json(frozen)
         _validate_event_schema_payload(schema, finding)
         return finding
     required, optional = _PAYLOAD_SHAPES[schema.name]
@@ -3570,7 +3590,7 @@ def encode_payload(payload: EventPayload) -> JsonValue:
 
     payload_type = type(payload)
     if payload_type is Finding:
-        return finding_to_json(cast(Finding, payload))
+        return finding_event_to_json(cast(Finding, payload))
     if payload_type is ChildDependenciesRecordedPayload:
         value = cast(ChildDependenciesRecordedPayload, payload)
         return _json_object(
@@ -3994,6 +4014,11 @@ def _validate_event_schema_payload(
     if type(payload) is CheckRecordedPayload:
         if (payload.semantic_conclusion is not None) != (
             schema.version == CHECK_EVENT_SCHEMA_VERSION
+        ):
+            raise ProtocolValueError("invalid_event_schema")
+    if type(payload) is Finding and schema.name == "finding_recorded":
+        if finding_has_dialogue_fields(payload) != (
+            schema.version == FINDING_DIALOGUE_EVENT_SCHEMA_VERSION
         ):
             raise ProtocolValueError("invalid_event_schema")
     if schema.version == SCHEMA_VERSION:

@@ -1753,8 +1753,8 @@ AI-powered review absence/weakness codes
 semantic_relevance_review_not_run|optional_semantic_review_blocked_by_policy|
 optional_semantic_review_registration_drift|
 semantic_review_context_withheld|semantic_challenges_rejected|
-semantic_case_content_over_item_limit|semantic_case_finding_refs_over_limit`) plus the
-evidence-strength codes
+semantic_case_content_over_item_limit|semantic_case_finding_refs_over_limit|
+semantic_prior_findings_over_limit`) plus the evidence-strength codes
 (`evidence_content_digest_only|evidence_content_withheld|evidence_digest_subject_legacy_unknown`)
 and the host-observation codes (`captured_object_unavailable|content_unselected|
 host_outcome_unavailable|unpaired_event`). Those host codes remain receipt coverage limitations;
@@ -1764,7 +1764,8 @@ pack re-fires the issue or returns its own coverage finding. The exception also 
 finding's original coverage to contain only the pre-existing AI-powered review, evidence, and
 host-observation tolerances and to have freshness outside
 `stale_after_material_change|redacted_gap|unknown`. For `semantic_model_derived` rows only the
-evidence-strength codes are tolerated, and the check must also record
+evidence-strength codes and `semantic_prior_findings_over_limit` are tolerated, and the check must
+also record
 `succeeded/semantic_completed`. Outside the narrow command-gap partition described below, any
 other gap — redacted or unavailable payloads, redacted objects,
 missing refs, unknown events, completion scope, import range, or a code not in the list — blocks
@@ -6901,3 +6902,32 @@ with integer counts: `semantic_capture_parts_resolved`, `semantic_diff_parts_res
 `semantic_excerpt_bytes_selected`. Resolved parts have passed capture authentication; selected
 excerpts are in the built packet. These counts precede privacy minimization and do not prove
 provider delivery or code correctness. The record contains no content, paths, or content hashes.
+
+### Review dialogue record (issue #905)
+
+`finding_recorded` version `1.4.0` is written only for an AI-powered finding that carries at
+least one review-dialogue field: `challenge` (the reviewer's `discrepancy`,
+`alternative_interpretation`, `requested_next_step` and `uncertainty`, each bounded like the
+provider challenge) and `relates_to` (1–16 earlier recorded finding ids the challenge cited; never
+the finding's own id). Local findings, and AI-powered findings without these fields, keep the
+frozen 1.3.0 shape and bytes, so old ledgers replay unchanged. The public `finding` object
+(check result, status, receipt) stays at 1.3.0 and carries the challenge only as `summary` and
+`detail`. `fixtures/canonical/review-dialogue-1.4.0.case.json` locks the new and legacy bytes.
+
+A cited `fnd_` in a challenge resolves to that finding's subjects when it is a local finding of
+the same check or a readable recorded finding inside the frozen fence; only already-recorded
+findings are kept as `relates_to`, so a link never names a finding that was ranked away.
+
+The review packet (`outbound-case` `1.2.0`) adds the `prior_finding` section and
+`review_packet.prior_finding_item_ids`. It carries the newest readable, unresolved AI-powered
+findings (at most 8, 48 KiB, and only case capacity the other sections leave): one
+`yoetz.prior-finding/1` structural row per finding (kind, ids, recorded sequence, requested next
+step, `relates_to`, the latest response disposition, cited refs and recorded sequence, and the
+readable evidence/results recorded after the finding) plus, where the profile already sends
+finding prose, the summary, message, challenge fields and response reason as
+`finding_summary` rows. No new data category crosses egress. A finding recorded before 1.4.0
+degrades to summary and message with a `not_recorded` omission. Findings the section cannot carry
+are `not_selected` omissions and add `semantic_prior_findings_over_limit` to coverage. That code
+is a disclosure of the section's own bound: it stays on the receipt and is tolerated by both
+finding-resolution proof classes, because a partial dialogue view is no weaker than the review
+before the section existed.

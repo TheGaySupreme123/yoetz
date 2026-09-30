@@ -1,0 +1,317 @@
+"""The prior-findings section carries the review dialogue into the next review (issue #905).
+
+The reviewer has no memory between checks. Before this section, earlier findings and the main
+agent's answers reached it only as raw timeline rows inside the last 64 events, which hook rows
+pushed out, and the stored finding had lost what the reviewer asked for. These tests pin the
+bounded, ledger-backed section that replaces that accident.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import replace
+from typing import cast
+
+from builders.policy_cases import (
+    BASE_COVERAGE,
+    FRONTIER,
+    act,
+    clm,
+    evd,
+    evidence_record,
+    evt,
+    finding_record,
+    fnd,
+    make_case,
+    obl,
+    obligation_record,
+    record,
+    res,
+)
+from yoetz.application.semantic_case import (
+    MAX_PRIOR_FINDINGS,
+    build_semantic_case,
+    semantic_case_to_prepared_payload,
+)
+from yoetz.domain.events import (
+    EvidenceKind,
+    EvidenceRecordedPayload,
+    ObligationPublishedPayload,
+    ObligationStatus,
+    ResponseDisposition,
+    ResponseRecordedPayload,
+    ResultOutcome,
+    ResultRecordedPayload,
+)
+from yoetz.domain.findings import (
+    Finding,
+    FindingChallenge,
+    FindingKind,
+    FindingOrigin,
+    SamplingParams,
+    SemanticDispatchKind,
+    SemanticProvenance,
+)
+from yoetz.domain.privacy import ReviewContextProfile, ReviewSelectionPolicy
+from yoetz.domain.receipts import SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP
+from yoetz.domain.values import FindingId, timestamp_from_string
+from yoetz.kernel.deterministic_checks import DeterministicCase
+from yoetz.kernel.projections import FindingProjectionRecord
+from yoetz.ports.semantic import SemanticCase
+from yoetz.protocol.canonical import JsonValue, strict_json_parse
+from yoetz.protocol.coverage import EvidenceImmutability
+from yoetz.protocol.models import DataCategory, SemanticReason, SemanticStatus
+
+_DIGEST = "sha256:" + "1" * 64
+_NOW = timestamp_from_string("2026-09-28T12:00:00.000Z")
+
+
+def _provenance() -> SemanticProvenance:
+    return SemanticProvenance(
+        provider="fake",
+        endpoint_profile_id="fake",
+        endpoint_profile_version="1.0.0",
+        model="fake/model",
+        sdk_version="1.0.0",
+        prompt_digest=_DIGEST,
+        schema_digest=_DIGEST,
+        policy_digest=_DIGEST,
+        privacy_policy_digest=_DIGEST,
+        sampling_params=SamplingParams(128),
+        latency_ms=1,
+        semantic_attempt_id="att_00000000-0000-4000-8000-000000000001",
+        dispatch_kind=SemanticDispatchKind.EXTERNAL,
+        privacy_receipt_id="egr_00000000-0000-4000-8000-000000000001",
+        status=SemanticStatus.SUCCEEDED,
+        reason=SemanticReason.SEMANTIC_COMPLETED,
+        provider_request_id="fake-1",
+        egress_authorization_id="aut_00000000-0000-4000-8000-000000000001",
+        request_commitment="hmac-sha256:" + "b" * 64,
+    )
+
+
+def _semantic(
+    number: int,
+    *,
+    challenge: FindingChallenge | None = None,
+    related: tuple[FindingId, ...] = (),
+    origin: FindingOrigin = FindingOrigin.SEMANTIC_MODEL_DERIVED,
+) -> Finding:
+    return Finding(
+        finding_id=fnd(number),
+        kind=FindingKind.COMPLETION_WITH_OPEN_OBLIGATIONS,
+        origin=origin,
+        priority=1,
+        summary=f"Required llvmlite 0.46.0 verification remains open ({number}).",
+        detail="Make one concrete authorized attempt to obtain llvmlite 0.46.0.",
+        subject_refs=(obl(1),),
+        policy_id="work-integrity",
+        policy_version="0.1.0",
+        subject_frontier=FRONTIER,
+        coverage=BASE_COVERAGE,
+        provenance=None if origin is FindingOrigin.DETERMINISTIC else _provenance(),
+        challenge=challenge,
+        related_finding_ids=related,
+    )
+
+
+_CHALLENGE = FindingChallenge(
+    discrepancy="The claim is complete while the llvmlite 0.46.0 obligation is open.",
+    alternative_interpretation="The package index may be unreachable from this sandbox.",
+    requested_next_step="act",
+    uncertainty="The recorded install failure may already be the authorized attempt.",
+)
+
+
+def _numba_case(
+    extra_findings: Mapping[FindingId, FindingProjectionRecord] | None = None,
+) -> DeterministicCase:
+    """numba-stencil-boundary-modes: a legacy finding, a restatement, two blocked attempts."""
+
+    obligation = obligation_record(
+        ObligationPublishedPayload(
+            obl(1), "Verify with llvmlite 0.46.0", "stencil tests pass", ObligationStatus.OPEN
+        ),
+        2,
+    )
+    attempts = {
+        res(number): record(
+            ResultRecordedPayload(
+                result_id=res(number),
+                action_id=act(number),
+                outcome=ResultOutcome.FAILURE,
+                summary=f"Package index reported no matching llvmlite==0.46.0 ({number}).",
+            ),
+            sequence,
+        )
+        for number, sequence in ((1, 12), (2, 14))
+    }
+    stale = evidence_record(
+        EvidenceRecordedPayload(
+            evd(1),
+            EvidenceKind.COMMAND_OUTPUT,
+            EvidenceImmutability.METADATA_ONLY,
+            _NOW,
+            description="pip install llvmlite==0.46.0: connection reset",
+        ),
+        3,
+    )
+    response = ResponseRecordedPayload(
+        finding_id=fnd(2),
+        finding_frontier=FRONTIER,
+        disposition=ResponseDisposition.REJECTED,
+        reason=(
+            "The instruction to make an attempt has already been met: two exact-version "
+            "installation attempts failed because the package index was unavailable."
+        ),
+        evidence_refs=(res(1), res(2)),
+    )
+    findings: dict[FindingId, FindingProjectionRecord] = {
+        fnd(1): finding_record(_semantic(1), 5),
+        fnd(2): finding_record(_semantic(2, challenge=_CHALLENGE, related=(fnd(1),)), 10),
+    }
+    if extra_findings is not None:
+        findings.update(extra_findings)
+    return make_case(
+        obligations={obl(1): obligation},
+        results=attempts,
+        evidence={evd(1): stale},
+        findings=findings,
+        responses={fnd(2): record(response, 16)},
+        extra_refs=(obl(1), clm(1)),
+    )
+
+
+def _build(
+    case: DeterministicCase,
+    profile: ReviewContextProfile = ReviewContextProfile.GOAL_AWARE,
+    *,
+    selection: ReviewSelectionPolicy | None = None,
+) -> SemanticCase:
+    return build_semantic_case(
+        case_id="cas_10000000-0000-4000-8000-000000000001",
+        frozen_case=case,
+        dependency_digest="sha256:" + "b" * 64,
+        findings=(),
+        review_context_profile=profile,
+        review_selection=selection or ReviewSelectionPolicy.for_profile(profile),
+        policy_id="pvy_10000000-0000-4000-8000-000000000001",
+        policy_version="1",
+    )
+
+
+def _row(case: SemanticCase, item_id: str) -> Mapping[str, JsonValue]:
+    item = next(item for item in case.items if item.item_id == item_id)
+    return cast(Mapping[str, JsonValue], strict_json_parse(item.content))
+
+
+def test_prior_findings_carry_the_challenge_the_answer_and_newer_material() -> None:
+    case = _build(_numba_case())
+
+    first, second = f"prior-finding-{fnd(1)}", f"prior-finding-{fnd(2)}"
+    assert first in case.packet.prior_finding_item_ids
+    assert second in case.packet.prior_finding_item_ids
+    restated = _row(case, second)
+    assert restated["finding_ref"] == str(fnd(2))
+    assert restated["challenge_fields"] == "recorded"
+    assert restated["requested_next_step"] == "act"
+    assert restated["relates_to"] == [str(fnd(1))]
+    response = cast(Mapping[str, JsonValue], restated["response"])
+    assert response["disposition"] == "rejected"
+    assert response["evidence_refs"] == [str(res(1)), str(res(2))]
+    # The two blocked attempts were recorded after the finding; the older evidence was not.
+    assert restated["recorded_after_finding"] == [str(res(2)), str(res(1))]
+    texts = {
+        item.item_id: item.content.decode("utf-8")
+        for item in case.items
+        if item.section == "prior_finding" and item.category is DataCategory.FINDING_SUMMARY
+    }
+    assert _CHALLENGE.discrepancy in texts[f"prior-finding-discrepancy-{fnd(2)}"]
+    assert _CHALLENGE.uncertainty in texts[f"prior-finding-uncertainty-{fnd(2)}"]
+    assert "already been met" in texts[f"prior-finding-response-{fnd(2)}"]
+    # Everything the reviewer would cite for a verdict is citable.
+    assert {str(fnd(1)), str(fnd(2)), str(res(1)), str(res(2))} <= case.frontier_refs
+    payload = cast(
+        Mapping[str, JsonValue],
+        strict_json_parse(
+            semantic_case_to_prepared_payload(case, {item.item_id for item in case.items})
+        ),
+    )
+    packet = cast(Mapping[str, JsonValue], payload["review_packet"])
+    assert packet["prior_finding_item_ids"] == list(case.packet.prior_finding_item_ids)
+
+
+def test_a_legacy_finding_degrades_to_summary_and_message_with_an_explicit_omission() -> None:
+    case = _build(_numba_case())
+
+    legacy = _row(case, f"prior-finding-{fnd(1)}")
+    assert legacy["challenge_fields"] == "not_recorded"
+    assert "requested_next_step" not in legacy
+    assert set(cast(Mapping[str, JsonValue], legacy["text_item_ids"])) == {"message", "summary"}
+    assert any(
+        omission.subject_ref == str(fnd(1))
+        and omission.category is DataCategory.FINDING_SUMMARY
+        and omission.reason == "not_recorded"
+        for omission in case.packet.omissions
+    )
+
+
+def test_the_structural_profile_carries_only_the_structural_rows() -> None:
+    case = _build(_numba_case(), ReviewContextProfile.STRUCTURAL)
+
+    rows = [item for item in case.items if item.section == "prior_finding"]
+    assert {item.item_id for item in rows} == {
+        f"prior-finding-{fnd(1)}",
+        f"prior-finding-{fnd(2)}",
+    }
+    assert all(item.category is DataCategory.BOUNDED_STRUCTURAL_METADATA for item in rows)
+    assert "text_item_ids" not in _row(case, f"prior-finding-{fnd(2)}")
+
+
+def test_local_and_resolved_findings_are_not_live_questions_for_the_reviewer() -> None:
+    resolved = finding_record(
+        _semantic(3, challenge=_CHALLENGE), 6, resolved_by_check_event_id=evt(90)
+    )
+    local = finding_record(_semantic(4, origin=FindingOrigin.DETERMINISTIC), 7)
+    case = _build(_numba_case({fnd(3): resolved, fnd(4): local}))
+
+    carried = {item.source_ref for item in case.items if item.section == "prior_finding"}
+    assert carried == {str(fnd(1)), str(fnd(2))}
+
+
+def test_the_section_is_bounded_and_says_so_when_it_truncates() -> None:
+    extra = {
+        fnd(number): finding_record(_semantic(number, challenge=_CHALLENGE), 20 + number)
+        for number in range(3, 3 + MAX_PRIOR_FINDINGS)
+    }
+    case = _build(_numba_case(extra))
+
+    carried = {item.source_ref for item in case.items if item.section == "prior_finding"}
+    assert len(carried) == MAX_PRIOR_FINDINGS
+    # Newest first: the two oldest rows of the dialogue are the ones not carried.
+    assert str(fnd(1)) not in carried
+    assert str(fnd(2)) not in carried
+    assert SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP in case.packet.coverage.known_gaps
+    omitted = {
+        omission.subject_ref
+        for omission in case.packet.omissions
+        if omission.reason == "not_selected" and omission.source_kind == "finding"
+    }
+    assert {str(fnd(1)), str(fnd(2))} <= omitted
+
+
+def test_the_section_is_not_crowded_out_by_the_timeline_budget() -> None:
+    selection = replace(
+        ReviewSelectionPolicy.for_profile(ReviewContextProfile.GOAL_AWARE), max_timeline_items=0
+    )
+    case = _build(_numba_case(), ReviewContextProfile.CUSTOM, selection=selection)
+
+    assert case.packet.timeline_item_ids == ()
+    assert f"prior-finding-{fnd(2)}" in case.packet.prior_finding_item_ids
+
+
+def test_a_case_without_prior_findings_is_unchanged_apart_from_the_empty_list() -> None:
+    case = _build(make_case(extra_refs=(clm(1),)))
+
+    assert case.packet.prior_finding_item_ids == ()
+    assert not any(item.section == "prior_finding" for item in case.items)

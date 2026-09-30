@@ -30,6 +30,7 @@ from yoetz.domain.receipts import (
     SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
     SEMANTIC_CHALLENGES_REJECTED_GAP,
     SEMANTIC_PACKET_INSUFFICIENT_GAP,
+    SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP,
     SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
     SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP,
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
@@ -106,11 +107,17 @@ _HOST_OBSERVATION_GAPS: Final = frozenset(
         "unpaired_event",
     }
 )
-_BASE_DETERMINISTIC_PROOF_TOLERATED_GAPS: Final = _SEMANTIC_ONLY_GAPS | _EVIDENCE_STRENGTH_GAPS
+# The prior-findings section's own bound (issue #905). A section that could not carry every
+# earlier finding is no weaker than the review before that section existed, so the gap stays on
+# the receipt as a disclosure and proves nothing about any finding's absence either way.
+_REVIEW_DIALOGUE_DISCLOSURE_GAPS: Final = frozenset({SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP})
+_BASE_DETERMINISTIC_PROOF_TOLERATED_GAPS: Final = (
+    _SEMANTIC_ONLY_GAPS | _EVIDENCE_STRENGTH_GAPS | _REVIEW_DIALOGUE_DISCLOSURE_GAPS
+)
 _DETERMINISTIC_PROOF_TOLERATED_GAPS: Final = (
     _BASE_DETERMINISTIC_PROOF_TOLERATED_GAPS | _HOST_OBSERVATION_GAPS
 )
-_SEMANTIC_PROOF_TOLERATED_GAPS: Final = _EVIDENCE_STRENGTH_GAPS
+_SEMANTIC_PROOF_TOLERATED_GAPS: Final = _EVIDENCE_STRENGTH_GAPS | _REVIEW_DIALOGUE_DISCLOSURE_GAPS
 # These native capture limits may be compared with the readable original finding's baseline.
 # The check stamps the ones its review ran under onto every semantic finding it raises, so the
 # baseline is durable finding coverage, not a later reconstruction (issue #884). Recorded clipping

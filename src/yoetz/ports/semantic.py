@@ -69,6 +69,8 @@ if TYPE_CHECKING:
     )
 
 __all__ = [
+    "MAX_PRIOR_FINDING_ITEMS",
+    "MAX_SEMANTIC_CASE_ITEMS",
     "MAX_SEMANTIC_ITEM_SUBJECT_REFS",
     "ChangeObservation",
     "Deadline",
@@ -104,6 +106,7 @@ type SemanticCaseSection = Literal[
     "obligation",
     "claim",
     "decision",
+    "prior_finding",
     "timeline",
     "deterministic_summary",
     "deterministic_detail",
@@ -160,6 +163,10 @@ _MAX_SUBJECT_REFS: Final = 16
 MAX_SEMANTIC_ITEM_SUBJECT_REFS: Final = _MAX_SUBJECT_REFS
 _MAX_INTERNAL_SUBJECT_REFS: Final = 64
 _MAX_CASE_ITEMS: Final = 256
+MAX_SEMANTIC_CASE_ITEMS: Final = _MAX_CASE_ITEMS
+# The prior-findings section (issue #905): at most eight earlier AI-powered findings, each one
+# structural row plus up to six prose rows (summary, message, three challenge fields, response).
+MAX_PRIOR_FINDING_ITEMS: Final = 56
 _OPAQUE_REF_PATTERN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$", re.ASCII)
 _IDENTITY_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9._-]*$", re.ASCII)
 _MODEL_IDENTITY_PATTERN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$", re.ASCII)
@@ -181,6 +188,7 @@ _SECTIONS: Final = frozenset(
         "obligation",
         "claim",
         "decision",
+        "prior_finding",
         "timeline",
         "deterministic_summary",
         "deterministic_detail",
@@ -195,6 +203,9 @@ _SECTION_ORDINAL: Final = {
             "obligation",
             "claim",
             "decision",
+            # Ahead of the timeline: envelope bounding drops catalog rows from the tail, and the
+            # dialogue record must never be crowded out by hook rows (issue #905).
+            "prior_finding",
             "timeline",
             "deterministic_summary",
             "deterministic_detail",
@@ -914,10 +925,17 @@ class ReviewPacket:
     coverage: Coverage
     targeted_excerpts: tuple[TargetedExcerptRef, ...]
     omissions: tuple[ReviewOmission, ...]
+    # Earlier AI-powered findings with the agent's answers, outside the timeline (issue #905).
+    prior_finding_item_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self, "goal_item_ids", _validated_item_ids(self.goal_item_ids, maximum=4)
+        )
+        object.__setattr__(
+            self,
+            "prior_finding_item_ids",
+            _validated_item_ids(self.prior_finding_item_ids, maximum=MAX_PRIOR_FINDING_ITEMS),
         )
         object.__setattr__(
             self,
@@ -995,6 +1013,7 @@ class ReviewPacket:
             *self.obligation_item_ids,
             *self.claim_item_ids,
             *self.decision_item_ids,
+            *self.prior_finding_item_ids,
             *self.timeline_item_ids,
         ]
         for assessment in self.deterministic_assessments:
@@ -1096,6 +1115,7 @@ class SemanticCase:
             (packet.obligation_item_ids, "obligation"),
             (packet.claim_item_ids, "claim"),
             (packet.decision_item_ids, "decision"),
+            (packet.prior_finding_item_ids, "prior_finding"),
             (packet.timeline_item_ids, "timeline"),
         )
         for ids, section in expected_sections:
@@ -1153,6 +1173,7 @@ class SemanticCase:
             *packet.obligation_item_ids,
             *packet.claim_item_ids,
             *packet.decision_item_ids,
+            *packet.prior_finding_item_ids,
             *packet.timeline_item_ids,
             *(item.excerpt_item_id for item in packet.targeted_excerpts),
         }

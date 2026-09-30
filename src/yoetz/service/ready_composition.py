@@ -205,6 +205,7 @@ from yoetz.domain.privacy import (
 from yoetz.domain.receipts import (
     SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
     SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
+    SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP,
     PolicyVersionEntry,
     ReceiptVersionSlice,
     SchemaVersionEntry,
@@ -4334,6 +4335,7 @@ def _privacy_gated_semantic_evaluator(
                         "content_redacted",
                         "truncated_payload",
                         SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
+                        SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP,
                     }
                 )
             )

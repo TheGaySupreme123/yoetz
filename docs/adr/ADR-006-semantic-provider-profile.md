@@ -831,3 +831,20 @@ whose resolved subjects exceed one finding's 64-subject bound is dropped and cou
 **Advisory rejections.** `weak_or_stale_response` is minted only for local findings, matching
 `questionable_finding_rejection`. Rejecting an AI-powered finding without evidence no longer adds a
 local receipt-blocking finding; the rejection is judged by the next review.
+
+**The dialogue record.** The reviewer keeps no memory between checks, and a persistent provider
+thread would be provider-specific and unauditable, so the ledger carries the dialogue. An
+AI-powered finding records the reviewer's remaining challenge fields (`discrepancy`,
+`alternative_interpretation`, `requested_next_step`, `uncertainty`) and a `relates_to` link to the
+earlier recorded findings its challenge cited, in `finding_recorded/1.4.0`. Local findings and
+older rows keep 1.3.0 bytes; the public finding wire is unchanged.
+
+**The prior-findings section.** The review packet (`outbound-case/1.2.0`) carries the newest
+unresolved AI-powered findings in their own `prior_finding` section, outside the 64-row timeline
+and ahead of it in envelope bounding: a structural row with what was asked, the latest answer
+(disposition, cited refs) and the evidence and results recorded after the finding, plus the prose
+rows the profile's finding-prose selection already permits. It is bounded (8 findings, 48 KiB,
+leftover case capacity only); what does not fit is named as `not_selected` omissions and discloses
+`semantic_prior_findings_over_limit`, a gap that stays on the receipt but does not veto absence
+proof. Findings recorded before 1.4.0 degrade to summary and message with a `not_recorded`
+omission. No new data category leaves the machine.

@@ -394,7 +394,12 @@ def test_reviewer_challenge_uses_existing_summary_and_detail() -> None:
         "subject_frontier",
         "coverage",
         "provenance",
+        "challenge",
+        "related_finding_ids",
     ]
+    # The remaining challenge fields are event facts (issue #905); the public finding wire keeps
+    # carrying the challenge only as summary and detail.
+    assert "challenge" not in finding_to_json(challenge)
 
 
 def test_sampling_usage_cost_and_provenance_are_strict_and_frozen() -> None:

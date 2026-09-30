@@ -15,6 +15,7 @@ from yoetz.domain.findings import (
     FINDING_KIND_TRAITS,
     CandidateFinding,
     Finding,
+    FindingChallenge,
     FindingKind,
     FindingOrigin,
     RankedFindings,
@@ -32,6 +33,7 @@ from yoetz.domain.receipts import (
     SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
     SEMANTIC_CHALLENGES_REJECTED_GAP,
     SEMANTIC_PACKET_INSUFFICIENT_GAP,
+    SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP,
     SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
     SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP,
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
@@ -975,6 +977,7 @@ class FinalSemanticEvaluation:
                 "content_unselected",
                 "content_redacted",
                 SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
+                SEMANTIC_PRIOR_FINDINGS_OVER_LIMIT_GAP,
             }
         ):
             raise _invalid("semantic_judgment_invalid")
@@ -1632,6 +1635,8 @@ def allocate_findings(
                 candidate.subject_frontier,
                 candidate.coverage,
                 candidate.provenance,
+                candidate.challenge,
+                candidate.related_finding_ids,
             )
         )
     return tuple(output)
@@ -1742,11 +1747,18 @@ def _policy_identity(kind: FindingKind) -> tuple[str, str]:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _ResolvedChallengeRefs:
+    subject_refs: tuple[str, ...]
+    # The cited earlier (recorded) findings: the ``relates_to`` link the new finding records.
+    related_finding_ids: tuple[FindingId, ...]
+
+
 def _resolve_challenge_refs(
     case: DeterministicCase,
     deterministic: tuple[Finding, ...],
     challenge: ReviewerChallenge,
-) -> tuple[str, ...] | None:
+) -> _ResolvedChallengeRefs | None:
     """Resolve one challenge's citations to frozen subject refs, or ``None`` if any is outside.
 
     Every per-ref test below is byte-identical to the fence this replaced; only the disposition of
@@ -1757,10 +1769,12 @@ def _resolve_challenge_refs(
     findings or a recorded finding the frozen case carries: ``citable_refs`` offers every recorded
     finding id, and the prompt asks the reviewer to name the earlier finding a re-raise concerns,
     so a challenge that does exactly that must not be dropped as outside the case (issue #905).
+    Cited recorded findings are kept as the new finding's ``relates_to`` link.
     """
 
     findings = {str(item.finding_id): item for item in deterministic}
     resolved: set[str] = set()
+    related: set[str] = set()
     for ref in challenge.cited_refs:
         if ref.startswith("fnd_"):
             local = findings.get(ref)
@@ -1772,6 +1786,10 @@ def _resolve_challenge_refs(
             if subjects is None:
                 return None
             resolved.update(subjects)
+            if finding_id(ref) in case.projection.findings:
+                # Only an already-recorded finding is linked: a fresh local finding of this check
+                # may still be ranked away and never recorded, and a link must never dangle.
+                related.add(ref)
         elif ref not in case.allowed_ids:
             return None
         elif ref.startswith(("evt_", "obl_", "clm_")):
@@ -1798,7 +1816,10 @@ def _resolve_challenge_refs(
             resolved.add(source)
     if not resolved:
         return None
-    return tuple(sorted(resolved, key=str.encode))
+    return _ResolvedChallengeRefs(
+        tuple(sorted(resolved, key=str.encode)),
+        tuple(finding_id(ref) for ref in sorted(related, key=str.encode)),
+    )
 
 
 # A finding names at most 64 subjects. Several cited findings can union past that; such a
@@ -1911,12 +1932,13 @@ def validate_semantic_judgment(
     candidates: list[CandidateFinding] = []
     rejections: dict[str, int] = {}
     for challenge in judgment.challenges:
-        refs = _resolve_challenge_refs(case, deterministic, challenge)
-        if refs is None:
+        resolution = _resolve_challenge_refs(case, deterministic, challenge)
+        if resolution is None:
             rejections[SEMANTIC_REJECTED_REF_OUTSIDE_CASE] = (
                 rejections.get(SEMANTIC_REJECTED_REF_OUTSIDE_CASE, 0) + 1
             )
             continue
+        refs = resolution.subject_refs
         if len(refs) > _MAX_CHALLENGE_SUBJECT_REFS:
             rejections[SEMANTIC_REJECTED_SUBJECTS_OVER_LIMIT] = (
                 rejections.get(SEMANTIC_REJECTED_SUBJECTS_OVER_LIMIT, 0) + 1
@@ -1949,6 +1971,15 @@ def validate_semantic_judgment(
                 case.frontier,
                 coverage,
                 provenance,
+                # Persisted so a later review and the agent see what would settle the finding,
+                # not only its headline (issue #905).
+                FindingChallenge(
+                    discrepancy=challenge.discrepancy,
+                    alternative_interpretation=challenge.alternative_interpretation,
+                    requested_next_step=challenge.requested_next_step,
+                    uncertainty=challenge.uncertainty,
+                ),
+                resolution.related_finding_ids,
             )
         )
     return SemanticJudgmentReview(

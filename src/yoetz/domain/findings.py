@@ -42,6 +42,7 @@ from yoetz.protocol.coverage import (
 from yoetz.protocol.errors import ProtocolValueError
 from yoetz.protocol.ids import IdKind, validate_id
 from yoetz.protocol.models import (
+    MAX_REVIEW_TEXT_BYTES,
     SemanticReason,
     SemanticStatus,
     validate_semantic_outcome,
@@ -51,11 +52,14 @@ __all__ = [
     "EXTERNAL_SEMANTIC_FINDING_KINDS",
     "FALLBACK_ORIGIN_REASONS",
     "FINDING_KIND_TRAITS",
+    "MAX_RELATED_FINDING_IDS",
+    "REVIEWER_NEXT_STEPS",
     "CandidateFinding",
     "CheckVerdict",
     "CostFields",
     "DeterministicFinding",
     "Finding",
+    "FindingChallenge",
     "FindingKind",
     "FindingOrigin",
     "RankedFindings",
@@ -71,7 +75,10 @@ __all__ = [
     "SemanticProvenance",
     "TokenUsage",
     "WaiverScope",
+    "finding_event_from_json",
+    "finding_event_to_json",
     "finding_from_json",
+    "finding_has_dialogue_fields",
     "finding_to_json",
     "rank_key",
     "semantic_fallback_origin_to_json",
@@ -752,6 +759,84 @@ def _validate_finding_fields(
     return validated_refs
 
 
+# The closed next-step vocabulary a reviewer challenge names (provider-judgment 1.0.0).
+REVIEWER_NEXT_STEPS: Final = frozenset(
+    {
+        "act",
+        "provide_evidence",
+        "revise_claim",
+        "dispute_with_evidence",
+        "state_unresolved_limitation",
+    }
+)
+# A challenge cites at most 16 refs, so it can name at most 16 earlier findings.
+MAX_RELATED_FINDING_IDS: Final = 16
+
+
+def _validate_review_text(value: object) -> str:
+    """Bound reviewer prose by UTF-8 bytes, exactly as the provider-facing challenge does."""
+
+    if type(value) is not str:
+        raise ProtocolValueError("finding_json_shape_invalid")
+    try:
+        encoded = value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ProtocolValueError("finding_json_shape_invalid") from exc
+    if not 1 <= len(encoded) <= MAX_REVIEW_TEXT_BYTES:
+        raise ProtocolValueError("finding_json_shape_invalid")
+    ensure_canonical_value(value)
+    return str.__getitem__(value, slice(None))
+
+
+@dataclass(frozen=True, slots=True)
+class FindingChallenge:
+    """What the reviewer asked for when it raised an AI-powered finding (issue #905).
+
+    ``summary`` and ``message_to_main_agent`` already travel as the finding's summary and
+    detail. These are the remaining challenge fields, persisted so a later review and the agent
+    can see what the reviewer said would settle the finding instead of only its headline.
+    """
+
+    discrepancy: str
+    alternative_interpretation: str
+    requested_next_step: str
+    uncertainty: str
+
+    def __post_init__(self) -> None:
+        for field_name in ("discrepancy", "alternative_interpretation", "uncertainty"):
+            object.__setattr__(self, field_name, _validate_review_text(getattr(self, field_name)))
+        if (
+            type(self.requested_next_step) is not str
+            or self.requested_next_step not in REVIEWER_NEXT_STEPS
+        ):
+            raise ProtocolValueError("finding_json_shape_invalid")
+
+
+def _validate_dialogue_fields(
+    *,
+    origin: FindingOrigin,
+    challenge: object,
+    related_finding_ids: object,
+    own_id: FindingId | None,
+) -> tuple[FindingId, ...]:
+    """Challenge fields and prior-finding links exist only on AI-powered findings."""
+
+    if challenge is not None and type(challenge) is not FindingChallenge:
+        raise ProtocolValueError("finding_json_shape_invalid")
+    if type(related_finding_ids) is not tuple:
+        raise ProtocolValueError("finding_json_shape_invalid")
+    related = cast(tuple[object, ...], related_finding_ids)
+    if len(related) > MAX_RELATED_FINDING_IDS:
+        raise ProtocolValueError("finding_json_shape_invalid")
+    ensure_canonical_set(cast(tuple[str, ...], related))
+    validated = tuple(finding_id(item) for item in related)
+    if own_id is not None and own_id in validated:
+        raise ProtocolValueError("finding_json_shape_invalid")
+    if origin is not FindingOrigin.SEMANTIC_MODEL_DERIVED and (challenge is not None or validated):
+        raise ProtocolValueError("finding_json_shape_invalid")
+    return validated
+
+
 @dataclass(frozen=True, slots=True)
 class CandidateFinding:
     kind: FindingKind
@@ -765,6 +850,8 @@ class CandidateFinding:
     subject_frontier: Frontier
     coverage: Coverage
     provenance: SemanticProvenance | None = None
+    challenge: FindingChallenge | None = None
+    related_finding_ids: tuple[FindingId, ...] = ()
 
     def __post_init__(self) -> None:
         validated_refs = _validate_finding_fields(
@@ -781,10 +868,29 @@ class CandidateFinding:
             provenance=self.provenance,
         )
         object.__setattr__(self, "subject_refs", validated_refs)
+        object.__setattr__(
+            self,
+            "related_finding_ids",
+            _validate_dialogue_fields(
+                origin=self.origin,
+                challenge=self.challenge,
+                related_finding_ids=self.related_finding_ids,
+                own_id=None,
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class Finding:
+    """One recorded finding.
+
+    ``challenge`` and ``related_finding_ids`` (the ``relates_to`` link to earlier findings the
+    reviewer cited) are recorded only on AI-powered findings from ``finding_recorded/1.4.0`` on
+    (issue #905). They are event facts, not part of the public ``finding`` wire: the public
+    encoding (:func:`finding_to_json`) is unchanged, and :func:`finding_event_to_json` carries
+    them on the ledger.
+    """
+
     finding_id: FindingId
     kind: FindingKind
     origin: FindingOrigin
@@ -797,6 +903,8 @@ class Finding:
     subject_frontier: Frontier
     coverage: Coverage
     provenance: SemanticProvenance | None = None
+    challenge: FindingChallenge | None = None
+    related_finding_ids: tuple[FindingId, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "finding_id", finding_id(self.finding_id))
@@ -814,6 +922,22 @@ class Finding:
             provenance=self.provenance,
         )
         object.__setattr__(self, "subject_refs", validated_refs)
+        object.__setattr__(
+            self,
+            "related_finding_ids",
+            _validate_dialogue_fields(
+                origin=self.origin,
+                challenge=self.challenge,
+                related_finding_ids=self.related_finding_ids,
+                own_id=self.finding_id,
+            ),
+        )
+
+
+def finding_has_dialogue_fields(finding: Finding) -> bool:
+    """Whether the finding carries the ``finding_recorded/1.4.0`` dialogue fields."""
+
+    return finding.challenge is not None or bool(finding.related_finding_ids)
 
 
 DeterministicFinding = Finding
@@ -1410,6 +1534,89 @@ def finding_to_json(finding: Finding) -> JsonObject:
     }
     if finding.provenance is not None:
         result["provenance"] = semantic_provenance_to_json(finding.provenance)
+    return JsonObject(result)
+
+
+_CHALLENGE_KEYS: Final = frozenset(
+    {"discrepancy", "alternative_interpretation", "requested_next_step", "uncertainty"}
+)
+_FINDING_EVENT_ALLOWED_KEYS: Final = _FINDING_ALLOWED_KEYS | {"challenge", "relates_to"}
+
+
+def finding_event_from_json(value: JsonValue) -> Finding:
+    """Decode one ``finding_recorded`` payload, including the optional dialogue fields.
+
+    The shape is the public finding object plus, from event version 1.4.0, ``challenge`` and
+    ``relates_to``. Which versions admit them is the event decoder's decision.
+    """
+
+    source = _require_json_object(
+        value,
+        required=_FINDING_REQUIRED_KEYS,
+        allowed=_FINDING_EVENT_ALLOWED_KEYS,
+        reason="finding_json_shape_invalid",
+    )
+    public = JsonObject({key: item for key, item in source.items() if key in _FINDING_ALLOWED_KEYS})
+    finding = finding_from_json(public)
+    challenge_value = _optional_field(source, "challenge")
+    related_value = _optional_field(source, "relates_to")
+    if "challenge" in source and challenge_value is None:
+        raise ProtocolValueError("finding_json_shape_invalid")
+    if "relates_to" in source and (type(related_value) is not tuple or not related_value):
+        raise ProtocolValueError("finding_json_shape_invalid")
+    challenge: FindingChallenge | None = None
+    if challenge_value is not None:
+        fields = _require_json_object(
+            challenge_value,
+            required=_CHALLENGE_KEYS,
+            allowed=_CHALLENGE_KEYS,
+            reason="finding_json_shape_invalid",
+        )
+        challenge = FindingChallenge(
+            discrepancy=cast(str, fields["discrepancy"]),
+            alternative_interpretation=cast(str, fields["alternative_interpretation"]),
+            requested_next_step=cast(str, fields["requested_next_step"]),
+            uncertainty=cast(str, fields["uncertainty"]),
+        )
+    return Finding(
+        finding_id=finding.finding_id,
+        kind=finding.kind,
+        origin=finding.origin,
+        priority=finding.priority,
+        summary=finding.summary,
+        detail=finding.detail,
+        subject_refs=finding.subject_refs,
+        policy_id=finding.policy_id,
+        policy_version=finding.policy_version,
+        subject_frontier=finding.subject_frontier,
+        coverage=finding.coverage,
+        provenance=finding.provenance,
+        challenge=challenge,
+        related_finding_ids=(
+            () if related_value is None else cast(tuple[FindingId, ...], related_value)
+        ),
+    )
+
+
+def finding_event_to_json(finding: Finding) -> JsonObject:
+    """Encode one ``finding_recorded`` payload: the public object plus any dialogue fields.
+
+    A finding without dialogue fields encodes byte-identically to :func:`finding_to_json`, so
+    every local finding and every pre-#905 AI-powered finding keeps its recorded bytes.
+    """
+
+    result = dict(finding_to_json(finding).items())
+    if finding.challenge is not None:
+        result["challenge"] = JsonObject(
+            {
+                "alternative_interpretation": finding.challenge.alternative_interpretation,
+                "discrepancy": finding.challenge.discrepancy,
+                "requested_next_step": finding.challenge.requested_next_step,
+                "uncertainty": finding.challenge.uncertainty,
+            }
+        )
+    if finding.related_finding_ids:
+        result["relates_to"] = tuple(finding.related_finding_ids)
     return JsonObject(result)
 
 
