@@ -385,7 +385,7 @@ def test_digest_provenance_limitation_is_retained_in_receipt() -> None:
 
 
 @pytest.mark.parametrize(
-    ("gaps", "expected"),
+    ("gaps", "expected", "per_item"),
     (
         pytest.param(
             (
@@ -401,6 +401,7 @@ def test_digest_provenance_limitation_is_retained_in_receipt() -> None:
                 ),
             ),
             "2 cited evidence items carry caller-asserted digests that Yoetz did not verify",
+            True,
             id="two-items",
         ),
         pytest.param(
@@ -411,15 +412,22 @@ def test_digest_provenance_limitation_is_retained_in_receipt() -> None:
                     (),
                 ),
             ),
-            "Cited evidence carries caller-asserted digests that Yoetz did not verify",
+            "Recorded check or finding coverage names caller-asserted digests that Yoetz did not "
+            "verify; no currently cited evidence item carries one.",
+            False,
             id="check-coverage-only",
         ),
     ),
 )
 def test_caller_digest_label_is_named_once_with_its_count(
-    gaps: tuple[CaseGap, ...], expected: str
+    gaps: tuple[CaseGap, ...], expected: str, per_item: bool
 ) -> None:
-    """Issue #912 fallback (a): the receipt, not a finding, discloses unverified caller digests."""
+    """Issue #912 fallback (a): the receipt, not a finding, discloses unverified caller digests.
+
+    Without a per-item gap root the code comes only from recorded check or finding coverage, so
+    the label describes that recorded limitation and never implies currently cited items or
+    permanence (a later check of the current record may drop it). Every format carries it.
+    """
 
     codes = tuple(sorted({gap.code for gap in gaps}))
     coverage = _coverage(gaps=codes)
@@ -438,8 +446,18 @@ def test_caller_digest_label_is_named_once_with_its_count(
     )
     assert expected in limitations
     assert limitations.count("caller-asserted digest") == 1
-    assert "no response or recheck changes it" in limitations
+    assert ("no response or recheck changes it" in limitations) is per_item
+    if not per_item:
+        assert "cited evidence items carry" not in limitations
+        assert "Cited evidence carries" not in limitations
     assert "content-bearing" not in limitations
+    wire = receipt_document_to_json(receipt)
+    assert any(
+        cast(dict[str, object], section)["body"] == limitations
+        for section in cast(list[object], wire["sections"])
+    )
+    for markdown in (True, False):
+        assert expected in render_receipt_human(receipt, markdown=markdown)
 
 
 def test_resolved_history_no_longer_lowers_receipt_coverage() -> None:

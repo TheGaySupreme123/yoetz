@@ -345,10 +345,11 @@ def test_templates_are_complete_exact_and_structural() -> None:
 def test_text_contract_digest_pins_every_rendered_wording_branch() -> None:
     corpus = deterministic_checks._text_contract_corpus()  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
     assert canonical_digest(corpus) == DETERMINISTIC_TEXT_CONTRACT_DIGEST
-    assert len(corpus) == len(FindingKind) + 4
+    assert len(corpus) == len(FindingKind) + 5
     rendered = canonical_encode(corpus).decode("utf-8")
     assert "Gaps: missing_ref." in rendered
     assert "Evidence provenance is recorded history" in rendered
+    assert "an acknowledgement answers this finding but does not resolve it" in rendered
     assert "content-bearing" not in rendered
     assert "limiting result res_" in rendered
     assert "material coverage-gap record evt_" in rendered

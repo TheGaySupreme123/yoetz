@@ -56,6 +56,7 @@ from yoetz.domain.values import (
 )
 from yoetz.kernel.deterministic_checks import (
     CaseGap,
+    render_deterministic_finding_text,
     run_deterministic_policies,
 )
 from yoetz.kernel.policies.work_integrity import WORK_INTEGRITY_POLICY_PACK
@@ -546,6 +547,43 @@ def test_legacy_digest_finding_names_only_actions_an_agent_can_take() -> None:
     assert "content-bearing" not in detail
     assert "filter.strength immutable_snapshot" in detail
     assert "typed digest_binding" in detail
+
+
+def test_mixed_legacy_digest_finding_does_not_claim_acknowledgement_resolves_it() -> None:
+    """Greptile P1 on #912: provenance advice must not cover a finding's other, current gaps.
+
+    A legacy digest beside an unknown event (or beside a rootless-coded subject such as a
+    command-attempt obligation) keeps the finding current after any acknowledgement, so the text
+    must say so instead of "one acknowledged response answers it".
+    """
+
+    code = "evidence_digest_subject_legacy_unknown"
+    legacy = replace(BASE_COVERAGE, known_gaps=(code,))
+    unknown = CaseGap(f"unknown_event:{evt(12)}:future_event@2.0.0", "unknown_event", (evt(12),))
+    mixed = make_case(
+        gaps=(CaseGap(f"{code}:{evt(9)}", code, (evt(9),)), unknown),
+        extra_refs=(evt(9), evt(12)),
+        coverage_overrides={evt(9): legacy},
+    )
+    result = run_deterministic_policies(mixed, WORK_INTEGRITY_POLICY_PACK)
+    detail = next(
+        item.candidate.detail
+        for item in result.assessments
+        if item.candidate.kind is FindingKind.LEDGER_STALE_OR_INCOMPLETE
+    )
+    assert "one acknowledged response answers it" not in detail
+    assert "needs no repair or recheck" not in detail
+    assert "an acknowledgement answers this finding but does not resolve it" in detail
+    assert "until a qualifying check proves those other gaps absent" in detail
+
+    # Same wording when the other subject is an obligation whose gap code is not listed.
+    _, rendered = render_deterministic_finding_text(
+        FindingKind.LEDGER_STALE_OR_INCOMPLETE,
+        (evt(9), obl(1)),
+        (code,),
+    )
+    assert "one acknowledged response answers it" not in rendered
+    assert "does not resolve it" in rendered
 
 
 def _recorded_finding() -> Finding:

@@ -915,12 +915,18 @@ def _caller_digest_sentence(count: int) -> str:
 
     This is the fallback provenance label: an unverified caller digest raises no finding, yet
     the receipt must still say that Yoetz did not verify those bytes. Nothing an agent publishes
-    changes the recorded provenance, so the sentence names no remedy.
+    changes the recorded provenance, so the sentence names no remedy. Without a per-item root the
+    code comes only from recorded check or finding coverage; the sentence then describes that
+    recorded limitation instead of implying currently cited items, and makes no permanence claim
+    because a later check of the current record may no longer carry it.
     """
 
     if count == 0:
-        subject = "Cited evidence carries caller-asserted digests"
-    elif count == 1:
+        return (
+            "Recorded check or finding coverage names caller-asserted digests that Yoetz did not "
+            "verify; no currently cited evidence item carries one."
+        )
+    if count == 1:
         subject = "One cited evidence item carries a caller-asserted digest"
     else:
         subject = f"{count} cited evidence items carry caller-asserted digests"
