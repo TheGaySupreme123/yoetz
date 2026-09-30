@@ -135,9 +135,21 @@ def test_only_agent_published_actions_and_results_answer_a_request() -> None:
         ),
     )
     allowed = frozenset(str(ref) for ref in case.allowed_ids)
-    assert supplied_since(case.projection, pending, allowed) == (
+    # Authorship is the service-stamped envelope fact the frozen case carries, never payload text.
+    observed = frozenset(
+        {
+            str(case.projection.actions[act(60)].source_event_id),
+            str(case.projection.results[res(61)].source_event_id),
+        }
+    )
+    assert supplied_since(case.projection, pending, allowed, observed) == (
         tuple(sorted((str(act(62)), str(res(63))), key=str.encode)),
         (str(res(63)),),
+    )
+    # Without the stamp, an action worded like a hook row is the agent's own answer.
+    assert supplied_since(case.projection, pending, allowed) == (
+        tuple(sorted((str(act(60)), str(act(62)), str(res(61)), str(res(63))), key=str.encode)),
+        tuple(sorted((str(res(61)), str(res(63))), key=str.encode)),
     )
 
 

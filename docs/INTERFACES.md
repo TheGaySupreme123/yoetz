@@ -6870,7 +6870,9 @@ discloses `semantic_missing_items_rejected`. A malformed item still rejects the 
 fence drops targets outside the frozen case (`semantic_missing_items_rejected`) and drops an item
 whose earlier request was answered by material recorded since unless the reviewer cites that
 material (`semantic_missing_already_supplied`; only agent-published material answers a request,
-never hook-captured tool output). Yoetz classifies each kept item as `agent_suppliable` or
+never hook-captured tool output: authorship is the service-stamped envelope fact, carried on the
+frozen case as `observation_event_ids`, the observation-authored events recorded after the
+request, emitted only when non-empty so other cases keep their bytes). Yoetz classifies each kept item as `agent_suppliable` or
 `structurally_unavailable_on_this_host` (a kind the effective review selection or channel can never
 carry, or a redacted target), adding `semantic_missing_agent_suppliable` and
 `semantic_missing_structurally_unavailable`. These are check limitations, never findings, and weigh

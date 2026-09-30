@@ -21,6 +21,7 @@ from yoetz.domain.events import (
     UnknownEvent,
     decode_payload,
     encode_payload,
+    is_observation_authored,
 )
 from yoetz.domain.findings import (
     FINDING_KIND_TRAITS,
@@ -777,8 +778,22 @@ class DeterministicCase:
     history: tuple[FrozenHistoryEvent, ...] = ()
     history_availability: Literal["available", "not_recorded"] = "not_recorded"
     history_omitted_before_count: int = 0
+    # Service-stamped observation-authored events recorded after the pending missing-item request
+    # (issue #907). Authorship is an envelope fact the projection does not keep; the next review
+    # needs it to tell the agent answering a request from hook capture recording each tool call.
+    observation_event_ids: frozenset[EventId] = frozenset()
 
     def __post_init__(self) -> None:
+        if type(self.observation_event_ids) is not frozenset:
+            raise _invalid_case()
+        try:
+            object.__setattr__(
+                self,
+                "observation_event_ids",
+                frozenset(event_id(value) for value in self.observation_event_ids),
+            )
+        except (TypeError, ValueError) as exc:
+            raise _invalid_case() from exc
         if (
             type(self.projection) is not ProjectionState
             or type(self.frontier) is not Frontier
@@ -855,6 +870,8 @@ _LEGACY_CASE_JSON_KEYS: Final = frozenset(
 _CASE_JSON_KEYS: Final = _LEGACY_CASE_JSON_KEYS | frozenset(
     {"history", "history_availability", "history_omitted_before_count"}
 )
+# Emitted only when non-empty, so a case without a pending request keeps its exact bytes.
+_OBSERVATION_CASE_JSON_KEYS: Final = _CASE_JSON_KEYS | frozenset({"observation_event_ids"})
 
 
 def _case_json_object(
@@ -1042,6 +1059,15 @@ def deterministic_case_to_json(case: DeterministicCase) -> dict[str, JsonValue]:
         ],
         "history_availability": case.history_availability,
         "history_omitted_before_count": case.history_omitted_before_count,
+        **(
+            {}
+            if not case.observation_event_ids
+            else {
+                "observation_event_ids": [
+                    str(item) for item in sorted(case.observation_event_ids, key=_ascii_key)
+                ]
+            }
+        ),
     }
 
 
@@ -1052,7 +1078,11 @@ def deterministic_case_from_json(value: JsonValue) -> DeterministicCase:
         frozen = freeze_json(value)
         source = _case_json_object(frozen)
         source_keys = frozenset(source)
-        if source_keys not in {_CASE_JSON_KEYS, _LEGACY_CASE_JSON_KEYS}:
+        if source_keys not in {
+            _CASE_JSON_KEYS,
+            _LEGACY_CASE_JSON_KEYS,
+            _OBSERVATION_CASE_JSON_KEYS,
+        }:
             raise _invalid_case()
         availability_source = _case_json_object(
             source["availability"],
@@ -1104,7 +1134,7 @@ def deterministic_case_from_json(value: JsonValue) -> DeterministicCase:
         history: list[FrozenHistoryEvent] = []
         history_availability: Literal["available", "not_recorded"] = "not_recorded"
         history_omitted_before_count = 0
-        if source_keys == _CASE_JSON_KEYS:
+        if source_keys != _LEGACY_CASE_JSON_KEYS:
             for raw_item in _case_json_array(source["history"]):
                 item = _case_json_object(raw_item)
                 legacy_history_keys = frozenset(
@@ -1172,6 +1202,10 @@ def deterministic_case_from_json(value: JsonValue) -> DeterministicCase:
             history=tuple(history),
             history_availability=history_availability,
             history_omitted_before_count=history_omitted_before_count,
+            observation_event_ids=frozenset(
+                event_id(cast(str, value))
+                for value in _case_json_array(source.get("observation_event_ids", ()))
+            ),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise _invalid_case() from exc
@@ -1503,6 +1537,7 @@ def build_deterministic_case(
     records_by_event = {record.event_id: record for record in accepted_prefix}
     if len(records_by_event) != len(accepted_prefix):
         raise _invalid_case()
+    pending_missing = projection.pending_missing_for_assessment
 
     projection_redacted_events: set[EventId] = set()
     redacted_objects: set[ObjectId] = set()
@@ -1804,6 +1839,13 @@ def build_deterministic_case(
         history=history,
         history_availability="available",
         history_omitted_before_count=history_omitted_before_count,
+        observation_event_ids=frozenset(
+            record.event_id
+            for record in accepted_prefix
+            if pending_missing is not None
+            and record.ledger.ingestion_sequence > pending_missing.source_frontier
+            and is_observation_authored(record)
+        ),
     )
 
 

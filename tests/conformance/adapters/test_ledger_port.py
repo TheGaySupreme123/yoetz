@@ -51,6 +51,10 @@ from yoetz.domain.values import (
     obligation_id,
     parse_rfc3339_millis,
 )
+from yoetz.kernel.deterministic_checks import (
+    deterministic_case_from_json,
+    deterministic_case_to_json,
+)
 from yoetz.kernel.projections import ProjectionState
 from yoetz.kernel.ranking import CheckCompleteness, RankingContext, rank_findings
 from yoetz.ports.ledger import (
@@ -1576,7 +1580,7 @@ async def test_sqlite_reopen_replays_ranked_order_after_canonical_set_commit() -
 
 
 @pytest.mark.anyio
-async def test_named_missing_items_commit_as_check_recorded_1_4_and_replay_after_restart() -> None:
+async def test_named_missing_items_commit_as_check_recorded_1_3_and_replay_after_restart() -> None:
     """Issue #907: both ledgers record the structural items and a restart replays them."""
 
     items = (
@@ -1636,6 +1640,62 @@ async def test_named_missing_items_commit_as_check_recorded_1_4_and_replay_after
     assert type(replayed) is CheckCommitResult
     assert replayed.outcome == "replayed"
     assert replayed.missing_for_assessment == items
+
+
+@pytest.mark.anyio
+async def test_frozen_case_names_hook_events_recorded_after_a_missing_item_request() -> None:
+    """Issue #907: hook capture after an ``insufficient_packet`` request is never the answer.
+
+    Authorship is a service-stamped envelope fact the projection does not keep, so the frozen
+    case carries the observation-authored events recorded after the pending request, in both
+    ledgers and through the persisted case JSON.
+    """
+
+    items = (MissingForAssessmentItem("verification_output", (), "agent_suppliable"),)
+    for adapter_factory in (memory_ledger, sqlite_ledger):
+        # The unknown-family vector freezes cleanly after a hook ingest in both test adapters.
+        command = ledger_command(unknown=True)
+        adapter = adapter_factory(command)
+        await adapter.append_batch(command)
+        frozen = await _ready_case(
+            adapter,
+            command,
+            "req_00000000-0000-4000-8000-00000000004e",
+            "sha256:" + "e" * 64,
+        )
+        assert frozen.case.observation_event_ids == frozenset()
+        provenance = _descending_rank_findings(
+            frozen.case.frontier, command.entries[0].coverage, semantic_lead=True
+        )[0].provenance
+        committed = await adapter.commit_check_if_current(
+            frozen,
+            RankedFindings((), 0, CheckVerdict.INSUFFICIENT_COVERAGE, command.entries[0].coverage),
+            (CheckPolicyExecution("work-integrity", "0.1.0", "run", "completed"),),
+            SemanticStatus.SUCCEEDED,
+            SemanticReason.SEMANTIC_COMPLETED,
+            provenance,
+            frozen.lease.operation_id,
+            semantic_conclusion="insufficient_packet",
+            missing_for_assessment=items,
+        )
+        hook = _observation_command(
+            request_suffix="5", expected_frontier=committed.result_frontier.sequence, seed="c"
+        )
+        drained = await adapter.append_batch(hook)
+        refrozen = await adapter.freeze_case(
+            command.session_id,
+            command.writer_id,
+            drained.result_frontier.sequence,
+            "req_00000000-0000-4000-8000-00000000004f",
+            "sha256:" + "f" * 64,
+        )
+        assert isinstance(refrozen, FrozenCase)
+        pending = refrozen.case.projection.pending_missing_for_assessment
+        assert pending is not None and pending.items == items
+        assert refrozen.case.observation_event_ids == frozenset({hook.entries[0].draft.event_id})
+        encoded = deterministic_case_to_json(refrozen.case)
+        assert encoded["observation_event_ids"] == [str(hook.entries[0].draft.event_id)]
+        assert deterministic_case_from_json(encoded) == refrozen.case
 
 
 @pytest.mark.anyio

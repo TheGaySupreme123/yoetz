@@ -155,8 +155,10 @@ _MIN_CLIPPABLE_PROSE_BYTES: Final = 256
 # The gateway compares the whole prepared provider document with the channel byte ceiling, whose
 # schema maximum is MAX_SEMANTIC_CASE_BYTES (and the bytes/4 token estimate reaches the same
 # ceiling). Selection plans below it so a larger excerpt can never turn a reviewable case into a
-# policy denial; the reserve absorbs privacy redaction markers that can differ in length.
-_PREPARED_PAYLOAD_PLANNING_BYTES: Final = MAX_SEMANTIC_CASE_BYTES - 4_096
+# policy denial; the reserve absorbs privacy redaction markers that can differ in length. The
+# same reserve applies below a narrower owner ceiling.
+_PLANNING_RESERVE_BYTES: Final = 4_096
+_PREPARED_PAYLOAD_PLANNING_BYTES: Final = MAX_SEMANTIC_CASE_BYTES - _PLANNING_RESERVE_BYTES
 _PLANNING_GRANULARITY_BYTES: Final = 1_024
 _PACKET_ID_LIST_KEYS: Final = (
     "goal_item_ids",
@@ -2147,7 +2149,7 @@ def build_semantic_case(
     planning_bytes = (
         _PREPARED_PAYLOAD_PLANNING_BYTES
         if prepared_byte_ceiling is None
-        else min(_PREPARED_PAYLOAD_PLANNING_BYTES, prepared_byte_ceiling)
+        else max(0, min(MAX_SEMANTIC_CASE_BYTES, prepared_byte_ceiling) - _PLANNING_RESERVE_BYTES)
     )
 
     def build(excerpt_byte_budget: int | None) -> SemanticCase:
@@ -2736,7 +2738,12 @@ def _build_semantic_case_once(
     prior_missing_item: SemanticCaseItem | None = None
     pending_missing = projection.pending_missing_for_assessment
     if pending_missing is not None and "timeline" in sections and selection.max_timeline_items:
-        answered = supplied_since(projection, pending_missing, frozenset(allowed))
+        answered = supplied_since(
+            projection,
+            pending_missing,
+            frozenset(allowed),
+            frozenset(str(item) for item in frozen_case.observation_event_ids),
+        )
         check_ref = str(pending_missing.source_check_event_id)
         prior_missing_item = _content_item(
             item_id="prior-missing-for-assessment",

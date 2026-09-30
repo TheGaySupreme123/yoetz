@@ -1001,7 +1001,10 @@ def test_excerpt_selection_plans_below_the_owner_channel_ceiling_when_it_is_narr
     ceiling = wide_bytes - 3 * 6_000
     narrow = _build(ledger, prepared_byte_ceiling=ceiling)
     prepared = semantic_case_to_prepared_payload(narrow, {item.item_id for item in narrow.items})
-    assert len(prepared) <= ceiling
+    # The planning reserve holds below a narrower owner ceiling too: marker growth of up to the
+    # reserve after planning (privacy redaction markers differ in length) still fits.
+    reserve = semantic_case_module._PLANNING_RESERVE_BYTES  # pyright: ignore[reportPrivateUsage]
+    assert len(prepared) + reserve <= ceiling
     assert "content_unselected" in narrow.packet.coverage.known_gaps
 
     def excerpt_bytes(case: SemanticCase) -> int:
@@ -1010,5 +1013,8 @@ def test_excerpt_selection_plans_below_the_owner_channel_ceiling_when_it_is_narr
     assert excerpt_bytes(narrow) < excerpt_bytes(wide)
     selected = {item.source_ref for item in narrow.items if item.section == "excerpt"}
     assert {str(ref) for ref in ledger.newest_edit_for_path.values()} <= selected
+    # A ceiling inside the reserve plans no excerpt at all; the gateway still decides the rest.
+    starved = _build(ledger, prepared_byte_ceiling=reserve)
+    assert not [item for item in starved.items if item.section == "excerpt"]
     with pytest.raises(ValueError, match="semantic_case_prepared_ceiling_invalid"):
         _build(ledger, prepared_byte_ceiling=0)

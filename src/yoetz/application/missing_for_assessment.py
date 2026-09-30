@@ -16,11 +16,9 @@ from dataclasses import dataclass
 from typing import Final
 
 from yoetz.domain.events import (
-    ActionRecordedPayload,
     EvidenceDigestProvenance,
     EvidenceRecordedPayload,
     MissingForAssessmentItem,
-    ResultRecordedPayload,
 )
 from yoetz.domain.findings import Finding
 from yoetz.domain.privacy import ReviewSelectionPolicy
@@ -114,6 +112,7 @@ def supplied_since(
     projection: ProjectionState,
     pending: PendingMissingForAssessment,
     allowed: frozenset[str],
+    observation_event_ids: frozenset[str] = frozenset(),
 ) -> tuple[tuple[str, ...], ...]:
     """For each pending item, the case refs of answering material recorded after the request.
 
@@ -131,7 +130,7 @@ def supplied_since(
     ):
         for ref, row in rows.items():
             if row.source_frontier > after and row.payload is not None and not row.redacted:
-                if _hook_observed(projection, row.payload):
+                if str(row.source_event_id) in observation_event_ids or _hook_observed(row.payload):
                     # Hook capture records every tool call; it is never the agent answering a
                     # named request, so it must not turn a still-missing item into "supplied".
                     continue
@@ -159,33 +158,14 @@ def supplied_since(
     return tuple(answered)
 
 
-def _hook_observed_action(payload: ActionRecordedPayload) -> bool:
-    # Hook materialization writes exactly this shape: an "Observed ..." description and no
-    # command bytes (none, or an ``omitted:`` digest placeholder). The projection keeps no
-    # authorship, so the payload shape is the structural marker.
-    return payload.description.startswith("Observed ") and (
-        payload.command is None or payload.command.startswith("omitted:")
+def _hook_observed(payload: object) -> bool:
+    """Hook-captured bytes carry service-stamped observation provenance on their evidence row."""
+
+    return (
+        type(payload) is EvidenceRecordedPayload
+        and payload.digest_binding is not None
+        and payload.digest_binding.provenance is EvidenceDigestProvenance.OBSERVATION_CAPTURED
     )
-
-
-def _hook_observed(projection: ProjectionState, payload: object) -> bool:
-    """True for a record the harness hooks captured rather than one the agent published."""
-
-    if type(payload) is EvidenceRecordedPayload:
-        return (
-            payload.digest_binding is not None
-            and payload.digest_binding.provenance is EvidenceDigestProvenance.OBSERVATION_CAPTURED
-        )
-    if type(payload) is ActionRecordedPayload:
-        return _hook_observed_action(payload)
-    if type(payload) is ResultRecordedPayload:
-        action = projection.actions.get(payload.action_id)
-        return (
-            action is not None
-            and action.payload is not None
-            and _hook_observed_action(action.payload)
-        )
-    return False
 
 
 def _redacted_refs(projection: ProjectionState) -> frozenset[str]:
@@ -232,7 +212,8 @@ def review_missing_for_assessment(
     )
     projection = case.projection
     pending = projection.pending_missing_for_assessment
-    answered = () if pending is None else supplied_since(projection, pending, allowed)
+    observed = frozenset(str(item) for item in case.observation_event_ids)
+    answered = () if pending is None else supplied_since(projection, pending, allowed, observed)
     redacted = _redacted_refs(projection)
     gaps: set[str] = set()
     kept: dict[tuple[str, tuple[str, ...]], str] = {}
