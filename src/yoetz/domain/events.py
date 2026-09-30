@@ -128,6 +128,7 @@ __all__ = [
     "CLAIM_SCHEMA_VERSION",
     "COORDINATION_EVENT_SCHEMA_VERSION",
     "SCHEMA_VERSION",
+    "SEMANTIC_INCLUDED_REFS_NOT_RECORDED_GAP",
     "SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP",
     "EVIDENCE_SCHEMA_VERSION",
     "EVIDENCE_SCHEMA_VERSIONS",
@@ -259,11 +260,13 @@ MAX_REF_LIST: Final = 64
 MAX_CAUSAL_PARENTS: Final = 32
 MAX_REQUESTED_ITEMS: Final = 64
 MAX_ALTERNATIVES: Final = 16
-# The reduced AI-powered review packet's included frontier references recorded on its check
-# (issue #904). A packet whose dependency closure is larger records none, so no absence proof can
-# rely on it and its reduced scope keeps blocking semantic resolution.
-MAX_SEMANTIC_INCLUDED_REFS: Final = 2_048
+# The frontier references whose own content item a reduced AI-powered review packet carried,
+# recorded on its check (issue #904). A case holds at most 256 items, so the bound is the same. A
+# check whose set cannot be recorded carries SEMANTIC_INCLUDED_REFS_NOT_RECORDED_GAP instead, and
+# its reduced scope keeps blocking semantic resolution.
+MAX_SEMANTIC_INCLUDED_REFS: Final = 256
 SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP: Final = "semantic_reference_scope_reduced"
+SEMANTIC_INCLUDED_REFS_NOT_RECORDED_GAP: Final = "semantic_included_refs_not_recorded"
 
 _MAX_SAFE_INTEGER: Final = 9_007_199_254_740_991
 _MAX_SQLITE_INTEGER: Final = 9_223_372_036_854_775_807
@@ -2240,9 +2243,10 @@ class CheckRecordedPayload:
     projection_version: str
     semantic_provenance: SemanticProvenance | None = None
     semantic_conclusion: str | None = None
-    # The frontier references a reduced AI-powered review packet included (its selected dependency
-    # closure, issue #904). Present only on a completed review whose coverage records the reduced
-    # scope; resolution tests a finding's relevant material against it.
+    # The frontier references whose own content item a reduced AI-powered review packet actually
+    # sent (after envelope bounding and privacy minimization, issue #904). Present only on a
+    # completed review whose coverage records the reduced scope; resolution tests a finding's
+    # relevant material against it.
     semantic_included_refs: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:

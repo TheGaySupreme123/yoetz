@@ -636,6 +636,5 @@ def test_only_a_completed_reduced_review_records_its_included_references() -> No
         for number in range(MAX_SEMANTIC_INCLUDED_REFS + 1)
     )
     assert semantic_included_refs(replace(succeeded, case_included_refs=oversized)) is None
-    # An unreduced review has no included-reference record at all.
-    with pytest.raises(ValueError, match="semantic_judgment_invalid"):
-        replace(succeeded, case_reference_scope_reduced=False)
+    # An unreduced review sent its whole frontier and records nothing.
+    assert semantic_included_refs(replace(succeeded, case_reference_scope_reduced=False)) is None

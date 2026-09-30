@@ -23,6 +23,7 @@ from typing import Final, cast
 
 from yoetz.domain.coordination import CoordinationGapCode
 from yoetz.domain.events import (
+    SEMANTIC_INCLUDED_REFS_NOT_RECORDED_GAP,
     SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP,
     CheckRecordedPayload,
     ClaimKind,
@@ -112,6 +113,9 @@ _SEMANTIC_ONLY_GAPS: Final = frozenset(
         SEMANTIC_CHALLENGES_REJECTED_GAP,
         SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
         SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
+        # The reduced review's sent content could not be recorded (issue #904): a limit of that
+        # review, never of the complete local case. For AI-powered proof it blocks.
+        SEMANTIC_INCLUDED_REFS_NOT_RECORDED_GAP,
     }
 )
 # Evidence-strength gaps: the cited evidence was readable but its content was not captured or
@@ -458,13 +462,14 @@ def _reduced_scope_repair_in_view(
     check: CheckRecordedPayload,
     state: ProjectionState | None,
 ) -> bool:
-    """Whether a reduced review packet provably included the material this finding depends on.
+    """Whether a reduced review packet provably sent the material this finding depends on.
 
-    The check must record the packet's included frontier references (issue #904). Every subject of
-    the finding and every repair reference its response links must be among them, and so must at
-    least one material change made after the finding: the repair the later review is credited with
-    judging. A missing record, an unreadable response or linked row, or any omitted relevant
-    reference is no proof, so the reduced scope keeps blocking.
+    The check must record the frontier references whose own content item survived in the packet
+    actually sent (issue #904). Every subject of the finding and every repair reference its
+    response links must be among them, and so must at least one material change made after the
+    finding: the repair the later review is credited with judging. A missing record, an unreadable
+    response or linked row, or any relevant reference that was only mentioned, linked, omitted or
+    withheld is no proof, so the reduced scope keeps blocking.
     """
 
     included_refs = check.semantic_included_refs

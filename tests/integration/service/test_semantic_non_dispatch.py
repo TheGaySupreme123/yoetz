@@ -1494,13 +1494,14 @@ def _wide_frozen(
 
 
 @pytest.mark.anyio
-async def test_a_reduced_case_carries_its_included_references_to_the_check(
+async def test_a_reduced_case_records_no_included_references_it_did_not_send(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Issue #904: the final evaluation carries the reduced packet's included frontier references.
+    """Issue #904: only what a sent packet carried is recorded, never the builder's closure.
 
-    The check records them so finding resolution can ask whether a finding's material was in view.
-    Unrelated frontier references the packet did not select are counted as omitted, never included.
+    The case's reference closure names refs that were only mentioned, linked or omitted. A review
+    that never produced a result sent nothing the check may credit, so the final evaluation carries
+    no included references even though its scope was reduced.
     """
 
     monkeypatch.setattr(diagnostics_module, "log_dir", lambda: tmp_path)
@@ -1519,15 +1520,12 @@ async def test_a_reduced_case_carries_its_included_references_to_the_check(
         parsed: object = json.loads(item.plaintext)
         if isinstance(parsed, dict) and "frontier_refs" in parsed:
             envelopes.append(cast(dict[str, Any], parsed))
-    assert len(envelopes) == 1, "the case envelope the reviewer receives names its included refs"
     [envelope] = envelopes
-    frontier_refs = cast(list[str], envelope["frontier_refs"])
     assert int(cast(str, envelope["omitted_reference_count"])) >= len(unrelated)
+    assert cast(list[str], envelope["frontier_refs"]), "the closure names references"
+    assert result.status is SemanticStatus.UNAVAILABLE
     assert result.case_reference_scope_reduced is True
-    assert result.case_included_refs == frozenset(frontier_refs)
-    assert result.case_included_refs is not None
-    assert not set(unrelated) & result.case_included_refs
-    assert {str(clm(1)), str(obl(1))} <= result.case_included_refs
+    assert result.case_included_refs is None
 
 
 @pytest.mark.anyio

@@ -10,7 +10,11 @@ from typing import Final, Literal, Protocol, cast
 
 from yoetz.application.ledger_snapshot import projection_for_records
 from yoetz.domain.coordination import CoordinationError, CoordinationErrorCode
-from yoetz.domain.events import MAX_SEMANTIC_INCLUDED_REFS, LedgerRecord
+from yoetz.domain.events import (
+    MAX_SEMANTIC_INCLUDED_REFS,
+    SEMANTIC_INCLUDED_REFS_NOT_RECORDED_GAP,
+    LedgerRecord,
+)
 from yoetz.domain.findings import (
     FINDING_KIND_TRAITS,
     CandidateFinding,
@@ -968,7 +972,9 @@ class FinalSemanticEvaluation:
     # rather than let the shortening pass as material the author chose not to send.
     case_content_over_item_limit: bool = False
     case_reference_scope_reduced: bool = False
-    # The frontier references a reduced packet included (issue #904); None when not reduced.
+    # The frontier references whose own content item the exact sent review packet carried, after
+    # envelope bounding and privacy minimization (issue #904); None when no packet was sent or it
+    # could not be read. The check records them only for a completed reduced review.
     case_included_refs: frozenset[str] | None = None
     case_content_gaps: tuple[str, ...] = ()
     # Set only on the nonterminal awaiting_human branch: what the caller must do to resume this
@@ -985,7 +991,6 @@ class FinalSemanticEvaluation:
             raise _invalid("semantic_judgment_invalid")
         if self.case_included_refs is not None and (
             type(self.case_included_refs) is not frozenset
-            or not self.case_reference_scope_reduced
             or any(type(ref) is not str for ref in self.case_included_refs)
         ):
             raise _invalid("semantic_judgment_invalid")
@@ -1836,11 +1841,12 @@ def semantic_capture_baseline_gaps(result: FinalSemanticEvaluation) -> frozenset
 
 
 def semantic_included_refs(result: FinalSemanticEvaluation) -> tuple[str, ...] | None:
-    """The check record of a completed reduced review's included references (issue #904).
+    """The check record of what a completed reduced review's sent packet carried (issue #904).
 
     Only a completed review that reached a conclusion and ran over a reduced reference scope
-    records them. An empty or oversized selection records none, so no finding resolution can rely
-    on it and the reduced scope keeps blocking AI-powered absence proof.
+    records them: the frontier references whose own content item survived envelope bounding and
+    privacy minimization. An unreadable, empty or oversized set records none; the check then
+    carries ``semantic_included_refs_not_recorded`` and no AI-powered finding resolves through it.
     """
 
     refs = result.case_included_refs
@@ -2465,6 +2471,14 @@ async def execute_check_commit(
             declared_gaps.add(SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP)
         if semantic_result.case_reference_scope_reduced:
             declared_gaps.add(SEMANTIC_REFERENCE_SCOPE_REDUCED_GAP)
+            if (
+                semantic_result.status is SemanticStatus.SUCCEEDED
+                and semantic_result.judgment is not None
+                and semantic_included_refs(semantic_result) is None
+            ):
+                # The reduced review completed but its sent content could not be recorded, so
+                # no AI-powered finding can be resolved by it; say so rather than fail silently.
+                declared_gaps.add(SEMANTIC_INCLUDED_REFS_NOT_RECORDED_GAP)
         new_gaps = declared_gaps - set(coverage.known_gaps)
         if new_gaps:
             gaps = set(coverage.known_gaps) | new_gaps

@@ -4749,8 +4749,8 @@ def _scripted_semantic_evaluator(
 
     ``scope_reduced`` scripts, per check, whether the review packet carried a reduced reference
     scope; omitted, no packet is reduced. ``omitted_refs`` scripts, per reduced check, which
-    frozen references its packet left out; every other one is recorded as included. Omitted, a
-    reduced packet records no included references at all.
+    frozen references its sent packet carried no content item for; every other one is reported as
+    sent. Omitted, a reduced review reports nothing about what it sent.
     """
 
     async def evaluate(
@@ -5046,8 +5046,14 @@ async def _assert_reduced_scope_disclosed(
     started: StartInternalResult,
     seed: int,
     frontier: Frontier | FrontierModel,
+    *,
+    blockers: tuple[str, ...] = (),
 ) -> None:
-    """Status and every receipt rendering still say the review saw a bounded scope."""
+    """Status and every receipt rendering still say the review saw a bounded scope.
+
+    Each of *blockers* must also appear in the JSON document and in the markdown and text
+    renderings, where the receipt explains why a finding stays current.
+    """
 
     status = await app.status(
         StatusRequest.model_validate(
@@ -5084,6 +5090,12 @@ async def _assert_reduced_scope_disclosed(
         if fmt != "json":
             assert receipt.human_text is not None
             assert _SCOPE_REDUCED in receipt.human_text
+            rendered = receipt.human_text
+        else:
+            assert receipt.document is not None
+            rendered = canonical_encode(receipt.document).decode("utf-8")
+        for blocker in blockers:
+            assert blocker in rendered, (fmt, blocker)
 
 
 @pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))
@@ -5157,10 +5169,11 @@ async def test_a_reduced_review_that_omitted_the_repair_leaves_the_semantic_find
 
     The finding was raised under a reduced reference scope, the agent published repair evidence
     and answered the finding with it, and a later completed review under the same bound did not
-    return the issue. That review's packet omitted the repair evidence, so it proves nothing about
-    the repair: the finding stays current and every surface keeps disclosing the bounded scope. A
-    check that records no included references proves nothing either. The next review whose packet
-    carried the repair resolves it.
+    return the issue. That review's sent packet carried no content for the repair evidence, so it
+    proves nothing about the repair: the finding stays current, and status and every receipt
+    rendering name why while disclosing the bounded scope. A review whose sent content was not
+    recorded proves nothing either and carries ``semantic_included_refs_not_recorded``. The next
+    review whose packet carried the repair resolves it.
     """
 
     seed = 5900
@@ -5237,7 +5250,20 @@ async def test_a_reduced_review_that_omitted_the_repair_leaves_the_semantic_find
     unrecorded = await recheck_leaves_open(
         seed + 44, "finding_material_outside_reduced_review_scope"
     )
-    await _assert_reduced_scope_disclosed(app, started, seed + 50, unrecorded.result_frontier)
+    # A completed reduced review whose sent content was not recorded says so on its coverage.
+    assert "semantic_included_refs_not_recorded" in unrecorded.coverage.known_gaps
+    assert "semantic_included_refs_not_recorded" not in omitted_repair.coverage.known_gaps
+    await _assert_reduced_scope_disclosed(
+        app,
+        started,
+        seed + 50,
+        unrecorded.result_frontier,
+        blockers=(
+            "finding_material_outside_reduced_review_scope",
+            "coverage:" + _SCOPE_REDUCED,
+            "semantic_included_refs_not_recorded",
+        ),
+    )
 
     ledger, _objects = next(iter(runtime.resources.values()))
     records = tuple([item async for item in ledger.load_events(started.session_id)])

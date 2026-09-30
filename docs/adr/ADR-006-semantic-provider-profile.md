@@ -812,19 +812,32 @@ a bounded scope. Its effect on resolution is now decided (interim step, by maint
   assessable conclusion under the same bound may then resolve the finding after material change,
   but only when its packet provably carried the finding's material (next bullet). A finding raised
   by an unreduced review is still blocked by a newly reduced one.
-- **Relevance of a reduced packet.** A completed reduced review records the frontier references
-  its packet included (the selected dependency closure) on `check_recorded` 1.3.0 as
-  `semantic_included_refs`, at most 2,048 and only beside the recorded conclusion and the
-  `semantic_reference_scope_reduced` code. The unchanged baseline code is tolerated only when that
-  record contains every subject of the finding, every repair reference the finding's latest
-  response links (cited evidence, and the evidence of a cited result, or the result when it cites
-  none), and at least one material change recorded after the finding (by its logical row or its
-  source event). A check without the record (recorded before this rule, or an empty or oversized
-  selection), an unreadable response or linked row, or any omitted relevant reference keeps `coverage:semantic_reference_scope_reduced` and adds the explanation
-  `finding_material_outside_reduced_review_scope`. The response event itself is not required:
-  an acknowledgement is not repair evidence, and the packet's recent history window cannot promise
-  to carry it. "Included" means the packet carried the reference in its dependency closure; how
-  much of each item's content was shown stays bounded by the separately disclosed content gaps.
+- **Relevance of a reduced packet.** A completed reduced review records, on `check_recorded`
+  1.3.0 as `semantic_included_refs`, the frontier references whose own content item survived in
+  the exact packet sent to the reviewer. The set is read from the prepared document after
+  envelope bounding and privacy minimization, and carried with the selected attempt's durable
+  response so recovery records the same set. A reference counts only as the `source_ref` of a
+  carried content item. A mention inside another item, a typed link, the citable-reference list,
+  or an omission row does not count. A reference that any omission row names (not selected,
+  withheld by policy, history content left out) is excluded even when a structural item for it
+  survived. The field appears only beside the recorded conclusion and the
+  `semantic_reference_scope_reduced` code, and holds at most 256 references, the case item bound.
+  The unchanged baseline code is tolerated only when that record contains every subject of the
+  finding, every repair reference the finding's latest response links (cited evidence, and the
+  evidence of a cited result, or the result when it cites none), and at least one material change
+  recorded after the finding (by its logical row or its source event). Otherwise
+  `coverage:semantic_reference_scope_reduced` stays and the explanation adds
+  `finding_material_outside_reduced_review_scope`. That applies to a missing record, an unreadable
+  response or linked row, and any relevant reference the packet only mentioned, linked, omitted or
+  withheld. When a completed reduced review's sent set cannot be recorded (an unreadable packet,
+  no frontier content item, over the bound, or a result recovered from a response written before
+  this record existed), the check carries `semantic_included_refs_not_recorded`. That code limits
+  the review only: local proof tolerates it, and it blocks AI-powered proof. One new check records
+  its own sent set; if it carries the code again, the finding stays current and is disclosed. The response event itself
+  is not required. An acknowledgement is not repair evidence, and the packet's recent history
+  window cannot promise to carry it. An item clipped to its size bound still counts as sent; that
+  clipping stays disclosed as `semantic_case_content_over_item_limit`, and a clipped payload stays
+  `truncated_payload`, which blocks.
 - **Findings recorded before the stamp.** Resolution reads the raising check's recorded coverage.
   The raising check is the check whose completed review raised the finding: same tested frontier
   and same AI-powered review attempt. The reducer folds this into the projection as
@@ -849,7 +862,11 @@ a bounded scope. Its effect on resolution is now decided (interim step, by maint
 The first interim trusted the repair-evidence priority (#898) to keep a repair in view, which
 removed the only signal that a repair might have been omitted from the packet. Review of PR #930
 (finding PR930-F1) closed that gap with the relevance bullet above, so the scope code no longer
-resolves a finding whose repair the reduced packet omitted. `check_recorded` 1.3.0 is unreleased,
+resolves a finding whose repair the reduced packet did not send. A first version recorded the
+builder's reference closure. That closure is computed before envelope bounding and privacy
+minimization, and it names every allowed reference the packet mentions, including omission rows
+and link-only references. It could therefore credit a repair the reviewer never saw, and it was
+replaced by the sent-content set. `check_recorded` 1.3.0 is unreleased,
 so the optional field is added to that version rather than a new one; older versions never carry
 it and so never let a reduced scope resolve an AI-powered finding. `truncated_payload` remains a
 veto: its producers are not yet settled, and a clipped item may be the finding's own evidence. The
@@ -861,15 +878,17 @@ pure kernel replay, the same on every host and supported operating system.
 Resolution of a `semantic_model_derived` finding against a later completed, assessable review that
 did not return it, after material change:
 
-| Later check coverage | Finding baseline has the scope code (stamp or raising-check fallback) | Included references cover subjects, linked repair and a change | Result |
+| Later check coverage | Finding baseline has the scope code (stamp or raising-check fallback) | Sent content covers subjects, linked repair and a change | Result |
 |---|---|---|---|
 | no `semantic_reference_scope_reduced` | either | not needed | resolves if every other rule holds |
 | `semantic_reference_scope_reduced` | no | any | blocked: `coverage:semantic_reference_scope_reduced` |
 | `semantic_reference_scope_reduced` | yes | yes | resolves; the receipt still discloses the reduced scope |
-| `semantic_reference_scope_reduced` | yes | no, or no record | blocked: `finding_material_outside_reduced_review_scope`, `coverage:semantic_reference_scope_reduced` |
+| `semantic_reference_scope_reduced` | yes | no | blocked: `finding_material_outside_reduced_review_scope`, `coverage:semantic_reference_scope_reduced` |
+| `semantic_reference_scope_reduced`, `semantic_included_refs_not_recorded` | yes | no record | blocked: as above plus `coverage:semantic_included_refs_not_recorded`; one new check records its own sent set, otherwise disclose the open finding |
 | `truncated_payload` (any scope) | any | any | blocked: `coverage:truncated_payload` |
 
-A local finding tolerates `semantic_reference_scope_reduced` without any included-reference record.
+A local finding tolerates `semantic_reference_scope_reduced` and
+`semantic_included_refs_not_recorded` without any sent-content record.
 
 
 ### Repair evidence selection for rechecks (2026-09-28, #884)

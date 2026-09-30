@@ -1754,3 +1754,22 @@ def test_the_included_reference_record_is_bound_to_a_completed_reduced_review() 
             replace(reduced, **invalid)  # type: ignore[arg-type]
     with pytest.raises(ProtocolValueError):
         replace(unreduced, semantic_included_refs=_in_view(*_REPAIR_IN_VIEW))
+
+
+def test_an_unrecorded_sent_packet_is_disclosed_and_blocks_only_semantic_proof() -> None:
+    """``semantic_included_refs_not_recorded`` limits the reduced review, never the local case."""
+
+    from yoetz.domain.events import SEMANTIC_INCLUDED_REFS_NOT_RECORDED_GAP
+
+    later = _review_check(
+        *_LONG_SESSION_REVIEW_GAPS, SEMANTIC_INCLUDED_REFS_NOT_RECORDED_GAP, included=None
+    )
+    assert _blockers(_finding(), later) == ()
+    stamped = _semantic_finding(
+        "content_unselected", "host_outcome_unavailable", _SCOPE_REDUCED, "unpaired_event"
+    )
+    assert _blockers(stamped, later) == (
+        "finding_material_outside_reduced_review_scope",
+        "coverage:" + SEMANTIC_INCLUDED_REFS_NOT_RECORDED_GAP,
+        "coverage:" + _SCOPE_REDUCED,
+    )

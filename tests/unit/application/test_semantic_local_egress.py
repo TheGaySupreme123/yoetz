@@ -194,6 +194,7 @@ async def _dispatch(
     proposal_expires_at: datetime = _NOW + timedelta(minutes=1),
     deadline: Deadline = Deadline(_NOW + timedelta(minutes=1), 60.0),
     monotonic: float = 1.0,
+    prepared_bytes: bytes | None = None,
 ) -> tuple[object, _Audit, _Gateway]:
     binding = _binding()
     audit = _Audit(persist=persist)
@@ -210,7 +211,13 @@ async def _dispatch(
     result = await coordinator._dispatch_approved(  # pyright: ignore[reportPrivateUsage]
         _candidate(binding),
         _effective(binding),
-        _proposal(binding, expires_at=proposal_expires_at),
+        (
+            _proposal(binding, expires_at=proposal_expires_at)
+            if prepared_bytes is None
+            else replace(
+                _proposal(binding, expires_at=proposal_expires_at), prepared_bytes=prepared_bytes
+            )
+        ),
         _minimized(),
         ConsentSource.BASELINE_POLICY,
         deadline,
@@ -241,6 +248,56 @@ async def test_local_semantic_success_persists_receipt_and_finalizes_local_prove
     assert final.provenance.local_disclosure_reservation_id == _PROPOSAL
     assert final.provenance.egress_authorization_id is None
     assert final.provenance.request_commitment is None
+
+
+@pytest.mark.anyio
+async def test_semantic_success_names_only_content_the_exact_prepared_packet_carried() -> None:
+    """Issue #904: the check may credit only what the sent (bounded, minimized) packet carried.
+
+    A reference counts as the source of a carried content item. A reference named only by an
+    omission row, or by a structural item beside its own omission, does not.
+    """
+
+    from yoetz.protocol.canonical import JsonValue, canonical_encode
+
+    shown = "evd_30000000-0000-4000-8000-000000000011"
+    withheld = "evd_30000000-0000-4000-8000-000000000012"
+    clipped = "evt_30000000-0000-4000-8000-000000000013"
+    packet = canonical_encode(
+        cast(
+            JsonValue,
+            {
+                "schema": "yoetz.review-packet-case/1",
+                "frontier_refs": sorted([shown, withheld, clipped]),
+                "items": [
+                    {
+                        "item_id": "excerpt-a",
+                        "source_ref": shown,
+                        "linked_subject_refs": [withheld],
+                    },
+                    {"item_id": "history-b", "source_ref": clipped, "linked_subject_refs": []},
+                ],
+                "review_packet": {
+                    "omissions": [
+                        {"subject_ref": withheld, "category": "evidence_excerpt", "reason": "x"},
+                        {"subject_ref": clipped, "category": "timeline", "reason": "x"},
+                    ]
+                },
+            },
+        )
+    )
+    result, _audit, _gateway = await _dispatch(persist=True, prepared_bytes=packet)
+
+    assert isinstance(result, SemanticEgressSuccess)
+    assert result.disclosed_content_refs == frozenset({shown})
+    final = ready_composition._map_egress_to_final(  # pyright: ignore[reportPrivateUsage]
+        result, ready_composition.IdPort()
+    )
+    assert final.case_included_refs == frozenset({shown})
+    # A document that is not a readable review packet proves nothing about what it carried.
+    opaque, _audit, _gateway = await _dispatch(persist=True)
+    assert isinstance(opaque, SemanticEgressSuccess)
+    assert opaque.disclosed_content_refs is None
 
 
 @pytest.mark.anyio

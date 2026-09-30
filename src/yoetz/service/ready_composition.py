@@ -3062,6 +3062,7 @@ def _map_egress_to_final(
             SemanticReason.SEMANTIC_COMPLETED,
             judgment=result.result.judgment,
             provenance=provenance,
+            case_included_refs=result.disclosed_content_refs,
         )
     if type(result) is SemanticEgressAwaitingHuman:
         # The proposal id and its expiry are the only things that make this branch recoverable.
@@ -3523,6 +3524,11 @@ async def _publish_semantic_response_object(
         body["provenance"] = cast(
             CanonicalJsonValue, dict(semantic_provenance_to_json(evaluation.provenance).items())
         )
+    if evaluation.case_included_refs is not None:
+        # What the sent packet carried (#904), so a recovered selection records the same fact.
+        body["disclosed_content_refs"] = cast(
+            CanonicalJsonValue, sorted(evaluation.case_included_refs, key=str.encode)
+        )
     payload = canonical_encode(cast(CanonicalJsonValue, body))
     staged = await runtime.objects.stage(
         ObjectSource(data=payload, declared_size=len(payload)),
@@ -3593,7 +3599,15 @@ async def _recover_response_evaluation(
             return None
     if status is SemanticStatus.SUCCEEDED and (judgment is None or provenance is None):
         return None
-    return FinalSemanticEvaluation(status, reason, judgment=judgment, provenance=provenance)
+    disclosed: frozenset[str] | None = None
+    raw_disclosed = body.get("disclosed_content_refs")
+    if type(raw_disclosed) is list:
+        refs = cast(list[object], raw_disclosed)
+        if all(type(ref) is str for ref in refs):
+            disclosed = frozenset(cast(list[str], refs))
+    return FinalSemanticEvaluation(
+        status, reason, judgment=judgment, provenance=provenance, case_included_refs=disclosed
+    )
 
 
 def _observation_workspace_for_runtime(runtime: TaskRuntime) -> str | None:
@@ -3986,7 +4000,6 @@ def _privacy_gated_semantic_evaluator(
         withheld: tuple[str, ...] = ()
         over_item_limit = False
         reference_scope_reduced = False
-        included_refs: frozenset[str] | None = None
         content_gaps: tuple[str, ...] = ()
 
         def _on_lease_renewed(renewed: object) -> None:
@@ -4325,9 +4338,6 @@ def _privacy_gated_semantic_evaluator(
             # The builder folds the gap into the packet coverage the reviewer sees; the check
             # result is a separate coverage fold, so carry the fact rather than re-deriving it.
             reference_scope_reduced = semantic_case.omitted_reference_count > 0
-            # The reduced packet's included frontier references go onto the check record so
-            # finding resolution can ask whether a finding's material was in view (issue #904).
-            included_refs = semantic_case.frontier_refs if reference_scope_reduced else None
             content_gaps = tuple(
                 sorted(
                     set(semantic_case.packet.coverage.known_gaps)
@@ -4396,7 +4406,6 @@ def _privacy_gated_semantic_evaluator(
                     _map_egress_to_final(result, ids),
                     case_content_over_item_limit=over_item_limit,
                     case_reference_scope_reduced=reference_scope_reduced,
-                    case_included_refs=included_refs,
                     case_content_gaps=content_gaps,
                 )
 
@@ -4425,7 +4434,6 @@ def _privacy_gated_semantic_evaluator(
                     withheld_review_categories=withheld,
                     case_content_over_item_limit=over_item_limit,
                     case_reference_scope_reduced=reference_scope_reduced,
-                    case_included_refs=included_refs,
                     case_content_gaps=content_gaps,
                 )
 
@@ -4687,10 +4695,13 @@ def _privacy_gated_semantic_evaluator(
                 judgment = None
                 provenance = None
                 continuation = None
+                disclosed: frozenset[str] | None = None
                 if type(evaluation) is FinalSemanticEvaluation:
                     if status is SemanticStatus.SUCCEEDED:
                         judgment = evaluation.judgment
                         provenance = evaluation.provenance
+                        # What the exact sent packet carried, from the selected attempt (#904).
+                        disclosed = evaluation.case_included_refs
                     elif (
                         status is evaluation.status
                         and reason is evaluation.reason
@@ -4713,7 +4724,6 @@ def _privacy_gated_semantic_evaluator(
                         withheld_review_categories=withheld,
                         case_content_over_item_limit=over_item_limit,
                         case_reference_scope_reduced=reference_scope_reduced,
-                        case_included_refs=included_refs,
                         case_content_gaps=content_gaps,
                     )
                 return FinalSemanticEvaluation(
@@ -4726,7 +4736,7 @@ def _privacy_gated_semantic_evaluator(
                     withheld_review_categories=withheld,
                     case_content_over_item_limit=over_item_limit,
                     case_reference_scope_reduced=reference_scope_reduced,
-                    case_included_refs=included_refs,
+                    case_included_refs=disclosed,
                     case_content_gaps=content_gaps,
                     continuation=continuation,
                 )
@@ -4772,7 +4782,6 @@ def _privacy_gated_semantic_evaluator(
                 withheld_review_categories=withheld,
                 case_content_over_item_limit=over_item_limit,
                 case_reference_scope_reduced=reference_scope_reduced,
-                case_included_refs=included_refs,
                 case_content_gaps=content_gaps,
             )
 

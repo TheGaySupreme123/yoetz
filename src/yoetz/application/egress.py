@@ -141,6 +141,9 @@ class SemanticEgressSuccess:
     case_digest: str
     privacy_receipt_id: str | None = None
     request_commitment: str | None = None
+    # Frontier references whose own content item the exact prepared (bounded, minimized) review
+    # packet carried; None when that document is not a readable review packet (issue #904).
+    disclosed_content_refs: frozenset[str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1452,6 +1455,7 @@ class PrivacyCoordinator:
                 proposal.prepared_case_digest,
                 subject_digest,
                 result,
+                prepared_bytes=proposal.prepared_bytes,
             )
 
         if authority_digest is None or not await self._repository_authority_is_current(
@@ -1538,6 +1542,7 @@ class PrivacyCoordinator:
             proposal.prepared_case_digest,
             subject_digest,
             result,
+            prepared_bytes=proposal.prepared_bytes,
         )
 
     async def _map_provider_result(
@@ -1549,6 +1554,8 @@ class PrivacyCoordinator:
         case_digest: str,
         subject_digest: str,
         result: SemanticResult,
+        *,
+        prepared_bytes: bytes | None = None,
     ) -> SemanticEgressResult:
         receipt_id: str | None = None
         try:
@@ -1559,6 +1566,8 @@ class PrivacyCoordinator:
             receipt_id = None
         request_commitment = getattr(result.provenance, "request_commitment", None)
         if type(result) is SemanticResultSuccess:
+            from yoetz.application.semantic_case import review_packet_content_refs
+
             return SemanticEgressSuccess(
                 request_id,
                 privacy_proposal_id,
@@ -1568,6 +1577,11 @@ class PrivacyCoordinator:
                 case_digest,
                 privacy_receipt_id=receipt_id,
                 request_commitment=request_commitment,
+                # What the provider actually received: the exact prepared bytes after envelope
+                # bounding and privacy minimization, never the pre-minimization case.
+                disclosed_content_refs=(
+                    None if prepared_bytes is None else review_packet_content_refs(prepared_bytes)
+                ),
             )
         if type(result) in {
             SemanticResultRefused,

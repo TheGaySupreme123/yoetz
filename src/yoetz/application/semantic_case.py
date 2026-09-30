@@ -120,6 +120,7 @@ __all__ = [
     "build_semantic_case",
     "review_selection_digest",
     "repair_evidence_refs",
+    "review_packet_content_refs",
     "semantic_case_to_candidate_context",
     "semantic_case_to_prepared_payload",
 ]
@@ -2872,6 +2873,50 @@ def assemble_filtered_review_packet(
         },
     )
     return canonical_encode(cast(JsonValue, document))
+
+
+def review_packet_content_refs(prepared: bytes) -> frozenset[str] | None:
+    """The frontier references whose own content item the sent review packet carried (#904).
+
+    Read from the final provider-facing document, after envelope bounding and privacy
+    minimization: a reference counts only as the ``source_ref`` of a carried content item. A mere
+    mention in another item, a typed link, a citable-reference list or an omission row does not
+    count, and a reference that any omission row names (not selected, withheld by policy, clipped
+    history content) is excluded even when a structural item for it survived. ``None`` means the
+    document is not a readable review packet, so nothing may be claimed about what it carried.
+    """
+
+    try:
+        document = strict_json_parse(prepared)
+    except ValueError:
+        return None
+    if not isinstance(document, dict) or document.get("schema") != _PACKET_SCHEMA:
+        return None
+    body = document
+    frontier_raw = body.get("frontier_refs")
+    items_raw = body.get("items")
+    packet_raw = body.get("review_packet")
+    if (
+        type(frontier_raw) is not list
+        or type(items_raw) is not list
+        or not isinstance(packet_raw, dict)
+    ):
+        return None
+    frontier = {ref for ref in cast(list[JsonValue], frontier_raw) if type(ref) is str}
+    omissions_raw = packet_raw.get("omissions", [])
+    if type(omissions_raw) is not list:
+        return None
+    omitted = {
+        cast(str, row["subject_ref"])
+        for row in cast(list[JsonValue], omissions_raw)
+        if isinstance(row, dict) and type(row.get("subject_ref")) is str
+    }
+    carried = {
+        cast(str, row["source_ref"])
+        for row in cast(list[JsonValue], items_raw)
+        if isinstance(row, dict) and type(row.get("source_ref")) is str
+    }
+    return frozenset((carried & frontier) - omitted)
 
 
 class SemanticCaseTooLarge(ValueError):
