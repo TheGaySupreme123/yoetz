@@ -551,7 +551,9 @@ async def test_code_mode_replay_records_one_action_per_host_call(replay: _Replay
     assert all(row.publication_channel is PublicationChannel.HOOK_OBSERVED for row in command_rows)
     assert len(command_rows) / calls["shell"] <= 4, len(command_rows)
 
-    # The code-mode cell wrappers stay in the local store: retained, not dropped.
+    # Nested tool hooks fired for this session, so the code-mode cell wrappers
+    # stay in the local store: retained, not dropped.
+    assert replay.store.codex_hook_observes_session(replay.commitment, replay.session)
     wrappers = [
         envelope
         for envelope in replay.store.list_envelopes(replay.commitment)
@@ -586,3 +588,58 @@ async def test_code_mode_replay_records_one_action_per_host_call(replay: _Replay
     # ``unknown`` here until #910 parses them; this replay only proves that
     # consolidating records drops none of the facts that are recorded.
     assert ("outcome", "success", "0") in before
+
+
+@pytest.mark.anyio
+async def test_cell_without_tool_hooks_is_still_recorded(replay: _Replay) -> None:
+    """Delay, not drop: lifecycle hooks alone do not prove a cell's nested calls were hooked.
+
+    A cell whose nested tool fired no tool hook (an unhooked tool, an older Codex,
+    a hook timeout) is the only record of that work, so its wrapper is delivered.
+    """
+
+    replay.append(
+        _rollout_row(
+            "session_meta",
+            {
+                "cli_version": "0.157.1",
+                "cwd": str(replay.workspace),
+                "history_mode": "legacy",
+                "id": HOST,
+                "originator": "codex_exec",
+            },
+            "2026-09-29T17:54:00.000Z",
+        )
+    )
+    replay.hook("SessionStart", source="startup")
+    replay.append(
+        _exec_cell(
+            "call_cellPlan",
+            'await tools.update_plan({plan:[{step:"public",status:"completed"}]});\n',
+            "2026-09-29T17:54:10.000Z",
+        ),
+        _exec_cell_output("call_cellPlan", '{"ok":true}', "2026-09-29T17:54:11.000Z"),
+    )
+    replay.hook("Stop", last_assistant_message="Plan updated.", stop_hook_active=False)
+    assert not replay.store.codex_hook_observes_session(replay.commitment, replay.session)
+
+    recorder = _Recorder(_coordinator(replay))
+    sweeper = ObservationOutboxSweeper(replay.store, recorder)
+    try:
+        for _ in range(8):
+            if (await sweeper.sweep()).attempted == 0:
+                break
+    finally:
+        sweeper.close()
+    delivered = [
+        envelope
+        for envelope in recorder.delivered
+        if envelope.structural_payload.get("tool_name") == "exec"
+    ]
+    assert len(delivered) == 2
+    actions = [cast(ActionRecordedPayload, row.payload) for row in replay.rows("action_recorded")]
+    results = replay.rows("result_recorded")
+    assert len(actions) == 1 and len(results) == 1
+    accounting = replay.store.selection_accounting(replay.commitment)
+    assert accounting["intentionally_omitted_input_count"] == 0
+    assert accounting["observed_count"] == accounting["admitted_input_count"]

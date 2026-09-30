@@ -463,20 +463,26 @@ unchanged, so a pre committed before the upgrade replays its committed operation
 the upgrade keeps its historical second action, never a third, and no history is rewritten.
 
 A Codex code-mode `exec` cell fires no hook of its own; each nested `tools.*` call fires its hooks.
-While the Codex hook carrier has admitted input for the host session, the session-stream reader
-keeps the cell's call and output rows in the local store and does not deliver them. The nested
-hook rows are the ledger's record of the cell. The option of recording the cell as the explicit
-parent of its nested actions was not taken: nested hook payloads carry no cell identity to link.
+Once Codex tool hooks (`PreToolUse`/`PostToolUse`; lifecycle hooks do not count) have admitted
+input for the host session, the session-stream reader keeps the cell's call and output rows in the
+local store and does not deliver them. The nested hook rows are the ledger's record of the cell.
+A session whose tool hooks never fired keeps delivering its cells. The option of recording the
+cell as the explicit parent of its nested actions was not taken: nested hook payloads carry no cell
+identity to link. Residual limits: a cell whose only nested tool is unhooked, in a session where
+other tools are hooked, is not recorded; a retained wrapper counts in `observed_count` without an
+accounting bucket.
 
 ### The standing `unpaired_event` record (decisions for the set)
 
 - **B1.** The durable record is unchanged: an orphan post keeps `unpaired_event` in the observation
   store, check coverage, `status` coverage and the receipt, through resume and restart. It is no
   longer a stale-observation cause: it does not raise `observation_gap_or_stale` and does not keep
-  the lifecycle `degraded`. The advisory remains for source lag, cursor stale, drain backlog,
-  service unavailable and vault locked (and the unchanged unsupported-record codes), names its
-  live cause first (`cause:<gap>`), and clears on recovery. `host_outcome_unavailable` is a ledger
-  coverage code that never fed the advisory; it stays disclosed either way.
+  the lifecycle `degraded`. The advisory names its live cause first (`cause:<gap>`). For source
+  lag, cursor stale, drain backlog, service unavailable and vault locked it clears on recovery.
+  `unsupported_event` and `unsupported_format` keep their pre-#917 advisory; they never clear in
+  session, and classifying them as standing records is a follow-up (owners #917/#913).
+  `host_outcome_unavailable` is a ledger coverage code that never fed the advisory; it stays
+  disclosed either way.
 - **B2.** A distinct new gap is a new `(source, session, source generation)` orphan scope. The first
   orphan in it queues one local notice, delivered once in hook `PostToolUse` context and never
   repeated, across restart. It is informational, not a ledger record or finding: it never counts

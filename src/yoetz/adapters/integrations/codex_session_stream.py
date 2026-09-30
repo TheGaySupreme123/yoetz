@@ -1783,7 +1783,7 @@ def _code_mode_cell_wrapper(structural: Mapping[str, JsonValue]) -> bool:
 def _codex_hook_observes_session(
     store: LocalObservationStore, workspace_commitment: str, session_commitment: str
 ) -> bool:
-    """Whether the Codex hook carrier has admitted input for this host session.
+    """Whether Codex tool hooks have admitted input for this host session.
 
     A store without the read seam, or an unreadable one, answers ``False`` so
     stream-only reconciliation keeps delivering every row as before.
@@ -2241,7 +2241,7 @@ def _reconcile_session_stream_path(
 
         # A code-mode ``exec`` cell is a container: Codex fires no hook for it, and
         # every host action inside it is a nested tool call that fires its own
-        # hooks. While the Codex hook carrier observes this session, the nested
+        # hooks. While Codex tool hooks fire for this session, the nested
         # hook rows are the ledger's record of the cell, so the wrapper stays in
         # the local store only instead of adding an independent action (#917).
         cell_wrapper = hook_observed and _code_mode_cell_wrapper(envelope.structural_payload)

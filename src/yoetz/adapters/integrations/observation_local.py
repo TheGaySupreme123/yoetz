@@ -1687,6 +1687,9 @@ class _WorkspaceState:
     # One informational notice per new (source, session, generation) orphan
     # scope, keyed by that lane; kept after delivery so a scope is announced once.
     unpaired_notices: dict[str, UnpairedScopeNotice] | None = None
+    # Host sessions whose Codex tool hooks have admitted input (bounded like the
+    # orphan scopes; a full set only keeps later sessions' cell wrappers delivered).
+    codex_tool_hook_sessions: set[str] | None = None
     # True when a state was written by a pre-/11 reader that could not retain
     # scoped pairing provenance. It is deliberately sticky: a later save must
     # not turn unknown history into proof that a gap was false.
@@ -1829,6 +1832,8 @@ class _WorkspaceState:
             self.unpaired_scopes = set()
         if self.unpaired_notices is None:
             self.unpaired_notices = {}
+        if self.codex_tool_hook_sessions is None:
+            self.codex_tool_hook_sessions = set()
         if type(self.pairing_state_unknown) is not bool:
             raise ProtocolValueError("invalid_event_value_type")
         if self.stream_cursors is None:
@@ -2395,6 +2400,7 @@ def _copy_state(state: _WorkspaceState) -> _WorkspaceState:
         open_pre=dict(state.open_pre or {}),
         unpaired_scopes=set(state.unpaired_scopes or ()),
         unpaired_notices=dict(state.unpaired_notices or {}),
+        codex_tool_hook_sessions=set(state.codex_tool_hook_sessions or ()),
         pairing_state_unknown=state.pairing_state_unknown,
         stream_cursors=dict(state.stream_cursors or {}),
         stream_partials=dict(state.stream_partials or {}),
@@ -5683,17 +5689,17 @@ class LocalObservationStore:
 
     @_read_mostly
     def codex_hook_observes_session(self, workspace: str, session_commitment: str) -> bool:
-        """Whether the Codex hook carrier has admitted any input for one host session.
+        """Whether Codex tool hooks (``PreToolUse``/``PostToolUse``) fired for one host session.
 
-        The per-source cursor is the authoritative ingest record, so this survives
-        restart. The session-stream reader uses it to keep a code-mode ``exec``
-        cell wrapper local while the cell's nested calls are hook-observed (#917).
+        Lifecycle hooks alone do not count: they are registered even when no tool
+        hook fires. The durable set survives restart. The session-stream reader
+        uses it to keep a code-mode ``exec`` cell wrapper local only while the
+        cell's nested calls are hook-observed (#917).
         """
 
         with self._reading():
             state = self._load(workspace)
-            assert state.cursors is not None
-            return _cursor_key(ObservationSource.CODEX_HOOK, session_commitment) in state.cursors
+            return session_commitment in (state.codex_tool_hook_sessions or ())
 
     @_read_mostly
     def last_stream_reconcile_mono(self, workspace: str) -> float | None:
@@ -9375,6 +9381,13 @@ class LocalObservationStore:
                         state, evicted_session, ObservationGapCode.TRUNCATED_PAYLOAD.value
                     )
             state.cursors[cursor_key] = envelope.cursor
+            if (
+                envelope.source is ObservationSource.CODEX_HOOK
+                and envelope.event_kind in {"PreToolUse", "PostToolUse"}
+                and state.codex_tool_hook_sessions is not None
+                and len(state.codex_tool_hook_sessions) < _MAX_UNPAIRED_SCOPES
+            ):
+                state.codex_tool_hook_sessions.add(envelope.session_commitment)
             state.envelopes.append(envelope)
             if len(state.envelopes) > _MAX_ENVELOPES:
                 state.envelopes_truncated = True
@@ -10976,6 +10989,10 @@ class LocalObservationStore:
                     )
                 }
             )
+        if state.codex_tool_hook_sessions:
+            payload["codex_tool_hook_sessions"] = tuple(
+                sorted(state.codex_tool_hook_sessions, key=str.encode)
+            )
         if state.stream_partial_dropped_sessions:
             payload["stream_partial_dropped_sessions"] = tuple(
                 sorted(state.stream_partial_dropped_sessions, key=str.encode)
@@ -11946,6 +11963,11 @@ class LocalObservationStore:
             open_pre=open_pre,
             unpaired_scopes=unpaired_scopes,
             unpaired_notices=_unpaired_notices_from_json(raw.get("unpaired_notices")),
+            codex_tool_hook_sessions={
+                value
+                for value in cast(tuple[JsonValue, ...], raw.get("codex_tool_hook_sessions") or ())
+                if type(value) is str and value
+            },
             pairing_state_unknown=pairing_state_unknown,
             stream_cursors=stream_cursors,
             stream_partials=stream_partials,

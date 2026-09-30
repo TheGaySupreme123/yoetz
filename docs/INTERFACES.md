@@ -4896,10 +4896,12 @@ generation, and an orphan post retains `unpaired_event` until explicitly repaire
 record is disclosed coverage, not stale acquisition (issue #917): it stays on the observation
 store, check coverage, `status` coverage and the receipt, through resume and service restart, but
 it no longer raises the `observation_gap_or_stale` / `refresh_observation` advisory or keeps the
-observation lifecycle `degraded`. That advisory is reserved for conditions that can recover in
-session (source lag, a stale cursor, drain backlog, service unavailable, vault locked, plus the
-unchanged unsupported-record codes), names the live cause first in its evidence references
-(`cause:<gap>` or `cause:lifecycle_<state>`), and clears when the cause recovers. Instead, the
+observation lifecycle `degraded`. The advisory names its live cause first in its evidence
+references (`cause:<gap>` or `cause:lifecycle_<state>`). For source lag, a stale cursor, drain
+backlog, service unavailable and vault locked, which recover in session, it clears when the cause
+recovers. The unsupported-record codes (`unsupported_event`, `unsupported_format`) keep their
+pre-#917 advisory: they do not clear in session, and classifying them as standing records is a
+follow-up owned by #917/#913. Instead, the
 first orphan in each new `(source, session, source generation)` scope queues one local
 `UnpairedScopeNotice`; the next eligible hook `PostToolUse` context delivers it once ("Yoetz notice
 (no response needed)"), and a delivered scope is never announced again, across restart. The notice
@@ -4920,10 +4922,13 @@ reattach resolves to the committed operation. A pre committed before this change
 `pre-event:` identity and its operation digest, so its redelivery replays that operation and a
 call spanning the upgrade keeps its historical second action instead of a third; history is never
 rewritten. A Codex code-mode `exec` cell (the rollout `custom_tool_call` named `exec` and its
-output) is a container that fires no hook: while the Codex hook carrier has admitted input for the
-host session, the session-stream reader retains the cell rows locally and does not deliver them,
-because the nested calls' own hook rows are the ledger record of the cell. They are not counted as
-intentionally omitted input. The currently
+output) is a container that fires no hook: once Codex tool hooks (`PreToolUse`/`PostToolUse`, not
+lifecycle hooks) have admitted input for the host session, the session-stream reader retains the
+cell rows locally and does not deliver them, because the nested calls' own hook rows are the ledger
+record of the cell. A session whose tool hooks never fired keeps delivering its cells. Two limits
+remain disclosed: a cell whose only nested tool is unhooked, in a session where other tools are
+hooked, is not recorded in the ledger; and a retained wrapper counts in the local `observed_count`
+without an admitted, summarized or intentionally omitted bucket. The currently
 installed Claude and Cursor native profiles are post-only carriers: their post observations never
 diagnose a missing pre-event. A post with an actual tool-call identity, such as Claude's
 `tool_use_id`, can materialize an observed action/result pair with a distinct post-only action

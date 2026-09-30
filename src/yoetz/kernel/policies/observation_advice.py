@@ -654,7 +654,7 @@ def _outside_plan(
 # Source lag, a stale cursor, an unavailable service and a locked vault recover
 # while the session continues (reconcile, drain, restart, unlock), and the
 # advisory clears when they do. Unsupported rollout records keep their earlier
-# treatment.
+# treatment and do not clear in session.
 _ADVISED_OBSERVATION_GAPS: Final = frozenset(
     {
         ObservationGapCode.SOURCE_LAG.value,
