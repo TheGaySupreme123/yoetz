@@ -170,7 +170,7 @@ operations and does not add a composer or a new protocol field:
    `mode`; use `semantic_if_configured` only when review is known to be optional. Reserve
    `deterministic_only` for explicitly local/structural work or a deliberate no-egress choice, and
    disclose an unmet required review.
-5. Respond only to findings returned by that check, then read
+5. Respond only to findings that check returned that are still unanswered, then read
    `status view=findings` with `filter.include_resolved: true` and actual `resolved` state. “Not
    returned” is not “resolved”: call a
    finding resolved only when a later qualifying check recorded it. Those responses, acknowledging

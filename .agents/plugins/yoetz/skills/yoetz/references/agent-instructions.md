@@ -45,7 +45,7 @@ and gaps. `respond` records a disposition; only a qualifying check clears the fi
 
 # Completion and findings
 
-Publish the material completion claim and current evidence, answer unanswered findings, call `check`, answer only its findings, then `receipt` and `work_closed`.
+Publish the material completion claim and current evidence, answer unanswered findings, call `check` and answer its still-unanswered ones, then `receipt` and `work_closed`.
 
 A readable response removes unanswered work but only a later qualifying check of the repaired record resolves a receipt-blocking finding. `waived` is for an authorized local-CLI human. Publish an exact `attempted_items` entry on `action_recorded` for every requested item attempted, never on a claim. Read `yoetz://guidance/coverage-and-receipts.md` for the full finding and receipt rules.
 
@@ -166,9 +166,9 @@ Load only the resource needed for the current operation; retain it across calls 
 # Repair then finish
 
 Read current status and evidence first. Publish the real repair results, corrected claim/evidence,
-and any required plan revision. Answer each unanswered finding in `status view=findings` before the
-final check. Choose `semantic_required` for an explicit requirement, otherwise omit `mode` for the
-configured default. After it, answer only its findings and read `status view=findings` with
+and any required plan revision. Answer each unanswered finding before the final check. Choose
+`semantic_required` for an explicit requirement, otherwise omit `mode` for the configured default.
+After it, answer its still-unanswered findings and read `status view=findings` with
 `filter.include_resolved: true` and actual `resolved` state; “not returned” is not “resolved.” Only
 a repair or other material record needs a recheck; those answers and `work_closed` do not. Then
 request `receipt` and publish `work_closed`; report its actual actionable unresolved count, checked

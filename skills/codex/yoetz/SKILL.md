@@ -202,7 +202,7 @@ For a material repair, follow the shared ledger sequence:
    such as the current status frontier, so never search historical frontiers. Observation-authored
    non-actionable findings need no answer. Then run `semantic_required` for an explicit
    AI-powered review requirement, or omit `mode` when relying on the configured default.
-4. Respond only to findings returned by that check, then read
+4. Respond only to findings that check returned that are still unanswered, then read
    `status view=findings` with `filter.include_resolved: true` and actual `resolved` state. “Not
    returned” is not “resolved”; a response
    records disposition but does not prove repair. Those responses, acknowledging an

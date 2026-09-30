@@ -181,7 +181,7 @@ See [Receipts and coverage](receipts-and-coverage.md) for how to read one.
 5. `publish_work` — the intended completion claim plus current evidence.
 6. `check` — with a deliberately chosen mode.
 7. `respond` — to each unanswered finding before the final check, then only to that check's
-   findings.
+   findings that are still unanswered.
 8. `check` — again, after any material change.
 9. `receipt` — then publish `work_closed` when the work is complete, and keep the final answer no
    stronger than its weakest coverage, freshness, unresolved findings, and limitations.

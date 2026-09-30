@@ -42,7 +42,9 @@ def _section(path: Path, heading: str) -> str:
 def test_repair_then_finish_orders_findings_check_receipt_then_work_closed() -> None:
     section = _section(_GUIDANCE / "coverage-and-receipts.md", "## Repair then finish")
     before = section.index("Before the final check, read `status view=findings`")
-    after = section.index("After the final check, respond only to the findings that check returned")
+    after = section.index(
+        "After the final check, respond only to the findings it returned that are still unanswered"
+    )
     closing = section.index("Request `receipt`, then publish `work_closed`")
     assert before < after < closing
     for phrase in (
@@ -124,9 +126,8 @@ def test_insufficient_packet_goes_to_the_receipt_not_a_deterministic_fallback(na
 def test_the_initialize_safety_floor_carries_the_closure_order() -> None:
     text = _collapsed(_GUIDANCE / "agent-instructions.md")
     assert "- `respond` — once per finding; `finding_frontier` may be the current status" in text
-    assert "Answer each unanswered finding in `status view=findings` before the final check." in (
-        text
-    )
+    assert "Answer each unanswered finding before the final check." in text
+    assert "answer its still-unanswered findings" in text
     assert "Only a repair or other material record needs a recheck; those answers and " in text
     assert "`work_closed` do not." in text
     assert "Non-actionable observation-authored findings need no answer." in text

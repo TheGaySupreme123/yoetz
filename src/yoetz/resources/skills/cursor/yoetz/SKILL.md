@@ -121,11 +121,11 @@ the current typed continuation and the shared recovery guidance.
 ## Output
 
 Follow the linked coverage and publication references for the repair, evidence, finding-response,
-and receipt sequence: answer unanswered findings before the final check (the current status
-frontier is a valid `finding_frontier`), answer only the findings that check returns, and recheck
-only after a repair or other material record, never after those answers or `work_closed`.
-Observation-authored non-actionable findings need no answer. Request a receipt, then publish
-`work_closed` when the work is complete. Report the closure counts and checked frontier, the
+and receipt sequence: answer unanswered findings before the final check (the current status frontier
+is a valid `finding_frontier`), answer only the findings that check returns that are still
+unanswered, and recheck only after a repair or other material record, never after those answers or
+`work_closed`. Observation-authored non-actionable findings need no answer. Request a receipt, then
+publish `work_closed` when the work is complete. Report the closure counts and checked frontier, the
 check's AI-powered review status/reason, and the receipt's coverage limits. Keep completed product
 work separate from unresolved verification. Activation, registration, and hook delivery do not
 establish observation, AI-powered review, or completion.

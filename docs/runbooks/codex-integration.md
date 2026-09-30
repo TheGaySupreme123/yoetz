@@ -1423,13 +1423,13 @@ supersedes a recorded check. It stays in `status view=findings` and on the recei
 limitation and does not become resolvable. The hook `refresh_observation` clause asks the agent to
 wait only while `yoetz observe status` reports lag or a drain backlog. The shared guidance and this
 host's skill give the closure order: answer unanswered findings before the final check (the current
-status frontier is a valid `finding_frontier`), answer only the findings that check returns, then
-`receipt`, then `work_closed`; no recheck follows those answers, `work_closed`, or an
-`insufficient_packet` review without a new repair, while a recorded repair still gets its re-check.
-Which conditions raise the advisory, and how the sticky `unpaired_event` gap surfaces, are owned by
-issue #917. Verification: shared-path regressions cover the ledger rule on the memory and SQLite
-backends; a live Codex dogfood transcript on macOS, Linux and WSL 2 is not yet recorded. That gap is
-owned by issue #911.
+status frontier is a valid `finding_frontier`), answer only the findings that check returns that are
+still unanswered, then `receipt`, then `work_closed`; no recheck follows those answers,
+`work_closed`, or an `insufficient_packet` review without a new repair, while a recorded repair
+still gets its re-check. Which conditions raise the advisory, and how the sticky `unpaired_event`
+gap surfaces, are owned by issue #917. Verification: shared-path regressions cover the ledger rule
+on the memory and SQLite backends; a live Codex dogfood transcript on macOS, Linux and WSL 2 is not
+yet recorded. That gap is owned by issue #911.
 
 ### Bounded workflow recovery examples (#613)
 

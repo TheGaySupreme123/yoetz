@@ -51,7 +51,7 @@ The normal sequence is:
    relying on the configured default; use `semantic_if_configured` only when review is known
    optional; and reserve `deterministic_only` for explicit local/structural work or a deliberate
    no-egress choice.
-6. Respond only to findings returned by the check, then read
+6. Respond only to findings the check returned that are still unanswered, then read
    `status view=findings` with `filter.include_resolved: true` and actual `resolved` state. “Not
    returned” is not “resolved.” Those responses and `work_closed` need no recheck; if a repair, a
    response to another older finding, or other material record follows the check, recheck before

@@ -83,7 +83,8 @@ For a material repair, use one bounded status → repair → check → read → 
 4. Choose the final check mode deliberately: `semantic_required` for an explicit user, policy, or
    acceptance requirement; omitted `mode` when relying on the configured default; and
    `deterministic_only` only for explicitly local/structural work or a deliberate no-egress choice.
-5. After the final check, respond only to the findings that check returned, then read
+5. After the final check, respond only to the findings it returned that are still unanswered (a
+   second response replaces the first), then read
    `status view=findings` with `filter.include_resolved: true` and `resolved`. “Not returned” is
    not “resolved.” Responses to the check's own findings, an acknowledgement of an
    observation-authored non-actionable finding, and `work_closed` need no recheck. Recheck before

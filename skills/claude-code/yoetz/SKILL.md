@@ -123,8 +123,8 @@ alternative. See "Change local retention capacity" in [workflow.md](references/w
 
 For closure, follow [coverage-and-receipts.md](references/coverage-and-receipts.md): ground status
 and evidence, publish the actual result, answer unanswered findings (the current status frontier is
-a valid `finding_frontier`), check, respond only to the findings it returned, read findings
-including resolved history, recheck after a repair or other material change (not after those
-responses or `work_closed`), then request `receipt` and publish `work_closed`. Observation-authored
-non-actionable findings need no answer. Report the closure counts and checked frontier, the
-check's AI-powered review status/reason, and the receipt's coverage limits.
+a valid `finding_frontier`), check, respond only to returned findings still unanswered, read
+findings including resolved history, recheck after a repair or other material change (not after
+those responses or `work_closed`), then request `receipt` and publish `work_closed`.
+Observation-authored non-actionable findings need no answer. Report the closure counts and checked
+frontier, the check's AI-powered review status/reason, and the receipt's coverage limits.
