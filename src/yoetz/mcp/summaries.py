@@ -599,6 +599,8 @@ def summary_for_status(envelope: object) -> str:
         f"Status view: {view}; {_frontier_clause(source)}; freshness: {freshness}; "
         f"open obligations: {obligations}; "
     )
+    if view == "evidence":
+        prefix += _evidence_channel_clause(source)
     if view == "operation":
         operation_clause = _operation_progress_clause(source)
         if len((prefix + operation_clause).encode("ascii")) > _MAX_SUMMARY_BYTES - 128:
@@ -616,6 +618,46 @@ def summary_for_status(envelope: object) -> str:
         byte_budget=_MAX_SUMMARY_BYTES - len((prefix + suffix).encode("ascii")),
     )
     return _bounded(prefix + clause + suffix)
+
+
+_PUBLICATION_CHANNELS: Final = (
+    "codex_jsonl_import",
+    "cooperative_mcp",
+    "engine_derived",
+    "hook_observed",
+    "human_import",
+    "local_cli",
+)
+
+
+def _evidence_channel_clause(source: Mapping[str, JsonValue]) -> str:
+    """Count this page's evidence rows per closed publication channel (issue #914).
+
+    The channel is the only structural way to tell the requester's own cooperative evidence from
+    host-observed captures when a host drops the structured page; no row prose is rendered.
+    """
+
+    page = source.get("page")
+    items = cast(Mapping[str, JsonValue], page).get("items") if isinstance(page, Mapping) else None
+    if not isinstance(items, list | tuple):
+        return "evidence rows: unavailable; "
+    rows = cast(Sequence[JsonValue], items)
+    counts = {channel: 0 for channel in _PUBLICATION_CHANNELS}
+    for row in rows:
+        channel = (
+            cast(Mapping[str, JsonValue], row).get("publication_channel")
+            if isinstance(row, Mapping)
+            else None
+        )
+        if type(channel) is str and channel in counts:
+            counts[channel] += 1
+    parts = [f"{channel} {count}" for channel, count in counts.items() if count]
+    # Rows from earlier 0.3 builds carry no channel; an unknown value is caller text and is never
+    # rendered. Both are counted, not named.
+    unrecorded = len(rows) - sum(counts.values())
+    if unrecorded:
+        parts.append(f"unrecorded {unrecorded}")
+    return f"evidence rows: {_item_count(rows)} ({', '.join(parts) or 'none'}); "
 
 
 def _operation_progress_clause(source: Mapping[str, JsonValue]) -> str:

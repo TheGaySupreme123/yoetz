@@ -2365,6 +2365,10 @@ def _status_request_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         "pattern": r"^[A-Za-z0-9][A-Za-z0-9._:/+\-]*$",
         "type": "string",
     }
+    # Issue #914, unreleased in-place addition: the writer-relative evidence selector. A closed
+    # one-member enum, so the caller can ask for its own rows but never assert membership.
+    evidence_filter = cast(dict[str, JsonValue], definitions["evidence_filter"])
+    cast(dict[str, JsonValue], evidence_filter["properties"])["author"] = {"enum": ["mine"]}
     properties = cast(dict[str, JsonValue], document["properties"])
     properties.update(
         {
@@ -2460,6 +2464,14 @@ def _status_result_v1_4_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         if "coordination" not in policy_values:
             policy_values.append("coordination")
             policy_values.sort(key=lambda item: str(item).encode("ascii"))
+    # Issue #914, unreleased in-place addition: each evidence row's ledger-recorded channel. It is
+    # optional so rows produced by earlier 0.3 builds still validate; the service always fills it.
+    evidence_properties = cast(
+        dict[str, JsonValue], cast(dict[str, JsonValue], definitions["evidence_item"])["properties"]
+    )
+    evidence_properties["publication_channel"] = json.loads(
+        json.dumps(history_properties["publication_channel"])
+    )
     frontier_ref = SCHEMA_NAMESPACE + "common/frontier-1.0.0.schema.json"
     definitions["project_id"] = {
         "pattern": r"^prj_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from collections.abc import AsyncIterator, Callable, Mapping
+from bisect import bisect_right
+from collections.abc import AsyncIterator, Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -60,6 +61,7 @@ from yoetz.domain.findings import (
     rank_key,
     semantic_provenance_to_json,
 )
+from yoetz.domain.privacy import DisclosureProvenance, SourceAuthorship, authorship_provenance
 from yoetz.domain.receipts import CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP
 from yoetz.domain.values import (
     Actor,
@@ -102,6 +104,7 @@ from yoetz.kernel.observed_failures import (
 from yoetz.kernel.plan_scope import current_plan_scope
 from yoetz.kernel.projections import (
     PROJECTION_VERSION,
+    EvidenceProjectionRecord,
     ProjectionState,
     empty_projection_state,
     observation_limitation_finding_ids,
@@ -200,6 +203,7 @@ from yoetz.protocol.models import (
     CheckPolicyExecutionModel,
     CheckScopeModel,
     CoverageModel,
+    FreshnessWire,
     FrontierModel,
     SemanticProgressPhase,
     SemanticReason,
@@ -473,9 +477,10 @@ class MemoryLedgerState:
         default_factory=lambda: {}
     )
     # Transient, bounded exact-snapshot row indexes; never persisted or shared across clones.
+    # Evidence rows are built per page (``_evidence_page_rows``), so their entry holds ``None``.
     query_records: tuple[LedgerRecord, ...] = ()
     query_cache: dict[
-        tuple[Frontier, str, str], tuple[ProjectionState, tuple[ProjectionItem, ...]]
+        tuple[Frontier, str, str], tuple[ProjectionState, tuple[ProjectionItem, ...] | None]
     ] = field(default_factory=lambda: {})
 
     def restore_writer(
@@ -1182,6 +1187,198 @@ def _compact_obligation_item(obligation: str, record: object) -> StatusCompactOb
     return StatusCompactObligationModel.model_validate(values)
 
 
+def _indexed_source_row(
+    record: EvidenceProjectionRecord, records: tuple[LedgerRecord, ...]
+) -> LedgerRecord | None:
+    """Return an evidence row's source event by its ``source_frontier`` index, if it is there.
+
+    Replay admits only a contiguous chain whose ingestion sequences start at 1, so the index
+    normally names the source event directly; ``None`` sends the caller to one full scan.
+    """
+
+    index = record.source_frontier - 1
+    if 0 <= index < len(records) and records[index].event_id == record.source_event_id:
+        return records[index]
+    return None
+
+
+def _scanned_source_rows(
+    projection: ProjectionState, records: tuple[LedgerRecord, ...]
+) -> dict[str, LedgerRecord]:
+    """Locate every readable evidence row's source event in one scan of the frozen prefix."""
+
+    wanted = {
+        record.source_event_id: evidence
+        for evidence, record in projection.evidence.items()
+        if record.payload is not None
+    }
+    return {wanted[row.event_id]: row for row in records if row.event_id in wanted}
+
+
+def _evidence_rows(
+    projection: ProjectionState,
+    records: tuple[LedgerRecord, ...],
+    *,
+    after: str | None = None,
+) -> Iterator[tuple[str, EvidenceProjectionRecord, LedgerRecord]]:
+    """Yield readable evidence rows with their source events, in wire order, one at a time.
+
+    Rows are ordered by the UTF-8 bytes of their ids (the ``IdProjectionPosition`` order) and
+    start strictly after ``after``, so a page reaches its cursor without visiting earlier rows.
+    Nothing is built here: the caller constructs only the rows it keeps.
+    """
+
+    ordered = sorted(
+        (key for key, record in projection.evidence.items() if record.payload is not None),
+        key=str.encode,
+    )
+    start = 0 if after is None else bisect_right(ordered, after.encode(), key=str.encode)
+    scanned: dict[str, LedgerRecord] | None = None
+    for evidence in ordered[start:]:
+        record = projection.evidence[evidence]
+        source = _indexed_source_row(record, records)
+        if source is None:
+            if scanned is None:
+                scanned = _scanned_source_rows(projection, records)
+            source = scanned.get(evidence)
+        if source is None:
+            raise _error(PublicErrorCode.STORAGE_CORRUPT)
+        yield evidence, record, source
+
+
+def _evidence_freshness(
+    projection: ProjectionState, record: EvidenceProjectionRecord
+) -> FreshnessWire:
+    freshness = projection.freshness.value
+    if not record.object_available and freshness == "current":
+        return "redacted_gap"
+    return freshness
+
+
+def _evidence_item(
+    evidence: str,
+    record: EvidenceProjectionRecord,
+    source: LedgerRecord,
+    freshness: FreshnessWire,
+) -> StatusEvidenceItemModel:
+    payload = record.payload
+    assert payload is not None
+    state = payload.subject_state
+    subject_state = None
+    if state is not None and (state.tree_digest is not None or state.diff_digest is not None):
+        # Optional non-null digests must be omitted when unset, never passed as null —
+        # ``StatusStructuralSubjectStateModel`` rejects explicit null leaves.
+        subject_state_values: dict[str, object] = {}
+        if state.tree_digest is not None:
+            subject_state_values["tree_digest"] = state.tree_digest
+        if state.diff_digest is not None:
+            subject_state_values["diff_digest"] = state.diff_digest
+        subject_state = StatusStructuralSubjectStateModel.model_validate(subject_state_values)
+    return StatusEvidenceItemModel(
+        evidence_id=evidence,
+        publication_channel=source.publication_channel.value,
+        strength=payload.strength.value,
+        freshness=freshness,
+        available=record.object_available,
+        description=payload.description,
+        reference=payload.reference,
+        captured_object_id=payload.captured_object_id,
+        content_digest=payload.content_digest,
+        subject_state=subject_state,
+    )
+
+
+def _evidence_page_rows(
+    projection: ProjectionState,
+    records: tuple[LedgerRecord, ...],
+    query: ProjectionQuery,
+    frontier: Frontier,
+    sources: dict[str, LedgerRecord],
+) -> Iterator[StatusEvidenceItemModel]:
+    """Yield the rows of one evidence page lazily, building only rows that pass the filter.
+
+    The filter is decided on the projection record and its source event (every filtered field
+    is a direct copy of one of them), so a row that a filter drops is never constructed, and the
+    page loop stops after ``limit + 1`` kept rows. ``sources`` receives each yielded row's source
+    event for the page's authorship facts.
+    """
+
+    evidence_filter = query.filter if type(query.filter) is EvidenceProjectionFilter else None
+    after = query.position.last_id if type(query.position) is IdProjectionPosition else None
+    for evidence, record, source in _evidence_rows(projection, records, after=after):
+        payload = record.payload
+        assert payload is not None
+        freshness = _evidence_freshness(projection, record)
+        if evidence_filter is not None and not (
+            (evidence_filter.strength is None or payload.strength.value == evidence_filter.strength)
+            and (evidence_filter.freshness is None or freshness == evidence_filter.freshness)
+            and (evidence_filter.include_unavailable is True or record.object_available)
+            and (
+                evidence_filter.author is None
+                or _authored_by_requester(_source_authorship(source), query, frontier)
+            )
+        ):
+            continue
+        sources[evidence] = source
+        yield _evidence_item(evidence, record, source, freshness)
+
+
+def _source_authorship(row: LedgerRecord | None) -> SourceAuthorship | None:
+    """Read one source event's authorship from its accepted envelope.
+
+    Writer chain, session and sequence are service-assigned; the channel is the ledger-recorded
+    one (a cooperative writer records only ``cooperative_mcp`` or ``local_cli``); the observation
+    stamp cannot be asserted by a cooperative writer.
+    """
+
+    if row is None:
+        return None
+    return SourceAuthorship(
+        row.writer.writer_id,
+        row.session_id,
+        row.ledger.ingestion_sequence,
+        row.publication_channel,
+        is_observation_authored(row),
+    )
+
+
+def _later_redaction_targets(
+    suffix: tuple[LedgerRecord, ...],
+) -> tuple[frozenset[str], frozenset[str]]:
+    """Collect the event and object targets of every redaction after a pinned frontier.
+
+    An object target redacts the event whose payload object it names, exactly as replay resolves
+    it, so a row can be withdrawn by either identity. The suffix is empty for a head read.
+    """
+
+    events: set[str] = set()
+    objects: set[str] = set()
+    for row in suffix:
+        if row.schema.name != "redaction_recorded":
+            continue
+        events.update(row.projection_locator.redaction_target_event_ids)
+        objects.update(row.projection_locator.redaction_target_object_ids)
+    return frozenset(events), frozenset(objects)
+
+
+def _authored_by_requester(
+    source: SourceAuthorship | None, query: ProjectionQuery, frontier: Frontier
+) -> bool:
+    """Apply the ``DisclosureProvenance`` self-authorship rule for ``author=mine``."""
+
+    return (
+        source is not None
+        and query.writer_id is not None
+        and authorship_provenance(
+            (source,),
+            writer_id=query.writer_id,
+            session_id=query.session_id,
+            frontier_sequence=frontier.sequence,
+        )
+        is DisclosureProvenance.SELF_AUTHORED
+    )
+
+
 def _projection_items(
     view: ProjectionView,
     projection: ProjectionState,
@@ -1304,45 +1501,10 @@ def _projection_items(
             result_items.append(StatusResultItemModel.model_validate(fields))
         return tuple(result_items)
     if view is ProjectionView.EVIDENCE:
-        evidence_items: list[ProjectionItem] = []
-        for evidence, record in sorted(
-            projection.evidence.items(), key=lambda item: item[0].encode()
-        ):
-            payload = record.payload
-            if payload is None:
-                continue
-            state = payload.subject_state
-            subject_state = None
-            if state is not None and (
-                state.tree_digest is not None or state.diff_digest is not None
-            ):
-                # Optional non-null digests must be omitted when unset, never passed as null —
-                # ``StatusStructuralSubjectStateModel`` rejects explicit null leaves.
-                subject_state_values: dict[str, object] = {}
-                if state.tree_digest is not None:
-                    subject_state_values["tree_digest"] = state.tree_digest
-                if state.diff_digest is not None:
-                    subject_state_values["diff_digest"] = state.diff_digest
-                subject_state = StatusStructuralSubjectStateModel.model_validate(
-                    subject_state_values
-                )
-            freshness = projection.freshness.value
-            if not record.object_available and freshness == "current":
-                freshness = "redacted_gap"
-            evidence_items.append(
-                StatusEvidenceItemModel(
-                    evidence_id=evidence,
-                    strength=payload.strength.value,
-                    freshness=freshness,
-                    available=record.object_available,
-                    description=payload.description,
-                    reference=payload.reference,
-                    captured_object_id=payload.captured_object_id,
-                    content_digest=payload.content_digest,
-                    subject_state=subject_state,
-                )
-            )
-        return tuple(evidence_items)
+        return tuple(
+            _evidence_item(evidence, record, source, _evidence_freshness(projection, record))
+            for evidence, record, source in _evidence_rows(projection, records)
+        )
     if view is ProjectionView.FINDINGS:
         finding_items: list[ProjectionItem] = []
         proof_state_cache: dict[tuple[int, int, str], ProjectionState | None] = {}
@@ -2239,8 +2401,8 @@ class MemoryLedgerAdapter:
         head: Frontier,
         records: tuple[LedgerRecord, ...],
         projection: ProjectionState,
-        cached: tuple[ProjectionState, tuple[ProjectionItem, ...]] | None,
-    ) -> tuple[ProjectionPage, ProjectionState, tuple[ProjectionItem, ...]]:
+        cached: tuple[ProjectionState, tuple[ProjectionItem, ...] | None] | None,
+    ) -> tuple[ProjectionPage, ProjectionState, tuple[ProjectionItem, ...] | None]:
         if not any(row.session_id == query.session_id for row in records):
             raise _error(PublicErrorCode.SESSION_NOT_FOUND)
         if query.requested_frontier > head or (
@@ -2264,19 +2426,32 @@ class MemoryLedgerAdapter:
         if effective != query.requested_frontier:
             raise _error(PublicErrorCode.INVALID_REQUEST)
         view = ProjectionView(query.view)
-        all_items = (
-            cached[1]
-            if cached is not None
-            else _projection_items(
-                view,
-                effective_projection,
-                prefix,
-                task=self._task_id,
-                session=query.session_id,
+        all_items: tuple[ProjectionItem, ...] | None = None
+        # Evidence rows are built lazily from the cursor on and filtered before construction, so
+        # a page builds at most ``limit + 1`` rows however long the task is. Ledger authorship is
+        # read per query, never cached: ``author=mine`` and the disclosure provenance both depend
+        # on the requesting writer and this exact prefix.
+        evidence_sources: dict[str, LedgerRecord] = {}
+        candidates: Iterable[ProjectionItem]
+        if view is ProjectionView.EVIDENCE:
+            candidates = _evidence_page_rows(
+                effective_projection, prefix, query, effective, evidence_sources
             )
-        )
+        else:
+            all_items = (
+                cached[1]
+                if cached is not None and cached[1] is not None
+                else _projection_items(
+                    view,
+                    effective_projection,
+                    prefix,
+                    task=self._task_id,
+                    session=query.session_id,
+                )
+            )
+            candidates = all_items
         filtered_items: list[ProjectionItem] = []
-        for item in all_items:
+        for item in candidates:
             keep = True
             if type(query.filter) is AssignmentProjectionFilter:
                 assert type(item) is StatusAssignmentItemModel
@@ -2303,12 +2478,8 @@ class MemoryLedgerAdapter:
                     and (query.filter.include_resolved is True or not item.resolved)
                 )
             elif type(query.filter) is EvidenceProjectionFilter:
+                # Already applied, before construction, by ``_evidence_page_rows``.
                 assert type(item) is StatusEvidenceItemModel
-                keep = (
-                    (query.filter.strength is None or item.strength == query.filter.strength)
-                    and (query.filter.freshness is None or item.freshness == query.filter.freshness)
-                    and (query.filter.include_unavailable is True or item.available)
-                )
             elif type(query.filter) is HistoryProjectionFilter:
                 assert type(item) is StatusHistoryItemModel
                 keep = (
@@ -2350,6 +2521,24 @@ class MemoryLedgerAdapter:
                 if len(filtered_items) > query.limit:
                     break
         selected = tuple(filtered_items[: query.limit])
+        item_sources: tuple[tuple[SourceAuthorship, ...], ...] = ()
+        if view is ProjectionView.EVIDENCE and selected:
+            page_ids = tuple(
+                item.evidence_id for item in selected if type(item) is StatusEvidenceItemModel
+            )
+            # A pinned read replays its own prefix, so a row redacted later (by its event or by
+            # its payload object) still carries its prose there. The self-authorship exemption
+            # must never re-disclose what the current ledger has redacted: such a row stays
+            # unattributed and keeps the category ceiling.
+            redacted_events, redacted_objects = _later_redaction_targets(records[len(prefix) :])
+            item_sources = tuple(
+                ()
+                if (row := evidence_sources.get(evidence)) is None
+                or row.event_id in redacted_events
+                or row.payload_ref.object_id in redacted_objects
+                else (cast(SourceAuthorship, _source_authorship(row)),)
+                for evidence in page_ids
+            )
         next_position = None
         if selected and len(filtered_items) > len(selected):
             last = selected[-1]
@@ -2403,6 +2592,7 @@ class MemoryLedgerAdapter:
             coverage,
             status_gaps,
             next_position,
+            item_sources,
         )
 
         return page, effective_projection, all_items

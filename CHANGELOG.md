@@ -12,6 +12,16 @@ reverse-chronological released versions.
   owner-only file, replaced whole, and prints a short summary, so agents query the file instead of
   preparing again (#916).
 
+- `status view=evidence` accepts `filter.author=mine`, which lists exactly the evidence the
+  requesting writer published in its current session (decided by the service from ledger
+  authorship, never a caller flag), and every evidence row now names the ledger-recorded
+  `publication_channel` of its source event (a cooperative writer can record only `cooperative_mcp`
+  or `local_cli`; import and observation channels are service-only). Both are optional additions made in place to the unreleased 0.3 status
+  request 1.2.0 and status result 1.4.0. The CLI human status and the MCP text summary show the
+  channel. An evidence page now builds only the rows it returns (plus one to find the next
+  cursor), filtering before it builds them, instead of every row in the task. Dogfood evidence per
+  host remains tracked in #914.
+
 - Codex, Claude Code and Cursor session-start context can show a fresh repository-grant snapshot
   and name the owner's missing admission command. The notice leaves route and host approval
   unconfirmed, preserves existing context and spends only spare hook time. No cross-session
@@ -90,6 +100,16 @@ reverse-chronological released versions.
   publication and coverage guidance no longer promise "content-bearing evidence". A resolved
   finding stays on the receipt as history but its coverage no longer lowers the receipt's.
   Binding a caller digest to matching captured bytes remains open (#912).
+
+- An agent can read back the evidence it published: production now composes the privacy
+  enforcer with its ledger-authorship provenance resolver, so under the default policy the
+  requester's own evidence descriptions and references are returned instead of
+  `local_disclosure_not_authorized`. Other writers', host-observed and imported rows stay omitted
+  without a grant; the never-send scan, absolute data classes and per-projection receipt are
+  unchanged. Guidance no longer asks agents to page every evidence item and match on descriptions
+  the projection omits; it names published IDs, `filter.author=mine`,
+  `filter.strength=immutable_snapshot` and structural links instead (#914).
+
 - With the Codex subscription evaluator bound, the service no longer re-hashes the retained Codex
   runtime (about 359 MB on Linux) on the event loop for every observation advice cycle. Structural
   readiness is memoized by binding and file fingerprints and re-checked off the event loop only

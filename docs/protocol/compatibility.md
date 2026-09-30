@@ -125,6 +125,14 @@ receipts always name the engine/policy version that produced them and never rein
 under a newer policy silently. Unknown or redacted data always weakens coverage and receipt
 wording; it is never treated as equivalent to current, fully observed data.
 
+The evidence read-back change (issue #914) is an in-place edit of the unreleased 0.3 status
+request 1.2.0 and status result 1.4.0, which no released tag carries. The evidence filter gains an
+optional `author` whose only value is `mine`, and each evidence row gains an optional
+`publication_channel`. Both are optional on the wire, so a request or result produced by an earlier
+0.3 build still validates; the current service always fills the channel. Control 2.9.0 references
+the same two documents and needs no new version. No event bytes, storage, or released schema
+change.
+
 ## Storage, object and recovery
 
 Storage migrates forward only, through a contiguous, immutable, numbered migration set, under an

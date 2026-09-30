@@ -117,9 +117,33 @@ case → single-use authorization → bounded gateway → bound sink/provider �
 
    ADR-022's derived observation writer is `engine_derived_from_self_authored` for this provenance
    decision: a hook observation records the requesting agent's own action, not another writer's
-   independent authorship. Production still constructs `LocalPrivacyEnforcer` without a provenance
-   resolver, so this classification is a forward contract for the resolver rather than a claim that
-   the widening path ships today.
+   independent authorship. This classification was a forward contract written before any
+   production resolver existed; see the 2026-09-29 revision below for what ships.
+
+   **Revised 2026-09-29 — the provenance resolver ships (issue #914).** Production now composes
+   `LocalPrivacyEnforcer` with a ledger-authorship resolver, so an agent reads back the evidence it
+   published. The resolver consumes only authorship the service read from accepted event envelopes
+   at the page's frozen frontier (writer chain, session, ingestion sequence, ledger-recorded
+   publication channel, observation stamp); it never reads a field of the request being projected.
+   A cooperative writer can record only the `cooperative_mcp` or `local_cli` channel; import and
+   observation channels are service-only. It attributes status
+   evidence rows, whose prose comes from one source event: a row is `self_authored` only when that
+   event was written by the requesting writer, in the requesting session, at or before the frontier,
+   through `cooperative_mcp` or `local_cli`, without the observation stamp. Import channels are
+   `imported`. Hook-observed rows are written by the observation coordinator's own writer and stay
+   `other_writer`: the shipped resolver does not implement the forward
+   `engine_derived_from_self_authored` classification above, per the issue #914 owner decision that
+   matching session or host is not authorship and that host-captured prose must not be widened into
+   the default ceiling. Reconciling that forward contract is left to a maintainer decision recorded
+   on #914. Every other leaf is ambiguous and keeps the category ceiling, including every finding.
+   Attach opens a new session with a new writer, so rows published before it are not
+   self-authored for the attached session. A row whose source event a later redaction targets,
+   by event or by the event's payload object, is withdrawn from attribution even on a pinned read,
+   so the exemption never re-discloses redacted prose. The never-send scan still runs first, `sensitive_confidential` stays absolute, and each
+   projection still writes its receipt. The receipt's approved categories show the inclusion but
+   not the reason: the `self_authored` provenance is recorded only in the internal audit subject,
+   and surfacing it in `privacy receipts get` needs a design-gated egress-receipt schema change,
+   left as a follow-up.
 
    **Revised 2026-07-24 — default agent-context disclosure of verification output.** Under the
    default LOCAL_ONLY bootstrap policy, `agent_context` may include Yoetz-authored verification

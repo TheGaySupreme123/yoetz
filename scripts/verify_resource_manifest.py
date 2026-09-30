@@ -299,6 +299,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
+        "fixtures/canonical/status-evidence-author-1.4.0.case.json",
+        "canonical_vector",
+        "application/json",
+        True,
+    ),
+    (
         "fixtures/canonical/status-semantic-progress-1.4.0.case.json",
         "canonical_vector",
         "application/json",

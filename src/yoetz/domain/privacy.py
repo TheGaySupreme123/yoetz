@@ -20,6 +20,7 @@ from yoetz.protocol.canonical import (
     canonical_encode,
     strict_json_parse,
 )
+from yoetz.protocol.coverage import PublicationChannel
 from yoetz.protocol.ids import IdKind, validate_id
 from yoetz.protocol.models import DataCategory
 
@@ -72,6 +73,7 @@ __all__ = [
     "PrivacyPolicyChangeValue",
     "PrivacyProfile",
     "ProjectionAuditContext",
+    "ProjectionItemAuthorship",
     "ProjectionProvenanceContext",
     "PrivacyReason",
     "ProviderBinding",
@@ -84,6 +86,8 @@ __all__ = [
     "RequestCommitment",
     "ReviewContextProfile",
     "ReviewSelectionPolicy",
+    "SourceAuthorship",
+    "authorship_provenance",
     "outcome_reason_is_valid",
     "privacy_change_order",
     "sort_privacy_changes",
@@ -1443,18 +1447,126 @@ class CandidateContextItem:
             raise _invalid()
 
 
+# Channels through which a cooperative writer publishes its own records. Every other channel is a
+# service, host-observation, or import stamp and never yields self-authorship.
+_SELF_AUTHORING_CHANNELS: Final = frozenset(
+    {PublicationChannel.COOPERATIVE_MCP, PublicationChannel.LOCAL_CLI}
+)
+_IMPORT_CHANNELS: Final = frozenset(
+    {PublicationChannel.CODEX_JSONL_IMPORT, PublicationChannel.HUMAN_IMPORT}
+)
+_MAX_ITEM_AUTHORSHIP: Final = 100
+_MAX_ITEM_SOURCES: Final = 64
+
+
+@dataclass(frozen=True, slots=True)
+class SourceAuthorship:
+    """Ledger-recorded authorship of one accepted event that contributes to a row.
+
+    Every field is read from the accepted event envelope in the ledger, never from the request
+    being projected. Writer chain, session and sequence are service-assigned. The publication
+    channel is the ledger-recorded channel: a cooperative writer can record only
+    ``cooperative_mcp`` or ``local_cli``, while import and observation channels are service-only.
+    ``observation_authored`` is the observation coordinator authorship predicate, which a
+    cooperative writer cannot assert for itself.
+    """
+
+    writer_id: str
+    session_id: str
+    ingestion_sequence: int
+    publication_channel: PublicationChannel
+    observation_authored: bool
+
+    def __post_init__(self) -> None:
+        validate_id(IdKind.WRITER, self.writer_id)
+        validate_id(IdKind.SESSION, self.session_id)
+        _positive(self.ingestion_sequence)
+        _enum(self.publication_channel, PublicationChannel)
+        if type(self.observation_authored) is not bool:
+            raise _invalid()
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectionItemAuthorship:
+    """The contributing ledger events of one projected row, read at the page's frozen frontier.
+
+    ``item_pointer`` is the JSON pointer of the row inside the unprojected result body (for
+    example ``/page/items/3``); a candidate leaf belongs to the row when its origin pointer is a
+    child of it.
+    """
+
+    item_pointer: str
+    sources: tuple[SourceAuthorship, ...]
+
+    def __post_init__(self) -> None:
+        _text(self.item_pointer, _POINTER, maximum=256)
+        if (
+            type(self.sources) is not tuple
+            or not 1 <= len(self.sources) <= _MAX_ITEM_SOURCES
+            or any(type(source) is not SourceAuthorship for source in self.sources)
+        ):
+            raise _invalid()
+
+
+def authorship_provenance(
+    sources: tuple[SourceAuthorship, ...],
+    *,
+    writer_id: str,
+    session_id: str,
+    frontier_sequence: int,
+) -> DisclosureProvenance:
+    """Apply the ``DisclosureProvenance`` rule to ledger facts for one requesting writer.
+
+    A row is ``self_authored`` only when every contributing accepted event was written by the
+    requesting ``writer_id`` in the requesting session, at or before the frozen frontier, through
+    a cooperative publication channel, and without the observation coordinator's stamp. Any
+    import-derived contribution makes the row ``imported`` even when the importing writer matches.
+    Everything else is ``other_writer``. The result is recomputed for each request and frontier.
+    """
+
+    if not sources:
+        raise _invalid()
+    if any(source.publication_channel in _IMPORT_CHANNELS for source in sources):
+        return DisclosureProvenance.IMPORTED
+    if all(
+        source.writer_id == writer_id
+        and source.session_id == session_id
+        and source.ingestion_sequence <= frontier_sequence
+        and source.publication_channel in _SELF_AUTHORING_CHANNELS
+        and not source.observation_authored
+        for source in sources
+    ):
+        return DisclosureProvenance.SELF_AUTHORED
+    return DisclosureProvenance.OTHER_WRITER
+
+
 @dataclass(frozen=True, slots=True)
 class ProjectionProvenanceContext:
-    """Trusted identity and frozen ledger boundary for agent projection authorship."""
+    """Trusted identity and frozen ledger boundary for agent projection authorship.
+
+    ``item_authorship`` carries the ledger authorship of the projected rows that a production
+    resolver can attribute; it is read by the service from the same frozen frontier as the page
+    and is never accepted from a caller. An absent row means ambiguous authorship.
+    """
 
     session_id: str
     writer_id: str
     frontier: Frontier
+    item_authorship: tuple[ProjectionItemAuthorship, ...] = ()
 
     def __post_init__(self) -> None:
         validate_id(IdKind.SESSION, self.session_id)
         validate_id(IdKind.WRITER, self.writer_id)
         if type(self.frontier) is not Frontier:
+            raise _invalid()
+        if (
+            type(self.item_authorship) is not tuple
+            or len(self.item_authorship) > _MAX_ITEM_AUTHORSHIP
+            or any(type(item) is not ProjectionItemAuthorship for item in self.item_authorship)
+        ):
+            raise _invalid()
+        pointers = [item.item_pointer for item in self.item_authorship]
+        if len(set(pointers)) != len(pointers):
             raise _invalid()
 
 

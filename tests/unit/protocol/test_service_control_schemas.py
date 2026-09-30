@@ -1481,3 +1481,42 @@ def test_v29_changes_only_the_selection_runtime_and_keeps_frozen_v28() -> None:
         assert budget["additionalProperties"] is False
         assert set(budget["required"]) == set(budget["properties"])
         assert budget["properties"]["no_cap"]["properties"]["available"] == {"const": False}
+
+
+def test_v29_admits_the_evidence_author_filter_in_place() -> None:
+    """Unreleased 0.3 status request 1.2.0 carries ``filter.author=mine`` in place (#914)."""
+
+    request = cast(
+        JsonValue,
+        {
+            "kind": "call",
+            "protocol_version": "1.0",
+            "rpc_id": _RPC_ID,
+            "service_instance_id": _INSTANCE_ID,
+            "service_generation": "1",
+            "method": "status",
+            "body": {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "request_id": _REQUEST_ID,
+                "session_id": "ses_00000000-0000-4000-8000-000000000004",
+                "writer_id": "wri_00000000-0000-4000-8000-000000000005",
+                "view": "evidence",
+                "limit": "100",
+                "filter": {"author": "mine", "strength": "content_digest"},
+                "actor": {"actor_id": "harness:test", "actor_type": "harness"},
+                "client": {
+                    "kind": "test_client",
+                    "version": "0.3.0",
+                    "integration": "cooperative_mcp",
+                },
+            },
+        },
+    )
+    validate_schema_instance("control-request", "2.9.0", request)
+    body = cast(dict[str, Any], request)["body"]
+    for rejected in ("theirs", "all", True):
+        invalid = deepcopy(request)
+        cast(dict[str, Any], invalid)["body"]["filter"] = {**body["filter"], "author": rejected}
+        with pytest.raises(ProtocolValueError):
+            validate_schema_instance("control-request", "2.9.0", invalid)

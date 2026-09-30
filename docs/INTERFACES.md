@@ -1869,6 +1869,18 @@ policies/frontier/returned IDs alone cannot prove applicability.
 
 `include_resolved` absent/false adds `resolved=false`, while true removes only that predicate;
 `include_unavailable` has the identical rule for `available=true`. Filters are otherwise ANDed.
+The evidence filter's optional `author` accepts only `mine`: it keeps rows whose
+source event the requesting writer published in its current session at or before the page frontier
+through `cooperative_mcp` or `local_cli`, decided per request from ledger authorship by the same
+rule as `self_authored` provenance; hook-observed, other-writer, engine and import rows never
+match. Attach opens a new session with a new writer, so it matches none of the rows published
+before it. Every evidence row carries the ledger-recorded `publication_channel` of its source event:
+a cooperative writer can record only `cooperative_mcp` or `local_cli`, while import and
+observation channels are service-only. Both fields were added in place to
+the unreleased 0.3 status request 1.2.0 and status result 1.4.0 (carried by control 2.9.0); the
+row field is optional on the wire so results from earlier 0.3 builds still validate, although the
+service always fills it. Omitting `author` keeps the earlier filter digest, so an earlier cursor
+still binds.
 Assignment/obligation/evidence IDs sort ascending; findings use the complete mixed-direction
 ten-part rank order; history uses ingestion sequence. The repository selects at most `limit + 1`
 indexed structural candidates and hydrates only the first `limit`; an unreadable selected row is
@@ -3199,6 +3211,24 @@ requires the explicit `agent_context_categories` grant. `sensitive_confidential`
 only a category the host demonstrably already has. Provenance is recomputed at projection time
 against the frozen frontier and is never cached across frontiers, and each projection still reserves
 and completes its `AgentProjectionAuditSubject` receipt.
+
+Production composes `LocalPrivacyEnforcer` with the ledger-authorship `TrustedProvenanceResolver`
+(`build_local_privacy_enforcer`). Its only input is `ProjectionProvenanceContext.item_authorship`:
+per projected row, the `SourceAuthorship` (writer, session, ingestion sequence, ledger-recorded
+publication channel, observation-coordinator stamp) of each contributing accepted event, read by the
+ledger at the page's frozen frontier and carried inside the service, never on the wire. Status
+evidence rows are attributed; every other leaf resolves as ambiguous and keeps the category ceiling.
+Self-authorship additionally requires a cooperative channel (`cooperative_mcp` or `local_cli`)
+without the observation stamp, so hook-observed rows — written by the observation coordinator's own
+writer — stay `other_writer` even when session and host match. Attach opens a new session with a
+new writer, so rows published before it are not `self_authored` for the attached session. A row
+whose source event a later `redaction_recorded` targets is withdrawn from attribution even on a
+pinned read (`at_frontier` or an older cursor), so self-authorship never re-discloses redacted
+prose; a later redaction of the source event's payload object counts the same as an event target.
+A local-disclosure receipt lists an included self-authored category under its approved
+categories without stating why; the `self_authored` provenance is recorded only in the internal
+`AgentProjectionAuditSubject`, and surfacing it in `privacy receipts get` needs an egress-receipt
+schema change that is a design-gated follow-up.
 
 `PrivacyPolicyStorePort` alone loads/intersects and mutates the machine ceiling plus
 repository/task/request overlays. Its `repository_authority(scope) -> RepositoryPrivacyAuthority`

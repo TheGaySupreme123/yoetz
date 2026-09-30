@@ -297,8 +297,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(TOOL_DESCRIPTORS) == ("policy", "strict")
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == ("policy", "strict")
     assert TOOL_DESCRIPTOR_SET_DIGEST == {
-        "policy": "sha256:751030d29330d27e8cfc03bbba3fc9ad71bd30dc4507c1716223fca7bb16c7bd",
-        "strict": "sha256:830771d74df67eff89a04a4db15580df3610ea926414053470557736dccf7746",
+        "policy": "sha256:d92a46a5293d9a4e4514bf08f0d1e7763d6f35a65944a41808d3ddaed38f17a4",
+        "strict": "sha256:29e02ef43b52c91b5375072e541241e47be17c91206c128262a8b6499d30d8f6",
     }
     for profile, descriptors in TOOL_DESCRIPTORS.items():
         assert tuple(item.name for item in descriptors) == _EXPECTED_TOOL_NAMES

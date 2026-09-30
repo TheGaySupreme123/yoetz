@@ -1591,8 +1591,11 @@ class StatusCandidateFindingsFilterModel(_ClosedModel):
 
 
 class StatusEvidenceFilterModel(_ClosedModel):
-    optional_non_null_fields = frozenset({"freshness", "include_unavailable", "strength"})
+    optional_non_null_fields = frozenset({"author", "freshness", "include_unavailable", "strength"})
 
+    # ``mine`` keeps only rows whose source event this writer published in this session, decided
+    # by the service from ledger authorship; the caller cannot assert it for any other row.
+    author: Literal["mine"] | None = None
     freshness: (
         Literal["current", "partial", "redacted_gap", "stale_after_material_change", "unknown"]
         | None
@@ -3018,7 +3021,23 @@ class StatusStructuralSubjectStateModel(_ClosedModel):
 
 
 class StatusEvidenceItemModel(_ClosedModel):
+    optional_non_null_fields = frozenset({"publication_channel"})
+
     evidence_id: EvidenceIdWire
+    # The ledger-recorded channel of the row's source event: a cooperative writer can record only
+    # cooperative_mcp or local_cli, while import and observation channels are service-only. The
+    # service always fills it; it stays optional so rows from earlier 0.3 builds still parse.
+    publication_channel: (
+        Literal[
+            "codex_jsonl_import",
+            "cooperative_mcp",
+            "engine_derived",
+            "hook_observed",
+            "human_import",
+            "local_cli",
+        ]
+        | None
+    ) = None
     strength: Literal[
         "content_digest",
         "immutable_snapshot",
@@ -4673,6 +4692,7 @@ _STATUS_EVIDENCE_STRUCTURAL_POINTERS: Final = (
             "content_digest",
             "evidence_id",
             "freshness",
+            "publication_channel",
             "strength",
             "subject_state",
         ),
@@ -5235,7 +5255,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 1174:
+    if len(result) != 1175:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 

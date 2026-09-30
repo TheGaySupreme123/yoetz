@@ -27,6 +27,7 @@ from yoetz.application.status_faults import (
 from yoetz.application.task_views import LineageStatusSnapshot, ProjectStatusSnapshot
 from yoetz.domain.findings import FINDING_KIND_TRAITS, FindingOrigin
 from yoetz.domain.observation import AdviceSnapshot
+from yoetz.domain.privacy import ProjectionItemAuthorship
 from yoetz.domain.values import (
     Frontier,
     SemanticContinuation,
@@ -218,6 +219,9 @@ class StatusInternalResult:
     gaps: tuple[str, ...]
     import_status: StatusImportStatusModel
     closure_readiness: StatusClosureReadinessModel
+    # Service-read ledger authorship of the page's evidence rows at ``subject_frontier``. It feeds
+    # the agent-context provenance decision and is deliberately not part of ``as_json``.
+    item_authorship: tuple[ProjectionItemAuthorship, ...] = ()
 
     def as_json(self) -> dict[str, JsonValue]:
         # Unset optional non-null leaves (today: obligation ``acceptance_criteria``, structural
@@ -403,7 +407,12 @@ def _task_snapshot_page(
 def _filter_json(value: StatusFilter | None) -> JsonValue:
     if value is None:
         return None
-    return cast(JsonValue, value.model_dump(mode="json", exclude_none=False))
+    dumped = cast(dict[str, JsonValue], value.model_dump(mode="json", exclude_none=False))
+    if type(value) is StatusEvidenceFilterModel and value.author is None:
+        # The later ``author`` selector is omitted when unset so a cursor minted before it
+        # existed keeps binding to the same filter digest.
+        del dumped["author"]
+    return cast(JsonValue, dumped)
 
 
 def _filter_digest(request: StatusRequest) -> str:
@@ -573,7 +582,9 @@ def _port_filter(value: StatusFilter | None) -> ProjectionFilter | None:
             value.origin, value.priority, value.disposition, value.include_resolved
         )
     if type(value) is StatusEvidenceFilterModel:
-        return EvidenceProjectionFilter(value.strength, value.freshness, value.include_unavailable)
+        return EvidenceProjectionFilter(
+            value.strength, value.freshness, value.include_unavailable, value.author
+        )
     if type(value) is StatusHistoryFilterModel:
         return HistoryProjectionFilter(
             value.schema_name,
@@ -1293,6 +1304,7 @@ async def execute_status(
 
         result_view = request.view
         import_status = await _import_status(runtime)
+        item_authorship: tuple[ProjectionItemAuthorship, ...] = ()
         compact_page: ProjectionPage | None = None
         if request.view == "operation":
             if position is not None:
@@ -1584,6 +1596,7 @@ async def execute_status(
                     int(request.limit),
                     cast(ProjectionPosition | None, position),
                     expected_version,
+                    runtime.writer_id,
                 )
             except (TypeError, ValueError) as exc:
                 # The one remaining caller-shape stage: this view, filter, and cursor position do
@@ -1594,6 +1607,11 @@ async def execute_status(
             raw_page = await runtime.ledger.query_projection(query)
             if request.view == "compact":
                 compact_page = raw_page
+            item_authorship = tuple(
+                ProjectionItemAuthorship(f"/page/items/{index}", sources)
+                for index, sources in enumerate(raw_page.item_sources)
+                if sources
+            )
             next_cursor = (
                 None
                 if raw_page.next_position is None
@@ -1663,6 +1681,7 @@ async def execute_status(
             gaps,
             import_status,
             closure_readiness,
+            item_authorship,
         )
     except (StatusFault, TypeError, ValueError) as exc:
         # The request passed schema validation and every caller-shape rejection above is explicit,
