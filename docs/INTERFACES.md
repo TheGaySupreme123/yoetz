@@ -6936,10 +6936,14 @@ plan. Names and contracts:
   statement row carries its own fixed label. Plan payloads in the goal item and in timeline rows
   never include `task_statement`.
 - Source order: agent statement, then task title (`task_title_only`), else no item. The item is
-  built only when the effective review selection names `task_statement`.
+  built only when the effective review selection names `task_statement`. Composition builds from
+  `review_selection_for_delivery(policy)`, which drops the section when the LLM channel withholds
+  `task_description`, so a statement egress would filter is never offered and the packet names
+  its absence.
 - Gaps (packet, check, finding baseline and receipt coverage): `task_statement_unavailable`
   (nothing carried) always travels with exactly one reason: `task_statement_not_authorized` (the
-  selection lacks the section, whether or not a statement is recorded) or
+  selection lacks the section, or the LLM channel's `allowed_categories` lack `task_description`,
+  whether or not a statement is recorded) or
   `task_statement_not_supplied` (the section is selected but neither a statement nor a readable
   title is recorded). A title standing in adds no gap; its `task_title_only` source label is the
   disclosure. Receipts add fixed prose for each code. They are semantic-only for deterministic

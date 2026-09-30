@@ -166,3 +166,29 @@ def test_privacy_show_line_is_plain_for_both_wire_versions() -> None:
         assert line is not None and line.startswith(prefix)
         assert "host-captured user prompt is never used" in line
     assert _effective_task_statement_line(cast(JsonValue, {"policy": {}})) is None
+
+
+def test_a_channel_that_withholds_task_description_drops_the_section_for_delivery() -> None:
+    from yoetz.domain.task_statement import review_selection_for_delivery
+
+    current = minimal_external_policy()
+    assert review_selection_for_delivery(current) == current.review_selection
+    blocked = replace(
+        current,
+        channel_policies=tuple(
+            replace(
+                channel,
+                allowed_categories=tuple(
+                    item
+                    for item in channel.allowed_categories
+                    if item is not DataCategory.TASK_DESCRIPTION
+                ),
+            )
+            for channel in current.channel_policies
+        ),
+    )
+    delivered = review_selection_for_delivery(blocked)
+    assert "task_statement" not in delivered.sections
+    assert set(current.review_selection.sections) - set(delivered.sections) == {"task_statement"}
+    # Only the statement's own section moves; the goal stays for the generic withheld disclosure.
+    assert "goal" in delivered.sections

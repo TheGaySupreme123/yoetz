@@ -1743,3 +1743,77 @@ async def test_an_unset_custom_ceiling_still_plans_below_the_disclosure_bound(
     assert "content_unselected" in result.case_content_gaps
     [built] = [row for row in _records(tmp_path) if row["operation"] == "semantic_case_built"]
     assert cast(int, built["semantic_excerpt_ceiling_rounds"]) >= 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("recorded", ["statement", "title_only"])
+async def test_a_channel_that_withholds_task_description_says_the_statement_was_not_sent(
+    recorded: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #908: the section is selected but the LLM channel will not let task_description out.
+
+    The statement (or the title standing in) would be built and then filtered at egress, so a
+    review could succeed without the user's request and say only that some context was withheld.
+    The packet and the final evaluation name it instead: ``task_statement_unavailable`` with
+    ``task_statement_not_authorized``, and no statement item is offered at all.
+    """
+
+    from builders.privacy_policies import minimal_external_policy
+    from yoetz.domain.task_statement import RecordedTaskStatement
+    from yoetz.domain.values import event_id
+
+    monkeypatch.setattr(diagnostics_module, "log_dir", lambda: tmp_path)
+    privacy = _Privacy(profile=ReviewContextProfile.EXPANDED)
+    privacy.terminal_provider_result = True
+    store = privacy.policy_application.policy_store
+    effective = store._effective  # pyright: ignore[reportPrivateUsage]
+    base = minimal_external_policy()
+    blocked = replace(
+        base,
+        review_context_profile=ReviewContextProfile.EXPANDED,
+        review_selection=ReviewSelectionPolicy.for_profile(ReviewContextProfile.EXPANDED),
+        effective_scope=effective.policy.effective_scope,
+        channel_policies=tuple(
+            replace(
+                channel,
+                allowed_categories=tuple(
+                    item
+                    for item in channel.allowed_categories
+                    if item is not DataCategory.TASK_DESCRIPTION
+                ),
+            )
+            if channel.channel is EgressChannel.LLM_INFERENCE
+            else channel
+            for channel in base.channel_policies
+        ),
+    )
+    assert "task_statement" in blocked.review_selection.sections
+    assert DataCategory.TASK_DESCRIPTION in blocked.withheld_review_categories
+    store._effective = EffectivePrivacyPolicy(  # pyright: ignore[reportPrivateUsage]
+        blocked, effective.generation, blocked.policy_digest
+    )
+    statement_event = event_id("evt_53000000-0000-4000-8000-000000000909")
+    statement = "Under Ascii, Style.Truncate returns plain text without tail."
+    case = replace(
+        make_case(extra_refs=(statement_event,)),
+        task_statement=(
+            RecordedTaskStatement(statement, statement_event, "session_opened", 1)
+            if recorded == "statement"
+            else None
+        ),
+        task_title="termenv",
+    )
+
+    result = await _evaluator(privacy, lambda: _PROVIDER, _route())(
+        replace(_frozen(), case=case), ()
+    )
+
+    assert privacy.calls == 1
+    [candidate] = privacy.candidates
+    assert [item for item in candidate.items if item.item_id == "task-statement"] == []
+    assert {"task_statement_unavailable", "task_statement_not_authorized"} <= set(
+        result.case_content_gaps
+    )
+    assert "task_statement_not_supplied" not in result.case_content_gaps
+    envelope = next(item.plaintext for item in candidate.items if item.item_id == "review-packet")
+    assert b"task_statement_not_authorized" in envelope

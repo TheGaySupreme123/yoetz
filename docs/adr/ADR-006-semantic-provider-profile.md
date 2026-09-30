@@ -822,7 +822,8 @@ a requirement both plan and diff omitted.
   labelled `agent plan (the agent's own summary)` and never carries the statement; nor do timeline
   rows. `host_captured_user_prompt` is reserved and unused.
 - Absence is never silent: `task_statement_unavailable` with `task_statement_not_authorized` (the
-  policy withholds the section) or `task_statement_not_supplied` (neither statement nor readable
+  policy withholds the section, or its AI-powered review channel does not allow
+  `task_description`) or `task_statement_not_supplied` (neither statement nor readable
   title) travels on the packet, check, finding baseline and receipt coverage. The source order is
   followed literally: a title standing in is disclosed by its `task_title_only` label, not by a
   gap. These codes do not weaken deterministic absence proof, and they tolerate semantic absence
