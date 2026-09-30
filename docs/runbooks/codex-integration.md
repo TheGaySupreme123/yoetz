@@ -51,8 +51,8 @@ neither activation nor AI-powered review dispatch.
 The Codex skill routes to the existing five MCP guidance URIs with installed reference fallbacks.
 The server initializes only a compact summary of the safety floor, which names all five URIs and
 says to read `agent-instructions.md` before the first `start` (see
-[code-mode host profile](#code-mode-host-profile-issue-918)). Consumer source-inspection restrictions do not
-prohibit developing or debugging Yoetz itself against isolated test state.
+[code-mode host profile](#code-mode-host-profile-issue-918)). Consumer source-inspection
+restrictions do not prohibit developing or debugging Yoetz itself against isolated test state.
 
 A new Codex session reads guidance and discovers tool schemas before calling MCP `start` as
 its first workflow operation, before substantive research, commands, edits, or delegation.
@@ -264,18 +264,22 @@ initialize instructions, the tool description and a generated declaration, so th
 are charged once per advertised tool (seven copies). The `--host codex` profile keeps every
 ceremony step and makes each one cheaper:
 
-- **Compact initialize body.** The bridge serves `COMPACT_INITIALIZE_INSTRUCTIONS` (1,991 bytes;
-  byte cap 2,048, `COMPACT_INSTRUCTIONS_BUDGET`) instead of the 19,835-byte
-  `agent-instructions.md`. With the route line the policy block is 2,074 bytes before the
-  destination disclosure (#479), which is appended whole as before; the packaged advertised
-  surface falls from 223,627 to 99,300 bytes. The body keeps the start trigger and late-start rule,
-  the schema-load step, all five guidance URIs and when to read each, the cadence, the
-  no-false-activation and no-fabrication rules, typed continuations, the unavailable-service
-  statement, the disclosure, consent and recovery boundaries, and coverage-honest wording. It
-  tells the agent to read `agent-instructions.md` with `read_guidance` before the first `start`,
-  so the full safety floor is one call away. `tests/unit/mcp/test_compact_host_instructions.py`
-  and an import-time lint pin the cap, those rules and the shared tail. A legacy registration
-  without `--host codex` keeps the generic body.
+- **Compact initialize body.** The bridge serves `COMPACT_INITIALIZE_INSTRUCTIONS` instead of the
+  19,835-byte `agent-instructions.md`. The stated 2,048-byte cap (`COMPACT_INSTRUCTIONS_BUDGET`)
+  covers the packaged body alone, currently 1,991 bytes. The served block adds the route line and,
+  on the policy route, the destination disclosure (#479), which is appended whole as before: 2,074
+  bytes on the policy route without a disclosure, 2,098 bytes on the strict route, and at most
+  3,132 bytes (`max_encoded_bytes`) with the longest admissible disclosure. The packaged
+  advertised surface falls from 223,627 to 99,300 bytes. The body keeps the start trigger and
+  late-start rule, the schema-load step, all five guidance URIs and when to read each, the
+  cadence, the no-false-activation and no-fabrication rules, typed continuations, the
+  unavailable-service statement, the disclosure, consent and recovery boundaries, and
+  coverage-honest wording. It tells the agent to read `agent-instructions.md` with `read_guidance`
+  before the first `start`, so the full safety floor is one call away.
+  `tests/packaging/test_compact_instructions_cap.py` gates the stated cap next to the Claude cap
+  gate; `tests/unit/mcp/test_compact_host_instructions.py` and an import-time lint pin the cap,
+  those rules and the shared tail. A legacy registration without `--host codex` keeps the generic
+  body.
 - **Code-mode section in the skill.** `skills/codex/yoetz/SKILL.md` shows a declaration-only
   `ALL_TOOLS` discovery helper, reading guidance from `structuredContent.text`, a UUIDv4 helper
   that needs no `crypto`, and `yield_time_ms` sized to the bridge deadline of the Yoetz call in
@@ -287,7 +291,11 @@ ceremony step and makes each one cheaper:
   `act_`, `res_`, `evd_`, `clm_` and `obl_` patterns in `schemas/`; the patterns stay strict.
 - **Single-copy guidance.** On this profile only, a `read_guidance` result's `content[0].text` is
   the bounded pointer `Guidance <uri>: <n> bytes; full text in structuredContent.text.`;
-  `structuredContent` and the output schema are unchanged. This is the lowest-priority item and is
+  `structuredContent` and the output schema are unchanged. Outside code mode, Codex hands the
+  model the serialized `structuredContent` and ignores `content` whenever `structuredContent` is
+  present (upstream `CallToolResult::as_function_call_output_payload`, read 2026-09-30 on the
+  `main` branch, not pinned to `0.157.1`), as it already does for every other Yoetz result, so the
+  pointer is not the model-visible copy there either. This is the lowest-priority item and is
   revertible: if a Codex dogfood run shows additional guidance re-read turns, restore the full
   text in `content`. The other items stand alone.
 

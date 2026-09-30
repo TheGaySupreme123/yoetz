@@ -21,6 +21,18 @@ reverse-chronological released versions.
   cue, not the grant explanation. Shipped guidance keeps grant claims conditional and host approval
   separate. Live acceptance and the remaining cross-host work stay tracked in #857.
 
+### Changed
+
+- Codex and Cursor now receive a compact initialize instructions body (at most 2,048 bytes)
+  instead of the 19.8 KB `agent-instructions.md` document, which Codex code mode copied into
+  every Yoetz tool description. The body keeps when to call `start`, the no-false-activation,
+  consent, disclosure and coverage-wording rules, and tells the agent to read the full safety
+  floor with `read_guidance` before the first `start`. The Codex skill gains a code-mode section:
+  declaration-only tool discovery, a UUIDv4 helper that needs no `crypto`, and a `yield_time_ms`
+  sized to each Yoetz call's deadline. On Codex only, `read_guidance` returns its document once,
+  in `structuredContent.text`. Claude Code and the generic host are unchanged. Codex dogfood
+  acceptance is pending (#918).
+
 ### Fixed
 
 - With the Codex subscription evaluator bound, the service no longer re-hashes the retained Codex
