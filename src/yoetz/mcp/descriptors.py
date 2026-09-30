@@ -54,7 +54,7 @@ _HOST_PROFILES: Final[frozenset[str]] = frozenset({"generic", "codex", "claude",
 
 _SCHEMA_VERSION: Final = "1.0.0"
 _TOOL_INPUT_SCHEMA_VERSIONS: Final = MappingProxyType(
-    {"start": "1.2.0", "publish_work": "1.3.0", "check": "1.1.0", "status": "1.2.0"}
+    {"start": "1.1.0", "publish_work": "1.2.0", "check": "1.1.0", "status": "1.2.0"}
 )
 _TOOL_OUTPUT_SCHEMA_VERSIONS: Final = MappingProxyType(
     {"start": "1.1.0", "check": "1.3.0", "status": "1.4.0", "receipt": "1.3.0"}
@@ -90,6 +90,12 @@ _BOUNDARY_TERMS: Final = re.compile(
 # Presentation keeps ordinary families through schema 1.1.0. Additive ``evidence_recorded/1.2.0``
 # (``observation_captured``) is authored only by the observation coordinator, not MCP/CLI publish.
 ORDINARY_MCP_PRESENTATION_SCHEMA_VERSIONS: Final[frozenset[str]] = frozenset({"1.0.0", "1.1.0"})
+# The statement-bearing plan 1.1.0 schemas (issue #908) stay out of the advertised draft so the
+# reviewed budgets hold; the catalog admission schema still accepts them, and an agent revises the
+# task statement through a reattaching ``start``.
+_MCP_PRESENTATION_EXCLUDED_EVENT_SCHEMAS: Final[frozenset[tuple[str, str]]] = frozenset(
+    {("plan_published", "1.1.0"), ("plan_revised", "1.1.0")}
+)
 ORDINARY_MCP_PUBLISH_EVENT_FAMILIES: Final[frozenset[str]] = frozenset(
     {
         "plan_published",
@@ -120,9 +126,9 @@ _COMMON_INLINE_SCHEMA_IDS: Final[frozenset[str]] = frozenset(
         f"{SCHEMA_NAMESPACE}common/frontier-1.0.0.schema.json",
     }
 )
-_EVENT_DRAFT_SCHEMA_ID: Final = f"{SCHEMA_NAMESPACE}events/event-draft-1.3.0.schema.json"
+_EVENT_DRAFT_SCHEMA_ID: Final = f"{SCHEMA_NAMESPACE}events/event-draft-1.2.0.schema.json"
 _OPAQUE_EVENT_DRAFT_SCHEMA_ID: Final = (
-    f"{SCHEMA_NAMESPACE}events/opaque-unknown-event-draft-1.3.0.schema.json"
+    f"{SCHEMA_NAMESPACE}events/opaque-unknown-event-draft-1.2.0.schema.json"
 )
 
 # Reviewed keyword budgets for tools/list presentation schemas (agent-usability guardrails).
@@ -139,17 +145,15 @@ PRESENTATION_INPUT_SCHEMA_BUDGETS: Final[Mapping[str, Mapping[str, int]]] = Mapp
                 "max_encoded_bytes": 5_000,
             }
         ),
-        # Issue #908 adds the plan_published/plan_revised 1.1.0 branches that carry a revised
-        # task statement: two branches, two payload definitions, about 2.4 KB.
         "publish-work-request": MappingProxyType(
             {
                 "max_oneof_nodes": 8,
-                "max_oneof_branches": 38,
+                "max_oneof_branches": 36,
                 "max_ref_nodes": 0,
                 "max_conditional_nodes": 0,
-                "max_defs_count": 23,
+                "max_defs_count": 21,
                 "max_defs_nest_depth": 1,
-                "max_encoded_bytes": 52_000,
+                "max_encoded_bytes": 49_000,
             }
         ),
         "check-request": MappingProxyType(
@@ -285,18 +289,15 @@ CLAUDE_CODE_INITIALIZE_INSTRUCTIONS: Final = (
 # The 0.3 surface retains the 18 ordinary lifecycle/coordination event families and the expanded
 # current-main initialize guidance, including the #789 late-start rule carried from the 0.2 line.
 # That makes the measured generic-host packaged surface about 221 KB; the reviewed 224 KB ceiling
-# left bounded headroom without dropping an admitted family, example, or startup rule. Issue #908
-# adds the statement-bearing plan_published/plan_revised 1.1.0 branches (the only way an agent
-# revises the task statement through publish_work) and start.task_statement: about 227 KB, so the
-# ceiling is 228 KB. Claude Code receives the compact initialize body instead and is bounded
-# separately above.
+# leaves bounded headroom without dropping an admitted family, example, or startup rule. Claude
+# Code receives the compact initialize body instead and is bounded separately above.
 # The aggregate likewise carries the packaged bound plus one disclosure allowance per advertised
 # tool, because the host that inlines the instructions inlines the disclosure with them.
 ADVERTISED_SURFACE_BUDGET: Final[Mapping[str, int]] = MappingProxyType(
     {
         "instructions_copies_per_tool": 1,
-        "packaged_max_encoded_bytes": 228_000,
-        "max_encoded_bytes": 228_000
+        "packaged_max_encoded_bytes": 224_000,
+        "max_encoded_bytes": 224_000
         + len(YOETZ_WORKFLOW_TOOL_NAMES) * MAX_DISCLOSURE_ENCODED_BYTES,
     }
 )
@@ -428,7 +429,6 @@ _INPUT_SCHEMA_EXAMPLES: Final[Mapping[str, tuple[dict[str, JsonValue], ...]]] = 
                 "request_id": _example_id("request", 1),
                 "mode": "create",
                 "task_title": "Example task",
-                "task_statement": "The user's request, verbatim.",
                 "requested_view": "compact",
                 "actor": dict(_EXAMPLE_ACTOR),
                 "client": dict(_EXAMPLE_CLIENT),
@@ -926,6 +926,7 @@ def _project_event_draft_for_ordinary_mcp(
         if (
             family in ORDINARY_MCP_PUBLISH_EVENT_FAMILIES
             and version in ORDINARY_MCP_PRESENTATION_SCHEMA_VERSIONS
+            and (family, version) not in _MCP_PRESENTATION_EXCLUDED_EVENT_SCHEMAS
         ):
             kept.append(_mutable_json(branch_map))
             kept_families.add(family)
@@ -1683,9 +1684,8 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "record occurred. Each new operation uses a fresh req_ prefixed random UUID; recover an "
         "unknown write outcome with the same request_id before any sibling. "
         "workspace_ref and external_ref are admitted only as a pair. Call it once per "
-        "task. task_title and requested_view are required. Pass the user's request verbatim as "
-        "task_statement: AI-powered review reads it as the specification, apart from your plan. "
-        "Attach selectors are exactly one of: "
+        "task. task_title and requested_view are required; task_statement is the user's request "
+        "verbatim. Attach selectors are exactly one of: "
         "(1) session_id for the session you hold, or "
         "(2) workspace_ref + external_ref as a pair with no session_id — mode=create_or_attach "
         "creates on first use and attaches on later conversations. task_id is not an accepted "
@@ -1923,8 +1923,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
     {
         "policy": MappingProxyType(
             {
-                "start": "sha256:54fe13c09b3900dd8a9ac185e7d4fe383310e6818b75f8af6f4aa439ad4a0622",
-                "publish_work": "sha256:1a66d8959e9ec756cedc6aef3c0f84c29830b6848d27f3149fa9b3d9f4c36dd6",
+                "start": "sha256:4c6c687e3dc3666c2a248f8a23f504b3f22bb7258df2c608ed557165ea3af78a",
+                "publish_work": "sha256:5b7e151a4583762f500803165aa48d3c49ec61172a36945a6af92064ffc171ff",
                 "check": "sha256:9befe13b257acf10535009c1dd69d9a933f3d94f5cd2aaac1655d4867596f89e",
                 "respond": "sha256:8b5dc94f431a411ef332021af01050a4b0c248a800e46d5b3bdb567f770d25a5",
                 "status": "sha256:517eb05aa015834d98bd96ed59d4b647a95e6c42a13013803caf19b9b4b07875",
@@ -1934,8 +1934,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         ),
         "strict": MappingProxyType(
             {
-                "start": "sha256:54fe13c09b3900dd8a9ac185e7d4fe383310e6818b75f8af6f4aa439ad4a0622",
-                "publish_work": "sha256:1a66d8959e9ec756cedc6aef3c0f84c29830b6848d27f3149fa9b3d9f4c36dd6",
+                "start": "sha256:4c6c687e3dc3666c2a248f8a23f504b3f22bb7258df2c608ed557165ea3af78a",
+                "publish_work": "sha256:5b7e151a4583762f500803165aa48d3c49ec61172a36945a6af92064ffc171ff",
                 "check": "sha256:2bd9947abc7b60564474840a73d99a80bfa528b98af1a725d11fdfde5dac9795",
                 "respond": "sha256:8b5dc94f431a411ef332021af01050a4b0c248a800e46d5b3bdb567f770d25a5",
                 "status": "sha256:517eb05aa015834d98bd96ed59d4b647a95e6c42a13013803caf19b9b4b07875",
@@ -1947,8 +1947,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:4fc3f878b1a5e94a883e423c3424f427f5300d06289207437b0ee25b5057099b",
-        "strict": "sha256:54f2761ad859a0ed5207a12e1b9c019e720c76c9038ee11e428843becc3f8b23",
+        "policy": "sha256:7de8ca21f97a0f50399776384b92cd0495ce77bc9c337088a7583a8a55e074a0",
+        "strict": "sha256:346b51c057fc564610315c4b42835bb7cfbf8ce8333bc5a5714f0f2951b71400",
     }
 )
 

@@ -45,11 +45,11 @@ Pass the user's request verbatim in `task_statement`: the whole request as the u
 a paraphrase and not your plan. It is recorded in the task ledger and labelled as your
 transcription (`agent_transcribed`). AI-powered review reads it as the specification, apart from
 your plan, only when the approved privacy policy lists the `task_statement` section; otherwise the
-check and receipt say `task_statement_not_authorized`. When the user amends the request, record
-the whole amended request in the `task_statement` of a `plan_revised` (or `plan_published`)
-1.1.0 payload; a resuming `start` that carries one records it too. The newest statement is
-current and earlier ones stay in history. Never put the statement in a plan `summary`, and never
-infer it from commit messages or files.
+check and receipt say `task_statement_not_authorized`. When the user amends the request, call
+`start` again with a fresh `request_id`, `mode=attach`, the `session_id` you hold, and the whole
+amended request in `task_statement` (a CLI publisher may instead carry it in a `plan_revised`
+1.1.0 payload). The newest statement is current and earlier ones stay in history. Never put the
+statement in a plan `summary`, and never infer it from commit messages or files.
 
 ```json
 {

@@ -249,10 +249,10 @@ SESSION_EVENT_SCHEMA_VERSION: Final = "1.1.0"
 LINEAGE_SESSION_EVENT_SCHEMA_VERSION: Final = "1.2.0"
 LINEAGE_EVENT_SCHEMA_VERSION: Final = "1.0.0"
 # The agent-transcribed task statement (issue #908) is additive to the session and plan families.
-# Every older schema stays frozen; the newer version is selected only when a statement is present,
-# so a ledger that never carries one keeps its exact historical bytes. The session-opened version
-# is a superset of the lineage 1.2.0 payload.
-TASK_STATEMENT_SESSION_OPENED_SCHEMA_VERSION: Final = "1.3.0"
+# Released schemas stay frozen; a new version is selected only when a statement is present, so a
+# ledger that never carries one keeps its exact historical bytes. The unreleased session-opened
+# 1.2.0 contract admits the statement as an optional field beside the lineage metadata.
+TASK_STATEMENT_SESSION_OPENED_SCHEMA_VERSION: Final = LINEAGE_SESSION_EVENT_SCHEMA_VERSION
 TASK_STATEMENT_SESSION_RESUMED_SCHEMA_VERSION: Final = "1.2.0"
 TASK_STATEMENT_PLAN_SCHEMA_VERSION: Final = "1.1.0"
 LINEAGE_SERVICE_STAMPED_FAMILIES: Final = frozenset(
@@ -2396,9 +2396,6 @@ PAYLOAD_TYPES: Final[Mapping[EventSchema, type[EventPayload]]] = MappingProxyTyp
         EventSchema("session_opened", SCHEMA_VERSION): SessionOpenedPayload,
         EventSchema("session_opened", SESSION_EVENT_SCHEMA_VERSION): SessionOpenedPayload,
         EventSchema("session_opened", LINEAGE_SESSION_EVENT_SCHEMA_VERSION): SessionOpenedPayload,
-        EventSchema(
-            "session_opened", TASK_STATEMENT_SESSION_OPENED_SCHEMA_VERSION
-        ): SessionOpenedPayload,
         EventSchema("session_resumed", SCHEMA_VERSION): SessionResumedPayload,
         EventSchema("session_resumed", SESSION_EVENT_SCHEMA_VERSION): SessionResumedPayload,
         EventSchema(
@@ -2460,7 +2457,7 @@ PAYLOAD_TYPES: Final[Mapping[EventSchema, type[EventPayload]]] = MappingProxyTyp
     }
 )
 
-# The one schema per family that may carry a task statement, and must (issue #908).
+# The one schema per family that may carry a task statement (issue #908).
 TASK_STATEMENT_EVENT_SCHEMAS: Final = frozenset(
     {
         EventSchema("session_opened", TASK_STATEMENT_SESSION_OPENED_SCHEMA_VERSION),
@@ -2469,6 +2466,11 @@ TASK_STATEMENT_EVENT_SCHEMAS: Final = frozenset(
         EventSchema("plan_revised", TASK_STATEMENT_PLAN_SCHEMA_VERSION),
     }
 )
+# The versions minted only for the statement are never chosen without one; session-opened 1.2.0
+# also carries lineage alone, so its statement stays optional.
+_TASK_STATEMENT_REQUIRED_SCHEMAS: Final = TASK_STATEMENT_EVENT_SCHEMAS - {
+    EventSchema("session_opened", TASK_STATEMENT_SESSION_OPENED_SCHEMA_VERSION)
+}
 
 
 def _closed_object(
@@ -4059,13 +4061,13 @@ def _validate_event_schema_payload(
         has_project_lineage = any(
             value is not None for value in (payload.project_id, payload.membership_generation)
         )
-        lineage_schemas = {
-            EventSchema("session_opened", LINEAGE_SESSION_EVENT_SCHEMA_VERSION),
-            EventSchema("session_opened", TASK_STATEMENT_SESSION_OPENED_SCHEMA_VERSION),
-        }
-        if has_lineage and schema not in lineage_schemas:
+        if has_lineage and schema != EventSchema(
+            "session_opened", LINEAGE_SESSION_EVENT_SCHEMA_VERSION
+        ):
             raise ProtocolValueError("invalid_event_schema")
-        if has_project_lineage and schema not in lineage_schemas:
+        if has_project_lineage and schema != EventSchema(
+            "session_opened", LINEAGE_SESSION_EVENT_SCHEMA_VERSION
+        ):
             raise ProtocolValueError("invalid_event_schema")
     if type(payload) in {
         SessionOpenedPayload,
@@ -4073,8 +4075,8 @@ def _validate_event_schema_payload(
         PlanPublishedPayload,
         PlanRevisedPayload,
     }:
-        # Exactly one schema per family carries a statement, and it always does: an older
-        # schema never admits the field, and the newer one is never chosen without it.
+        # One schema per family admits a statement; an older schema never does, and a version
+        # minted only for the statement is never chosen without it.
         statement = cast(
             SessionOpenedPayload
             | SessionResumedPayload
@@ -4082,7 +4084,9 @@ def _validate_event_schema_payload(
             | PlanRevisedPayload,
             payload,
         ).task_statement
-        if (statement is not None) != (schema in TASK_STATEMENT_EVENT_SCHEMAS):
+        if statement is not None and schema not in TASK_STATEMENT_EVENT_SCHEMAS:
+            raise ProtocolValueError("invalid_event_schema")
+        if statement is None and schema in _TASK_STATEMENT_REQUIRED_SCHEMAS:
             raise ProtocolValueError("invalid_event_schema")
     if type(payload) is CheckRecordedPayload:
         if (payload.semantic_conclusion is not None) != (

@@ -1,4 +1,4 @@
-"""The task statement is persisted on exactly one new schema per family (issue #908)."""
+"""The task statement is persisted on exactly one schema per family (issue #908)."""
 
 from __future__ import annotations
 
@@ -47,8 +47,8 @@ def _payloads() -> tuple[
     return (
         (
             "session_opened",
-            "1.3.0",
             "1.2.0",
+            "1.1.0",
             SessionOpenedPayload(
                 "termenv truncation",
                 ClientKind.COOPERATIVE_AGENT,
@@ -100,13 +100,25 @@ def test_statement_round_trips_only_under_its_statement_bearing_version(
         # session-resumed's reviewed schema inherits a model-derived integer frontier that the
         # engine-authored wire never matched; only the field this version adds is new here.
         validate_schema_instance(family.replace("_", "-"), version, cast(JsonValue, wire))
-    # The frozen older version never admits the field, and the new one requires it.
+    # The frozen older version never admits the field.
     with pytest.raises(ProtocolValueError):
         decode_payload(EventSchema(family, older), wire)
     without = {key: value for key, value in cast(dict[str, JsonValue], wire).items()}
     without.pop("task_statement")
-    with pytest.raises(ProtocolValueError):
-        decode_payload(schema, freeze_json(without))
+    if family == "session_opened":
+        # The unreleased session-opened 1.2.0 carries the statement as an optional field beside
+        # the lineage metadata, so it still decodes without one.
+        assert decode_payload(schema, freeze_json(without)) == SessionOpenedPayload(
+            "termenv truncation",
+            ClientKind.COOPERATIVE_AGENT,
+            "0.1.0",
+            IntegrationKind.COOPERATIVE_MCP,
+            RuntimeProfile.TEST_FAKE,
+        )
+    else:
+        # A version minted only for the statement is never chosen without it.
+        with pytest.raises(ProtocolValueError):
+            decode_payload(schema, freeze_json(without))
 
 
 def test_statement_is_bounded_by_utf8_bytes_not_characters() -> None:
@@ -135,8 +147,9 @@ def test_an_older_service_contract_refuses_the_statement_instead_of_dropping_it(
     """Upgrade over a running older service (issue #908).
 
     A newer client's handshake already fails on the schema-manifest digest; even a start body
-    that reached a 2.9.0 control boundary is refused by the closed start-request 1.1.0 schema,
-    never accepted with the statement silently dropped.
+    that reached a released 0.2.5 service is refused by its closed start-request 1.0.0 schema,
+    never accepted with the statement silently dropped. The unreleased 1.1.0 contract carries
+    the field as an optional addition, so a body without it keeps its earlier shape.
     """
 
     from yoetz.protocol.schemas import SchemaInstanceInvalid
@@ -155,6 +168,9 @@ def test_an_older_service_contract_refuses_the_statement_instead_of_dropping_it(
             "task_statement": _STATEMENT,
         },
     )
-    validate_schema_instance("start-request", "1.2.0", wire)
+    validate_schema_instance("start-request", "1.1.0", wire)
+    without = {key: value for key, value in cast(dict[str, JsonValue], wire).items()}
+    without.pop("task_statement")
+    validate_schema_instance("start-request", "1.0.0", cast(JsonValue, without))
     with pytest.raises(SchemaInstanceInvalid):
-        validate_schema_instance("start-request", "1.1.0", wire)
+        validate_schema_instance("start-request", "1.0.0", wire)

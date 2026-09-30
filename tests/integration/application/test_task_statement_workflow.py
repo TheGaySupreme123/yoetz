@@ -167,7 +167,7 @@ async def test_start_records_the_statement_and_same_request_retry_is_idempotent(
     assert len(records) == 1
     opened = records[0]
     assert type(opened) is AcceptedEvent
-    assert (opened.schema.name, opened.schema.version) == ("session_opened", "1.3.0")
+    assert (opened.schema.name, opened.schema.version) == ("session_opened", "1.2.0")
     assert type(opened.payload) is SessionOpenedPayload
     assert opened.payload.task_statement == _REQUEST
 

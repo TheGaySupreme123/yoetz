@@ -582,10 +582,9 @@ def test_exact_schema_pair_dispatch_and_unknown_boundary() -> None:
         if schema.name == "coordination_obligation_declared"
     } == {"1.0.0"}
     for family in ("session_opened", "session_resumed"):
-        # 1.3.0 / 1.2.0 carry the agent-transcribed task statement (issue #908).
+        # session_opened 1.2.0 carries lineage and, optionally, the task statement; the
+        # session_resumed 1.2.0 version exists only to carry the statement (issue #908).
         expected_versions = {SCHEMA_VERSION, "1.1.0", "1.2.0"}
-        if family == "session_opened":
-            expected_versions.add("1.3.0")
         assert {
             schema.version for schema in PAYLOAD_TYPES if schema.name == family
         } == expected_versions

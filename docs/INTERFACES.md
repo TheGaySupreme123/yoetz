@@ -6903,16 +6903,20 @@ provider delivery or code correctness. The record contains no content, paths, or
 The reviewer judges the change against what the user asked for, kept apart from the agent's own
 plan. Names and contracts:
 
-- `start.task_statement` (start-request 1.2.0, optional): the user's request as the agent
+- `start.task_statement` (optional in the unreleased start-request 1.1.0): the user's request as the agent
   transcribed it, 1..`MAX_TASK_STATEMENT_BYTES` (65,536) UTF-8 bytes. It is part of start request
   identity: a retry with the same `request_id` and statement replays; different words under the
   same `request_id` conflict. `yoetz start --task-statement-file PATH|-` reads it verbatim. A
   request without it keeps its exact historical digest.
-- Ledger: `session_opened` 1.3.0 (on create; a superset of the lineage 1.2.0 payload),
-  `session_resumed` 1.2.0 (on reattach), and `plan_published`/`plan_revised` 1.1.0 (revision via
-  `publish_work`, event-draft 1.3.0, publish-work-request 1.3.0) carry a required
-  `task_statement`. Each older version stays frozen and never admits the field; the newer version
-  is chosen only when a statement is present. `domain/task_statement.current_task_statement`
+- Ledger: the unreleased `session_opened` 1.2.0 carries an optional `task_statement` beside the
+  lineage metadata (on create; a statement alone selects 1.2.0, and a create with neither stays on
+  1.1.0). The released families gain new versions that require it: `session_resumed` 1.2.0 (on
+  reattach) and `plan_published`/`plan_revised` 1.1.0, which the unreleased event-draft 1.2.0 and
+  publish-work-request 1.2.0 admit in place. Each released version stays frozen and never admits
+  the field, and a version minted for the statement is never chosen without one. The advertised
+  MCP `publish_work` presentation leaves the plan 1.1.0 branches out to hold the reviewed surface
+  budget, so an MCP agent revises the statement with a reattaching `start`; the catalog schema,
+  the CLI and the service still accept the plan branches. `domain/task_statement.current_task_statement`
   returns the newest readable statement in ledger order; earlier ones stay in history, and a
   redacted event contributes nothing.
 - `DeterministicCase.task_statement` (`RecordedTaskStatement`) and `task_title` are frozen from
@@ -6944,10 +6948,11 @@ plan. Names and contracts:
   `review_selection_policy_schema_version` (1.1.0 unless a 1.2.0-only section is selected), so an
   approval made before the section keeps its bytes and digest; a 1.0.0/1.1.0 row that names the
   section is `privacy_policy_row_corrupt`.
-- Local control 2.10.0 carries start-request 1.2.0, publish-work-request 1.3.0, and either
+- The unreleased local control 2.9.0 carries the fields in place and admits either
   privacy-policy wire version. A newer client meets an older running service at the schema-manifest
   digest in `control-hello` (`manifest_mismatch`, superseded through `yoetz service restart`), and a
-  2.9.0 boundary's closed start-request 1.1.0 schema refuses the field rather than dropping it.
+  released 0.2.5 boundary's closed start-request 1.0.0 schema refuses the field rather than
+  dropping it.
 - `TASK_STATEMENT_REVIEW_INSTRUCTION` (appended to the Responses and Chat Completions system
   instructions): the task statement is the specification and wins over the plan; an omitted or
   contradicted stated requirement is a discrepancy citing the statement's source ref; never request

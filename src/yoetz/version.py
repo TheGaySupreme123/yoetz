@@ -102,7 +102,7 @@ _RESOURCE_LIMIT: Final = 4_194_304
 # One independently reviewed cardinality tripwire guards the generated resource manifest. All
 # per-kind counts are derived from the manifest entries so adding a resource has exactly one
 # hand-authored count to review and the owning resource-ripple command can regenerate the rest.
-REVIEWED_RESOURCE_COUNT: Final = 285
+REVIEWED_RESOURCE_COUNT: Final = 276
 _RESOURCE_KINDS: Final = frozenset(
     {
         "canonical_vector",
@@ -122,10 +122,10 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("check-request", "1.1.0"),
     ("check-result", "1.3.0"),
     ("client-info", "1.0.0"),
-    ("control-hello", "2.10.0"),
-    ("control-hello-result", "2.10.0"),
-    ("control-request", "2.10.0"),
-    ("control-result", "2.10.0"),
+    ("control-hello", "2.9.0"),
+    ("control-hello-result", "2.9.0"),
+    ("control-request", "2.9.0"),
+    ("control-result", "2.9.0"),
     ("coverage", "1.0.0"),
     ("egress-receipt", "1.0.0"),
     ("finding", "1.3.0"),
@@ -142,7 +142,7 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("privacy-policy", "1.2.0"),
     ("provider-judgment", "1.0.0"),
     ("public-error", "1.0.0"),
-    ("publish-work-request", "1.3.0"),
+    ("publish-work-request", "1.2.0"),
     ("publish-work-result", "1.0.0"),
     ("read-guidance-request", "1.0.0"),
     ("read-guidance-result", "1.0.0"),
@@ -160,7 +160,7 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("setup-readiness", "1.0.0"),
     ("setup-status", "2.0.0"),
     ("setup-wizard-contract", "1.0.0"),
-    ("start-request", "1.2.0"),
+    ("start-request", "1.1.0"),
     ("start-result", "1.1.0"),
     ("status", "7.0.0"),
     ("status-request", "1.2.0"),
@@ -786,9 +786,9 @@ def build_version_manifest(*, include_optional_probes: bool = False) -> VersionM
             (
                 name,
                 "1.3.0"
-                if name in {"finding_recorded", "check_recorded", "session_opened"}
+                if name in {"finding_recorded", "check_recorded"}
                 else "1.2.0"
-                if name in {"evidence_recorded", "session_resumed"}
+                if name in {"evidence_recorded", "session_opened", "session_resumed"}
                 else "1.1.0"
                 if name
                 in {

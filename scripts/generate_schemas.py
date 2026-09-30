@@ -340,95 +340,13 @@ def _with_required_task_statement(
     return document
 
 
-def _start_request_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
-    """Add the optional agent-transcribed task statement to ``start`` (issue #908)."""
-
-    document = _load_versioned_template(entry, "operations/start-request-1.1.0.schema.json")
-    properties = cast(dict[str, JsonValue], document["properties"])
-    properties["task_statement"] = dict(_TASK_STATEMENT_SCHEMA)
-    document["title"] = f"Yoetz start request {entry.schema_version}"
-    return document
-
-
-def _event_draft_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
-    """Admit the statement-bearing session and plan payload versions (issue #908)."""
-
-    document = _event_draft_v1_2_schema(entry)
-    definitions = cast(dict[str, JsonValue], document["$defs"])
-    branches = cast(list[JsonValue], document["oneOf"])
-    opaque_v12 = SCHEMA_NAMESPACE + "events/opaque-unknown-event-draft-1.2.0.schema.json"
-    opaque_v13 = SCHEMA_NAMESPACE + "events/opaque-unknown-event-draft-1.3.0.schema.json"
-    opaque_branch = next(
-        (item for item in branches if isinstance(item, dict) and item.get("$ref") == opaque_v12),
-        None,
-    )
-    if opaque_branch is None:
-        raise SchemaGenerationError(
-            "event_draft_schema_template_invalid", entries=(entry.relative_path,)
-        )
-    opaque_branch["$ref"] = opaque_v13
-    for family, version in _TASK_STATEMENT_EVENT_PAIRS:
-        suffix = "_".join(version.split(".")[:2])
-        identity_name = f"schema_identity_{family}_{suffix}"
-        alias_name = f"{family}_{suffix}_schema"
-        definitions[identity_name] = {
-            "additionalProperties": False,
-            "properties": {"name": {"const": family}, "version": {"const": version}},
-            "required": ["name", "version"],
-            "type": "object",
-        }
-        definitions[alias_name] = {"$ref": f"#/$defs/{identity_name}"}
-        payload_path = f"events/{family.replace('_', '-')}-{version}.schema.json"
-        branches.append(
-            {
-                "properties": {
-                    "payload": {"$ref": SCHEMA_NAMESPACE + payload_path},
-                    "schema": {"$ref": f"#/$defs/{alias_name}"},
-                },
-                "required": ["schema", "payload"],
-            }
-        )
-    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
-    document["title"] = f"Yoetz event draft {entry.schema_version}"
-    return document
-
-
+# The statement-bearing versions of released families (issue #908). ``session_opened`` 1.2.0 is
+# unreleased and carries the optional statement in place, so its existing branch already admits it.
 _TASK_STATEMENT_EVENT_PAIRS: Final[tuple[tuple[str, str], ...]] = (
-    ("session_opened", "1.3.0"),
     ("session_resumed", "1.2.0"),
     ("plan_published", "1.1.0"),
     ("plan_revised", "1.1.0"),
 )
-
-
-def _opaque_unknown_event_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
-    """Exclude the statement-bearing event pairs from the opaque-event fallback."""
-
-    document = _opaque_unknown_event_v1_2_schema(entry)
-    definitions = cast(dict[str, JsonValue], document["$defs"])
-    unknown = cast(dict[str, JsonValue], definitions["unknown_event_schema"])
-    exclusion = cast(dict[str, JsonValue], unknown["not"])
-    values = cast(list[JsonValue], exclusion["anyOf"])
-    for family, version in _TASK_STATEMENT_EVENT_PAIRS:
-        values.append(
-            {
-                "additionalProperties": False,
-                "properties": {"name": {"const": family}, "version": {"const": version}},
-                "required": ["name", "version"],
-                "type": "object",
-            }
-        )
-    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
-    document["title"] = f"Yoetz opaque unknown event draft {entry.schema_version}"
-    return document
-
-
-def _publish_work_request_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
-    return _simple_versioned_schema(
-        entry,
-        "operations/publish-work-request-1.2.0.schema.json",
-        {"event-draft-1.2.0": "event-draft-1.3.0"},
-    )
 
 
 def _privacy_policy_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
@@ -517,29 +435,17 @@ def _outbound_case_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     return document
 
 
-def _control_v2_10_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
-    """Carry the task-statement contracts over the local control boundary (issue #908).
+def _admit_privacy_policy_v1_2(document: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    """Let the unreleased 2.9 control boundary carry the 1.2.0 privacy-policy wire (issue #908).
 
-    ``start`` and ``publish_work`` bodies move to the versions that admit the statement, and every
-    privacy-policy document the boundary carries may be the 1.2.0 wire that names the
-    ``task_statement`` review section. A 1.1.0 policy stays valid unchanged. Hello and
-    hello-result only move to the 2.10.0 ``$id``.
+    Every privacy-policy document the boundary carries may be the 1.2.0 wire that names the
+    ``task_statement`` review section; a 1.1.0 policy stays valid unchanged, and recipe review
+    selections use the 1.2.0 section vocabulary (a superset of 1.0.0).
     """
 
-    source = (
-        Path(__file__).resolve().parent.parent
-        / "schemas"
-        / entry.relative_path.replace("2.10.0", "2.9.0")
-    )
-    document = cast(dict[str, JsonValue], json.loads(source.read_bytes()))
-    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
     policy_v11 = SCHEMA_NAMESPACE + "privacy/privacy-policy-1.1.0.schema.json"
     policy_v12 = SCHEMA_NAMESPACE + "privacy/privacy-policy-1.2.0.schema.json"
     replacements = {
-        SCHEMA_NAMESPACE + "operations/start-request-1.1.0.schema.json": SCHEMA_NAMESPACE
-        + "operations/start-request-1.2.0.schema.json",
-        SCHEMA_NAMESPACE + "operations/publish-work-request-1.2.0.schema.json": SCHEMA_NAMESPACE
-        + "operations/publish-work-request-1.3.0.schema.json",
         SCHEMA_NAMESPACE
         + "privacy/privacy-policy-1.0.0.schema.json#/$defs/review_selection_policy": policy_v12
         + "#/$defs/review_selection_policy",
@@ -563,9 +469,7 @@ def _control_v2_10_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
             return cast(JsonValue, {key: rewrite(item) for key, item in value.items()})
         return value
 
-    rewritten = cast(dict[str, JsonValue], rewrite(document))
-    rewritten["$id"] = SCHEMA_NAMESPACE + entry.relative_path
-    return rewritten
+    return cast(dict[str, JsonValue], rewrite(document))
 
 
 def _frozen_version_manifest_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
@@ -2209,6 +2113,8 @@ def _lineage_session_opened_schema(entry: _RegistryEntry) -> dict[str, JsonValue
                 "type": "string",
             },
             "project_id": _lineage_id_schema("project_id"),
+            # Optional in place while 1.2.0 is unreleased (issue #908).
+            "task_statement": dict(_TASK_STATEMENT_SCHEMA),
         }
     )
     all_of = cast(list[JsonValue], document.setdefault("allOf", []))
@@ -2285,6 +2191,9 @@ def _start_request_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
             "parent_tool_call_id": {"$ref": "#/$defs/host_correlation"},
             "session_id": {"$ref": "#/$defs/session_id"},
             "subagent_id": {"$ref": "#/$defs/host_correlation"},
+            # The optional agent-transcribed task statement (issue #908), added in place while
+            # 1.1.0 is unreleased; absent requests keep their exact shape.
+            "task_statement": dict(_TASK_STATEMENT_SCHEMA),
         }
     )
     rules = cast(list[JsonValue], document.setdefault("allOf", []))
@@ -3405,6 +3314,8 @@ def _event_draft_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     add_branch("session_opened", "1.2.0")
     add_branch("finding_recorded", "1.2.0")
     add_branch("finding_recorded", "1.3.0")
+    for family, version in _TASK_STATEMENT_EVENT_PAIRS:
+        add_branch(family, version)
     for family in (
         "child_accepted",
         "child_dependencies_recorded",
@@ -3490,6 +3401,15 @@ def _opaque_unknown_event_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonVa
             "type": "object",
         }
     )
+    for family, version in _TASK_STATEMENT_EVENT_PAIRS:
+        values.append(
+            {
+                "additionalProperties": False,
+                "properties": {"name": {"const": family}, "version": {"const": version}},
+                "required": ["name", "version"],
+                "type": "object",
+            }
+        )
     for family in (
         "child_accepted",
         "child_dependencies_recorded",
@@ -4417,7 +4337,7 @@ def _control_v2_9_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         )
         required.extend(["selected_capacity_label", "effective_capacity_label", "effective_budget"])
         definitions["observation_effective_budget"] = _observation_effective_budget_schema(token)
-    return document
+    return _admit_privacy_policy_v1_2(document)
 
 
 # The local-disclosure purpose grammar owned by ``yoetz.domain.privacy``.  Mirrored here rather
@@ -5912,14 +5832,6 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         lambda: __import__("yoetz.domain.events", fromlist=["EventDraft"]).EventDraft,
     ),
     _RegistryEntry(
-        "events/event-draft-1.3.0.schema.json",
-        "event-draft",
-        "1.3.0",
-        "event",
-        "event-envelope",
-        lambda: __import__("yoetz.domain.events", fromlist=["EventDraft"]).EventDraft,
-    ),
-    _RegistryEntry(
         "events/evidence-recorded-1.0.0.schema.json",
         "evidence-recorded",
         "1.0.0",
@@ -6019,14 +5931,6 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "events/opaque-unknown-event-draft-1.2.0.schema.json",
         "opaque-unknown-event-draft",
         "1.2.0",
-        "event",
-        "event-envelope",
-        lambda: __import__("yoetz.domain.events", fromlist=["UnknownEvent"]).UnknownEvent,
-    ),
-    _RegistryEntry(
-        "events/opaque-unknown-event-draft-1.3.0.schema.json",
-        "opaque-unknown-event-draft",
-        "1.3.0",
         "event",
         "event-envelope",
         lambda: __import__("yoetz.domain.events", fromlist=["UnknownEvent"]).UnknownEvent,
@@ -6151,18 +6055,6 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "events/session-opened-1.2.0.schema.json",
         "session-opened",
         "1.2.0",
-        "event",
-        "event-payload",
-        lambda: (
-            __import__(
-                "yoetz.domain.events", fromlist=["SessionOpenedPayload"]
-            ).SessionOpenedPayload
-        ),
-    ),
-    _RegistryEntry(
-        "events/session-opened-1.3.0.schema.json",
-        "session-opened",
-        "1.3.0",
         "event",
         "event-payload",
         lambda: (
@@ -6438,18 +6330,6 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         ),
     ),
     _RegistryEntry(
-        "operations/publish-work-request-1.3.0.schema.json",
-        "publish-work-request",
-        "1.3.0",
-        "request_result",
-        "MCP input",
-        lambda: (
-            __import__(
-                "yoetz.protocol.models", fromlist=["PublishWorkRequestModel"]
-            ).PublishWorkRequestModel
-        ),
-    ),
-    _RegistryEntry(
         "operations/publish-work-result-1.0.0.schema.json",
         "publish-work-result",
         "1.0.0",
@@ -6571,16 +6451,6 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "operations/start-request-1.1.0.schema.json",
         "start-request",
         "1.1.0",
-        "request_result",
-        "MCP input",
-        lambda: (
-            __import__("yoetz.protocol.models", fromlist=["StartRequestModel"]).StartRequestModel
-        ),
-    ),
-    _RegistryEntry(
-        "operations/start-request-1.2.0.schema.json",
-        "start-request",
-        "1.2.0",
         "request_result",
         "MCP input",
         lambda: (
@@ -7200,38 +7070,6 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         lambda: __import__("yoetz.ports.control", fromlist=["ControlResult"]).ControlResult,
     ),
     _RegistryEntry(
-        "service/control-hello-2.10.0.schema.json",
-        "control-hello",
-        "2.10.0",
-        "request_result",
-        "local-control",
-        lambda: __import__("yoetz.ports.control", fromlist=["ControlRequest"]).ControlRequest,
-    ),
-    _RegistryEntry(
-        "service/control-hello-result-2.10.0.schema.json",
-        "control-hello-result",
-        "2.10.0",
-        "request_result",
-        "local-control",
-        lambda: __import__("yoetz.ports.control", fromlist=["ControlResult"]).ControlResult,
-    ),
-    _RegistryEntry(
-        "service/control-request-2.10.0.schema.json",
-        "control-request",
-        "2.10.0",
-        "request_result",
-        "local-control",
-        lambda: __import__("yoetz.ports.control", fromlist=["ControlRequest"]).ControlRequest,
-    ),
-    _RegistryEntry(
-        "service/control-result-2.10.0.schema.json",
-        "control-result",
-        "2.10.0",
-        "request_result",
-        "local-control",
-        lambda: __import__("yoetz.ports.control", fromlist=["ControlResult"]).ControlResult,
-    ),
-    _RegistryEntry(
         "service/isolation-report-1.0.0.schema.json",
         "isolation-report",
         "1.0.0",
@@ -7333,20 +7171,11 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
 _BUILDER_OWNED_SCHEMA_PATHS: Final[frozenset[str]] = frozenset(
     {
         # The task-statement contracts (issue #908).
-        "events/event-draft-1.3.0.schema.json",
-        "events/opaque-unknown-event-draft-1.3.0.schema.json",
         "events/plan-published-1.1.0.schema.json",
         "events/plan-revised-1.1.0.schema.json",
-        "events/session-opened-1.3.0.schema.json",
         "events/session-resumed-1.2.0.schema.json",
-        "operations/publish-work-request-1.3.0.schema.json",
-        "operations/start-request-1.2.0.schema.json",
         "privacy/outbound-case-1.2.0.schema.json",
         "privacy/privacy-policy-1.2.0.schema.json",
-        "service/control-hello-2.10.0.schema.json",
-        "service/control-hello-result-2.10.0.schema.json",
-        "service/control-request-2.10.0.schema.json",
-        "service/control-result-2.10.0.schema.json",
         "events/check-recorded-1.3.0.schema.json",
         "consent/status-7.0.0.schema.json",
         "consent/review-result-7.0.0.schema.json",
@@ -7816,18 +7645,6 @@ def build_schema_documents(
             normalized = _privacy_policy_v1_2_schema(entry)
         elif entry.relative_path == "privacy/outbound-case-1.2.0.schema.json":
             normalized = _outbound_case_v1_2_schema(entry)
-        elif entry.relative_path == "operations/start-request-1.2.0.schema.json":
-            normalized = _start_request_v1_2_schema(entry)
-        elif entry.relative_path == "operations/publish-work-request-1.3.0.schema.json":
-            normalized = _publish_work_request_v1_3_schema(entry)
-        elif entry.relative_path == "events/event-draft-1.3.0.schema.json":
-            normalized = _event_draft_v1_3_schema(entry)
-        elif entry.relative_path == "events/opaque-unknown-event-draft-1.3.0.schema.json":
-            normalized = _opaque_unknown_event_v1_3_schema(entry)
-        elif entry.relative_path == "events/session-opened-1.3.0.schema.json":
-            normalized = _with_required_task_statement(
-                entry, "events/session-opened-1.2.0.schema.json"
-            )
         elif entry.relative_path == "events/session-resumed-1.2.0.schema.json":
             normalized = _with_required_task_statement(
                 entry, "events/session-resumed-1.1.0.schema.json"
@@ -7840,13 +7657,7 @@ def build_schema_documents(
             normalized = _with_required_task_statement(
                 entry, "events/plan-revised-1.0.0.schema.json", title="Yoetz plan revised"
             )
-        elif entry.relative_path in {
-            "service/control-hello-2.10.0.schema.json",
-            "service/control-hello-result-2.10.0.schema.json",
-            "service/control-request-2.10.0.schema.json",
-            "service/control-result-2.10.0.schema.json",
-        }:
-            normalized = _control_v2_10_schema(entry)
+
         elif entry.relative_path == "privacy/outbound-case-1.1.0.schema.json":
             normalized = _outbound_case_schema(entry)
         else:

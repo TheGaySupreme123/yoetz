@@ -864,12 +864,6 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
-        "schemas/events/session-opened-1.3.0.schema.json",
-        "json_schema",
-        "application/schema+json",
-        True,
-    ),
-    (
         "schemas/events/session-resumed-1.2.0.schema.json",
         "json_schema",
         "application/schema+json",
@@ -888,30 +882,6 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
-        "schemas/events/event-draft-1.3.0.schema.json",
-        "json_schema",
-        "application/schema+json",
-        True,
-    ),
-    (
-        "schemas/events/opaque-unknown-event-draft-1.3.0.schema.json",
-        "json_schema",
-        "application/schema+json",
-        True,
-    ),
-    (
-        "schemas/operations/start-request-1.2.0.schema.json",
-        "json_schema",
-        "application/schema+json",
-        True,
-    ),
-    (
-        "schemas/operations/publish-work-request-1.3.0.schema.json",
-        "json_schema",
-        "application/schema+json",
-        True,
-    ),
-    (
         "schemas/privacy/privacy-policy-1.2.0.schema.json",
         "json_schema",
         "application/schema+json",
@@ -919,30 +889,6 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     (
         "schemas/privacy/outbound-case-1.2.0.schema.json",
-        "json_schema",
-        "application/schema+json",
-        True,
-    ),
-    (
-        "schemas/service/control-hello-2.10.0.schema.json",
-        "json_schema",
-        "application/schema+json",
-        True,
-    ),
-    (
-        "schemas/service/control-hello-result-2.10.0.schema.json",
-        "json_schema",
-        "application/schema+json",
-        True,
-    ),
-    (
-        "schemas/service/control-request-2.10.0.schema.json",
-        "json_schema",
-        "application/schema+json",
-        True,
-    ),
-    (
-        "schemas/service/control-result-2.10.0.schema.json",
         "json_schema",
         "application/schema+json",
         True,

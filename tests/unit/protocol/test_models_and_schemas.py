@@ -235,7 +235,7 @@ _COMMON_MODEL_SPECS: tuple[tuple[str, str, str | None], ...] = (
 )
 
 _REQUEST_MODEL_SPECS: tuple[tuple[str, str], ...] = (
-    ("StartRequestModel", "operations/start-request-1.2.0.schema.json"),
+    ("StartRequestModel", "operations/start-request-1.1.0.schema.json"),
     ("PublishWorkRequestModel", "operations/publish-work-request-1.1.0.schema.json"),
     ("CheckRequestModel", "operations/check-request-1.0.0.schema.json"),
     ("RespondRequestModel", "operations/respond-request-1.0.0.schema.json"),
@@ -2997,7 +2997,7 @@ def test_schema_catalog_reports_complete_registry() -> None:
     assert SCHEMA_NAMESPACE == "https://schemas.yoetz.dev/0.1/"
     assert SCHEMA_MANIFEST_SCHEMA == "yoetz.schema-manifest/1.0.0"
     assert SCHEMA_MANIFEST_VERSION == "1.0.0"
-    assert SCHEMA_MEMBER_COUNT == 221
+    assert SCHEMA_MEMBER_COUNT == 212
     assert len(catalog.documents) == SCHEMA_MEMBER_COUNT
 
     paths = tuple(document.relative_path for document in catalog.documents)
@@ -3081,7 +3081,7 @@ def test_schema_catalog_record_shape_and_indexes_are_exact() -> None:
     root = resources.files("yoetz").joinpath("resources", "schemas")
     manifest_bytes = root.joinpath("manifest.json").read_bytes()
     assert catalog.manifest_digest == f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
-    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 7_415
+    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 7_031
 
 
 def test_schema_name_derivation_and_version_maps_are_exact() -> None:
@@ -3100,7 +3100,7 @@ def test_schema_name_derivation_and_version_maps_are_exact() -> None:
         "1.2.0",
         "1.3.0",
         "2.0.0",
-        "2.10.0",
+        "2.9.0",
         "7.0.0",
         "1.4.0",
     }
@@ -3111,7 +3111,7 @@ def test_schema_name_derivation_and_version_maps_are_exact() -> None:
     assert event_versions["claim_recorded"] == "1.1.0"
     assert event_versions["finding_recorded"] == "1.3.0"
     # The task-statement versions (issue #908).
-    assert event_versions["session_opened"] == "1.3.0"
+    assert event_versions["session_opened"] == "1.2.0"
     assert event_versions["session_resumed"] == "1.2.0"
     assert event_versions["plan_published"] == "1.1.0"
     assert event_versions["plan_revised"] == "1.1.0"
