@@ -77,10 +77,12 @@ from yoetz.protocol.models import (
     StatusFindingItemModel,
     StatusFindingsPageModel,
     StatusObligationItemModel,
+    StatusObservedRunModel,
     StatusOperationPageModel,
     StatusProjectDetectionModel,
     StatusProjectPageModel,
     StatusRequest,
+    StatusResultItemModel,
     StatusSemanticProgressModel,
     StatusStructuralSubjectStateModel,
     StatusVersionSliceModel,
@@ -159,6 +161,8 @@ _RESULT_OPTIONAL_NON_NULL: tuple[tuple[type[BaseModel], frozenset[str]], ...] = 
     (StatusFindingItemModel, frozenset({"todo_state", "review_rounds", "finding_frontier"})),
     (StatusFindingsPageModel, frozenset({"attempt_budget"})),
     (StatusObligationItemModel, frozenset({"acceptance_criteria"})),
+    (StatusObservedRunModel, frozenset({"tool_name", "command_commitment", "exit_status"})),
+    (StatusResultItemModel, frozenset({"observed_run"})),
     (
         StatusAdviceItemModel,
         frozenset(
@@ -1014,6 +1018,11 @@ async def test_root_start_and_check_omit_unset_multi_agent_fields() -> None:
             },
             ("resource_paths",),
         ),
+        (
+            StatusObservedRunModel,
+            {"occurrence": "1"},
+            ("tool_name", "command_commitment", "exit_status"),
+        ),
     ),
 )
 def test_nested_multi_agent_results_omit_unset_fields(
@@ -1163,9 +1172,16 @@ def test_every_result_optional_non_null_field_has_an_unset_projection_case() -> 
             ),
         ),
         ("StatusProjectDetectionModel", ("resource_paths",)),
+        # Issue #909: a legacy or shell-less observed run states no tool, identity, or exit status.
+        ("StatusObservedRunModel", ("tool_name", "command_commitment", "exit_status")),
     ):
         for field in fields:
             covered[model, field] = "test_nested_multi_agent_results_omit_unset_fields"
+    # Issue #909: tests/unit/kernel/test_observed_failure_supersession.py projects a cooperative
+    # result through the results view and asserts `observed_run` is absent from its wire form.
+    covered["StatusResultItemModel", "observed_run"] = (
+        "test_results_view_names_tool_occurrence_commitment_and_exit_status"
+    )
     expected = {
         (model_type.__name__, field)
         for model_type, fields in _RESULT_OPTIONAL_NON_NULL
