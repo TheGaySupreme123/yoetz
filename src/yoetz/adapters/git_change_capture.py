@@ -30,6 +30,7 @@ import shutil
 import stat
 import subprocess
 import time
+import zlib
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -206,6 +207,8 @@ class _RawEntry:
 class _TrackedRead:
     raw: bytes
     sections: list[_Section]
+    # Working copies and loose objects (with their fan-out directories), keyed by root-relative
+    # path, taken before Git read any content and compared again after the whole capture.
     identities: dict[bytes, _Identity | None]
 
 
@@ -377,6 +380,7 @@ class GitChangeCaptureAdapter:
         assembly: float,
         deadline: float,
     ) -> CheckChangeCapture:
+        packs = self._refuse_unsafe_object_store(pinned)
         head = self._rev(pinned, "HEAD^{commit}", assembly)
         index = _path_identity(pinned.descriptor, b".git/index")
         base_kind: ChangeBaseKind
@@ -401,7 +405,7 @@ class GitChangeCaptureAdapter:
                     raise
         # Past the deadline no untracked file is listed or read; the header says the untracked
         # count is a lower bound, and the tracked change above still stands.
-        self._verify_stable(pinned, base_id, tracked, untracked, head, index, deadline)
+        self._verify_stable(pinned, base_id, tracked, untracked, head, index, packs, deadline)
         sections = [*tracked.sections, *untracked.sections]
         sections.sort(key=lambda item: item.path)
         return self._render(
@@ -450,6 +454,22 @@ class GitChangeCaptureAdapter:
             (git_facts.st_dev, git_facts.st_ino),
         )
         _verify_same_root(pinned)
+        # Every capture call names the validated ``.git`` and working tree explicitly, so no
+        # configuration can redirect it; confirm Git agrees before reading anything.
+        try:
+            _, located = GitChangeCaptureAdapter._git(
+                pinned,
+                ("rev-parse", "--path-format=absolute", "--show-toplevel", "--git-dir"),
+                deadline=deadline,
+                limit=8_192,
+            )
+        except ValueError:
+            raise ChangeCaptureUnavailable("unsafe_root") from None
+        if located.rstrip(b"\n").split(b"\n") != [
+            os.fsencode(validated_root),
+            os.fsencode(validated_root / ".git"),
+        ]:
+            raise ChangeCaptureUnavailable("unsafe_root")
         return pinned
 
     @staticmethod
@@ -469,7 +489,15 @@ class GitChangeCaptureAdapter:
         try:
             result = run_read_only_git(
                 pinned.handle,
-                (*_CAPTURE_CONFIG, *arguments),
+                (
+                    *_CAPTURE_CONFIG,
+                    # Explicit, so neither ``core.worktree`` nor any other setting written at any
+                    # level can point this call at another directory. The runner's environment is
+                    # fixed, so no ``GIT_DIR``-style variable reaches Git either.
+                    f"--git-dir={os.fspath(pinned.root / '.git')}",
+                    f"--work-tree={os.fspath(pinned.root)}",
+                    *arguments,
+                ),
                 stdout_limit=limit,
                 timeout_seconds=_remaining(deadline),
                 accepted_returncodes=accepted,
@@ -540,7 +568,7 @@ class GitChangeCaptureAdapter:
             name = fields[index + 1].lower()
             if (
                 name.startswith((b"filter.", b"include.", b"includeif."))
-                or name == b"extensions.partialclone"
+                or name in {b"extensions.partialclone", b"core.worktree"}
                 or (
                     name.startswith(b"remote.")
                     and name.endswith((b".promisor", b".partialclonefilter"))
@@ -549,13 +577,21 @@ class GitChangeCaptureAdapter:
                 raise ChangeCaptureUnavailable("unsupported_repository")
 
     @staticmethod
-    def _refuse_unsafe_object_store(pinned: _Workspace) -> None:
+    def _refuse_unsafe_object_store(pinned: _Workspace) -> tuple[tuple[bytes, _Identity], ...]:
         """Refuse an object store Git would reach through a link or another repository.
 
         Git follows links inside ``.git`` and trusts every object file it opens, so an object
-        store (or a pack in it) that is a link, or a ``commondir`` naming another repository's,
-        could hand the diff bytes from outside the workspace. Loose objects are checked one by
-        one as they are verified (``_verify_object``).
+        store, a pack or an index that is a link, a second name for another repository's file,
+        or a ``commondir`` or ``alternates`` naming another repository's store could hand the diff
+        bytes from outside the workspace. Every pack-directory entry must be a regular file of
+        the service user, not group- or world-writable, with a single link. Returns a snapshot the
+        closing stability check compares: the identity of every pack-directory entry and of the
+        object directories themselves (``objects``, ``info``, ``pack`` and each fan-out
+        directory), whose modification and change times move whenever an object file is created,
+        renamed or removed in them. So a loose object swapped for a link and back while Git
+        reads it is seen, even one outside the diff's own list (Git itself rejects a tree or
+        commit whose bytes do not hash to its name; it does not re-hash a blob it streams into a
+        diff). Loose blobs a shown diff reads are fenced one by one as well (``_verify_object``).
         """
 
         descriptor = pinned.descriptor
@@ -566,7 +602,11 @@ class GitChangeCaptureAdapter:
             raise ChangeCaptureUnavailable("unsafe_root") from None
         if not stat.S_ISDIR(objects.st_mode) or objects.st_uid != expected_uid:
             raise ChangeCaptureUnavailable("unsafe_root")
-        for name in (".git/commondir", ".git/objects/info/alternates"):
+        for name in (
+            ".git/commondir",
+            ".git/objects/info/alternates",
+            ".git/objects/info/http-alternates",
+        ):
             try:
                 os.stat(name, dir_fd=descriptor, follow_symlinks=False)
             except FileNotFoundError:
@@ -581,13 +621,25 @@ class GitChangeCaptureAdapter:
                 continue
             except OSError:
                 raise ChangeCaptureUnavailable("unsafe_root") from None
-            if not stat.S_ISDIR(facts.st_mode):
+            if not stat.S_ISDIR(facts.st_mode) or facts.st_uid != expected_uid:
                 raise ChangeCaptureUnavailable("unsafe_root")
+        snapshot: list[tuple[bytes, _Identity]] = [(b".git/objects", _identity(objects))]
+        for index in range(256):
+            name = b".git/objects/%02x" % index
+            identity = _path_identity(descriptor, name)
+            if identity is not None:
+                if not stat.S_ISDIR(identity[0]):
+                    raise ChangeCaptureUnavailable("unsafe_root")
+                snapshot.append((name, identity))
+        for name in (b".git/objects/info", b".git/objects/pack"):
+            identity = _path_identity(descriptor, name)
+            if identity is not None:
+                snapshot.append((name, identity))
         flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
         try:
             pack = os.open(".git/objects/pack", flags, dir_fd=descriptor)
         except FileNotFoundError:
-            return
+            return tuple(snapshot)
         except OSError:
             raise ChangeCaptureUnavailable("unsafe_root") from None
         try:
@@ -595,12 +647,21 @@ class GitChangeCaptureAdapter:
                 for count, entry in enumerate(entries, start=1):
                     if count > _MAX_PACK_DIRECTORY_ENTRIES:
                         raise ChangeCaptureUnavailable("unsupported_repository")
-                    if not entry.is_file(follow_symlinks=False):
+                    facts = entry.stat(follow_symlinks=False)
+                    if not stat.S_ISREG(facts.st_mode):
                         raise ChangeCaptureUnavailable("unsafe_root")
+                    if not _owned_single_link(facts):
+                        # Shared with another repository (``git clone`` of a local path hard
+                        # links its packs): its objects are not provably this repository's.
+                        raise ChangeCaptureUnavailable("unsupported_repository")
+                    snapshot.append(
+                        (b".git/objects/pack/" + os.fsencode(entry.name), _identity(facts))
+                    )
         except OSError:
             raise ChangeCaptureUnavailable("unsafe_root") from None
         finally:
             os.close(pack)
+        return tuple(sorted(snapshot))
 
     @staticmethod
     def _raw_arguments(base_id: str) -> tuple[str, ...]:
@@ -617,6 +678,23 @@ class GitChangeCaptureAdapter:
             _, raw = self._git(
                 pinned, self._raw_arguments(base_id), deadline=deadline, limit=_LIST_LIMIT
             )
+        except ValueError:
+            raise ChangeCaptureUnavailable("unsupported_repository") from None
+        # The raw list reads trees and the index but no file or blob content; it is compared
+        # again after the capture. Every content read below (counts, patch, verification) sits
+        # between the identities taken here and the same identities taken by ``_verify_stable``:
+        # each working copy, each loose object a diff may read and its fan-out directory (whose
+        # times change when an object appears or disappears in it). The working-copy identity is
+        # also the no-link fence.
+        entries = _raw_entries(raw)
+        identities: dict[bytes, _Identity | None] = {}
+        for entry in entries:
+            identities[entry.path] = _path_identity(pinned.descriptor, entry.path)
+            for oid, mode in ((entry.src_oid, entry.src_mode), (entry.dst_oid, entry.dst_mode)):
+                if mode in _BLOB_MODES and oid.strip("0"):
+                    for path in _loose_paths(oid):
+                        identities[path] = _path_identity(pinned.descriptor, path)
+        try:
             _, numbers = self._git(
                 pinned,
                 ("diff", "--numstat", "-z", *_DIFF_OPTIONS, base_id, "--"),
@@ -625,7 +703,6 @@ class GitChangeCaptureAdapter:
             )
         except ValueError:
             raise ChangeCaptureUnavailable("unsupported_repository") from None
-        entries = _raw_entries(raw)
         counts: dict[bytes, tuple[str, str]] = {}
         for record in _nul_fields(numbers):
             parts = record.split(b"\t", 2)
@@ -635,11 +712,6 @@ class GitChangeCaptureAdapter:
                 parts[0].decode("ascii", errors="replace"),
                 parts[1].decode("ascii", errors="replace"),
             )
-        # Each working copy's identity is taken before Git reads it and compared again after the
-        # whole capture (``_verify_stable``); the same identity is the no-link fence.
-        identities = {
-            entry.path: _path_identity(pinned.descriptor, entry.path) for entry in entries
-        }
         sections: list[_Section] = []
         for entry in entries:
             section = _Section(
@@ -688,7 +760,7 @@ class GitChangeCaptureAdapter:
                     section.omitted = "unreadable"
         else:
             self._per_file_diffs(pinned, base_id, sections, deadline)
-        self._verify_section_objects(pinned, object_format, entries, sections, deadline)
+        self._verify_section_objects(pinned, object_format, entries, sections, identities, deadline)
         return read
 
     def _per_file_diffs(
@@ -736,6 +808,7 @@ class GitChangeCaptureAdapter:
         object_format: Literal["sha1", "sha256"],
         entries: list[_RawEntry],
         sections: list[_Section],
+        identities: dict[bytes, _Identity | None],
         deadline: float,
     ) -> None:
         """Withhold every shown diff whose Git objects do not hash to their own names.
@@ -757,7 +830,7 @@ class GitChangeCaptureAdapter:
                     continue
                 if oid not in verified:
                     verified[oid] = self._verify_object(
-                        pinned, object_format, oid, deadline, budget
+                        pinned, object_format, oid, identities, deadline, budget
                     )
                 reason = verified[oid]
                 if reason is not None:
@@ -772,19 +845,29 @@ class GitChangeCaptureAdapter:
         pinned: _Workspace,
         object_format: Literal["sha1", "sha256"],
         oid: str,
+        identities: dict[bytes, _Identity | None],
         deadline: float,
         budget: list[int],
     ) -> _OmitReason | None:
-        loose = f".git/objects/{oid[:2]}"
-        for name, directory in ((loose, True), (f"{loose}/{oid[2:]}", False)):
-            try:
-                facts = os.stat(name, dir_fd=pinned.descriptor, follow_symlinks=False)
-            except FileNotFoundError:
-                break  # packed: the pack directory holds no link (``_refuse_unsafe_object_store``)
-            except OSError:
+        """Prove one blob a shown diff read is the object its name commits to.
+
+        A loose object must be a regular file of the service user with a single link, reached
+        without a link, still the file whose identity was taken before the diff read it; it is
+        inflated and hashed from that same open descriptor. The object is also read the way the
+        diff read it (``git cat-file``, packs first) and hashed. Packs are fenced and pinned by
+        ``_refuse_unsafe_object_store``.
+        """
+
+        fan_out, loose = _loose_paths(oid)
+        fan_out_facts, loose_facts = identities.get(fan_out), identities.get(loose)
+        if fan_out_facts is not None and not stat.S_ISDIR(fan_out_facts[0]):
+            return "object_unverified"
+        if fan_out_facts is not None and loose_facts is not None:
+            if not stat.S_ISREG(loose_facts[0]) or not _identity_owned_single_link(loose_facts):
                 return "object_unverified"
-            if not (stat.S_ISDIR if directory else stat.S_ISREG)(facts.st_mode):
-                return "object_unverified"
+            reason = _verify_loose_object(pinned.descriptor, loose, loose_facts, object_format, oid)
+            if reason is not None:
+                return reason
         if _expired(deadline):
             return "capture_limit"
         if budget[0] <= 0:
@@ -808,6 +891,9 @@ class GitChangeCaptureAdapter:
         hasher = hashlib.new(object_format)
         hasher.update(b"blob %d\0" % len(content))
         hasher.update(content)
+        # ``content`` is an immutable ``bytes`` returned by the runner (which already overwrote
+        # its own buffer); drop the reference so it is not kept beyond the hash.
+        del content
         return None if hasher.hexdigest() == oid else "object_unverified"
 
     @staticmethod
@@ -894,17 +980,20 @@ class GitChangeCaptureAdapter:
         untracked: _UntrackedRead,
         head: str | None,
         index: _Identity | None,
+        packs: tuple[tuple[bytes, _Identity], ...],
         deadline: float,
     ) -> None:
         """Prove the capture is one state: nothing it read moved while it was assembled.
 
-        The changed-file list, the identity of every working copy and untracked file read (its
-        inode, size, and modification and change times), the untracked listing, HEAD and the
-        index are read again and must equal what the assembly saw. A write, a rename, a new link
-        or a commit in between changes one of them.
+        The changed-file list, the identity (inode, size, modification and change times, link
+        count) of every working copy, loose object and fan-out directory the diff could read and
+        of every untracked file read, every pack-directory entry, the untracked listing, HEAD and
+        the index are read again and must equal what the assembly saw. A write, a rename, a
+        link swapped in and back out, or a commit in between changes one of them.
         """
 
-        self._refuse_unsafe_object_store(pinned)
+        if self._refuse_unsafe_object_store(pinned) != packs:
+            raise _ChangedDuringCapture
         try:
             _, raw = self._git(
                 pinned, self._raw_arguments(base_id), deadline=deadline, limit=_LIST_LIMIT
@@ -1213,6 +1302,81 @@ def _path_identity(root_descriptor: int, path: bytes) -> _Identity | None:
     except OSError:
         return _BLOCKED
     finally:
+        for descriptor in reversed(opened):
+            os.close(descriptor)
+
+
+def _loose_paths(oid: str) -> tuple[bytes, bytes]:
+    """The fan-out directory and loose object path of ``oid``, relative to the root."""
+
+    fan_out = b".git/objects/" + oid[:2].encode("ascii")
+    return fan_out, fan_out + b"/" + oid[2:].encode("ascii")
+
+
+def _owned_single_link(facts: os.stat_result) -> bool:
+    return _identity_owned_single_link(_identity(facts))
+
+
+def _identity_owned_single_link(identity: _Identity) -> bool:
+    """A file of the service user, not group- or world-writable, with exactly one name."""
+
+    expected_uid = os.geteuid() if hasattr(os, "geteuid") else os.getuid()
+    mode, _, _, _, _, _, links, owner = identity
+    return owner == expected_uid and links == 1 and not stat.S_IMODE(mode) & 0o022
+
+
+def _verify_loose_object(
+    root_descriptor: int,
+    path: bytes,
+    expected: _Identity,
+    object_format: Literal["sha1", "sha256"],
+    oid: str,
+) -> _OmitReason | None:
+    """Inflate and hash one loose object from a descriptor bound to its recorded identity."""
+
+    if expected[3] > _MAX_VERIFIED_OBJECT_BYTES:
+        return "too_large"
+    parts = path.split(b"/")
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    file_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    opened: list[int] = []
+    compressed = bytearray()
+    inflated = bytearray()
+    current = root_descriptor
+    try:
+        for part in parts[:-1]:
+            current = os.open(part, directory_flags, dir_fd=current)
+            opened.append(current)
+        descriptor = os.open(parts[-1], file_flags, dir_fd=current)
+        opened.append(descriptor)
+        if _identity(os.fstat(descriptor)) != expected:
+            raise _ChangedDuringCapture
+        while len(compressed) <= expected[3]:
+            chunk = os.read(descriptor, _READ_CHUNK)
+            if not chunk:
+                break
+            compressed += chunk
+        if len(compressed) != expected[3] or _identity(os.fstat(descriptor)) != expected:
+            raise _ChangedDuringCapture
+        inflater = zlib.decompressobj()
+        inflated += inflater.decompress(compressed, _MAX_VERIFIED_OBJECT_BYTES + 64)
+        if inflater.unconsumed_tail:
+            return "too_large"
+        if not inflater.eof:
+            return "object_unverified"
+        header_end = inflated.find(b"\0", 0, 64)
+        if header_end < 0 or bytes(inflated[:header_end]) != b"blob %d" % (
+            len(inflated) - header_end - 1
+        ):
+            return "object_unverified"
+        hasher = hashlib.new(object_format)
+        hasher.update(inflated)
+        return None if hasher.hexdigest() == oid else "object_unverified"
+    except OSError, zlib.error:
+        return "object_unverified"
+    finally:
+        compressed[:] = bytes(len(compressed))
+        inflated[:] = bytes(len(inflated))
         for descriptor in reversed(opened):
             os.close(descriptor)
 

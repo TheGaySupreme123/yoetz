@@ -339,7 +339,10 @@ def discover_workspace_root(path: Path, *, timeout_seconds: float = _GIT_TIMEOUT
 
     A control connection may name a subdirectory of its repository. This resolves the root with
     the same hardened, no-shell runner before ``open_local_workspace`` applies its full root and
-    metadata fences to the answer. Raises ``ValueError`` with a closed token on failure.
+    metadata fences to the answer. The repository Git found for ``path`` must be the one whose
+    top level it reports, with its ``.git`` directly beneath, and ``path`` must lie inside it: a
+    ``core.worktree`` (or any other redirection) that points one repository's metadata at another
+    directory is ``unsafe_root`` (ADR-031). Raises ``ValueError`` with a closed token on failure.
     """
 
     candidate = _lexically_safe_absolute(path)
@@ -347,16 +350,20 @@ def discover_workspace_root(path: Path, *, timeout_seconds: float = _GIT_TIMEOUT
         runner = _default_runner(timeout_seconds)
         _, top = runner.run(
             candidate,
-            ("rev-parse", "--path-format=absolute", "--show-toplevel"),
-            stdout_limit=4_096,
+            ("rev-parse", "--path-format=absolute", "--show-toplevel", "--git-dir"),
+            stdout_limit=8_192,
         )
     except (_GitProcessFailure, _OutputLimit) as exc:
         raise ValueError("not_git") from exc
     try:
-        root = Path(os.fsdecode(bytes(top).rstrip(b"\n")))
+        lines = bytes(top).rstrip(b"\n").split(b"\n")
     finally:
         _overwrite(top)
-    if not root.is_absolute():
+    if len(lines) != 2:
+        raise ValueError("not_git")
+    root = Path(os.fsdecode(lines[0]))
+    git_dir = Path(os.fsdecode(lines[1]))
+    if not root.is_absolute() or git_dir != root / ".git" or not candidate.is_relative_to(root):
         raise ValueError("unsafe_root")
     return _lexically_safe_absolute(root)
 

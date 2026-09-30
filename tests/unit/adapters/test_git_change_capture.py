@@ -457,7 +457,8 @@ def test_deadline_inside_the_diff_lists_every_file_and_shows_none(
     repository = _repository(tmp_path)
     (repository / "selectors.ts").write_text("export const changed = 1;\n", encoding="utf-8")
     (repository / "notes.txt").write_text("untracked words\n", encoding="utf-8")
-    # Config, object format, HEAD, the raw list and numstat take 2 s each; the patch never ends.
+    # Every call before the patch takes 2 s (location check, config, object format, HEAD, the
+    # raw list and numstat: 12 s); the patch never ends.
     clock, timeouts = _slow_git(
         monkeypatch, seconds_per_call=60.0, slow_marker="--unified=3", seconds_before=2.0
     )
@@ -466,9 +467,9 @@ def test_deadline_inside_the_diff_lists_every_file_and_shows_none(
     capture = GitChangeCaptureAdapter(_deadline_seconds=20.0).capture(os.fspath(repository), None)
     text = _text(capture)
 
-    # The patch got only what was left of the 15 s assembly share; the closing stability check
-    # then ran inside the 5 s kept for it.
-    assert timeouts[5] == pytest.approx(5.0)
+    # The patch (the seventh call) got only what was left of the 15 s assembly share; the
+    # closing stability check then ran inside the 5 s kept for it.
+    assert timeouts[6] == pytest.approx(3.0)
     assert 15.0 < clock.now - started <= 20.0
     assert capture.truncated
     assert (
@@ -823,3 +824,164 @@ def test_untracked_file_rewritten_while_it_is_read_is_never_a_mix(
     assert rewrites
     assert "old-" not in text or "new-" not in text
     assert "+" + "new-" * 20 in text
+
+
+# --- Adversarial follow-up: redirection, shared packs, swaps inside one Git read -------------
+
+
+def _other_worktree(tmp_path: Path) -> Path:
+    other = tmp_path / "other"
+    other.mkdir(mode=0o700)
+    _git(other, "init", "--quiet")
+    (other / "selectors.ts").write_text("OUTSIDE WORKTREE SECRET\n", encoding="utf-8")
+    _git(other, "add", "--", "selectors.ts")
+    return other
+
+
+def test_core_worktree_naming_another_repository_is_refused_at_discovery(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path)
+    other = _other_worktree(tmp_path)
+    _git(repository, "config", "core.worktree", os.fspath(other))
+
+    with pytest.raises(ChangeCaptureUnavailable) as raised:
+        GitChangeCaptureAdapter().capture(os.fspath(repository), None)
+
+    assert raised.value.reason in {"unsafe_root", "unsupported_repository"}
+
+
+def test_core_worktree_written_after_discovery_never_redirects_the_diff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = _repository(tmp_path)
+    other = _other_worktree(tmp_path)
+    (repository / "selectors.ts").write_text("export const mine = 1;\n", encoding="utf-8")
+
+    def mutate(_: int) -> None:
+        _git(repository, "config", "core.worktree", os.fspath(other))
+
+    _mutate_on(monkeypatch, "--raw", mutate, times=1)
+
+    try:
+        capture = GitChangeCaptureAdapter().capture(os.fspath(repository), None)
+    except ChangeCaptureUnavailable as exc:
+        assert exc.reason in {"unsafe_root", "unsupported_repository", "changed_during_capture"}
+        return
+    text = _text(capture)
+    assert "OUTSIDE WORKTREE SECRET" not in text
+    assert "export const mine = 1;" in text
+
+
+def test_pack_hard_linked_from_another_repository_is_refused(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    outside = tmp_path / "outside-repo"
+    outside.mkdir(mode=0o700)
+    _git(outside, "init", "--quiet")
+    (outside / "secret.txt").write_text("PACKED OUTSIDE SECRET\n", encoding="utf-8")
+    oid = _git(outside, "hash-object", "-w", "--", "secret.txt").strip()
+    _git(outside, "add", "--", "secret.txt")
+    _commit(outside, "outside")
+    _git(outside, "repack", "-a", "-d", "--quiet")
+    pack_directory = outside / ".git" / "objects" / "pack"
+    for entry in pack_directory.iterdir():
+        os.link(entry, repository / ".git" / "objects" / "pack" / entry.name)
+    # The task base names the foreign blob, which the repository reaches only through that pack.
+    _git(repository, "update-index", "--add", "--cacheinfo", f"100644,{oid},leak.txt")
+    _git(
+        repository,
+        "-c",
+        "user.name=Yoetz Test",
+        "-c",
+        "user.email=yoetz@example.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+        "reference a foreign blob",
+    )
+    base = GitChangeCaptureAdapter().read_task_base(os.fspath(repository))
+    (repository / "leak.txt").write_text("replaced\n", encoding="utf-8")
+
+    try:
+        capture = GitChangeCaptureAdapter().capture(os.fspath(repository), base)
+    except ChangeCaptureUnavailable as exc:
+        assert exc.reason in {"unsafe_root", "unsupported_repository"}
+        return
+    assert "PACKED OUTSIDE SECRET" not in _text(capture)
+
+
+def test_loose_object_swapped_only_during_the_diff_is_never_shown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = _repository(tmp_path)
+    base = GitChangeCaptureAdapter().read_task_base(os.fspath(repository))
+    oid = _git(repository, "rev-parse", "HEAD:selectors.ts").strip()
+    target = _loose_object_path(repository, oid)
+    aside = target.with_name(target.name + ".aside")
+    outside_object = _outside_blob(tmp_path, "secret-outside\n")
+    (repository / "selectors.ts").write_text("export const shown = 5;\n", encoding="utf-8")
+    real = capture_module.run_read_only_git
+    swaps: list[int] = []
+
+    def run(handle: Any, arguments: tuple[str, ...], **kwargs: Any) -> tuple[int, bytes]:
+        if "--unified=3" not in arguments or swaps:
+            return real(handle, arguments, **kwargs)
+        swaps.append(1)
+        target.rename(aside)
+        os.symlink(outside_object, target)
+        try:
+            return real(handle, arguments, **kwargs)
+        finally:
+            target.unlink()
+            aside.rename(target)
+
+    monkeypatch.setattr(capture_module, "run_read_only_git", run)
+
+    capture = GitChangeCaptureAdapter().capture(os.fspath(repository), base)
+    text = _text(capture)
+
+    assert swaps
+    assert "secret-outside" not in text
+    assert "export const shown = 5;" in text  # the retaken capture is the real change
+
+
+def test_hard_link_swapped_in_only_while_counting_never_reaches_the_header(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = _repository(tmp_path)
+    (repository / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(repository, "add", "--", "tracked.txt")
+    _commit(repository, "track a file")
+    (repository / "tracked.txt").write_text("changed\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "private.txt").write_text("".join(f"x{n}\n" for n in range(7)), encoding="utf-8")
+    target = repository / "tracked.txt"
+    aside = repository / "tracked.aside"
+
+    def mutate(_: int) -> None:
+        target.rename(aside)
+        os.link(outside / "private.txt", target)
+
+    real = capture_module.run_read_only_git
+    swaps: list[int] = []
+
+    def run(handle: Any, arguments: tuple[str, ...], **kwargs: Any) -> tuple[int, bytes]:
+        if "--numstat" not in arguments or swaps:
+            return real(handle, arguments, **kwargs)
+        swaps.append(1)
+        mutate(1)
+        try:
+            return real(handle, arguments, **kwargs)
+        finally:
+            target.unlink()
+            aside.rename(target)
+
+    monkeypatch.setattr(capture_module, "run_read_only_git", run)
+
+    capture = GitChangeCaptureAdapter().capture(os.fspath(repository), None)
+    text = _text(capture)
+
+    assert swaps
+    assert "(+7 " not in text and "x6" not in text
+    assert "  M tracked.txt (+1 -1)" in text
