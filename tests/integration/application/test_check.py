@@ -18,6 +18,9 @@ from builders.policy_cases import (
     FRONTIER,
     act,
     clm,
+    evd,
+    evidence_record,
+    evt,
     make_case,
     obl,
     obligation_record,
@@ -25,7 +28,7 @@ from builders.policy_cases import (
     record,
     res,
 )
-from yoetz.application.check import FinalSemanticEvaluation
+from yoetz.application.check import FinalSemanticEvaluation, check_internal_json
 from yoetz.application.check import execute_check as _execute_check
 from yoetz.application.check import execute_check_commit as _execute_check_commit
 from yoetz.application.service import VerificationPolicy
@@ -34,6 +37,9 @@ from yoetz.domain.events import (
     ActionRecordedPayload,
     ClaimKind,
     ClaimRecordedPayload,
+    EvidenceKind,
+    EvidenceRecordedPayload,
+    MissingForAssessmentItem,
     NoObligationsReason,
     ObligationPublishedPayload,
     ObligationStatus,
@@ -53,8 +59,15 @@ from yoetz.domain.receipts import (
     COMPLETION_SCOPE_UNDECLARED_GAP,
     SEMANTIC_CASE_FINDING_REFS_OVER_LIMIT_GAP,
 )
-from yoetz.domain.values import Frontier, disclosure_continuation
+from yoetz.domain.values import (
+    EvidenceId,
+    Frontier,
+    disclosure_continuation,
+    timestamp_from_string,
+)
 from yoetz.kernel import deterministic_checks as deterministic_checks_module
+from yoetz.kernel.deterministic_checks import DeterministicCase
+from yoetz.kernel.projections import EvidenceProjectionRecord, PendingMissingForAssessment
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.ids import IdPort
 from yoetz.ports.ledger import (
@@ -71,7 +84,13 @@ from yoetz.ports.ledger import (
 )
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef
 from yoetz.ports.runtime import BundleRuntimePort, OwnershipFence, RouteCommand, TaskRuntime
-from yoetz.ports.semantic import ReviewerChallenge, SamplingParams, SemanticJudgment
+from yoetz.ports.semantic import (
+    MissingForAssessment,
+    ReviewerChallenge,
+    SamplingParams,
+    SemanticJudgment,
+)
+from yoetz.protocol.coverage import EvidenceImmutability
 from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind
 from yoetz.protocol.models import CheckRequest, CheckScopeModel, SemanticReason, SemanticStatus
@@ -148,6 +167,8 @@ class _Ledger:
         self.phase_transitions: list[tuple[CheckPhase, CheckPhase]] = []
         self.last_ranked: RankedFindings | None = None
         self.last_executions: tuple[CheckPolicyExecution, ...] | None = None
+        self.last_missing: tuple[MissingForAssessmentItem, ...] = ()
+        self.last_conclusion: str | None = None
         self.operation: OperationRecord | None = None
 
     async def load_events(
@@ -251,8 +272,11 @@ class _Ledger:
         *,
         scope: CheckScopeModel | None = None,
         semantic_conclusion: str | None = None,
+        missing_for_assessment: tuple[MissingForAssessmentItem, ...] = (),
     ) -> CheckCommitResult:
         assert frozen == self.frozen
+        self.last_missing = missing_for_assessment
+        self.last_conclusion = semantic_conclusion
         if self.commit_failure is not None:
             raise self.commit_failure
         self.commit_count += 1
@@ -280,6 +304,7 @@ class _Ledger:
                 "0.1.0",
                 ("research-evidence/0.1.0", "work-integrity/0.1.0"),
             ),
+            missing_for_assessment=missing_for_assessment,
         )
 
     async def fail_check_if_current(
@@ -1268,3 +1293,167 @@ async def test_insufficient_packet_is_nonblocking_but_never_clean(mode: str) -> 
     # The gap is in the committed result, so replay/CLI/MCP do not have to infer it from prose.
     assert app.ledger.last_ranked is not None
     assert "semantic_packet_insufficient" in app.ledger.last_ranked.coverage.known_gaps
+
+
+_OUTSIDE_REF = "evd_99999999-0000-4000-8000-000000000001"
+
+
+def _missing_case(*, pending: bool = False, supplied: bool = False) -> DeterministicCase:
+    """A claimed completion, optionally with a prior review's request and an answer since."""
+
+    evidence: dict[EvidenceId, EvidenceProjectionRecord] = {}
+    if supplied:
+        evidence[evd(60)] = evidence_record(
+            EvidenceRecordedPayload(
+                evd(60),
+                EvidenceKind.TEST_RESULT,
+                EvidenceImmutability.METADATA_ONLY,
+                timestamp_from_string("2026-09-27T00:00:00.000Z"),
+                description="12 passed in 0.31s",
+            ),
+            60,
+        )
+    case = make_case(
+        claims={
+            clm(1): record(
+                ClaimRecordedPayload(clm(1), ClaimKind.COMPLETION, "Lookups repaired", ()), 3
+            )
+        },
+        evidence=evidence,
+        extra_refs=(clm(1),),
+    )
+    if not pending:
+        return case
+    return replace(
+        case,
+        projection=replace(
+            case.projection,
+            pending_missing_for_assessment=PendingMissingForAssessment(
+                evt(50),
+                50,
+                (
+                    MissingForAssessmentItem(
+                        "verification_output", (str(clm(1)),), "agent_suppliable"
+                    ),
+                ),
+            ),
+        ),
+    )
+
+
+@pytest.mark.anyio
+async def test_insufficient_packet_names_each_missing_item_as_a_check_limitation() -> None:
+    """Issue #907: the reviewer's named items reach the agent, fenced and classified by Yoetz."""
+
+    app = _App(semantic=True)
+    app.ledger.frozen = replace(app.ledger.frozen, case=_missing_case())
+    judgment = SemanticJudgment(
+        "insufficient_packet",
+        (),
+        (
+            MissingForAssessment("verification_output", (str(clm(1)),), "test output absent"),
+            MissingForAssessment("command_identity", (), "which command ran is not shown"),
+            MissingForAssessment("current_diff_for_path", (_OUTSIDE_REF,), "invented target"),
+        ),
+    )
+    app.semantic_result = replace(
+        _succeeded(judgment), unsuppliable_missing_kinds=("command_identity",)
+    )
+    checked = await execute_check_commit(app, _request("semantic_required"))
+
+    # A named missing item is never a finding; only the local claim rule may fire here.
+    assert all(finding.provenance is None for finding in checked.findings)
+    assert checked.verdict.value != "no_issue_detected"
+    assert [
+        (item.kind, item.target_refs, item.availability) for item in checked.missing_for_assessment
+    ] == [
+        ("command_identity", (), "structurally_unavailable_on_this_host"),
+        ("verification_output", (str(clm(1)),), "agent_suppliable"),
+    ]
+    gaps = set(checked.coverage.known_gaps)
+    assert {
+        "semantic_packet_insufficient",
+        "semantic_missing_agent_suppliable",
+        "semantic_missing_structurally_unavailable",
+        "semantic_missing_items_rejected",
+    } <= gaps
+    # Nothing the reviewer invented reaches the record.
+    assert _OUTSIDE_REF not in {
+        ref for item in checked.missing_for_assessment for ref in item.target_refs
+    }
+    assert app.ledger.last_missing == checked.missing_for_assessment
+    assert app.ledger.last_conclusion == "insufficient_packet"
+    wire = check_internal_json(checked)
+    assert wire["missing_for_assessment"] == (
+        {
+            "availability": "structurally_unavailable_on_this_host",
+            "kind": "command_identity",
+            "target_refs": (),
+        },
+        {
+            "availability": "agent_suppliable",
+            "kind": "verification_output",
+            "target_refs": (str(clm(1)),),
+        },
+    )
+
+
+@pytest.mark.anyio
+async def test_legacy_insufficient_packet_without_named_items_records_none() -> None:
+    app = _App(semantic=True)
+    app.ledger.frozen = replace(app.ledger.frozen, case=_missing_case())
+    app.semantic_result = _succeeded(SemanticJudgment("insufficient_packet", ()))
+    checked = await execute_check_commit(app, _request("semantic_required"))
+    assert checked.missing_for_assessment == ()
+    assert "semantic_packet_insufficient" in checked.coverage.known_gaps
+    assert not {gap for gap in checked.coverage.known_gaps if gap.startswith("semantic_missing_")}
+    assert "missing_for_assessment" not in check_internal_json(checked)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("cites_new_material", [False, True])
+async def test_supplied_item_is_not_listed_again_unless_the_reviewer_cites_the_new_material(
+    cites_new_material: bool,
+) -> None:
+    """Scripted provider: the agent answered the prior request, the reviewer asks again."""
+
+    app = _App(semantic=True)
+    app.ledger.frozen = replace(app.ledger.frozen, case=_missing_case(pending=True, supplied=True))
+    targets = (str(clm(1)), str(evd(60))) if cites_new_material else (str(clm(1)),)
+    app.semantic_result = _succeeded(
+        SemanticJudgment(
+            "insufficient_packet",
+            (),
+            (MissingForAssessment("verification_output", targets, "still cannot assess"),),
+        )
+    )
+    checked = await execute_check_commit(app, _request("semantic_required"))
+
+    gaps = set(checked.coverage.known_gaps)
+    assert "semantic_packet_insufficient" in gaps
+    if cites_new_material:
+        assert [item.target_refs for item in checked.missing_for_assessment] == [
+            tuple(sorted(targets, key=str.encode))
+        ]
+        assert "semantic_missing_already_supplied" not in gaps
+    else:
+        # The repeat is dropped and disclosed: the agent sees nothing it can add for it.
+        assert checked.missing_for_assessment == ()
+        assert "semantic_missing_already_supplied" in gaps
+        assert "semantic_missing_agent_suppliable" not in gaps
+
+
+@pytest.mark.anyio
+async def test_unanswered_prior_request_may_be_listed_again() -> None:
+    app = _App(semantic=True)
+    app.ledger.frozen = replace(app.ledger.frozen, case=_missing_case(pending=True))
+    app.semantic_result = _succeeded(
+        SemanticJudgment(
+            "insufficient_packet",
+            (),
+            (MissingForAssessment("verification_output", (str(clm(1)),), "still absent"),),
+        )
+    )
+    checked = await execute_check_commit(app, _request("semantic_required"))
+    assert [item.kind for item in checked.missing_for_assessment] == ["verification_output"]
+    assert "semantic_missing_already_supplied" not in checked.coverage.known_gaps

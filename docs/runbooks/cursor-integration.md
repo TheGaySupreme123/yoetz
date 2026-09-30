@@ -562,6 +562,15 @@ deduplication contract proves they are distinct from the generic stream. The hoo
 the exact profile id with `--observation-profile`; the id records the normalization contract and
 does not certify the installed Cursor build.
 
+Review packet reserved room (#907): a Cursor `postToolUse` `Write` capture carries a
+workspace-relative `path`, so the newest applied write of each path is reserved as the current
+diff and older writes are marked `superseded_by`. Edits that reach Yoetz only through
+`afterFileEdit` are not captured in this profile, so their paths get no reserved slot; agent
+evidence and generic `postToolUse` output compete by recency. Verification output is reserved
+per command only when the agent records the action, result and output; generic captured output
+has no command identity until #910. The named-missing-item check result, gaps and guidance are
+the same as on Codex and Claude Code. Gap owner: #883 (check-time diff) and #910.
+
 The ordinary `postToolUse` path emits queued advice through the documented
 [`additional_context` output](https://cursor.com/docs/hooks#posttooluse), including when a
 command's exit is unknown or nonzero. Advice is marked delivered only after successful stdout

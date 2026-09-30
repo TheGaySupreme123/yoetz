@@ -8,6 +8,15 @@ reverse-chronological released versions.
 
 ### Added
 
+- AI-powered review now fills its approved excerpt slots with the most valuable content: the newest
+  captured edit of each changed file, then the latest recorded output of each verification
+  command, then repair evidence, then everything else by recency. Items reach the reviewer in
+  recorded order with older hunks and runs marked as superseded; long output keeps its final
+  summary line; an oversized plan or claim is clipped instead of replaced by a digest. An
+  `insufficient_packet` review must now name what it needed. The check result lists each item and
+  whether you can supply it, as a coverage limitation, never a finding. The excerpt count and the
+  privacy policy are unchanged (#907).
+
 - Codex, Claude Code and Cursor session-start context can show a fresh repository-grant snapshot
   and name the owner's missing admission command. The notice leaves route and host approval
   unconfirmed, preserves existing context and spends only spare hook time. No cross-session

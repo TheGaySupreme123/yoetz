@@ -22,6 +22,7 @@ from yoetz.domain.events import (
     EventPayload,
     EventSchema,
     EvidenceRecordedPayload,
+    MissingForAssessmentItem,
     ObligationChangeKind,
     ObligationPublishedPayload,
     PlanPublishedPayload,
@@ -81,6 +82,7 @@ __all__ = [
     "FindingProjectionRecord",
     "LatestTestedState",
     "ObligationProjectionRecord",
+    "PendingMissingForAssessment",
     "PlanProjectionRecord",
     "ProjectionRecord",
     "ProjectionState",
@@ -433,6 +435,34 @@ class LatestTestedState:
 
 
 @dataclass(frozen=True, slots=True)
+class PendingMissingForAssessment:
+    """What the latest assessed AI-powered review named as missing (issue #907).
+
+    Set by a ``check_recorded`` 1.4.0 ``insufficient_packet`` that recorded missing items and
+    cleared by any later check with an assessed conclusion, or by redacting that check. The next
+    review packet shows each item with what was recorded since, so a reviewer can tell a supplied
+    item from one still missing.
+    """
+
+    source_check_event_id: EventId
+    source_frontier: int
+    items: tuple[MissingForAssessmentItem, ...]
+
+    def __post_init__(self) -> None:
+        try:
+            object.__setattr__(self, "source_check_event_id", event_id(self.source_check_event_id))
+        except ValueError as exc:
+            raise _invalid() from exc
+        object.__setattr__(self, "source_frontier", _nonnegative_safe_integer(self.source_frontier))
+        if (
+            type(self.items) is not tuple
+            or not self.items
+            or any(type(item) is not MissingForAssessmentItem for item in self.items)
+        ):
+            raise _invalid()
+
+
+@dataclass(frozen=True, slots=True)
 class ContradictionKey:
     disputing_claim_id: ClaimId
     disputed_ref: ClaimId | EventId
@@ -532,6 +562,7 @@ class ProjectionState:
             dict[EventId, ProjectionRecord[CoordinationObligationDeclaredPayload]], {}
         )
     )
+    pending_missing_for_assessment: PendingMissingForAssessment | None = None
 
     def __post_init__(self) -> None:
         if type(self.frontier) is not int or not 0 <= self.frontier <= _MAX_SQLITE_SIGNED_INTEGER:
@@ -565,6 +596,11 @@ class ProjectionState:
                 or self.latest_tested_state.subject_frontier.sequence > self.frontier
             ):
                 raise _invalid()
+        if self.pending_missing_for_assessment is not None and (
+            type(self.pending_missing_for_assessment) is not PendingMissingForAssessment
+            or self.pending_missing_for_assessment.source_frontier > self.frontier
+        ):
+            raise _invalid()
 
         prior = _TRUSTED_PRIOR.get()
         if type(prior) is not ProjectionState or prior.frontier > self.frontier:
@@ -1011,6 +1047,20 @@ def projection_snapshot(state: ProjectionState) -> dict[str, JsonValue]:
         snapshot["coordination_declarations"] = _sorted_record_map(
             cast(Mapping[EventId, _ProjectionRecordLike], state.coordination_declarations)
         )
+    if state.pending_missing_for_assessment is not None:
+        pending = state.pending_missing_for_assessment
+        snapshot["pending_missing_for_assessment"] = {
+            "items": [
+                {
+                    "availability": item.availability,
+                    "kind": item.kind,
+                    "target_refs": list(item.target_refs),
+                }
+                for item in pending.items
+            ],
+            "source_check_event_id": pending.source_check_event_id,
+            "source_frontier": canonical_integer_string(pending.source_frontier),
+        }
     return snapshot
 
 
@@ -1036,12 +1086,14 @@ _SNAPSHOT_KEYS: Final = frozenset(
         "coordination_contexts",
         "coordination_dispositions",
         "coordination_declarations",
+        "pending_missing_for_assessment",
     }
 )
 _REQUIRED_SNAPSHOT_KEYS: Final = _SNAPSHOT_KEYS - {
     "coordination_contexts",
     "coordination_dispositions",
     "coordination_declarations",
+    "pending_missing_for_assessment",
 }
 _RECORD_KEYS: Final = frozenset(
     {"payload", "payload_digest", "redacted", "source_event_id", "source_frontier"}
@@ -1329,6 +1381,29 @@ def _latest_tested_from_snapshot(value: JsonValue) -> LatestTestedState | None:
     )
 
 
+def _pending_missing_from_snapshot(value: JsonValue | None) -> PendingMissingForAssessment | None:
+    if value is None:
+        return None
+    source = _snapshot_object(
+        value, required=frozenset({"items", "source_check_event_id", "source_frontier"})
+    )
+    items: list[MissingForAssessmentItem] = []
+    for raw in _snapshot_array(source["items"]):
+        row = _snapshot_object(raw, required=frozenset({"availability", "kind", "target_refs"}))
+        items.append(
+            MissingForAssessmentItem(
+                kind=cast(str, row["kind"]),
+                target_refs=cast(tuple[str, ...], _snapshot_array(row["target_refs"])),
+                availability=cast(str, row["availability"]),
+            )
+        )
+    return PendingMissingForAssessment(
+        source_check_event_id=cast(EventId, source["source_check_event_id"]),
+        source_frontier=_snapshot_uint(source["source_frontier"], safe=True),
+        items=tuple(items),
+    )
+
+
 def _contradictions_from_snapshot(
     value: JsonValue,
 ) -> dict[ContradictionKey, ContradictionRecord]:
@@ -1377,6 +1452,7 @@ def projection_from_snapshot(value: JsonValue) -> ProjectionState:
                     "coordination_contexts",
                     "coordination_dispositions",
                     "coordination_declarations",
+                    "pending_missing_for_assessment",
                 }
             ),
         )
@@ -1448,6 +1524,9 @@ def projection_from_snapshot(value: JsonValue) -> ProjectionState:
                     source.get("coordination_declarations", {}),
                     collection="coordination_declarations",
                 ),
+            ),
+            pending_missing_for_assessment=_pending_missing_from_snapshot(
+                source.get("pending_missing_for_assessment")
             ),
         )
     except (KeyError, TypeError, ValueError) as exc:

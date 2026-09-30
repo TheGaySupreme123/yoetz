@@ -99,6 +99,7 @@ from yoetz.application.lineage_recovery import (
     observed_activity_renewal,
     observed_host_session_binding,
 )
+from yoetz.application.missing_for_assessment import unsuppliable_missing_kinds
 from yoetz.application.observation_advice import (
     ObservationAdviceContextBuilder,
     stable_advice_finding_id,
@@ -3439,10 +3440,18 @@ def _judgment_to_response_json(judgment: object) -> dict[str, CanonicalJsonValue
                 "uncertainty": item.uncertainty,
             }
         )
-    return {
+    body: dict[str, CanonicalJsonValue] = {
         "conclusion": judgment.conclusion,
         "reviewer_challenges": challenges,
     }
+    if judgment.missing_for_assessment:
+        # Issue #907: the named missing items, reviewer reason included, live only in this
+        # encrypted durable response object; the check record keeps the structural fields.
+        body["missing_for_assessment"] = [
+            {"kind": item.kind, "target_refs": list(item.target_refs), "reason": item.reason}
+            for item in judgment.missing_for_assessment
+        ]
+    return body
 
 
 def _judgment_from_response_json(value: object) -> object:
@@ -3450,6 +3459,8 @@ def _judgment_from_response_json(value: object) -> object:
 
     from yoetz.domain.findings import FindingKind
     from yoetz.ports.semantic import (
+        MissingForAssessment,
+        MissingForAssessmentKind,
         ReviewerChallenge,
         ReviewerNextStep,
         SemanticConclusion,
@@ -3499,7 +3510,36 @@ def _judgment_from_response_json(value: object) -> object:
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("semantic_response_judgment_invalid") from exc
-    return SemanticJudgment(cast(SemanticConclusion, conclusion_raw), tuple(challenges))
+    # Responses recorded before issue #907 carry no missing items and decode with none.
+    missing: list[MissingForAssessment] = []
+    raw_missing = source.get("missing_for_assessment", [])
+    if type(raw_missing) is not list:
+        raise ValueError("semantic_response_judgment_invalid")
+    for item in cast(list[object], raw_missing):
+        if type(item) is not dict:
+            raise ValueError("semantic_response_judgment_invalid")
+        row = cast(dict[str, object], item)
+        targets = row.get("target_refs")
+        if type(targets) is not list or any(
+            type(ref) is not str for ref in cast(list[object], targets)
+        ):
+            raise ValueError("semantic_response_judgment_invalid")
+        try:
+            missing.append(
+                MissingForAssessment(
+                    cast(MissingForAssessmentKind, row["kind"]),
+                    tuple(cast(list[str], targets)),
+                    cast(str, row["reason"]),
+                )
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("semantic_response_judgment_invalid") from exc
+    try:
+        return SemanticJudgment(
+            cast(SemanticConclusion, conclusion_raw), tuple(challenges), tuple(missing)
+        )
+    except ValueError as exc:
+        raise ValueError("semantic_response_judgment_invalid") from exc
 
 
 async def _publish_semantic_response_object(
@@ -3987,6 +4027,7 @@ def _privacy_gated_semantic_evaluator(
         over_item_limit = False
         reference_scope_reduced = False
         content_gaps: tuple[str, ...] = ()
+        unsuppliable: tuple[str, ...] = ()
 
         def _on_lease_renewed(renewed: object) -> None:
             assert type(renewed) is _OpLease
@@ -4201,6 +4242,8 @@ def _privacy_gated_semantic_evaluator(
             # material, yet still reports succeeded — so record it and carry it into coverage
             # rather than letting a hollow review read as a complete one.
             withheld = tuple(item.value for item in policy.withheld_review_categories)
+            # What no agent action can put in front of this reviewer (issue #907).
+            unsuppliable = unsuppliable_missing_kinds(review_selection, withheld)
             if withheld:
                 record_bounded_event_without_raising(
                     component="semantic_composition",
@@ -4393,6 +4436,7 @@ def _privacy_gated_semantic_evaluator(
                     case_content_over_item_limit=over_item_limit,
                     case_reference_scope_reduced=reference_scope_reduced,
                     case_content_gaps=content_gaps,
+                    unsuppliable_missing_kinds=unsuppliable,
                 )
 
             # Build the packet before anything durable exists. A packet that cannot be built is a
@@ -4421,6 +4465,7 @@ def _privacy_gated_semantic_evaluator(
                     case_content_over_item_limit=over_item_limit,
                     case_reference_scope_reduced=reference_scope_reduced,
                     case_content_gaps=content_gaps,
+                    unsuppliable_missing_kinds=unsuppliable,
                 )
 
             # One durable AI-powered review job per check: create/recover after freeze, before dispatch.
@@ -4708,6 +4753,7 @@ def _privacy_gated_semantic_evaluator(
                         case_content_over_item_limit=over_item_limit,
                         case_reference_scope_reduced=reference_scope_reduced,
                         case_content_gaps=content_gaps,
+                        unsuppliable_missing_kinds=unsuppliable,
                     )
                 return FinalSemanticEvaluation(
                     status,
@@ -4720,6 +4766,7 @@ def _privacy_gated_semantic_evaluator(
                     case_content_over_item_limit=over_item_limit,
                     case_reference_scope_reduced=reference_scope_reduced,
                     case_content_gaps=content_gaps,
+                    unsuppliable_missing_kinds=unsuppliable,
                     continuation=continuation,
                 )
 
@@ -4765,6 +4812,7 @@ def _privacy_gated_semantic_evaluator(
                 case_content_over_item_limit=over_item_limit,
                 case_reference_scope_reduced=reference_scope_reduced,
                 case_content_gaps=content_gaps,
+                unsuppliable_missing_kinds=unsuppliable,
             )
 
     return _evaluate

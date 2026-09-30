@@ -24,7 +24,7 @@ _MANIFEST_PATH = "manifest.json"
 _SCHEMA_NAMESPACE = "https://schemas.yoetz.dev/0.1/"
 _EXPECTED_SCHEMA_MANIFEST_SCHEMA = "yoetz.schema-manifest/1.0.0"
 _EXPECTED_SCHEMA_MANIFEST_VERSION = "1.0.0"
-_EXPECTED_MEMBER_COUNT = 207
+_EXPECTED_MEMBER_COUNT = 209
 _EXPECTED_REQUEST_RESULT_VERSION_COUNT = 51
 _EXPECTED_EVENT_VERSION_COUNT = 29
 
@@ -297,6 +297,7 @@ def test_schema_registry_is_complete() -> None:
                     "events/session-opened-1.1.0.schema.json",
                     "events/session-resumed-1.1.0.schema.json",
                     "findings/finding-1.1.0.schema.json",
+                    "findings/provider-judgment-1.1.0.schema.json",
                     "findings/semantic-provenance-1.1.0.schema.json",
                     "operations/check-request-1.1.0.schema.json",
                     "operations/check-result-1.1.0.schema.json",

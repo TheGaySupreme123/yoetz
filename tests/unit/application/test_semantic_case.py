@@ -25,6 +25,7 @@ from builders.policy_cases import (
     res,
 )
 from builders.replay import replay_records
+from yoetz.application import semantic_case as semantic_case_module
 from yoetz.application.check import (
     CheckScope,
     allocate_findings,
@@ -907,7 +908,9 @@ def test_captured_multipart_group_is_one_deterministic_excerpt() -> None:
     )
 
 
-def test_capture_quota_tie_selects_first_capture_and_discloses_the_rest() -> None:
+def test_capture_budget_selects_newest_capture_and_discloses_the_rest() -> None:
+    """Unreserved captures compete by recency (issue #907); the loser is disclosed, not lost."""
+
     case, captured, scope, captured_ref = _opaque_before_capture_case()
     second_ref = evd(21)
     second_content = b"second-capture"
@@ -991,11 +994,11 @@ def test_capture_quota_tie_selects_first_capture_and_discloses_the_rest() -> Non
     )
 
     assert [item.excerpt_item_id for item in semantic.packet.targeted_excerpts] == [
-        f"excerpt-{captured_ref}"
+        f"excerpt-{second_ref}"
     ]
     assert "content_unselected" in semantic.packet.coverage.known_gaps
     assert any(
-        omission.subject_ref == str(second_ref) and omission.reason == "not_selected"
+        omission.subject_ref == str(captured_ref) and omission.reason == "not_selected"
         for omission in semantic.packet.omissions
     )
 
@@ -1359,7 +1362,7 @@ def test_prepared_payload_binds_selected_packet_and_withheld_omissions() -> None
         if item.category is DataCategory.BOUNDED_STRUCTURAL_METADATA
     }
     payload = semantic_case_to_prepared_payload(semantic, included)
-    assert b"yoetz.review-packet-case/1" in payload
+    assert b"yoetz.review-packet-case/2" in payload
     document = strict_json_parse(payload)
     assert isinstance(document, dict)
     packet = document.get("review_packet")
@@ -1487,19 +1490,18 @@ def _case_with_long_evidence(description: str) -> DeterministicCase:
     )
 
 
-def test_prose_that_publishes_but_cannot_be_carried_whole_is_named_in_coverage() -> None:
-    """The publish-fits-but-case-drops window is disclosed, not silently shortened (issue #177).
+def test_excerpt_honors_the_approved_per_excerpt_bound_instead_of_the_4_kib_item_clip() -> None:
+    """A recorded description the selection admits reaches the reviewer whole (issue #907).
 
-    Publish-side prose accepts up to ``MAX_TEXT_BYTES`` (8192), while one case item carries at
-    most ``MAX_REVIEW_TEXT_BYTES`` (4096). A 5 KB description therefore records cleanly and then
-    reaches the reviewer shortened. Nothing said so: the only omission raised was the generic
-    ``not_selected``, which reads as a selection-policy choice rather than a size drop.
+    Publish-side prose accepts up to ``MAX_TEXT_BYTES`` (8192). Excerpts used to be clipped at
+    ``MAX_REVIEW_TEXT_BYTES`` (4096) although the approved Assisted and Expanded policies allow
+    16 KiB per excerpt, so a 5 KB description arrived as a fragment. The approved bound now
+    applies; nothing is widened past what the owner approved.
     """
 
     body = "e" * 5_000
     assert len(body.encode("utf-8")) <= MAX_TEXT_BYTES
     assert len(body.encode("utf-8")) > MAX_REVIEW_TEXT_BYTES
-    # The selection would carry it whole; only the per-item case bound stands in the way.
     assert ReviewSelectionPolicy.for_profile(ReviewContextProfile.ASSISTED).max_excerpt_bytes > len(
         body.encode("utf-8")
     )
@@ -1508,8 +1510,9 @@ def test_prose_that_publishes_but_cannot_be_carried_whole_is_named_in_coverage()
     semantic = _build(case, ReviewContextProfile.ASSISTED, findings=_findings_for(case))
 
     excerpt = next(item for item in semantic.items if item.item_id == f"excerpt-{evd(1)}")
-    assert excerpt.content_bytes == MAX_REVIEW_TEXT_BYTES
-    assert SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP in semantic.packet.coverage.known_gaps
+    assert excerpt.content == body.encode("utf-8")
+    assert SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP not in semantic.packet.coverage.known_gaps
+    assert "truncated_payload" not in semantic.packet.coverage.known_gaps
 
 
 def test_narrow_custom_excerpt_bound_is_selection_not_a_size_gap() -> None:
@@ -1552,16 +1555,16 @@ def test_prose_within_the_case_item_bound_raises_no_over_limit_gap() -> None:
     assert SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP not in semantic.packet.coverage.known_gaps
 
 
-def test_payload_replaced_by_the_bounded_marker_names_the_size_drop() -> None:
-    """A payload too large to encode is replaced wholesale; the marker says why.
+def test_oversized_plan_prose_is_clipped_with_both_ends_instead_of_replaced_by_a_digest() -> None:
+    """An oversized plan keeps its structure and readable prose (issue #907).
 
-    ``_bounded_json`` swaps the entire event payload for a ``yoetz.bounded-content-omission/1``
-    marker. Its ``reason`` was ``not_selected`` — the same token the packet uses for material the
-    selection policy declined — so a reviewer could not tell an unsent section from one that was
-    admitted and then dropped for size.
+    ``_bounded_json`` used to swap the entire payload for a ``yoetz.bounded-content-omission/1``
+    digest marker, leaving the reviewer nothing to read. The longest prose field is now clipped
+    with its head and tail kept and the cut marked, and coverage still names the size drop.
     """
 
-    plan = plan_record(PlanPublishedPayload(1, "s" * 6_000, (obl(1),)), 1)
+    summary = "START " + "s" * 6_000 + " END"
+    plan = plan_record(PlanPublishedPayload(1, summary, (obl(1),)), 1)
     obligation = obligation_record(
         ObligationPublishedPayload(
             obl(1), "Build the real packet", "tests pass", ObligationStatus.OPEN
@@ -1576,11 +1579,33 @@ def test_payload_replaced_by_the_bounded_marker_names_the_size_drop() -> None:
     semantic = _build(case, ReviewContextProfile.GOAL_AWARE)
 
     goal = next(item for item in semantic.items if item.section == "goal")
-    marker = strict_json_parse(goal.content)
+    assert goal.content_bytes <= MAX_REVIEW_TEXT_BYTES
+    body = strict_json_parse(goal.content)
+    assert isinstance(body, dict)
+    assert "schema" not in body
+    assert body["obligation_refs"] == [str(obl(1))]
+    clipped = body["summary"]
+    assert isinstance(clipped, str)
+    assert clipped.startswith("START ") and clipped.endswith(" END")
+    assert "bytes elided here; head and tail kept]" in clipped
+    assert SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP in semantic.packet.coverage.known_gaps
+    # The payload was carried, clipped: it is not reported as a section the profile declined.
+    assert not any(
+        omission.category is DataCategory.TASK_DESCRIPTION for omission in semantic.packet.omissions
+    )
+
+
+def test_payload_without_clippable_prose_still_falls_back_to_the_named_marker() -> None:
+    """When no single prose field is long enough to clip, the digest marker says why."""
+
+    value: dict[str, JsonValue] = {f"field_{index:02d}": "x" * 200 for index in range(40)}
+    text, fit = semantic_case_module._bounded_json(value)  # pyright: ignore[reportPrivateUsage]
+
+    marker = strict_json_parse(text.encode("utf-8"))
+    assert fit == "replaced"
     assert isinstance(marker, dict)
     assert marker["schema"] == "yoetz.bounded-content-omission/1"
     assert marker["reason"] == OVER_CASE_ITEM_LIMIT_REASON
-    assert SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP in semantic.packet.coverage.known_gaps
 
 
 @pytest.mark.parametrize(
@@ -1641,16 +1666,23 @@ def test_reused_native_evidence_survives_mixed_digest_and_item_limits(profile: s
     native_excerpt = next(item for item in semantic.items if item.item_id == f"excerpt-{evd(1)}")
     assert native_excerpt.content == captured.content
     large_excerpt = next(item for item in semantic.items if item.item_id == f"excerpt-{evd(3)}")
-    assert large_excerpt.content_bytes == MAX_REVIEW_TEXT_BYTES
-    assert SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP in semantic.packet.coverage.known_gaps
+    # The approved per-excerpt bound (16 KiB) carries the 5,000-byte description whole (#907).
+    assert oversized.description is not None
+    assert large_excerpt.content == oversized.description.encode("utf-8")
     prepared = semantic_case_to_prepared_payload(
         semantic, {item.item_id for item in semantic.items}
     )
     assert b"synthetic matching native evidence" in prepared
 
 
-def test_linked_evidence_precedes_unrelated_authenticated_capture() -> None:
-    case, captured, scope, _ = _opaque_before_capture_case()
+def test_unreserved_excerpts_compete_by_recency_before_link_class() -> None:
+    """Outside the reserved room, newer material wins the last slot (issue #907, step 3.4).
+
+    Link class used to outrank recency, so an old claim-linked metadata row beat newer captured
+    output. The reserved-room order ranks everything unreserved by recency, then by link class.
+    """
+
+    case, captured, scope, captured_ref = _opaque_before_capture_case()
     row = case.projection.claims[clm(1)]
     assert row.payload is not None
     case = replace(
@@ -1674,12 +1706,15 @@ def test_linked_evidence_precedes_unrelated_authenticated_capture() -> None:
         captured_content_scope=scope,
         selection=selection,
     )
-    assert semantic.packet.targeted_excerpts[0].excerpt_item_id == f"excerpt-{evd(1)}"
-    assert "content_unselected" in semantic.packet.coverage.known_gaps
+    assert semantic.packet.targeted_excerpts[0].excerpt_item_id == f"excerpt-{captured_ref}"
+    assert any(
+        omission.subject_ref == str(evd(1)) and omission.reason == "not_selected"
+        for omission in semantic.packet.omissions
+    )
 
 
 def test_retained_code_hunks_beyond_first_item_reach_prepared_review() -> None:
-    content = ("+ordinary_line()\n" * 600 + "+planted_late_bug()\n").encode()
+    content = ("+ordinary_line()\n" * 1_100 + "+planted_late_bug()\n").encode()
     case, captured, scope = _captured_case_values(content)
     captured = replace(
         captured,
@@ -1693,7 +1728,8 @@ def test_retained_code_hunks_beyond_first_item_reach_prepared_review() -> None:
     )
     excerpts = [item for item in semantic.items if item.section == "excerpt"]
     assert len(excerpts) > 1
-    assert all(item.content_bytes <= 4096 for item in excerpts)
+    # Each part honors the approved per-excerpt bound; a part is one slot of one capture.
+    assert all(item.content_bytes <= 16_384 for item in excerpts)
     assert b"".join(item.content for item in excerpts) == content
     prepared = semantic_case_to_prepared_payload(
         semantic, {item.item_id for item in semantic.items}
@@ -1706,7 +1742,7 @@ def test_retained_code_hunks_beyond_first_item_reach_prepared_review() -> None:
 def test_code_chunk_selection_keeps_utf8_and_reports_unselected_suffix(
     max_excerpts: int, max_total: int
 ) -> None:
-    content = ("+π🙂\n" * 2000).encode()
+    content = ("+π🙂\n" * 4_000).encode()
     case, captured, scope = _captured_case_values(content)
     captured = replace(
         captured,

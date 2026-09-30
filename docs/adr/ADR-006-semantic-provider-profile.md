@@ -806,3 +806,26 @@ This changes relevance, not proof: every capture still requires authentication, 
 obeys the selected privacy profile and byte/count limits, and a response never clears a finding.
 An insufficient packet or a deterministic-only recheck still cannot resolve a semantic defect.
 The same selection applies to all hosts and supported OSes.
+
+
+### Most valuable review content and named missing items (2026-09-30, #907 Phase 1a)
+
+Decision: within the owner-approved count and byte budget, the packet reserves room for the current
+diff (newest captured edit per changed path), then the latest output per identified verification
+command (keeping the last failure beside a later pass), then repair evidence; everything else
+follows by recency, then link class; superseded hunks and runs come last and are marked
+`superseded_by`. Items travel in recording order with `occurred_order` (`review-packet-case/2`).
+Excerpts honour the approved `max_excerpt_bytes` rather than the 4 KiB structural clip (open
+question 3); long output keeps head and tail, oversized structured prose is clipped rather than
+digest-replaced, and selection plans below the channel byte ceiling's schema maximum on the exact
+prepared document. One excerpt holds one recorded source or one part of one capture; the 16-slot
+count and the privacy-policy schema are unchanged (Phase 1b lifts the count).
+
+`insufficient_packet` must name what was missing (`provider-judgment` 1.1.0,
+`missing_for_assessment`). Yoetz fences targets to the case, drops an already-answered request the
+reviewer repeats without citing the new material, classifies each item as `agent_suppliable` or
+`structurally_unavailable_on_this_host`, records the structural items on `check_recorded` 1.4.0 and
+shows the prior request with `supplied_since` refs to the next reviewer. Items are check
+limitations with their own coverage gaps; `semantic_packet_insufficient` is unchanged and the
+outcome still blocks absence proof. Command identity for captured output waits on #910, an exact
+check-time diff on #883, and the task-statement section on #908.

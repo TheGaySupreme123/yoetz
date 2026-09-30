@@ -1292,6 +1292,78 @@ def _check_recorded_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     return document
 
 
+def _provider_judgment_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Generate the provider judgment catalog with the frozen finding-kind definition name.
+
+    The public protocol owns a fifteen-kind ``FindingKindWire`` while the provider alias keeps the
+    historical fourteen-kind wire under that same frozen definition key; the runtime request
+    schema applies the identical rename, so the catalog and the request stay shape-equivalent.
+    """
+
+    assert entry.loader is not None
+    raw_schema = cast(dict[str, object], TypeAdapter(entry.loader()).json_schema())
+    normalized = _normalize(raw_schema, entry)
+    rendered = json.dumps(normalized).replace(
+        '"#/$defs/ProviderFindingKindWire"', '"#/$defs/FindingKindWire"'
+    )
+    document = cast(dict[str, JsonValue], json.loads(rendered))
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+    definitions["FindingKindWire"] = definitions.pop("ProviderFindingKindWire")
+    document["$defs"] = dict(sorted(definitions.items()))
+    return document
+
+
+def _check_recorded_v1_4_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Record what an ``insufficient_packet`` review named as missing (issue #907)."""
+
+    document = _simple_versioned_schema(entry, "events/check-recorded-1.3.0.schema.json", {})
+    properties = cast(dict[str, JsonValue], document["properties"])
+    properties["semantic_conclusion"] = {"const": "insufficient_packet", "type": "string"}
+    properties["missing_for_assessment"] = {
+        "items": {
+            "additionalProperties": False,
+            "properties": {
+                "availability": {
+                    "enum": ["agent_suppliable", "structurally_unavailable_on_this_host"],
+                    "type": "string",
+                },
+                "kind": {
+                    "enum": [
+                        "command_identity",
+                        "current_diff_for_path",
+                        "other",
+                        "plan_or_claim_text",
+                        "prior_finding_context",
+                        "task_statement",
+                        "verification_output",
+                    ],
+                    "type": "string",
+                },
+                "target_refs": {
+                    "items": {
+                        "pattern": (
+                            "^(act|clm|evd|evt|fnd|obl|res)_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}"
+                            "-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                        ),
+                        "type": "string",
+                    },
+                    "maxItems": 4,
+                    "type": "array",
+                    "uniqueItems": True,
+                },
+            },
+            "required": ["availability", "kind", "target_refs"],
+            "type": "object",
+        },
+        "maxItems": 8,
+        "minItems": 1,
+        "type": "array",
+        "uniqueItems": True,
+    }
+    cast(list[JsonValue], document["required"]).append("missing_for_assessment")
+    return document
+
+
 def _check_recorded_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     document = _load_versioned_template(
         entry,
@@ -2311,6 +2383,43 @@ def _check_result_v1_3_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         "type": "array",
         "uniqueItems": True,
     }
+    # Issue #907: what an insufficient_packet review named as missing, as a check limitation.
+    # Additive and optional on this unreleased version, like advisory_notes above.
+    definitions["missing_item"] = {
+        "additionalProperties": False,
+        "properties": {
+            "availability": {
+                "enum": ["agent_suppliable", "structurally_unavailable_on_this_host"],
+                "type": "string",
+            },
+            "kind": {
+                "enum": [
+                    "command_identity",
+                    "current_diff_for_path",
+                    "other",
+                    "plan_or_claim_text",
+                    "prior_finding_context",
+                    "task_statement",
+                    "verification_output",
+                ],
+                "type": "string",
+            },
+            "target_refs": {
+                "items": {"$ref": "#/$defs/subject_id"},
+                "maxItems": 4,
+                "type": "array",
+                "uniqueItems": True,
+            },
+        },
+        "required": ["availability", "kind", "target_refs"],
+        "type": "object",
+    }
+    properties["missing_for_assessment"] = {
+        "items": {"$ref": "#/$defs/missing_item"},
+        "maxItems": 8,
+        "type": "array",
+        "uniqueItems": True,
+    }
     policy_execution = cast(dict[str, JsonValue], definitions["policy_execution"])
     policy_execution_properties = cast(dict[str, JsonValue], policy_execution["properties"])
     policy_id = cast(dict[str, JsonValue], policy_execution_properties["policy_id"])
@@ -3145,6 +3254,7 @@ def _event_draft_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
 
     add_branch("check_recorded", "1.2.0")
     add_branch("check_recorded", "1.3.0")
+    add_branch("check_recorded", "1.4.0")
     add_branch("session_opened", "1.2.0")
     add_branch("finding_recorded", "1.2.0")
     add_branch("finding_recorded", "1.3.0")
@@ -3229,6 +3339,14 @@ def _opaque_unknown_event_v1_2_schema(entry: _RegistryEntry) -> dict[str, JsonVa
         {
             "additionalProperties": False,
             "properties": {"name": {"const": "check_recorded"}, "version": {"const": "1.3.0"}},
+            "required": ["name", "version"],
+            "type": "object",
+        }
+    )
+    values.append(
+        {
+            "additionalProperties": False,
+            "properties": {"name": {"const": "check_recorded"}, "version": {"const": "1.4.0"}},
             "required": ["name", "version"],
             "type": "object",
         }
@@ -5571,6 +5689,18 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         ),
     ),
     _RegistryEntry(
+        "events/check-recorded-1.4.0.schema.json",
+        "check-recorded",
+        "1.4.0",
+        "event",
+        "event-payload",
+        lambda: (
+            __import__(
+                "yoetz.domain.events", fromlist=["CheckRecordedPayload"]
+            ).CheckRecordedPayload
+        ),
+    ),
+    _RegistryEntry(
         "events/claim-recorded-1.0.0.schema.json",
         "claim-recorded",
         "1.0.0",
@@ -6022,6 +6152,18 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "findings/provider-judgment-1.0.0.schema.json",
         "provider-judgment",
         "1.0.0",
+        "request_result",
+        "provider-judgment",
+        lambda: (
+            __import__(
+                "yoetz.protocol.models", fromlist=["ProviderJudgmentEnvelopeModel"]
+            ).ProviderJudgmentEnvelopeModel
+        ),
+    ),
+    _RegistryEntry(
+        "findings/provider-judgment-1.1.0.schema.json",
+        "provider-judgment",
+        "1.1.0",
         "request_result",
         "provider-judgment",
         lambda: (
@@ -6940,6 +7082,8 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
 _BUILDER_OWNED_SCHEMA_PATHS: Final[frozenset[str]] = frozenset(
     {
         "events/check-recorded-1.3.0.schema.json",
+        "events/check-recorded-1.4.0.schema.json",
+        "findings/provider-judgment-1.1.0.schema.json",
         "consent/status-7.0.0.schema.json",
         "consent/review-result-7.0.0.schema.json",
         "consent/prepare-result-7.0.0.schema.json",
@@ -7208,10 +7352,12 @@ def build_schema_documents(
             "events/check-recorded-1.0.0.schema.json",
             "events/finding-recorded-1.0.0.schema.json",
             "findings/finding-1.0.0.schema.json",
+            "findings/provider-judgment-1.0.0.schema.json",
             "findings/semantic-provenance-1.0.0.schema.json",
             "operations/check-result-1.0.0.schema.json",
             "operations/receipt-result-1.0.0.schema.json",
         }:
+            # Released contracts whose owning model has since moved on stay byte-frozen.
             normalized = _frozen_schema(entry)
         elif entry.relative_path == "observations/routine-read-summary-1.0.0.schema.json":
             normalized = _routine_read_summary_schema(entry)
@@ -7230,6 +7376,10 @@ def build_schema_documents(
             normalized = _check_recorded_v1_1_schema(entry)
         elif entry.relative_path == "events/check-recorded-1.3.0.schema.json":
             normalized = _check_recorded_v1_3_schema(entry)
+        elif entry.relative_path == "events/check-recorded-1.4.0.schema.json":
+            normalized = _check_recorded_v1_4_schema(entry)
+        elif entry.relative_path == "findings/provider-judgment-1.1.0.schema.json":
+            normalized = _provider_judgment_v1_1_schema(entry)
         elif entry.relative_path == "events/check-recorded-1.2.0.schema.json":
             normalized = _simple_versioned_schema(
                 entry,

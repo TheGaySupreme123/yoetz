@@ -12,6 +12,7 @@ from typing import Final, Literal, cast
 
 from yoetz.domain.events import (
     CHECK_EVENT_SCHEMA_VERSION,
+    CHECK_MISSING_ITEMS_EVENT_SCHEMA_VERSION,
     FINDING_EVENT_SCHEMA_VERSION,
     SEMANTIC_EVENT_SCHEMA_VERSION,
     AcceptedEvent,
@@ -30,6 +31,7 @@ from yoetz.domain.events import (
     FindingRecordedPayload,
     LedgerChain,
     LedgerRecord,
+    MissingForAssessmentItem,
     NoObligationsReasonMismatch,
     ObligationPublishedPayload,
     ObligationResolutionMismatch,
@@ -3295,6 +3297,7 @@ class MemoryLedgerAdapter:
         *,
         scope: CheckScopeModel | None = None,
         semantic_conclusion: str | None = None,
+        missing_for_assessment: tuple[MissingForAssessmentItem, ...] = (),
     ) -> CheckCommitResult:
         key = (frozen.lease.writer_id, frozen.lease.operation_id)
         async with self._lock:
@@ -3403,6 +3406,7 @@ class MemoryLedgerAdapter:
             projection_version=PROJECTION_VERSION,
             semantic_provenance=semantic_provenance,
             semantic_conclusion=semantic_conclusion,
+            missing_for_assessment=missing_for_assessment,
         )
         event_payloads.append((event_id(self._ids.new(IdKind.EVENT)), check_payload))
         accepted_at = _now(self._clock)
@@ -3432,6 +3436,8 @@ class MemoryLedgerAdapter:
                 "finding_recorded" if type(payload) is FindingRecordedPayload else "check_recorded",
                 FINDING_EVENT_SCHEMA_VERSION
                 if type(payload) is FindingRecordedPayload
+                else CHECK_MISSING_ITEMS_EVENT_SCHEMA_VERSION
+                if missing_for_assessment
                 else CHECK_EVENT_SCHEMA_VERSION
                 if semantic_conclusion is not None
                 else SEMANTIC_EVENT_SCHEMA_VERSION,
@@ -3516,6 +3522,7 @@ class MemoryLedgerAdapter:
             semantic_provenance,
             findings.coverage,
             CheckVersionSlice("0.1", "0.1.0", PROJECTION_VERSION, packs),
+            missing_for_assessment=check_payload.missing_for_assessment,
         )
         canonical = canonical_encode(
             {

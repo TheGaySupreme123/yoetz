@@ -21,6 +21,7 @@ from yoetz.application.check import (
     case_coverage,
     run_deterministic_policies,
 )
+from yoetz.application.missing_for_assessment import supplied_since
 from yoetz.domain.events import (
     ActionKind,
     ClaimRecordedPayload,
@@ -128,7 +129,23 @@ SEMANTIC_REVIEW_PURPOSE: Final = "semantic-review"
 # Marker reason for content the case admitted and then could not carry whole. Distinct from the
 # `not_selected` omission vocabulary, which means the selection policy declined to carry it.
 OVER_CASE_ITEM_LIMIT_REASON: Final = "over_case_item_limit"
-_PACKET_SCHEMA: Final = "yoetz.review-packet-case/1"
+# Version 2 (issue #907) carries each item's recording order and excerpt freshness marks, and
+# lists items in case order (section, then recording order) instead of by opaque item id.
+_PACKET_SCHEMA: Final = "yoetz.review-packet-case/2"
+# Long output keeps its head and its tail: the command and first failure sit at the top, and the
+# test/lint summary line sits at the bottom. The marker says how much was cut and where.
+_ELISION_MARKER: Final = "\n[yoetz: {elided} of {total} bytes elided here; head and tail kept]\n"
+# Below this many bytes per side a head-and-tail split is not worth its marker; a very narrow
+# custom excerpt bound keeps the head instead.
+_MIN_HEAD_TAIL_SIDE_BYTES: Final = 64
+# Strings at or below this size are identifiers, digests or enum tokens, never prose to clip.
+_MIN_CLIPPABLE_PROSE_BYTES: Final = 256
+# The gateway compares the whole prepared provider document with the channel byte ceiling, whose
+# schema maximum is MAX_SEMANTIC_CASE_BYTES (and the bytes/4 token estimate reaches the same
+# ceiling). Selection plans below it so a larger excerpt can never turn a reviewable case into a
+# policy denial; the reserve absorbs privacy redaction markers that can differ in length.
+_PREPARED_PAYLOAD_PLANNING_BYTES: Final = MAX_SEMANTIC_CASE_BYTES - 4_096
+_PLANNING_GRANULARITY_BYTES: Final = 1_024
 _PACKET_ID_LIST_KEYS: Final = (
     "goal_item_ids",
     "obligation_item_ids",
@@ -408,6 +425,43 @@ def _utf8(text: str, *, maximum: int = MAX_SEMANTIC_ITEM_BYTES) -> bytes:
     return encoded
 
 
+def _elision_marker(elided: int, total: int) -> str:
+    return _ELISION_MARKER.format(elided=elided, total=total)
+
+
+def _head_tail(raw: bytes, limit: int) -> str:
+    """Keep the head and the tail of ``raw`` within ``limit`` UTF-8 bytes and mark the cut.
+
+    A test, build or lint run prints its verdict last, so a head-only clip dropped exactly the
+    line a reviewer needs (issue #907). The middle goes instead, and the marker says how many
+    bytes of how many were elided. A bound too small to hold a marker keeps the head only.
+    """
+
+    total = len(raw)
+    if total <= limit:
+        return raw.decode("utf-8")
+    available = limit - len(_elision_marker(total, total).encode("utf-8"))
+    if available < 2 * _MIN_HEAD_TAIL_SIDE_BYTES:
+        return raw[:limit].decode("utf-8", errors="ignore")
+    best = ""
+    for _attempt in range(4):
+        head_bytes = available // 2
+        head = raw[:head_bytes].decode("utf-8", errors="ignore")
+        tail = raw[total - (available - head_bytes) :].decode("utf-8", errors="ignore")
+        kept = len(head.encode("utf-8")) + len(tail.encode("utf-8"))
+        text = head + _elision_marker(total - kept, total) + tail
+        size = len(text.encode("utf-8"))
+        if size <= limit and size > len(best.encode("utf-8")):
+            best = text
+        if size == limit:
+            break
+        # The marker's digit count depends on what was elided; settle on the exact fill.
+        available += limit - size
+    if not best:
+        return raw[:limit].decode("utf-8", errors="ignore")
+    return best
+
+
 def _content_item(
     *,
     item_id: str,
@@ -419,15 +473,19 @@ def _content_item(
     occurred_order: int,
     text: str,
     over_limit: set[str] | None = None,
+    limit: int = MAX_REVIEW_TEXT_BYTES,
+    latest_for: Literal["path", "command"] | None = None,
+    superseded_by: tuple[str, ...] = (),
 ) -> SemanticCaseItem:
     # Bound by UTF-8 bytes, not characters — multi-byte prose must not raise.
-    limit = min(MAX_REVIEW_TEXT_BYTES, MAX_SEMANTIC_ITEM_BYTES)
+    limit = min(limit, MAX_SEMANTIC_ITEM_BYTES)
     raw = text.encode("utf-8")
     if len(raw) > limit:
-        # Publish-side prose accepts up to MAX_PROSE_CHARS, which is twice what one case item can
-        # carry. Silent truncation here is what made a 5 KB evidence description publish cleanly
-        # and then reach the reviewer as a shortened fragment with nothing saying so (issue #177).
-        raw = raw[:limit].decode("utf-8", errors="ignore").encode("utf-8")
+        # Publish-side prose accepts up to MAX_PROSE_CHARS, which is twice what one structural
+        # case item can carry. Silent truncation here is what made a 5 KB evidence description
+        # publish cleanly and then reach the reviewer as a shortened fragment with nothing saying
+        # so (issue #177). The cut keeps both ends and is marked in the text (issue #907).
+        raw = _head_tail(raw, limit).encode("utf-8")
         if over_limit is not None:
             over_limit.add(item_id)
     if not raw:
@@ -445,6 +503,8 @@ def _content_item(
         content=content,
         content_bytes=len(content),
         content_digest=digest,
+        latest_for=latest_for,
+        superseded_by=superseded_by,
     )
 
 
@@ -456,10 +516,90 @@ def _structural_json(value: Mapping[str, JsonValue]) -> str:
     return canonical_encode(cast(JsonValue, dict(value))).decode("utf-8")
 
 
-def _bounded_json(value: Mapping[str, JsonValue]) -> tuple[str, bool]:
+type _BoundedFit = Literal["whole", "clipped", "replaced"]
+
+
+def _longest_prose_leaf(
+    value: JsonValue, path: tuple[str | int, ...] = ()
+) -> tuple[tuple[str | int, ...], int]:
+    """Return the path and UTF-8 size of the longest string leaf (keys are never candidates)."""
+
+    best: tuple[tuple[str | int, ...], int] = ((), 0)
+    if isinstance(value, str):
+        return path, len(value.encode("utf-8"))
+    if isinstance(value, Mapping):
+        for key in sorted(cast(Mapping[str, JsonValue], value), key=str.encode):
+            found = _longest_prose_leaf(cast(Mapping[str, JsonValue], value)[key], (*path, key))
+            if found[1] > best[1]:
+                best = found
+    elif isinstance(value, (list, tuple)):
+        for index, child in enumerate(cast(Sequence[JsonValue], value)):
+            found = _longest_prose_leaf(child, (*path, index))
+            if found[1] > best[1]:
+                best = found
+    return best
+
+
+def _replace_leaf(value: JsonValue, path: tuple[str | int, ...], leaf: str) -> JsonValue:
+    if not path:
+        return leaf
+    head, rest = path[0], path[1:]
+    if isinstance(value, Mapping) and type(head) is str:
+        source = cast(Mapping[str, JsonValue], value)
+        return {
+            key: (_replace_leaf(child, rest, leaf) if key == head else child)
+            for key, child in source.items()
+        }
+    if isinstance(value, (list, tuple)) and type(head) is int:
+        return [
+            _replace_leaf(child, rest, leaf) if index == head else child
+            for index, child in enumerate(cast(Sequence[JsonValue], value))
+        ]
+    raise ValueError("semantic_case_content_invalid")
+
+
+def _clip_json_prose(value: JsonValue, limit: int) -> JsonValue | None:
+    """Shorten the longest prose strings, head and tail kept, until the canonical JSON fits.
+
+    Identifiers, digests and enum tokens are short and never clipped. ``None`` means the payload
+    cannot fit even with all of its prose at the minimum clip, so the caller must fall back to
+    the digest-only omission marker.
+    """
+
+    current = value
+    for _attempt in range(64):
+        encoded = canonical_encode(current)
+        if len(encoded) <= limit:
+            return current
+        path, size = _longest_prose_leaf(current)
+        if size <= _MIN_CLIPPABLE_PROSE_BYTES:
+            return None
+        leaf: JsonValue = current
+        for step in path:
+            leaf = (
+                cast(Mapping[str, JsonValue], leaf)[step]
+                if type(step) is str
+                else cast(Sequence[JsonValue], leaf)[cast(int, step)]
+            )
+        raw = cast(str, leaf).encode("utf-8")
+        target = max(_MIN_CLIPPABLE_PROSE_BYTES, size - (len(encoded) - limit))
+        clipped = _head_tail(raw, target)
+        if len(clipped.encode("utf-8")) >= size:
+            clipped = raw[:target].decode("utf-8", errors="ignore")
+        current = _replace_leaf(current, path, clipped)
+    return None
+
+
+def _bounded_json(value: Mapping[str, JsonValue]) -> tuple[str, _BoundedFit]:
     encoded = canonical_encode(cast(JsonValue, dict(value)))
     if len(encoded) <= MAX_REVIEW_TEXT_BYTES:
-        return encoded.decode("utf-8"), False
+        return encoded.decode("utf-8"), "whole"
+    # An oversized plan, obligation, claim or decision keeps its structure and every identifier;
+    # only its longest prose fields are clipped, with the cut marked in the text (issue #907).
+    # Replacing the whole payload by a digest left the reviewer with nothing to read.
+    clipped = _clip_json_prose(cast(JsonValue, dict(value)), MAX_REVIEW_TEXT_BYTES)
+    if clipped is not None:
+        return canonical_encode(clipped).decode("utf-8"), "clipped"
     # `not_selected` read as a selection-policy choice, indistinguishable from a section the
     # profile declined to carry. The payload was in fact admitted and then dropped for size, and
     # the reviewer needs to know which of the two happened (issue #177).
@@ -469,7 +609,7 @@ def _bounded_json(value: Mapping[str, JsonValue]) -> tuple[str, bool]:
         "reason": OVER_CASE_ITEM_LIMIT_REASON,
         "schema": "yoetz.bounded-content-omission/1",
     }
-    return _structural_json(marker), True
+    return _structural_json(marker), "replaced"
 
 
 class LineageSemanticCapacityExceeded(ValueError):
@@ -762,7 +902,7 @@ def _history_json(
     *,
     include_content: bool,
     include_exact_command_text: bool,
-) -> tuple[str, bool]:
+) -> tuple[str, _BoundedFit]:
     body: dict[str, JsonValue] = {
         "content_visibility": item.content_visibility,
         "event_id": item.event_id,
@@ -1039,6 +1179,707 @@ def repair_evidence_refs(projection: ProjectionState, allowed: frozenset[str]) -
     return frozenset(selected)
 
 
+# Excerpt ranks, in the reserved-room order issue #907 fixes. The task statement (#908) is a packet
+# section of its own, not an excerpt: it takes no excerpt slot, and neither the excerpt byte budget
+# nor the prepared-payload planning in ``build_semantic_case`` ever trims a non-excerpt section, so
+# its room is held by construction ahead of every excerpt class below.
+_RANK_CURRENT_DIFF: Final = 0
+_RANK_LATEST_VERIFICATION: Final = 1
+_RANK_PRIOR_FINDING_CONTEXT: Final = 2
+_RANK_UNRESERVED: Final = 3
+_RANK_SUPERSEDED: Final = 4
+_OUTSIDE_WORKSPACE_PATH: Final = "<outside-workspace>"
+_MAX_EDIT_PATHS: Final = 64
+_PATCH_FILE_LINE: Final = re.compile(r"^\*\*\* (?:Update|Add|Delete) File: (.+?)[ \t]*$", re.M)
+_PATCH_MOVE_LINE: Final = re.compile(r"^\*\*\* Move to: (.+?)[ \t]*$", re.M)
+_GIT_DIFF_LINE: Final = re.compile(r"^diff --git a/(\S+) b/(\S+)[ \t]*$", re.M)
+_UNIFIED_HEADER: Final = re.compile(r"^--- \S[^\n]*\n\+\+\+ (?:b/)?(\S+)[ \t]*$", re.M)
+
+
+@dataclass(frozen=True, slots=True)
+class _ExcerptCandidate:
+    """One evidence row, command, or failed result that may become one or more excerpt items.
+
+    Each candidate is exactly one recorded source: one evidence row (or one authenticated
+    multipart capture), one action's command, or one result's summary. A candidate split into
+    parts spends one excerpt slot per part; no excerpt ever joins two sources (issue #907).
+    """
+
+    source_ref: str
+    item_base: str
+    source_kind: _ExcerptKind
+    category: DataCategory
+    parts: tuple[str, ...]
+    clipped: bool
+    linked: tuple[str, ...]
+    occurred_order: int
+    captured: bool
+    content_visibility: Literal["available", "not_recorded"]
+    digest_provenance: ExcerptDigestProvenance | None
+    identity_refs: frozenset[str]
+    # Changed paths of an applied (or unconfirmed) captured edit; ``None`` for anything else.
+    edit_paths: tuple[str, ...] | None = None
+    verification_identity: str | None = None
+    verification_outcome: ResultOutcome | None = None
+    verification_action: str | None = None
+    structural_only: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _ExcerptSelection:
+    items: tuple[SemanticCaseItem, ...]
+    targeted: tuple[TargetedExcerptRef, ...]
+    omissions: tuple[ReviewOmission, ...]
+    gaps: frozenset[str]
+    over_limit: frozenset[str]
+
+
+def _captured_edit_paths(content: bytes) -> tuple[bool, tuple[str, ...]]:
+    """Return ``(failed, paths)`` for one captured edit, from its own recorded bytes only.
+
+    Codex ``apply_patch`` and shell ``git apply`` captures are patch text; Claude Code, Cursor
+    and shell whole-file writes are the changed-file JSON the hook selected. Paths are already
+    workspace-relative (the hook masks anything outside the workspace), are used only to relate
+    hunks of the same file, and are never copied into the packet by this function.
+    """
+
+    paths: set[str] = set()
+    failed = False
+    parsed: JsonValue = None
+    if content.lstrip().startswith(b"{"):
+        try:
+            parsed = strict_json_parse(content)
+        except ValueError:
+            parsed = None
+    if isinstance(parsed, Mapping):
+        body = cast(Mapping[str, JsonValue], parsed)
+        failed = body.get("edit_outcome") == "failed"
+        path = body.get("path")
+        if type(path) is str:
+            paths.add(path)
+        writes = body.get("writes")
+        if isinstance(writes, (list, tuple)):
+            for write in cast(Sequence[JsonValue], writes):
+                if isinstance(write, Mapping):
+                    target = cast(Mapping[str, JsonValue], write).get("path")
+                    if type(target) is str:
+                        paths.add(target)
+    else:
+        text = content.decode("utf-8", errors="replace")
+        failed = text.startswith("# yoetz edit outcome: failed")
+        paths.update(_PATCH_FILE_LINE.findall(text))
+        paths.update(_PATCH_MOVE_LINE.findall(text))
+        for old, new in _GIT_DIFF_LINE.findall(text):
+            paths.update((old, new))
+        paths.update(path for path in _UNIFIED_HEADER.findall(text) if path != "/dev/null")
+    paths.discard(_OUTSIDE_WORKSPACE_PATH)
+    paths.discard("")
+    ordered = tuple(sorted(paths, key=lambda value: value.encode("utf-8")))
+    return failed, ordered[:_MAX_EDIT_PATHS]
+
+
+type _VerificationRun = tuple[str, ResultOutcome, str]
+
+
+def _verification_identities(
+    projection: ProjectionState,
+) -> tuple[dict[str, _VerificationRun], dict[str, _VerificationRun]]:
+    """Map evidence and result refs to the command whose run they record.
+
+    Each run is ``(identity, outcome, action ref)``. Identity is the digest of the recorded command
+    text of the action a result answers; nothing else is inferred. Captured tool output carries no command until #910 records one, so it stays
+    unidentified and competes by recency. The digest never leaves this function's callers.
+    """
+
+    by_evidence: dict[str, _VerificationRun] = {}
+    by_result: dict[str, _VerificationRun] = {}
+    for result_ref, row in sorted(
+        projection.results.items(),
+        key=lambda pair: (pair[1].source_frontier, str(pair[0]).encode("ascii")),
+    ):
+        payload = row.payload
+        if payload is None or row.redacted:
+            continue
+        action = projection.actions.get(payload.action_id)
+        if (
+            action is None
+            or action.payload is None
+            or action.redacted
+            or action.payload.action_kind is not ActionKind.COMMAND
+            or not action.payload.command
+        ):
+            continue
+        identity = "command:" + hashlib.sha256(action.payload.command.encode("utf-8")).hexdigest()
+        run = (identity, payload.outcome, str(payload.action_id))
+        by_result[str(result_ref)] = run
+        for evidence_ref in payload.evidence_refs:
+            by_evidence[str(evidence_ref)] = run
+    return by_evidence, by_result
+
+
+def _evidence_candidates(
+    *,
+    projection: ProjectionState,
+    allowed: frozenset[str],
+    selection: ReviewSelectionPolicy,
+    linked_subjects: set[str],
+    captured_groups: Mapping[str, _CapturedGroup],
+    captured_group_leader: Mapping[str, str],
+    excerpt_limit: int,
+    part_limit: int,
+    verification_by_evidence: Mapping[str, _VerificationRun],
+    omissions: list[ReviewOmission],
+    gaps: set[str],
+) -> list[_ExcerptCandidate]:
+    candidates: list[_ExcerptCandidate] = []
+    admitted_capture_digests: set[bytes] = set()
+    for evidence_id, record in sorted(
+        projection.evidence.items(),
+        key=lambda pair: (pair[1].source_frontier, str(pair[0]).encode("ascii")),
+    ):
+        ref = str(evidence_id)
+        if ref not in allowed:
+            continue
+        payload = record.payload
+        if payload is None or record.redacted:
+            omissions.append(
+                _omit(
+                    ref,
+                    DataCategory.EVIDENCE_EXCERPT,
+                    "evidence",
+                    "redacted_never_send" if record.redacted else "not_recorded",
+                )
+            )
+            continue
+        assert type(payload) is EvidenceRecordedPayload
+        leader = captured_group_leader.get(ref)
+        if leader is not None and leader != ref:
+            # Multipart captured evidence is one AI-powered review excerpt. Carrying each part as a
+            # separate excerpt would let an incomplete group look reviewable and would spend
+            # the selection budget on duplicate structural descriptions.
+            continue
+        captured_group = captured_groups.get(ref)
+        excerpt_kind = (
+            captured_group.source_kind
+            if captured_group is not None
+            else _EVIDENCE_EXCERPT_KIND.get(payload.evidence_kind, "evidence")
+        )
+        if excerpt_kind not in selection.excerpt_kinds:
+            if captured_group is not None:
+                gaps.add("content_unselected")
+            omissions.append(
+                _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_selected")
+            )
+            continue
+        if selection.relevance == "linked_subjects_only":
+            source_event = str(record.source_event_id)
+            if ref not in linked_subjects and source_event not in linked_subjects:
+                if captured_group is not None:
+                    gaps.add("content_unselected")
+                omissions.append(
+                    _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_selected")
+                )
+                continue
+        if (
+            captured_group is None
+            and payload.captured_object_id is not None
+            and payload.digest_binding is not None
+            and payload.digest_binding.provenance is EvidenceDigestProvenance.OBSERVATION_CAPTURED
+        ):
+            # A structural capture description is never a substitute for authenticated bytes.
+            # Preserve the coverage gap even when the omission list itself is capped away.
+            omissions.append(
+                _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_recorded")
+            )
+            gaps.add("captured_object_unavailable")
+            continue
+        digest_provenance: ExcerptDigestProvenance | None = None
+        text: str | None
+        if captured_group is not None:
+            capture_digest = hashlib.sha256(captured_group.content).digest()
+            if capture_digest in admitted_capture_digests:
+                # Identical retained bytes (for example a patch captured by an older build
+                # on both its pre- and post-tool events) are one excerpt, not two.
+                omissions.append(
+                    _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_selected")
+                )
+                continue
+            admitted_capture_digests.add(capture_digest)
+            # The service-authenticated inner bytes are the only source that may populate a
+            # captured AI-powered review excerpt. Their digest provenance is retained separately
+            # from the digest of the selection-clipped item below.
+            text = captured_group.content.decode("utf-8")
+            digest_provenance = captured_group.digest_provenance
+        elif payload.content_digest is not None:
+            binding = payload.digest_binding
+            if binding is None:
+                omissions.append(
+                    _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_recorded")
+                )
+                continue
+            digest_provenance = ExcerptDigestProvenance(
+                evidence_kind=payload.evidence_kind,
+                strength=payload.strength,
+                content_digest=payload.content_digest,
+                digest_subject=binding.subject,
+                content_availability=binding.content_availability,
+                byte_count=binding.byte_count,
+                provenance=binding.provenance,
+                approval_commitment=binding.approval_commitment,
+                approved_check_result_digest=binding.approved_check_result_digest,
+            )
+            if payload.description:
+                # Caller-authored narrative stays legible; digest identity rides on the
+                # excerpt ref instead of replacing the content (issue #176).
+                text = payload.description
+            else:
+                text = canonical_encode(
+                    cast(
+                        JsonValue,
+                        {
+                            "schema": "yoetz.evidence-digest-provenance/1",
+                            "evidence_kind": payload.evidence_kind.value,
+                            "strength": payload.strength.value,
+                            "content_digest": payload.content_digest,
+                            "digest_subject": binding.subject.value,
+                            "content_availability": binding.content_availability.value,
+                            "byte_count": binding.byte_count,
+                            "provenance": binding.provenance.value,
+                            **(
+                                {}
+                                if binding.approval_commitment is None
+                                else {"approval_commitment": binding.approval_commitment}
+                            ),
+                            **(
+                                {}
+                                if binding.approved_check_result_digest is None
+                                else {
+                                    "approved_check_result_digest": (
+                                        binding.approved_check_result_digest
+                                    )
+                                }
+                            ),
+                        },
+                    )
+                ).decode("utf-8")
+        else:
+            text = payload.description or payload.reference
+        if text is None or not text:
+            omissions.append(
+                _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_recorded")
+            )
+            continue
+        encoded = text.encode("utf-8")
+        split_diff = captured_group is not None and excerpt_kind == "diff"
+        clipped = False
+        if split_diff:
+            # Split authenticated code, not freeform claim prose, into independently bounded
+            # items. Later hunks compete for the explicit count/total caps as parts of this one
+            # capture; each part is one excerpt slot and no part joins two captures.
+            parts: list[str] = []
+            remaining = encoded
+            while remaining and len(parts) <= selection.max_excerpts:
+                part = remaining[:part_limit].decode("utf-8", errors="ignore")
+                if not part:
+                    break
+                parts.append(part)
+                remaining = remaining[len(part.encode("utf-8")) :]
+            clipped = bool(remaining)
+        else:
+            # Long output keeps its head and its tail with the cut marked (issue #907).
+            clipped = len(encoded) > excerpt_limit
+            parts = [_head_tail(encoded, excerpt_limit) if clipped else text]
+        group_refs = captured_group.evidence_refs if captured_group is not None else ()
+        linked = tuple(
+            sorted(
+                {
+                    ref,
+                    *group_refs,
+                    str(record.source_event_id),
+                    *(
+                        str(projection.evidence[validate_evidence_id(evidence_ref)].source_event_id)
+                        for evidence_ref in group_refs
+                        if validate_evidence_id(evidence_ref) in projection.evidence
+                    ),
+                    *(
+                        str(claim_id)
+                        for claim_id, claim_record in effective_claim_items(projection)
+                        if claim_record.payload is not None
+                        and any(
+                            str(support) in (set(group_refs) if group_refs else {ref})
+                            for support in claim_record.payload.supporting_refs
+                        )
+                    ),
+                }
+                & allowed,
+                key=str.encode,
+            )
+        )[:16]
+        if not linked:
+            if captured_group is not None:
+                gaps.add("content_unselected")
+            omissions.append(
+                _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_selected")
+            )
+            continue
+        edit_paths: tuple[str, ...] | None = None
+        if split_diff:
+            assert captured_group is not None
+            failed_edit, paths = _captured_edit_paths(captured_group.content)
+            edit_paths = None if failed_edit else paths
+        verification = verification_by_evidence.get(ref)
+        candidates.append(
+            _ExcerptCandidate(
+                source_ref=ref,
+                item_base=f"excerpt-{ref}",
+                source_kind=excerpt_kind,
+                category=DataCategory.EVIDENCE_EXCERPT,
+                parts=tuple(parts),
+                clipped=clipped,
+                linked=linked,
+                occurred_order=record.source_frontier,
+                captured=captured_group is not None,
+                content_visibility=(
+                    "available"
+                    if captured_group is not None or payload.captured_object_id is None
+                    else "not_recorded"
+                ),
+                digest_provenance=digest_provenance,
+                identity_refs=frozenset({ref, *group_refs}),
+                edit_paths=edit_paths,
+                verification_identity=None if verification is None else verification[0],
+                verification_outcome=None if verification is None else verification[1],
+                verification_action=None if verification is None else verification[2],
+                structural_only=(
+                    captured_group is None
+                    and payload.evidence_kind is EvidenceKind.OTHER
+                    and payload.strength is EvidenceImmutability.METADATA_ONLY
+                    and payload.content_digest is None
+                ),
+            )
+        )
+    return candidates
+
+
+def _select_targeted_excerpts(
+    *,
+    projection: ProjectionState,
+    allowed: frozenset[str],
+    selection: ReviewSelectionPolicy,
+    findings: Sequence[Finding],
+    review_assessments: Sequence[ReviewAssessment],
+    captured_groups: Mapping[str, _CapturedGroup],
+    captured_group_leader: Mapping[str, str],
+    excerpt_byte_budget: int,
+) -> _ExcerptSelection:
+    """Choose the excerpts that fill the approved count and byte budget, most valuable first.
+
+    Reserved room comes first, in the order issue #907 fixes: the newest captured edit of every
+    changed path, then the latest output of every identified verification command (with the last
+    failure kept beside a later pass). Evidence supplied to repair a finding (#898) follows, then
+    everything else by recency, then by link class; older hunks and runs of the same path or
+    command come last and are marked ``superseded_by``. Every excerpt still holds exactly one
+    recorded source or one part of one capture.
+    """
+
+    repair_refs = repair_evidence_refs(projection, allowed)
+    linked_subjects: set[str] = set(repair_refs)
+    for finding in findings:
+        linked_subjects.update(str(ref) for ref in finding.subject_refs)
+    for claim_id, _ in effective_claim_items(projection):
+        linked_subjects.add(str(claim_id))
+    for obligation_id in projection.obligations:
+        linked_subjects.add(str(obligation_id))
+    # Assessment supporting refs are case-bound links the reviewer may need as excerpts.
+    for assessment in review_assessments:
+        linked_subjects.update(str(ref) for ref in assessment.supporting_refs)
+        for fact in (*assessment.observed_facts, *assessment.required_but_missing_facts):
+            linked_subjects.update(str(ref) for ref in fact.subject_refs)
+    for _, claim_record in effective_claim_items(projection):
+        if claim_record.payload is None:
+            continue
+        linked_subjects.update(str(ref) for ref in claim_record.payload.supporting_refs)
+
+    # The approved policy already allows ``max_excerpt_bytes`` per excerpt; the old 4 KiB
+    # structural item clip no longer applies to excerpts (issue #907, open question 3). Nothing
+    # here widens the count, the per-excerpt bound or the total the owner approved.
+    excerpt_limit = min(selection.max_excerpt_bytes, MAX_SEMANTIC_ITEM_BYTES)
+    # A capture split into parts never makes one part larger than the whole excerpt budget.
+    part_limit = min(excerpt_limit, selection.max_total_excerpt_bytes)
+    omissions: list[ReviewOmission] = []
+    gaps: set[str] = set()
+    verification_by_evidence, verification_by_result = _verification_identities(projection)
+    candidates = _evidence_candidates(
+        projection=projection,
+        allowed=allowed,
+        selection=selection,
+        linked_subjects=linked_subjects,
+        captured_groups=captured_groups,
+        captured_group_leader=captured_group_leader,
+        excerpt_limit=excerpt_limit,
+        part_limit=part_limit,
+        verification_by_evidence=verification_by_evidence,
+        omissions=omissions,
+        gaps=gaps,
+    )
+
+    # Optional command excerpts from actions when expanded selection allows exact commands.
+    if selection.include_exact_command_text and "command" in selection.excerpt_kinds:
+        for action_id, record in sorted(projection.actions.items(), key=lambda pair: str(pair[0])):
+            ref = str(action_id)
+            if ref not in allowed or record.payload is None or record.redacted:
+                continue
+            if record.payload.action_kind is not ActionKind.COMMAND:
+                continue
+            command = record.payload.command
+            if command is None:
+                omissions.append(
+                    _omit(ref, DataCategory.COMMAND_METADATA, "command", "not_recorded")
+                )
+                continue
+            linked = (ref,) if ref in allowed else (str(record.source_event_id),)
+            linked = tuple(item for item in linked if item in allowed)
+            if not linked:
+                continue
+            encoded = command.encode("utf-8")
+            clipped = len(encoded) > excerpt_limit
+            candidates.append(
+                _ExcerptCandidate(
+                    source_ref=ref,
+                    item_base=f"excerpt-cmd-{ref}",
+                    source_kind="command",
+                    category=DataCategory.COMMAND_METADATA,
+                    parts=(_head_tail(encoded, excerpt_limit) if clipped else command,),
+                    clipped=clipped,
+                    linked=linked,
+                    occurred_order=record.source_frontier,
+                    captured=False,
+                    content_visibility="available",
+                    digest_provenance=None,
+                    identity_refs=frozenset({ref, str(record.source_event_id)}),
+                )
+            )
+
+    # Failed results as failure excerpts when description-like summary exists.
+    if "failure" in selection.excerpt_kinds:
+        for result_id, record in sorted(projection.results.items(), key=lambda pair: str(pair[0])):
+            ref = str(result_id)
+            if ref not in allowed or record.payload is None or record.redacted:
+                continue
+            if record.payload.outcome is not ResultOutcome.FAILURE:
+                continue
+            summary = record.payload.summary
+            if summary is None or not summary:
+                omissions.append(
+                    _omit(ref, DataCategory.EVIDENCE_EXCERPT, "failure", "not_recorded")
+                )
+                continue
+            linked = tuple(
+                sorted(
+                    {
+                        item
+                        for item in (
+                            ref,
+                            str(record.payload.action_id),
+                            str(record.source_event_id),
+                        )
+                        if item in allowed
+                    },
+                    key=str.encode,
+                )
+            )[:16]
+            if not linked:
+                continue
+            encoded = summary.encode("utf-8")
+            clipped = len(encoded) > excerpt_limit
+            verification = verification_by_result.get(ref)
+            candidates.append(
+                _ExcerptCandidate(
+                    source_ref=ref,
+                    item_base=f"excerpt-fail-{ref}",
+                    source_kind="failure",
+                    category=DataCategory.EVIDENCE_EXCERPT,
+                    parts=(_head_tail(encoded, excerpt_limit) if clipped else summary,),
+                    clipped=clipped,
+                    linked=linked,
+                    occurred_order=record.source_frontier,
+                    captured=False,
+                    content_visibility="available",
+                    digest_provenance=None,
+                    identity_refs=frozenset(
+                        {ref, str(record.payload.action_id), str(record.source_event_id)}
+                    ),
+                    verification_identity=None if verification is None else verification[0],
+                    verification_outcome=None if verification is None else verification[1],
+                    verification_action=None if verification is None else verification[2],
+                )
+            )
+
+    latest_for: dict[int, Literal["path", "command"]] = {}
+    superseded_by: dict[int, tuple[str, ...]] = {}
+    current_diffs: set[int] = set()
+    reserved_runs: set[int] = set()
+
+    def recency(index: int) -> tuple[int, bytes]:
+        candidate = candidates[index]
+        return (candidate.occurred_order, candidate.source_ref.encode("ascii"))
+
+    # Current diff: the newest applied (or unconfirmed) captured edit of each changed path. A
+    # failed edit changed nothing, so it neither is current code nor supersedes anything.
+    newest_for_path: dict[str, int] = {}
+    for index, candidate in enumerate(candidates):
+        for path in candidate.edit_paths or ():
+            known = newest_for_path.get(path)
+            if known is None or recency(index) > recency(known):
+                newest_for_path[path] = index
+    for index, candidate in enumerate(candidates):
+        if candidate.edit_paths is None:
+            continue
+        newer = {newest_for_path[path] for path in candidate.edit_paths} - {index}
+        if not candidate.edit_paths or len(newer) < len(
+            {newest_for_path[path] for path in candidate.edit_paths}
+        ):
+            # Newest for at least one path (or a capture whose paths cannot be read): current.
+            current_diffs.add(index)
+            if candidate.edit_paths:
+                latest_for[index] = "path"
+        else:
+            superseded_by[index] = tuple(
+                sorted({candidates[other].source_ref for other in newer}, key=str.encode)
+            )
+
+    # Latest verification output per command identity, keeping a failure beside a later pass.
+    runs: dict[str, list[int]] = {}
+    for index, candidate in enumerate(candidates):
+        if candidate.verification_identity is not None:
+            runs.setdefault(candidate.verification_identity, []).append(index)
+    for members in runs.values():
+        members.sort(key=recency, reverse=True)
+        latest = members[0]
+        reserved_runs.add(latest)
+        latest_for.setdefault(latest, "command")
+        if candidates[latest].verification_outcome is ResultOutcome.SUCCESS:
+            prior_failure = next(
+                (
+                    index
+                    for index in members[1:]
+                    if candidates[index].verification_outcome is ResultOutcome.FAILURE
+                ),
+                None,
+            )
+            if prior_failure is not None:
+                reserved_runs.add(prior_failure)
+        for index in members[1:]:
+            if index not in current_diffs:
+                superseded_by.setdefault(index, (candidates[latest].source_ref,))
+    # The exact command of a reserved run travels beside its output, so the reviewer can name
+    # which verification it reads (Expanded selection only carries command text).
+    reserved_actions = {
+        candidates[index].verification_action
+        for index in reserved_runs
+        if candidates[index].verification_action is not None
+    }
+    for index, candidate in enumerate(candidates):
+        if candidate.source_kind == "command" and candidate.source_ref in reserved_actions:
+            reserved_runs.add(index)
+
+    def rank(index: int) -> tuple[int, int, int, int, bytes, bytes]:
+        candidate = candidates[index]
+        linked = bool(candidate.identity_refs & linked_subjects)
+        if index in current_diffs:
+            klass = _RANK_CURRENT_DIFF
+        elif index in reserved_runs:
+            klass = _RANK_LATEST_VERIFICATION
+        elif candidate.identity_refs & repair_refs:
+            klass = _RANK_PRIOR_FINDING_CONTEXT
+        elif index in superseded_by:
+            klass = _RANK_SUPERSEDED
+        else:
+            klass = _RANK_UNRESERVED
+        # Unlinked observation metadata rows describe an event, not its content; they only fill
+        # room that content-bearing material leaves.
+        metadata_last = (
+            1 if klass == _RANK_UNRESERVED and candidate.structural_only and not linked else 0
+        )
+        return (
+            klass,
+            metadata_last,
+            -candidate.occurred_order,
+            0 if linked else 1,
+            candidate.source_ref.encode("ascii"),
+            candidate.item_base.encode("ascii"),
+        )
+
+    items: list[SemanticCaseItem] = []
+    targeted: list[TargetedExcerptRef] = []
+    over_limit: set[str] = set()
+    excerpt_bytes_used = 0
+    for index in sorted(range(len(candidates)), key=rank):
+        candidate = candidates[index]
+        admitted_before = len(targeted)
+        truncated = candidate.clipped
+        for part_index, part in enumerate(candidate.parts):
+            part_bytes = len(part.encode("utf-8"))
+            if (
+                len(targeted) >= selection.max_excerpts
+                or excerpt_bytes_used + part_bytes > excerpt_byte_budget
+            ):
+                truncated = True
+                if candidate.captured:
+                    gaps.add("content_unselected")
+                omissions.append(
+                    _omit(
+                        candidate.source_ref,
+                        candidate.category,
+                        candidate.source_kind,
+                        "not_selected",
+                    )
+                )
+                break
+            item_id = (
+                candidate.item_base
+                if len(candidate.parts) == 1
+                else f"{candidate.item_base}-part-{part_index + 1:02d}"
+            )
+            item = _content_item(
+                item_id=item_id,
+                section="excerpt",
+                category=candidate.category,
+                source_kind=candidate.source_kind,
+                source_ref=candidate.source_ref,
+                linked_subject_refs=candidate.linked,
+                occurred_order=candidate.occurred_order,
+                text=part,
+                over_limit=over_limit,
+                limit=excerpt_limit,
+                latest_for=latest_for.get(index) if index not in superseded_by else None,
+                superseded_by=superseded_by.get(index, ()),
+            )
+            items.append(item)
+            targeted.append(
+                TargetedExcerptRef(
+                    excerpt_item_id=item_id,
+                    source_kind=candidate.source_kind,
+                    linked_subject_refs=candidate.linked,
+                    subject_state_relation=SubjectStateRelation.UNKNOWN,
+                    content_visibility=candidate.content_visibility,
+                    content_digest=item.content_digest,
+                    content_bytes=item.content_bytes,
+                    digest_provenance=candidate.digest_provenance,
+                )
+            )
+            excerpt_bytes_used += item.content_bytes
+        if truncated and len(targeted) > admitted_before:
+            gaps.add("truncated_payload")
+    return _ExcerptSelection(
+        items=tuple(items),
+        targeted=tuple(targeted),
+        omissions=tuple(omissions),
+        gaps=frozenset(gaps),
+        over_limit=frozenset(over_limit),
+    )
+
+
 def build_semantic_case(
     *,
     case_id: str,
@@ -1054,8 +1895,78 @@ def build_semantic_case(
     captured_content_scope: CapturedContentScope | None = None,
     captured_content_gaps: Sequence[str] = (),
 ) -> SemanticCase:
-    """Build one pre-egress AI-powered review case from frozen authority only."""
+    """Build one pre-egress AI-powered review case from frozen authority only.
 
+    Excerpts may now fill the approved per-excerpt bound, so the case plans its excerpts below
+    the channel byte ceiling's schema maximum as measured on the exact prepared document the
+    gateway will size (issue #907). An over-plan case is rebuilt with a smaller excerpt budget;
+    the dropped excerpts are ordinary ``not_selected`` omissions with ``content_unselected``. The
+    gateway still enforces the owner's own ceiling on every dispatch.
+    """
+
+    def build(excerpt_byte_budget: int | None) -> SemanticCase:
+        return _build_semantic_case_once(
+            case_id=case_id,
+            frozen_case=frozen_case,
+            dependency_digest=dependency_digest,
+            findings=findings,
+            review_context_profile=review_context_profile,
+            review_selection=review_selection,
+            policy_id=policy_id,
+            policy_version=policy_version,
+            lineage_evaluation=lineage_evaluation,
+            captured_content=captured_content,
+            captured_content_scope=captured_content_scope,
+            captured_content_gaps=captured_content_gaps,
+            excerpt_byte_budget=excerpt_byte_budget,
+        )
+
+    def fits(candidate: SemanticCase) -> bool | None:
+        try:
+            prepared = semantic_case_to_prepared_payload(
+                candidate, {item.item_id for item in candidate.items}
+            )
+        except SemanticCaseTooLarge:
+            # The structural envelope cannot be bounded at all; the coordinator maps that to
+            # its own terminal capacity outcome. Excerpt planning cannot help it.
+            return None
+        return len(prepared) <= _PREPARED_PAYLOAD_PLANNING_BYTES
+
+    case = build(None)
+    excerpt_bytes = sum(item.content_bytes for item in case.items if item.section == "excerpt")
+    if not excerpt_bytes or fits(case) is not False:
+        return case
+    # JSON escaping makes the prepared document grow by a content-dependent factor, so search the
+    # largest excerpt byte budget whose exact document fits. Admission runs in rank order, so a
+    # smaller budget drops the lowest-ranked excerpts first.
+    best = build(0)
+    low, high = 0, excerpt_bytes
+    while high - low > _PLANNING_GRANULARITY_BYTES:
+        middle = (low + high) // 2
+        candidate = build(middle)
+        if fits(candidate):
+            low, best = middle, candidate
+        else:
+            high = middle
+    return best
+
+
+def _build_semantic_case_once(
+    *,
+    case_id: str,
+    frozen_case: DeterministicCase,
+    dependency_digest: str,
+    findings: Sequence[Finding],
+    review_context_profile: ReviewContextProfile,
+    review_selection: ReviewSelectionPolicy,
+    policy_id: str,
+    policy_version: str,
+    lineage_evaluation: LineageEvaluation | None,
+    captured_content: Sequence[CapturedSemanticContent],
+    captured_content_scope: CapturedContentScope | None,
+    captured_content_gaps: Sequence[str],
+    excerpt_byte_budget: int | None,
+) -> SemanticCase:
     if type(frozen_case) is not DeterministicCase:
         raise TypeError("deterministic_case_invalid")
     if type(review_context_profile) is not ReviewContextProfile:
@@ -1151,9 +2062,7 @@ def build_semantic_case(
         plan = projection.plans[latest_version]
         plan_ref = str(plan.source_event_id)
         if "goal" in sections and plan.payload is not None and not plan.redacted:
-            text, content_omitted = _bounded_json(
-                cast(Mapping[str, JsonValue], encode_payload(plan.payload))
-            )
+            text, fit = _bounded_json(cast(Mapping[str, JsonValue], encode_payload(plan.payload)))
             item = _content_item(
                 item_id=f"goal-{latest_version}",
                 section="goal",
@@ -1167,8 +2076,9 @@ def build_semantic_case(
             )
             items.append(item)
             goal_ids.append(item.item_id)
-            if content_omitted:
+            if fit != "whole":
                 over_limit.add(item.item_id)
+            if fit == "replaced":
                 omissions.append(
                     _omit(plan_ref, DataCategory.TASK_DESCRIPTION, "task", "not_selected")
                 )
@@ -1215,9 +2125,7 @@ def build_semantic_case(
                 key=str.encode,
             )
         )[:16]
-        text, content_omitted = _bounded_json(
-            cast(Mapping[str, JsonValue], encode_payload(payload))
-        )
+        text, fit = _bounded_json(cast(Mapping[str, JsonValue], encode_payload(payload)))
         item = _content_item(
             item_id=f"obligation-{ref}",
             section="obligation",
@@ -1231,8 +2139,9 @@ def build_semantic_case(
         )
         items.append(item)
         obligation_ids.append(item.item_id)
-        if content_omitted:
+        if fit != "whole":
             over_limit.add(item.item_id)
+        if fit == "replaced":
             omissions.append(
                 _omit(source_ref, DataCategory.OBLIGATION_TEXT, "obligation", "not_selected")
             )
@@ -1257,9 +2166,7 @@ def build_semantic_case(
             )
             continue
         assert type(payload) in {ClaimRecordedPayload, ClaimRecordedPayloadV1_1}
-        text, content_omitted = _bounded_json(
-            cast(Mapping[str, JsonValue], encode_payload(payload))
-        )
+        text, fit = _bounded_json(cast(Mapping[str, JsonValue], encode_payload(payload)))
         item = _content_item(
             item_id=f"claim-{ref}",
             section="claim",
@@ -1273,8 +2180,9 @@ def build_semantic_case(
         )
         items.append(item)
         claim_ids.append(item.item_id)
-        if content_omitted:
+        if fit != "whole":
             over_limit.add(item.item_id)
+        if fit == "replaced":
             omissions.append(_omit(ref, DataCategory.CLAIM_TEXT, "claim", "not_selected"))
 
         if "change_observations" in sections and payload.subject_state is not None:
@@ -1309,9 +2217,7 @@ def build_semantic_case(
             )
             continue
         assert type(payload) is DecisionRecordedPayload
-        text, content_omitted = _bounded_json(
-            cast(Mapping[str, JsonValue], encode_payload(payload))
-        )
+        text, fit = _bounded_json(cast(Mapping[str, JsonValue], encode_payload(payload)))
         item = _content_item(
             item_id=f"decision-{ref}",
             section="decision",
@@ -1325,8 +2231,9 @@ def build_semantic_case(
         )
         items.append(item)
         decision_ids.append(item.item_id)
-        if content_omitted:
+        if fit != "whole":
             over_limit.add(item.item_id)
+        if fit == "replaced":
             omissions.append(_omit(ref, DataCategory.DECISION_EXCERPT, "decision", "not_selected"))
 
     # --- Frozen accepted-event history ---
@@ -1368,7 +2275,7 @@ def build_semantic_case(
             category = (
                 content_category if include_content else DataCategory.BOUNDED_STRUCTURAL_METADATA
             )
-            text, content_omitted = _history_json(
+            text, fit = _history_json(
                 history_item,
                 include_content=include_content,
                 include_exact_command_text=selection.include_exact_command_text,
@@ -1396,10 +2303,13 @@ def build_semantic_case(
                         history_item.content_visibility,
                     )
                 )
-            elif not detailed_history or content_omitted:
-                if content_omitted:
+            else:
+                if fit != "whole":
                     over_limit.add(item.item_id)
-                omissions.append(_omit(event_ref, content_category, source_kind, "not_selected"))
+                if not detailed_history or fit == "replaced":
+                    omissions.append(
+                        _omit(event_ref, content_category, source_kind, "not_selected")
+                    )
 
     if (
         "timeline" in sections
@@ -1576,6 +2486,40 @@ def build_semantic_case(
             items.append(item)
             timeline_ids.append(item.item_id)
 
+    # --- The prior review's missing-item request and what was recorded since (issue #907) ---
+    prior_missing_item: SemanticCaseItem | None = None
+    pending_missing = projection.pending_missing_for_assessment
+    if pending_missing is not None and "timeline" in sections and selection.max_timeline_items:
+        answered = supplied_since(projection, pending_missing, frozenset(allowed))
+        check_ref = str(pending_missing.source_check_event_id)
+        prior_missing_item = _content_item(
+            item_id="prior-missing-for-assessment",
+            section="timeline",
+            category=DataCategory.BOUNDED_STRUCTURAL_METADATA,
+            source_kind="finding",
+            source_ref=check_ref,
+            linked_subject_refs=(check_ref,) if check_ref in allowed else (),
+            occurred_order=pending_missing.source_frontier,
+            text=_structural_json(
+                {
+                    "items": [
+                        {
+                            "availability": item.availability,
+                            "kind": item.kind,
+                            "supplied_since": list(supplied),
+                            "target_refs": [ref for ref in item.target_refs if ref in allowed],
+                        }
+                        for item, supplied in zip(pending_missing.items, answered, strict=True)
+                    ],
+                    "kind": "prior_missing_for_assessment",
+                    "source_check_event_id": check_ref,
+                }
+            ),
+            over_limit=over_limit,
+            limit=MAX_SEMANTIC_ITEM_BYTES,
+        )
+        items.append(prior_missing_item)
+
     # --- Local assessments + optional finding prose ---
     review_assessments: list[ReviewAssessment] = []
     finding_refs_over_limit = False
@@ -1643,472 +2587,26 @@ def build_semantic_case(
                 omissions.append(projected.omission)
 
     # --- Targeted excerpts (recorded text only; never fetch objects) ---
-    excerpt_bytes_used = 0
     if "targeted_excerpts" in sections and selection.max_excerpts > 0:
-        repair_refs = repair_evidence_refs(projection, frozenset(allowed))
-        linked_subjects: set[str] = set(repair_refs)
-        for finding in findings:
-            linked_subjects.update(str(ref) for ref in finding.subject_refs)
-        for claim_id, _ in effective_claim_items(projection):
-            linked_subjects.add(str(claim_id))
-        for obligation_id in projection.obligations:
-            linked_subjects.add(str(obligation_id))
-        # Assessment supporting refs are case-bound links the reviewer may need as excerpts.
-        for assessment in review_assessments:
-            linked_subjects.update(str(ref) for ref in assessment.supporting_refs)
-            for fact in (*assessment.observed_facts, *assessment.required_but_missing_facts):
-                linked_subjects.update(str(ref) for ref in fact.subject_refs)
-        for _, claim_record in effective_claim_items(projection):
-            if claim_record.payload is None:
-                continue
-            linked_subjects.update(str(ref) for ref in claim_record.payload.supporting_refs)
-
-        # Claim/assessment-linked material wins the shared cap before unrelated captures.
-        # Within each relevance class, authenticated captures win over metadata. Multipart
-        # groups inherit linkage from any member so UUID ordering cannot hide a linked group.
-        evidence_rows = sorted(
-            projection.evidence.items(),
-            key=lambda pair: (
-                0
-                if str(pair[0]) in repair_refs
-                or any(
-                    ref in repair_refs
-                    for ref in (
-                        captured_groups[str(pair[0])].evidence_refs
-                        if str(pair[0]) in captured_groups
-                        else ()
-                    )
-                )
-                else 1,
-                0
-                if str(pair[0]) in linked_subjects
-                or any(
-                    ref in linked_subjects
-                    for ref in (
-                        captured_groups[str(pair[0])].evidence_refs
-                        if str(pair[0]) in captured_groups
-                        else ()
-                    )
-                )
-                else 1,
-                0 if str(pair[0]) in captured_groups else 1,
-                # Captured code edits are the change under review (#883): rank them ahead of
-                # other captured tool output, newest first, so a patch cannot be starved by
-                # test logs or file reads competing for the shared excerpt cap.
-                0
-                if str(pair[0]) in captured_groups
-                and captured_groups[str(pair[0])].source_kind == "diff"
-                else 1,
-                -pair[1].source_frontier
-                if str(pair[0]) in captured_groups
-                and captured_groups[str(pair[0])].source_kind == "diff"
-                else 0,
-                str(pair[0]).encode("ascii"),
+        excerpts = _select_targeted_excerpts(
+            projection=projection,
+            allowed=allowed,
+            selection=selection,
+            findings=findings,
+            review_assessments=review_assessments,
+            captured_groups=captured_groups,
+            captured_group_leader=captured_group_leader,
+            excerpt_byte_budget=(
+                selection.max_total_excerpt_bytes
+                if excerpt_byte_budget is None
+                else min(selection.max_total_excerpt_bytes, excerpt_byte_budget)
             ),
         )
-        admitted_capture_digests: set[bytes] = set()
-        processed_evidence_refs: set[str] = set()
-        captured_rows_omitted_by_limit: set[str] = set()
-        for evidence_id, record in evidence_rows:
-            if len(targeted) >= selection.max_excerpts:
-                # Captured groups are ordered first, so anything not visited here is excluded by
-                # the excerpt-count cap. Keep that loss visible instead of silently reporting a
-                # complete coverage snapshot. Rows excluded by a deliberate kind/relevance
-                # selection are processed below and retain their ordinary omission reason.
-                captured_rows_omitted_by_limit.update(
-                    set(captured_groups) - processed_evidence_refs
-                )
-                break
-            ref = str(evidence_id)
-            processed_evidence_refs.add(ref)
-            if ref not in allowed:
-                continue
-            payload = record.payload
-            if payload is None or record.redacted:
-                omissions.append(
-                    _omit(
-                        ref,
-                        DataCategory.EVIDENCE_EXCERPT,
-                        "evidence",
-                        "redacted_never_send" if record.redacted else "not_recorded",
-                    )
-                )
-                continue
-            assert type(payload) is EvidenceRecordedPayload
-            leader = captured_group_leader.get(ref)
-            if leader is not None and leader != ref:
-                # Multipart captured evidence is one AI-powered review excerpt. Carrying each part as a
-                # separate excerpt would let an incomplete group look reviewable and would spend
-                # the selection budget on duplicate structural descriptions.
-                continue
-            captured_group = captured_groups.get(ref)
-            excerpt_kind = (
-                captured_group.source_kind
-                if captured_group is not None
-                else _EVIDENCE_EXCERPT_KIND.get(payload.evidence_kind, "evidence")
-            )
-            if excerpt_kind not in selection.excerpt_kinds:
-                if captured_group is not None:
-                    capture_gap_set.add("content_unselected")
-                omissions.append(
-                    _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_selected")
-                )
-                continue
-            if selection.relevance == "linked_subjects_only":
-                source_event = str(record.source_event_id)
-                if ref not in linked_subjects and source_event not in linked_subjects:
-                    if captured_group is not None:
-                        capture_gap_set.add("content_unselected")
-                    omissions.append(
-                        _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_selected")
-                    )
-                    continue
-            if (
-                captured_group is None
-                and payload.captured_object_id is not None
-                and payload.digest_binding is not None
-                and payload.digest_binding.provenance
-                is EvidenceDigestProvenance.OBSERVATION_CAPTURED
-            ):
-                # A structural capture description is never a substitute for authenticated bytes.
-                # Preserve the coverage gap even when the omission list itself is capped away.
-                omissions.append(
-                    _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_recorded")
-                )
-                capture_gap_set.add("captured_object_unavailable")
-                continue
-            digest_provenance: ExcerptDigestProvenance | None = None
-            if captured_group is not None:
-                capture_digest = hashlib.sha256(captured_group.content).digest()
-                if capture_digest in admitted_capture_digests:
-                    # Identical retained bytes (for example a patch captured by an older build
-                    # on both its pre- and post-tool events) are one excerpt, not two.
-                    omissions.append(
-                        _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_selected")
-                    )
-                    continue
-                admitted_capture_digests.add(capture_digest)
-                # The service-authenticated inner bytes are the only source that may populate a
-                # captured AI-powered review excerpt. Their digest provenance is retained separately from
-                # the digest of the selection-clipped item below.
-                text = captured_group.content.decode("utf-8")
-                digest_provenance = captured_group.digest_provenance
-            elif payload.content_digest is not None:
-                binding = payload.digest_binding
-                if binding is None:
-                    omissions.append(
-                        _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_recorded")
-                    )
-                    continue
-                digest_provenance = ExcerptDigestProvenance(
-                    evidence_kind=payload.evidence_kind,
-                    strength=payload.strength,
-                    content_digest=payload.content_digest,
-                    digest_subject=binding.subject,
-                    content_availability=binding.content_availability,
-                    byte_count=binding.byte_count,
-                    provenance=binding.provenance,
-                    approval_commitment=binding.approval_commitment,
-                    approved_check_result_digest=binding.approved_check_result_digest,
-                )
-                if payload.description:
-                    # Caller-authored narrative stays legible; digest identity rides on the
-                    # excerpt ref instead of replacing the content (issue #176).
-                    text = payload.description
-                else:
-                    text = canonical_encode(
-                        cast(
-                            JsonValue,
-                            {
-                                "schema": "yoetz.evidence-digest-provenance/1",
-                                "evidence_kind": payload.evidence_kind.value,
-                                "strength": payload.strength.value,
-                                "content_digest": payload.content_digest,
-                                "digest_subject": binding.subject.value,
-                                "content_availability": binding.content_availability.value,
-                                "byte_count": binding.byte_count,
-                                "provenance": binding.provenance.value,
-                                **(
-                                    {}
-                                    if binding.approval_commitment is None
-                                    else {"approval_commitment": binding.approval_commitment}
-                                ),
-                                **(
-                                    {}
-                                    if binding.approved_check_result_digest is None
-                                    else {
-                                        "approved_check_result_digest": (
-                                            binding.approved_check_result_digest
-                                        )
-                                    }
-                                ),
-                            },
-                        )
-                    ).decode("utf-8")
-            else:
-                text = payload.description or payload.reference
-            if text is None or not text:
-                omissions.append(
-                    _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_recorded")
-                )
-                continue
-            encoded = text.encode("utf-8")
-            split_diff = captured_group is not None and excerpt_kind == "diff"
-            excerpt_truncated = len(encoded) > selection.max_excerpt_bytes and not split_diff
-            if excerpt_truncated:
-                text = encoded[: selection.max_excerpt_bytes].decode("utf-8", errors="ignore")
-            if split_diff:
-                # Split authenticated code, not freeform claim prose, into independently
-                # bounded items. Later hunks must compete for the explicit count/total caps,
-                # rather than vanish at the first item's 4 KiB boundary.
-                part_limit = min(
-                    selection.max_excerpt_bytes, MAX_REVIEW_TEXT_BYTES, MAX_SEMANTIC_ITEM_BYTES
-                )
-                parts: list[str] = []
-                remaining = encoded
-                while remaining and len(parts) <= selection.max_excerpts:
-                    part = remaining[:part_limit].decode("utf-8", errors="ignore")
-                    if not part:
-                        break
-                    parts.append(part)
-                    remaining = remaining[len(part.encode("utf-8")) :]
-                if remaining:
-                    excerpt_truncated = True
-            else:
-                parts = [text]
-            linked = tuple(
-                sorted(
-                    {
-                        ref,
-                        *(captured_group.evidence_refs if captured_group is not None else ()),
-                        str(record.source_event_id),
-                        *(
-                            str(
-                                projection.evidence[
-                                    validate_evidence_id(evidence_ref)
-                                ].source_event_id
-                            )
-                            for evidence_ref in (
-                                captured_group.evidence_refs if captured_group is not None else ()
-                            )
-                            if validate_evidence_id(evidence_ref) in projection.evidence
-                        ),
-                        *(
-                            str(claim_id)
-                            for claim_id, claim_record in effective_claim_items(projection)
-                            if claim_record.payload is not None
-                            and any(
-                                str(support)
-                                in (
-                                    set(captured_group.evidence_refs)
-                                    if captured_group is not None
-                                    else {ref}
-                                )
-                                for support in claim_record.payload.supporting_refs
-                            )
-                        ),
-                    }
-                    & allowed,
-                    key=str.encode,
-                )
-            )[:16]
-            if not linked:
-                if captured_group is not None:
-                    capture_gap_set.add("content_unselected")
-                omissions.append(
-                    _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_selected")
-                )
-                continue
-            admitted_before = len(targeted)
-            for part_index, part in enumerate(parts):
-                if (
-                    len(targeted) >= selection.max_excerpts
-                    or excerpt_bytes_used + len(part.encode("utf-8"))
-                    > selection.max_total_excerpt_bytes
-                ):
-                    excerpt_truncated = True
-                    if captured_group is not None:
-                        capture_gap_set.add("content_unselected")
-                    omissions.append(
-                        _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_selected")
-                    )
-                    break
-                item_id = (
-                    f"excerpt-{ref}" if len(parts) == 1 else f"excerpt-{ref}-part-{part_index + 1}"
-                )
-                item = _content_item(
-                    item_id=item_id,
-                    section="excerpt",
-                    category=DataCategory.EVIDENCE_EXCERPT,
-                    source_kind=excerpt_kind,
-                    source_ref=ref,
-                    linked_subject_refs=linked,
-                    occurred_order=record.source_frontier,
-                    text=part,
-                    over_limit=over_limit,
-                )
-                items.append(item)
-                targeted.append(
-                    TargetedExcerptRef(
-                        excerpt_item_id=item_id,
-                        source_kind=excerpt_kind,
-                        linked_subject_refs=linked,
-                        subject_state_relation=SubjectStateRelation.UNKNOWN,
-                        content_visibility=(
-                            "available"
-                            if captured_group is not None or payload.captured_object_id is None
-                            else "not_recorded"
-                        ),
-                        content_digest=item.content_digest,
-                        content_bytes=item.content_bytes,
-                        digest_provenance=digest_provenance,
-                    )
-                )
-                excerpt_bytes_used += item.content_bytes
-            if excerpt_truncated and len(targeted) > admitted_before:
-                capture_gap_set.add("truncated_payload")
-
-        if captured_rows_omitted_by_limit:
-            capture_gap_set.add("content_unselected")
-            for ref in sorted(captured_rows_omitted_by_limit, key=str.encode):
-                captured_group = captured_groups[ref]
-                omissions.append(
-                    _omit(
-                        ref,
-                        DataCategory.EVIDENCE_EXCERPT,
-                        captured_group.source_kind,
-                        "not_selected",
-                    )
-                )
-
-        # Optional command excerpts from actions when expanded selection allows exact commands.
-        if selection.include_exact_command_text and "command" in selection.excerpt_kinds:
-            for action_id, record in sorted(
-                projection.actions.items(), key=lambda pair: str(pair[0])
-            ):
-                if len(targeted) >= selection.max_excerpts:
-                    break
-                ref = str(action_id)
-                if ref not in allowed or record.payload is None or record.redacted:
-                    continue
-                if record.payload.action_kind is not ActionKind.COMMAND:
-                    continue
-                command = record.payload.command
-                if command is None:
-                    omissions.append(
-                        _omit(ref, DataCategory.COMMAND_METADATA, "command", "not_recorded")
-                    )
-                    continue
-                encoded = command.encode("utf-8")
-                command_truncated = len(encoded) > selection.max_excerpt_bytes
-                if command_truncated:
-                    command = encoded[: selection.max_excerpt_bytes].decode(
-                        "utf-8", errors="ignore"
-                    )
-                    encoded = command.encode("utf-8")
-                if excerpt_bytes_used + len(encoded) > selection.max_total_excerpt_bytes:
-                    break
-                linked = (ref,) if ref in allowed else (str(record.source_event_id),)
-                linked = tuple(item for item in linked if item in allowed)
-                if not linked:
-                    continue
-                item_id = f"excerpt-cmd-{ref}"
-                item = _content_item(
-                    item_id=item_id,
-                    section="excerpt",
-                    category=DataCategory.COMMAND_METADATA,
-                    source_kind="command",
-                    source_ref=ref,
-                    linked_subject_refs=linked,
-                    occurred_order=record.source_frontier,
-                    text=command,
-                    over_limit=over_limit,
-                )
-                items.append(item)
-                targeted.append(
-                    TargetedExcerptRef(
-                        excerpt_item_id=item_id,
-                        source_kind="command",
-                        linked_subject_refs=linked,
-                        subject_state_relation=SubjectStateRelation.UNKNOWN,
-                        content_visibility="available",
-                        content_digest=item.content_digest,
-                        content_bytes=item.content_bytes,
-                    )
-                )
-                excerpt_bytes_used += item.content_bytes
-
-        # Failed results as failure excerpts when description-like summary exists.
-        if "failure" in selection.excerpt_kinds:
-            for result_id, record in sorted(
-                projection.results.items(), key=lambda pair: str(pair[0])
-            ):
-                if len(targeted) >= selection.max_excerpts:
-                    break
-                ref = str(result_id)
-                if ref not in allowed or record.payload is None or record.redacted:
-                    continue
-                if record.payload.outcome is not ResultOutcome.FAILURE:
-                    continue
-                summary = record.payload.summary
-                if summary is None or not summary:
-                    omissions.append(
-                        _omit(ref, DataCategory.EVIDENCE_EXCERPT, "failure", "not_recorded")
-                    )
-                    continue
-                encoded = summary.encode("utf-8")
-                summary_truncated = len(encoded) > selection.max_excerpt_bytes
-                if summary_truncated:
-                    summary = encoded[: selection.max_excerpt_bytes].decode(
-                        "utf-8", errors="ignore"
-                    )
-                    encoded = summary.encode("utf-8")
-                if excerpt_bytes_used + len(encoded) > selection.max_total_excerpt_bytes:
-                    omissions.append(
-                        _omit(ref, DataCategory.EVIDENCE_EXCERPT, "failure", "not_selected")
-                    )
-                    continue
-                linked = tuple(
-                    sorted(
-                        {
-                            item
-                            for item in (
-                                ref,
-                                str(record.payload.action_id),
-                                str(record.source_event_id),
-                            )
-                            if item in allowed
-                        },
-                        key=str.encode,
-                    )
-                )[:16]
-                if not linked:
-                    continue
-                item_id = f"excerpt-fail-{ref}"
-                item = _content_item(
-                    item_id=item_id,
-                    section="excerpt",
-                    category=DataCategory.EVIDENCE_EXCERPT,
-                    source_kind="failure",
-                    source_ref=ref,
-                    linked_subject_refs=linked,
-                    occurred_order=record.source_frontier,
-                    text=summary,
-                    over_limit=over_limit,
-                )
-                items.append(item)
-                targeted.append(
-                    TargetedExcerptRef(
-                        excerpt_item_id=item_id,
-                        source_kind="failure",
-                        linked_subject_refs=linked,
-                        subject_state_relation=SubjectStateRelation.UNKNOWN,
-                        content_visibility="available",
-                        content_digest=item.content_digest,
-                        content_bytes=item.content_bytes,
-                    )
-                )
-                excerpt_bytes_used += item.content_bytes
+        items.extend(excerpts.items)
+        targeted.extend(excerpts.targeted)
+        omissions.extend(excerpts.omissions)
+        capture_gap_set.update(excerpts.gaps)
+        over_limit.update(excerpts.over_limit)
 
     lineage_items: tuple[SemanticCaseItem, ...] = ()
     if lineage_evaluation is not None:
@@ -2147,6 +2645,22 @@ def build_semantic_case(
     if lineage_items:
         timeline_ids = timeline_ids[: max(0, selection.max_timeline_items - len(lineage_items))]
         timeline_ids.extend(item.item_id for item in lineage_items)
+    if prior_missing_item is not None:
+        # The prior request holds its own timeline slot: without it the reviewer cannot tell a
+        # supplied item from one still missing, which is the loop issue #907 closes.
+        timeline_ids = [
+            item_id for item_id in timeline_ids if item_id != prior_missing_item.item_id
+        ]
+        if len(timeline_ids) >= selection.max_timeline_items:
+            ordinary = [
+                item_id
+                for item_id in timeline_ids
+                if item_id not in {item.item_id for item in lineage_items}
+            ]
+            if ordinary:
+                timeline_ids.remove(ordinary[-1])
+        if len(timeline_ids) < selection.max_timeline_items:
+            timeline_ids.append(prior_missing_item.item_id)
     review_assessments = review_assessments[: selection.max_assessments]
     changes = changes[: selection.max_change_observations]
     targeted = targeted[: selection.max_excerpts]
@@ -2396,7 +2910,9 @@ def build_semantic_case(
                     {
                         "content_digest": item.content_digest,
                         "item_id": item.item_id,
+                        "occurred_order": item.occurred_order,
                         "section": item.section,
+                        **_freshness_json(item),
                     }
                     for item in items
                 ],
@@ -2575,8 +3091,23 @@ def _packet_to_json(packet: ReviewPacket) -> dict[str, JsonValue]:
     )
 
 
+def _freshness_json(item: SemanticCaseItem) -> dict[str, JsonValue]:
+    """Excerpt freshness marks; absent on every item that has none."""
+
+    body: dict[str, JsonValue] = {}
+    if item.latest_for is not None:
+        body["latest_for"] = item.latest_for
+    if item.superseded_by:
+        body["superseded_by"] = list(item.superseded_by)
+    return body
+
+
 def _item_catalog_json(items: Sequence[SemanticCaseItem]) -> list[dict[str, JsonValue]]:
-    """Metadata-only catalog so egress can project without reverse-engineering origin_ref."""
+    """Metadata-only catalog so egress can project without reverse-engineering origin_ref.
+
+    ``occurred_order`` is the ledger ingestion order of the item's source, so the reviewer can
+    tell earlier material from later material without trusting the opaque item ids (#907).
+    """
 
     return [
         cast(
@@ -2587,9 +3118,11 @@ def _item_catalog_json(items: Sequence[SemanticCaseItem]) -> list[dict[str, Json
                 "content_digest": item.content_digest,
                 "item_id": item.item_id,
                 "linked_subject_refs": list(item.linked_subject_refs),
+                "occurred_order": item.occurred_order,
                 "section": item.section,
                 "source_kind": item.source_kind,
                 "source_ref": item.source_ref,
+                **_freshness_json(item),
             },
         )
         for item in items
@@ -2625,7 +3158,7 @@ def assemble_filtered_review_packet(
     content_by_id: Mapping[str, bytes],
     included_item_ids: frozenset[str] | set[str],
 ) -> bytes:
-    """Assemble ``yoetz.review-packet-case/1`` from a builder envelope + approved content.
+    """Assemble ``yoetz.review-packet-case/2`` from a builder envelope + approved content.
 
     Single shared projection used by the application prepared-payload path and the privacy
     enforcer. Filters by approved item id only; never re-derives section/source metadata from
@@ -2676,6 +3209,14 @@ def assemble_filtered_review_packet(
                 text = plaintext.decode("utf-8")
             except UnicodeDecodeError:
                 continue
+            occurred_order = meta.get("occurred_order")
+            latest_for = meta.get("latest_for")
+            superseded_raw = meta.get("superseded_by")
+            superseded = (
+                [ref for ref in cast(list[object], superseded_raw) if type(ref) is str]
+                if type(superseded_raw) is list
+                else []
+            )
             content_rows.append(
                 cast(
                     dict[str, JsonValue],
@@ -2686,9 +3227,12 @@ def assemble_filtered_review_packet(
                         "content_digest": "sha256:" + hashlib.sha256(plaintext).hexdigest(),
                         "item_id": item_id,
                         "linked_subject_refs": linked,
+                        "occurred_order": occurred_order if type(occurred_order) is int else 0,
                         "section": section if type(section) is str else "timeline",
                         "source_kind": source_kind if type(source_kind) is str else "task",
                         "source_ref": source_ref if type(source_ref) is str else item_id,
+                        **({"latest_for": latest_for} if type(latest_for) is str else {}),
+                        **({"superseded_by": cast(JsonValue, superseded)} if superseded else {}),
                     },
                 )
             )
@@ -2717,7 +3261,9 @@ def assemble_filtered_review_packet(
                 },
             )
         )
-    content_rows.sort(key=lambda row: cast(str, row["item_id"]).encode("ascii"))
+    # Rows keep the case's own order: section, then recording order. Sorting by item id put
+    # excerpts in the order of their random evidence ids, so a superseded hunk could read as the
+    # newest one (issue #907).
 
     packet_raw = envelope.get("review_packet")
     packet_obj: dict[str, JsonValue] = (

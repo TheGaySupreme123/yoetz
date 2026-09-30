@@ -25,6 +25,7 @@ from yoetz.domain.events import (
     EventDraft,
     EventPayload,
     EventSchema,
+    MissingForAssessmentItem,
     UnknownEvent,
 )
 from yoetz.domain.findings import (
@@ -1572,6 +1573,69 @@ async def test_sqlite_reopen_replays_ranked_order_after_canonical_set_commit() -
     assert replayed.findings[0].provenance is not None
     assert replayed.semantic_status is SemanticStatus.SUCCEEDED
     assert replayed.semantic_provenance is not None
+
+
+@pytest.mark.anyio
+async def test_named_missing_items_commit_as_check_recorded_1_4_and_replay_after_restart() -> None:
+    """Issue #907: both ledgers record the structural items and a restart replays them."""
+
+    items = (
+        MissingForAssessmentItem("command_identity", (), "structurally_unavailable_on_this_host"),
+    )
+    for adapter_factory in (memory_ledger, sqlite_ledger):
+        command = ledger_command()
+        adapter = adapter_factory(command)
+        await adapter.append_batch(command)
+        frozen = await _ready_case(
+            adapter,
+            command,
+            "req_00000000-0000-4000-8000-00000000004d",
+            "sha256:" + "d" * 64,
+        )
+        provenance = _descending_rank_findings(
+            frozen.case.frontier, command.entries[0].coverage, semantic_lead=True
+        )[0].provenance
+        committed = await adapter.commit_check_if_current(
+            frozen,
+            RankedFindings((), 0, CheckVerdict.INSUFFICIENT_COVERAGE, command.entries[0].coverage),
+            (CheckPolicyExecution("work-integrity", "0.1.0", "run", "completed"),),
+            SemanticStatus.SUCCEEDED,
+            SemanticReason.SEMANTIC_COMPLETED,
+            provenance,
+            frozen.lease.operation_id,
+            semantic_conclusion="insufficient_packet",
+            missing_for_assessment=items,
+        )
+        assert committed.missing_for_assessment == items
+        events = [row async for row in adapter.load_events(command.session_id)]
+        assert [row.schema.version for row in events if row.schema.name == "check_recorded"] == [
+            "1.4.0"
+        ]
+        stored = await adapter.load_projection(
+            command.session_id, ProjectionView.CANDIDATE_FINDINGS
+        )
+        assert stored is not None and type(stored.state) is ProjectionState
+        pending = stored.state.pending_missing_for_assessment
+        assert pending is not None and pending.items == items
+    assert type(adapter) is SqliteLedger
+    restarted = SqliteLedger(
+        db=adapter._db,  # pyright: ignore[reportPrivateUsage]
+        task_id=command.task_id,
+        ownership_fence=_fence(),
+        clock=adapter._clock,  # pyright: ignore[reportPrivateUsage]
+        ids=adapter._ids,  # pyright: ignore[reportPrivateUsage]
+        objects=adapter._objects,  # pyright: ignore[reportPrivateUsage]
+    )
+    replayed = await restarted.freeze_case(
+        command.session_id,
+        command.writer_id,
+        1,
+        frozen.lease.operation_id,
+        "sha256:" + "d" * 64,
+    )
+    assert type(replayed) is CheckCommitResult
+    assert replayed.outcome == "replayed"
+    assert replayed.missing_for_assessment == items
 
 
 @pytest.mark.anyio

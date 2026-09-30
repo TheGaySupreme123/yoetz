@@ -450,7 +450,7 @@ def test_bounded_json_round_trips_non_ascii(text: str) -> None:
     from yoetz.application import semantic_case as module
 
     value = {"text": text}
-    encoded, truncated = module._bounded_json(value)  # pyright: ignore[reportPrivateUsage]
-    assert truncated is False
+    encoded, fit = module._bounded_json(value)  # pyright: ignore[reportPrivateUsage]
+    assert fit == "whole"
     assert text in encoded
     assert text in module._structural_json(value)  # pyright: ignore[reportPrivateUsage]

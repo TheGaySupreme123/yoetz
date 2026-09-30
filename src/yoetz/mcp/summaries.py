@@ -154,6 +154,52 @@ def _finding_identity_clause(source: Mapping[str, JsonValue], *, byte_budget: in
     return _bounded_list_clause("finding IDs: ", finding_ids, byte_budget=byte_budget)
 
 
+_MISSING_KINDS: Final = frozenset(
+    {
+        "command_identity",
+        "current_diff_for_path",
+        "other",
+        "plan_or_claim_text",
+        "prior_finding_context",
+        "task_statement",
+        "verification_output",
+    }
+)
+_MISSING_AVAILABILITIES: Final = frozenset(
+    {"agent_suppliable", "structurally_unavailable_on_this_host"}
+)
+
+
+def _missing_items_clause(source: Mapping[str, JsonValue], *, byte_budget: int) -> str:
+    """Name each item an ``insufficient_packet`` review needed, from closed tokens only (#907).
+
+    Kinds and availability classes are re-gated against their closed vocabularies; target refs
+    stay in the structured result. The clause is a check limitation, never a finding.
+    """
+
+    raw = source.get("missing_for_assessment")
+    if not isinstance(raw, list | tuple) or byte_budget <= 0:
+        return ""
+    tokens: list[str] = []
+    suppliable = 0
+    for item in cast(Sequence[JsonValue], raw):
+        if not isinstance(item, Mapping):
+            continue
+        kind = cast(Mapping[str, JsonValue], item).get("kind")
+        availability = cast(Mapping[str, JsonValue], item).get("availability")
+        if kind not in _MISSING_KINDS or availability not in _MISSING_AVAILABILITIES:
+            continue
+        suppliable += availability == "agent_suppliable"
+        tokens.append(f"{kind}={availability}")
+    if not tokens:
+        return ""
+    return _bounded_list_clause(
+        f"missing for assessment: {len(tokens)} (agent-suppliable: {suppliable}): ",
+        tokens,
+        byte_budget=byte_budget,
+    )
+
+
 def _bounded_list_clause(prefix: str, values: Sequence[str], *, byte_budget: int) -> str:
     """Render a bounded structural-token list with an exact omitted-item count."""
 
@@ -517,6 +563,10 @@ def summary_for_check(envelope: object) -> str:
     clause = _finding_identity_clause(
         source,
         byte_budget=_MAX_SUMMARY_BYTES - len((prefix + suffix).encode("ascii")),
+    )
+    clause += _missing_items_clause(
+        source,
+        byte_budget=_MAX_SUMMARY_BYTES - len((prefix + clause + suffix).encode("ascii")),
     )
     return _bounded(prefix + clause + suffix)
 

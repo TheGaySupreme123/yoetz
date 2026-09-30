@@ -95,7 +95,9 @@ _SYSTEM_INSTRUCTION: Final = (
     '"no_material_discrepancy" | "challenges_returned" | "insufficient_packet", '
     '"reviewer_challenges": array of objects with "finding_kind", "summary", "cited_refs", '
     '"discrepancy", "alternative_interpretation", "message_to_main_agent", '
-    '"requested_next_step", "uncertainty"}.'
+    '"requested_next_step", "uncertainty"}. With "insufficient_packet" add '
+    '"missing_for_assessment": one to eight objects with "kind", "target_refs" (refs from '
+    'citable_refs only) and a short "reason".'
 )
 
 _PROMPT_DIGEST: Final = "sha256:" + hashlib.sha256(_SYSTEM_INSTRUCTION.encode("utf-8")).hexdigest()

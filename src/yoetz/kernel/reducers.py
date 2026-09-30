@@ -76,6 +76,7 @@ from yoetz.kernel.projections import (
     FindingProjectionRecord,
     LatestTestedState,
     ObligationProjectionRecord,
+    PendingMissingForAssessment,
     PlanProjectionRecord,
     ProjectionRecord,
     ProjectionState,
@@ -1121,6 +1122,7 @@ def reduce_event(
     contradictions = dict(state.contradictions)
     gaps = set(state.coverage_gaps)
     latest = state.latest_tested_state
+    pending_missing = state.pending_missing_for_assessment
     unknown_count = state.unknown_event_count
     stale = state.freshness is LedgerFreshness.STALE_AFTER_MATERIAL_CHANGE
 
@@ -1278,6 +1280,20 @@ def reduce_event(
                 # one: a finding proven absent stays resolved when a later weaker check adds
                 # nothing, and is re-fired only when a check returns the same issue again.
                 apply_check_resolution(findings, check, accepted.event_id, proof_state=state)
+                # Issue #907: the latest assessed review decides what is still named missing. A
+                # local-only or failed check leaves the prior request standing.
+                if check.semantic_conclusion == "insufficient_packet":
+                    pending_missing = (
+                        PendingMissingForAssessment(
+                            accepted.event_id,
+                            accepted.ledger.ingestion_sequence,
+                            check.missing_for_assessment,
+                        )
+                        if check.missing_for_assessment
+                        else None
+                    )
+                elif check.semantic_conclusion is not None:
+                    pending_missing = None
         elif family == "redaction_recorded":
             event_targets = set(accepted.projection_locator.redaction_target_event_ids)
             object_targets = accepted.projection_locator.redaction_target_object_ids
@@ -1305,6 +1321,11 @@ def reduce_event(
             if latest is not None and latest.source_check_event_id in event_targets:
                 latest = None
                 stale = False
+            if (
+                pending_missing is not None
+                and pending_missing.source_check_event_id in event_targets
+            ):
+                pending_missing = None
             reopen_findings_resolved_by(findings, frozenset(ordered_event_targets))
             for target_event in ordered_event_targets:
                 gaps.add(f"redacted_event:{target_event}")
@@ -1392,6 +1413,7 @@ def reduce_event(
         freshness=freshness,
         unknown_event_count=unknown_count,
         coverage_gaps=coverage_gaps,
+        pending_missing_for_assessment=pending_missing,
     )
 
 

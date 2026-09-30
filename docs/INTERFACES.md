@@ -6819,6 +6819,50 @@ conclusion blocks semantic absence proof even if a producer omitted its coverage
 Failed and local-only attempts retain their existing version. The owning schema generator and
 `fixtures/canonical/check-conclusion-1.3.0.case.json` lock the new and legacy bytes.
 
+### Review packet selection and named missing items (issue #907, Phase 1a)
+
+The provider review packet is `yoetz.review-packet-case/2`. Every `items[]` row carries
+`occurred_order` (the source's ledger ingestion order) and rows are listed in case order (section,
+then recording order), never by opaque item id. An excerpt may carry `latest_for` (`path`: the
+newest applied or unconfirmed captured edit of each changed path; `command`: the newest recorded
+output of a command identity) or `superseded_by` (the source refs of the newer edit or run). The
+marks describe recording order only; they never claim what the working tree now contains.
+`review_packet` keeps its `outbound-case` 1.1.0 shape; `schemas/privacy/` is unchanged.
+
+Excerpt selection stays inside the approved count and byte budget. Reserved room comes first: the
+current diff, then the latest output per identified verification command (with the last failure
+beside a later pass, and the reserved run's exact command when the selection carries command
+text), then prior-finding repair evidence (#898); everything else follows by recency, then link
+class, and superseded hunks and runs come last. A command identity is the digest of the command a
+recorded result answers; captured tool output is unidentified until #910. The task statement
+(#908) is its own section and never competes for an excerpt slot. Each excerpt holds one recorded
+source or one part of one capture. Excerpts honour the approved `max_excerpt_bytes` instead of the
+4 KiB structural item clip; long output keeps its head and tail with a marked elision; an
+oversized plan, obligation, claim or decision payload has its longest prose clipped the same way
+and falls back to `yoetz.bounded-content-omission/1` only when clipping cannot fit.
+`semantic_case_content_over_item_limit` still names every clip. The builder measures the exact
+prepared document and drops lowest-ranked excerpts (`not_selected`, `content_unselected`) to stay
+below the channel byte ceiling's schema maximum.
+
+`provider-judgment` 1.1.0 requires `missing_for_assessment` (1–8 items of `kind`, up to four
+`target_refs` from `citable_refs`, and a short `reason`) on `insufficient_packet` and forbids it
+elsewhere; 1.0.0 stays frozen. The check fence drops targets outside the frozen case
+(`semantic_missing_items_rejected`) and drops an item whose earlier request was answered by
+material recorded since unless the reviewer cites that material
+(`semantic_missing_already_supplied`). Yoetz classifies each kept item as `agent_suppliable` or
+`structurally_unavailable_on_this_host` (a kind the effective review selection or channel can
+never carry, or a redacted target), adding `semantic_missing_agent_suppliable` and
+`semantic_missing_structurally_unavailable`. These are check limitations, never findings.
+
+`check_recorded` 1.4.0 adds required `missing_for_assessment` (kind, target refs, availability; no
+reviewer prose) and is emitted only when at least one item survives; 1.0–1.3 keep their shapes.
+The projection keeps the latest request as `pending_missing_for_assessment` until an assessed
+review clears it; snapshots omit the key when absent. The next packet carries it as the timeline
+item `prior-missing-for-assessment` with `supplied_since` refs. The check result's optional
+`missing_for_assessment` (check-result 1.3.0, unreleased, additive) and the MCP and CLI check text
+list each item and its availability; status, TUI and receipts carry the gap codes. The reviewer's
+reason stays in the encrypted durable semantic response object.
+
 `resolution_attempt_required` is the `respond` rejection for an `acknowledged` response to a
 `semantic_model_derived` finding whose `evidence_refs` cite no evidence or result recorded after
 the finding frontier. It writes nothing; the continuation is `input_correction_new_identity`.

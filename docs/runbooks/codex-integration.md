@@ -1640,6 +1640,16 @@ performs this repair. The shared service behavior applies on macOS, Linux and Wi
 source tests do not establish native host/platform acceptance.
 
 
+### Review packet reserved room and named missing items (#907)
+
+Codex `apply_patch` captures carry workspace-relative paths, so the newest applied edit of each path is
+reserved as the current diff and older hunks for the same path are marked `superseded_by`. Shell
+rewrites without visible bytes are still uncaptured (#883). Verification output is reserved per
+command when the agent records the action, result and output; captured tool output has no command
+identity until #910. An `insufficient_packet` check lists `missing_for_assessment` items with
+their availability in the MCP and CLI check result; recheck only after supplying an
+`agent_suppliable` item.
+
 ### Reviewable native edits
 
 Codex `apply_patch` calls (including code-mode nested calls) enter the shared encrypted capture

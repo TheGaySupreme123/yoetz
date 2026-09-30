@@ -519,6 +519,14 @@ request and report the unresolved start. These continuations do not authorize a 
 new defect finding and carries `semantic_packet_insufficient`; it is never a clean review or
 permission to claim the work is verified. Existing findings and coverage limitations remain.
 
+The check result lists what the reviewer needed in `missing_for_assessment`: each item's kind,
+case refs, and whether it is `agent_suppliable` or `structurally_unavailable_on_this_host`
+(gaps `semantic_missing_agent_suppliable`, `semantic_missing_structurally_unavailable`). Recheck
+only after supplying a named `agent_suppliable` item, such as the named verification output with
+the action and result that produced it. If no item is suppliable, or
+`semantic_missing_already_supplied` says the reviewer re-asked for material you recorded, report
+the named limitation instead. A named item is a check limitation, never a finding.
+
 Before choosing to leave a remediable finding as an unresolved limitation, attempt one specific,
 authorized resolution: publish the relevant bounded diff or test/failure excerpt, run the
 relevant test/doctest/lint check, or repair the named defect. Select the target from the actual
