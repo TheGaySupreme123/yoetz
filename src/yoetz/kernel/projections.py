@@ -439,7 +439,8 @@ class PendingMissingForAssessment:
     """What the latest assessed AI-powered review named as missing (issue #907).
 
     Set by a ``check_recorded`` 1.3.0 ``insufficient_packet`` that recorded missing items and
-    cleared by any later check with an assessed conclusion, or by redacting that check. The next
+    cleared by any later check with another assessed conclusion, or by redacting that check. A
+    later ``insufficient_packet`` that recorded no item leaves it standing. The next
     review packet shows each item with what was recorded since, so a reviewer can tell a supplied
     item from one still missing.
     """

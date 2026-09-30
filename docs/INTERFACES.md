@@ -6867,14 +6867,16 @@ elsewhere; 1.0.0 stays frozen. Like the rulings, the list is read backward: a re
 (or sends it empty) beside another conclusion reads as absent, and an `insufficient_packet` that
 names nothing (a local model or prompt-only host) keeps its conclusion and rulings with no items and
 discloses `semantic_missing_items_rejected`. A malformed item still rejects the reply. The check
-fence drops targets outside the frozen case (`semantic_missing_items_rejected`) and drops an item
-whose earlier request was answered by material recorded since unless the reviewer cites that
-material (`semantic_missing_already_supplied`; only agent-published material answers a request,
-never hook-captured tool output: authorship is the service-stamped envelope fact, carried on the
-frozen case as `observation_event_ids`, the observation-authored events recorded after the
-request, emitted only when non-empty so other cases keep their bytes). Yoetz classifies each kept item as `agent_suppliable` or
-`structurally_unavailable_on_this_host` (a kind the effective review selection or channel can never
-carry, or a redacted target), adding `semantic_missing_agent_suppliable` and
+fence trims targets to the packet's `citable_refs`, as it trims a ruling's cited refs, dropping an
+item left with none (`semantic_missing_items_rejected`), and drops an item whose earlier request was
+answered by material recorded since unless the reviewer cites that material
+(`semantic_missing_already_supplied`). Only agent-published material answers a request, never
+hook-captured tool output: authorship is the service-stamped envelope fact, carried on the frozen
+case as `observation_event_ids`, the observation-authored events recorded after the request, emitted
+only when non-empty so other cases keep their bytes; and a result answers `verification_output` only
+when it carries output (linked evidence or a summary). Yoetz classifies each kept item as
+`agent_suppliable` or `structurally_unavailable_on_this_host` (a kind the effective review selection
+or channel can never carry, or a redacted target), adding `semantic_missing_agent_suppliable` and
 `semantic_missing_structurally_unavailable`. These are check limitations, never findings, and weigh
 on finding resolution exactly like the `semantic_packet_insufficient` they ride beside: a local
 issue is still proven absent, and a `fixed` ruling (#905) still resolves its own finding.
@@ -6884,12 +6886,12 @@ The unreleased `check_recorded` 1.3.0 is extended in place with the optional
 `insufficient_packet`), present only when at least one item survives, beside issue #905's optional
 `prior_finding_verdicts`; a check with neither keeps its bytes, and 1.0–1.2 keep their shapes.
 `provider-judgment` 1.1.0 likewise carries both lists. The projection keeps the latest request as
-`pending_missing_for_assessment` until an assessed review clears it; snapshots omit the key when
-absent. The next packet carries it as the timeline item `prior-missing-for-assessment` with
-`supplied_since` refs. The check result's optional `missing_for_assessment` (check-result 1.3.0,
-unreleased, additive) and the MCP and CLI check text list each item and its availability; status,
-TUI and receipts carry the gap codes. The reviewer's reason stays in the encrypted durable semantic
-response object.
+`pending_missing_for_assessment` until an assessed review clears it (an `insufficient_packet` that
+recorded no item leaves it standing); snapshots omit the key when absent. The next packet carries it
+as the timeline item `prior-missing-for-assessment` with `supplied_since` refs. The check result's
+optional `missing_for_assessment` (check-result 1.3.0, unreleased, additive) and the MCP and CLI
+check text list each item and its availability; status, TUI and receipts carry the gap codes. The
+reviewer's reason stays in the encrypted durable semantic response object.
 
 `resolution_attempt_required` is the `respond` rejection for an `acknowledged` response to a
 `semantic_model_derived` finding whose `evidence_refs` cite no evidence or result recorded after

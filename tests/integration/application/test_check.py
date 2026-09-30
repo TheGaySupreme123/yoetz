@@ -1407,6 +1407,36 @@ async def test_insufficient_packet_names_each_missing_item_as_a_check_limitation
 
 
 @pytest.mark.anyio
+async def test_missing_item_targets_are_fenced_to_what_the_packet_showed() -> None:
+    """Greptile P2 on #940: a target in the frozen case but not in the packet is not citable.
+
+    The reviewer was shown only the packet's ``citable_refs``; like #905's cited refs, a missing
+    item's targets are trimmed to them, and an item left with no target is dropped and disclosed.
+    """
+
+    app = _App(semantic=True)
+    app.ledger.frozen = replace(app.ledger.frozen, case=_missing_case(supplied=True))
+    assert evd(60) in app.ledger.frozen.case.allowed_ids
+    judgment = SemanticJudgment(
+        "insufficient_packet",
+        (),
+        missing_for_assessment=(
+            MissingForAssessment(
+                "verification_output", (str(clm(1)), str(evd(60))), "test output absent"
+            ),
+            MissingForAssessment("current_diff_for_path", (str(evd(60)),), "diff not shown"),
+        ),
+    )
+    app.semantic_result = replace(_succeeded(judgment), case_citable_refs=frozenset({str(clm(1))}))
+    checked = await execute_check_commit(app, _request("semantic_required"))
+
+    assert [(item.kind, item.target_refs) for item in checked.missing_for_assessment] == [
+        ("verification_output", (str(clm(1)),))
+    ]
+    assert "semantic_missing_items_rejected" in checked.coverage.known_gaps
+
+
+@pytest.mark.anyio
 async def test_insufficient_packet_naming_nothing_records_none_and_says_so() -> None:
     """A 1.0.0-shape reply (local model, prompt-only host) is read backward, never as named."""
 

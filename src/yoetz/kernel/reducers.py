@@ -1281,17 +1281,17 @@ def reduce_event(
                 # nothing, and is re-fired only when a check returns the same issue again.
                 apply_check_resolution(findings, check, accepted.event_id, proof_state=state)
                 # Issue #907: the latest assessed review decides what is still named missing. A
-                # local-only or failed check leaves the prior request standing.
+                # local-only or failed check leaves the prior request standing, and so does an
+                # ``insufficient_packet`` that recorded no item (a reply that named nothing, or
+                # whose items were all dropped): it assessed nothing and supplied nothing, so the
+                # next packet keeps the earlier request and its ``supplied_since`` context.
                 if check.semantic_conclusion == "insufficient_packet":
-                    pending_missing = (
-                        PendingMissingForAssessment(
+                    if check.missing_for_assessment:
+                        pending_missing = PendingMissingForAssessment(
                             accepted.event_id,
                             accepted.ledger.ingestion_sequence,
                             check.missing_for_assessment,
                         )
-                        if check.missing_for_assessment
-                        else None
-                    )
                 elif check.semantic_conclusion is not None:
                     pending_missing = None
         elif family == "redaction_recorded":

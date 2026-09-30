@@ -2651,6 +2651,7 @@ async def execute_check_commit(
                 deterministic,
                 semantic_result.judgment,
                 unsuppliable_kinds=frozenset(semantic_result.unsuppliable_missing_kinds),
+                citable_refs=semantic_result.case_citable_refs,
             )
             declared_gaps |= missing.gaps
         if (

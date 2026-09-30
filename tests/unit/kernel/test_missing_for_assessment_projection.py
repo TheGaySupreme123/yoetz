@@ -171,13 +171,27 @@ def test_replay_keeps_the_latest_request_until_an_assessed_review_clears_it() ->
     assert cleared.pending_missing_for_assessment is None
     assert "pending_missing_for_assessment" not in projection_snapshot(cleared)
 
-    legacy = replay(
+    # Greptile P1 on #940: an insufficient_packet that recorded no item (a 1.0.0-shape reply
+    # that named nothing, or whose items were all dropped) assessed nothing and supplied nothing,
+    # so the earlier request and its supplied_since context stay pending for the next packet.
+    unnamed = replay(
         _chain(
             (EventSchema("check_recorded", "1.3.0"), _check("insufficient_packet", _ITEMS)),
             (EventSchema("check_recorded", "1.3.0"), _check("insufficient_packet")),
         )
     )
-    assert legacy.pending_missing_for_assessment is None
+    kept = unnamed.pending_missing_for_assessment
+    assert kept is not None and kept.items == _ITEMS and kept.source_frontier == 1
+    assert projection_from_snapshot(projection_snapshot(unnamed)) == unnamed
+    # A later assessed review still clears it.
+    after = replay(
+        _chain(
+            (EventSchema("check_recorded", "1.3.0"), _check("insufficient_packet", _ITEMS)),
+            (EventSchema("check_recorded", "1.3.0"), _check("insufficient_packet")),
+            (EventSchema("check_recorded", "1.3.0"), _check("challenges_returned")),
+        )
+    )
+    assert after.pending_missing_for_assessment is None
 
 
 def test_a_projection_without_a_request_snapshots_unchanged() -> None:

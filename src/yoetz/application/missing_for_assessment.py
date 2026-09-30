@@ -19,6 +19,7 @@ from yoetz.domain.events import (
     EvidenceDigestProvenance,
     EvidenceRecordedPayload,
     MissingForAssessmentItem,
+    ResultRecordedPayload,
 )
 from yoetz.domain.findings import Finding
 from yoetz.domain.privacy import ReviewSelectionPolicy
@@ -44,7 +45,9 @@ AGENT_SUPPLIABLE: Final = "agent_suppliable"
 STRUCTURALLY_UNAVAILABLE: Final = "structurally_unavailable_on_this_host"
 # How many refs recorded since the request the next packet names per item, newest first.
 _MAX_SUPPLIED_REFS: Final = 4
-# Which recorded families can answer each missing kind.
+# Which recorded families can answer each missing kind. ``output_results`` are results that
+# carry output (linked evidence or a summary): a bare outcome row names a run but not what it
+# printed, so it can never answer a request for verification output.
 _ANSWERING_FAMILIES: Final[Mapping[str, tuple[str, ...]]] = {
     "command_identity": ("actions", "results", "evidence"),
     "current_diff_for_path": ("evidence",),
@@ -52,9 +55,17 @@ _ANSWERING_FAMILIES: Final[Mapping[str, tuple[str, ...]]] = {
     "plan_or_claim_text": ("plans", "claims"),
     "prior_finding_context": ("responses",),
     "task_statement": ("plans",),
-    "verification_output": ("evidence", "results"),
+    "verification_output": ("evidence", "output_results"),
 }
-_FAMILY_NAMES: Final = ("actions", "results", "evidence", "claims", "plans", "responses")
+_FAMILY_NAMES: Final = (
+    "actions",
+    "results",
+    "output_results",
+    "evidence",
+    "claims",
+    "plans",
+    "responses",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +146,8 @@ def supplied_since(
                     # named request, so it must not turn a still-missing item into "supplied".
                     continue
                 recorded[family].append((row.source_frontier, str(ref)))
+                if type(row.payload) is ResultRecordedPayload and _carries_output(row.payload):
+                    recorded["output_results"].append((row.source_frontier, str(ref)))
     for row in projection.plans.values():
         if row.source_frontier > after and row.payload is not None and not row.redacted:
             recorded["plans"].append((row.source_frontier, str(row.source_event_id)))
@@ -156,6 +169,10 @@ def supplied_since(
             tuple(sorted((ref for _order, ref in candidates[:_MAX_SUPPLIED_REFS]), key=str.encode))
         )
     return tuple(answered)
+
+
+def _carries_output(payload: ResultRecordedPayload) -> bool:
+    return bool(payload.evidence_refs) or bool(payload.summary and payload.summary.strip())
 
 
 def _hook_observed(payload: object) -> bool:
@@ -190,11 +207,14 @@ def review_missing_for_assessment(
     judgment: SemanticJudgment,
     *,
     unsuppliable_kinds: frozenset[str],
+    citable_refs: frozenset[str] | None = None,
 ) -> MissingItemsReview:
-    """Fence what the reviewer named to the frozen case and classify who can supply it.
+    """Fence what the reviewer named to the packet it was shown and classify who can supply it.
 
-    A target outside the case is dropped (``semantic_missing_items_rejected``); an item whose
-    every target was outside is dropped whole, because the reviewer named nothing the packet held.
+    A target outside the packet's ``citable_refs`` (the frozen case when the composing evaluator
+    did not report the packet) is dropped (``semantic_missing_items_rejected``), as #905 trims a
+    ruling's cited refs; an item whose every target was outside is dropped whole, because the
+    reviewer named nothing the packet held.
     An ``insufficient_packet`` that named no item at all discloses the same gap.
     An item the prior review already requested and the agent answered since is dropped unless
     the reviewer cites that newer material (``semantic_missing_already_supplied``), so the same
@@ -215,10 +235,11 @@ def review_missing_for_assessment(
     observed = frozenset(str(item) for item in case.observation_event_ids)
     answered = () if pending is None else supplied_since(projection, pending, allowed, observed)
     redacted = _redacted_refs(projection)
+    shown = allowed if citable_refs is None else allowed & citable_refs
     gaps: set[str] = set()
     kept: dict[tuple[str, tuple[str, ...]], str] = {}
     for entry in judgment.missing_for_assessment:
-        refs = tuple(ref for ref in entry.target_refs if ref in allowed)
+        refs = tuple(ref for ref in entry.target_refs if ref in shown)
         if len(refs) != len(entry.target_refs):
             gaps.add(SEMANTIC_MISSING_ITEMS_REJECTED_GAP)
             if not refs:

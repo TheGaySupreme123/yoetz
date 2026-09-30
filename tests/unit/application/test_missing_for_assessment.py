@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 
 from builders.policy_cases import act, evt, make_case, record, res
 from builders.privacy_policies import local_only_policy, minimal_external_policy
-from yoetz.application.missing_for_assessment import supplied_since, unsuppliable_missing_kinds
+from yoetz.application.missing_for_assessment import (
+    review_missing_for_assessment,
+    supplied_since,
+    unsuppliable_missing_kinds,
+)
 from yoetz.domain.events import (
     ActionKind,
     ActionRecordedPayload,
@@ -20,7 +25,9 @@ from yoetz.domain.privacy import (
     ReviewContextProfile,
     ReviewSelectionPolicy,
 )
-from yoetz.kernel.projections import PendingMissingForAssessment
+from yoetz.domain.values import ResultId
+from yoetz.kernel.deterministic_checks import DeterministicCase
+from yoetz.kernel.projections import PendingMissingForAssessment, ProjectionRecord
 from yoetz.mcp.summaries import summary_for_check
 from yoetz.ports.semantic import MissingForAssessment, PriorFindingVerdict, SemanticJudgment
 from yoetz.protocol.canonical import JsonValue
@@ -121,8 +128,14 @@ def test_only_agent_published_actions_and_results_answer_a_request() -> None:
     case = make_case(
         actions={act(60): record(hook_action, 60), act(62): record(agent_action, 62)},
         results={
-            res(61): record(ResultRecordedPayload(res(61), act(60), ResultOutcome.SUCCESS), 61),
-            res(63): record(ResultRecordedPayload(res(63), act(62), ResultOutcome.SUCCESS), 63),
+            res(61): record(
+                ResultRecordedPayload(res(61), act(60), ResultOutcome.SUCCESS, summary="1 passed"),
+                61,
+            ),
+            res(63): record(
+                ResultRecordedPayload(res(63), act(62), ResultOutcome.SUCCESS, summary="1 passed"),
+                63,
+            ),
         },
         extra_refs=(act(60), res(61), act(62), res(63)),
     )
@@ -177,3 +190,59 @@ def test_packet_planning_ceiling_is_the_narrower_owner_channel_limit() -> None:
     assert ceiling(with_limits(0, 5_000)) == 20_000
     assert ceiling(with_limits(0, 0)) is None
     assert ceiling(local_only_policy()) is None
+
+
+def _requested_case(
+    results: Mapping[ResultId, ProjectionRecord[ResultRecordedPayload]],
+) -> DeterministicCase:
+    action = ActionRecordedPayload(
+        act(62), ActionKind.COMMAND, "Ran the unit tests", command="uv run pytest -q"
+    )
+    case = make_case(
+        actions={act(62): record(action, 62)},
+        results=results,
+        extra_refs=(act(62), *results),
+    )
+    pending = PendingMissingForAssessment(
+        evt(50), 50, (MissingForAssessmentItem("verification_output", (), "agent_suppliable"),)
+    )
+    return replace(
+        case, projection=replace(case.projection, pending_missing_for_assessment=pending)
+    )
+
+
+def test_an_output_free_result_never_answers_a_request_for_verification_output() -> None:
+    """Greptile P1 on #940: a bare outcome row names a run, not what it printed."""
+
+    bare = ResultRecordedPayload(res(63), act(62), ResultOutcome.SUCCESS)
+    summarized = ResultRecordedPayload(
+        res(64), act(62), ResultOutcome.SUCCESS, summary="41 passed, 0 failed"
+    )
+    case = _requested_case({res(63): record(bare, 63)})
+    pending = case.projection.pending_missing_for_assessment
+    assert pending is not None
+    allowed = frozenset(str(ref) for ref in case.allowed_ids)
+    assert supplied_since(case.projection, pending, allowed) == ((),)
+
+    # The reviewer asks again without citing the bare row: the request stays named, not dropped.
+    judgment = SemanticJudgment(
+        "insufficient_packet",
+        (),
+        missing_for_assessment=(
+            MissingForAssessment("verification_output", (), "The test output is still absent."),
+        ),
+    )
+    review = review_missing_for_assessment(case, (), judgment, unsuppliable_kinds=frozenset())
+    assert [item.kind for item in review.items] == ["verification_output"]
+    assert "semantic_missing_already_supplied" not in review.gaps
+
+    # A result that carries its output does answer it.
+    answered = _requested_case({res(63): record(bare, 63), res(64): record(summarized, 64)})
+    answered_pending = answered.projection.pending_missing_for_assessment
+    assert answered_pending is not None
+    assert supplied_since(answered.projection, answered_pending, allowed | {str(res(64))}) == (
+        (str(res(64)),),
+    )
+    dropped = review_missing_for_assessment(answered, (), judgment, unsuppliable_kinds=frozenset())
+    assert dropped.items == ()
+    assert "semantic_missing_already_supplied" in dropped.gaps

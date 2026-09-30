@@ -908,15 +908,17 @@ source or one part of one capture; the 16-slot count and the privacy-policy sche
 
 `insufficient_packet` must name what was missing (`provider-judgment` 1.1.0,
 `missing_for_assessment`); a reply that names nothing is read backward, keeping its conclusion and
-#905 rulings, and discloses `semantic_missing_items_rejected`. Yoetz fences targets to the case,
-drops a request the reviewer repeats without citing what the agent published since (hook-captured
-tool output never counts as supplied), classifies each item as `agent_suppliable` or
+#905 rulings, and discloses `semantic_missing_items_rejected`. Yoetz fences targets to the packet's
+`citable_refs`, drops a request the reviewer repeats without citing what the agent published since
+(hook-captured tool output never counts as supplied, and a result supplies verification output only
+when it carries output), classifies each item as `agent_suppliable` or
 `structurally_unavailable_on_this_host`, records the structural items as the optional
 `missing_for_assessment` field of the unreleased `check_recorded` 1.3.0 (extended in place, only
 beside `insufficient_packet`) and shows the prior request with `supplied_since` refs to the next
-reviewer. Items are check limitations with their own coverage gaps; `semantic_packet_insufficient`
-is unchanged and the outcome still blocks absence proof. Command identity for captured output waits
-on #910, an exact check-time diff on #883, and the task-statement section on #908.
+reviewer; an `insufficient_packet` that recorded no item leaves that request standing. Items are
+check limitations with their own coverage gaps; `semantic_packet_insufficient` is unchanged and the
+outcome still blocks absence proof. Command identity for captured output waits on #910, an exact
+check-time diff on #883, and the task-statement section on #908.
 
 Both review changes share one version of each contract: the new `provider-judgment` 1.1.0
 carries `prior_finding_verdicts` (#905) and `missing_for_assessment`, and the unreleased

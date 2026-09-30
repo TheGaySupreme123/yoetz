@@ -1699,6 +1699,92 @@ async def test_frozen_case_names_hook_events_recorded_after_a_missing_item_reque
 
 
 @pytest.mark.anyio
+async def test_an_itemless_insufficient_packet_keeps_the_pending_request_on_both_ledgers() -> None:
+    """Greptile P1 on #940: a later insufficient_packet that recorded no item (a reply that named
+    nothing) assessed nothing, so both ledgers keep the earlier request, and SQLite replays it."""
+
+    items = (MissingForAssessmentItem("verification_output", (), "agent_suppliable"),)
+    pending_by_adapter: list[object] = []
+    for adapter_factory in (memory_ledger, sqlite_ledger):
+        command = ledger_command()
+        adapter = adapter_factory(command)
+        await adapter.append_batch(command)
+        coverage = command.entries[0].coverage
+        ranked = RankedFindings((), 0, CheckVerdict.INSUFFICIENT_COVERAGE, coverage)
+        executions = (CheckPolicyExecution("work-integrity", "0.1.0", "run", "completed"),)
+        first = await _ready_case(
+            adapter,
+            command,
+            "req_00000000-0000-4000-8000-000000000051",
+            "sha256:" + "5" * 64,
+        )
+        provenance = _descending_rank_findings(first.case.frontier, coverage, semantic_lead=True)[
+            0
+        ].provenance
+        requested = await adapter.commit_check_if_current(
+            first,
+            ranked,
+            executions,
+            SemanticStatus.SUCCEEDED,
+            SemanticReason.SEMANTIC_COMPLETED,
+            provenance,
+            first.lease.operation_id,
+            semantic_conclusion="insufficient_packet",
+            missing_for_assessment=items,
+        )
+        again = await adapter.freeze_case(
+            command.session_id,
+            command.writer_id,
+            requested.result_frontier.sequence,
+            "req_00000000-0000-4000-8000-000000000052",
+            "sha256:" + "6" * 64,
+        )
+        assert type(again) is FrozenCase
+        lease = await adapter.advance_check_phase(
+            again.lease,
+            CheckPhase.RESERVED,
+            CheckPhase.LOCAL_READY,
+            await _local_result_ref(adapter, command),
+        )
+        lease = await adapter.advance_check_phase(
+            lease, CheckPhase.LOCAL_READY, CheckPhase.READY_TO_FINALIZE
+        )
+        await adapter.commit_check_if_current(
+            FrozenCase(again.case, lease),
+            ranked,
+            executions,
+            SemanticStatus.SUCCEEDED,
+            SemanticReason.SEMANTIC_COMPLETED,
+            provenance,
+            again.lease.operation_id,
+            semantic_conclusion="insufficient_packet",
+        )
+        stored = await adapter.load_projection(
+            command.session_id, ProjectionView.CANDIDATE_FINDINGS
+        )
+        assert stored is not None and type(stored.state) is ProjectionState
+        pending = stored.state.pending_missing_for_assessment
+        assert pending is not None and pending.items == items
+        assert pending.source_frontier == requested.result_frontier.sequence
+        pending_by_adapter.append(pending)
+    assert pending_by_adapter[0] == pending_by_adapter[1]
+    assert type(adapter) is SqliteLedger
+    restarted = SqliteLedger(
+        db=adapter._db,  # pyright: ignore[reportPrivateUsage]
+        task_id=command.task_id,
+        ownership_fence=_fence(),
+        clock=adapter._clock,  # pyright: ignore[reportPrivateUsage]
+        ids=adapter._ids,  # pyright: ignore[reportPrivateUsage]
+        objects=adapter._objects,  # pyright: ignore[reportPrivateUsage]
+    )
+    replayed = await restarted.load_projection(
+        command.session_id, ProjectionView.CANDIDATE_FINDINGS
+    )
+    assert replayed is not None and type(replayed.state) is ProjectionState
+    assert replayed.state.pending_missing_for_assessment == pending_by_adapter[1]
+
+
+@pytest.mark.anyio
 async def test_invalid_semantic_outcome_commits_and_does_not_poison_later_checks() -> None:
     """A designed provider-invalid outcome must be durable in both ledger adapters."""
 
