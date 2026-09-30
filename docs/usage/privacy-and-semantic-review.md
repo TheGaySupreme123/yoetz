@@ -191,7 +191,10 @@ include the configured pair in the review screen before approval.
 When you accept the CLI's recommended `assisted-review` recipe, it shows and confirms a standing
 exact-repository policy that sends the reviewer a structured packet: the goal, obligations, claims, the
 material timeline, local findings and their exact bases, coverage gaps, and bounded
-problem-local excerpts of evidence, tests, diffs, or source **already recorded in the case**.
+problem-local excerpts of evidence, tests, diffs, or source **already recorded in the case**. It
+also carries the earlier AI-powered findings still open, what the reviewer asked for, and your
+recorded responses to them, so the next review can rule on each one. These are the same finding and
+response records the case already held; no new kind of data is sent.
 
 Sensitive and confidential content is off. The never-send set remains absolute. The reviewer gets a
 packet built from the ledger, not a handle on your repository — composition passes bundled provider

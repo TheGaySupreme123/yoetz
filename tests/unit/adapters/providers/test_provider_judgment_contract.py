@@ -698,3 +698,58 @@ def test_released_provider_judgment_1_0_stays_frozen_beside_1_1() -> None:
     assert set(insufficient["properties"]) == {"conclusion", "reviewer_challenges"}
     current = cast(dict[str, Any], strict_json_parse(_FROZEN_SCHEMA.read_bytes()))
     assert "missing_for_assessment" in current["$defs"]["ProviderJudgmentInsufficient"]["required"]
+
+
+def _ruling(**overrides: JsonValue) -> dict[str, JsonValue]:
+    return {
+        "finding_id": "fnd_866db2dd-0000-4000-8000-000000000001",
+        "verdict": "fixed",
+        "cited_refs": [_REF_C],
+        "note": "The regression result recorded after the finding shows distinct keys.",
+        **overrides,
+    }
+
+
+def test_a_reply_without_rulings_reads_as_the_1_0_0_shape_with_none() -> None:
+    """A local model or prompt-only host may still answer without the array (issue #905).
+
+    That is an explicit backward read: no rulings, so nothing can ever be ``fixed``; it must not
+    fail the whole review and discard its challenges.
+    """
+
+    legacy = {"conclusion": "challenges_returned", "reviewer_challenges": [_challenge()]}
+    for parsed in (legacy, {"judgment": legacy}):
+        judgment = normalize_judgment(cast(JsonValue, parsed))
+        assert len(judgment.challenges) == 1
+        assert judgment.prior_finding_verdicts == ()
+        assert judgment.prior_finding_verdicts_dropped == 0
+
+
+def test_a_malformed_or_surplus_ruling_is_dropped_and_counted_not_fatal() -> None:
+    malformed: list[JsonValue] = [
+        _ruling(finding_id="fnd_866db2dd"),
+        _ruling(verdict="resolved"),
+        _ruling(note=""),
+        "fixed",
+    ]
+    judgment = normalize_judgment(
+        cast(
+            JsonValue,
+            {
+                **_judgment("challenges_returned", [_challenge()]),
+                "prior_finding_verdicts": [_ruling(), *malformed],
+            },
+        )
+    )
+    assert len(judgment.challenges) == 1
+    assert [item.verdict for item in judgment.prior_finding_verdicts] == ["fixed"]
+    assert judgment.prior_finding_verdicts_dropped == len(malformed)
+
+    surplus = normalize_judgment(
+        cast(
+            JsonValue,
+            {**_judgment(), "prior_finding_verdicts": [_ruling(verdict="unassessable")] * 9},
+        )
+    )
+    assert len(surplus.prior_finding_verdicts) == 8
+    assert surplus.prior_finding_verdicts_dropped == 1

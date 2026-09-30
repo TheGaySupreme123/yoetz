@@ -85,7 +85,7 @@ from yoetz.protocol.coverage import EvidenceImmutability
 type Host = Literal["codex", "claude", "cursor"]
 
 _KEY = b"k" * 32
-_WORKSPACE = "/home/dev/proj"
+_WORKSPACE = "/srv/dev/proj"
 _TASK = "tsk_10000000-0000-4000-8000-000000000001"
 _SESSION = "ses_10000000-0000-4000-8000-000000000001"
 _WORKSPACE_COMMITMENT = "hmac-sha256:" + "8" * 64
@@ -154,7 +154,7 @@ def _edit_payload(host: Host, path: str, marker: str, call: int) -> dict[str, Js
         if call % 2:
             return {
                 "session_id": "5b3c1d2e-0000-4000-8000-000000000001",
-                "transcript_path": "/home/dev/.claude/projects/proj/session.jsonl",
+                "transcript_path": "/srv/dev/.claude/projects/proj/session.jsonl",
                 "cwd": _WORKSPACE,
                 "permission_mode": "acceptEdits",
                 "hook_event_name": "PostToolUse",
@@ -187,7 +187,7 @@ def _edit_payload(host: Host, path: str, marker: str, call: int) -> dict[str, Js
         content = f"def handler(key):\n    return lookup({marker})\n"
         return {
             "session_id": "5b3c1d2e-0000-4000-8000-000000000001",
-            "transcript_path": "/home/dev/.claude/projects/proj/session.jsonl",
+            "transcript_path": "/srv/dev/.claude/projects/proj/session.jsonl",
             "cwd": _WORKSPACE,
             "permission_mode": "acceptEdits",
             "hook_event_name": "PostToolUse",
@@ -241,7 +241,7 @@ def _output_payload(host: Host, text: str, call: int) -> dict[str, JsonValue]:
     if host == "claude":
         return {
             "session_id": "5b3c1d2e-0000-4000-8000-000000000001",
-            "transcript_path": "/home/dev/.claude/projects/proj/session.jsonl",
+            "transcript_path": "/srv/dev/.claude/projects/proj/session.jsonl",
             "cwd": _WORKSPACE,
             "permission_mode": "acceptEdits",
             "hook_event_name": "PostToolUse",

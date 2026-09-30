@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
+from typing import cast
 
 import pytest
 
@@ -132,16 +134,18 @@ def _chain(*payloads: tuple[EventSchema, CheckRecordedPayload]) -> tuple[LedgerR
     return tuple(records)
 
 
-def test_named_items_decode_only_on_check_recorded_1_4_and_round_trip() -> None:
+def test_named_items_decode_on_check_recorded_1_3_and_round_trip() -> None:
     payload = _check("insufficient_packet", _ITEMS)
     wire = encode_payload(payload)
-    assert decode_payload(EventSchema("check_recorded", "1.4.0"), wire) == payload
-    for version in ("1.2.0", "1.3.0"):
-        with pytest.raises(ProtocolValueError):
-            decode_payload(EventSchema("check_recorded", version), wire)
-    plain = encode_payload(_check("insufficient_packet"))
+    assert decode_payload(EventSchema("check_recorded", "1.3.0"), wire) == payload
     with pytest.raises(ProtocolValueError):
-        decode_payload(EventSchema("check_recorded", "1.4.0"), plain)
+        decode_payload(EventSchema("check_recorded", "1.2.0"), wire)
+    # The field is optional on the unreleased 1.3.0: a check without items keeps its bytes.
+    plain = encode_payload(_check("insufficient_packet"))
+    assert "missing_for_assessment" not in cast(Mapping[str, object], plain)
+    assert decode_payload(EventSchema("check_recorded", "1.3.0"), plain) == _check(
+        "insufficient_packet"
+    )
     with pytest.raises(ProtocolValueError):
         _check("no_material_discrepancy", _ITEMS)
     with pytest.raises(ProtocolValueError):
@@ -150,7 +154,7 @@ def test_named_items_decode_only_on_check_recorded_1_4_and_round_trip() -> None:
 
 def test_replay_keeps_the_latest_request_until_an_assessed_review_clears_it() -> None:
     requested = replay(
-        _chain((EventSchema("check_recorded", "1.4.0"), _check("insufficient_packet", _ITEMS)))
+        _chain((EventSchema("check_recorded", "1.3.0"), _check("insufficient_packet", _ITEMS)))
     )
     pending = requested.pending_missing_for_assessment
     assert pending is not None and pending.items == _ITEMS and pending.source_frontier == 1
@@ -160,7 +164,7 @@ def test_replay_keeps_the_latest_request_until_an_assessed_review_clears_it() ->
 
     cleared = replay(
         _chain(
-            (EventSchema("check_recorded", "1.4.0"), _check("insufficient_packet", _ITEMS)),
+            (EventSchema("check_recorded", "1.3.0"), _check("insufficient_packet", _ITEMS)),
             (EventSchema("check_recorded", "1.3.0"), _check("no_material_discrepancy")),
         )
     )
@@ -169,7 +173,7 @@ def test_replay_keeps_the_latest_request_until_an_assessed_review_clears_it() ->
 
     legacy = replay(
         _chain(
-            (EventSchema("check_recorded", "1.4.0"), _check("insufficient_packet", _ITEMS)),
+            (EventSchema("check_recorded", "1.3.0"), _check("insufficient_packet", _ITEMS)),
             (EventSchema("check_recorded", "1.3.0"), _check("insufficient_packet")),
         )
     )

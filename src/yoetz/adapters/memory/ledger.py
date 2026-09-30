@@ -11,6 +11,9 @@ from enum import StrEnum
 from typing import Final, Literal, cast
 
 from yoetz.domain.events import (
+    CHECK_EVENT_SCHEMA_VERSION,
+    FINDING_EVENT_SCHEMA_VERSION,
+    SEMANTIC_EVENT_SCHEMA_VERSION,
     AcceptedEvent,
     ActionRecordedPayload,
     AssignmentRecordedPayload,
@@ -43,9 +46,7 @@ from yoetz.domain.events import (
     SessionOpenedPayload,
     UnknownEvent,
     WriterChain,
-    check_event_schema,
     encode_payload,
-    finding_event_schema,
     is_observation_authored,
     is_observation_authorship,
     media_type_for,
@@ -3433,15 +3434,13 @@ class MemoryLedgerAdapter:
                 ObjectSource(data=payload_bytes, declared_size=len(payload_bytes)), metadata
             )
             payload_ref = await self._objects.finalize(staged)
-            schema = (
-                finding_event_schema(payload)
+            schema = EventSchema(
+                "finding_recorded" if type(payload) is FindingRecordedPayload else "check_recorded",
+                FINDING_EVENT_SCHEMA_VERSION
                 if type(payload) is FindingRecordedPayload
-                else EventSchema(
-                    "check_recorded",
-                    check_event_schema(
-                        semantic_conclusion, prior_finding_verdicts, missing_for_assessment
-                    ),
-                )
+                else CHECK_EVENT_SCHEMA_VERSION
+                if semantic_conclusion is not None
+                else SEMANTIC_EVENT_SCHEMA_VERSION,
             )
             entries.append(
                 AppendEntry(

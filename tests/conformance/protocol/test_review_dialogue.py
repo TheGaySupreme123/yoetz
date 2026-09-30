@@ -8,14 +8,7 @@ from typing import Any
 
 import pytest
 
-from yoetz.domain.events import (
-    CheckRecordedPayload,
-    EventSchema,
-    check_event_schema,
-    decode_payload,
-    encode_payload,
-    finding_event_schema,
-)
+from yoetz.domain.events import CheckRecordedPayload, EventSchema, decode_payload, encode_payload
 from yoetz.domain.findings import Finding, FindingChallenge, finding_to_json
 from yoetz.domain.values import freeze_json
 from yoetz.protocol.canonical import canonical_digest, canonical_encode
@@ -25,7 +18,7 @@ from yoetz.protocol.schemas import SchemaInstanceInvalid, validate_schema_instan
 
 def _vectors() -> list[dict[str, Any]]:
     path = (
-        Path(__file__).resolve().parents[3] / "fixtures/canonical/review-dialogue-1.4.0.case.json"
+        Path(__file__).resolve().parents[3] / "fixtures/canonical/review-dialogue-1.3.0.case.json"
     )
     return json.loads(path.read_bytes())["input"]["vectors"]
 
@@ -53,17 +46,19 @@ def test_golden_checks_round_trip_and_rulings_need_their_version() -> None:
         encoded = encode_payload(payload)
         assert canonical_encode(encoded).hex() == vector["canonical_hex"]
         assert canonical_digest(encoded) == vector["digest"]
-        expected = "1.4.0" if payload.prior_finding_verdicts else "1.3.0"
-        assert check_event_schema(payload.semantic_conclusion, payload.prior_finding_verdicts) == (
-            expected
-        )
-    decoded = decode_payload(EventSchema("check_recorded", "1.4.0"), freeze_json(ruled["payload"]))
+        # The rulings are optional on the unreleased 1.3.0 check: a check without them keeps
+        # the bytes an earlier 0.3 build wrote.
+        assert version == "1.3.0"
+    decoded = decode_payload(EventSchema("check_recorded", "1.3.0"), freeze_json(ruled["payload"]))
     assert type(decoded) is CheckRecordedPayload
     assert [item.verdict for item in decoded.prior_finding_verdicts] == ["unassessable", "fixed"]
+    # Released versions never carry rulings (they cannot carry a conclusion either).
+    released = {
+        key: value for key, value in ruled["payload"].items() if key != "semantic_conclusion"
+    }
     with pytest.raises(ProtocolValueError):
-        decode_payload(EventSchema("check_recorded", "1.3.0"), freeze_json(ruled["payload"]))
-    with pytest.raises(ProtocolValueError):
-        decode_payload(EventSchema("check_recorded", "1.4.0"), freeze_json(legacy["payload"]))
+        decode_payload(EventSchema("check_recorded", "1.2.0"), freeze_json(released))
+    assert legacy["payload"].get("prior_finding_verdicts") is None
     unknown = {
         **ruled["payload"],
         "prior_finding_verdicts": [
@@ -71,13 +66,13 @@ def test_golden_checks_round_trip_and_rulings_need_their_version() -> None:
         ],
     }
     with pytest.raises(ProtocolValueError):
-        decode_payload(EventSchema("check_recorded", "1.4.0"), freeze_json(unknown))
+        decode_payload(EventSchema("check_recorded", "1.3.0"), freeze_json(unknown))
     unsorted = {
         **ruled["payload"],
         "prior_finding_verdicts": list(reversed(ruled["payload"]["prior_finding_verdicts"])),
     }
     with pytest.raises(ProtocolValueError):
-        decode_payload(EventSchema("check_recorded", "1.4.0"), freeze_json(unsorted))
+        decode_payload(EventSchema("check_recorded", "1.3.0"), freeze_json(unsorted))
 
 
 def test_golden_findings_round_trip_through_schema_and_domain() -> None:
@@ -86,8 +81,7 @@ def test_golden_findings_round_trip_through_schema_and_domain() -> None:
         validate_schema_instance("finding-recorded", version, wire)
         payload = decode_payload(EventSchema("finding_recorded", version), freeze_json(wire))
         assert type(payload) is Finding
-        # The writer picks exactly the version the vector was recorded under.
-        assert finding_event_schema(payload) == EventSchema("finding_recorded", version)
+        assert version == "1.3.0"
         encoded = encode_payload(payload)
         assert canonical_encode(encoded).hex() == vector["canonical_hex"]
         assert canonical_digest(encoded) == vector["digest"]
@@ -97,15 +91,16 @@ def test_golden_findings_round_trip_through_schema_and_domain() -> None:
         assert "relates_to" not in public
 
 
-def test_dialogue_fields_are_admitted_only_on_their_version() -> None:
+def test_dialogue_fields_are_optional_on_1_3_0_and_absent_from_released_versions() -> None:
     legacy, restated, _link_only = _findings()
-    with pytest.raises(ProtocolValueError):
-        decode_payload(EventSchema("finding_recorded", "1.3.0"), freeze_json(restated["payload"]))
-    _schema_rejects("1.3.0", restated["payload"])
-    # 1.4.0 is written only when a dialogue field is present, so a bare row never reads as one.
-    with pytest.raises(ProtocolValueError):
-        decode_payload(EventSchema("finding_recorded", "1.4.0"), freeze_json(legacy["payload"]))
-    _schema_rejects("1.4.0", legacy["payload"])
+    # A row written by an earlier 0.3 build (no dialogue fields) still reads and validates.
+    validate_schema_instance("finding-recorded", "1.3.0", legacy["payload"])
+    for version in ("1.1.0", "1.2.0"):
+        with pytest.raises(ProtocolValueError):
+            decode_payload(
+                EventSchema("finding_recorded", version), freeze_json(restated["payload"])
+            )
+        _schema_rejects(version, restated["payload"])
 
 
 def test_local_findings_and_malformed_dialogue_fields_are_refused() -> None:
@@ -113,8 +108,8 @@ def test_local_findings_and_malformed_dialogue_fields_are_refused() -> None:
     local = {**restated, "origin": "deterministic"}
     local.pop("provenance")
     with pytest.raises(ProtocolValueError):
-        decode_payload(EventSchema("finding_recorded", "1.4.0"), freeze_json(local))
-    _schema_rejects("1.4.0", local)
+        decode_payload(EventSchema("finding_recorded", "1.3.0"), freeze_json(local))
+    _schema_rejects("1.3.0", local)
 
     malformed: list[dict[str, Any]] = [
         {**restated, "relates_to": [restated["finding_id"]]},
@@ -125,7 +120,7 @@ def test_local_findings_and_malformed_dialogue_fields_are_refused() -> None:
     ]
     for wire in malformed:
         with pytest.raises(ProtocolValueError):
-            decode_payload(EventSchema("finding_recorded", "1.4.0"), freeze_json(wire))
+            decode_payload(EventSchema("finding_recorded", "1.3.0"), freeze_json(wire))
     oversized = {**restated["challenge"], "uncertainty": "é" * 2049}
     with pytest.raises(ProtocolValueError):
         FindingChallenge(

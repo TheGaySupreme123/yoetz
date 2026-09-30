@@ -1218,7 +1218,7 @@ def test_a_fixed_ruling_never_bypasses_material_change_freshness_or_a_re_raise()
         replace(check, semantic_conclusion=None)
 
 
-@pytest.mark.parametrize("verdict", ["still_present", "answered_not_fixed", "withdrawn"])
+@pytest.mark.parametrize("verdict", ["still_present", "answered_not_fixed"])
 def test_any_other_ruling_blocks_its_own_finding_even_under_an_assessable_review(
     verdict: str,
 ) -> None:
@@ -1242,3 +1242,30 @@ def test_a_ruling_on_a_local_finding_is_ignored_by_local_proof() -> None:
         _check(semantic=_SEMANTIC_OK), (1, "still_present"), conclusion="no_material_discrepancy"
     )
     assert _resolves(local, check) is True
+
+
+def test_a_withdrawn_ruling_accepts_a_rejection_without_lifting_the_packet_veto() -> None:
+    """The owner's rule: a reasoned rejection not re-raised counts as accepted (issue #905).
+
+    ``withdrawn`` must not block what an assessable recheck over changed state already resolves,
+    and it is no licence to resolve under a whole-packet ``insufficient_packet``.
+    """
+
+    from yoetz.kernel.finding_resolution import resolution_blockers
+
+    finding = _finding(1, origin=FindingOrigin.SEMANTIC_MODEL_DERIVED)
+    assessable = _ruled(
+        _check(semantic=_SEMANTIC_OK), (1, "withdrawn"), conclusion="no_material_discrepancy"
+    )
+    assert _resolves(finding, assessable) is True
+    gapped = _coverage(
+        gaps=("semantic_packet_insufficient",), semantic=True, freshness=LedgerFreshness.PARTIAL
+    )
+    unassessable = _ruled(
+        _check(semantic=_SEMANTIC_OK, coverage=gapped),
+        (1, "withdrawn"),
+        conclusion="insufficient_packet",
+    )
+    assert "semantic_packet_insufficient" in resolution_blockers(
+        finding, 4, unassessable, frozenset(), proof_state=_changed_state(unassessable)
+    )

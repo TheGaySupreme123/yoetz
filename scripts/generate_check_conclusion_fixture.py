@@ -70,7 +70,8 @@ def document(root: Path) -> dict[str, Any]:
                 "digest": canonical_digest(encoded),
             }
         )
-    # Issue #907: an unassessable review that named what it needed. Structural fields only.
+    # Issue #907: an unassessable review that named what it needed, on the same (unreleased)
+    # 1.3.0 payload with the optional list. Structural fields only.
     missing_coverage = dict(coverage)
     missing_coverage["known_gaps"] = [
         "content_unselected",
@@ -96,11 +97,11 @@ def document(root: Path) -> dict[str, Any]:
             },
         ],
     }
-    payload = decode_payload(EventSchema("check_recorded", "1.4.0"), freeze_json(missing))
+    payload = decode_payload(EventSchema("check_recorded", "1.3.0"), freeze_json(missing))
     encoded = encode_payload(payload)
     vectors.append(
         {
-            "schema_version": "1.4.0",
+            "schema_version": "1.3.0",
             "payload": missing,
             "canonical_hex": canonical_encode(encoded).hex(),
             "digest": canonical_digest(encoded),

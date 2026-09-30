@@ -18,7 +18,7 @@ import pytest
 from builders.projection_workflow import build_projection_application, frontier_json, request_base
 from builders.start_application import protocol_id, start_request
 from yoetz.application.check import FinalSemanticEvaluation
-from yoetz.application.semantic_case import build_semantic_case
+from yoetz.application.semantic_case import build_semantic_case, semantic_case_packet_view
 from yoetz.application.service import Application
 from yoetz.domain.events import CheckRecordedPayload, EventSchema, LedgerRecord
 from yoetz.domain.findings import (
@@ -126,11 +126,16 @@ class _Reviewer:
             )
         )
         judgment = self.answers[len(self.cases) - 1](frozen)
+        # Report the packet exactly as the production composition does, so the rulings are
+        # fenced to what this reviewer was shown.
+        view = semantic_case_packet_view(self.cases[-1])
         return FinalSemanticEvaluation(
             SemanticStatus.SUCCEEDED,
             SemanticReason.SEMANTIC_COMPLETED,
             judgment=judgment,
             provenance=_provenance(self.seed + 10 * len(self.cases)),
+            case_prior_finding_refs=view.prior_finding_refs,
+            case_citable_refs=view.citable_refs,
         )
 
 
@@ -236,14 +241,14 @@ async def test_challenge_fields_are_recorded_and_carried_into_the_next_review() 
         and isinstance(row.payload, Finding)
         and row.payload.finding_id == raised.finding_id
     ]
-    assert [row.schema for row in rows] == [EventSchema("finding_recorded", "1.4.0")]
+    assert [row.schema for row in rows] == [EventSchema("finding_recorded", "1.3.0")]
     recorded = cast(Finding, rows[0].payload)
     assert recorded.challenge is not None
     assert recorded.challenge.discrepancy == _DISCREPANCY
     assert recorded.challenge.requested_next_step == "act"
-    # Local findings keep the frozen 1.3.0 shape and bytes.
+    # Local findings carry no dialogue fields, so their recorded bytes are unchanged.
     assert all(
-        row.schema.version == "1.3.0"
+        row.payload.challenge is None and row.payload.related_finding_ids == ()
         for row in _records(session.app)
         if row.schema.name == "finding_recorded"
         and isinstance(row.payload, Finding)
@@ -381,7 +386,7 @@ async def test_a_cited_fixed_ruling_closes_a_repaired_finding_under_an_insuffici
     live = _live_projection(session.app)
     resolved_by = live.findings[raised.finding_id].resolved_by_check_event_id
     if cite_repair:
-        assert check_rows[-1].schema == EventSchema("check_recorded", "1.4.0")
+        assert check_rows[-1].schema == EventSchema("check_recorded", "1.3.0")
         assert [item.verdict for item in recorded.prior_finding_verdicts] == ["fixed"]
         assert resolved_by == check_rows[-1].event_id
         explanation = finding_resolution_explanation(live, raised.finding_id, _records(session.app))

@@ -163,6 +163,12 @@ finding. Redacted or unavailable event payloads, redacted objects, missing refer
 unknown events, weak original finding coverage, suppression, stale state, scoped-away work, or a
 failed pack still change nothing, and a check that reports the same issue again keeps it current.
 
+For an AI-powered finding, the recheck's reviewer also rules on each earlier finding it was shown.
+A `fixed` ruling resolves that finding on that check even when the review could not assess the rest
+of the case, but only if it cites evidence or a result recorded after the finding and every other
+rule above still holds. A `fixed` that cites nothing newer counts only as unassessable, any other
+ruling keeps the finding current and names why, and a ruling is never inferred from silence.
+
 A resolved finding is not erased. Status still lists it (`resolved: true`, shown when
 `include_resolved` is requested), the receipt still carries it as history, and the receipt wording
 says how many earlier findings were resolved by a later qualifying check, apart from any findings

@@ -1366,6 +1366,8 @@ class SemanticJudgment:
     conclusion: SemanticConclusion
     challenges: tuple[ReviewerChallenge, ...]
     prior_finding_verdicts: tuple[PriorFindingVerdict, ...] = ()
+    # Rulings the reviewer returned that were malformed or over the cap and so were never read.
+    prior_finding_verdicts_dropped: int = 0
     # Named by every provider-judgment 1.1.0 ``insufficient_packet``. A durable semantic response
     # recorded before issue #907 decodes with none, so the domain value admits an empty tuple;
     # the provider schema is what requires at least one.
@@ -1397,6 +1399,9 @@ class SemanticJudgment:
             or len(verdicts) > _MAX_PRIOR_FINDING_VERDICTS
             or any(type(item) is not PriorFindingVerdict for item in verdicts)
         ):
+            raise _invalid_judgment()
+        dropped = self.prior_finding_verdicts_dropped
+        if type(dropped) is not int or not 0 <= dropped <= _MAX_SAFE_INTEGER:
             raise _invalid_judgment()
 
 

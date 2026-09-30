@@ -1609,7 +1609,7 @@ async def test_named_missing_items_commit_as_check_recorded_1_4_and_replay_after
         assert committed.missing_for_assessment == items
         events = [row async for row in adapter.load_events(command.session_id)]
         assert [row.schema.version for row in events if row.schema.name == "check_recorded"] == [
-            "1.4.0"
+            "1.3.0"
         ]
         stored = await adapter.load_projection(
             command.session_id, ProjectionView.CANDIDATE_FINDINGS
