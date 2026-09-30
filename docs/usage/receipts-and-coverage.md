@@ -167,7 +167,8 @@ For an AI-powered finding, the recheck's reviewer also rules on each earlier fin
 A `fixed` ruling resolves that finding on that check even when the review could not assess the rest
 of the case, but only if it cites evidence or a result recorded after the finding and every other
 rule above still holds. A `fixed` that cites nothing newer counts only as unassessable, any other
-ruling keeps the finding current and names why, and a ruling is never inferred from silence.
+ruling except `withdrawn`, which leaves the ordinary rules, keeps the finding current and names
+why, and a ruling is never inferred from silence.
 
 A resolved finding is not erased. Status still lists it (`resolved: true`, shown when
 `include_resolved` is requested), the receipt still carries it as history, and the receipt wording
